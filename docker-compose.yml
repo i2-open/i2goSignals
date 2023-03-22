@@ -1,0 +1,12 @@
+version: '3'
+services:
+  db:
+    container_name: mongoDb
+    image: mongo:6.0.3
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+    ports:
+      - "8880:27017"
+    command: mongod
+

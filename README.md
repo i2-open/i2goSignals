@@ -48,7 +48,7 @@ docker system prune -a -f
 
 ## Creating a Security Event
 
-```go
+```
 
   subject := &EventSubject{
     SubIdentifier: SubIdentifier{Sub: "1234"},

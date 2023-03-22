@@ -3,10 +3,11 @@ module i2goSignals
 go 1.19
 
 require (
+	github.com/MicahParks/jwkset v0.3.1
 	github.com/MicahParks/keyfunc v1.7.0
 	github.com/golang-jwt/jwt/v4 v4.4.2
 	github.com/gorilla/mux v1.8.0
-	github.com/rs/xid v1.4.0
+	github.com/segmentio/ksuid v1.0.4
 	github.com/stretchr/testify v1.8.1
 	go.mongodb.org/mongo-driver v1.11.1
 )
