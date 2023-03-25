@@ -1,12 +1,52 @@
-version: '3'
+version: '3.1'
 services:
-  db:
-    container_name: mongoDb
+  mongo1:
+    container_name: mongo1
     image: mongo:6.0.3
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
     ports:
-      - "8880:27017"
-    command: mongod
+      - "30001:30001"
+    command: ["--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30001"]
+    volumes:
+      - "$PWD/.mongo/replica.key:/data/replica.key"
+      - "$PWD/.mongo/mongo1:/data/db"
+  mongo2:
+    container_name: mongo2
+    image: mongo:6.0.3
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
+    ports:
+      - "30002:30002"
+    command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30002" ]
+    volumes:
+      - "$PWD/.mongo/replica.key:/data/replica.key"
+      - "$PWD/.mongo/mongo2:/data/db"
+  mongo3:
+    container_name: mongo3
+    image: mongo:6.0.3
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
+    ports:
+      - "30003:30003"
+    command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30003" ]
+    volumes:
+      - "$PWD/.mongo/replica.key:/data/replica.key"
+      - "$PWD/.mongo/mongo3:/data/db"
+  mongoSetup:
+    image: mongo:6.0.3
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    volumes:
+      - "$PWD/.mongo/:/scripts"
+    restart: "no"
+    entrypoint: [ "bash", "/scripts/mongo_init.sh"]
 
