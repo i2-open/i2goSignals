@@ -5,7 +5,6 @@ import (
 	"i2goSignals/pkg/goSet"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -49,11 +48,6 @@ type StreamStateRecord struct {
 	StartDate time.Time
 	CreatedAt time.Time
 	Status    string
-}
-
-type EventAuthToken struct {
-	StreamId string `json:"sid"`
-	jwt.RegisteredClaims
 }
 
 type documentKey struct {

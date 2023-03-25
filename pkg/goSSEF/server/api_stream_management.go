@@ -10,6 +10,7 @@ package server
 
 import (
 	"encoding/json"
+	"i2goSignals/internal/authUtil"
 	"i2goSignals/internal/model"
 	"net/http"
 
@@ -18,32 +19,124 @@ import (
 
 func AddSubject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func GetStatus(w http.ResponseWriter, r *http.Request) {
+	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	vars := mux.Vars(r)
+	subject := vars["subject"]
+
+	streamStatus, err := sa.Provider.GetStatus(sid, subject)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
+	resp, _ := json.Marshal(*streamStatus)
+	w.Write(resp)
 }
 
 func RemoveSubject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func StreamDelete(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	err := sa.Provider.DeleteStream(sid)
+	if err != nil {
+		if err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func StreamGet(w http.ResponseWriter, r *http.Request) {
+	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	config, err := sa.Provider.GetStream(sid)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
+	resp, _ := json.Marshal(*config)
+	w.Write(resp)
 }
 
 func StreamPost(w http.ResponseWriter, r *http.Request) {
+	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	var jsonRequest model.StreamConfiguration
+	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	configResp, err := sa.Provider.UpdateStream(sid, jsonRequest)
+	if err != nil {
+		if err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
+	respBytes, _ := json.MarshalIndent(configResp, "", "  ")
+	w.Write(respBytes)
 }
 
 func UpdateStatus(w http.ResponseWriter, r *http.Request) {

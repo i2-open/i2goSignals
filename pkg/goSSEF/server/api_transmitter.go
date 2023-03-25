@@ -9,11 +9,15 @@
 package server
 
 import (
+	"encoding/json"
+	"i2goSignals/internal/authUtil"
 	"i2goSignals/internal/model"
 	"i2goSignals/pkg/goSet"
 	"log"
 	"net/http"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
 )
 
@@ -50,8 +54,80 @@ func JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
 }
 
 func PollEvents(w http.ResponseWriter, r *http.Request) {
+	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	// set default to return immediately
+	request := model.PollParameters{ReturnImmediately: false}
+
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+
+	// First, process the acknowlegdgements
+	for _, jti := range request.Acks {
+		sa.Provider.AckEvent(jti, sid)
+	}
+
+	state, _ := sa.Provider.GetStatus(sid, "")
+
+	if state.Status != "" && state.Status != "enabled" {
+		w.WriteHeader(http.StatusOK)
+		// Give an empty response but indicate suspension with a header
+		resp := model.PollResponse{
+			Sets:          nil,
+			MoreAvailable: false,
+		}
+		respBytes, _ := json.Marshal(resp)
+		w.Write(respBytes)
+		w.Header().Set("ssef-stream-state", state.Status)
+		return
+
+	}
+
+	config, _ := sa.Provider.GetStream(sid)
+
+	key, err := sa.Provider.GetIssuerJWKS(config.Iss)
+
+	// This will remain pending as if return immediately is false
+	jtis, more := sa.Provider.GetEventIds(sid, request)
+	sets := make([]string, len(jtis))
+	if len(jtis) > 0 {
+		tokens := sa.Provider.GetEvents(jtis)
+		for i, token := range *tokens {
+			token.Issuer = config.Iss
+			token.Audience = config.Aud
+			token.IssuedAt = jwt.NewNumericDate(time.Now())
+			sets[i], err = token.JWS(jwt.SigningMethodRS256, key)
+			if err != nil {
+				log.Println("Error signing event: " + err.Error())
+			}
+		}
+	}
+	resp := model.PollResponse{
+		Sets:          sets,
+		MoreAvailable: more,
+	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
+	respBytes, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		log.Println("Error serializing response: " + err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.Write(respBytes)
+	return
+
 }
 
 func PushEvents(configuration model.StreamConfiguration, events []goSet.SecurityEventToken) *[]string {

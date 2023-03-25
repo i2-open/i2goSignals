@@ -45,7 +45,7 @@ func (m *MongoProvider) initializePollStream(configuration model.StreamConfigura
 }
 
 func (m *MongoProvider) initializePushStream(configuration model.StreamConfiguration) error {
-	streamState, err := m.GetStreamState(configuration.Id)
+	streamState, err := m.getStreamState(configuration.Id)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,8 @@ func (m *MongoProvider) iteratePendingPush(ctx context.Context, group *sync.Wait
 
 	defer group.Done()
 
-	jtis := m.GetEventIds(configuration.Id, CBatch_Size)
+	jtis, _ := m.GetEventIds(configuration.Id, model.PollParameters{MaxEvents: CBatch_Size,
+		ReturnImmediately: true})
 	for len(jtis) > 0 {
 		events := m.GetEvents(jtis)
 		ackIds := server.PushEvents(configuration, *events)
@@ -93,14 +94,14 @@ func (m *MongoProvider) iteratePendingPush(ctx context.Context, group *sync.Wait
 			}
 		}
 		// Keep looping until all events sent
-		jtis = m.GetEventIds(configuration.Id, CBatch_Size)
+		jtis, _ = m.GetEventIds(configuration.Id, model.PollParameters{MaxEvents: CBatch_Size, ReturnImmediately: true})
 	}
 	// This will pause the steam if it is marked inactive
 	m.checkStreamState(ctx, configuration) //
 
 	for stream.Next(ctx) {
 		// New events are available.  Get the next ones
-		jtis = m.GetEventIds(configuration.Id, CBatch_Size)
+		jtis, _ = m.GetEventIds(configuration.Id, model.PollParameters{MaxEvents: CBatch_Size, ReturnImmediately: true})
 		if len(jtis) == 0 {
 			// This loop will actually fire for each change. If events already processed, just ignore
 			continue
@@ -119,7 +120,7 @@ func (m *MongoProvider) iteratePendingPush(ctx context.Context, group *sync.Wait
 }
 
 func (m *MongoProvider) checkStreamState(ctx context.Context, configuration model.StreamConfiguration) bool {
-	state, _ := m.GetStreamState(configuration.Id)
+	state, _ := m.getStreamState(configuration.Id)
 	if state.Status == CState_Active {
 		return true
 	}
@@ -128,7 +129,7 @@ func (m *MongoProvider) checkStreamState(ctx context.Context, configuration mode
 		if !m.waitForStreamChange(ctx, state.Id) {
 			return false
 		}
-		state, _ = m.GetStreamState(configuration.Id)
+		state, _ = m.getStreamState(configuration.Id)
 	}
 	return true
 }

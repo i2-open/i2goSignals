@@ -1,8 +1,8 @@
-package server
+package handler
 
 import (
 	"crypto/rsa"
-	model2 "i2goSignals/internal/model"
+	model "i2goSignals/internal/model"
 
 	"github.com/MicahParks/keyfunc"
 )
@@ -18,18 +18,18 @@ type StreamConfigHandler interface {
 	Name(token string) string
 
 	// ListStreams returns all configured streams
-	ListStreams() []model2.StreamConfiguration
+	ListStreams() []model.StreamConfiguration
 
 	// RegisterStream creates a new stream
-	RegisterStream(request model2.RegisterParameters) model2.RegisterResponse
+	RegisterStream(request model.RegisterParameters) model.RegisterResponse
 
 	DeleteStream(streamId string) (string, error)
 
 	// GetStream retrieves a current stream and often used to UpdateStream
-	GetStream(streamId string) (model2.StreamConfiguration, error)
+	GetStream(streamId string) (model.StreamConfiguration, error)
 
 	// UpdateStream replaces the current configuration with the new configuration requested (read-only attributes ignored)
-	UpdateStream(streamId string, configuration model2.StreamConfiguration) (model2.StreamConfiguration, error)
+	UpdateStream(streamId string, configuration model.StreamConfiguration) (model.StreamConfiguration, error)
 
 	// GetTransmitterJWKS returns the key that will be used to sign events
 	GetTransmitterJWKS(issuer string) (*rsa.PrivateKey, error)
@@ -49,11 +49,11 @@ StreamHandler largely handles all interactions with using an operational stream.
 calls to Kafka (or other provider).
 */
 type StreamHandler interface {
-	GetStatus(token string, subject model2.Subject) (model2.StreamStatus, error)
-	SetStatus(token string, status model2.StreamStatus) (model2.StreamStatus, error)
-	AddSubject(token string, parameters model2.AddSubjectParameters) error
-	RemoveSubject(token string, parameters model2.RemoveSubjectParameters) error
-	TriggerEvent(token string, parameters model2.TriggerEventParameters) error
-	PollEvents(streamId string, parameters model2.PollParameters) (model2.PollResponse, error)
+	GetStatus(token string, subject model.Subject) (model.StreamStatus, error)
+	SetStatus(token string, status model.StreamStatus) (model.StreamStatus, error)
+	AddSubject(token string, parameters model.AddSubjectParameters) error
+	RemoveSubject(token string, parameters model.RemoveSubjectParameters) error
+	TriggerEvent(token string, parameters model.TriggerEventParameters) error
+	PollEvents(streamId string, parameters model.PollParameters) (model.PollResponse, error)
 	CreateStream(streamId string) error
 }

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/stretchr/testify/assert"
@@ -19,11 +20,13 @@ type testData struct {
 	streamToken string
 }
 
+var Const_DB_URL = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
+
 var data testData
 
 func TestMain(m *testing.M) {
 	var err error
-	provider, err := mongo_provider.Open("mongodb://root:dockTest@0.0.0.0:8880")
+	provider, err := mongo_provider.Open(Const_DB_URL)
 	if err != nil {
 		fmt.Println("Mongo client error: " + err.Error())
 		return
@@ -66,7 +69,9 @@ func TestStreamConfig(t *testing.T) {
 
 	assert.Equal(t, data.stream.Id, configs[0].Id, "should be the same data.stream id")
 
-	events := data.provider.GetEventIds(data.stream.Id, 5)
+	events, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{
+		MaxEvents: 5, ReturnImmediately: true,
+	})
 	assert.Equal(t, 0, len(events), "should be no events")
 
 	id := data.stream.Id
@@ -82,7 +87,7 @@ func TestEvents(t *testing.T) {
 	generateEvent(streams)
 
 	// Check Events by data.stream id
-	eventIds := data.provider.GetEventIds(data.stream.Id, 5)
+	eventIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	assert.Equal(t, 1, len(eventIds), "should be 1 event")
 
 	// Check event collection (all data.streams)
@@ -92,9 +97,52 @@ func TestEvents(t *testing.T) {
 	// Acknowledge should transfer pending event to acked event leaving no pending events
 	data.provider.AckEvent(eventIds[0], data.stream.Id)
 
-	nextIds := data.provider.GetEventIds(data.stream.Id, 5)
+	nextIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	assert.Equal(t, 0, len(nextIds), "Should be no pending events")
 
+	generateEvent(streams)
+	generateEvent(streams)
+	generateEvent(streams)
+	generateEvent(streams)
+	generateEvent(streams)
+	generateEvent(streams)
+
+	nextIds, _ = data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	assert.Equal(t, 5, len(nextIds), "Should be 5 max events")
+	ackEvents(nextIds)
+
+	finalIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	assert.Equal(t, 1, len(finalIds), "should be 1 event")
+	data.provider.AckEvent(finalIds[0], data.stream.Id)
+}
+
+func TestPolling(t *testing.T) {
+	streams := make([]string, 1)
+	streams[0] = data.stream.Id
+
+	go generateEventsOverTime(streams)
+
+	eventIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: false, TimeoutSecs: 15})
+	count := len(eventIds)
+	log.Printf("Total events returned from first get: %v", count)
+	assert.Truef(t, count > 0, "Should be at least 1 event (actual: %v)", count)
+	ackEvents(eventIds)
+	time.Sleep(15 * time.Second) // this should be long enough for the remainder
+
+	nextIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: false, TimeoutSecs: 15})
+	should := 10 - count
+	log.Printf("Total events from 2nd batch is %v and should be %v", len(nextIds), should)
+
+	assert.Equalf(t, should, len(nextIds), "There should be %v events left. Actual is %v", should, len(nextIds))
+	ackEvents(nextIds)
+}
+
+func ackEvents(ids []string) {
+	for _, id := range ids {
+		if id != "" {
+			data.provider.AckEvent(id, data.stream.Id)
+		}
+	}
 }
 
 func TestStreams(t *testing.T) {
@@ -109,7 +157,17 @@ func TestStreams(t *testing.T) {
 
 }
 
-func generateEvent(ids []string) {
+func generateEventsOverTime(sids []string) {
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Second)
+		log.Println(" ... adding 2 events")
+		generateEvent(sids)
+		generateEvent(sids)
+	}
+	log.Println("*** event generation complete ***")
+}
+
+func generateEvent(streamIds []string) {
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/1234").AddUsername("huntp").AddEmail("phil.hunt@hexa.org"),
 	}
@@ -117,9 +175,9 @@ func generateEvent(ids []string) {
 	payload_claims := map[string]interface{}{
 		"aclaim": "avalue",
 	}
-	test1.AddEventPayload("uri:testevent", payload_claims)
+	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payload_claims)
 
-	data.provider.AddEvent(&test1, ids)
+	data.provider.AddEvent(&test1, streamIds)
 }
 
 func TestIssuerKeys(t *testing.T) {
@@ -159,4 +217,27 @@ func TestReceiverKeys(t *testing.T) {
 
 	res := data.provider.GetReceiverKey("dummy")
 	assert.Nil(t, res)
+}
+
+func TestStreamManagement(t *testing.T) {
+	sid := data.stream.Id
+	orig := data.stream
+	config := model.StreamConfiguration{
+		Id:              sid,
+		Iss:             "bleh",
+		Aud:             []string{"test"},
+		EventsRequested: []string{"abc"},
+		Delivery:        orig.Delivery,
+		Format:          orig.Format,
+	}
+
+	_, err := data.provider.UpdateStream("1234", config)
+	assert.Error(t, err, "not found")
+
+	res, err := data.provider.UpdateStream(sid, config)
+	assert.NoError(t, err, "Update should have no error")
+	assert.Equal(t, orig.Aud, res.Aud, "Audience should not change")
+	assert.Equal(t, orig.Iss, res.Iss, "Issuer should not change")
+	assert.Equal(t, []string{"abc"}, res.EventsRequested, "Event should be abc")
+
 }

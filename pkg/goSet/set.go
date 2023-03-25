@@ -17,6 +17,11 @@ import (
 type UsernameIdentifier struct {
 	Username string `json:"username,omitempty"`
 }
+
+type ExternalIdentifier struct {
+	ExternalId string `json:"externalId,omitempty"`
+}
+
 type EmailIdentifier struct {
 	Email string `json:"email,omitempty"`
 }
@@ -62,6 +67,7 @@ type SubjectIdentifier struct {
 	PhoneNumberIdentifier
 	DecentralizedIdentifier
 	UniformResourceIdentifier
+	ExternalIdentifier
 }
 
 func (sid *SubjectIdentifier) AddUsername(username string) *SubjectIdentifier {
@@ -71,6 +77,11 @@ func (sid *SubjectIdentifier) AddUsername(username string) *SubjectIdentifier {
 
 func (sid *SubjectIdentifier) AddEmail(email string) *SubjectIdentifier {
 	sid.Email = email
+	return sid
+}
+
+func (sid *SubjectIdentifier) AddExternalId(id string) *SubjectIdentifier {
+	sid.ExternalId = id
 	return sid
 }
 
@@ -183,9 +194,9 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	token := jwt.NewWithClaims(signingMethod, set)
 	token.Header["typ"] = "secevent+jwt"
 
-	//publicKey := key.PublicKey
+	// publicKey := key.PublicKey
 
-	//givenKey := keyfunc.NewGivenRSA(&publicKey)
+	// givenKey := keyfunc.NewGivenRSA(&publicKey)
 
 	//	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
 	//		"issuer": givenKey,
@@ -216,7 +227,7 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 
 func GenerateJti() string {
 
-	//return xid.New().String()
+	// return xid.New().String()
 	ksuid.New()
 	return ksuid.New().String()
 }

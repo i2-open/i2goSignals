@@ -7,9 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"i2goSignals/internal/authUtil"
 	model "i2goSignals/internal/model"
 	"i2goSignals/pkg/goSet"
-
 	"log"
 	"os"
 	"time"
@@ -75,7 +75,7 @@ type MongoProvider struct {
 }
 
 func (m *MongoProvider) Name(token string) string {
-	if _, err := m.authenticateToken(token); err != nil {
+	if _, err := m.AuthenticateToken(token); err != nil {
 		return m.DbName
 	}
 	return CDbName
@@ -121,7 +121,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	if m.DefaultIssuer != m.TokenIssuer {
 		m.tokenKey = m.CreateIssuerJwkKeyPair(m.TokenIssuer)
 	}
-	m.tokenPubKey = m.getInternalPublicTransmitterJWKS(m.TokenIssuer)
+	m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
 
 	indexSid := mongo.IndexModel{
 		Keys: bson.D{
@@ -238,8 +238,13 @@ func (m *MongoProvider) DeleteStream(streamId string) error {
 	docId, _ := primitive.ObjectIDFromHex(streamId)
 	filter := bson.M{"_id": docId}
 
-	_, err := m.streamCol.DeleteOne(context.TODO(), filter)
-
+	resp, err := m.streamCol.DeleteOne(context.TODO(), filter)
+	if resp.DeletedCount == 1 {
+		return nil
+	}
+	if resp.DeletedCount == 0 {
+		return errors.New("not Found")
+	}
 	return err
 }
 
@@ -301,7 +306,7 @@ func (m *MongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
 	return &rec
 }
 
-func (m *MongoProvider) getInternalPublicTransmitterJWKS(issuer string) *keyfunc.JWKS {
+func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc.JWKS {
 	filter := bson.D{{"iss", issuer}}
 
 	res := m.keyCol.FindOne(context.TODO(), filter)
@@ -398,6 +403,7 @@ func (m *MongoProvider) RegisterStreamIssuer(request model.RegisterParameters, i
 	config.Delivery = method
 
 	config.MinVerificationInterval = 15
+	config.IssuerJWKSUrl = "/jwks/" + issuer
 
 	// SCIM services will generally use the SCIM ID
 	config.Format = CSubjectFmt
@@ -418,12 +424,45 @@ func (m *MongoProvider) RegisterStreamIssuer(request model.RegisterParameters, i
 	return config, err
 }
 
-func (m *MongoProvider) GetStreamState(id string) (*StreamStateRecord, error) {
+func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+
+	streamRec, err := m.getStreamState(streamId)
+	if err != nil {
+		return nil, err
+	}
+
+	config := streamRec.StreamConfiguration
+
+	config.EventsRequested = configReq.EventsRequested
+	if configReq.Delivery != nil {
+		config.Delivery = configReq.Delivery
+	}
+	if configReq.Format != "" {
+		config.Format = configReq.Format
+	}
+
+	streamRec.StreamConfiguration = config
+
+	docId, _ := primitive.ObjectIDFromHex(streamId)
+	filter := bson.M{"_id": docId}
+	res, err := m.streamCol.ReplaceOne(context.TODO(), filter, streamRec)
+	if err != nil {
+		return nil, errors.New("Stream update error: " + err.Error())
+	}
+	if res.ModifiedCount == 0 {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func (m *MongoProvider) getStreamState(id string) (*StreamStateRecord, error) {
 	docId, _ := primitive.ObjectIDFromHex(id)
 	filter := bson.M{"_id": docId}
 
 	res := m.streamCol.FindOne(context.TODO(), filter)
-
+	if res.Err() == mongo.ErrNoDocuments {
+		return nil, errors.New("not found")
+	}
 	var rec StreamStateRecord
 
 	err := res.Decode(&rec)
@@ -434,8 +473,20 @@ func (m *MongoProvider) GetStreamState(id string) (*StreamStateRecord, error) {
 	return &rec, nil
 }
 
+func (m *MongoProvider) GetStatus(streamId string, subject string) (*model.StreamStatus, error) {
+	state, err := m.getStreamState(streamId)
+	if err != nil {
+		return nil, err
+	}
+
+	status := model.StreamStatus{
+		Status: state.Status,
+	}
+	return &status, nil
+}
+
 func (m *MongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
-	rec, err := m.GetStreamState(id)
+	rec, err := m.getStreamState(id)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +539,7 @@ func (m *MongoProvider) AckEvent(jtiString string, streamId string) {
 	}
 }
 
-func (m *MongoProvider) GetEventIds(streamId string, maxEvents int) []string {
+func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
 	sid, _ := primitive.ObjectIDFromHex(streamId)
 
 	filter := bson.D{
@@ -496,9 +547,64 @@ func (m *MongoProvider) GetEventIds(streamId string, maxEvents int) []string {
 	}
 
 	opts := options.Find()
-	if maxEvents > 0 {
-		opts.SetLimit(int64(maxEvents))
+	if params.MaxEvents > 0 {
+		opts.SetLimit(int64(params.MaxEvents))
 	}
+
+	totalCount, _ := m.pendingCol.CountDocuments(context.TODO(), filter, options.Count())
+
+	if totalCount == 0 {
+		// TODO: check pending
+		if params.ReturnImmediately {
+			// no events to return at the moment
+			return []string{}, false
+		}
+
+		// wait for pending changes
+		/*
+			matchInserts := bson.D{
+				{
+					"$match", bson.D{
+					{"operationType", "insert"},
+				},
+				},
+			}
+
+		*/
+		matchInserts := bson.D{
+			{
+				"$match", bson.D{
+					{"operationType", "insert"},
+					{"fullDocument.sid", sid}},
+			},
+		}
+
+		var opts options.ChangeStreamOptions
+		if params.TimeoutSecs > 0 {
+
+			wait := time.Duration(float64(time.Second) * float64(params.TimeoutSecs))
+			opts.SetMaxAwaitTime(wait)
+		}
+
+		eventStream, err := m.pendingCol.Watch(context.TODO(), mongo.Pipeline{matchInserts}, &opts)
+		if err != nil {
+			log.Println("Error: Unable to initialize event stream: " + err.Error())
+		}
+
+		routineCtx := context.WithValue(context.Background(), "streamid", streamId)
+		defer eventStream.Close(routineCtx)
+		if eventStream.Next(routineCtx) {
+			// now that there are events to return, re-poll
+			// changeEvent := eventStream.Current
+			// log.Printf("ChangeEvent: %v", changeEvent.String())
+			return m.GetEventIds(streamId, params)
+		} else {
+			if routineCtx.Err() != nil {
+				log.Printf("Error occurred waiting for events on sid [%v]: %s", streamId, routineCtx.Err().Error())
+			}
+		}
+	}
+
 	var events []DeliverableEvent
 	cursor, err := m.pendingCol.Find(context.TODO(), filter, opts)
 	if err = cursor.All(context.TODO(), &events); err != nil {
@@ -509,7 +615,12 @@ func (m *MongoProvider) GetEventIds(streamId string, maxEvents int) []string {
 	for i, v := range events {
 		ids[i] = v.Jti
 	}
-	return ids
+
+	more := false
+	if len(ids) < int(totalCount) {
+		more = true
+	}
+	return ids, more
 }
 
 func (m *MongoProvider) getEvent(jti string) *goSet.SecurityEventToken {
@@ -538,7 +649,7 @@ func (m *MongoProvider) GetEvents(jtis []string) *[]goSet.SecurityEventToken {
 func (m *MongoProvider) IssueStreamToken(record model.StreamConfiguration) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
-	eat := EventAuthToken{
+	eat := authUtil.EventAuthToken{
 		StreamId: record.Id,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -555,29 +666,14 @@ func (m *MongoProvider) IssueStreamToken(record model.StreamConfiguration) (stri
 	return token.SignedString(m.tokenKey)
 }
 
-func (m *MongoProvider) authenticateToken(token string) (string, error) {
-	tkn, err := ParseAuthToken(token, m.tokenPubKey)
+func (m *MongoProvider) AuthenticateToken(token string) (string, error) {
+	tkn, err := authUtil.ParseAuthToken(token, m.tokenPubKey)
 	if err != nil {
 		return "", err
 	}
 	return tkn.StreamId, nil
 }
 
-func ParseAuthToken(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*EventAuthToken, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, issuerPublicJwks.Keyfunc)
-	if err != nil {
-		log.Printf("Error validating token: %s", err.Error())
-	}
-	if token.Header["typ"] != "jwt" {
-		log.Printf("token is not an authorization token (JWT)")
-		return nil, errors.New("token type is not an authorization token (`jwt`)")
-	}
-
-	jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
-	claimString := string(jsonByte)
-	log.Println(claimString)
-	if claims, ok := token.Claims.(*EventAuthToken); ok && token.Valid {
-		return claims, nil
-	}
-	return nil, err
+func (m *MongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
+	return m.tokenPubKey
 }
