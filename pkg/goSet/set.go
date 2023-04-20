@@ -210,6 +210,7 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())
+		return nil, err
 	}
 	if token.Header["typ"] != "secevent+jwt" {
 		log.Printf("token is not a security event type(secevent+jwt)")

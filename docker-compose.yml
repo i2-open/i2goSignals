@@ -49,4 +49,17 @@ services:
       - "$PWD/.mongo/:/scripts"
     restart: "no"
     entrypoint: [ "bash", "/scripts/mongo_init.sh"]
+  i2goSignalsServer:
+    image: i2gosignals
+    command: goSignalsServer
+    depends_on:
+      mongoSetup:
+        condition: service_completed_successfully
+    ports:
+      - "8888:8888"
+    environment:
+      - MONGO_URL="mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
+      - SSEF_ADMIN_USER=
+
+
 

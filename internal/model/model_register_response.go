@@ -10,5 +10,7 @@ package model
 
 type RegisterResponse struct {
 	// The Bearer Token that the receiver will need to use for all Stream Management API calls that require authorization.
-	Token string `json:"token"`
+	Token   string `json:"token"`
+	PushUrl string `json:"pushUrl,omitempty"`
+	Inbound *bool  `json:"inbound,omitempty"`
 }

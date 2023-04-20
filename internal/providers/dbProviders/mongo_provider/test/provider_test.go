@@ -20,13 +20,31 @@ type testData struct {
 	streamToken string
 }
 
-var Const_DB_URL = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
+func (t *testData) InitStream(events []string) {
+	req := model.RegisterParameters{
+		Audience: []string{"test.example.com"},
+	}
+	t.stream, _ = t.provider.CreateStream(req, "test.com")
+	t.streamToken, _ = t.provider.IssueStreamToken(t.stream)
+
+	if len(events) > 0 {
+		t.stream.EventsRequested = events
+		result, err := t.provider.UpdateStream(t.stream.Id, t.stream)
+		if err != nil {
+			log.Println("ERROR: " + err.Error())
+		}
+		t.stream = *result
+	}
+
+}
+
+var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
 
 var data testData
 
 func TestMain(m *testing.M) {
 	var err error
-	provider, err := mongo_provider.Open(Const_DB_URL)
+	provider, err := mongo_provider.Open(TestDbUrl, "")
 	if err != nil {
 		fmt.Println("Mongo client error: " + err.Error())
 		return
@@ -34,21 +52,15 @@ func TestMain(m *testing.M) {
 
 	provider.ResetDb(true)
 
-	req := model.RegisterParameters{
-		Audience: []string{"test.example.com"},
-	}
-	stream, _ := provider.RegisterStreamIssuer(req, "test.com")
-	streamToken, err := provider.IssueStreamToken(stream)
 	if err != nil {
 		log.Println("Received error generating test token")
 		ShutDown()
 		os.Exit(-1)
 	}
 	data = testData{
-		provider:    *provider,
-		stream:      stream,
-		streamToken: streamToken,
+		provider: *provider,
 	}
+	data.InitStream([]string{})
 
 	code := m.Run()
 
@@ -62,7 +74,7 @@ func ShutDown() {
 }
 
 func TestStreamConfig(t *testing.T) {
-	assert.Equal(t, mongo_provider.CDbName, data.provider.Name(data.streamToken), "Confirm name is set")
+	assert.Equal(t, mongo_provider.CDbName, data.provider.Name(), "Confirm name is set")
 
 	configs := data.provider.ListStreams()
 	assert.Equal(t, 1, len(configs), "should be one registered")
@@ -90,6 +102,9 @@ func TestEvents(t *testing.T) {
 	eventIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	assert.Equal(t, 1, len(eventIds), "should be 1 event")
 
+	if len(eventIds) == 0 {
+		return
+	}
 	// Check event collection (all data.streams)
 	events := data.provider.GetEvents(eventIds)
 	assert.Equal(t, 1, len(*events), "Should be 1 event")
@@ -127,14 +142,26 @@ func TestPolling(t *testing.T) {
 	log.Printf("Total events returned from first get: %v", count)
 	assert.Truef(t, count > 0, "Should be at least 1 event (actual: %v)", count)
 	ackEvents(eventIds)
-	time.Sleep(15 * time.Second) // this should be long enough for the remainder
 
-	nextIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: false, TimeoutSecs: 15})
-	should := 10 - count
-	log.Printf("Total events from 2nd batch is %v and should be %v", len(nextIds), should)
+	events := eventIds
+	callCount := 0
+	for len(events) < 10 && callCount < 6 {
+		log.Println("\nPolling for next events...")
+		nextIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: false, TimeoutSecs: 5})
+		events = append(events, nextIds...)
+		callCount++
+		log.Printf("...\tPoll# %v, received %v events\n", callCount, len(nextIds))
+		ackEvents(nextIds)
+	}
 
-	assert.Equalf(t, should, len(nextIds), "There should be %v events left. Actual is %v", should, len(nextIds))
-	ackEvents(nextIds)
+	assert.Truef(t, callCount < 6, "Too many calls required")
+	assert.Equal(t, 10, len(events), "Should be 10 total events")
+
+	sets := data.provider.GetEvents(events)
+
+	assert.Equal(t, len(events), len(*sets), "Sets return matches getevents")
+	aset := (*sets)[0]
+	assert.Equal(t, data.stream.Iss, aset.Issuer, "Issuer is matched")
 }
 
 func ackEvents(ids []string) {
@@ -177,7 +204,7 @@ func generateEvent(streamIds []string) {
 	}
 	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payload_claims)
 
-	data.provider.AddEvent(&test1, streamIds)
+	data.provider.AddEvent(&test1, false)
 }
 
 func TestIssuerKeys(t *testing.T) {
@@ -185,11 +212,11 @@ func TestIssuerKeys(t *testing.T) {
 	key := data.provider.CreateIssuerJwkKeyPair(issuer)
 	assert.NotNil(t, key, "Should be a key returned")
 
-	keyRetrieved, err := data.provider.GetIssuerJWKS(issuer)
+	keyRetrieved, err := data.provider.GetIssuerPrivateKey(issuer)
 	assert.NoError(t, err, "Should be no error")
 	assert.Equal(t, key, keyRetrieved, "Should be same key")
 
-	keyFail, err := data.provider.GetIssuerJWKS("should.fail")
+	keyFail, err := data.provider.GetIssuerPrivateKey("should.fail")
 	assert.Error(t, err, "No key found for: should.fail")
 	assert.Nil(t, keyFail, "Shoudl be no key returned")
 
@@ -239,5 +266,17 @@ func TestStreamManagement(t *testing.T) {
 	assert.Equal(t, orig.Aud, res.Aud, "Audience should not change")
 	assert.Equal(t, orig.Iss, res.Iss, "Issuer should not change")
 	assert.Equal(t, []string{"abc"}, res.EventsRequested, "Event should be abc")
+	assert.Equal(t, 0, len(res.EventsDelivered), "Should be no delivered events")
 
+	res.EventsRequested = res.EventsSupported // request all events
+	res2, err := data.provider.UpdateStream(sid, *res)
+	assert.NoError(t, err, "2nd Update should have no error")
+	assert.Equal(t, res.EventsSupported, res2.EventsDelivered, "All events enabled")
+
+	err = data.provider.DeleteStream(data.stream.Id)
+	assert.NoError(t, err, "Delete should be successful")
+
+	supportedEvents := mongo_provider.GetSupportedEvents()
+	data.InitStream(supportedEvents)
+	assert.Equal(t, len(supportedEvents), len(data.stream.EventsDelivered), "All events enabled")
 }

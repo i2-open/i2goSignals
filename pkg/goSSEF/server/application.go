@@ -1,19 +1,24 @@
 package server
 
 import (
+	"i2goSignals/internal/eventRouter"
 	"i2goSignals/internal/providers/dbProviders"
 	"log"
 	"net/http"
 	"os"
 )
 
-var sa *SignalsApplication
+// var sa *SignalsApplication
 
 type SignalsApplication struct {
-	Provider  dbProviders.DbProviderInterface
-	Server    *http.Server
-	HostName  string
-	DefIssuer string
+	Provider    dbProviders.DbProviderInterface
+	Server      *http.Server
+	EventRouter eventRouter.EventRouter
+	HostName    string
+	DefIssuer   string
+	AdminRole   string
+	AdminUser   string
+	AdminPwd    string
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -30,12 +35,30 @@ func (sa *SignalsApplication) HealthCheck() bool {
 }
 
 func StartServer(addr string, provider dbProviders.DbProviderInterface) *SignalsApplication {
-	router := NewRouter()
+	role := os.Getenv("SSEF_ADMIN_ROLE")
+	if role == "" {
+		role = "ADMIN"
+	}
+
+	user := os.Getenv("SSEF_ADMIN_USER")
+
+	pwd := os.Getenv("SSEF_ADMIN_SECRET")
+
+	sa := &SignalsApplication{
+		Provider:  provider,
+		AdminRole: role,
+		AdminUser: user,
+		AdminPwd:  pwd,
+	}
+
+	router := NewRouter(sa)
 
 	server := http.Server{
 		Addr:    addr,
-		Handler: router,
+		Handler: router.router,
 	}
+	sa.Server = &server
+	sa.EventRouter = eventRouter.NewRouter(sa)
 	name := ""
 	if server.TLSConfig != nil {
 		name = server.TLSConfig.ServerName
@@ -45,18 +68,13 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface) *Signals
 		name = "http://" + addr
 		log.Println("Server default hostname:\t[" + name + "]")
 	}
+	sa.HostName = name
 
 	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
 	if !issDefined {
 		defaultIssuer = "DEFAULT"
 	}
-	sa = &SignalsApplication{
-		Provider:  provider,
-		Server:    &server,
-		HostName:  name,
-		DefIssuer: defaultIssuer,
-	}
+	sa.DefIssuer = defaultIssuer
 
 	return sa
-
 }

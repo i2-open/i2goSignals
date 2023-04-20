@@ -14,7 +14,7 @@ import (
 	"net/http"
 )
 
-func Register(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
 	var jsonRequest model.RegisterParameters
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
@@ -27,13 +27,14 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	// TODO: Update Event Router about stream change
 	regBytes, _ := json.MarshalIndent(response, "", " ")
 	w.Write(regBytes)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 }
 
-func TriggerEvent(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNotImplemented)
 }

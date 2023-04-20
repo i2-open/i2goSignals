@@ -10,20 +10,19 @@ package server
 
 import (
 	"encoding/json"
-	"i2goSignals/internal/authUtil"
 	"i2goSignals/internal/model"
 	"net/http"
 
 	"github.com/gorilla/mux"
 )
 
-func AddSubject(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-func GetStatus(w http.ResponseWriter, r *http.Request) {
-	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
+	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -50,13 +49,13 @@ func GetStatus(w http.ResponseWriter, r *http.Request) {
 	w.Write(resp)
 }
 
-func RemoveSubject(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-func StreamDelete(w http.ResponseWriter, r *http.Request) {
-	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Request) {
+	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -68,6 +67,7 @@ func StreamDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := sa.Provider.DeleteStream(sid)
+	// TODO: Also update the router to delete the stream
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -79,8 +79,8 @@ func StreamDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func StreamGet(w http.ResponseWriter, r *http.Request) {
-	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
+	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -104,8 +104,8 @@ func StreamGet(w http.ResponseWriter, r *http.Request) {
 	w.Write(resp)
 }
 
-func StreamPost(w http.ResponseWriter, r *http.Request) {
-	sid, status := authUtil.ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request) {
+	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -132,6 +132,7 @@ func StreamPost(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(err.Error()))
 	}
+	// TODO Update router regarding stream change
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
@@ -139,25 +140,25 @@ func StreamPost(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBytes)
 }
 
-func UpdateStatus(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 }
 
-func VerificationRequest(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 }
 
-func WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	config := model.TransmitterConfiguration{
 		Issuer:  sa.DefIssuer,
 		JwksUri: sa.HostName + "/jwks.json",
 		DeliveryMethodsSupported: []string{
-			"https://schemas.openid.net/secevent/risc/delivery-method/push",
-			"https://schemas.openid.net/secevent/risc/delivery-method/poll",
+			model.DeliveryPoll,
+			model.DeliveryPush,
 		},
 		ConfigurationEndpoint:  sa.HostName + "/stream",
 		StatusEndpoint:         sa.HostName + "/status",
@@ -172,7 +173,7 @@ func WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func WellKnownSseConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) WellKnownSseConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
@@ -180,8 +181,8 @@ func WellKnownSseConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) 
 		Issuer:  issuer,
 		JwksUri: "https://localhost/jwks/" + issuer,
 		DeliveryMethodsSupported: []string{
-			"https://schemas.openid.net/secevent/risc/delivery-method/push",
-			"https://schemas.openid.net/secevent/risc/delivery-method/poll",
+			model.DeliveryPoll,
+			model.DeliveryPush,
 		},
 		ConfigurationEndpoint:  sa.HostName + "/stream",
 		StatusEndpoint:         sa.HostName + "/status",

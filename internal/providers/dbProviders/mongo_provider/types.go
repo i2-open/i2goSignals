@@ -5,14 +5,8 @@ import (
 	"i2goSignals/pkg/goSet"
 	"time"
 
+	"github.com/MicahParks/keyfunc"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-)
-
-const (
-	CState_Active   = "A"
-	CState_Pause    = "P"
-	CState_Inactive = "I"
-	CBatch_Size     = 5
 )
 
 type JwkKeyRec struct {
@@ -25,29 +19,33 @@ type JwkKeyRec struct {
 	ReceiverJwksUrl string             `json:"receiverJwksUrl" bson:"receiver_jwks_url"`
 }
 
+// EventRecord is stored in MongoProvider.eventCol
 type EventRecord struct {
 	// Id        primitive.ObjectID       `json:"id" bson:"_id"`
 	Jti   string                   `json:"jti" bson:"jti"`
 	Event goSet.SecurityEventToken `json:"event"`
+
+	// Inbound indicates that the event has been received and is destined for a local client
+	Inbound bool     `json:"inbound,omitempty" bson:"inbound,omitempty"`
+	Types   []string `json:"types,omitempty" bson:"types,omitempty"`
 }
 
+// DeliveredEvent is stored in MongoProvider.deliveredCol
 type DeliveredEvent struct {
 	DeliverableEvent
 	AckDate time.Time `json:"ackDate"`
 }
 
+// DeliverableEvent is stored in MongoProvider.pendingCol
 type DeliverableEvent struct {
 	// Id       primitive.ObjectID `json:"id" bson:"_id"`
 	Jti      string             `json:"jti" bson:"jti"`
 	StreamId primitive.ObjectID `json:"sid" bson:"sid"`
 }
 
-type StreamStateRecord struct {
-	Id primitive.ObjectID `bson:"_id"`
+type EventReceiver struct {
 	model.StreamConfiguration
-	StartDate time.Time
-	CreatedAt time.Time
-	Status    string
+	jwks *keyfunc.JWKS
 }
 
 type documentKey struct {
@@ -63,9 +61,9 @@ type namespace struct {
 	Coll string `bson:"coll"`
 }
 
-// pendingChangeEvent holds a changeEvent for the pending events collection
+// PendingChangeEvent holds a changeEvent for the pending events collection
 // https://docs.mongodb.com/manual/reference/change-events/
-type pendingChangeEvent struct {
+type PendingChangeEvent struct {
 	ID            changeID            `bson:"_id"`
 	OperationType string              `bson:"operationType"`
 	ClusterTime   primitive.Timestamp `bson:"clusterTime"`

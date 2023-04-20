@@ -23,140 +23,159 @@ type Route struct {
 	HandlerFunc http.HandlerFunc
 }
 
+type HttpRouter struct {
+	router *mux.Router
+	sa     *SignalsApplication
+}
+
 type Routes []Route
 
-func NewRouter() *mux.Router {
-	router := mux.NewRouter().StrictSlash(true)
+func NewRouter(application *SignalsApplication) *HttpRouter {
+	httpRouter := HttpRouter{
+		router: mux.NewRouter().StrictSlash(true),
+		sa:     application,
+	}
+	routes := httpRouter.getRoutes()
 
 	for _, route := range routes {
 		var handler http.Handler
 		handler = route.HandlerFunc
 		handler = Logger(handler, route.Name)
 
-		router.
+		httpRouter.router.
 			Methods(route.Method).
 			Path(route.Pattern).
 			Name(route.Name).
 			Handler(handler)
 	}
 
-	return router
+	return &httpRouter
 }
 
-func Index(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) Index(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello World!")
 }
 
-var routes = Routes{
-	Route{
-		"Index",
-		"GET",
-		"/",
-		Index,
-	},
+func (h *HttpRouter) getRoutes() Routes {
+	routes := Routes{
+		Route{
+			"Index",
+			"GET",
+			"/",
+			h.sa.Index,
+		},
 
-	Route{
-		"Register",
-		http.MethodPost,
-		"/register",
-		Register,
-	},
+		Route{
+			"Register",
+			http.MethodPost,
+			"/register",
+			h.sa.Register,
+		},
 
-	Route{
-		"TriggerEvent",
-		strings.ToUpper("Post"),
-		"/trigger-event",
-		TriggerEvent,
-	},
+		Route{
+			"TriggerEvent",
+			strings.ToUpper("Post"),
+			"/trigger-event",
+			h.sa.TriggerEvent,
+		},
 
-	Route{
-		"AddSubject",
-		strings.ToUpper("Post"),
-		"/add-subject",
-		AddSubject,
-	},
+		Route{
+			"ReceiveEvent",
+			strings.ToUpper("Post"),
+			"/events",
+			h.sa.ReceiveEvent,
+		},
 
-	Route{
-		"GetStatus",
-		strings.ToUpper("Get"),
-		"/status",
-		GetStatus,
-	},
+		Route{
+			"AddSubject",
+			strings.ToUpper("Post"),
+			"/add-subject",
+			h.sa.AddSubject,
+		},
 
-	Route{
-		"RemoveSubject",
-		strings.ToUpper("Post"),
-		"/remove-subject",
-		RemoveSubject,
-	},
+		Route{
+			"GetStatus",
+			strings.ToUpper("Get"),
+			"/status",
+			h.sa.GetStatus,
+		},
 
-	Route{
-		"StreamDelete",
-		strings.ToUpper("Delete"),
-		"/stream",
-		StreamDelete,
-	},
+		Route{
+			"RemoveSubject",
+			strings.ToUpper("Post"),
+			"/remove-subject",
+			h.sa.RemoveSubject,
+		},
 
-	Route{
-		"StreamGet",
-		strings.ToUpper("Get"),
-		"/stream",
-		StreamGet,
-	},
+		Route{
+			"StreamDelete",
+			strings.ToUpper("Delete"),
+			"/stream",
+			h.sa.StreamDelete,
+		},
 
-	Route{
-		"StreamPost",
-		strings.ToUpper("Post"),
-		"/stream",
-		StreamPost,
-	},
+		Route{
+			"StreamGet",
+			strings.ToUpper("Get"),
+			"/stream",
+			h.sa.StreamGet,
+		},
 
-	Route{
-		"UpdateStatus",
-		strings.ToUpper("Post"),
-		"/status",
-		UpdateStatus,
-	},
+		Route{
+			"StreamPost",
+			strings.ToUpper("Post"),
+			"/stream",
+			h.sa.StreamPost,
+		},
 
-	Route{
-		"VerificationRequest",
-		strings.ToUpper("Post"),
-		"/verification",
-		VerificationRequest,
-	},
+		Route{
+			"UpdateStatus",
+			strings.ToUpper("Post"),
+			"/status",
+			h.sa.UpdateStatus,
+		},
 
-	Route{
-		"WellKnownSseConfigurationGet",
-		strings.ToUpper("Get"),
-		"/.well-known/sse-configuration",
-		WellKnownSseConfigurationGet,
-	},
+		Route{
+			"VerificationRequest",
+			strings.ToUpper("Post"),
+			"/verification",
+			h.sa.VerificationRequest,
+		},
 
-	Route{
-		"WellKnownSseConfigurationIssuerGet",
-		strings.ToUpper("Get"),
-		"/.well-known/sse-configuration/{issuer}",
-		WellKnownSseConfigurationIssuerGet,
-	},
+		Route{
+			"WellKnownSseConfigurationGet",
+			strings.ToUpper("Get"),
+			"/.well-known/sse-configuration",
+			h.sa.WellKnownSseConfigurationGet,
+		},
 
-	Route{
-		"JwksJson",
-		strings.ToUpper("Get"),
-		"/jwks.json",
-		JwksJson,
-	},
+		Route{
+			"WellKnownSseConfigurationIssuerGet",
+			strings.ToUpper("Get"),
+			"/.well-known/sse-configuration/{issuer}",
+			h.sa.WellKnownSseConfigurationIssuerGet,
+		},
 
-	Route{
-		"JwksJsonTenant",
-		strings.ToUpper("Get"),
-		"/jwks/{issuer}",
-		JwksJsonIssuer,
-	},
+		Route{
+			"JwksJson",
+			strings.ToUpper("Get"),
+			"/jwks.json",
+			h.sa.JwksJson,
+		},
 
-	Route{
-		"PollEvents",
-		strings.ToUpper("Post"),
-		"/poll",
-		PollEvents,
-	},
+		Route{
+			"JwksJsonTenant",
+			strings.ToUpper("Get"),
+			"/jwks/{issuer}",
+			h.sa.JwksJsonIssuer,
+		},
+
+		Route{
+			"PollEvents",
+			strings.ToUpper("Post"),
+			"/poll",
+			h.sa.PollEvents,
+		},
+	}
+	return routes
 }

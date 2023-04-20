@@ -21,7 +21,7 @@ import (
 func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 	var provider dbProviders.DbProviderInterface
-	mongo, err := mongo_provider.Open(dbUrl)
+	mongo, err := mongo_provider.Open(dbUrl, "")
 	provider = mongo
 	return provider, err
 }
