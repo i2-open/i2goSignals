@@ -1,18 +1,12 @@
 package server
 
 import (
-	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"i2goSignals/internal/model"
-	"i2goSignals/pkg/goSet"
-	"io"
 	"log"
 	"net/http"
-	"strings"
-	"time"
 
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
 )
 
@@ -71,7 +65,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 
-	// First, process the acknowlegdgements
+	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		sa.Provider.AckEvent(jti, sid)
 	}
@@ -101,69 +95,4 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 }
 
-// PushEvents implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
-func (sa *SignalsApplication) PushEvents(configuration model.StreamConfiguration, events []goSet.SecurityEventToken, key *rsa.PrivateKey) *[]string {
-	jtis := make([]string, len(events))
-	pushConfig := configuration.Delivery.PushDeliveryMethod
-
-	client := http.Client{Timeout: 60 * time.Second}
-
-	for i, token := range events {
-
-		url := pushConfig.EndpointUrl
-
-		token.Issuer = configuration.Iss
-		token.Audience = configuration.Aud
-		token.IssuedAt = jwt.NewNumericDate(time.Now())
-		tokenString, err := token.JWS(jwt.SigningMethodRS256, key)
-		if err != nil {
-			log.Println("TRANSMIT PUSH Error signing event: " + err.Error())
-		}
-
-		req, err := http.NewRequest("POST", url, strings.NewReader(tokenString))
-		if pushConfig.AuthorizationHeader != "" {
-			req.Header.Set("Authorization", pushConfig.AuthorizationHeader)
-		}
-		req.Header.Set("Content-Type", "application/secevent+jwt")
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			errMsg := fmt.Sprintf("TRANSMIT PUSH Error transmitting to stream (%s): %s", configuration.Id, err.Error())
-			log.Println(errMsg)
-			return &jtis
-		}
-		if resp.StatusCode != http.StatusAccepted {
-			if resp.StatusCode == http.StatusBadRequest {
-				var errorMsg model.SetDeliveryErr
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					sa.Provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to read response")
-					log.Println("TRANSMIT PUSH Error reading response: " + err.Error())
-					return &jtis
-				}
-				err = json.Unmarshal(body, &errorMsg)
-				if err != nil {
-					log.Println("TRANSMIT PUSH Error parsing error response: " + err.Error())
-					sa.Provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
-					return &jtis
-				}
-				errMsg := fmt.Sprintf("TRANSMIT PUSH [%s] %s", errorMsg.ErrCode, errorMsg.Description)
-				log.Println(errMsg)
-				sa.Provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
-				return &jtis
-			}
-			if resp.StatusCode > 400 {
-				errMsg := fmt.Sprintf("TRANSMIT PUSH HTTP Error: %s, POSTING to %s", resp.Status, url)
-				log.Println(errMsg)
-				sa.Provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
-			}
-		}
-
-		jtis[i] = token.ID
-
-	}
-
-	log.Printf("Events delivered: %s", jtis)
-	return &jtis
-}
+// PushEvents has been moved to the event router (to avoid an import cycle)

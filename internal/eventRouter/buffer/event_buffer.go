@@ -14,7 +14,7 @@ type EventBuf interface {
 }
 
 type EventPollBuffer struct {
-	In     chan string
+	in     chan string
 	events []string
 	mutex  sync.Mutex
 
@@ -22,25 +22,28 @@ type EventPollBuffer struct {
 	pollReady        bool
 }
 
-// CreateEventPollBuffer is intended to queue up events via an In channel. Events can be subsequently retrieved
+// CreateEventPollBuffer is intended to queue up events via an in channel. Events can be subsequently retrieved
 // from the buffer using EventPollBuffer.GetEvents()
-func CreateEventPollBuffer() *EventPollBuffer {
+func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 
 	buffer := &EventPollBuffer{
-		In: make(chan string),
+		in: make(chan string),
 		// Out:    make(chan interface{}),
 		events:           []string{},
 		mutex:            sync.Mutex{},
 		pollReady:        false,
 		triggerCondition: sync.NewCond(new(sync.Mutex)),
 	}
+	if len(initialJtis) > 0 {
+		buffer.addEvents(initialJtis)
+	}
 
 	go func() {
-		for len(buffer.events) > 0 || buffer.In != nil {
+		for len(buffer.events) > 0 || buffer.in != nil {
 			select {
-			case v, ok := <-buffer.In:
+			case v, ok := <-buffer.in:
 				if !ok {
-					buffer.In = nil
+					buffer.in = nil
 				} else {
 					// log.Println("DEBUG: incoming JTI: " + v)
 					buffer.mutex.Lock()
@@ -59,7 +62,7 @@ func CreateEventPollBuffer() *EventPollBuffer {
 				*/
 			}
 		}
-		log.Println("Stream buffer closing")
+
 		if len(buffer.events) > 0 {
 			log.Printf("WARNING: The following JTIs were not read:\n%v", buffer.events)
 		}
@@ -68,7 +71,7 @@ func CreateEventPollBuffer() *EventPollBuffer {
 	return buffer
 }
 
-func (b *EventPollBuffer) AddEvents(jtis []string) {
+func (b *EventPollBuffer) addEvents(jtis []string) {
 	defer b.mutex.Unlock()
 	b.mutex.Lock()
 	for _, jti := range jtis {
@@ -77,19 +80,23 @@ func (b *EventPollBuffer) AddEvents(jtis []string) {
 }
 
 func (b *EventPollBuffer) SubmitEvent(jti string) {
-	b.In <- jti
+	// This avoids a panic. The submitted event will be recovered on restart
+	if b.IsClosed() {
+		return
+	}
+	b.in <- jti
 }
 
 func (b *EventPollBuffer) IsClosed() bool {
-	return b.In == nil
+	return b.in == nil
 }
 
 func (b *EventPollBuffer) Close() {
 	if b.IsClosed() {
 		return
 	}
-	close(b.In)
-	b.In = nil
+	close(b.in)
+	b.in = nil
 }
 
 func (b *EventPollBuffer) waitForEventTrigger(result chan string) {
@@ -118,7 +125,7 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 		if params.ReturnImmediately == false {
 			timeout := time.Duration(params.TimeoutSecs) * time.Second
 			if timeout == 0 {
-				timeout = time.Duration(900)
+				timeout = time.Duration(900 * time.Second)
 			}
 			b.waitForEventWithTimeout(timeout)
 		}
@@ -137,7 +144,7 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 				b.events = []string{}
 			} else {
 				more = true
-				values = b.events[0 : params.MaxEvents-1]
+				values = b.events[:params.MaxEvents]
 				b.events = b.events[params.MaxEvents:]
 			}
 		} else {
@@ -150,25 +157,25 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 }
 
 type EventPushBuffer struct {
-	In          chan interface{}
+	in          chan interface{}
 	Out         chan interface{}
 	events      []interface{}
 	eventsMutex sync.Mutex
 }
 
-// CreateEventPushBuffer creates an input and output channel that allows events to be queued up (using In channel) for a reader
+// CreateEventPushBuffer creates an input and output channel that allows events to be queued up (using in channel) for a reader
 // that is sending events one at a time using the Out channel
-func CreateEventPushBuffer(jtis []string) *EventPushBuffer {
+func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 
 	buffer := &EventPushBuffer{
-		In:          make(chan interface{}),
+		in:          make(chan interface{}),
 		Out:         make(chan interface{}),
 		events:      []interface{}{},
 		eventsMutex: sync.Mutex{},
 	}
 
-	if len(jtis) > 0 {
-		buffer.addEvents(jtis)
+	if len(initialJtis) > 0 {
+		buffer.addEvents(initialJtis)
 	}
 
 	go func() {
@@ -184,12 +191,12 @@ func CreateEventPushBuffer(jtis []string) *EventPushBuffer {
 			}
 			return buffer.events[0]
 		}
-		for len(buffer.events) > 0 || buffer.In != nil {
+		for len(buffer.events) > 0 || buffer.in != nil {
 			select {
-			case v, ok := <-buffer.In:
+			case v, ok := <-buffer.in:
 				// log.Printf("DEBUG: incoming JTI: %s", v)
 				if !ok {
-					buffer.In = nil
+					buffer.in = nil
 				} else {
 					buffer.events = append(buffer.events, v)
 				}
@@ -215,17 +222,21 @@ func (b *EventPushBuffer) addEvents(jtis []string) {
 }
 
 func (b *EventPushBuffer) SubmitEvent(jti string) {
-	b.In <- jti
+	// To avoid a panic just return. This will be recovered on restart
+	if b.IsClosed() {
+		return
+	}
+	b.in <- jti
 }
 
 func (b *EventPushBuffer) IsClosed() bool {
-	return b.In == nil
+	return b.in == nil
 }
 
 func (b *EventPushBuffer) Close() {
 	if b.IsClosed() {
 		return
 	}
-	close(b.In)
-	b.In = nil
+	close(b.in)
+	b.in = nil
 }

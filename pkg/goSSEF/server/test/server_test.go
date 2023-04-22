@@ -46,6 +46,17 @@ func TestServer(t *testing.T) {
 	if err != nil {
 		log.Printf("Error starting %s: %s", "ssf1", err.Error())
 	}
+
+	req := model.RegisterParameters{
+		Audience: []string{"test.example.com"},
+		Method:   model.DeliveryPoll,
+	}
+	stream, _ := instance.provider.CreateStream(req, "SSF1")
+	streamToken, err := instance.provider.IssueStreamToken(stream)
+
+	instance.streamToken = streamToken
+	instance.stream = stream
+
 	instances[0] = instance
 	log.Println("** Starting SSF2...")
 	instance, err = createServer("ssf2")
@@ -78,24 +89,12 @@ func createServer(dbName string) (*ssfInstance, error) {
 
 	mongo.ResetDb(true)
 
-	req := model.RegisterParameters{
-		Audience: []string{"test.example.com"},
-	}
-	stream, _ := mongo.CreateStream(req, dbName)
-	streamToken, err := mongo.IssueStreamToken(stream)
-	if err != nil {
-		return nil, err
-	}
-
-	instance.provider = mongo
-	instance.streamToken = streamToken
-	instance.stream = stream
-
 	listener, _ := net.Listen("tcp", "localhost:0")
-	signalsApplication := ssef.StartServer(listener.Addr().String(), instance.provider)
+	signalsApplication := ssef.StartServer(listener.Addr().String(), &*mongo)
 	instance.app = *signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
+	instance.provider = mongo
 
 	go func() {
 		signalsApplication.Server.Serve(listener)
@@ -221,7 +220,7 @@ func (suite *ServerSuite) generateEvent(stream model.StreamConfiguration) {
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/44f6142df96bd6ab61e7521d9").AddExternalId("jdoe"),
 	}
 
-	event := goSet.CreateSetForStream(subject, stream)
+	event := goSet.CreateSet(subject, stream.Iss, stream.Aud)
 
 	payload_claims := map[string]interface{}{
 		"data": map[string]interface{}{

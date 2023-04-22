@@ -3,10 +3,15 @@ package eventRouter
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/json"
+	"fmt"
 	"i2goSignals/internal/eventRouter/buffer"
 	"i2goSignals/internal/model"
-	"i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"i2goSignals/pkg/goSSEF/server"
+	"i2goSignals/internal/providers/dbProviders"
+	"i2goSignals/pkg/goSet"
+	"io"
+	"net/http"
+
 	"log"
 	"os"
 	"strings"
@@ -21,9 +26,10 @@ var eventLogger = log.New(os.Stdout, "ROUTER: ", log.Ldate|log.Ltime)
 type EventRouter interface {
 	UpdateStreamState(stream model.StreamStateRecord)
 	RemoveStreamState(id primitive.ObjectID)
-	HandleEvent(event mongo_provider.EventRecord)
-	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
+	HandleEvent(event model.EventRecord)
+	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool)
+	Shutdown()
 }
 
 type router struct {
@@ -34,27 +40,27 @@ type router struct {
 	issuerKeys  map[string]*rsa.PrivateKey
 	pollBuffers map[string]*buffer.EventPollBuffer
 	pushBuffers map[string]*buffer.EventPushBuffer
-	signalsApp  *server.SignalsApplication
+	provider    dbProviders.DbProviderInterface
 }
 
-func NewRouter(application *server.SignalsApplication) EventRouter {
+func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 	router := router{
-		signalsApp:  application,
+		provider:    provider,
 		pushStreams: map[string]model.StreamStateRecord{},
 		pollStreams: map[string]model.StreamStateRecord{},
 		pushBuffers: map[string]*buffer.EventPushBuffer{},
 		pollBuffers: map[string]*buffer.EventPollBuffer{},
 		issuerKeys:  map[string]*rsa.PrivateKey{},
 		enabled:     false,
-		ctx:         context.WithValue(context.Background(), "app", &application),
+		ctx:         context.WithValue(context.Background(), "provider", provider),
 	}
 
-	states := application.Provider.GetStateMap()
+	states := router.provider.GetStateMap()
 
 	for k, state := range states {
 		if state.Inbound == false {
 			// Load any outstanding pending events (because we may be re-starting)
-			jtis, _ := application.Provider.GetEventIds(state.StreamConfiguration.Id, model.PollParameters{
+			jtis, _ := provider.GetEventIds(state.StreamConfiguration.Id, model.PollParameters{
 				MaxEvents:         0,
 				ReturnImmediately: true,
 				Acks:              nil,
@@ -66,7 +72,7 @@ func NewRouter(application *server.SignalsApplication) EventRouter {
 			issuer := state.StreamConfiguration.Iss
 			_, ok := router.issuerKeys[issuer]
 			if !ok {
-				key, err := application.Provider.GetIssuerPrivateKey(issuer)
+				key, err := provider.GetIssuerPrivateKey(issuer)
 				if err != nil {
 					eventLogger.Printf("INIT ERROR[%s]: Unable to locate key for issuer %s", state.StreamConfiguration.Id, issuer)
 				}
@@ -74,21 +80,17 @@ func NewRouter(application *server.SignalsApplication) EventRouter {
 			}
 			if state.StreamConfiguration.Delivery.PollDeliveryMethod.Method == model.DeliveryPoll {
 				router.pollStreams[k] = state
-				pollBuffer := buffer.CreateEventPollBuffer()
-				if len(jtis) > 0 {
-					pollBuffer.AddEvents(jtis)
-				}
+				pollBuffer := buffer.CreateEventPollBuffer(jtis)
 				router.pollBuffers[k] = pollBuffer
 			} else {
 				router.pushStreams[k] = state
-
 				pushBuffer := buffer.CreateEventPushBuffer(jtis)
 				router.pushBuffers[k] = pushBuffer
 				go router.PushStreamHandler(&state, pushBuffer)
 			}
 		}
 	}
-
+	router.enabled = true
 	return &router
 }
 
@@ -109,15 +111,26 @@ func (r *router) RemoveStreamState(id primitive.ObjectID) {
 	}
 }
 
-func (r *router) HandleEvent(event mongo_provider.EventRecord) {
+func (r *router) HandleEvent(event model.EventRecord) {
 	// eventLogger.Println("\n", event.Event.String())
+
 	for _, stream := range r.pushStreams {
 		if isOutboundStreamMatch(stream, event) {
-			dir := "OUT"
 
-			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Dir: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, dir, event.Types)
-			r.signalsApp.Provider.AddEventToStream(event.Jti, stream.Id)
+			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, "PUSH", event.Types)
+			r.provider.AddEventToStream(event.Jti, stream.Id)
+			// This will cause the PollStreamHandler assigned to deliver the event
+
 			r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
+		}
+	}
+
+	for _, stream := range r.pollStreams {
+		if isOutboundStreamMatch(stream, event) {
+			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, "POLL", event.Types)
+			r.provider.AddEventToStream(event.Jti, stream.Id)
+			// This causes the event to be available on the next poll
+			r.pollBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
 	}
 }
@@ -144,8 +157,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	if jtiSize > 0 {
 		sets := make(map[string]string, jtiSize)
 
-		tokens := r.signalsApp.Provider.GetEvents(*jtiSlice)
-		for _, token := range *tokens {
+		tokens := r.provider.GetEvents(*jtiSlice)
+		for _, jwtToken := range *tokens {
+			token := jwtToken.(goSet.SecurityEventToken)
 			token.Issuer = state.StreamConfiguration.Iss
 			token.Audience = state.StreamConfiguration.Aud
 			token.IssuedAt = jwt.NewNumericDate(time.Now())
@@ -159,12 +173,16 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	return map[string]string{}, false
 }
 
+/*
+PushStreamHandler is started as a separate thread during the initialization of the eventRouter. To stop the handler the buffer is closed.
+*/
 func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer) {
 	eventLogger.Printf("PUSH-HANDLER[%s]: Starting..", stream.StreamConfiguration.Id)
-	rsaKey, err := r.signalsApp.Provider.GetIssuerPrivateKey(stream.StreamConfiguration.Iss)
+	rsaKey, err := r.provider.GetIssuerPrivateKey(stream.StreamConfiguration.Iss)
 	if err != nil {
 		eventLogger.Printf("PUSH-HANDLER[%s]: ERROR Loading issuer key: %s", stream.StreamConfiguration.Id, err.Error())
 	}
+
 	out := eventBuf.Out
 eventLoop:
 	for v := range out {
@@ -179,14 +197,14 @@ eventLoop:
 }
 
 func (r *router) sendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey) {
-	events := r.signalsApp.Provider.GetEvents([]string{jti}) // Get the event
+	events := r.provider.GetEvents([]string{jti}) // Get the event
 	if events != nil && len(*events) > 0 {
-		delivered := r.signalsApp.PushEvents(config.StreamConfiguration, *events, rsaKey)
+		delivered := r.PushEvent(config.StreamConfiguration, *events, rsaKey)
 		if delivered != nil {
 			items := *delivered
 			if len(items) > 0 {
 				for _, jti := range items {
-					r.signalsApp.Provider.AckEvent(jti, config.StreamConfiguration.Id)
+					r.provider.AckEvent(jti, config.StreamConfiguration.Id)
 				}
 
 			}
@@ -194,7 +212,75 @@ func (r *router) sendEvent(jti string, config *model.StreamStateRecord, rsaKey *
 	}
 }
 
-func isOutboundStreamMatch(stream model.StreamStateRecord, event mongo_provider.EventRecord) bool {
+// PushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
+// Note: Moved from the api_transmitter.go in server package
+func (r *router) PushEvent(configuration model.StreamConfiguration, events []jwt.Claims, key *rsa.PrivateKey) *[]string {
+	jtis := make([]string, len(events))
+	pushConfig := configuration.Delivery.PushDeliveryMethod
+
+	client := http.Client{Timeout: 60 * time.Second}
+
+	for i, jwtToken := range events {
+		token := jwtToken.(goSet.SecurityEventToken)
+		url := pushConfig.EndpointUrl
+
+		token.Issuer = configuration.Iss
+		token.Audience = configuration.Aud
+		token.IssuedAt = jwt.NewNumericDate(time.Now())
+		tokenString, err := token.JWS(jwt.SigningMethodRS256, key)
+		if err != nil {
+			log.Println("TRANSMIT PUSH Error signing event: " + err.Error())
+		}
+
+		req, err := http.NewRequest("POST", url, strings.NewReader(tokenString))
+		if pushConfig.AuthorizationHeader != "" {
+			req.Header.Set("Authorization", pushConfig.AuthorizationHeader)
+		}
+		req.Header.Set("Content-Type", "application/secevent+jwt")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			errMsg := fmt.Sprintf("TRANSMIT PUSH Error transmitting to stream (%s): %s", configuration.Id, err.Error())
+			log.Println(errMsg)
+			return &jtis
+		}
+		if resp.StatusCode != http.StatusAccepted {
+			if resp.StatusCode == http.StatusBadRequest {
+				var errorMsg model.SetDeliveryErr
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					r.provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to read response")
+					log.Println("TRANSMIT PUSH Error reading response: " + err.Error())
+					return &jtis
+				}
+				err = json.Unmarshal(body, &errorMsg)
+				if err != nil {
+					log.Println("TRANSMIT PUSH Error parsing error response: " + err.Error())
+					r.provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
+					return &jtis
+				}
+				errMsg := fmt.Sprintf("TRANSMIT PUSH [%s] %s", errorMsg.ErrCode, errorMsg.Description)
+				log.Println(errMsg)
+				r.provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
+				return &jtis
+			}
+			if resp.StatusCode > 400 {
+				errMsg := fmt.Sprintf("TRANSMIT PUSH HTTP Error: %s, POSTING to %s", resp.Status, url)
+				log.Println(errMsg)
+				r.provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
+			}
+		}
+
+		jtis[i] = token.ID
+
+	}
+
+	log.Printf("Events delivered: %s", jtis)
+	return &jtis
+}
+
+func isOutboundStreamMatch(stream model.StreamStateRecord, event model.EventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
 	if stream.Inbound != event.Inbound {
 		return false
@@ -211,4 +297,15 @@ func isOutboundStreamMatch(stream model.StreamStateRecord, event mongo_provider.
 		}
 	}
 	return false
+}
+
+// Shutdown closes all the PushHandlers. Events will continue to be routed but only delivered when server restarts
+func (r *router) Shutdown() {
+	// This will shut down the threads that are pushing events.
+	r.enabled = false
+	for _, pushBuffer := range r.pushBuffers {
+		pushBuffer.Close()
+	}
+
+	// Nothing need to be done for polling because.
 }

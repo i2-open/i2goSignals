@@ -2,7 +2,7 @@ package test
 
 import (
 	"fmt"
-	model "i2goSignals/internal/model"
+	"i2goSignals/internal/model"
 	"i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"i2goSignals/pkg/goSet"
 	"log"
@@ -50,7 +50,7 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	provider.ResetDb(true)
+	_ = provider.ResetDb(true)
 
 	if err != nil {
 		log.Println("Received error generating test token")
@@ -70,7 +70,7 @@ func TestMain(m *testing.M) {
 }
 
 func ShutDown() {
-	data.provider.Close()
+	_ = data.provider.Close()
 }
 
 func TestStreamConfig(t *testing.T) {
@@ -96,7 +96,7 @@ func TestEvents(t *testing.T) {
 	streams := make([]string, 1)
 	streams[0] = data.stream.Id
 
-	generateEvent(streams)
+	generateEvent()
 
 	// Check Events by data.stream id
 	eventIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
@@ -115,12 +115,12 @@ func TestEvents(t *testing.T) {
 	nextIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	assert.Equal(t, 0, len(nextIds), "Should be no pending events")
 
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
 
 	nextIds, _ = data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	assert.Equal(t, 5, len(nextIds), "Should be 5 max events")
@@ -135,7 +135,7 @@ func TestPolling(t *testing.T) {
 	streams := make([]string, 1)
 	streams[0] = data.stream.Id
 
-	go generateEventsOverTime(streams)
+	go generateEventsOverTime()
 
 	eventIds, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: false, TimeoutSecs: 15})
 	count := len(eventIds)
@@ -160,7 +160,7 @@ func TestPolling(t *testing.T) {
 	sets := data.provider.GetEvents(events)
 
 	assert.Equal(t, len(events), len(*sets), "Sets return matches getevents")
-	aset := (*sets)[0]
+	aset := (*sets)[0].(goSet.SecurityEventToken)
 	assert.Equal(t, data.stream.Iss, aset.Issuer, "Issuer is matched")
 }
 
@@ -175,36 +175,40 @@ func ackEvents(ids []string) {
 func TestStreams(t *testing.T) {
 	streams := make([]string, 1)
 	streams[0] = data.stream.Id
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
-	generateEvent(streams)
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
+	generateEvent()
 
 }
 
-func generateEventsOverTime(sids []string) {
+func generateEventsOverTime() {
 	for i := 0; i < 5; i++ {
 		time.Sleep(2 * time.Second)
 		log.Println(" ... adding 2 events")
-		generateEvent(sids)
-		generateEvent(sids)
+		generateEvent()
+		generateEvent()
 	}
 	log.Println("*** event generation complete ***")
 }
 
-func generateEvent(streamIds []string) {
+func generateEvent() {
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/1234").AddUsername("huntp").AddEmail("phil.hunt@hexa.org"),
 	}
-	test1 := goSet.CreateSetForStream(subject, data.stream)
-	payload_claims := map[string]interface{}{
+	test1 := goSet.CreateSet(subject, data.stream.Iss, data.stream.Aud)
+	payloadClaims := map[string]interface{}{
 		"aclaim": "avalue",
 	}
-	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payload_claims)
+	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payloadClaims)
 
 	data.provider.AddEvent(&test1, false)
+
+	state, _ := data.provider.GetStreamState(data.stream.Id)
+
+	data.provider.AddEventToStream(test1.ID, state.Id)
 }
 
 func TestIssuerKeys(t *testing.T) {

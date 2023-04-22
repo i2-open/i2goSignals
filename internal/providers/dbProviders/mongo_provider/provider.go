@@ -656,7 +656,7 @@ func (m *MongoProvider) PauseStream(streamId string, status string, errorMsg str
 	}
 }
 
-func (m *MongoProvider) GetStatus(streamId string, subject string) (*model.StreamStatus, error) {
+func (m *MongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
 	state, err := m.GetStreamState(streamId)
 	if err != nil {
 		return nil, err
@@ -686,7 +686,7 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, inbound bool) 
 		i++
 	}
 
-	rec := EventRecord{
+	rec := model.EventRecord{
 		Jti:     jti,
 		Event:   *event,
 		Types:   keys,
@@ -838,7 +838,7 @@ func (m *MongoProvider) getEvent(jti string) *goSet.SecurityEventToken {
 	filter := bson.D{
 		{"jti", jti},
 	}
-	var res EventRecord
+	var res model.EventRecord
 	cursor := m.eventCol.FindOne(context.TODO(), filter)
 	err := cursor.Decode(&res)
 	if err != nil {
@@ -848,10 +848,11 @@ func (m *MongoProvider) getEvent(jti string) *goSet.SecurityEventToken {
 	return &res.Event
 }
 
-func (m *MongoProvider) GetEvents(jtis []string) *[]goSet.SecurityEventToken {
-	res := make([]goSet.SecurityEventToken, len(jtis))
+func (m *MongoProvider) GetEvents(jtis []string) *[]jwt.Claims {
+	res := make([]jwt.Claims, len(jtis))
 	for i, v := range jtis {
-		res[i] = *m.getEvent(v)
+		set := *m.getEvent(v)
+		res[i] = set
 	}
 
 	return &res

@@ -58,7 +58,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface) *Signals
 		Handler: router.router,
 	}
 	sa.Server = &server
-	sa.EventRouter = eventRouter.NewRouter(sa)
+	sa.EventRouter = eventRouter.NewRouter(provider)
 	name := ""
 	if server.TLSConfig != nil {
 		name = server.TLSConfig.ServerName

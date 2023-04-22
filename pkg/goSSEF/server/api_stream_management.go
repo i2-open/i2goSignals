@@ -34,10 +34,10 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	vars := mux.Vars(r)
-	subject := vars["subject"]
+	// vars := mux.Vars(r)
+	// subject := vars["subject"]
 
-	streamStatus, err := sa.Provider.GetStatus(sid, subject)
+	streamStatus, err := sa.Provider.GetStatus(sid)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

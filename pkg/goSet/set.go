@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
-	model "i2goSignals/internal/model"
 	"log"
 	"time"
 
@@ -147,16 +146,6 @@ func CreateSet(subject *EventSubject, issuer string, audience []string) Security
 		SubjectId: &subject.SubjectIdentifier,
 	}
 
-}
-
-/*
-CreateSetForStream is used to create a SecurityEventToken based on a provided StreamConfiguration (which provides issuer
-and audience information). 'subject' allows the specification of a "sub" or "sub-id" top-level JWT claim. If 'subject'
-is nil, no top-level claim is created which may be useful for OpenID RISC and CAEP events.
-*/
-func CreateSetForStream(subject *EventSubject, streamConfig model.StreamConfiguration) SecurityEventToken {
-	// Uses https://github.com/rs/xid to generate sortable jti values compatible with Mongo and other DBs
-	return CreateSet(subject, streamConfig.Iss, streamConfig.Aud)
 }
 
 func (set *SecurityEventToken) String() string {

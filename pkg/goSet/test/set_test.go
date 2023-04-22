@@ -44,7 +44,7 @@ func TestCreateSetForStream(t *testing.T) {
 		SubIdentifier: goSet.SubIdentifier{Sub: "1234"},
 	}
 
-	set := goSet.CreateSetForStream(subject, testStream)
+	set := goSet.CreateSet(subject, testStream.Iss, testStream.Aud)
 
 	payload_claims := map[string]interface{}{
 		"aclaim": "avalue",
@@ -61,7 +61,7 @@ func TestCreateSetForStream(t *testing.T) {
 	subject = &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/1234").AddUsername("huntp").AddEmail("phil.hunt@hexa.org"),
 	}
-	set = goSet.CreateSetForStream(subject, testStream)
+	set = goSet.CreateSet(subject, testStream.Iss, testStream.Aud)
 	set.AddEventPayload("uri:testevent", payload_claims)
 	jsonString = set.String()
 
@@ -79,7 +79,7 @@ func TestCreateSetForStream(t *testing.T) {
 
 	// No subject
 	log.Println("Testing createStream with 'nil' subject...")
-	set = goSet.CreateSetForStream(nil, testStream)
+	set = goSet.CreateSet(nil, testStream.Iss, testStream.Aud)
 	set.AddEventPayload("uri:testevent", payload_claims)
 	jsonString = set.String()
 
