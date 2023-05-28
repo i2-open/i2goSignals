@@ -1,8 +1,8 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -62,7 +62,7 @@ func ValidateAuthorization(r *http.Request, pubKey *keyfunc.JWKS) (string, int) 
 	if authz == "" {
 		return "", http.StatusUnauthorized
 	}
-
+	fmt.Sprintf("Authorization: %s", authz)
 	parts := strings.Split(authz, " ")
 	if parts[0] == "Bearer" {
 
@@ -73,7 +73,7 @@ func ValidateAuthorization(r *http.Request, pubKey *keyfunc.JWKS) (string, int) 
 		}
 		return tkn.StreamId, http.StatusOK
 	}
-	log.Printf("Received invalid authorization type: [%s]\n", parts[0])
+	log.Printf("Received invalid authorization: %s\n", parts[0])
 	return "", http.StatusUnauthorized
 
 }
@@ -88,12 +88,13 @@ func ParseAuthToken(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*EventA
 		return nil, errors.New("token type is not an authorization token (`jwt`)")
 	}
 
-	jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
-	claimString := string(jsonByte)
-	log.Println(claimString)
+	// jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
+	// claimString := string(jsonByte)
+	// log.Println(claimString)
 	if claims, ok := token.Claims.(*EventAuthToken); ok && token.Valid {
 		return claims, nil
 	}
+
 	return nil, err
 }
 

@@ -14,7 +14,6 @@ import (
 	"i2goSignals/internal/providers/dbProviders/mongo_provider"
 	ssef "i2goSignals/pkg/goSSEF/server"
 	"log"
-	"net"
 	"os"
 )
 
@@ -28,23 +27,17 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 func main() {
 	log.Printf("i2goSignals Server starting...")
-	addr := "0.0.0.0:8888"
-
+	port := "8888"
 	if found := os.Getenv("PORT"); found != "" {
-		host, _, _ := net.SplitHostPort(addr)
-		addr = fmt.Sprintf("%v:%v", host, found)
+		port = found
 	}
-	log.Printf("Found server address %v", addr)
 
-	if found := os.Getenv("HOST"); found != "" {
-		_, port, _ := net.SplitHostPort(addr)
-		addr = fmt.Sprintf("%v:%v", found, port)
-	}
-	log.Printf("Found server host %v", addr)
+	log.Printf("Listening on port: %v", port)
 
 	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
 	if found := os.Getenv("MONGO_URL"); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
+		log.Printf("Connecting to MONGO_URL service at: [%s]", dbUrl)
 	}
 
 	provider, err := StartProvider(dbUrl)
@@ -53,8 +46,8 @@ func main() {
 		os.Exit(-1)
 	}
 
-	listener, _ := net.Listen("tcp", addr)
+	// listener, _ := net.Dial("tcp", addr)
 
-	signalsApplication := ssef.StartServer(addr, provider)
-	log.Fatal(signalsApplication.Server.Serve(listener))
+	signalsApplication := ssef.StartServer(":"+port, provider)
+	log.Fatal(signalsApplication.Server.ListenAndServe())
 }

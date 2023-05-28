@@ -68,6 +68,8 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		sa.Provider.AckEvent(jti, sid)
+		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
+		sa.EventsOut.Inc()
 	}
 
 	// Second, log any errors received

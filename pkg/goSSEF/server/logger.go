@@ -11,17 +11,21 @@ package server
 import (
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
-func Logger(inner http.Handler, name string) http.Handler {
+var httpLog = log.New(os.Stdout, "HTTP: ", log.Ldate|log.Ltime)
+
+func (sa *SignalsApplication) Logger(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
 		inner.ServeHTTP(w, r)
 
-		log.Printf(
-			"%s %s %s %s",
+		httpLog.Printf(
+			"[%s] %s %s %s %s",
+			sa.Provider.Name(),
 			r.Method,
 			r.RequestURI,
 			name,

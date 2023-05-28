@@ -11,13 +11,14 @@ type EventBuf interface {
 	SubmitEvent(jti string)
 	IsClosed() bool
 	Close()
+	Cnt() int
 }
 
 type EventPollBuffer struct {
-	in     chan string
-	events []string
-	mutex  sync.Mutex
-
+	in               chan string
+	events           []string
+	mutex            sync.Mutex
+	closed           bool
 	triggerCondition *sync.Cond
 	pollReady        bool
 }
@@ -32,6 +33,7 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 		events:           []string{},
 		mutex:            sync.Mutex{},
 		pollReady:        false,
+		closed:           false,
 		triggerCondition: sync.NewCond(new(sync.Mutex)),
 	}
 	if len(initialJtis) > 0 {
@@ -71,6 +73,10 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 	return buffer
 }
 
+func (b *EventPollBuffer) Cnt() float64 {
+	return float64(len(b.events))
+}
+
 func (b *EventPollBuffer) addEvents(jtis []string) {
 	defer b.mutex.Unlock()
 	b.mutex.Lock()
@@ -88,13 +94,14 @@ func (b *EventPollBuffer) SubmitEvent(jti string) {
 }
 
 func (b *EventPollBuffer) IsClosed() bool {
-	return b.in == nil
+	return b.closed
 }
 
 func (b *EventPollBuffer) Close() {
 	if b.IsClosed() {
 		return
 	}
+	b.closed = true
 	close(b.in)
 	b.in = nil
 }
@@ -125,7 +132,7 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 		if params.ReturnImmediately == false {
 			timeout := time.Duration(params.TimeoutSecs) * time.Second
 			if timeout == 0 {
-				timeout = time.Duration(900 * time.Second)
+				timeout = 900 * time.Second
 			}
 			b.waitForEventWithTimeout(timeout)
 		}
@@ -211,6 +218,10 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 		}
 	}()
 	return buffer
+}
+
+func (b *EventPushBuffer) Cnt() float64 {
+	return float64(len(b.events))
 }
 
 func (b *EventPushBuffer) addEvents(jtis []string) {

@@ -66,6 +66,12 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
+	// Stop all the inbound traffic if Polling
+	sa.ClosePollReceiver(sid)
+
+	// Stop any outbound activity
+	sa.EventRouter.RemoveStream(sid)
+
 	err := sa.Provider.DeleteStream(sid)
 	// TODO: Also update the router to delete the stream
 	if err != nil {
@@ -73,9 +79,11 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(err.Error()))
 	}
+	// sa.EventRouter.RemoveStream(sid)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -100,7 +108,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
-	resp, _ := json.Marshal(*config)
+	resp, _ := json.Marshal(config)
 	w.Write(resp)
 }
 
@@ -129,25 +137,31 @@ func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		w.WriteHeader(http.StatusInternalServerError)
+
 		w.Write([]byte(err.Error()))
+		w.WriteHeader(http.StatusInternalServerError)
 	}
-	// TODO Update router regarding stream change
+
+	// Update the event router
+	state, _ := sa.Provider.GetStreamState(sid)
+	sa.EventRouter.UpdateStreamState(state)
+	sa.HandleClientPollReceiver(state)
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+
 	respBytes, _ := json.MarshalIndent(configResp, "", "  ")
 	w.Write(respBytes)
+	// w.WriteHeader(http.StatusOK)
 }
 
 func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {

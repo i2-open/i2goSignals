@@ -87,6 +87,7 @@ func TestCreateEventPollBuffer(t *testing.T) {
 		buffer.in <- testVals[i]
 	}
 	buffer.Close()
+	assert.True(t, buffer.IsClosed(), "Buffer should be closed")
 	fmt.Println("Finished writing")
 	wg.Wait()
 	if testVals[99] != receiveVals[99] {

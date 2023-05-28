@@ -191,7 +191,7 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	//		"issuer": givenKey,
 	//	})
 
-	token.Header["kid"] = "issuer"
+	token.Header["kid"] = set.Issuer
 	return token.SignedString(key)
 }
 

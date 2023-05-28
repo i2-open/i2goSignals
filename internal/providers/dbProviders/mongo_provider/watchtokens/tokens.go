@@ -59,6 +59,11 @@ func storeFilename() string {
 	cwd, _ := os.Getwd()
 	watchFile := os.Getenv("MONGO_WATCH_FILE")
 	if watchFile == "" {
+		resDir := filepath.Join(cwd, "resources")
+		_, err := os.Stat(resDir)
+		if os.IsNotExist(err) {
+			os.Mkdir(resDir, 770)
+		}
 		watchFile = filepath.Join(cwd, "resources/mongo_token.json")
 
 	}

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Route struct {
@@ -35,12 +36,16 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 		router: mux.NewRouter().StrictSlash(true),
 		sa:     application,
 	}
+
+	// Add the Prometheus middleware first so logging happens inside
+	httpRouter.router.Use(PrometheusHttpMiddleware)
+	// httpRouter.router.Use()
 	routes := httpRouter.getRoutes()
 
 	for _, route := range routes {
 		var handler http.Handler
 		handler = route.HandlerFunc
-		handler = Logger(handler, route.Name)
+		handler = application.Logger(handler, route.Name)
 
 		httpRouter.router.
 			Methods(route.Method).
@@ -48,6 +53,9 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 			Name(route.Name).
 			Handler(handler)
 	}
+
+	// Add prometheus handler at metrics endpoint
+	httpRouter.router.Path("/metrics").Handler(promhttp.Handler())
 
 	return &httpRouter
 }

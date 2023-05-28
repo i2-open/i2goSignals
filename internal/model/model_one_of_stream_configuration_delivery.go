@@ -8,7 +8,66 @@
  */
 package model
 
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+)
+
 type OneOfStreamConfigurationDelivery struct {
 	*PushDeliveryMethod
 	*PollDeliveryMethod
+}
+
+func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
+	// Required because json.Marshal doesn't seem to handle two optional structures.
+	if d.PushDeliveryMethod != nil {
+		return json.Marshal(d.PushDeliveryMethod)
+	} else {
+		if d.PollDeliveryMethod != nil {
+			return json.Marshal(d.PollDeliveryMethod)
+		} else {
+			return []byte("{}"), nil
+		}
+	}
+}
+
+func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
+	if d.PushDeliveryMethod != nil {
+		return DeliveryPush
+	}
+	if d.PollDeliveryMethod != nil {
+		return DeliveryPoll
+	}
+	return "-"
+}
+
+func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
+	dataString := string(data)
+	if dataString == "null" || dataString == `""` {
+		d.PollDeliveryMethod = nil
+		d.PushDeliveryMethod = nil
+		return nil
+	}
+
+	if strings.Contains(strings.ToLower(dataString), DeliveryPoll) {
+		var poll PollDeliveryMethod
+		err := json.Unmarshal(data, &poll)
+		if err != nil {
+			return err
+		}
+		d.PollDeliveryMethod = &poll
+		return nil
+	} else {
+		if strings.Contains(strings.ToLower(dataString), DeliveryPush) {
+			var push PushDeliveryMethod
+			err := json.Unmarshal(data, &push)
+			if err != nil {
+				return err
+			}
+			d.PushDeliveryMethod = &push
+			return nil
+		}
+	}
+	return errors.New("Unknown Stream delivery_method value.")
 }

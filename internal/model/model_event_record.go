@@ -5,10 +5,17 @@ import "i2goSignals/pkg/goSet"
 // EventRecord is stored in MongoProvider.eventCol
 type EventRecord struct {
 	// Id        primitive.ObjectID       `json:"id" bson:"_id"`
-	Jti   string                   `json:"jti" bson:"jti"`
+	Jti string `json:"jti" bson:"jti"`
+
+	// A parsed Security Event Token
 	Event goSet.SecurityEventToken `json:"event"`
 
-	// Inbound indicates that the event has been received and is destined for a local client
-	Inbound bool     `json:"inbound,omitempty" bson:"inbound,omitempty"`
-	Types   []string `json:"types,omitempty" bson:"types,omitempty"`
+	// Original holds the original token received. This is useful for scenarios when the original
+	// signature or encrypted token is desired
+	Original string
+
+	// Sid indicates the origin Stream that the event came from
+	Sid string
+	// Types indicates the event URIs available. This may be used for filtering and sorting of events
+	Types []string `json:"types,omitempty" bson:"types,omitempty"`
 }

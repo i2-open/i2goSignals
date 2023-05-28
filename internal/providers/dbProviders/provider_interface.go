@@ -37,7 +37,7 @@ type DbProviderInterface interface {
 	GetEventIds(streamId string, params model.PollParameters) ([]string, bool)
 	GetEvents(jtis []string) *[]jwt.Claims
 	AckEvent(jtiString string, streamId string)
-	AddEvent(event *goSet.SecurityEventToken, inbound bool)
+	AddEvent(event *goSet.SecurityEventToken, sid string) (eventRecord *model.EventRecord)
 	AddEventToStream(jti string, streamId primitive.ObjectID)
 
 	// handler.PushStreamHandler
