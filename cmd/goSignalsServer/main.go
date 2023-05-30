@@ -17,6 +17,8 @@ import (
 	"os"
 )
 
+var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)
+
 func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 	var provider dbProviders.DbProviderInterface
@@ -26,28 +28,31 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 }
 
 func main() {
-	log.Printf("i2goSignals Server starting...")
+	mLog.Printf("i2goSignals Server starting...")
 	port := "8888"
 	if found := os.Getenv("PORT"); found != "" {
 		port = found
 	}
 
-	log.Printf("Listening on port: %v", port)
+	mLog.Printf("Listening on port: %v", port)
 
 	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
 	if found := os.Getenv("MONGO_URL"); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
-		log.Printf("Connecting to MONGO_URL service at: [%s]", dbUrl)
+		mLog.Printf("Connecting to MONGO_URL service at: [%s]", dbUrl)
 	}
 
 	provider, err := StartProvider(dbUrl)
 	if err != nil {
-		log.Println("Fatal: Unable to start database provider: " + err.Error())
+		mLog.Println("Fatal: Unable to start database provider: " + err.Error())
 		os.Exit(-1)
 	}
 
 	// listener, _ := net.Dial("tcp", addr)
 
 	signalsApplication := ssef.StartServer(":"+port, provider)
-	log.Fatal(signalsApplication.Server.ListenAndServe())
+	err = signalsApplication.Server.ListenAndServe()
+	if err != nil {
+		mLog.Fatal(err.Error())
+	}
 }

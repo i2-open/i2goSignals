@@ -13,7 +13,7 @@ import (
 
 // var sa *SignalsApplication
 
-var serverLog = log.New(os.Stdout, "goSigServ: ", log.Ldate|log.Ltime)
+var serverLog = log.New(os.Stdout, "SERVER: ", log.Ldate|log.Ltime)
 
 type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
@@ -81,11 +81,12 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface) *Signals
 
 	sa.InitializePrometheus()
 
-	log.Println("Server TLS hostname: \t[" + name + "]")
-	if name == "" {
+	if name != "" {
+		serverLog.Println("TLS hostname: [" + name + "]")
+	} else {
 		serverLog.Println("TLS not configured.")
-
 	}
+
 	sa.HostName = name
 
 	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
