@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"os"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // var sa *SignalsApplication
@@ -28,9 +26,7 @@ type SignalsApplication struct {
 	AdminPwd      string
 	pollClients   map[string]*ClientPollStream
 	pushReceivers map[string]model.StreamStateRecord
-	OpsCounter    prometheus.Counter
-	EventsIn      prometheus.Counter
-	EventsOut     prometheus.Counter
+	Stats         *PrometheusHandler
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -82,6 +78,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface) *Signals
 	if server.TLSConfig != nil {
 		name = server.TLSConfig.ServerName
 	}
+
 	sa.InitializePrometheus()
 
 	log.Println("Server TLS hostname: \t[" + name + "]")

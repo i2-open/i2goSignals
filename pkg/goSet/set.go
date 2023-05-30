@@ -170,6 +170,18 @@ func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims map[
 	set.Events[eventUri] = eventClaims
 }
 
+func (set *SecurityEventToken) GetEventIds() []string {
+	if len(set.Events) == 0 {
+		return []string{}
+	}
+
+	var keys []string
+	for key := range set.Events {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 func (set *SecurityEventToken) JWT() *jwt.Token {
 	token := jwt.NewWithClaims(jwt.SigningMethodNone, set)
 	token.Header["typ"] = "secevent+jwt"
@@ -223,6 +235,5 @@ func GenerateJti() string {
 }
 
 func (set *SecurityEventToken) IsBefore(jtiVal []byte) (bool, error) {
-
-	return false, nil
+	return set.ID < string(jtiVal), nil
 }

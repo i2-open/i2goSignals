@@ -1,4 +1,6 @@
 version: '3.1'
+volumes:
+  prometheus_data: {}
 services:
   mongo1:
     container_name: mongo1
@@ -49,17 +51,45 @@ services:
       - "$PWD/.mongo/:/scripts"
     restart: "no"
     entrypoint: [ "bash", "/scripts/mongo_init.sh"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - "$PWD/.monitor/prometheus:/etc/prometheus"
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=grafana
+    volumes:
+      - "$PWD/.monitor/grafana:/etc/grafana/provisioning/datasources"
+
   i2goSignalsServer:
     image: i2gosignals
-    command: goSignalsServer
+    command: /goSignalsServer
+    container_name: gosignals1
     depends_on:
+      mongo1:
+        condition: service_started
       mongoSetup:
         condition: service_completed_successfully
     ports:
       - "8888:8888"
     environment:
-      - MONGO_URL="mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
-      - SSEF_ADMIN_USER=
+      - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256
+      - PORT=8888
 
 
 

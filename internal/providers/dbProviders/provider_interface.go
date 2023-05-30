@@ -7,7 +7,6 @@ import (
 	"i2goSignals/pkg/goSet"
 
 	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -35,7 +34,8 @@ type DbProviderInterface interface {
 	GetStateMap() map[string]model.StreamStateRecord
 
 	GetEventIds(streamId string, params model.PollParameters) ([]string, bool)
-	GetEvents(jtis []string) *[]jwt.Claims
+	GetEvent(jti string) *goSet.SecurityEventToken
+	GetEvents(jtis []string) []*goSet.SecurityEventToken
 	AckEvent(jtiString string, streamId string)
 	AddEvent(event *goSet.SecurityEventToken, sid string) (eventRecord *model.EventRecord)
 	AddEventToStream(jti string, streamId primitive.ObjectID)

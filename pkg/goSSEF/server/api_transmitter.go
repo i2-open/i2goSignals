@@ -56,11 +56,15 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-
+	streamState, err := sa.Provider.GetStreamState(sid)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	// set default to return immediately
 	request := model.PollParameters{ReturnImmediately: false}
 
-	err := json.NewDecoder(r.Body).Decode(&request)
+	err = json.NewDecoder(r.Body).Decode(&request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
@@ -68,8 +72,10 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		sa.Provider.AckEvent(jti, sid)
+		event := sa.Provider.GetEvent(jti)
 		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
-		sa.EventsOut.Inc()
+		sa.EventRouter.IncrementCounter(streamState, event, false)
+
 	}
 
 	// Second, log any errors received

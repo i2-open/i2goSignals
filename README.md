@@ -24,9 +24,14 @@ git clone git@github.com:i2-open/i2gosignals.git
 To use in Golang code, `import github.com/i2-open/i2goSignals`
 To deploy the server, build an i2goSignals image with Pack. The newly created image will contain the ssef server.
 
-
+Building with Heroku
 ```bash
 pack build i2goSignals --builder heroku/buildpacks:20
+```
+
+Building with Docker
+```bash
+docker build --tag i2gosignals ./
 ```
 
 We'll be using postgresql and need to execute the below shell scripts from docker-compose.

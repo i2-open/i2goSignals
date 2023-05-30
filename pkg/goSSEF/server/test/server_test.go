@@ -123,8 +123,8 @@ func (suite *ServerSuite) TearDownTest() {
 }
 
 func (suite *ServerSuite) Test1_Certificate() {
-	url := fmt.Sprintf("http://%s/jwks.json", suite.servers[0].server.Addr)
-	resp, err := http.Get(url)
+	serverUrl := fmt.Sprintf("http://%s/jwks.json", suite.servers[0].server.Addr)
+	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
 	}
@@ -137,20 +137,20 @@ func (suite *ServerSuite) Test1_Certificate() {
 	issPub, err := keyfunc.NewJSON(rawJson)
 	assert.NoError(suite.T(), err, "No error parsing wellknown issuer")
 	assert.Equal(suite.T(), "DEFAULT", issPub.KIDs()[0], "Kid is DEFAULT")
-	issPub2, err := keyfunc.Get(url, keyfunc.Options{})
+	issPub2, err := keyfunc.Get(serverUrl, keyfunc.Options{})
 	assert.NoError(suite.T(), err, "Keyfunc retrieval had no error")
 
 	assert.Equal(suite.T(), body, issPub2.RawJWKS(), "Check JWKS issuers are equal")
 
-	url = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].server.Addr)
-	issPub3, err := keyfunc.Get(url, keyfunc.Options{})
+	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].server.Addr)
+	issPub3, err := keyfunc.Get(serverUrl, keyfunc.Options{})
 	assert.NoError(suite.T(), err, "Check no error keyfunc retrieval of /jwks/issuer")
 	assert.Equal(suite.T(), body, issPub3.RawJWKS(), "Check JWKS issuers are equal")
 }
 
 func (suite *ServerSuite) Test2_WellKnownConfigs() {
-	url := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
-	resp, err := http.Get(url)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
+	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
 	}
@@ -164,8 +164,8 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 }
 
 func (suite *ServerSuite) Test3_StreamConfig() {
-	url := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
-	resp, err := http.Get(url)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
+	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
 	}
@@ -275,8 +275,17 @@ func (suite *ServerSuite) Test5_PopStreamDelivery() {
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
+	app1 := suite.servers[0].app
+	pushCnt1 := int(testutil.ToFloat64(app1.Stats.PubPushCnt))
+	pollCnt1 := int(testutil.ToFloat64(app1.Stats.PubPollCnt))
+	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
+	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
+	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	assert.Equal(suite.T(), 0, pushCnt1, "Should be no PUSH servers")
+	assert.Equal(suite.T(), 1, pollCnt1, "Should be 1 POLL server")
+
 	testLog.Println("Resetting streams")
-	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[1].stream.Id)
+	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)
 	// time.Sleep(5 * time.Second)
 }
 
@@ -370,8 +379,17 @@ func (suite *ServerSuite) Test6_PushStreamDelivery() {
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
+	app1 := suite.servers[0].app
+	pushCnt1 := int(testutil.ToFloat64(app1.Stats.PubPushCnt))
+	pollCnt1 := int(testutil.ToFloat64(app1.Stats.PubPollCnt))
+	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
+	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
+	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	assert.Equal(suite.T(), 1, pushCnt1, "Should be 1 PUSH servers")
+	assert.Equal(suite.T(), 0, pollCnt1, "Should be no POLL server")
+
 	testLog.Println("Resetting streams")
-	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[1].stream.Id)
+	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)
 	// time.Sleep(5 * time.Second)
 }
 
@@ -383,39 +401,109 @@ func (suite *ServerSuite) Test7_Prometheus() {
 	app1 := suite.servers[0].app
 	app2 := suite.servers[1].app
 
-	metricName := app1.Name() + "_goSignals_events"
-	outCounters1 := testutil.CollectAndCount(app1.EventsOut, metricName+"_out")
-	inCounters1 := testutil.CollectAndCount(app1.EventsIn, metricName+"_in")
+	metricName := "goSignals_router_events"
+	outCounters1 := testutil.CollectAndCount(app1.Stats.EventsOut, metricName+"_out")
+	inCounters1 := testutil.CollectAndCount(app1.Stats.EventsIn, metricName+"_in")
 	// fmt.Println(fmt.Sprintf("SSF1 Counters in: %d, out: %d", inCounters1, outCounters1))
-	assert.Equal(suite.T(), 1, outCounters1, "One event out counter registered")
-	assert.Equal(suite.T(), 1, inCounters1, "One event in counter registered")
+	assert.Equal(suite.T(), 2, outCounters1, "Two (one for PUSH and POLL) event out counter registered")
+	assert.Equal(suite.T(), 2, inCounters1, "Two (one for PUSH and POLL) event in counter registered")
 
-	outCnt1 := int(testutil.ToFloat64(app1.EventsOut))
-	inCnt1 := int(testutil.ToFloat64(app1.EventsIn))
-	fmt.Println(fmt.Sprintf("SSF1 Event Count in: %v, out: %v", inCnt1, outCnt1))
-	assert.Equal(suite.T(), 2, inCnt1, "SSF1 should have 2 inbound events")
-	assert.Equal(suite.T(), 2, outCnt1, "SSF1 should have 2 outbound events")
+	// Test the counters for PUSH Transfer
+	label := prometheus.Labels{
+		"type": "urn:ietf:params:event:SCIM:prov:create",
+		"iss":  "DEFAULT",
+		"tfr":  "PUSH",
+	}
+	var outCnt1, inCnt1 int
 
-	outCnt2 := int(testutil.ToFloat64(app2.EventsOut))
-	inCnt2 := int(testutil.ToFloat64(app2.EventsIn))
-	fmt.Println(fmt.Sprintf("SSF2 Event Count in: %v, out: %v", inCnt2, outCnt2))
-	assert.Equal(suite.T(), 2, inCnt2, "SSF2 should have 2 inbound events")
+	cnt1, err := app1.Stats.EventsOut.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	in1, err := app1.Stats.EventsIn.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	if cnt1 != nil {
+		outCnt1 = int(testutil.ToFloat64(cnt1))
+		inCnt1 = int(testutil.ToFloat64(in1))
+	}
+	fmt.Println(fmt.Sprintf("SSF1 Event PUSH Count in: %v, out: %v", inCnt1, outCnt1))
+	assert.Equal(suite.T(), 1, inCnt1, "SSF1 should have 1 PUSH inbound events")
+	assert.Equal(suite.T(), 1, outCnt1, "SSF1 should have 1 PUSH outbound events")
+
+	// Test the counters for PULL transfer
+	label = prometheus.Labels{
+		"type": "urn:ietf:params:event:SCIM:prov:create",
+		"iss":  "DEFAULT",
+		"tfr":  "POLL",
+	}
+	cnt1, err = app1.Stats.EventsOut.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	in1, err = app1.Stats.EventsIn.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	if cnt1 != nil {
+		outCnt1 = int(testutil.ToFloat64(cnt1))
+		inCnt1 = int(testutil.ToFloat64(in1))
+	}
+	fmt.Println(fmt.Sprintf("SSF1 Event POLL Count in: %v, out: %v", inCnt1, outCnt1))
+	assert.Equal(suite.T(), 1, inCnt1, "SSF1 should have 1 POLL inbound events")
+	assert.Equal(suite.T(), 1, outCnt1, "SSF1 should have 1 POLL outbound events")
+
+	// Now look at SSF2
+	var inCnt2, outCnt2 int
+	label = prometheus.Labels{
+		"type": "urn:ietf:params:event:SCIM:prov:create",
+		"iss":  "DEFAULT",
+		"tfr":  "PUSH",
+	}
+
+	cnt2, err := app2.Stats.EventsOut.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	in2, err := app2.Stats.EventsIn.GetMetricWith(label)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	if cnt2 != nil {
+		outCnt2 = int(testutil.ToFloat64(cnt2))
+		inCnt2 = int(testutil.ToFloat64(in2))
+	}
+	fmt.Println(fmt.Sprintf("SSF2 Event PUSH Count in: %v, out: %v", inCnt2, outCnt2))
+	assert.Equal(suite.T(), 1, inCnt2, "SSF2 should have 1 PUSH inbound events")
 	assert.Equal(suite.T(), 0, outCnt2, "SSF2 should have NO outbound events")
 
+	pushCnt1 := int(testutil.ToFloat64(app1.Stats.PubPushCnt))
+	pollCnt1 := int(testutil.ToFloat64(app1.Stats.PubPollCnt))
+	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
+	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
+
+	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	assert.Equal(suite.T(), 0, pushCnt1, "Should be no PUSH servers")
+	assert.Equal(suite.T(), 0, pollCnt1, "Should be no POLL server")
 }
 
-func collectAndCount(counter prometheus.Counter, metric_name string) int {
-	return testutil.CollectAndCount(counter, metric_name)
+func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
+	suite.servers[1].app.ClosePollReceiver(ssf2Stream)
+	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
+	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
 
-}
-
-func (suite *ServerSuite) resetStreams(streamReceive, streamSend string) {
-	suite.servers[1].app.ClosePollReceiver(streamReceive)
-	suite.servers[1].app.EventRouter.RemoveStream(streamReceive)
-	suite.servers[1].provider.DeleteStream(streamReceive)
-
-	suite.servers[0].app.EventRouter.RemoveStream(streamSend)
-	suite.servers[0].provider.DeleteStream(streamSend)
+	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
+	_ = suite.servers[0].provider.DeleteStream(ssf1Stream)
 }
 
 func (suite *ServerSuite) setUpPopReceiverStream() {
@@ -443,6 +531,7 @@ func (suite *ServerSuite) setUpPopReceiverStream() {
 	}
 	stream, _ = suite.servers[1].provider.CreateStream(req, "DEFAULT")
 	state, _ := suite.servers[1].provider.GetStreamState(stream.Id)
+	fmt.Println(fmt.Sprintf("StreamID [%s], StateID [%s]", stream.Id, state.StreamConfiguration.Id))
 	suite.servers[1].app.HandleClientPollReceiver(state)
 	streamToken, _ := suite.servers[1].provider.IssueStreamToken(stream)
 	suite.servers[1].stream = stream

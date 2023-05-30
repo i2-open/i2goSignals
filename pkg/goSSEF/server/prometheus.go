@@ -11,8 +11,7 @@ import (
 
 type PrometheusHandler struct {
 	App                    *SignalsApplication
-	OpsCounter             prometheus.Counter
-	EventsIn, EventsOut    prometheus.Counter
+	EventsIn, EventsOut    *prometheus.CounterVec
 	PubPushCnt, PubPollCnt prometheus.GaugeFunc
 	RcvPushCnt, RcvPollCnt prometheus.GaugeFunc
 }
@@ -35,32 +34,32 @@ func PrometheusHttpMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (sa *SignalsApplication) InitializePrometheus() *PrometheusHandler {
+func (sa *SignalsApplication) InitializePrometheus() {
 	prometheusHandler := PrometheusHandler{
 		App: sa,
-		OpsCounter: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: sa.Name(),
-			Subsystem: "goSignals",
-			Name:      "processed_ops_total",
-			Help:      "The total number of processed events",
-		}),
-		EventsIn: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: sa.Name(),
-			Subsystem: "goSignals",
-			Name:      "events_in",
-			Help:      "The total SETs received",
-		}),
-		EventsOut: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: sa.Name(),
-			Subsystem: "goSignals",
-			Name:      "events_out",
-			Help:      "The total SETs delivered",
-		}),
+		EventsIn: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "events_in",
+				Help:      "Events received",
+			},
+			[]string{"type", "iss", "tfr"},
+		),
+		EventsOut: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "events_out",
+				Help:      "Events delivered",
+			},
+			[]string{"type", "iss", "tfr"},
+		),
 		PubPollCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
-				Namespace: sa.Name(),
-				Subsystem: "goSignals",
-				Name:      "pub_polling_streams_cnt",
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "stream_pub_polling_cnt",
 				Help:      "Number of SET polling publishers streams",
 			},
 			func() float64 {
@@ -68,9 +67,9 @@ func (sa *SignalsApplication) InitializePrometheus() *PrometheusHandler {
 			}),
 		PubPushCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
-				Namespace: sa.Name(),
-				Subsystem: "goSignals",
-				Name:      "pub_push_streams_cnt",
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "stream_pub_push_cnt",
 				Help:      "Number of SET push publisher streams",
 			},
 			func() float64 {
@@ -78,9 +77,9 @@ func (sa *SignalsApplication) InitializePrometheus() *PrometheusHandler {
 			}),
 		RcvPollCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
-				Namespace: sa.Name(),
-				Subsystem: "goSignals",
-				Name:      "rcv_poll_stream_cnt",
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "stream_rcv_poll_cnt",
 				Help:      "Number of SET polling receivers",
 			},
 			func() float64 {
@@ -88,28 +87,26 @@ func (sa *SignalsApplication) InitializePrometheus() *PrometheusHandler {
 			}),
 		RcvPushCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
-				Namespace: sa.Name(),
-				Subsystem: "goSignals",
-				Name:      "rcv_push_stream_cnt",
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "stream_rcv_push_cnt",
 				Help:      "Number of SET push receivers",
 			},
 			func() float64 {
 				return sa.GetPollReceiverCnt()
 			}),
 	}
-	registerCollector(prometheusHandler.OpsCounter)
-	sa.OpsCounter = prometheusHandler.OpsCounter
 	registerCollector(prometheusHandler.EventsIn)
-	sa.EventsIn = prometheusHandler.EventsIn
+
 	registerCollector(prometheusHandler.EventsOut)
-	sa.EventsOut = prometheusHandler.EventsOut                                              // this is to handle poll
+	// this is to handle poll
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut) // this is to handle push
 	registerCollector(prometheusHandler.RcvPollCnt)
 	registerCollector(prometheusHandler.RcvPushCnt)
 	registerCollector(prometheusHandler.PubPollCnt)
 	registerCollector(prometheusHandler.PubPushCnt)
 
-	return &prometheusHandler
+	sa.Stats = &prometheusHandler
 }
 
 func registerCollector(collector prometheus.Collector) {

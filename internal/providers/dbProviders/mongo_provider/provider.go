@@ -846,7 +846,7 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 	return ids, more
 }
 
-func (m *MongoProvider) getEvent(jti string) *goSet.SecurityEventToken {
+func (m *MongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
 	res := m.GetEventRecord(jti)
 	if res != nil {
 		return &res.Event
@@ -868,14 +868,14 @@ func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	return &res
 }
 
-func (m *MongoProvider) GetEvents(jtis []string) *[]jwt.Claims {
-	res := make([]jwt.Claims, len(jtis))
+func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
+	res := make([]*goSet.SecurityEventToken, len(jtis))
 	for i, v := range jtis {
-		set := *m.getEvent(v)
+		set := m.GetEvent(v)
 		res[i] = set
 	}
 
-	return &res
+	return res
 }
 
 func (m *MongoProvider) IssueStreamToken(record model.StreamConfiguration) (string, error) {
