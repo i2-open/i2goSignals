@@ -102,7 +102,7 @@ func createServer(dbName string) (*ssfInstance, error) {
 
 	listener, _ := net.Listen("tcp", "localhost:0")
 
-	signalsApplication := ssef.StartServer(listener.Addr().String(), &*mongo)
+	signalsApplication := ssef.StartServer(listener.Addr().String(), &*mongo, "")
 	instance.app = *signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
@@ -159,11 +159,15 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	err = json.Unmarshal(body, &config)
 	assert.NoError(suite.T(), err, "Configuration parsed and returned")
 
-	assert.Equal(suite.T(), suite.servers[0].app.HostName+"/stream", config.ConfigurationEndpoint, "Configuration endpoint matches")
+	verifyUrlString := fmt.Sprintf("http://%s/verification", suite.servers[0].server.Addr)
+	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
+	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
 	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Default issuer matched")
 }
 
 func (suite *ServerSuite) Test3_StreamConfig() {
+	fmt.Println("Retrieving well-known configuration...")
 	serverUrl := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
@@ -172,6 +176,8 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	body, _ := io.ReadAll(resp.Body)
 	var config model.TransmitterConfiguration
 	err = json.Unmarshal(body, &config)
+
+	fmt.Println("Testing creation of default stream...")
 
 	regUrl := fmt.Sprintf("http://%s/register", suite.servers[0].server.Addr)
 	reg := model.RegisterParameters{Audience: []string{"test"}}
@@ -185,6 +191,41 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	assert.NoError(suite.T(), err, "Registration response parse error")
 
 	assert.NotEmpty(suite.T(), registration.Token, "Token empty error")
+
+	streamUrl := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	req, err := http.NewRequest(http.MethodDelete, streamUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+registration.Token)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
+
+	fmt.Println("Testing creation of incoming push stream...")
+	var inbound bool = true
+	reg2 := model.RegisterParameters{
+		Audience:  []string{"test2"},
+		Issuer:    "DEFAULT",
+		Inbound:   &inbound,
+		Method:    model.DeliveryPush,
+		RouteMode: model.RouteModeImport,
+		EventUris: []string{"*"},
+	}
+	regBytes, _ = json.Marshal(reg2)
+	resp, err = http.Post(regUrl, "application/json; charset=UTF-8", bytes.NewReader(regBytes))
+
+	body, _ = io.ReadAll(resp.Body)
+	var registration2 model.RegisterResponse
+	err = json.Unmarshal(body, &registration2)
+	assert.NoError(suite.T(), err, "Registration response parse error")
+
+	assert.NotEmpty(suite.T(), registration2.Token, "Token empty error")
+	assert.Equal(suite.T(), true, *registration2.Inbound, "Stream is inbound")
+
+	pushUrlString := fmt.Sprintf("http://%s/events", suite.servers[0].server.Addr)
+	assert.Equal(suite.T(), pushUrlString, registration2.PushUrl, "Confirm PUSH URL calculation correct")
+
+	req, err = http.NewRequest(http.MethodDelete, streamUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+registration2.Token)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
 }
 
 func (suite *ServerSuite) Test4_StreamManagement() {
@@ -220,19 +261,19 @@ func (suite *ServerSuite) Test4_StreamManagement() {
 	assert.NoError(suite.T(), err, "Update request successful")
 	assert.NotNil(suite.T(), resp, "Response is not null")
 
-	var confgResp model.StreamConfiguration
+	var configResp model.StreamConfiguration
 	body, err = io.ReadAll(resp.Body)
 	assert.NoError(suite.T(), err, "No error reading config response body")
-	err = json.Unmarshal(body, &confgResp)
+	err = json.Unmarshal(body, &configResp)
 	assert.NoError(suite.T(), err, "No error parsing config response body")
 
-	assert.Equal(suite.T(), len(config.EventsRequested), len(confgResp.EventsDelivered), "Configuration set successfully")
+	assert.Equal(suite.T(), len(config.EventsRequested), len(configResp.EventsDelivered), "Configuration set successfully")
 
 	// save the updated state locally for the next tests
-	suite.servers[0].stream = confgResp
+	suite.servers[0].stream = configResp
 }
 
-func (suite *ServerSuite) Test5_PopStreamDelivery() {
+func (suite *ServerSuite) Test5_PollStreamDelivery() {
 
 	// Start server 2 and hopefully it polls!
 	suite.setUpPopReceiverStream()
@@ -282,7 +323,8 @@ func (suite *ServerSuite) Test5_PopStreamDelivery() {
 	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
 	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
 	assert.Equal(suite.T(), 0, pushCnt1, "Should be no PUSH servers")
-	assert.Equal(suite.T(), 1, pollCnt1, "Should be 1 POLL server")
+	// Includes the original from Test 3 plus the new one
+	assert.Equal(suite.T(), 1, pollCnt1, "Should be 2 POLL server")
 
 	testLog.Println("Resetting streams")
 	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)
@@ -386,7 +428,8 @@ func (suite *ServerSuite) Test6_PushStreamDelivery() {
 	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
 	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
 	assert.Equal(suite.T(), 1, pushCnt1, "Should be 1 PUSH servers")
-	assert.Equal(suite.T(), 0, pollCnt1, "Should be no POLL server")
+
+	assert.Equal(suite.T(), 0, pollCnt1, "Should be 1 POLL server")
 
 	testLog.Println("Resetting streams")
 	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)

@@ -107,7 +107,7 @@ func TestEvents(t *testing.T) {
 	}
 	// Check event collection (all data.streams)
 	events := data.provider.GetEvents(eventIds)
-	assert.Equal(t, 1, len(*events), "Should be 1 event")
+	assert.Equal(t, 1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
 	data.provider.AckEvent(eventIds[0], data.stream.Id)
@@ -159,9 +159,10 @@ func TestPolling(t *testing.T) {
 
 	sets := data.provider.GetEvents(events)
 
-	assert.Equal(t, len(events), len(*sets), "Sets return matches getevents")
-	aset := (*sets)[0].(goSet.SecurityEventToken)
-	assert.Equal(t, data.stream.Iss, aset.Issuer, "Issuer is matched")
+	assert.Equal(t, len(events), len(sets), "Sets return matches getevents")
+	tokenRef := sets[0]
+	set := *tokenRef
+	assert.Equal(t, data.stream.Iss, set.Issuer, "Issuer is matched")
 }
 
 func ackEvents(ids []string) {

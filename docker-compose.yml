@@ -77,7 +77,7 @@ services:
       - "$PWD/.monitor/grafana:/etc/grafana/provisioning/datasources"
 
   i2goSignalsServer:
-    image: i2gosignals
+    image: i2gosignals:latest
     command: /goSignalsServer
     container_name: gosignals1
     depends_on:
@@ -90,6 +90,7 @@ services:
     environment:
       - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256
       - PORT=8888
+      - BASE_URL=http://localhost:8888/
 
 
 

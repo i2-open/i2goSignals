@@ -66,14 +66,22 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
+
+	state, err := sa.Provider.GetStreamState(sid)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	state.Status = model.StreamStateInactive
+	sa.EventRouter.UpdateStreamState(state)
+
 	// Stop all the inbound traffic if Polling
 	sa.ClosePollReceiver(sid)
 
 	// Stop any outbound activity
 	sa.EventRouter.RemoveStream(sid)
 
-	err := sa.Provider.DeleteStream(sid)
-	// TODO: Also update the router to delete the stream
+	err = sa.Provider.DeleteStream(sid)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -167,18 +175,25 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
+	jwksUri, _ := sa.BaseUrl.Parse("/jwks.json")
+	configUri, _ := sa.BaseUrl.Parse("/stream")
+	statusUri, _ := sa.BaseUrl.Parse("/status")
+	addSubUri, _ := sa.BaseUrl.Parse("/add-subject")
+	remSubUri, _ := sa.BaseUrl.Parse("/remove-subject")
+	verifyUri, _ := sa.BaseUrl.Parse("/verification")
+
 	config := model.TransmitterConfiguration{
 		Issuer:  sa.DefIssuer,
-		JwksUri: sa.HostName + "/jwks.json",
+		JwksUri: jwksUri.String(),
 		DeliveryMethodsSupported: []string{
 			model.DeliveryPoll,
 			model.DeliveryPush,
 		},
-		ConfigurationEndpoint:  sa.HostName + "/stream",
-		StatusEndpoint:         sa.HostName + "/status",
-		AddSubjectEndpoint:     sa.HostName + "/add-subject",
-		RemoveSubjectEndpoint:  sa.HostName + "/remove-subject",
-		VerificationEndpoint:   sa.HostName + "/verification",
+		ConfigurationEndpoint:  configUri.String(),
+		StatusEndpoint:         statusUri.String(),
+		AddSubjectEndpoint:     addSubUri.String(),
+		RemoveSubjectEndpoint:  remSubUri.String(),
+		VerificationEndpoint:   verifyUri.String(),
 		CriticalSubjectMembers: nil,
 	}
 	resp, _ := json.Marshal(config)
@@ -191,18 +206,24 @@ func (sa *SignalsApplication) WellKnownSseConfigurationIssuerGet(w http.Response
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
+	jwksUri, _ := sa.BaseUrl.Parse("/jwks.json" + issuer)
+	configUri, _ := sa.BaseUrl.Parse("/stream")
+	statusUri, _ := sa.BaseUrl.Parse("/status")
+	addSubUri, _ := sa.BaseUrl.Parse("/add-subject")
+	remSubUri, _ := sa.BaseUrl.Parse("/remove-subject")
+	verifyUri, _ := sa.BaseUrl.Parse("/verification")
 	config := model.TransmitterConfiguration{
 		Issuer:  issuer,
-		JwksUri: "https://localhost/jwks/" + issuer,
+		JwksUri: jwksUri.String(),
 		DeliveryMethodsSupported: []string{
 			model.DeliveryPoll,
 			model.DeliveryPush,
 		},
-		ConfigurationEndpoint:  sa.HostName + "/stream",
-		StatusEndpoint:         sa.HostName + "/status",
-		AddSubjectEndpoint:     sa.HostName + "/add-subject",
-		RemoveSubjectEndpoint:  sa.HostName + "/remove-subject",
-		VerificationEndpoint:   sa.HostName + "/verification",
+		ConfigurationEndpoint:  configUri.String(),
+		StatusEndpoint:         statusUri.String(),
+		AddSubjectEndpoint:     addSubUri.String(),
+		RemoveSubjectEndpoint:  remSubUri.String(),
+		VerificationEndpoint:   verifyUri.String(),
 		CriticalSubjectMembers: nil,
 	}
 	resp, _ := json.Marshal(config)

@@ -113,6 +113,9 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 			m.pendingCol = m.ssefDb.Collection(CDbPending)
 			m.eventCol = m.ssefDb.Collection(CDbEvents)
 			m.dbInit = true
+
+			m.tokenKey, _ = m.GetIssuerPrivateKey(m.TokenIssuer)
+			m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
 			return
 		}
 	}
@@ -306,11 +309,13 @@ func (m *MongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord
 			RefreshUnknownKID: true,
 		}
 
-		fmt.Printf("\n\nLoading JWKS key from: %s\n\n", streamState.IssuerJWKSUrl)
-
+		if streamState.IssuerJWKSUrl == "" {
+			return
+		}
+		pLog.Printf("Loading JWKS key from: %s", streamState.IssuerJWKSUrl)
 		jwks, err := keyfunc.Get(streamState.IssuerJWKSUrl, keyOptions)
 		if err != nil {
-			msg := fmt.Sprintf("Error retrieving issuer JWKS public key:\nError: %s", err.Error())
+			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
 			pLog.Println(msg)
 			streamState.Status = model.StreamStatePause
 			streamState.ErrorMsg = msg
@@ -498,6 +503,18 @@ func (m *MongoProvider) RegisterStream(request model.RegisterParameters) *model.
 		return nil
 	}
 	eventAuthToken, err := m.IssueStreamToken(resp)
+	inbound := false
+	if request.Inbound != nil {
+		inbound = *request.Inbound
+	}
+
+	if inbound && resp.Delivery.PushDeliveryMethod != nil {
+		return &model.RegisterResponse{
+			Token:   eventAuthToken,
+			PushUrl: resp.Delivery.PushDeliveryMethod.EndpointUrl,
+			Inbound: &inbound,
+		}
+	}
 	return &model.RegisterResponse{Token: eventAuthToken}
 }
 
@@ -509,13 +526,23 @@ func (m *MongoProvider) insertStream(streamRec *model.StreamStateRecord) error {
 
 func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer string) (model.StreamConfiguration, error) {
 	mid := primitive.NewObjectID()
+
 	var config model.StreamConfiguration
 	{
 	}
+
 	config.Id = mid.Hex()
 	config.Aud = request.Audience
 	config.Iss = issuer
 	config.EventsSupported = GetSupportedEvents()
+
+	if len(request.EventUris) > 0 {
+		if request.EventUris[0] == "*" {
+			config.EventsRequested = config.EventsSupported
+		} else {
+			config.EventsRequested = request.EventUris
+		}
+	}
 
 	if request.Method == model.DeliveryPush {
 		pushMethod := &model.OneOfStreamConfigurationDelivery{

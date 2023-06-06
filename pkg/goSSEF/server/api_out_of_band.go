@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"i2goSignals/internal/model"
 	"net/http"
+	"strings"
 )
 
 func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
@@ -27,14 +28,45 @@ func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
+	if response.PushUrl != "" {
+		baseUrl := sa.BaseUrl
+		pushUri, err := baseUrl.Parse(response.PushUrl)
+
+		if err == nil && pushUri != nil {
+			response.PushUrl = pushUri.String()
+		}
+	}
+
+	sid, err := sa.Provider.AuthenticateToken(response.Token)
+	if err != nil {
+		serverLog.Println("ERROR: Issued token was not validated: " + err.Error())
+
+		http.Error(w, "Failed to issue stream token", http.StatusInternalServerError)
+		return
+	}
+	state, _ := sa.Provider.GetStreamState(sid)
+	sa.EventRouter.UpdateStreamState(state)
 	// TODO: Update Event Router about stream change
 	regBytes, _ := json.MarshalIndent(response, "", " ")
 	w.Write(regBytes)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
 }
 
 func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// getHost tries its best to return the request host.
+func getHost(r *http.Request) string {
+	if r.URL.IsAbs() {
+		host := r.Host
+		// Slice off any port information.
+		if i := strings.Index(host, ":"); i != -1 {
+			host = host[:i]
+		}
+		return host
+	}
+	return r.URL.String()
 }

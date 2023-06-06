@@ -7,6 +7,7 @@ import (
 	"i2goSignals/internal/providers/dbProviders"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -19,6 +20,7 @@ type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
 	Server        *http.Server
 	EventRouter   eventRouter.EventRouter
+	BaseUrl       *url.URL
 	HostName      string
 	DefIssuer     string
 	AdminRole     string
@@ -45,7 +47,7 @@ func (sa *SignalsApplication) HealthCheck() bool {
 	return true
 }
 
-func StartServer(addr string, provider dbProviders.DbProviderInterface) *SignalsApplication {
+func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
 	role := os.Getenv("SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"
@@ -78,6 +80,18 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface) *Signals
 	if server.TLSConfig != nil {
 		name = server.TLSConfig.ServerName
 	}
+
+	var baseUrl *url.URL
+	var err error
+	if baseUrlString == "" {
+		baseUrl, _ = url.Parse("http://" + server.Addr + "/")
+	} else {
+		baseUrl, err = url.Parse(baseUrlString)
+		if err != nil {
+			serverLog.Println("FATAL: Invalid Baseurl[%s]: %s", baseUrlString, err.Error())
+		}
+	}
+	sa.BaseUrl = baseUrl
 
 	sa.InitializePrometheus()
 

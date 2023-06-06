@@ -28,7 +28,8 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 }
 
 func main() {
-	mLog.Printf("i2goSignals Server starting...")
+	mLog.Printf("i2goSignals server starting...")
+	mLog.Printf("Version: 0.0.1")
 	port := "8888"
 	if found := os.Getenv("PORT"); found != "" {
 		port = found
@@ -48,9 +49,15 @@ func main() {
 		os.Exit(-1)
 	}
 
+	baseUrl := "127.0.0.1:" + port + "/"
+	if found := os.Getenv("BASE_URL"); found != "" {
+		baseUrl = found
+	}
+	mLog.Println("Base URL: " + baseUrl)
+
 	// listener, _ := net.Dial("tcp", addr)
 
-	signalsApplication := ssef.StartServer(":"+port, provider)
+	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
 	err = signalsApplication.Server.ListenAndServe()
 	if err != nil {
 		mLog.Fatal(err.Error())

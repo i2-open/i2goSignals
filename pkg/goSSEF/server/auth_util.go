@@ -79,6 +79,9 @@ func ValidateAuthorization(r *http.Request, pubKey *keyfunc.JWKS) (string, int) 
 }
 
 func ParseAuthToken(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*EventAuthToken, error) {
+	if issuerPublicJwks == nil {
+		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, issuerPublicJwks.Keyfunc)
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())

@@ -3,11 +3,14 @@ package server
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+var pLog = log.New(os.Stdout, "PROMTH: ", log.Ldate|log.Ltime)
 
 type PrometheusHandler struct {
 	App                    *SignalsApplication
@@ -110,8 +113,12 @@ func (sa *SignalsApplication) InitializePrometheus() {
 }
 
 func registerCollector(collector prometheus.Collector) {
-	err := prometheus.Register(collector)
-	if err != nil {
-		log.Println("WARNING: instrumentation error:" + err.Error())
-	}
+	/*
+		err := prometheus.Register(collector)
+		if err != nil {
+			pLog.Println("WARNING: instrumentation error:" + err.Error())
+		}
+
+	*/
+
 }
