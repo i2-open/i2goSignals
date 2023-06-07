@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"i2goSignals/internal/model"
 	"os"
 	"path/filepath"
@@ -17,9 +18,11 @@ type SsfServer struct {
 }
 
 type Stream struct {
-	Id    string
-	Alias string
-	Token string
+	Id          string
+	Description string
+	Alias       string
+	Token       string
+	Endpoint    string
 }
 
 type ConfigData struct {
@@ -27,7 +30,19 @@ type ConfigData struct {
 	Servers  map[string]SsfServer
 }
 
-func (c *ConfigData) GetCurrentServer() (*SsfServer, error) {
+/*
+GetServer returns either the specified server alias, or the currently selected server if alias is ""
+*/
+func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
+	if alias != "" {
+		server, exists := c.Servers[alias]
+		if !exists {
+			errMsg := fmt.Sprintf("specified alias '%s' is not defined", alias)
+			return nil, errors.New(errMsg)
+		}
+		return &server, nil
+	}
+
 	if c.Selected == "" || len(c.Servers) == 0 {
 		return nil, errors.New("no servers defined, use 'add server'")
 	}

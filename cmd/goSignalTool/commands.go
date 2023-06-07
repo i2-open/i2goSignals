@@ -81,8 +81,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	c.Data.Servers[as.Alias] = server
 	c.Data.Selected = as.Alias
 
-	c.Data.Save(&c.Globals)
-	return nil
+	return c.Data.Save(&c.Globals)
 }
 
 type AddCmd struct {
@@ -97,18 +96,78 @@ type CreateStreamPublisherCmd struct {
 }
 
 type CreatePollReceiverCmd struct {
-	Source string `required:"" help:"The event publishers polling endpoint URL"`
-	Token  string `required:"" help:"An authorization token used to poll for events"`
+	Alias       string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	Url         string `help:"The event publishers polling endpoint URL. Required unless SourceAlias specified."`
+	Token       string `help:"An authorization token used to poll for events. Required unless SourceAlias specified"`
+	SourceAlias string `optional:"" help:"The Alias of a stream which is publishing events. Specify in serverAlias.StreamAlias form."`
 }
 
-func (p *CreatePollReceiverCmd) Run(c *CreateCmd) error {
-	jsonString, _ := json.MarshalIndent(c, "", "  ")
-	out := fmt.Sprintf("POLL Receiver Command\n%s", jsonString)
+func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
+	c := cli.Create.Stream
+	var mode string
+	switch c.Receive.Mode {
+	case "IMPORT", "I":
+		mode = model.RouteModeImport
+	case "FORWARD", "F":
+		mode = model.RouteModeForward
+	case "REPUBLISH", "R", "P":
+		mode = model.RouteModePublish
+	}
+	var inbound bool = true
+
+	eventUrl := p.Url
+	eventAuthorization := p.Token
+
+	if p.SourceAlias != "" {
+		parts := strings.Split(p.SourceAlias, ".")
+		if len(parts) != 2 {
+			return errors.New("specify sourceAlias in `.` form. For example:  goSignals1.Xv1")
+		}
+
+		server, err := cli.Data.GetServer(parts[0])
+		if err != nil {
+			return err
+		}
+		stream, exist := server.Streams[parts[1]]
+		if !exist {
+			return errors.New("Could not find a stream identified by " + parts[1] + " for server " + parts[0])
+		}
+		eventUrl = stream.Endpoint
+		eventAuthorization = stream.Token
+	}
+
+	if eventUrl == "" || eventAuthorization == "" {
+		return errors.New("either --url and --token parameters or --sourceAlias parameters must be specified")
+	}
+
+	reg := model.RegisterParameters{
+		Audience:      c.Aud,
+		Issuer:        c.Iss,
+		Inbound:       &inbound,
+		Method:        model.DeliveryPoll,
+		RouteMode:     mode,
+		EventUrl:      eventUrl,
+		EventAuth:     eventAuthorization,
+		EventUris:     c.Receive.Events,
+		IssuerJWKSUrl: c.Receive.IssJwksUrl,
+	}
+	jsonString, _ := json.MarshalIndent(reg, "", "  ")
+	server, err := cli.Data.GetServer(p.Alias)
+	if err != nil {
+		return err
+	}
+	out := fmt.Sprintf("Polling receiver to be created on: %s/register\n%s", server.Host, jsonString)
 	fmt.Println(out)
-	return nil
+
+	if !ConfirmProceed("") {
+		return nil
+	}
+
+	return cli.executeCreateRequest(p.Alias, reg, server, "Poll Receiver")
 }
 
 type CreatePushReceiverCmd struct {
+	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
 }
 
 func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
@@ -134,30 +193,30 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		IssuerJWKSUrl: c.Receive.IssJwksUrl,
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
-	out := fmt.Sprintf("Create Push Receiver Stream Request:\n%s", jsonString)
+	server, err := cli.Data.GetServer(p.Alias)
+	if err != nil {
+		return err
+	}
+	out := fmt.Sprintf("Push receiver to be created on: %s/register\n%s", server.Host, jsonString)
+
 	fmt.Println(out)
 
-	if !ConfirmProceed() {
+	if !ConfirmProceed("") {
 		return nil
 	}
 
-	server, err := cli.Data.GetCurrentServer()
-	if err != nil {
-		return err
-	}
-	out = fmt.Sprintf("To be created on: %s/register", server.Host)
+	return cli.executeCreateRequest(p.Alias, reg, server, "Push Receiver")
+}
+
+func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string) error {
 	serverUrl, err := url.Parse(server.Host)
-
 	if err != nil {
 		return err
 	}
-
 	requestUrl, err := serverUrl.Parse("/register")
 	if err != nil {
 		return err
 	}
-
-	fmt.Println("Registration URL: " + requestUrl.String())
 
 	regBytes, err := json.MarshalIndent(&reg, "", " ")
 	if err != nil {
@@ -176,9 +235,39 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		return err
 	}
 
+	if streamAlias == "" {
+
+		streamAlias = generateAlias(3)
+		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
+			streamAlias = generateAlias(3)
+		}
+
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+registration.Token)
+	client := http.Client{}
+	resp, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var config model.StreamConfiguration
+	_ = json.Unmarshal(bodyBytes, &config)
+
+	stream := Stream{
+		Alias:       streamAlias,
+		Token:       registration.Token,
+		Id:          config.Id,
+		Endpoint:    registration.PushUrl,
+		Description: typeDescription,
+	}
+	server.Streams[streamAlias] = stream
+
 	SessionGlobals.StreamToken = registration.Token
-	jsonString, _ = json.MarshalIndent(registration, "", "  ")
-	out = fmt.Sprintf("Create Registration Response:\n%s", jsonString)
+	jsonBytes, _ := json.MarshalIndent(stream, "", "  ")
+	out := fmt.Sprintf("Stream defined:\n%s", string(jsonBytes))
 	fmt.Println(out)
 
 	fmt.Println("\nThe stream token has been cached for future requests.  Save the token for use in future sessions")
@@ -206,11 +295,16 @@ type CreateCmd struct {
 }
 
 type ExitCmd struct {
-	Arg string `help:"Test exit param"`
 }
 
 func (e *ExitCmd) Run(globals *Globals) error {
-	fmt.Println("Exiting...")
+	err := globals.Data.Save(globals)
+	if err != nil {
+		fmt.Println(err.Error())
+		if ConfirmProceed("Abort exit? Y|[n] ") {
+			return nil
+		}
+	}
 	os.Exit(-1)
 	return nil
 }
@@ -306,8 +400,13 @@ type ShowCmd struct {
 	Server ShowServerCmd `cmd:"" help:"Show information about locally defined servers"`
 }
 
-func ConfirmProceed() bool {
-	fmt.Print("Proceed Y|[N]? ")
+func ConfirmProceed(msg string) bool {
+	if msg != "" {
+		fmt.Print(msg)
+	} else {
+		fmt.Print("Proceed Y|[n]? ")
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
 	if line[0:1] == "Y" {
