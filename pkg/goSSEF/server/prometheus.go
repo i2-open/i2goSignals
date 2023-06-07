@@ -96,7 +96,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 				Help:      "Number of SET push receivers",
 			},
 			func() float64 {
-				return sa.GetPollReceiverCnt()
+				return sa.GetPushReceiverCnt()
 			}),
 	}
 	registerCollector(prometheusHandler.EventsIn)
@@ -113,12 +113,10 @@ func (sa *SignalsApplication) InitializePrometheus() {
 }
 
 func registerCollector(collector prometheus.Collector) {
-	/*
-		err := prometheus.Register(collector)
-		if err != nil {
-			pLog.Println("WARNING: instrumentation error:" + err.Error())
-		}
 
-	*/
+	err := prometheus.Register(collector)
+	if err != nil {
+		pLog.Println("WARNING: instrumentation error:" + err.Error())
+	}
 
 }

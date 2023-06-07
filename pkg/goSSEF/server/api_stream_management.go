@@ -56,7 +56,7 @@ func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Reque
 
 func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Request) {
 	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
-
+	serverLog.Printf("Stream %s DELETE requested.", sid)
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -93,6 +93,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	}
 	// sa.EventRouter.RemoveStream(sid)
 	w.WriteHeader(http.StatusOK)
+	serverLog.Printf("Stream %s inactivated and deleted.", sid)
 }
 
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +115,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	serverLog.Printf("Stream GET %s", sid)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	resp, _ := json.Marshal(config)
@@ -155,8 +157,9 @@ func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request)
 	sa.EventRouter.UpdateStreamState(state)
 	sa.HandleClientPollReceiver(state)
 
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	serverLog.Printf("Stream %s UPDATED", sid)
 
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, _ := json.MarshalIndent(configResp, "", "  ")
 	w.Write(respBytes)
 	// w.WriteHeader(http.StatusOK)
@@ -173,6 +176,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 }
 
 func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
+	serverLog.Println("GET WellKnownSseConfiguration")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	jwksUri, _ := sa.BaseUrl.Parse("/jwks.json")
@@ -206,6 +210,8 @@ func (sa *SignalsApplication) WellKnownSseConfigurationIssuerGet(w http.Response
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
+	serverLog.Printf("GET WellKnownSseConfigurationIssuer/%s", issuer)
+
 	jwksUri, _ := sa.BaseUrl.Parse("/jwks.json" + issuer)
 	configUri, _ := sa.BaseUrl.Parse("/stream")
 	statusUri, _ := sa.BaseUrl.Parse("/status")

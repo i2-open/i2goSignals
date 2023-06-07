@@ -163,7 +163,7 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
 	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
-	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Default issuer matched")
+	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Selected issuer matched")
 }
 
 func (suite *ServerSuite) Test3_StreamConfig() {

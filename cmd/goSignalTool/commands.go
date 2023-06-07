@@ -5,73 +5,88 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"i2goSignals/internal/model"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/alecthomas/kong"
 )
 
-type AttachCmd struct {
-	DetachKeys string `help:"Override the key sequence for detaching a container"`
-	NoStdin    bool   `help:"Do not attach STDIN"`
-	SigProxy   bool   `help:"Proxy all received signals to the process" default:"true"`
-
-	Container string `help:"Container ID to attach to."`
+type AddServerCmd struct {
+	Alias string `arg:"" help:"A unique name to identify the server"`
+	Host  string `arg:"" required:"" help:"Add a new goSignals server"`
 }
 
-func (a *AttachCmd) Run(globals *Globals) error {
-	fmt.Printf("Config: %s\n", globals.Config)
-	fmt.Printf("Attaching to: %v\n", a.Container)
-	fmt.Printf("SigProxy: %v\n", a.SigProxy)
-	return nil
-}
-
-type ExitCmd struct {
-	Arg string `help:"Test exit param"`
-}
-
-func (e *ExitCmd) Run(globals *Globals) error {
-	fmt.Println("Exiting...")
-	os.Exit(-1)
-	return nil
-}
-
-type ListStreamsCmd struct {
-	Ids []string `sep:"," optional:"" help:"Specify 1 or more stream identifiers to list"`
-}
-
-func (l *ListStreamsCmd) Run(globals *Globals) error {
-	if globals.Server == "" {
-		globals.Server = SessionGlobals.Server
+func (as *AddServerCmd) Run(c *CLI) error {
+	_, exists := c.Data.Servers[as.Alias]
+	if exists {
+		return errors.New("server alias already exists")
 	}
-	output := fmt.Sprintf("server: %s\nauthz: %s\nstreams: %v", globals.Server, globals.Authorization, l.Ids)
-	fmt.Println(output)
-	return nil
-}
+	var serverUrl *url.URL
+	var err error
+	if strings.Index(strings.ToUpper(as.Host), "HTTP") == -1 {
+		serverUrl = &url.URL{
+			Scheme:      "https",
+			Opaque:      "",
+			User:        nil,
+			Host:        as.Host,
+			Path:        "",
+			RawPath:     "",
+			OmitHost:    false,
+			ForceQuery:  false,
+			RawQuery:    "",
+			Fragment:    "",
+			RawFragment: "",
+		}
+	} else {
+		serverUrl, err = url.Parse(as.Host)
+		if err != nil {
+			return err
+		}
+	}
+	server := SsfServer{
+		Alias:   as.Alias,
+		Host:    serverUrl.String(),
+		Streams: map[string]Stream{},
+	}
+	tryUrl, _ := serverUrl.Parse("/.well-known/sse-configuration")
+	fmt.Println("Attempting to read configuration at: " + tryUrl.String())
+	var resp *http.Response
+	resp, err = http.Get(tryUrl.String())
+	if err != nil {
 
-type HelpCmd struct {
-	Command []string `arg:"" optional:"" help:"Show help on command."`
-}
-
-// Run shows help.
-func (h *HelpCmd) Run(realCtx *kong.Context) error {
-	ctx, err := kong.Trace(realCtx.Kong, h.Command)
+		if strings.Contains(err.Error(), "gave HTTP response") {
+			tryUrl.Scheme = "http"
+			fmt.Println("Warning: HTTPS not supported trying HTTP at:" + tryUrl.String())
+			resp, err = http.Get(tryUrl.String())
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var transmitterConfiguration model.TransmitterConfiguration
+	err = json.Unmarshal(body, &transmitterConfiguration)
 	if err != nil {
 		return err
 	}
-	if ctx.Error != nil {
-		return ctx.Error
-	}
-	err = ctx.PrintUsage(false)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintln(realCtx.Stdout)
+	server.ServerConfiguration = &transmitterConfiguration
+	c.Data.Servers[as.Alias] = server
+	c.Data.Selected = as.Alias
+
+	c.Data.Save(&c.Globals)
 	return nil
+}
+
+type AddCmd struct {
+	Server AddServerCmd `cmd:"" help:"Add a server to be configured."`
 }
 
 type EventUris struct {
@@ -126,13 +141,13 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	server := GetServer(&cli.Globals)
-
-	out = fmt.Sprintf("To be created on: %s/register", server)
-	serverUrl, err := url.ParseRequestURI(server)
-	if err == nil && serverUrl.Host == "" {
-		serverUrl, err = url.ParseRequestURI("http://" + server)
+	server, err := cli.Data.GetCurrentServer()
+	if err != nil {
+		return err
 	}
+	out = fmt.Sprintf("To be created on: %s/register", server.Host)
+	serverUrl, err := url.Parse(server.Host)
+
 	if err != nil {
 		return err
 	}
@@ -190,22 +205,55 @@ type CreateCmd struct {
 	Stream CreateStreamCmd `cmd:"" help:"Create a stream"`
 }
 
+type ExitCmd struct {
+	Arg string `help:"Test exit param"`
+}
+
+func (e *ExitCmd) Run(globals *Globals) error {
+	fmt.Println("Exiting...")
+	os.Exit(-1)
+	return nil
+}
+
+type HelpCmd struct {
+	Command []string `arg:"" optional:"" help:"Show help on command."`
+}
+
+// Run shows help.
+func (h *HelpCmd) Run(realCtx *kong.Context) error {
+	ctx, err := kong.Trace(realCtx.Kong, h.Command)
+	if err != nil {
+		return err
+	}
+	if ctx.Error != nil {
+		return ctx.Error
+	}
+	err = ctx.PrintUsage(false)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(realCtx.Stdout)
+	return nil
+}
+
+type ListStreamsCmd struct {
+	Ids []string `sep:"," optional:"" help:"Specify 1 or more stream identifiers to list"`
+}
+
+func (l *ListStreamsCmd) Run(globals *Globals) error {
+
+	return nil
+}
+
+type ListCmd struct {
+	Streams ListStreamsCmd `cmd:"" help:"List all streams or one or more specific streams"`
+}
+
 type VersionCmd struct{}
 
 func (v *VersionCmd) Run(realCtx *kong.Context) error {
 	fmt.Println("i2GoSignals client version ABC")
 	return nil
-}
-
-func GetServer(g *Globals) string {
-	if g.Server != "" {
-		SessionGlobals.Server = g.Server
-		return g.Server
-	}
-	if SessionGlobals.Server == "" {
-		SessionGlobals.Server = "localhost:8888"
-	}
-	return SessionGlobals.Server
 }
 
 type ShowTokenCmd struct {
@@ -220,8 +268,42 @@ func (s *ShowTokenCmd) Run(g *Globals) error {
 	return nil
 }
 
+type ShowServerCmd struct {
+	Alias string `arg:"" optional:"" help:"Specify a server alias, *, or blank to show the selected server"`
+}
+
+func (s *ShowServerCmd) Run(g *Globals) error {
+	if len(g.Data.Servers) == 0 {
+		fmt.Println("No servers defined.")
+		return nil
+	}
+	switch s.Alias {
+	case "":
+		if g.Data.Selected == "" {
+			return errors.New("no currently selected server")
+		}
+		s.Alias = g.Data.Selected
+	case "*":
+		output, _ := json.MarshalIndent(g.Data.Servers, "", "  ")
+		fmt.Println("Servers locally configured:")
+		fmt.Println(string(output))
+		return nil
+	default:
+	}
+
+	server, exists := g.Data.Servers[s.Alias]
+	if exists {
+		output, _ := json.MarshalIndent(server, "", "  ")
+		fmt.Println("Server configured:")
+		fmt.Println(string(output))
+		return nil
+	}
+	return errors.New("server " + s.Alias + " not defined")
+}
+
 type ShowCmd struct {
-	Token ShowTokenCmd `cmd:"" help:"Show the current stream access token"`
+	Token  ShowTokenCmd  `cmd:"" help:"Show the current stream access token"`
+	Server ShowServerCmd `cmd:"" help:"Show information about locally defined servers"`
 }
 
 func ConfirmProceed() bool {
@@ -232,4 +314,18 @@ func ConfirmProceed() bool {
 		return true
 	}
 	return false
+}
+
+type SelectCmd struct {
+	Alias string `arg:"" help:"Specify the alias of the server to work with"`
+}
+
+func (s *SelectCmd) Run(g *Globals) error {
+	_, exists := g.Data.Servers[s.Alias]
+	if exists {
+		g.Data.Selected = s.Alias
+		fmt.Println(s.Alias + " selected.")
+		return nil
+	}
+	return errors.New("server not found")
 }

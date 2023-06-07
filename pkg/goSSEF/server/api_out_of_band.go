@@ -10,6 +10,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"i2goSignals/internal/model"
 	"net/http"
 	"strings"
@@ -46,6 +47,12 @@ func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, _ := sa.Provider.GetStreamState(sid)
+	deliveryType := "PUSH"
+	if state.Receiver.Method == model.DeliveryPoll || state.StreamConfiguration.Delivery.PollDeliveryMethod != nil {
+		deliveryType = "POLL"
+	}
+	msg := fmt.Sprintf("Stream %s created. Inbound: %t Type: %s", state.StreamConfiguration.Id, state.Inbound, deliveryType)
+	serverLog.Println(msg)
 	sa.EventRouter.UpdateStreamState(state)
 	// TODO: Update Event Router about stream change
 	regBytes, _ := json.MarshalIndent(response, "", " ")

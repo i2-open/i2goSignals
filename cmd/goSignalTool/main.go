@@ -12,30 +12,36 @@ import (
 )
 
 type Globals struct {
-	Config        string `help:"Location of client config files" default:"~/.docker" type:"path"`
-	Server        string `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
-	Authorization string `help:"The authorization token to use to access an i2goSignals server"`
-	StreamToken   string `help:"A token used to manage a stream"`
+	Config string `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
+	Server string `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
+	// Authorization string     `help:"The authorization token to use to access an i2goSignals server"`
+	StreamToken string     `help:"A token used to manage a stream"`
+	Data        ConfigData `kong:"-"`
 }
 
 type CLI struct {
 	Globals
-	Attach  AttachCmd      `cmd:"" help:"Attach local standard input, output, and error streams to a running container"`
-	Create  CreateCmd      `cmd:"" help:"Create a PUBLISHER or RECEIVER stream."`
-	Show    ShowCmd        `cmd:"" help:"Show configured values"`
-	Exit    ExitCmd        `cmd:"" help:"Exit the shell"`
-	Help    HelpCmd        `cmd:"" help:"Show help on a command"`
-	List    ListStreamsCmd `cmd:"" help:"List all streams or one or more specific streams"`
-	Version VersionCmd     `cmd:"" short:"v" help:"Show the goSignals client version information"`
+	Add     AddCmd     `cmd:"" help:"Define a new server to be managed"`
+	Create  CreateCmd  `cmd:"" help:"Create a PUBLISHER or RECEIVER stream."`
+	Select  SelectCmd  `cmd:"" help:"Select a defined server to perform operations against"`
+	Show    ShowCmd    `cmd:"" help:"Show configured values"`
+	Exit    ExitCmd    `cmd:"" help:"Exit the shell"`
+	Help    HelpCmd    `cmd:"" help:"Show help on a command"`
+	List    ListCmd    `cmd:"" help:"List all streams or one or more specific streams"`
+	Version VersionCmd `cmd:"" short:"v" help:"Show the goSignals client version information"`
 }
 
 var SessionGlobals Globals
 
 func main() {
 
+	configNotLoaded := true
+
 	cli := &CLI{}
 
-	SessionGlobals = Globals{Server: "localhost:8888"}
+	cli.Data = ConfigData{
+		Servers: map[string]SsfServer{},
+	}
 
 	parser, err := kong.New(cli,
 		kong.Name("goSignals"),
@@ -89,6 +95,10 @@ func main() {
 				_ = err.Context.PrintUsage(false)
 			}
 			continue
+		}
+		if configNotLoaded {
+			cli.Data.Load(&cli.Globals)
+			configNotLoaded = false
 		}
 		err = ctx.Run(&cli.Globals)
 

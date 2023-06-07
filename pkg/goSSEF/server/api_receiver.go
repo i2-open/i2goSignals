@@ -27,11 +27,13 @@ func (sa *SignalsApplication) InitializeReceivers() {
 	states := sa.Provider.GetStateMap()
 	for _, stream := range states {
 		if !stream.Inbound {
-			return // nothing to do
+			continue
 		}
+
 		if stream.Receiver.Method == model.DeliveryPush {
+			serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id)
 			sa.pushReceivers[stream.StreamConfiguration.Id] = stream
-			return
+			continue
 		}
 		// Stream is a Polling receiver
 		sa.HandleClientPollReceiver(&stream)
@@ -78,8 +80,7 @@ func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.Stream
 			cancel: cancel,
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
-		serverLog.Printf("Starting polling [Stream %s] %s", streamState.StreamConfiguration.Id, streamState.Receiver.PollUrl)
-
+		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, Url: %s", streamState.StreamConfiguration.Id, streamState.Receiver.PollUrl)
 		go ps.pollEventsReceiver(ctx)
 		return ps
 	}

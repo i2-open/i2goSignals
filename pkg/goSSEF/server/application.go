@@ -66,11 +66,11 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		pushReceivers: map[string]model.StreamStateRecord{},
 	}
 
-	router := NewRouter(sa)
+	httpRouter := NewRouter(sa)
 
 	server := http.Server{
 		Addr:    addr,
-		Handler: router.router,
+		Handler: httpRouter.router,
 	}
 	serverLog.Printf("Server[%s] listening on %s", provider.Name(), addr)
 
@@ -108,7 +108,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		defaultIssuer = "DEFAULT"
 	}
 	sa.DefIssuer = defaultIssuer
-	serverLog.Printf("Default issuer id: %s", sa.DefIssuer)
+	serverLog.Printf("Selected issuer id: %s", sa.DefIssuer)
 
 	sa.InitializeReceivers()
 	return sa
