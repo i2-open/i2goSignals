@@ -192,6 +192,7 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	if signingMethod == nil {
 		signingMethod = jwt.SigningMethodES256
 	}
+
 	token := jwt.NewWithClaims(signingMethod, set)
 	token.Header["typ"] = "secevent+jwt"
 
@@ -204,11 +205,25 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	//	})
 
 	token.Header["kid"] = set.Issuer
+
+	if key == nil {
+		return token.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	}
 	return token.SignedString(key)
+
 }
 
 func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
+	var token *jwt.Token
+	var err error
+	if issuerPublicJwks == nil {
+		token, _, err = new(jwt.Parser).ParseUnverified(tokenString, &SecurityEventToken{})
+
+	} else {
+
+		token, err = jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
+	}
+
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())
 		return nil, err

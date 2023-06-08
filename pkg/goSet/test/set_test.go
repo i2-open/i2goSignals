@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	model2 "i2goSignals/internal/model"
 	dbProviders "i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"i2goSignals/pkg/goSet"
@@ -13,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"log"
 	"testing"
 )
 
@@ -39,7 +39,7 @@ TestCreateSetForStream creates a SET using the 3 variabions of subjects (sub, su
 streamconfiguration to supply issuer and audience values.
 */
 func TestCreateSetForStream(t *testing.T) {
-	log.Println("Testing createStream with 'sub' subject...")
+	fmt.Println("Testing createStream with 'sub' subject...")
 	subject := &goSet.EventSubject{
 		SubIdentifier: goSet.SubIdentifier{Sub: "1234"},
 	}
@@ -55,9 +55,9 @@ func TestCreateSetForStream(t *testing.T) {
 
 	assert.NotContainsf(t, jsonString, "sub_id", "sub_id detected")
 	assert.Contains(t, jsonString, "\"sub\"", "sub claim detected")
-	log.Println("\n", jsonString)
+	fmt.Println("\n", jsonString)
 
-	log.Println("Testing createStream with 'sub_id' subject...")
+	fmt.Println("Testing createStream with 'sub_id' subject...")
 	subject = &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/1234").AddUsername("huntp").AddEmail("phil.hunt@hexa.org"),
 	}
@@ -75,17 +75,17 @@ func TestCreateSetForStream(t *testing.T) {
 	assert.Contains(t, jsonString, "sub_id", "sub_id detected")
 	assert.NotContains(t, jsonString, "\"sub\"", "sub claim detected")
 	assert.Equal(t, jsonString, string(compString), "check that JsonBytes is the same")
-	log.Println("\n", jsonString)
+	fmt.Println("\n", jsonString)
 
 	// No subject
-	log.Println("Testing createStream with 'nil' subject...")
+	fmt.Println("Testing createStream with 'nil' subject...")
 	set = goSet.CreateSet(nil, testStream.Iss, testStream.Aud)
 	set.AddEventPayload("uri:testevent", payload_claims)
 	jsonString = set.String()
 
 	assert.NotContains(t, jsonString, "sub_id", "sub_id detected")
 	assert.NotContains(t, jsonString, "\"sub\"", "sub claim detected")
-	log.Println("\n", jsonString)
+	fmt.Println("\n", jsonString)
 
 }
 
@@ -95,7 +95,7 @@ TestCreateSet builds on the previous test to also check JWT functionality
 func TestCreateSet(t *testing.T) {
 
 	// As CreateSetForStream already calls CreateSet, we do not need to test all variations
-	log.Println("Testing CreateSet with 'sub_id' subject...")
+	fmt.Println("Testing CreateSet with 'sub_id' subject...")
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: goSet.SubjectIdentifier{
 			Format:                    "scim",
@@ -129,11 +129,13 @@ func TestCreateSet(t *testing.T) {
 }
 
 func TestSetJws(t *testing.T) {
-	log.Println("Testing SET JWT Signature and Validation...")
+	fmt.Println("Testing SET JWT Signature and Validation...")
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
+
+	kid := testSet.Issuer
 
 	publicKey := privateKey.PublicKey
 
@@ -143,19 +145,30 @@ func TestSetJws(t *testing.T) {
 	})
 
 	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-		"issuer": givenKey,
+		kid: givenKey,
 	})
 
 	signString, err := testSet.JWS(jwt.SigningMethodRS256, privateKey)
 	assert.Nil(t, err, "Signing is error free")
-	log.Println("Signed value")
-	log.Println(signString)
+	fmt.Println("Signed value")
+	fmt.Println(signString)
 
 	newSet, err := goSet.Parse(signString, jwks)
 	assert.Nil(t, err, "Assert that token was valid and parsed")
 	if err != nil {
-		log.Println("Parsed Signed token")
+		fmt.Println("Parsed Signed token")
 		println(newSet.String())
+	}
+
+	unsignedString, err := testSet.JWS(jwt.SigningMethodNone, nil)
+	fmt.Println("Alg=None unsigned value")
+	fmt.Println(unsignedString)
+
+	newUnSignedSet, err := goSet.Parse(unsignedString, nil)
+	assert.Nil(t, err, "Assert that unsigned token was valid and parsed")
+	if err != nil {
+		fmt.Println("Parsed Unsigned token")
+		println(newUnSignedSet.String())
 	}
 
 	altPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -190,12 +203,13 @@ func TestSetJws(t *testing.T) {
 	// Test for a bad token type
 	testToken := jwt.NewWithClaims(jwt.SigningMethodRS256, testSet)
 	testToken.Header["typ"] = "jwt"
-	testToken.Header["kid"] = "issuer"
+	testToken.Header["kid"] = kid
 	badSignText, err := testToken.SignedString(privateKey)
 
 	badSet, err = goSet.Parse(badSignText, jwks)
 	assert.Error(t, err, "token type is not `secevent+jwt`")
 	assert.Equal(t, err.Error(), "token type is not `secevent+jwt`")
+
 }
 
 /*
@@ -212,7 +226,7 @@ func TestSetJws(t *testing.T) {
 	}
 	set.AddEventPayload("uri:testevent", payload_claims)
 
-	log.Println(set.String())
+	fmt.Println(set.String())
 
 	set.JWS(nil, privateKey)
 
