@@ -61,7 +61,8 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 }
 
 func (sa *SignalsApplication) Index(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Hello World!")
+	test := r.UserAgent()
+	_, _ = fmt.Fprintf(w, "Hello %s", test)
 }
 
 func (h *HttpRouter) getRoutes() Routes {
@@ -88,10 +89,10 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"ReceiveEvent",
+			"ReceivePushEvent",
 			strings.ToUpper("Post"),
 			"/events",
-			h.sa.ReceiveEvent,
+			h.sa.ReceivePushEvent,
 		},
 
 		Route{

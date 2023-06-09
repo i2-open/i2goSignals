@@ -59,14 +59,15 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
 	if err != nil {
-
 		if strings.Contains(err.Error(), "gave HTTP response") {
 			tryUrl.Scheme = "http"
-			fmt.Println("Warning: HTTPS not supported trying HTTP at:" + tryUrl.String())
+			fmt.Println("Warning: HTTPS not supported trying HTTP at: " + tryUrl.String())
 			resp, err = http.Get(tryUrl.String())
 			if err != nil {
 				return err
 			}
+			serverUrl.Scheme = "http"
+			server.Host = serverUrl.String()
 		} else {
 			return err
 		}
@@ -81,6 +82,8 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	c.Data.Servers[as.Alias] = server
 	c.Data.Selected = as.Alias
 
+	cmd := ShowServerCmd{Alias: as.Alias}
+	_ = cmd.Run(&c.Globals)
 	return c.Data.Save(&c.Globals)
 }
 
@@ -92,17 +95,106 @@ type EventUris struct {
 	Events []string `optional:"" default:"*" help:"The event uris (types) requested for a stream"`
 }
 
-type CreateStreamPublisherCmd struct {
+type CreateStreamPublishPollCmd struct {
+	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
 }
 
-type CreatePollReceiverCmd struct {
+func (p *CreateStreamPublishPollCmd) Run(cli *CLI) error {
+	c := cli.Create.Stream
+
+	reg := model.RegisterParameters{
+		Audience:  c.Aud,
+		Issuer:    c.Iss,
+		EventUris: c.Publish.Events,
+	}
+	jsonString, _ := json.MarshalIndent(reg, "", "  ")
+	server, err := cli.Data.GetServer(p.Alias)
+	if err != nil {
+		return err
+	}
+	out := fmt.Sprintf("Create publish POLL stream on: %s/register\n%s", server.Host, jsonString)
+	fmt.Println(out)
+
+	if !ConfirmProceed("") {
+		return nil
+	}
+
+	return cli.executeCreateRequest(c.Name, reg, server, "Poll Publisher")
+}
+
+type CreateStreamPublishPushCmd struct {
+	Alias     string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl  string `short:"e" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if DestAlias not provided."`
+	Token     string `optional:"" help:"Provide the authorization token used to submit events at the endpoint url. Required if DestAlias not provided."`
+	DestAlias string `optional:"" help:"The Alias of a stream which is publishing events. Specify in serverAlias.StreamAlias form."`
+}
+
+func (p CreateStreamPublishPushCmd) Run(cli *CLI) error {
+	c := cli.Create.Stream
+
+	eventUrl := p.EventUrl
+	eventAuthorization := p.Token
+
+	if p.DestAlias != "" {
+		parts := strings.Split(p.DestAlias, ".")
+		if len(parts) != 2 {
+			return errors.New("specify destAlias in `.` form. For example:  goSignals1.Xv1")
+		}
+
+		server, err := cli.Data.GetServer(parts[0])
+		if err != nil {
+			return err
+		}
+		stream, exist := server.Streams[parts[1]]
+		if !exist {
+			return errors.New("Could not find a stream identified by " + parts[1] + " for server " + parts[0])
+		}
+		eventUrl = stream.Endpoint
+		eventAuthorization = stream.Token
+	}
+
+	if eventUrl == "" || eventAuthorization == "" {
+		return errors.New("either --url and --token parameters or --destAlias parameters must be specified")
+	}
+
+	reg := model.RegisterParameters{
+		Audience:  c.Aud,
+		Issuer:    c.Iss,
+		Method:    model.DeliveryPush,
+		EventUrl:  eventUrl,
+		EventAuth: eventAuthorization,
+		EventUris: c.Publish.Events,
+	}
+	jsonString, _ := json.MarshalIndent(reg, "", "  ")
+	server, err := cli.Data.GetServer(p.Alias)
+	if err != nil {
+		return err
+	}
+	out := fmt.Sprintf("Create publish PUSH stream on: %s/register\n%s", server.Host, jsonString)
+	fmt.Println(out)
+
+	if !ConfirmProceed("") {
+		return nil
+	}
+
+	return cli.executeCreateRequest(c.Name, reg, server, "Push Publisher")
+}
+
+type CreateStreamPublisherCmd struct {
+	Push CreateStreamPublishPushCmd `cmd:"" help:"Create a publishing push stream"`
+	Poll CreateStreamPublishPollCmd `cmd:"" help:"Create a publishing poll stream"`
+	// RcvJwksUrl string                     `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
+	EventUris
+}
+
+type CreateReceiverPollCmd struct {
 	Alias       string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	Url         string `help:"The event publishers polling endpoint URL. Required unless SourceAlias specified."`
+	EventUrl    string `short:"e" help:"The event publishers polling endpoint URL. Required unless SourceAlias specified."`
 	Token       string `help:"An authorization token used to poll for events. Required unless SourceAlias specified"`
 	SourceAlias string `optional:"" help:"The Alias of a stream which is publishing events. Specify in serverAlias.StreamAlias form."`
 }
 
-func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
+func (p *CreateReceiverPollCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
 	var mode string
 	switch c.Receive.Mode {
@@ -115,7 +207,7 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	}
 	var inbound bool = true
 
-	eventUrl := p.Url
+	eventUrl := p.EventUrl
 	eventAuthorization := p.Token
 
 	if p.SourceAlias != "" {
@@ -156,21 +248,21 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Polling receiver to be created on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create receiver POLL stream on: %s/register\n%s", server.Host, jsonString)
 	fmt.Println(out)
 
 	if !ConfirmProceed("") {
 		return nil
 	}
 
-	return cli.executeCreateRequest(p.Alias, reg, server, "Poll Receiver")
+	return cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver")
 }
 
-type CreatePushReceiverCmd struct {
+type CreateReceiverPushCmd struct {
 	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
 }
 
-func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
+func (p *CreateReceiverPushCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
 	var mode string
 	switch c.Receive.Mode {
@@ -197,7 +289,7 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Push receiver to be created on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create receiver PUSH stream  on: %s/register\n%s", server.Host, jsonString)
 
 	fmt.Println(out)
 
@@ -205,7 +297,7 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(p.Alias, reg, server, "Push Receiver")
+	return cli.executeCreateRequest(c.Name, reg, server, "Push Receiver")
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string) error {
@@ -276,18 +368,19 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 }
 
 type CreateStreamReceiverCmd struct {
-	Poll       CreatePollReceiverCmd `cmd:"" help:"Create a polling receiver stream"`
-	Push       CreatePushReceiverCmd `cmd:"" help:"Create a push receiver Stream and endpoint"`
+	Poll       CreateReceiverPollCmd `cmd:"" help:"Create a polling receiver stream"`
+	Push       CreateReceiverPushCmd `cmd:"" help:"Create a push receiver Stream and endpoint"`
 	IssJwksUrl string                `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
 	Mode       string                `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
 	EventUris
 }
 
 type CreateStreamCmd struct {
-	Receive CreateStreamReceiverCmd  `cmd:"" short:"r" help:"Create a receiver stream"`
-	Publish CreateStreamPublisherCmd `cmd:"" short:"p" help:"Create a publisher stream"`
+	Receive CreateStreamReceiverCmd  `cmd:"" help:"Create a receiver stream"`
+	Publish CreateStreamPublisherCmd `cmd:"" help:"Create a publisher stream"`
 	Aud     []string                 `default:"example.com" sep:"," help:"One or more audience values separated by commas"`
 	Iss     string                   `optional:"" help:"The event issuer value (default: DEFAULT" default:"DEFAULT"`
+	Name    string                   `optional:"" short:"n" help:"An alias name for the stream to be created"`
 }
 
 type CreateCmd struct {
@@ -334,21 +427,11 @@ type ListStreamsCmd struct {
 	Ids []string `sep:"," optional:"" help:"Specify 1 or more stream identifiers to list"`
 }
 
-func (l *ListStreamsCmd) Run(globals *Globals) error {
-
-	return nil
-}
-
 type ListCmd struct {
 	Streams ListStreamsCmd `cmd:"" help:"List all streams or one or more specific streams"`
 }
 
 type VersionCmd struct{}
-
-func (v *VersionCmd) Run(realCtx *kong.Context) error {
-	fmt.Println("i2GoSignals client version ABC")
-	return nil
-}
 
 type ShowTokenCmd struct {
 }

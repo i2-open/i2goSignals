@@ -80,8 +80,8 @@ func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.Stream
 			cancel: cancel,
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
-		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, Url: %s", streamState.StreamConfiguration.Id, streamState.Receiver.PollUrl)
-		go ps.pollEventsReceiver(ctx)
+		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, EventUrl: %s", streamState.StreamConfiguration.Id, streamState.Receiver.PollUrl)
+		go ps.pollEventsReceiver()
 		return ps
 	}
 	ps.stream = streamState
@@ -101,7 +101,7 @@ func (ps *ClientPollStream) Close() {
 }
 
 // PollEventsReceiver implements the client-side receiver of SET events using RFC8936
-func (ps *ClientPollStream) pollEventsReceiver(ctx context.Context) {
+func (ps *ClientPollStream) pollEventsReceiver() {
 	var acks []string
 	var setErrs map[string]model.SetErrorType
 	client := http.Client{}
@@ -141,7 +141,7 @@ func (ps *ClientPollStream) pollEventsReceiver(ctx context.Context) {
 
 		var pollResponse model.PollResponse
 		bodyBytes, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			ps.sa.Provider.PauseStream(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
 			errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
@@ -224,8 +224,8 @@ func (ps *ClientPollStream) pollEventsReceiver(ctx context.Context) {
 	return
 }
 
-// ReceiveEvent events enables and endpoint to receive events from the RFC8935 SET Push provider
-func (sa *SignalsApplication) ReceiveEvent(w http.ResponseWriter, r *http.Request) {
+// ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
+func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
 	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
 
 	if sid == "" {
@@ -256,9 +256,10 @@ func (sa *SignalsApplication) ReceiveEvent(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		jwks := sa.Provider.GetIssuerJwksForReceiver(sid)
+		jwksKey := sa.Provider.GetIssuerJwksForReceiver(sid)
 		tokenString := string(bodyBytes)
-		token, err := goSet.Parse(tokenString, jwks)
+
+		token, err := goSet.Parse(tokenString, jwksKey)
 
 		// Token validation and diagnostics
 		if err != nil {

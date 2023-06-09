@@ -276,7 +276,7 @@ func (suite *ServerSuite) Test4_StreamManagement() {
 func (suite *ServerSuite) Test5_PollStreamDelivery() {
 
 	// Start server 2 and hopefully it polls!
-	suite.setUpPopReceiverStream()
+	suite.setUpPollReceiverStream()
 
 	rcvState, err := suite.servers[1].app.Provider.GetStreamState(suite.servers[1].stream.Id)
 	assert.NoError(suite.T(), err, "Stream should be defined")
@@ -549,7 +549,7 @@ func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
 	_ = suite.servers[0].provider.DeleteStream(ssf1Stream)
 }
 
-func (suite *ServerSuite) setUpPopReceiverStream() {
+func (suite *ServerSuite) setUpPollReceiverStream() {
 	boolTrue := true
 	stream := suite.servers[0].stream
 	baseUrl := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
