@@ -21,8 +21,14 @@ var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)
 
 func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
+	name := "ssef"
+	if found := os.Getenv("DBNAME"); found != "" {
+		mLog.Println("Using dbname " + found)
+		name = found
+	}
+
 	var provider dbProviders.DbProviderInterface
-	mongo, err := mongo_provider.Open(dbUrl, "")
+	mongo, err := mongo_provider.Open(dbUrl, name)
 	provider = mongo
 	return provider, err
 }
