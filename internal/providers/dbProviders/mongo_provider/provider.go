@@ -680,7 +680,7 @@ func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, err
 	return &rec, nil
 }
 
-func (m *MongoProvider) PauseStream(streamId string, status string, errorMsg string) {
+func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
 	streamState, _ := m.GetStreamState(streamId)
 	streamState.Status = status
 	streamState.ErrorMsg = errorMsg
@@ -722,11 +722,24 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string) *m
 		i++
 	}
 
+	/*
+		The event time for searching is in order of preference the toe, iat, or current time.  This value is used for sorting and reseting
+	*/
+	var sortTime time.Time
+	if event.TimeOfEvent != nil {
+		sortTime = event.TimeOfEvent.Time
+	} else if event.IssuedAt != nil {
+		sortTime = event.IssuedAt.Time
+	} else {
+		sortTime = time.Now()
+	}
+
 	rec := model.EventRecord{
-		Jti:   jti,
-		Event: *event,
-		Types: keys,
-		Sid:   sid,
+		Jti:      jti,
+		Event:    *event,
+		Types:    keys,
+		Sid:      sid,
+		SortTime: sortTime,
 	}
 	_, err := m.eventCol.InsertOne(context.TODO(), &rec)
 	if err != nil {
@@ -755,6 +768,95 @@ func (m *MongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID
 		StreamId: streamId,
 	}
 	_, _ = m.pendingCol.InsertOne(context.TODO(), &deliverable)
+}
+
+func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+	// validate the request
+	if jti == "" && resetDate == nil {
+		return errors.New("reset error: a date or jti must be provided")
+	}
+	if streamId == "" {
+		return errors.New("reset error: invalid stream identifier specified")
+	}
+	stream, err := m.GetStreamState(streamId)
+	if err != nil {
+		return err
+	}
+
+	// first clear any currently pending events (in order to prevent sequencing issues)
+
+	filter := bson.D{
+		{"sid", stream.Id},
+	}
+	many, err := m.pendingCol.DeleteMany(context.TODO(), filter)
+	if err != nil {
+		return err
+	}
+	deleteCount := many.DeletedCount
+	fmt.Println(fmt.Sprintf("DEBUG: removed %d pending events before reset", deleteCount))
+
+	var fromFilter bson.D
+	// Now search and re-assign events from the event store
+	if jti != "" {
+		fromFilter = bson.D{
+			{"jti", bson.D{{"$gte", jti}}},
+		}
+	} else if resetDate != nil {
+		fromFilter = bson.D{
+			{"sortTime", bson.D{{"$gte", resetDate}}},
+		}
+	} else {
+		return errors.New("no reset date or JTI reset point provided")
+	}
+	filter = fromFilter
+	/*
+		types := stream.StreamConfiguration.EventsDelivered
+		if len(types) == 0 {
+			filter = fromFilter
+		} else if len(types) == 1 {
+			typeFilter := bson.D{
+				{"types", types[0]},
+			}
+			filter = bson.D{
+				{"$and", []interface{}{
+					fromFilter,
+					typeFilter,
+				}},
+			}
+		} else {
+			orTerms := make([]interface{}, len(types))
+			for i := 0; i < len(types); i++ {
+				orTerms[i] = bson.D{
+					{"types", types[i]},
+				}
+			}
+
+			filter = bson.D{
+				{"$and", []interface{}{
+					fromFilter,
+					bson.D{
+						{"$or", orTerms},
+					},
+				}},
+			}
+		}
+	*/
+
+	var eventRecord model.EventRecord
+	cursor, err := m.eventCol.Find(context.TODO(), filter)
+	if err != nil {
+		return err
+	}
+	for cursor.Next(context.TODO()) {
+		if err := cursor.Decode(&eventRecord); err != nil {
+			return err
+		}
+		if isStreamEvent(&eventRecord) {
+			m.AddEventToStream(eventRecord.Jti, stream.Id)
+		}
+	}
+
+	return nil
 }
 
 func (m *MongoProvider) AckEvent(jtiString string, streamId string) {

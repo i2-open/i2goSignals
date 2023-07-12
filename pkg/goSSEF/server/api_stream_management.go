@@ -10,13 +10,14 @@ package server
 
 import (
 	"encoding/json"
+	"i2goSignals/internal/eventRouter"
 	"i2goSignals/internal/model"
 	"net/http"
 
 	"github.com/gorilla/mux"
 )
 
-func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
@@ -46,10 +47,10 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	resp, _ := json.Marshal(*streamStatus)
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }
 
-func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
@@ -89,7 +90,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 		}
 
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(err.Error()))
 	}
 	// sa.EventRouter.RemoveStream(sid)
 	w.WriteHeader(http.StatusOK)
@@ -119,7 +120,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	resp, _ := json.Marshal(config)
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }
 
 func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +142,12 @@ func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	resetJti := jsonRequest.ResetJti
+	resetDate := jsonRequest.ResetDate
+
+	jsonRequest.ResetDate = nil
+	jsonRequest.ResetJti = ""
+
 	configResp, err := sa.Provider.UpdateStream(sid, jsonRequest)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -148,8 +155,25 @@ func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	streamState, err := sa.Provider.GetStreamState(sid)
+	if resetDate != nil || resetJti != "" {
+		// reset the stream to a particular date
+		err := sa.Provider.ResetEventStream(sid, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
+			// Because reset goes through all events, this function confirms the stream should get the event
+			return eventRouter.StreamEventMatch(streamState, eventRecord)
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if jsonRequest.ResetJti != "" {
+		// reset the stream to a particular jti (assuming sortable)
 	}
 
 	// Update the event router
@@ -161,21 +185,62 @@ func (sa *SignalsApplication) StreamPost(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, _ := json.MarshalIndent(configResp, "", "  ")
-	w.Write(respBytes)
+	_, _ = w.Write(respBytes)
 	// w.WriteHeader(http.StatusOK)
 }
 
 func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	if sid == "" {
+		// The authorization token had no stream identifier in it
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	var jsonRequest model.UpdateStreamStatus
+	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	modified := false
+	streamState, err := sa.Provider.GetStreamState(sid)
+	if jsonRequest.Status != "" {
+		if streamState.Status != jsonRequest.Status {
+			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateInactive || jsonRequest.Status == model.StreamStateActive {
+				sa.Provider.UpdateStreamStatus(sid, jsonRequest.Status, jsonRequest.Reason)
+				modified = true
+			}
+
+		}
+	}
+
+	if modified {
+		sa.EventRouter.UpdateStreamState(streamState)
+		sa.HandleClientPollReceiver(streamState)
+	}
+
+	statusResp := model.StreamStatus{
+		Status: streamState.Status,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	respBytes, _ := json.MarshalIndent(statusResp, "", "  ")
+	_, _ = w.Write(respBytes)
+
+}
+
+func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter, _ *http.Request) {
 	serverLog.Println("GET WellKnownSseConfiguration")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
@@ -202,7 +267,7 @@ func (sa *SignalsApplication) WellKnownSseConfigurationGet(w http.ResponseWriter
 	}
 	resp, _ := json.Marshal(config)
 	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
+	_, _ = w.Write(resp)
 
 }
 
@@ -234,5 +299,5 @@ func (sa *SignalsApplication) WellKnownSseConfigurationIssuerGet(w http.Response
 	}
 	resp, _ := json.Marshal(config)
 	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }

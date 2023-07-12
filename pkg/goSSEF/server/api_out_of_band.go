@@ -9,12 +9,36 @@
 package server
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"i2goSignals/internal/model"
 	"net/http"
-	"strings"
+
+	"github.com/gorilla/mux"
 )
+
+func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
+	// TODO Authorize the request here!
+	vars := mux.Vars(r)
+	issuer := vars["issuer"]
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	issuerKey := sa.Provider.CreateIssuerJwkKeyPair(issuer)
+
+	pkcs8bytes, _ := x509.MarshalPKCS8PrivateKey(issuerKey)
+	keyPemBytes := pem.EncodeToMemory(
+		&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: pkcs8bytes,
+		})
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(keyPemBytes)
+	return
+	// http.Error(w, "Unknown error generating private key", http.StatusInternalServerError)
+}
 
 func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
 	var jsonRequest model.RegisterParameters
@@ -56,24 +80,11 @@ func (sa *SignalsApplication) Register(w http.ResponseWriter, r *http.Request) {
 	sa.EventRouter.UpdateStreamState(state)
 	// TODO: Update Event Router about stream change
 	regBytes, _ := json.MarshalIndent(response, "", " ")
-	w.Write(regBytes)
+	_, _ = w.Write(regBytes)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// getHost tries its best to return the request host.
-func getHost(r *http.Request) string {
-	if r.URL.IsAbs() {
-		host := r.Host
-		// Slice off any port information.
-		if i := strings.Index(host, ":"); i != -1 {
-			host = host[:i]
-		}
-		return host
-	}
-	return r.URL.String()
 }

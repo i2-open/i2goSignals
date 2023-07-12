@@ -143,7 +143,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		bodyBytes, err = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
-			ps.sa.Provider.PauseStream(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
+			ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
 			errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
 			serverLog.Printf(errMsg)
 			continue
@@ -308,7 +308,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 }
 
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
-	sa.Provider.PauseStream(streamId, model.StreamStatePause, errMsg)
+	sa.Provider.UpdateStreamStatus(streamId, model.StreamStatePause, errMsg)
 	// TODO:  Update event router with stream state change??
 }
 

@@ -164,7 +164,12 @@ func (h *HttpRouter) getRoutes() Routes {
 			"/.well-known/sse-configuration/{issuer}",
 			h.sa.WellKnownSseConfigurationIssuerGet,
 		},
-
+		Route{
+			"JwksJsonCreate",
+			strings.ToUpper("POST"),
+			"/jwks/{issuer}",
+			h.sa.CreateJwksIssuer,
+		},
 		Route{
 			"JwksJson",
 			strings.ToUpper("Get"),

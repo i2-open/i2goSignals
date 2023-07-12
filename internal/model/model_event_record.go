@@ -1,6 +1,9 @@
 package model
 
-import "i2goSignals/pkg/goSet"
+import (
+	"i2goSignals/pkg/goSet"
+	"time"
+)
 
 // EventRecord is stored in MongoProvider.eventCol
 type EventRecord struct {
@@ -18,4 +21,10 @@ type EventRecord struct {
 	Sid string
 	// Types indicates the event URIs available. This may be used for filtering and sorting of events
 	Types []string `json:"types,omitempty" bson:"types,omitempty"`
+
+	/*
+		SortTime is used to reset event streams and allow searching historical events from a certain point in time.
+		When set it is based upon one of the following attributes in order of preference:  toe, iat, time of insertion
+	*/
+	SortTime time.Time `bson:"sortTime"`
 }

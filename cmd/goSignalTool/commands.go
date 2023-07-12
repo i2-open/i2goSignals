@@ -383,8 +383,38 @@ type CreateStreamCmd struct {
 	Name    string                   `optional:"" short:"n" help:"An alias name for the stream to be created"`
 }
 
+type CreateIssuerKeyCmd struct {
+	Alias    string `arg:"" help:"The alias of the server to issue the key (default is selected server)"`
+	IssuerId string `arg:"" help:"The issuer value associated with the key (e.g. example.com)"`
+	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
+}
+
+func (c *CreateIssuerKeyCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer(c.Alias)
+	if err != nil {
+		return err
+	}
+	baseUrl := fmt.Sprintf("%s/jwks/%s", server.Host, c.IssuerId)
+	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	client := http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(resp.Body)
+
+	outpath := "issuer.pem"
+	if c.File != "" {
+		outpath = c.File
+	}
+	_ = os.WriteFile(outpath, body, 0660)
+	fmt.Println("Certificate received (PEM):\n" + string(body))
+	return nil
+}
+
 type CreateCmd struct {
-	Stream CreateStreamCmd `cmd:"" help:"Create a stream"`
+	Stream CreateStreamCmd    `cmd:"" help:"Create a stream"`
+	Key    CreateIssuerKeyCmd `cmd:"" help:"Obtain an issuer key from an i2gosignals server"`
 }
 
 type ExitCmd struct {

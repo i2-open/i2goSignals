@@ -2,7 +2,10 @@ package test
 
 import (
 	"bytes"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"i2goSignals/internal/model"
 	"i2goSignals/internal/providers/dbProviders/mongo_provider"
@@ -19,10 +22,12 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // var TestDbUrl = "mongodb+srv://ssftester:u3NPH9GtTGS7VlhO@ssf-cluster.d0dnw23.mongodb.net/?retryWrites=true&w=majority"
@@ -38,6 +43,7 @@ type ssfInstance struct {
 	stream      model.StreamConfiguration
 	app         ssef.SignalsApplication
 	streamToken string
+	startTime   *time.Time
 }
 
 type ServerSuite struct {
@@ -107,6 +113,8 @@ func createServer(dbName string) (*ssfInstance, error) {
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
 	instance.provider = mongo
+	nowTime := time.Now()
+	instance.startTime = &nowTime
 
 	go func() {
 		_ = signalsApplication.Server.Serve(listener)
@@ -273,7 +281,7 @@ func (suite *ServerSuite) Test4_StreamManagement() {
 	suite.servers[0].stream = configResp
 }
 
-func (suite *ServerSuite) Test5_PollStreamDelivery() {
+func (suite *ServerSuite) Test5a_PollStreamDelivery() {
 
 	// Start server 2 and hopefully it polls!
 	suite.setUpPollReceiverStream()
@@ -326,9 +334,62 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	// Includes the original from Test 3 plus the new one
 	assert.Equal(suite.T(), 1, pollCnt1, "Should be 2 POLL server")
 
-	testLog.Println("Resetting streams")
-	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)
 	// time.Sleep(5 * time.Second)
+}
+
+/*
+Test5b_ResetStream tests the time reset functionality which causes the server to go through prior events and re-add them
+to the stream
+*/
+func (suite *ServerSuite) Test5b_ResetStream() {
+	outboundStreamConfig := suite.servers[0].stream
+
+	// Kill the polling client on SSF2
+	ssf2Stream := suite.servers[1].stream.Id
+	suite.servers[1].app.ClosePollReceiver(ssf2Stream)
+	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
+	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
+
+	// Check that there are no pending events
+	jtis, more := suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
+	assert.False(suite.T(), more, "Should be no more events")
+	assert.Len(suite.T(), jtis, 0, "No event jtis returned")
+
+	// let's add an extra event so we have 2. This event will be deleted and re-added so no duplicates!
+	jtiNew, err := suite.generateEvent(suite.servers[0].stream)
+
+	// reset the stream on SSF1 to beginning of startup
+	outboundStreamConfig.ResetDate = suite.servers[0].startTime
+
+	testLog.Println("Resetting stream to beginning")
+	// Post the new config with reset request to the handler
+	streamUrl := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	bodyBytes, err := json.MarshalIndent(outboundStreamConfig, "", " ")
+	assert.NoError(suite.T(), err, "JSON Marshalling error")
+	req, err := http.NewRequest("POST", streamUrl, bytes.NewReader(bodyBytes))
+	assert.NoError(suite.T(), err, "no request builder error")
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamToken)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "Update request successful")
+	assert.NotNil(suite.T(), resp, "Response is not null")
+
+	var configResp model.StreamConfiguration
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(suite.T(), err, "No error reading config response body")
+	err = json.Unmarshal(body, &configResp)
+	assert.NoError(suite.T(), err, "No error parsing config response body")
+	assert.Nil(suite.T(), configResp.ResetDate, "Reset date should be nil")
+	assert.Equal(suite.T(), "", configResp.ResetJti, "JTI should be empty")
+
+	// Check that there are pending events
+	jtis, more = suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
+	assert.False(suite.T(), more, "Should be no more events")
+	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
+	assert.Equal(suite.T(), jtiNew, jtis[1], "The new event should be second")
+
+	ssf1Stream := suite.servers[0].stream.Id
+	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
+	_ = suite.servers[0].provider.DeleteStream(ssf1Stream)
 }
 
 func (suite *ServerSuite) Test6_PushStreamDelivery() {
@@ -500,7 +561,8 @@ func (suite *ServerSuite) Test7_Prometheus() {
 		inCnt1 = int(testutil.ToFloat64(in1))
 	}
 	fmt.Println(fmt.Sprintf("SSF1 Event POLL Count in: %v, out: %v", inCnt1, outCnt1))
-	assert.Equal(suite.T(), 1, inCnt1, "SSF1 should have 1 POLL inbound events")
+	// should be 1 from test 5a plus 1 from 5b
+	assert.Equal(suite.T(), 2, inCnt1, "SSF1 should have 2 POLL inbound events")
 	assert.Equal(suite.T(), 1, outCnt1, "SSF1 should have 1 POLL outbound events")
 
 	// Now look at SSF2
@@ -538,6 +600,46 @@ func (suite *ServerSuite) Test7_Prometheus() {
 	fmt.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
 	assert.Equal(suite.T(), 0, pushCnt1, "Should be no PUSH servers")
 	assert.Equal(suite.T(), 0, pollCnt1, "Should be no POLL server")
+}
+
+func (suite *ServerSuite) Test8_CreateIssuerKey() {
+	testLog.Println("Creating new issuer key..")
+	issuer := "example.com"
+	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].server.Addr, issuer)
+
+	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "No error generating key")
+	assert.NotNil(suite.T(), resp, "A response was returned from issue key")
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.NotNil(suite.T(), body, "A certificate was returned.")
+
+	block, _ := pem.Decode(body)
+
+	pkcs8PrivateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	key := pkcs8PrivateKey.(*rsa.PrivateKey)
+	assert.NoError(suite.T(), err, "private key decoded")
+
+	fmt.Println("Creating and signing event with new key")
+	subject := &goSet.EventSubject{
+		SubjectIdentifier: goSet.SubjectIdentifier{
+			Format:                    "scim",
+			UniformResourceIdentifier: goSet.UniformResourceIdentifier{Uri: "?Users/1234"},
+		},
+	}
+	set := goSet.CreateSet(subject, "example.com", []string{"someaudience"})
+	payload_claims := map[string]interface{}{
+		"aclaim": "avalue",
+	}
+
+	set.AddEventPayload("uri:testevent", payload_claims)
+
+	val, err := set.JWS(jwt.SigningMethodRS256, key)
+
+	assert.NoError(suite.T(), err, "key was signed!")
+	assert.NotNil(suite.T(), val, "Signed value returned")
+	fmt.Println("Signed event: \n" + val)
 }
 
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {

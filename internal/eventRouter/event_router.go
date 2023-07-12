@@ -203,7 +203,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, sid string) e
 	}
 	for _, stream := range r.pushStreams {
 		routeMode := stream.Receiver.RouteMode
-		if isOutboundStreamMatch(stream, event) {
+		if StreamEventMatch(stream, event) {
 
 			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, routeMode, event.Types)
 
@@ -216,7 +216,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, sid string) e
 
 	for _, stream := range r.pollStreams {
 		routeMode := stream.Receiver.RouteMode
-		if isOutboundStreamMatch(stream, event) {
+		if StreamEventMatch(stream, event) {
 			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, routeMode, event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
@@ -345,25 +345,25 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet
 			var errorMsg model.SetDeliveryErr
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
-				r.provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to read response")
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
 				eventLogger.Println("PUSH-SRV[%s] Error reading response: ", configuration.Id, err.Error())
 				return false
 			}
 			err = json.Unmarshal(body, &errorMsg)
 			if err != nil {
 				eventLogger.Println("PUSH-SRV[%s] Error parsing error response: ", configuration.Id, err.Error())
-				r.provider.PauseStream(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
 				return false
 			}
 			errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", errorMsg.ErrCode, errorMsg.Description)
 			eventLogger.Println(errMsg)
-			r.provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
+			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
 			return false
 		}
 		if resp.StatusCode > 400 {
 			errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %s, POSTING to %s", configuration.Id, resp.Status, url)
 			eventLogger.Println(errMsg)
-			r.provider.PauseStream(configuration.Id, model.StreamStatePause, errMsg)
+			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
 		}
 	}
 
@@ -371,7 +371,10 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet
 	return true
 }
 
-func isOutboundStreamMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
+/*
+StreamEventMatch checks provided event to see if it should be routed to the selected stream
+*/
+func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
 	if stream.Inbound == true && stream.Receiver.RouteMode == model.RouteModeImport {
 		return false

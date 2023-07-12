@@ -11,7 +11,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/prometheus/client_golang v1.15.1
 	github.com/segmentio/ksuid v1.0.4
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.8.4
 	go.mongodb.org/mongo-driver v1.11.7
 )
 

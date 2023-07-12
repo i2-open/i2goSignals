@@ -8,6 +8,8 @@
  */
 package model
 
+import "time"
+
 // JSON Object describing and Event Stream's configuration [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#stream-config)\"
 type StreamConfiguration struct {
 	Id string `json:"id" bson:"id"`
@@ -41,4 +43,9 @@ type StreamConfiguration struct {
 
 	// Read-Only. Url for the event issuer public key
 	IssuerJWKSUrl string `json:"issuerJWKSUrl"`
+
+	// Used to reset a stream to a specific date, if available events will be loaded >= date
+	ResetDate *time.Time `json:"resetDate,omitempty"`
+	// Used to reset a stream to a specific jti (assuming jti's are sortable). Events equal to or since the JTI will be available
+	ResetJti string `json:"resetJti,omitempty"`
 }

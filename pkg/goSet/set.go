@@ -10,6 +10,7 @@ import (
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
+
 	"github.com/segmentio/ksuid"
 )
 
@@ -81,6 +82,11 @@ func (sid *SubjectIdentifier) AddEmail(email string) *SubjectIdentifier {
 
 func (sid *SubjectIdentifier) AddExternalId(id string) *SubjectIdentifier {
 	sid.ExternalId = id
+	return sid
+}
+
+func (sid *SubjectIdentifier) AddScimId(id string) *SubjectIdentifier {
+	sid.Id = id
 	return sid
 }
 
@@ -213,6 +219,10 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 
 }
 
+/*
+Parse will parse a SET or JWT into a SecurityEventToken. If issuerPublicJwks is provided the JWT will be validated.
+Note that if issuerPublicJwks is nil, the token will be validated if the header has alg=none only.
+*/
 func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
 	var token *jwt.Token
 	var err error
