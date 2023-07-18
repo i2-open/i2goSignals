@@ -298,22 +298,12 @@ func (m *MongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord
 		// Create the keyfunc keyOptions. Use an error handler that logs. Refresh the JWKS when a JWT signed by an unknown KID
 		// is found or at the specified interval. Rate limit these refreshes. Timeout the initial JWKS refresh request after
 		// 10 seconds. This timeout is also used to create the initial context.Context for keyfunc.Get.
-		keyOptions := keyfunc.Options{
-			Ctx: context.Background(),
-			RefreshErrorHandler: func(err error) {
-				pLog.Printf("There was an error with the jwt.Keyfunc\nError: %s", err.Error())
-			},
-			RefreshInterval:   time.Hour,
-			RefreshRateLimit:  time.Minute * 5,
-			RefreshTimeout:    time.Second * 10,
-			RefreshUnknownKID: true,
-		}
 
 		if streamState.IssuerJWKSUrl == "" {
 			return
 		}
 		pLog.Printf("Loading JWKS key from: %s", streamState.IssuerJWKSUrl)
-		jwks, err := keyfunc.Get(streamState.IssuerJWKSUrl, keyOptions)
+		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
 		if err != nil {
 			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
 			pLog.Println(msg)
