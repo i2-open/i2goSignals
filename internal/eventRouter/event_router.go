@@ -372,12 +372,38 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet
 }
 
 /*
-StreamEventMatch checks provided event to see if it should be routed to the selected stream
+StreamEventMatch checks provided event to see if it should be routed to the selected stream. If the aud or iss value
+is not specified for the stream is will be considered a wildcard. If the event has no value for aud or iss, they too
+will be considered a wildcard leading to the event being a match.
 */
 func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
 	if stream.Inbound == true && stream.Receiver.RouteMode == model.RouteModeImport {
 		return false
+	}
+
+	// Check for issuer match if stream has an issuer set
+	if stream.Iss != "" {
+		compIss := event.Event.Issuer
+
+		if compIss != "" && !strings.EqualFold(stream.Iss, compIss) {
+			return false
+		}
+	}
+
+	// Check for Aud match
+	if len(stream.Aud) > 0 {
+		audMatch := false
+		for _, value := range stream.Aud {
+			// test below returns true if the event has no aud value
+			if event.Event.VerifyAudience(value, false) {
+				audMatch = true
+				break
+			}
+		}
+		if !audMatch {
+			return false
+		}
 	}
 
 	for _, eventType := range event.Types {

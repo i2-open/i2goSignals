@@ -54,6 +54,7 @@ type ServerSuite struct {
 func TestServer(t *testing.T) {
 	serverSuite := ServerSuite{}
 
+	fmt.Println("NOTE: This test will generate a series of Prometheus duplicate collector registration errors. This is due to the test environment only.")
 	instances := make([]*ssfInstance, 2)
 
 	testLog.Println("** Starting SSF1...")
