@@ -12,23 +12,28 @@ import (
 )
 
 type Globals struct {
-	Config string `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
-	Server string `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
-	// Authorization string     `help:"The authorization token to use to access an i2goSignals server"`
+	Config      string     `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
+	Server      string     `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
 	StreamToken string     `help:"A token used to manage a stream"`
 	Data        ConfigData `kong:"-"`
+	// Output      string     `help:"To redirect output to a file" type:"path" `
+	// Authorization string     `help:"The authorization token to use to access an i2goSignals server"`
 }
 
 type CLI struct {
 	Globals
-	Add     AddCmd     `cmd:"" help:"Define a new server to be managed"`
-	Create  CreateCmd  `cmd:"" help:"Create a PUBLISHER or RECEIVER stream."`
-	Select  SelectCmd  `cmd:"" help:"Select a defined server to perform operations against"`
-	Show    ShowCmd    `cmd:"" help:"Show configured values"`
-	Exit    ExitCmd    `cmd:"" help:"Exit the shell"`
-	Help    HelpCmd    `cmd:"" help:"Show help on a command"`
-	List    ListCmd    `cmd:"" help:"List all streams or one or more specific streams"`
-	Version VersionCmd `cmd:"" short:"v" help:"Show the goSignals client version information"`
+	Add      AddCmd      `cmd:"" help:"Define a new server to be managed"`
+	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM."`
+	Select   SelectCmd   `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
+	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
+	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`
+	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
+	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
+	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
+	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
+	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
+	List     ListCmd     `cmd:"" help:"List all streams or one or more specific streams"`
+	Version  VersionCmd  `cmd:"" short:"v" help:"Show the goSignals client version information"`
 }
 
 var SessionGlobals Globals
@@ -87,6 +92,10 @@ func main() {
 		ctx, err = parser.Parse(args)
 		// ctx.Bind(&cli.Globals)
 		// ctx.Bind(args)
+		if configNotLoaded {
+			_ = cli.Data.Load(&cli.Globals)
+			configNotLoaded = false
+		}
 		if err != nil {
 
 			parser.Errorf("%s", err.Error())
@@ -96,10 +105,7 @@ func main() {
 			}
 			continue
 		}
-		if configNotLoaded {
-			cli.Data.Load(&cli.Globals)
-			configNotLoaded = false
-		}
+
 		err = ctx.Run(&cli.Globals)
 
 		if err != nil {

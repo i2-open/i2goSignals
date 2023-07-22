@@ -6,6 +6,8 @@ require (
 	github.com/MicahParks/jwkset v0.3.1
 	github.com/MicahParks/keyfunc v1.9.0
 	github.com/alecthomas/kong v0.7.1
+	github.com/brianvoe/gofakeit/v6 v6.23.0
+	github.com/fatih/structs v1.1.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/gorilla/mux v1.8.0
 	github.com/kelseyhightower/envconfig v1.4.0

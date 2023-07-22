@@ -12,11 +12,11 @@ type RegisterParameters struct {
 	// The audience claim to be used for all events on this stream.
 	Audience      []string `json:"audience"`
 	Issuer        string   // TODO: Empty Issuer shall mean accept any?
-	IssuerJWKSUrl string
+	IssuerJWKSUrl string   `json:"issuerJWKSUrl,omitempty"`
 	Inbound       *bool    `json:"inbound,omitempty"`
-	RouteMode     string   // One of RouteModeImport | RouteModeFoward | RouteModePublish
-	Method        string   // Either DeliveryPoll (default) or DeliveryPush
-	EventUrl      string   // For when the i2gosignals server is a stream client and using Polling (RF8936), or the client delivery endpoint for Push (RFC8935)
-	EventAuth     string   // The authorization parameter for Polling using RFC8936, or the client auth token for HTTP Push delivery
+	RouteMode     string   `json:"routeMode,omitempty"` // One of RouteModeImport | RouteModeFoward | RouteModePublish
+	Method        string   `json:"method,omitempty"`    // Either DeliveryPoll (default) or DeliveryPush
+	EventUrl      string   `json:"eventUrl,omitempty"`  // For when the i2gosignals server is a stream client and using Polling (RF8936), or the client delivery endpoint for Push (RFC8935)
+	EventAuth     string   `json:"eventAuth,omitempty"` // The authorization parameter for Polling using RFC8936, or the client auth token for HTTP Push delivery
 	EventUris     []string // These are the inbound event uris that are being delivered.
 }

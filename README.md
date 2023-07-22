@@ -31,7 +31,7 @@ pack build i2goSignals --builder heroku/buildpacks:20
 
 Building with Docker
 ```bash
-docker build --tag i2gosignals ./
+docker build . --tag i2gosignals
 ```
 
 We'll be using postgresql and need to execute the below shell scripts from docker-compose.

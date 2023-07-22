@@ -1,12 +1,18 @@
 package main
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"i2goSignals/internal/model"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SsfServer struct {
@@ -26,8 +32,82 @@ type Stream struct {
 }
 
 type ConfigData struct {
-	Selected string
-	Servers  map[string]SsfServer
+	Selected      string
+	Servers       map[string]SsfServer
+	Pems          map[string][]byte
+	keys          map[string]*rsa.PrivateKey            `json:"-"` // don't persist
+	streamConfigs map[string]*model.StreamConfiguration `json:"-"`
+}
+
+func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
+	key := c.keys[issuerId]
+	if key != nil {
+		return key, nil
+	}
+
+	var pemBytes []byte
+	pemBytes = c.Pems[issuerId]
+	block, _ := pem.Decode(pemBytes)
+
+	pkcs8PrivateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	key = pkcs8PrivateKey.(*rsa.PrivateKey)
+	c.keys[issuerId] = key // cache the result
+
+	return key, nil
+}
+
+/*
+GetStream returns either the specified stream by alias or nil
+*/
+func (c *ConfigData) GetStream(alias string) (*Stream, *SsfServer) {
+	for _, server := range c.Servers {
+		for k, stream := range server.Streams {
+			if strings.EqualFold(k, alias) {
+				return &stream, &server
+
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfiguration, error) {
+	config := c.streamConfigs[streamAlias]
+	if config != nil {
+		return config, nil
+	}
+	client := http.Client{}
+	stream, server := c.GetStream(streamAlias)
+	if stream == nil {
+		return nil, errors.New("stream alias not defined")
+	}
+	defer client.CloseIdleConnections()
+	config, err := getStreamConfig(client, server, stream)
+	if err != nil {
+		return nil, err
+	}
+	c.streamConfigs[streamAlias] = config
+	return config, nil
+}
+
+func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*model.StreamConfiguration, error) {
+	fmt.Println("Retrieving stream configuration...")
+	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+stream.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var config model.StreamConfiguration
+	_ = json.Unmarshal(bodyBytes, &config)
+	return &config, nil
 }
 
 /*
@@ -61,6 +141,9 @@ func (c *ConfigData) Load(g *Globals) error {
 		return nil
 	}
 	err = json.Unmarshal(configBytes, c)
+	if c.Pems == nil {
+		c.Pems = map[string][]byte{}
+	}
 	return err
 }
 
