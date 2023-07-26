@@ -44,17 +44,20 @@ var pLog = log.New(os.Stdout, "DBMONG: ", log.Ldate|log.Ltime)
 
 func GetSupportedEvents() []string {
 	return []string{
-		"urn:ietf:params:event:SCIM:feed:add",
-		"urn:ietf:params:event:SCIM:feed:remove",
-		"urn:ietf:params:event:SCIM:prov:create",
-		"urn:ietf:params:event:SCIM:prov:patch",
-		"urn:ietf:params:event:SCIM:prov:put",
-		"urn:ietf:params:event:SCIM:prov:delete",
-		"urn:ietf:params:event:SCIM:prov:activate",
-		"urn:ietf:params:event:SCIM:prov:deactivate",
-		"urn:ietf:params:event:SCIM:sig:authMethod",
-		"urn:ietf:params:event:SCIM:sig:pwdReset",
-		"urn:ietf:params:event:SCIM:misc:asyncResp",
+		"urn:ietf:params:SCIM:event:feed:add",
+		"urn:ietf:params:SCIM:event:feed:remove",
+		"urn:ietf:params:SCIM:event:prov:create:full",
+		"urn:ietf:params:SCIM:event:prov:patch:full",
+		"urn:ietf:params:SCIM:event:prov:put:full",
+		"urn:ietf:params:SCIM:event:prov:create:notice",
+		"urn:ietf:params:SCIM:event:prov:patch:notice",
+		"urn:ietf:params:SCIM:event:prov:put:notice",
+		"urn:ietf:params:SCIM:event:prov:delete:",
+		"urn:ietf:params:SCIM:event:prov:activate",
+		"urn:ietf:params:SCIM:event:prov:deactivate",
+		"urn:ietf:params:SCIM:event:sig:authMethod",
+		"urn:ietf:params:SCIM:event:sig:pwdReset",
+		"urn:ietf:params:SCIM:event:misc:asyncResp",
 	}
 }
 
@@ -284,7 +287,7 @@ func (m *MongoProvider) LoadReceiverStreams() map[string]*model.StreamStateRecor
 
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
-		if streamState.Inbound {
+		if streamState.Inbound != nil && *streamState.Inbound {
 			res[streamState.StreamConfiguration.Id] = &streamState
 			m.loadJwksForReceiver(&streamState)
 		}
@@ -487,7 +490,12 @@ func (m *MongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, err
 
 func (m *MongoProvider) RegisterStream(request model.RegisterParameters) *model.RegisterResponse {
 
-	resp, err := m.CreateStream(request, m.DefaultIssuer)
+	issuer := m.DefaultIssuer
+	if request.Issuer != "" {
+		issuer = request.Issuer
+	}
+
+	resp, err := m.CreateStream(request, issuer)
 	if err != nil {
 		pLog.Printf("Error registering stream: " + err.Error())
 		return nil
@@ -503,6 +511,11 @@ func (m *MongoProvider) RegisterStream(request model.RegisterParameters) *model.
 			Token:   eventAuthToken,
 			PushUrl: resp.Delivery.PushDeliveryMethod.EndpointUrl,
 			Inbound: &inbound,
+		}
+	} else if !inbound && resp.Delivery.PollDeliveryMethod != nil {
+		return &model.RegisterResponse{
+			Token:   eventAuthToken,
+			PushUrl: resp.Delivery.PollDeliveryMethod.EndpointUrl,
 		}
 	}
 	return &model.RegisterResponse{Token: eventAuthToken}
@@ -552,12 +565,17 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 		config.Delivery = method
 	}
 	config.MinVerificationInterval = 15
-	config.IssuerJWKSUrl = "/jwks/" + issuer
+	// config.IssuerJWKSUrl = "/jwks/" + issuer
 
 	// SCIM services will generally use the SCIM ID
 	config.Format = CSubjectFmt
 
-	config.IssuerJWKSUrl = "/jwks/" + issuer
+	if request.IssuerJWKSUrl != "" {
+		config.IssuerJWKSUrl = request.IssuerJWKSUrl
+	} else {
+		config.IssuerJWKSUrl = "/jwks/" + issuer
+	}
+
 	now := time.Now()
 	inbound := false
 	if request.Inbound != nil {
@@ -569,10 +587,10 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 		StartDate:           now,
 		Status:              model.StreamStateActive,
 		CreatedAt:           now,
-		Inbound:             inbound,
+		Inbound:             &inbound,
 	}
 	if inbound {
-		streamRec.IssuerJWKSUrl = request.IssuerJWKSUrl
+		// streamRec.IssuerJWKSUrl = request.IssuerJWKSUrl
 		receiverConfiguration := model.ReceiveConfig{
 			RouteMode: request.RouteMode,
 			Method:    request.Method,
@@ -604,6 +622,8 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 		}
 
 		streamRec.Receiver = receiverConfiguration
+	} else {
+
 	}
 
 	err := m.insertStream(&streamRec)
@@ -620,17 +640,21 @@ func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConf
 
 	config := streamRec.StreamConfiguration
 
-	if len(configReq.EventsRequested) > 0 {
-		config.EventsRequested = configReq.EventsRequested
-		var delivered []string
-		for _, eventUri := range config.EventsRequested {
-			for _, supported := range config.EventsSupported {
-				if strings.EqualFold(eventUri, supported) {
-					delivered = append(delivered, eventUri)
+	if configReq.EventsRequested[0] == "*" {
+		configReq.EventsDelivered = configReq.EventsSupported
+	} else {
+		if len(configReq.EventsRequested) > 0 {
+			config.EventsRequested = configReq.EventsRequested
+			var delivered []string
+			for _, eventUri := range config.EventsRequested {
+				for _, supported := range config.EventsSupported {
+					if strings.EqualFold(eventUri, supported) {
+						delivered = append(delivered, eventUri)
+					}
 				}
 			}
+			config.EventsDelivered = delivered
 		}
-		config.EventsDelivered = delivered
 	}
 
 	if configReq.Format != "" {
@@ -703,7 +727,7 @@ func (m *MongoProvider) GetStream(id string) (*model.StreamConfiguration, error)
 	return &config, nil
 }
 
-func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string) *model.EventRecord {
+func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) *model.EventRecord {
 	jti := event.ID
 	keys := make([]string, len(event.Events))
 	i := 0
@@ -727,6 +751,7 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string) *m
 	rec := model.EventRecord{
 		Jti:      jti,
 		Event:    *event,
+		Original: raw,
 		Types:    keys,
 		Sid:      sid,
 		SortTime: sortTime,

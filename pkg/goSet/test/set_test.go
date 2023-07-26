@@ -102,7 +102,7 @@ func TestCreateSet(t *testing.T) {
 			UniformResourceIdentifier: goSet.UniformResourceIdentifier{Uri: "?Users/1234"},
 		},
 	}
-	set := goSet.CreateSet(subject, "TestIssuer", []string{"TestAudience"})
+	set := goSet.CreateSet(subject, "TestIssuer", []string{"cluster.example.com", "monitor.example.com"})
 
 	payload_claims := map[string]interface{}{
 		"aclaim": "avalue",
@@ -122,9 +122,9 @@ func TestCreateSet(t *testing.T) {
 	claimString := string(jsonByte)
 	println(claimString)
 
-	assert.Contains(t, claimString, "\"TestAudience", "Contains TestAudience")
+	assert.Contains(t, claimString, "monitor.example.com", "Contains TestAudience")
 	assert.Equal(t, jwt.SigningMethodNone.Alg(), token.Header["alg"])
-
+	assert.Truef(t, set.VerifyAudience("cluster.example.com", false), "Contains audience")
 	testSet = &set
 }
 
@@ -159,6 +159,8 @@ func TestSetJws(t *testing.T) {
 		fmt.Println("Parsed Signed token")
 		println(newSet.String())
 	}
+
+	assert.Truef(t, newSet.VerifyAudience("cluster.example.com", false), "Contains audience")
 
 	unsignedString, err := testSet.JWS(jwt.SigningMethodNone, nil)
 	fmt.Println("Alg=None unsigned value")

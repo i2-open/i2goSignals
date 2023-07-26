@@ -243,13 +243,18 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 		return nil, errors.New("token type is not `secevent+jwt`")
 	}
 
-	jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
-	claimString := string(jsonByte)
-	log.Println(claimString)
-	if claims, ok := token.Claims.(*SecurityEventToken); ok && token.Valid {
-		return claims, nil
-	}
-	return nil, err
+	// jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
+	// claimString := string(jsonByte)
+	// log.Println(claimString)
+	return token.Claims.(*SecurityEventToken), nil
+	/*
+		if claims, ok := token.Claims.(*SecurityEventToken); ok && token.Valid {
+			fmt.Println("***** Token Valid!!")
+			return claims, nil
+		}
+		return nil, errors.New("****** Failed to validate")
+
+	*/
 }
 
 func GenerateJti() string {

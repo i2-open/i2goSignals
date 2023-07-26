@@ -101,10 +101,6 @@ type AddCmd struct {
 	Server AddServerCmd `cmd:"" help:"Add a server to be configured."`
 }
 
-type EventUris struct {
-	Events []string `optional:"" default:"*" help:"The event uris (types) requested for a stream"`
-}
-
 type CreateStreamPublishPollCmd struct {
 	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
 }
@@ -113,10 +109,11 @@ func (p *CreateStreamPublishPollCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
 
 	reg := model.RegisterParameters{
-		Audience:  c.Aud,
-		Issuer:    c.Iss,
-		Method:    model.DeliveryPoll,
-		EventUris: c.Publish.Events,
+		Audience:      c.Aud,
+		Issuer:        c.Iss,
+		Method:        model.DeliveryPoll,
+		EventUris:     c.Events,
+		IssuerJWKSUrl: c.IssJwksUrl,
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -169,12 +166,13 @@ func (p CreateStreamPublishPushCmd) Run(cli *CLI) error {
 	}
 
 	reg := model.RegisterParameters{
-		Audience:  c.Aud,
-		Issuer:    c.Iss,
-		Method:    model.DeliveryPush,
-		EventUrl:  eventUrl,
-		EventAuth: eventAuthorization,
-		EventUris: c.Publish.Events,
+		Audience:      c.Aud,
+		Issuer:        c.Iss,
+		Method:        model.DeliveryPush,
+		EventUrl:      eventUrl,
+		EventAuth:     eventAuthorization,
+		EventUris:     c.Events,
+		IssuerJWKSUrl: c.IssJwksUrl,
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -195,7 +193,6 @@ type CreateStreamPublisherCmd struct {
 	Push CreateStreamPublishPushCmd `cmd:"" help:"Create a publishing push stream"`
 	Poll CreateStreamPublishPollCmd `cmd:"" help:"Create a publishing poll stream"`
 	// RcvJwksUrl string                     `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	EventUris
 }
 
 type CreateReceiverPollCmd struct {
@@ -251,8 +248,8 @@ func (p *CreateReceiverPollCmd) Run(cli *CLI) error {
 		RouteMode:     mode,
 		EventUrl:      eventUrl,
 		EventAuth:     eventAuthorization,
-		EventUris:     c.Receive.Events,
-		IssuerJWKSUrl: c.Receive.IssJwksUrl,
+		EventUris:     c.Events,
+		IssuerJWKSUrl: c.IssJwksUrl,
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -292,8 +289,8 @@ func (p *CreateReceiverPushCmd) Run(cli *CLI) error {
 		Inbound:       &inbound,
 		Method:        model.DeliveryPush,
 		RouteMode:     mode,
-		EventUris:     c.Receive.Events,
-		IssuerJWKSUrl: c.Receive.IssJwksUrl,
+		EventUris:     c.Events,
+		IssuerJWKSUrl: c.IssJwksUrl,
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -382,19 +379,19 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 }
 
 type CreateStreamReceiverCmd struct {
-	Poll       CreateReceiverPollCmd `cmd:"" help:"Create a polling receiver stream"`
-	Push       CreateReceiverPushCmd `cmd:"" help:"Create a push receiver Stream and endpoint"`
-	IssJwksUrl string                `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	Mode       string                `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
-	EventUris
+	Poll CreateReceiverPollCmd `cmd:"" help:"Create a polling receiver stream"`
+	Push CreateReceiverPushCmd `cmd:"" help:"Create a push receiver Stream and endpoint"`
+	Mode string                `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
 }
 
 type CreateStreamCmd struct {
-	Receive CreateStreamReceiverCmd  `cmd:"" aliases:"r" help:"Create a receiver stream"`
-	Publish CreateStreamPublisherCmd `cmd:"" aliases:"p" help:"Create a publisher stream"`
-	Aud     []string                 `default:"example.com" sep:"," help:"One or more audience values separated by commas"`
-	Iss     string                   `optional:"" help:"The event issuer value (default: DEFAULT" default:"DEFAULT"`
-	Name    string                   `optional:"" short:"n" help:"An alias name for the stream to be created"`
+	Receive    CreateStreamReceiverCmd  `cmd:"" aliases:"r" help:"Create a receiver stream"`
+	Publish    CreateStreamPublisherCmd `cmd:"" aliases:"p" help:"Create a publisher stream"`
+	Aud        []string                 `default:"example.com" sep:"," help:"One or more audience values separated by commas"`
+	Iss        string                   `optional:"" help:"The event issuer value (default: DEFAULT" default:"DEFAULT"`
+	Name       string                   `optional:"" short:"n" help:"An alias name for the stream to be created"`
+	IssJwksUrl string                   `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
+	Events     []string                 `optional:"" default:"*" help:"The event uris (types) requested for a stream"`
 }
 
 type CreateIssuerKeyCmd struct {
@@ -692,7 +689,8 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		return err
 	}
 	fmt.Println("Stream configuration for " + streamAlias)
-	fmt.Println(json.MarshalIndent(config, "", "  "))
+	jsonBytes, _ := json.MarshalIndent(config, "", "  ")
+	fmt.Println(string(jsonBytes))
 
 	// Update the configuration...
 	if s.RJwksUrl != "" {
@@ -744,23 +742,24 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		}
 		fmt.Println(fmt.Sprintf("Requesting events:\n%+q", config.EventsRequested))
 
-		if ConfirmProceed("Update stream configuration Y|[n]?") {
-			bodyBytes, err := json.MarshalIndent(config, "", " ")
-			req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.ConfigurationEndpoint, bytes.NewReader(bodyBytes))
-			if err != nil {
-				return err
-			}
-			req.Header.Set("Authorization", "Bearer "+streamConfig.Token)
-			client := http.Client{}
-			resp, err := client.Do(req)
-			if err != nil {
-				return err
-			}
-			bodyBytes, _ = io.ReadAll(resp.Body)
-			var configFinal model.StreamConfiguration
-			_ = json.Unmarshal(bodyBytes, &configFinal)
-		}
 	}
+	if ConfirmProceed("Update stream configuration Y|[n]?") {
+		bodyBytes, err := json.MarshalIndent(config, "", " ")
+		req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.ConfigurationEndpoint, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+streamConfig.Token)
+		client := http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		bodyBytes, _ = io.ReadAll(resp.Body)
+		var configFinal model.StreamConfiguration
+		_ = json.Unmarshal(bodyBytes, &configFinal)
+	}
+	fmt.Println("Request cancelled.")
 	return nil
 }
 

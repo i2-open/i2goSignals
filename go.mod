@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/MicahParks/jwkset v0.3.1
 	github.com/MicahParks/keyfunc v1.9.0
-	github.com/alecthomas/kong v0.7.1
+	github.com/alecthomas/kong v0.8.0
 	github.com/brianvoe/gofakeit/v6 v6.23.0
 	github.com/fatih/structs v1.1.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
@@ -15,6 +15,7 @@ require (
 	github.com/segmentio/ksuid v1.0.4
 	github.com/stretchr/testify v1.8.4
 	go.mongodb.org/mongo-driver v1.11.7
+
 )
 
 require (

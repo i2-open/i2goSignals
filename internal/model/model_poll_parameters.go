@@ -14,7 +14,7 @@ type PollParameters struct {
 	// An OPTIONAL JSON boolean value that indicates the SET Transmitter SHOULD return an immediate response even if no results are available (short polling). The default value is false, which indicates the request is to be treated as an HTTP long poll, per [Section 2](https://www.rfc-editor.org/rfc/rfc6202#section-2) of [RFC6202](https://www.rfc-editor.org/rfc/rfc8936.html#RFC6202). The timeout for the request is part of the configuration between the participants, which is out of scope of this specification.
 	ReturnImmediately bool `json:"returnImmediately,omitempty"`
 	// List of event JTIs that the receiver is acknowledging. The Transmitter can stop keeping track of these.
-	Acks        []string                `json:"acks,omitempty"`
+	Acks        []string                `json:"ack,omitempty"`
 	SetErrs     map[string]SetErrorType `json:"setErrs,omitempty"`
 	TimeoutSecs int                     `json:"timeoutSecs,omitempty"`
 }

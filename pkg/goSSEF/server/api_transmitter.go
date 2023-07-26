@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"i2goSignals/internal/model"
-	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -71,17 +70,17 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
+		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]", sid, jti))
 		sa.Provider.AckEvent(jti, sid)
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
 		sa.EventRouter.IncrementCounter(streamState, event, false)
-
 	}
 
 	// Second, log any errors received
 	for jti, setError := range request.SetErrs {
 		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s", sid, jti, setError.Error, setError.Description)
-		log.Println(errMsg)
+		serverLog.Println(errMsg)
 		// TODO Nothing to do except log it?
 	}
 
@@ -95,7 +94,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 	respBytes, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
-		log.Println("TRANSMIT POLL Error serializing response: " + err.Error())
+		serverLog.Println("TRANSMIT POLL Error serializing response: " + err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	_, _ = w.Write(respBytes)

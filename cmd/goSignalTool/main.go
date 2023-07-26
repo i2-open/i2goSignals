@@ -70,7 +70,7 @@ func main() {
 		fmt.Println(err.Error())
 	}
 
-	initialArgs := []string{}
+	var initialArgs []string
 	if len(os.Args) > 1 {
 		initialArgs = os.Args[1:]
 	}

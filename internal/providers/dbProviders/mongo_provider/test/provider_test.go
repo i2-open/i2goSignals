@@ -205,7 +205,7 @@ func generateEvent() {
 	}
 	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payloadClaims)
 
-	data.provider.AddEvent(&test1, "")
+	data.provider.AddEvent(&test1, "", "")
 
 	state, _ := data.provider.GetStreamState(data.stream.Id)
 

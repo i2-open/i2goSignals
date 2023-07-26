@@ -26,7 +26,7 @@ InitializeReceivers handles updates to a receiver client polling stream when cha
 func (sa *SignalsApplication) InitializeReceivers() {
 	states := sa.Provider.GetStateMap()
 	for _, stream := range states {
-		if !stream.Inbound {
+		if stream.Inbound == nil || !*stream.Inbound {
 			continue
 		}
 
@@ -65,7 +65,7 @@ HandleClientPollReceiver checks if a poll receiver is already defined, the confi
 is started and its handle is returned. If the stream isn't an inbound Polling receiver the request is ignored.
 */
 func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
-	if !streamState.Inbound || streamState.Receiver.Method == model.DeliveryPush {
+	if (streamState.Inbound == nil || !*streamState.Inbound) || streamState.Receiver.Method == model.DeliveryPush {
 		return nil // nothing to do
 	}
 	ps, ok := sa.pollClients[streamState.StreamConfiguration.Id]
@@ -209,7 +209,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			}
 			// sa.Provider.AddEvent(token, true)
 			serverLog.Printf("POLL-RCV[%s] Handling Event: %s", ps.stream.StreamConfiguration.Id, token.ID)
-			_ = ps.sa.EventRouter.HandleEvent(token, ps.stream.StreamConfiguration.Id)
+			_ = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
 
 			acks = append(acks, jti)
 		}
@@ -233,6 +233,15 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		processPushError(w, "access_denied", "The authorization did not contain a stream identifier")
 		return
 	}
+	config, err := sa.Provider.GetStream(sid)
+	if config == nil || err != nil {
+
+		serverLog.Printf("PUSH-RCV[%s] Unable to locate stream configuration.", sid)
+		processPushError(w, "not_found", "Stream "+sid+" could not be located or was deleted")
+		return
+	}
+	fmt.Println("***********Config.iss=" + config.Iss)
+
 	if status != http.StatusOK {
 		processPushError(w, "authentication_failed", "The authorization was not successfully validated")
 		return
@@ -240,13 +249,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" || strings.EqualFold("application/secevent+jwt", contentType) {
-		config, err := sa.Provider.GetStream(sid)
-		if err != nil {
 
-			serverLog.Printf("PUSH-RCV[%s] Unable to locate stream configuration.", sid)
-			processPushError(w, "access_denied", "The authorization did not contain a valid stream identifier")
-			return
-		}
 		// TODO: check that the stream matched is inbound?
 
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -268,6 +271,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
 			return
 		}
+
 		if !token.VerifyIssuer(config.Iss, true) {
 			errMsg := fmt.Sprintf("invalid issuer received: %s does not match %s", token.Issuer, config.Iss)
 			serverLog.Printf("PUSH-RCV[%s] Token has %s", sid, errMsg)
@@ -276,9 +280,12 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		}
 		audMatch := false
 		if len(config.Aud) > 0 {
+			fmt.Println(fmt.Sprintf("Token Aud Vals: %v", token.Audience))
 			for _, value := range config.Aud {
+				fmt.Println("*****Checking aud match against: " + value)
 				if token.VerifyAudience(value, false) {
 					audMatch = true
+					break
 				}
 			}
 			if !audMatch {
@@ -290,7 +297,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		}
 
 		// Now we have a valid token, store it in the database and acknowledge it
-		err = sa.EventRouter.HandleEvent(token, sid)
+		err = sa.EventRouter.HandleEvent(token, tokenString, sid)
 		// TODO: Handle different types of errors
 		if err != nil {
 			processPushError(w, "invalid_request", "Unexpected error: "+err.Error())

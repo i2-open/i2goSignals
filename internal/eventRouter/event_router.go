@@ -26,7 +26,7 @@ var eventLogger = log.New(os.Stdout, "ROUTER: ", log.Ldate|log.Ltime)
 type EventRouter interface {
 	UpdateStreamState(stream *model.StreamStateRecord)
 	RemoveStream(sid string)
-	HandleEvent(eventToken *goSet.SecurityEventToken, sid string) error
+	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool)
 	Shutdown()
@@ -37,8 +37,8 @@ type EventRouter interface {
 }
 
 type router struct {
-	pushStreams         map[string]*model.StreamStateRecord
-	pollStreams         map[string]*model.StreamStateRecord
+	pushStreams         map[string]model.StreamStateRecord
+	pollStreams         map[string]model.StreamStateRecord
 	ctx                 context.Context
 	enabled             bool
 	issuerKeys          map[string]*rsa.PrivateKey
@@ -59,8 +59,8 @@ func (r *router) GetPollStreamCnt() float64 {
 func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 	router := router{
 		provider:    provider,
-		pushStreams: map[string]*model.StreamStateRecord{},
-		pollStreams: map[string]*model.StreamStateRecord{},
+		pushStreams: map[string]model.StreamStateRecord{},
+		pollStreams: map[string]model.StreamStateRecord{},
 		pushBuffers: map[string]*buffer.EventPushBuffer{},
 		pollBuffers: map[string]*buffer.EventPollBuffer{},
 		issuerKeys:  map[string]*rsa.PrivateKey{},
@@ -70,7 +70,8 @@ func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 
 	states := router.provider.GetStateMap()
 
-	for _, state := range states {
+	for k, state := range states {
+		eventLogger.Printf("Initializing: StreamKey: %s, ConfigId: %s ", k, state.StreamConfiguration.Id)
 		router.UpdateStreamState(&state)
 	}
 	router.enabled = true
@@ -89,11 +90,16 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 		eventLogger.Println("WARNING: events counter not initialized.")
 		return
 	}
-	eventLogger.Printf("EventOut [%s]: Type: PUSH ", r.provider.Name())
+	dir := "Out"
+	if inBound {
+		dir = "In"
+	}
+
 	tfr := "PUSH"
 	if stream.Delivery.PushDeliveryMethod == nil {
 		tfr = "POLL"
 	}
+
 	eventTypes := "UNSET"
 	if token != nil {
 		types := token.GetEventIds()
@@ -105,6 +111,11 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 				}
 			}
 		}
+	}
+
+	eventLogger.Printf("Event%s [%s] %s Types: %v", dir, stream.StreamConfiguration.Id, tfr, eventTypes)
+	if dir == "In" {
+		fmt.Println(token.String())
 	}
 
 	label := prometheus.Labels{
@@ -138,7 +149,7 @@ func (r *router) initPushStream(sid string, state *model.StreamStateRecord, jtis
 }
 
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
-	if !stream.Inbound {
+	if stream.Inbound == nil || !*stream.Inbound {
 		// Preload any outstanding pending events (because we may be re-starting)
 		jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
 			MaxEvents:         0,
@@ -158,27 +169,31 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			r.issuerKeys[issuer] = key
 		}
 
-		switch stream.StreamConfiguration.Delivery.GetMethod() {
-		case model.DeliveryPoll:
-			r.pollStreams[stream.StreamConfiguration.Id] = stream
-			_, ok := r.pollBuffers[stream.StreamConfiguration.Id]
+		if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
+
+			currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
+
+			if ok {
+				fmt.Println("Found existing match: " + currentState.StreamConfiguration.Id)
+				currentState.Update(stream)
+			} else {
+				fmt.Println("Adding stream to Pollers: " + stream.StreamConfiguration.Id)
+				r.pollStreams[stream.StreamConfiguration.Id] = *stream
+			}
+			_, ok = r.pollBuffers[stream.StreamConfiguration.Id]
 			if !ok {
 				// TODO:  might have to check for existing events!
 				r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis)
 			}
-		case model.DeliveryPush:
+		} else {
 			currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
 			if ok {
 				currentState.Update(stream)
 			} else {
-				r.pushStreams[stream.StreamConfiguration.Id] = stream
+				r.pushStreams[stream.StreamConfiguration.Id] = *stream
 				r.initPushStream(stream.StreamConfiguration.Id, stream, jtis)
 			}
-		default:
-			streamJson, _ := json.MarshalIndent(stream, "", " ")
-			eventLogger.Printf("Unknown delivery method below.\n%s", streamJson)
 		}
-
 	}
 }
 
@@ -186,26 +201,26 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 HandleEvent takes a new event received and adds it to the local token store. It then looks at the event to
 evaluates if it should be added to any streams for outgoing propagation
 */
-func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, sid string) error {
+func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
-	streamState, err := r.provider.GetStreamState(sid)
+	inboundStream, err := r.provider.GetStreamState(sid)
 	if err != nil {
 		return err
 	}
 
-	event := r.provider.AddEvent(eventToken, sid)
-	r.IncrementCounter(streamState, eventToken, true)
+	event := r.provider.AddEvent(eventToken, sid, rawEvent)
+	r.IncrementCounter(inboundStream, eventToken, true)
 
-	if streamState.Inbound && streamState.Receiver.RouteMode == model.RouteModeImport {
+	if (inboundStream != nil && *inboundStream.Inbound) && inboundStream.Receiver.RouteMode == model.RouteModeImport {
 		// nothing more to do
 		return nil
 	}
 	for _, stream := range r.pushStreams {
-		routeMode := stream.Receiver.RouteMode
-		if StreamEventMatch(stream, event) {
 
-			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, routeMode, event.Types)
+		if StreamEventMatch(&stream, event) {
+
+			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: PUSH, Types: %v", stream.StreamConfiguration.Id, event.Jti, event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
 			r.provider.AddEventToStream(event.Jti, stream.Id)
@@ -214,15 +229,16 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, sid string) e
 		}
 	}
 
-	for _, stream := range r.pollStreams {
-		routeMode := stream.Receiver.RouteMode
-		if StreamEventMatch(stream, event) {
-			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: %s, Types: %v", stream.StreamConfiguration.Id, event.Jti, routeMode, event.Types)
+	for k, pollStream := range r.pollStreams {
+		eventLogger.Printf("ROUTER: Checking: %s, ConfigId: %s", k, pollStream.StreamConfiguration.Id)
+
+		if StreamEventMatch(&pollStream, event) {
+			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: POLL, Types: %v", pollStream.StreamConfiguration.Id, event.Jti, event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			r.provider.AddEventToStream(event.Jti, stream.Id)
+			r.provider.AddEventToStream(event.Jti, pollStream.Id)
 			// This causes the event to be available on the next poll
-			r.pollBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
+			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
 	}
 	return nil
@@ -235,8 +251,12 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		return nil, false
 	}
 
+	forwardMode := false
+	if state.Receiver.RouteMode == model.RouteModeForward {
+		forwardMode = true
+	}
 	key, ok := r.issuerKeys[state.StreamConfiguration.Iss]
-	if !ok || key == nil {
+	if (!ok || key == nil) && !forwardMode {
 		eventLogger.Printf("POLL-SRV[%s]: Error no issuer key available for %s", sid, state.StreamConfiguration.Iss)
 		return nil, false
 	}
@@ -252,16 +272,23 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	var err error
 	if jtiSize > 0 {
 		sets := make(map[string]string, jtiSize)
+		if forwardMode {
+			jtis := *jtiSlice
+			for _, jti := range jtis {
+				eventRecord := r.provider.GetEventRecord(jti)
+				sets[jti] = eventRecord.Original
+			}
+		} else {
+			tokens := r.provider.GetEvents(*jtiSlice)
+			for _, token := range tokens {
+				token.Issuer = state.StreamConfiguration.Iss
+				token.Audience = state.StreamConfiguration.Aud
+				token.IssuedAt = jwt.NewNumericDate(time.Now())
 
-		tokens := r.provider.GetEvents(*jtiSlice)
-		for _, token := range tokens {
-			token.Issuer = state.StreamConfiguration.Iss
-			token.Audience = state.StreamConfiguration.Aud
-			token.IssuedAt = jwt.NewNumericDate(time.Now())
-
-			sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
-			if err != nil {
-				eventLogger.Printf("POLL-SRV[%s]: Error signing: ", sid, err.Error())
+				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
+				if err != nil {
+					eventLogger.Printf("POLL-SRV[%s]: Error signing: ", sid, err.Error())
+				}
 			}
 		}
 		return sets, more
@@ -378,7 +405,7 @@ will be considered a wildcard leading to the event being a match.
 */
 func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
-	if stream.Inbound == true && stream.Receiver.RouteMode == model.RouteModeImport {
+	if (stream.Inbound != nil && *stream.Inbound == true) && stream.Receiver.RouteMode == model.RouteModeImport {
 		return false
 	}
 
@@ -390,14 +417,17 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord)
 			return false
 		}
 	}
+	// fmt.Println("Checking match for " + stream.StreamConfiguration.Id)
 
 	// Check for Aud match
 	if len(stream.Aud) > 0 {
 		audMatch := false
 		for _, value := range stream.Aud {
+			// fmt.Println("Trying value: " + value)
 			// test below returns true if the event has no aud value
 			if event.Event.VerifyAudience(value, false) {
 				audMatch = true
+				// fmt.Println("Stream Aud Matched!")
 				break
 			}
 		}

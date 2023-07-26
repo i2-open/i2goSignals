@@ -707,5 +707,5 @@ func (suite *ServerSuite) generateEvent(stream model.StreamConfiguration) (strin
 	streamIds[0] = stream.Id
 	event.AddEventPayload("urn:ietf:params:event:SCIM:prov:create", payloadClaims)
 
-	return event.ID, suite.servers[0].app.EventRouter.HandleEvent(&event, stream.Id)
+	return event.ID, suite.servers[0].app.EventRouter.HandleEvent(&event, "", stream.Id)
 }

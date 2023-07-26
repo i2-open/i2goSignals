@@ -38,8 +38,9 @@ type DbProviderInterface interface {
 	GetEventIds(streamId string, params model.PollParameters) ([]string, bool)
 	GetEvent(jti string) *goSet.SecurityEventToken
 	GetEvents(jtis []string) []*goSet.SecurityEventToken
+	GetEventRecord(jti string) *model.EventRecord
 	AckEvent(jtiString string, streamId string)
-	AddEvent(event *goSet.SecurityEventToken, sid string) (eventRecord *model.EventRecord)
+	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord)
 	AddEventToStream(jti string, streamId primitive.ObjectID)
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 

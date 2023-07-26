@@ -19,7 +19,7 @@ type StreamStateRecord struct {
 	Status string
 
 	// Inbound indicates the stream is inbound and configured by ReceiverConfig
-	Inbound bool `json:"inbound,omitempty" bson:"inbound,omitempty"`
+	Inbound *bool `json:"inbound,omitempty" bson:"inbound,omitempty"`
 
 	// ValidateJwks is used when in Inbound mode to validate the inbound issuer. This value acts like a cache
 	ValidateJwks *keyfunc.JWKS `json:"-" bson:"-"` // not persisted

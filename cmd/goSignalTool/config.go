@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 type SsfServer struct {
@@ -65,7 +64,7 @@ GetStream returns either the specified stream by alias or nil
 func (c *ConfigData) GetStream(alias string) (*Stream, *SsfServer) {
 	for _, server := range c.Servers {
 		for k, stream := range server.Streams {
-			if strings.EqualFold(k, alias) {
+			if k == alias {
 				return &stream, &server
 
 			}
