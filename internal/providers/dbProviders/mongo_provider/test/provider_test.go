@@ -60,7 +60,7 @@ func TestMain(m *testing.M) {
 	data = testData{
 		provider: *provider,
 	}
-	data.InitStream([]string{})
+	data.InitStream([]string{"*"})
 
 	code := m.Run()
 

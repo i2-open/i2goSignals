@@ -638,42 +638,42 @@ func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConf
 		return nil, err
 	}
 
-	config := streamRec.StreamConfiguration
+	config := &streamRec.StreamConfiguration
 
 	if configReq.EventsRequested[0] == "*" {
-		configReq.EventsDelivered = configReq.EventsSupported
-	} else {
-		if len(configReq.EventsRequested) > 0 {
-			config.EventsRequested = configReq.EventsRequested
-			var delivered []string
-			for _, eventUri := range config.EventsRequested {
-				for _, supported := range config.EventsSupported {
-					if strings.EqualFold(eventUri, supported) {
-						delivered = append(delivered, eventUri)
-					}
+		configReq.EventsRequested = configReq.EventsSupported
+	}
+
+	if len(configReq.EventsRequested) > 0 {
+		config.EventsRequested = configReq.EventsRequested
+		var delivered []string
+		for _, eventUri := range config.EventsRequested {
+			for _, supported := range config.EventsSupported {
+				if strings.EqualFold(eventUri, supported) {
+					delivered = append(delivered, eventUri)
 				}
 			}
-			config.EventsDelivered = delivered
 		}
+		config.EventsDelivered = delivered
 	}
 
 	if configReq.Format != "" {
 		config.Format = configReq.Format
 	}
 
-	streamRec.StreamConfiguration = config
+	streamRec.StreamConfiguration = *config
 
-	docId, _ := primitive.ObjectIDFromHex(streamId)
-	filter := bson.M{"_id": docId}
+	docId := streamRec.Id
+	filter := bson.D{{"_id", docId}}
 	res, err := m.streamCol.ReplaceOne(context.TODO(), filter, streamRec)
 	if err != nil {
 		return nil, errors.New("Stream update error: " + err.Error())
 	}
 
 	if res.ModifiedCount == 0 {
-		return nil, err
+		return nil, nil
 	}
-	return &config, nil
+	return config, nil
 }
 
 func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
