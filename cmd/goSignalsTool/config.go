@@ -23,11 +23,14 @@ type SsfServer struct {
 }
 
 type Stream struct {
-	Id          string
-	Description string
-	Alias       string
-	Token       string
-	Endpoint    string
+	Alias       string `json:"alias"`
+	Id          string `json:"id"`
+	Description string `json:"description"`
+	Token       string `json:"token"`
+	Endpoint    string `json:"endpoint"`
+	Iss         string `json:"iss"`
+	Aud         string `json:"aud"` // Note this is a comma separated list because of the way i2scim consumes it
+	IssJwksUrl  string `json:"issJwksUrl"`
 }
 
 type ConfigData struct {

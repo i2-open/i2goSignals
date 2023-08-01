@@ -69,10 +69,11 @@ func main() {
 	if err != nil {
 		fmt.Println(err.Error())
 	}
-
+	oneCommand := false
 	var initialArgs []string
 	if len(os.Args) > 1 {
 		initialArgs = os.Args[1:]
+		oneCommand = true
 	}
 
 	for true {
@@ -111,6 +112,9 @@ func main() {
 		if err != nil {
 			parser.Errorf("%s", err)
 			continue
+		}
+		if oneCommand {
+			return
 		}
 	}
 

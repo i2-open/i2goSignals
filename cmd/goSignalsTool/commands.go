@@ -362,6 +362,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 		Id:          config.Id,
 		Endpoint:    registration.PushUrl,
 		Description: typeDescription,
+		Iss:         config.Iss,
+		Aud:         strings.Join(config.Aud[:], ","),
+		IssJwksUrl:  config.IssuerJWKSUrl,
 	}
 	server.Streams[streamAlias] = stream
 
@@ -916,7 +919,7 @@ func (p *PollCmd) Run(g *Globals) error {
 	}()
 	<-exitCh
 
-	fmt.Println("done.")
+	// fmt.Println("done.")
 	return nil
 }
 
@@ -957,9 +960,14 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		fmt.Println(fmt.Sprintf("Initiating polling to %s, stream %s...", server.Alias, stream.Alias))
 		params.Acks = p.Acks
 
-		pollResponse, err := p.DoPollRequest(ctx, client, params, stream)
+		pollResponse, err := p.DoPollRequest(ctx, client, params, stream, exitCh)
 		if err != nil {
+			if strings.Contains(err.Error(), "context canceled") {
+				exitCh <- struct{}{}
+				return
+			}
 			fmt.Println("Polling error: " + err.Error())
+			exitCh <- struct{}{}
 			return
 		}
 		setCnt := len(pollResponse.Sets)
@@ -995,12 +1003,12 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		}
 		if !p.Loop {
 			// Do one pass, but we may still need to ack
-			p.DoAckOnly(ctx, client, stream)
+			p.DoAckOnly(ctx, client, stream, exitCh)
 		}
 		select {
 		case <-ctx.Done():
 			fmt.Println("Received cancel!")
-			p.DoAckOnly(ctx, client, stream)
+			p.DoAckOnly(ctx, client, stream, exitCh)
 			exitCh <- struct{}{}
 			return
 		default:
@@ -1008,7 +1016,7 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 	}
 }
 
-func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params model.PollParameters, stream *Stream) (*model.PollResponse, error) {
+func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params model.PollParameters, stream *Stream, exitCh chan struct{}) (*model.PollResponse, error) {
 	bodyBytes, err := json.MarshalIndent(params, "", " ")
 	if err != nil {
 		return nil, err
@@ -1020,6 +1028,13 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params 
 	req.Header.Set("Authorization", "Bearer "+stream.Token)
 
 	resp, err := client.Do(req)
+	select {
+	case <-exitCh:
+		fmt.Println("Exiting poll request.")
+		return nil, nil
+	default:
+
+	}
 	if err != nil || resp.StatusCode >= 400 {
 		if err == nil {
 			return nil, errors.New("Received http error: " + resp.Status)
@@ -1036,17 +1051,18 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params 
 	if err != nil {
 		return nil, err
 	}
+
 	return &pollResponse, nil
 }
 
-func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, stream *Stream) {
+func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, stream *Stream, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
 			Acks:              p.Acks,
 		}
-		pollResponse, err := p.DoPollRequest(ctx, client, pollRequest, stream)
+		pollResponse, err := p.DoPollRequest(ctx, client, pollRequest, stream, exitCh)
 		if err != nil {
 			fmt.Println("Error occurred performing polling acknowledgement: " + err.Error())
 			return
