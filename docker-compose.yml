@@ -84,6 +84,8 @@ services:
     depends_on:
       mongo1:
         condition: service_started
+      mongoSetup:
+        condition: service_completed_successfully
     ports:
       - "8888:8888"
     environment:
@@ -111,7 +113,7 @@ services:
       - BASE_URL=http://goSignals2:8889/
 
   scim_cluster1:
-    image: independentid/i2scim-mem:0.7.0-SNAPSHOT
+    image: independentid/i2scim-universal:0.7.0-SNAPSHOT
     container_name: scim_cluster1
     ports:
       - "9000:8080"
@@ -127,45 +129,13 @@ services:
       - scim.prov.memory.backup.mins=2
       - scim.event.enable=true
       - scim.security.enable=false
-      - scim.prov.providerClass="com.independentid.scim.backend.memory.MemoryProvider"
+      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
       - scim.signals.enable=true
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://goSignals1:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.scim.example.com
-      - scim.signals.pub.push.endpoint=http://goSignals1:8888/events
-      - scim.signals.pub.push.auth=Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJzaWQiOiI2NGJlYWQ0Yzc5MjExYzUwMTAxYWU0N2UiLCJpc3MiOiJERUZBVUxUIiwiYXVkIjpbIkRFRkFVTFQiXSwiZXhwIjoxNjk3OTkzODA0LCJpYXQiOjE2OTAyMTc4MDQsImp0aSI6IjJUMWs3Q3RMR3cxM04zclZBeUVUdDJYYWFiMyJ9.iBkxcPZQ_BpjRygMVbwyPrhthLGMGtzcxKciAZBHETURzkGX1v9ea7lAx4SbiTHGQLNzKSlVyWHRF0xzfq8bBjr6_BpcL-MaDwMDR9TCWEUYgMfHL29o0M6PWZMnFYXRuLjSNJQC3IIDXLSCVwSggPa8uBSD6VPDLKXelluMHYCHTK8_hW1sgP-hB6_yrYiNrU9BmIFyHkYA1sS8CovUtdR5_7ew2EV5C_-6THgNCF6Rf7EW02RSms5rbTcWs5W4unK44_N0f07HUY4QT7LKLz_s0WDikOJhc33_XDPVJOZmSVh9r1RUE7WpaSEd4YTWMi_AuHDsS3MYYU9bPFOsoA
-      - scim.signals.rcv.poll.endpoint=http://goSignals1:8888/poll
-      - scim.signals.rcv.poll.auth=Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJzaWQiOiI2NGJlYWU0OTc5MjExYzUwMTAxYWU0N2YiLCJpc3MiOiJERUZBVUxUIiwiYXVkIjpbIkRFRkFVTFQiXSwiZXhwIjoxNjk3OTk0MDU3LCJpYXQiOjE2OTAyMTgwNTcsImp0aSI6IjJUMWtjenVOdzlGWjRienZ3Qzh4WlBmemJFWSJ9.iR4dbIvjOtj0MwU7BbUyom8eUAJv3X7yHYaxr_9mQ28CBRDBIEAdlq70BgUKWsZBAfmaZAZNdlN-rge-QSWS8HjNSzF90z-m-UCctaTnmyZspwmRV9SFwPKdA5qoakshVp2phJerYV10GPB8qTVfnG4hKDMzXeaMm6J2F12ELnghShTHxcdFL7WCJhg40uMGkwX4CfCDHDgXJQrVWfLrShZLuXFmYy-3RYrB0izAC-fSs1_WIb8EnSFX7OFA9Oq6Umo3wEtS1B3LOhz_FZvQHceekAWoSDYoBhzLi8y8iIKuFC5IBm551zcy3vX3OWF0oDSOne1Ww9zkyHy2VcxJEw
-      - scim.signals.pub.pem.value="MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDiiOZmBFN+8RIc
-        uBxpcF/eFsw15+a5ZfjOSwAx5+JYkEgR0QEi3BFcWChnX2/+qaNRnsqFINhmi4Ri
-        6SZeLoCxUxr21Go9lXDz102U6DXY/duyGuDIIZ2tu2stEskz6u8sQNgKqkk8rSyW
-        g5fn31GUYuxIvbA+bDoXlYCXp8icf02aW/TeusL7JtTmVk5Gkaa5gdGiRIt6u6mb
-        F58X09Via/GYKfh2Con1VVk+tMeZePHW703phmUmm8vwyns/+YXoRiH0hR9/8HyS
-        zU/eE5XA/oxsHfjDjI6h386ayHiGl/d1TBu9dY8BJKHBvUnTCRJWPY8OnbS8Brab
-        +qz1zAenAgMBAAECggEBAKCKnqWb2UR0Of7KZ7A9qGMvSufFAhlP8ATa2DeF+z4C
-        emDN+v0mctM70t53n1oeBJU6cJHqVhJOO7MRQlSqph+FIu3cWbJtLxBP/DZUXpz6
-        Q3E0ZSrPz/wof2sBDkBR9dAp4DGmvqJWo+vDNKtp81myxXtDmxyR/JVsKSbRDHYC
-        2EI8XKU8s89JWDsqWQx9XQLOExTrVW+ugDbp68uEXX1dUKqK/HvLKhtver+tAQwk
-        7Zc3LxmTpbrBRuOdoC8O9zFfcSPLClH1z2E5/GMRaDvJwLX5MPS1gKmxW2mPbvri
-        u6dKqQO03b8QkHYgdVaP3J3tl42LBgAxNoIp4EHa2jECgYEA5IMK0B2T83RCetgF
-        iPeJVkEavMOEgvQ4r+dIp2DwDhqmwUtx0tjK3Uke3xpffLMJKuYiVFxkY3MFweK+
-        j9ZQ+HkcUhozaxzLVuUcjy02dAUQArwK574O6CQd9682s7NPbASk75vRPmZbk5Gu
-        Wt7Y/RBngU98s8EgY4U8k1f2gUkCgYEA/cj5FKakmlZSAKlDQojM5hs5PV21dwzF
-        Tl5KaHxCQ2jkb3jo/Nl3111SxMcUKmEPVkEv+k1fZBTEK5hoqfG1LF+WtpAcjBs5
-        pOBU689lM8jUZzfIjTMSWSWxik+RK6uHFGZFuz2BUT0nMLA6FV8lIq80tlw5zeqr
-        59eAonTTMW8CgYAcdmILaBO8mDeLm4qc89AsaTGOX4AK26aP6mv3RTDBYPpySxZj
-        X9Ns2qW4vk00eAxlRoLyJQvwAyytaLO5sMUnHda0N0U+Szjcmu8Cumv06YiD/q4R
-        DXBH4+/DoRRcL7JtzupIWg0nC5LOf6/K68T1SGzMA32R2jVRkA/qfmNa2QKBgQC5
-        5O12j/5AQvx8GX/4C4azArvx1GNo2cTo+65bTLGo+PtjH9jh5VWgPm6zTvPZexEl
-        6EgBe41lHMT4/gGkgjVoVHhsL7GJeyPFPsFVnawOu4vCM51GuGM3Q6IBovi+WT1v
-        1t47IflIjZfYVS2mm/PyrQ3aikGZMM1M3JEP7q0IJwKBgHn93m7BfFxfcsounztC
-        nhUz93lJKC1jrVO7dz1MCp2F8A2wq57ULJB+VFoRvZ5oUiEcZhlTx2ehdBNPiH73
-        C2kbgR2s+HAiM7N/0z7k8K7Y5TuAkJ1YvP/MFAQsMwhJMw3Ebi8MOU8comO+rlSI
-        vcp67Zo/hy0OSwjKEduFFgbz"
+      - scim.signals.pub.config.file=/scim/pubStream.json
+      - scim.signals.rcv.config.file=/scim/receiveStream.json
+      - scim.signals.pub.pem.path=/scim/issuer.pem
   scim_cluster2:
-    image: independentid/i2scim-mem:0.7.0-SNAPSHOT
+    image: independentid/i2scim-universal:0.7.0-SNAPSHOT
     container_name: scim_cluster2
     ports:
       - "9001:8080"
@@ -183,46 +153,14 @@ services:
       - scim.security.enable=false
       - scim.prov.providerClass="com.independentid.scim.backend.memory.MemoryProvider"
       - scim.signals.enable=true
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://goSignals1:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.scim.example.com
-      - scim.signals.pub.push.endpoint=http://goSignals1:8888/events
-      - scim.signals.pub.push.auth=Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJzaWQiOiI2NGJlYWQ0Yzc5MjExYzUwMTAxYWU0N2UiLCJpc3MiOiJERUZBVUxUIiwiYXVkIjpbIkRFRkFVTFQiXSwiZXhwIjoxNjk3OTkzODA0LCJpYXQiOjE2OTAyMTc4MDQsImp0aSI6IjJUMWs3Q3RMR3cxM04zclZBeUVUdDJYYWFiMyJ9.iBkxcPZQ_BpjRygMVbwyPrhthLGMGtzcxKciAZBHETURzkGX1v9ea7lAx4SbiTHGQLNzKSlVyWHRF0xzfq8bBjr6_BpcL-MaDwMDR9TCWEUYgMfHL29o0M6PWZMnFYXRuLjSNJQC3IIDXLSCVwSggPa8uBSD6VPDLKXelluMHYCHTK8_hW1sgP-hB6_yrYiNrU9BmIFyHkYA1sS8CovUtdR5_7ew2EV5C_-6THgNCF6Rf7EW02RSms5rbTcWs5W4unK44_N0f07HUY4QT7LKLz_s0WDikOJhc33_XDPVJOZmSVh9r1RUE7WpaSEd4YTWMi_AuHDsS3MYYU9bPFOsoA
-      - scim.signals.rcv.poll.endpoint=http://goSignals1:8888/poll
-      - scim.signals.rcv.poll.auth=Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJzaWQiOiI2NGMwMWM1OWNhN2ZkMzkzZmExMzg2YzAiLCJpc3MiOiJERUZBVUxUIiwiYXVkIjpbIkRFRkFVTFQiXSwiZXhwIjoxNjk4MDg3NzY5LCJpYXQiOjE2OTAzMTE3NjksImp0aSI6IjJUNG9aWkxZRU01V0pDT0lPQ09MMDJwa2VQTCJ9.AtWtJa50RaIQjuw4cU1A2_dLnIhB1p4Zi5T2HunbzlOgyBKq6uQSqS9d4YShTMDnpt-jJq6THBa90B5HrHzPAfiTWrkOkuGBVxnLZfmUMpU58kRa-Io4MOF7lKvNXpn--i7XOieJ2p9ggcHFayaPQ69_pUD_UCzhkZUN0LDrMdnoAyA5anCec_ara2v_NZyPJVBXfrTORmUtUu7j0W9XP4WWSybvAghD5anAyW40r0wP-WyM1zdZ-Z2E3MNAgBxyBrgtRgkkpz4lfpIushuxaCal3DdQl8IbTGIwan90lagBLugSbWaBmmbCuDSEpSZ5SXwMH8uyid3Kn0H0P33TPQ
-      - scim.signals.pub.pem.value="MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDiiOZmBFN+8RIc
-        uBxpcF/eFsw15+a5ZfjOSwAx5+JYkEgR0QEi3BFcWChnX2/+qaNRnsqFINhmi4Ri
-        6SZeLoCxUxr21Go9lXDz102U6DXY/duyGuDIIZ2tu2stEskz6u8sQNgKqkk8rSyW
-        g5fn31GUYuxIvbA+bDoXlYCXp8icf02aW/TeusL7JtTmVk5Gkaa5gdGiRIt6u6mb
-        F58X09Via/GYKfh2Con1VVk+tMeZePHW703phmUmm8vwyns/+YXoRiH0hR9/8HyS
-        zU/eE5XA/oxsHfjDjI6h386ayHiGl/d1TBu9dY8BJKHBvUnTCRJWPY8OnbS8Brab
-        +qz1zAenAgMBAAECggEBAKCKnqWb2UR0Of7KZ7A9qGMvSufFAhlP8ATa2DeF+z4C
-        emDN+v0mctM70t53n1oeBJU6cJHqVhJOO7MRQlSqph+FIu3cWbJtLxBP/DZUXpz6
-        Q3E0ZSrPz/wof2sBDkBR9dAp4DGmvqJWo+vDNKtp81myxXtDmxyR/JVsKSbRDHYC
-        2EI8XKU8s89JWDsqWQx9XQLOExTrVW+ugDbp68uEXX1dUKqK/HvLKhtver+tAQwk
-        7Zc3LxmTpbrBRuOdoC8O9zFfcSPLClH1z2E5/GMRaDvJwLX5MPS1gKmxW2mPbvri
-        u6dKqQO03b8QkHYgdVaP3J3tl42LBgAxNoIp4EHa2jECgYEA5IMK0B2T83RCetgF
-        iPeJVkEavMOEgvQ4r+dIp2DwDhqmwUtx0tjK3Uke3xpffLMJKuYiVFxkY3MFweK+
-        j9ZQ+HkcUhozaxzLVuUcjy02dAUQArwK574O6CQd9682s7NPbASk75vRPmZbk5Gu
-        Wt7Y/RBngU98s8EgY4U8k1f2gUkCgYEA/cj5FKakmlZSAKlDQojM5hs5PV21dwzF
-        Tl5KaHxCQ2jkb3jo/Nl3111SxMcUKmEPVkEv+k1fZBTEK5hoqfG1LF+WtpAcjBs5
-        pOBU689lM8jUZzfIjTMSWSWxik+RK6uHFGZFuz2BUT0nMLA6FV8lIq80tlw5zeqr
-        59eAonTTMW8CgYAcdmILaBO8mDeLm4qc89AsaTGOX4AK26aP6mv3RTDBYPpySxZj
-        X9Ns2qW4vk00eAxlRoLyJQvwAyytaLO5sMUnHda0N0U+Szjcmu8Cumv06YiD/q4R
-        DXBH4+/DoRRcL7JtzupIWg0nC5LOf6/K68T1SGzMA32R2jVRkA/qfmNa2QKBgQC5
-        5O12j/5AQvx8GX/4C4azArvx1GNo2cTo+65bTLGo+PtjH9jh5VWgPm6zTvPZexEl
-        6EgBe41lHMT4/gGkgjVoVHhsL7GJeyPFPsFVnawOu4vCM51GuGM3Q6IBovi+WT1v
-        1t47IflIjZfYVS2mm/PyrQ3aikGZMM1M3JEP7q0IJwKBgHn93m7BfFxfcsounztC
-        nhUz93lJKC1jrVO7dz1MCp2F8A2wq57ULJB+VFoRvZ5oUiEcZhlTx2ehdBNPiH73
-        C2kbgR2s+HAiM7N/0z7k8K7Y5TuAkJ1YvP/MFAQsMwhJMw3Ebi8MOU8comO+rlSI
-        vcp67Zo/hy0OSwjKEduFFgbz"
+      - scim.signals.pub.config.file=/scim/pubStream.json
+      - scim.signals.rcv.config.file=/scim/receiveStream.json
+      - scim.signals.pub.pem.path=/scim/issuer.pem
 secrets:
   rcvfile:
-    file: config/receiveStream1.json
+    file: config/scim/data2/receiveStream.json
   pubfile:
-    file: config/pubStream.json
+    file: config/scim/data1/pubStream.json
   pemfile:
     file: config/cluster-scim-example-com.pem
 
