@@ -52,7 +52,7 @@ func GetSupportedEvents() []string {
 		"urn:ietf:params:SCIM:event:prov:create:notice",
 		"urn:ietf:params:SCIM:event:prov:patch:notice",
 		"urn:ietf:params:SCIM:event:prov:put:notice",
-		"urn:ietf:params:SCIM:event:prov:delete:",
+		"urn:ietf:params:SCIM:event:prov:delete",
 		"urn:ietf:params:SCIM:event:prov:activate",
 		"urn:ietf:params:SCIM:event:prov:deactivate",
 		"urn:ietf:params:SCIM:event:sig:authMethod",
