@@ -12,11 +12,12 @@ import (
 )
 
 type Globals struct {
-	Config      string     `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
-	Server      string     `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
-	StreamToken string     `help:"A token used to manage a stream"`
-	Data        ConfigData `kong:"-"`
-	// Output      string     `help:"To redirect output to a file" type:"path" `
+	Config       string     `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
+	Server       string     `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
+	StreamToken  string     `help:"A token used to manage a stream"`
+	Data         ConfigData `kong:"-"`
+	Output       string     `short:"o" help:"To redirect output to a file" type:"path" `
+	AppendOutput bool       `short:"a" default:"false" help:"When true, output to file (--output) will be appended"`
 	// Authorization string     `help:"The authorization token to use to access an i2goSignals server"`
 }
 
@@ -32,11 +33,85 @@ type CLI struct {
 	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
 	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
 	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
-	List     ListCmd     `cmd:"" help:"List all streams or one or more specific streams"`
-	Version  VersionCmd  `cmd:"" short:"v" help:"Show the goSignals client version information"`
 }
 
 var SessionGlobals Globals
+
+type OutputWriter struct {
+	output  *os.File
+	isReady bool
+	err     error
+}
+
+/*
+GetOutputWriter returns an output writer if one was requested or nil.  If one was requested and the output
+cannot be opened an error is returned.
+*/
+func (cli *CLI) GetOutputWriter() *OutputWriter {
+	if cli.Output == "" {
+		return &OutputWriter{
+			isReady: false,
+		}
+	}
+
+	if cli.AppendOutput {
+		file, err := os.OpenFile(cli.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Println(err.Error())
+			return &OutputWriter{
+				isReady: false,
+				err:     err,
+			}
+		}
+		return &OutputWriter{
+			output:  file,
+			isReady: true,
+		}
+	}
+
+	file, err := os.OpenFile(cli.Output, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println(err.Error())
+		return &OutputWriter{
+			isReady: false,
+			err:     err,
+		}
+	}
+	return &OutputWriter{
+		output:  file,
+		isReady: true,
+	}
+
+}
+
+func (o *OutputWriter) WriteString(msg string, andClose bool) {
+
+	if msg != "" && o.isReady {
+		_, _ = o.output.WriteString(msg)
+		_ = o.output.Sync()
+	}
+	if andClose {
+		o.Close()
+	}
+}
+
+func (o *OutputWriter) WriteBytes(msgBytes []byte, andClose bool) {
+	if len(msgBytes) != 0 && o.isReady {
+		_, _ = o.output.Write(msgBytes)
+		_ = o.output.Sync()
+	}
+	if andClose {
+		o.Close()
+	}
+}
+
+func (o *OutputWriter) Close() {
+	if o.isReady {
+		o.isReady = false
+		_ = o.output.Close()
+	}
+
+}
 
 func main() {
 

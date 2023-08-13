@@ -77,6 +77,9 @@ func (c *ConfigData) GetStream(alias string) (*Stream, *SsfServer) {
 }
 
 func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfiguration, error) {
+	if c.streamConfigs == nil {
+		c.streamConfigs = map[string]*model.StreamConfiguration{}
+	}
 	config := c.streamConfigs[streamAlias]
 	if config != nil {
 		return config, nil
@@ -156,7 +159,10 @@ func (c *ConfigData) Save(g *Globals) error {
 	configDir := filepath.Dir(configPath)
 	if _, err := os.Stat(configDir); os.IsNotExist(err) {
 		// path/to/whatever does not exist
-		os.Mkdir(configDir, 0770)
+		err = os.Mkdir(configDir, 0770)
+		if err != nil {
+			return err
+		}
 	}
 	out, err := json.MarshalIndent(c, "", " ")
 	if err != nil {

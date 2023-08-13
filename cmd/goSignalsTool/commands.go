@@ -29,7 +29,7 @@ import (
 
 type AddServerCmd struct {
 	Alias string `arg:"" help:"A unique name to identify the server"`
-	Host  string `arg:"" required:"" help:"Add a new goSignals server"`
+	Host  string `arg:"" required:"" help:"Http URL for a goSignals server"`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -65,7 +65,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		Streams: map[string]Stream{},
 	}
 	tryUrl, _ := serverUrl.Parse("/.well-known/sse-configuration")
-	fmt.Println("Attempting to read configuration at: " + tryUrl.String())
+	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
 	if err != nil {
@@ -93,7 +93,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	c.Data.Selected = as.Alias
 
 	cmd := ShowServerCmd{Alias: as.Alias}
-	_ = cmd.Run(&c.Globals)
+	_ = cmd.Run(c)
 	return c.Data.Save(&c.Globals)
 }
 
@@ -309,6 +309,7 @@ func (p *CreateReceiverPushCmd) Run(cli *CLI) error {
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string) error {
+
 	serverUrl, err := url.Parse(server.Host)
 	if err != nil {
 		return err
@@ -370,6 +371,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 
 	SessionGlobals.StreamToken = registration.Token
 	jsonBytes, _ := json.MarshalIndent(stream, "", "  ")
+
+	cli.GetOutputWriter().WriteBytes(jsonBytes, true)
+
 	out := fmt.Sprintf("Stream defined:\n%s", string(jsonBytes))
 	fmt.Println(out)
 	err = cli.Data.Save(&cli.Globals)
@@ -394,7 +398,7 @@ type CreateStreamCmd struct {
 	Iss        string                   `optional:"" help:"The event issuer value (default: DEFAULT" default:"DEFAULT"`
 	Name       string                   `optional:"" short:"n" help:"An alias name for the stream to be created"`
 	IssJwksUrl string                   `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	Events     []string                 `optional:"" default:"*" help:"The event uris (types) requested for a stream"`
+	Events     []string                 `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
 }
 
 type CreateIssuerKeyCmd struct {
@@ -470,25 +474,29 @@ func (h *HelpCmd) Run(realCtx *kong.Context) error {
 	return nil
 }
 
-type ListStreamsCmd struct {
-	Ids []string `sep:"," optional:"" help:"Specify 1 or more stream identifiers to list"`
-}
-
-type ListCmd struct {
-	Streams ListStreamsCmd `cmd:"" help:"List all streams or one or more specific streams"`
-}
-
-type VersionCmd struct{}
-
 type ShowTokenCmd struct {
+	Alias string `arg:"" optional:"" help:"The alias of a stream, or defaults to currently selected stream"`
 }
 
-func (s *ShowTokenCmd) Run(g *Globals) error {
+func (s *ShowTokenCmd) Run(c *CLI) error {
 	out := "Stream token: \n<undefined>"
-	if g.StreamToken != "" {
-		out = fmt.Sprintf("Stream token: \n%s", g.StreamToken)
+
+	if s.Alias == "" {
+		if c.StreamToken != "" {
+			c.GetOutputWriter().WriteString(c.StreamToken, true)
+			out = fmt.Sprintf("Stream token: \n%s", c.StreamToken)
+			fmt.Println(out)
+			return nil
+		}
 	}
-	fmt.Println(out)
+
+	stream, _ := c.Data.GetStream(s.Alias)
+	if stream != nil {
+		c.GetOutputWriter().WriteString(c.StreamToken, true)
+
+		out = fmt.Sprintf("Stream token: \n%s", c.StreamToken)
+		fmt.Println(out)
+	}
 	return nil
 }
 
@@ -496,30 +504,33 @@ type ShowServerCmd struct {
 	Alias string `arg:"" optional:"" help:"Specify a server alias, *, or blank to show the selected server"`
 }
 
-func (s *ShowServerCmd) Run(g *Globals) error {
-	if len(g.Data.Servers) == 0 {
+func (s *ShowServerCmd) Run(c *CLI) error {
+	if len(c.Data.Servers) == 0 {
 		fmt.Println("No servers defined.")
 		return nil
 	}
+
 	switch s.Alias {
 	case "":
-		if g.Data.Selected == "" {
+		if c.Data.Selected == "" {
 			return errors.New("no currently selected server")
 		}
-		s.Alias = g.Data.Selected
+		s.Alias = c.Data.Selected
 	case "*":
-		output, _ := json.MarshalIndent(g.Data.Servers, "", "  ")
+		output, _ := json.MarshalIndent(c.Data.Servers, "", "  ")
 		fmt.Println("Servers locally configured:")
 		fmt.Println(string(output))
+		c.GetOutputWriter().WriteBytes(output, true)
 		return nil
 	default:
 	}
 
-	server, exists := g.Data.Servers[s.Alias]
+	server, exists := c.Data.Servers[s.Alias]
 	if exists {
 		output, _ := json.MarshalIndent(server, "", "  ")
 		fmt.Println("Server configured:")
 		fmt.Println(string(output))
+		c.GetOutputWriter().WriteBytes(output, true)
 		return nil
 	}
 	return errors.New("server " + s.Alias + " not defined")
@@ -530,44 +541,48 @@ type ShowStreamCmd struct {
 	Full  bool   `help:"Set true to show the full information" default:"false"`
 }
 
-func (s *ShowStreamCmd) Run(g *Globals) error {
-	if len(g.Data.Servers) == 0 {
+func (s *ShowStreamCmd) Run(c *CLI) error {
+	if len(c.Data.Servers) == 0 {
 		fmt.Println("No servers defined. Please define a server and stream.")
 		return nil
 	}
-	selectedServerName := g.Data.Selected
+	selectedServerName := c.Data.Selected
 
+	outWriter := c.GetOutputWriter()
 	switch s.Alias {
 	case "":
 		// Print Streams for the selected server
 		if selectedServerName == "" {
 			return errors.New("no currently selected server")
 		}
-		serverConfig, err := g.Data.GetServer(selectedServerName)
+		serverConfig, err := c.Data.GetServer(selectedServerName)
 		if err != nil {
 			return err
 		}
-		PrintServerStreamsInfo(serverConfig, !s.Full)
+		PrintServerStreamsInfo(serverConfig, !s.Full, outWriter)
+
 	case "*":
 		// Print all streams
-		for _, server := range g.Data.Servers {
-			PrintServerStreamsInfo(&server, !s.Full)
+
+		for _, server := range c.Data.Servers {
+			PrintServerStreamsInfo(&server, !s.Full, outWriter)
 		}
 
 	default:
 		// Print the stream identified by s.Alias
-		stream, _ := g.Data.GetStream(s.Alias)
+		stream, _ := c.Data.GetStream(s.Alias)
 		if stream == nil {
 			// Try looking up by server alias
-			serverConfig, _ := g.Data.GetServer(s.Alias)
+			serverConfig, _ := c.Data.GetServer(s.Alias)
 			if serverConfig != nil {
-				PrintServerStreamsInfo(serverConfig, !s.Full)
+				PrintServerStreamsInfo(serverConfig, !s.Full, nil)
 				return nil
 			}
 			return errors.New(s.Alias + " not found.")
 		}
-		PrintStreamInfo(stream, false)
+		PrintStreamInfo(stream, false, outWriter)
 	}
+	outWriter.Close()
 	return nil
 }
 
@@ -582,10 +597,12 @@ type GetStreamStatusCmd struct {
 }
 
 func (s *GetStreamStatusCmd) Run(cli *CLI) error {
+
 	streamAlias := s.Alias
 	if streamAlias == "" {
 		return errors.New("please provide the alias of a stream to get status")
 	}
+
 	streamConfig, server := cli.Data.GetStream(streamAlias)
 	if streamConfig == nil {
 		return errors.New("Could not locate locally defined stream alias: " + streamAlias)
@@ -604,6 +621,8 @@ func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	var status model.StreamStatus
 	_ = json.Unmarshal(bodyBytes, &status)
+
+	cli.GetOutputWriter().WriteBytes(bodyBytes, true)
 
 	fmt.Println("Status for " + streamAlias)
 	fmt.Println(fmt.Sprintf("%s", bodyBytes))
@@ -633,6 +652,7 @@ func (s *GetStreamConfigCmd) Run(cli *CLI) error {
 	fmt.Println("Stream configuration for: " + streamAlias)
 
 	output, _ := json.MarshalIndent(config, "", "  ")
+	cli.GetOutputWriter().WriteBytes(output, true)
 	fmt.Println(fmt.Sprintf("%s", output))
 	return nil
 }
@@ -642,21 +662,31 @@ type GetStreamCmd struct {
 	Status GetStreamStatusCmd `cmd:"" aliases:"s" help:"Retrieve current status of the identified stream"`
 }
 
-func PrintServerStreamsInfo(server *SsfServer, brief bool) {
+func PrintServerStreamsInfo(server *SsfServer, brief bool, outWriter *OutputWriter) {
 	if len(server.Streams) == 0 {
 		fmt.Println("Server: " + server.Alias + "\nHas no streams defined.")
 		return
 	}
 	for _, v := range server.Streams {
-		PrintStreamInfo(&v, brief)
+		PrintStreamInfo(&v, brief, outWriter)
+	}
+	if outWriter != nil {
+		outWriter.Close()
 	}
 }
 
-func PrintStreamInfo(config *Stream, brief bool) {
+func PrintStreamInfo(config *Stream, brief bool, outWriter *OutputWriter) {
 	configString, _ := json.MarshalIndent(config, "", " ")
 	if brief {
-		fmt.Println(fmt.Sprintf("Stream [%s]", config.Alias))
+		msg := fmt.Sprintf("Stream [%s]", config.Alias)
+		fmt.Println(msg)
+		if outWriter != nil {
+			outWriter.WriteString(msg, false)
+		}
 		return
+	}
+	if outWriter != nil {
+		outWriter.WriteBytes(configString, false)
 	}
 	fmt.Println(fmt.Sprintf("Stream [%s]:\n%s", config.Alias, configString))
 }
@@ -687,6 +717,7 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	if streamConfig == nil {
 		return errors.New("Could not locate locally defined stream alias: " + streamAlias)
 	}
+
 	config, err := getStreamConfig(client, server, streamConfig)
 	if err != nil {
 		return err
@@ -747,6 +778,7 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 
 	}
 	if ConfirmProceed("Update stream configuration Y|[n]?") {
+
 		bodyBytes, err := json.MarshalIndent(config, "", " ")
 		req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.ConfigurationEndpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
@@ -760,8 +792,17 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		}
 		bodyBytes, _ = io.ReadAll(resp.Body)
 		var configFinal model.StreamConfiguration
-		_ = json.Unmarshal(bodyBytes, &configFinal)
+		err = json.Unmarshal(bodyBytes, &configFinal)
+		if err != nil {
+			return err
+		}
+		outBytes, _ := json.MarshalIndent(configFinal, "", " ")
+
+		cli.GetOutputWriter().WriteBytes(outBytes, true)
+		fmt.Printf("Final configuration:\n%s", outBytes)
+		return nil
 	}
+
 	fmt.Println("Request cancelled.")
 	return nil
 }
@@ -880,8 +921,8 @@ func (s *SelectCmd) Run(g *Globals) error {
 }
 
 type PollCmd struct {
-	Alias             string   `arg:"" help:"Specify the alias of a polling stream to receive events"`
-	Output            string   `short:"o" type:"path" help:"File to append results to (or new file name)"`
+	Alias string `arg:"" help:"Specify the alias of a polling stream to receive events"`
+	// Output            string   `short:"o" type:"path" help:"File to append results to (or new file name)"`
 	AutoAck           bool     `default:"true" help:"Set to false to download current events without acknowledging events received"`
 	MaxEvents         int32    `default:"100" short:"m" help:"Maximum events to retrieve per polling cycle"`
 	TimeoutSecs       int      `default:"3600" short:"t" help:"Number of seconds to wait for results"`
@@ -890,8 +931,8 @@ type PollCmd struct {
 	Loop              bool     `default:"true" short:"l" help:"By default, poll will keep looping unless set to false."`
 }
 
-func (p *PollCmd) Run(g *Globals) error {
-	stream, server := g.Data.GetStream(p.Alias)
+func (p *PollCmd) Run(cli *CLI) error {
+	stream, server := cli.Data.GetStream(p.Alias)
 	if server == nil || stream == nil {
 		return errors.New("enter the Alias name for a stream defined locally. See Show Stream *")
 	}
@@ -903,8 +944,10 @@ func (p *PollCmd) Run(g *Globals) error {
 		TimeoutSecs:       p.TimeoutSecs,
 	}
 	fmt.Println("Starting polling session. Use CTRL/C to stop...")
+	outWriter := cli.GetOutputWriter()
+	ctx := context.WithValue(context.Background(), "output", outWriter)
+	c1, cancel := context.WithCancel(ctx)
 
-	c1, cancel := context.WithCancel(context.Background())
 	exitCh := make(chan struct{})
 	go p.DoPolling(c1, server, stream, pollParams, exitCh)
 
@@ -919,6 +962,8 @@ func (p *PollCmd) Run(g *Globals) error {
 	}()
 	<-exitCh
 
+	outWriter.Close()
+
 	// fmt.Println("done.")
 	return nil
 }
@@ -928,20 +973,13 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 
-	appendToFile := false
-	var outputFile *os.File
 	var err error
-	if p.Output != "" {
-		appendToFile = true
-		outputFile, err = os.OpenFile(p.Output, os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			fmt.Println("Error opening " + p.Output + " for appending: " + err.Error())
-			return
-		}
-		defer func(outputFile *os.File) {
-			_ = outputFile.Close()
-		}(outputFile)
+	var outWriter *OutputWriter = nil
+	outVal := ctx.Value("output")
+	if outVal != nil {
+		outWriter = outVal.(*OutputWriter)
 	}
+
 	// Get the stream configuration to get the issuer JWKS URL
 	config, err := getStreamConfig(client, server, stream)
 	if err != nil {
@@ -989,12 +1027,8 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 				tokenBytes, _ := json.MarshalIndent(token, "", "  ")
 				fmt.Println(fmt.Sprintf("Security Event: [%s]", jti))
 				fmt.Println(string(tokenBytes))
-				if appendToFile {
-					_, err := outputFile.Write(tokenBytes)
-					if err != nil {
-						fmt.Println("Error occurred writing to output file: " + err.Error())
-						return
-					}
+				if outWriter != nil {
+					outWriter.WriteBytes(tokenBytes, false)
 				}
 				if p.AutoAck {
 					p.Acks = append(p.Acks, jti)
@@ -1080,7 +1114,7 @@ type GenerateCmd struct {
 	Alias string `arg:"" optional:"" help:"The stream alias to submit the event to, otherwise event is displayed to console"`
 }
 
-func (gen *GenerateCmd) Run(g *Globals) error {
+func (gen *GenerateCmd) Run(c *CLI) error {
 
 	issuer := "gen.scim.example.com"
 	audience := []string{"receiver.example.com"}
@@ -1090,11 +1124,11 @@ func (gen *GenerateCmd) Run(g *Globals) error {
 	var key *rsa.PrivateKey
 	var err error
 	if gen.Alias != "" {
-		stream, server = g.Data.GetStream(gen.Alias)
+		stream, server = c.Data.GetStream(gen.Alias)
 		if server == nil || stream == nil {
 			return errors.New("enter the Alias name for a stream defined locally. See Show Stream *")
 		}
-		config, err = g.Data.GetStreamConfig(gen.Alias)
+		config, err = c.Data.GetStreamConfig(gen.Alias)
 		issuer = config.Iss
 		if err != nil {
 			return err
@@ -1105,7 +1139,7 @@ func (gen *GenerateCmd) Run(g *Globals) error {
 		if pushDelivery == nil {
 			return errors.New("generate event currently requires a push event stream to submit")
 		}
-		key, err = g.Data.GetKey(config.Iss)
+		key, err = c.Data.GetKey(config.Iss)
 		if err != nil {
 			return err
 		}
@@ -1128,7 +1162,9 @@ func (gen *GenerateCmd) Run(g *Globals) error {
 	}
 	if gen.Alias == "" {
 		fmt.Println("Generated Event:")
-		fmt.Println(event.String())
+		output := event.String()
+		fmt.Println(output)
+		c.GetOutputWriter().WriteString(output, true)
 		return nil
 	}
 
@@ -1171,5 +1207,6 @@ func (gen *GenerateCmd) Run(g *Globals) error {
 		errMsg := fmt.Sprintf("HTTP Error: %s, POSTING to %s", resp.Status, stream.Endpoint)
 		return errors.New(errMsg)
 	}
+	c.GetOutputWriter().WriteString(event.String(), true)
 	return nil
 }
