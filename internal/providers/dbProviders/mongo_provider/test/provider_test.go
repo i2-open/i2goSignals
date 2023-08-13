@@ -80,7 +80,7 @@ func TestStreamConfig(t *testing.T) {
 	assert.Equal(t, 1, len(configs), "should be one registered")
 
 	assert.Equal(t, data.stream.Id, configs[0].Id, "should be the same data.stream id")
-
+	assert.Equal(t, 14, len(configs[0].EventsDelivered), "Should be 14 events configured for delivery")
 	events, _ := data.provider.GetEventIds(data.stream.Id, model.PollParameters{
 		MaxEvents: 5, ReturnImmediately: true,
 	})

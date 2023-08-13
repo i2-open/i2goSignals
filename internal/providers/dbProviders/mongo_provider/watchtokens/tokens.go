@@ -2,7 +2,7 @@ package watchtokens
 
 import (
 	"encoding/json"
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -18,13 +18,13 @@ type TokenData struct {
 func (tok *TokenData) Store() {
 	tf, err := os.Create(storeFilename())
 	if err != nil {
-		fmt.Println("Token file creation failed", err)
+		log.Default().Println("Token file creation failed", err)
 		return
 	}
 	jsonOut, _ := json.Marshal(tok)
 	_, err = tf.Write(jsonOut)
 	if err != nil {
-		fmt.Println("Failed to save token data", err)
+		log.Default().Println("Failed to save token data", err)
 		return
 	}
 	_ = tf.Close()
@@ -42,12 +42,12 @@ func Load() *TokenData {
 	var tokenData TokenData
 	dataBytes, err := os.ReadFile(storeFilename())
 	if err != nil {
-		fmt.Println("Token file not found or not yet initialized", err)
+		log.Println("Token file not found or not yet initialized", err)
 		tokenData = TokenData{}
 	} else {
 		err = json.Unmarshal(dataBytes, &tokenData)
 		if err != nil {
-			fmt.Println("Error parsing token data file", err)
+			log.Println("Error parsing token data file", err)
 			tokenData = TokenData{}
 		}
 	}
@@ -62,7 +62,11 @@ func storeFilename() string {
 		resDir := filepath.Join(cwd, "resources")
 		_, err := os.Stat(resDir)
 		if os.IsNotExist(err) {
-			os.Mkdir(resDir, 770)
+			err := os.Mkdir(resDir, 0770)
+			if err != nil {
+				log.Default().Println("Error creating directory for watch token: " + err.Error())
+				return ""
+			}
 		}
 		watchFile = filepath.Join(cwd, "resources/mongo_token.json")
 

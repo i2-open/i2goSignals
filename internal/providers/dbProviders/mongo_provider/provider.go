@@ -14,6 +14,7 @@ import (
 	"i2goSignals/pkg/goSet"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -540,11 +541,9 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 	config.EventsSupported = GetSupportedEvents()
 
 	if len(request.EventUris) > 0 {
-		if request.EventUris[0] == "*" {
-			config.EventsRequested = config.EventsSupported
-		} else {
-			config.EventsRequested = request.EventUris
-		}
+		config.EventsRequested = request.EventUris
+		config.EventsDelivered = calculatedDeliveredEvents(request.EventUris, config.EventsSupported)
+
 	}
 
 	if request.Method == model.DeliveryPush {
@@ -631,6 +630,35 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 	return config, err
 }
 
+func calculatedDeliveredEvents(requested []string, supported []string) []string {
+	var delivered []string
+	if len(requested) == 0 {
+		return []string{}
+	}
+	if requested[0] == "*" {
+		delivered = supported
+		return delivered
+	}
+
+	for _, reqUri := range requested {
+		compUri := "(?i)" + reqUri
+		if strings.Contains(reqUri, "*") {
+			compUri = strings.Replace(compUri, "*", ".*", -1)
+		}
+
+		for _, eventUri := range supported {
+			match, err := regexp.MatchString(compUri, eventUri)
+			if err != nil {
+				continue
+			} // ignore bad input
+			if match {
+				delivered = append(delivered, eventUri)
+			}
+		}
+	}
+	return delivered
+}
+
 func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
 
 	streamRec, err := m.GetStreamState(streamId)
@@ -640,22 +668,7 @@ func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConf
 
 	config := &streamRec.StreamConfiguration
 
-	if configReq.EventsRequested[0] == "*" {
-		configReq.EventsRequested = configReq.EventsSupported
-	}
-
-	if len(configReq.EventsRequested) > 0 {
-		config.EventsRequested = configReq.EventsRequested
-		var delivered []string
-		for _, eventUri := range config.EventsRequested {
-			for _, supported := range config.EventsSupported {
-				if strings.EqualFold(eventUri, supported) {
-					delivered = append(delivered, eventUri)
-				}
-			}
-		}
-		config.EventsDelivered = delivered
-	}
+	config.EventsDelivered = calculatedDeliveredEvents(configReq.EventsRequested, configReq.EventsSupported)
 
 	if configReq.Format != "" {
 		config.Format = configReq.Format
