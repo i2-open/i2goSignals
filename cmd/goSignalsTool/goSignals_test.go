@@ -23,7 +23,13 @@ import (
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
 var testLog = log.New(os.Stdout, "TOOL-TEST: ", log.Ldate|log.Ltime)
-var dir = os.TempDir()
+
+var testIssuer = "cluster.scim.example.com"
+var testAudMulti = "cluster.example.com,monitor.example.com,partner.scim.example.com"
+var testAudCluster = "cluster.example.com"
+var testAudMonitor = "monitor.example.com"
+var server1name = "test1server"
+var server2name = "test2server"
 
 type ssfInstance struct {
 	server      *http.Server
@@ -37,50 +43,38 @@ type ssfInstance struct {
 
 type toolSuite struct {
 	suite.Suite
-	cli     *CLI
-	parser  *kong.Kong
+	pd      *ParserData
 	servers []*ssfInstance
+	testDir string
 }
 
 func (suite *toolSuite) initialize() error {
-	suite.cli = &CLI{}
-	suite.cli.Data = ConfigData{
-		Servers: map[string]SsfServer{},
-	}
+
 	var err error
-	suite.parser, err = kong.New(suite.cli,
-		kong.Name("goSignals"),
-		kong.Description("i2goSignals client administration tool"),
-		kong.ConfigureHelp(kong.HelpOptions{
-			Compact:      true,
-			Summary:      true,
-			Tree:         true,
-			NoAppSummary: false,
-		}),
-		kong.UsageOnError(),
-		kong.Writers(os.Stdout, os.Stdout),
+	dir, _ := os.MkdirTemp(os.TempDir(), "goSignals-*")
+	suite.testDir = dir
 
-		kong.NoDefaultHelp(),
-		kong.Bind(&suite.cli.Globals),
-		kong.Exit(func(int) {}),
-	)
-	f, err := os.CreateTemp("", "ConfigTest*.json")
+	configName := fmt.Sprintf("%s/toolconfig.json", suite.testDir)
+	err = os.Setenv("GOSIGNALS_HOME", configName)
+
+	cli := &CLI{}
+	cli.Globals.Config = configName
+
+	fmt.Println("Test working directory: " + dir)
+	suite.pd, err = initParser(cli)
 	if err != nil {
-		testLog.Println(err.Error())
-		return err
+		testLog.Printf(err.Error())
 	}
-	suite.cli.Globals.Config = f.Name()
-	_ = suite.cli.Data.Load(&suite.cli.Globals)
 
-	instance, err := createServer("test1server")
+	instance, err := createServer(server1name)
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", "test1server", err.Error())
+		testLog.Printf("Error starting %s: %s", server1name, err.Error())
 		return err
 	}
 	suite.servers[0] = instance
-	instance, err = createServer("test2server")
+	instance, err = createServer(server2name)
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", "test2server", err.Error())
+		testLog.Printf("Error starting %s: %s", server2name, err.Error())
 		return err
 	}
 	suite.servers[1] = instance
@@ -89,13 +83,13 @@ func (suite *toolSuite) initialize() error {
 
 func (suite *toolSuite) cleanup() {
 
-	_ = os.Remove(suite.cli.Config)
-
 	for _, instance := range suite.servers {
 		testLog.Printf("** Shutting down server %s...", instance.provider.Name())
 		instance.app.Shutdown()
 		time.Sleep(time.Second)
 	}
+
+	os.RemoveAll(suite.testDir)
 
 }
 
@@ -129,11 +123,10 @@ func createServer(dbName string) (*ssfInstance, error) {
 func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error) {
 	args := strings.Split(cmd, " ")
 	var ctx *kong.Context
-	ctx, err := suite.parser.Parse(args)
+	ctx, err := suite.pd.parser.Parse(args)
 
 	if err != nil {
-
-		suite.parser.Errorf("%s", err.Error())
+		suite.pd.parser.Errorf("%s", err.Error())
 		if err, ok := err.(*kong.ParseError); ok {
 			log.Println(err.Error())
 			_ = err.Context.PrintUsage(false)
@@ -145,26 +138,32 @@ func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error)
 	input := os.Stdin
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	var ir, iw *os.File
 	if confirm {
-		ir, iw, _ := os.Pipe()
+		ir, iw, _ = os.Pipe()
 		os.Stdin = ir
 		confirm := "Y\n"
 		_, _ = iw.Write([]byte(confirm))
 		_ = iw.Close()
+
 	}
 
-	err = ctx.Run(&suite.cli.Globals)
-
-	os.Stdin = input
+	err = ctx.Run(&suite.pd.cli.Globals)
+	if confirm {
+		os.Stdin = input
+		ir.Close()
+	}
 	_ = w.Close()
 	os.Stdout = output
 
 	resultBytes, _ := io.ReadAll(r)
+	_ = r.Close()
 
 	return resultBytes, err
 }
 
 func TestTool(t *testing.T) {
+
 	instances := make([]*ssfInstance, 2)
 	s := toolSuite{
 		servers: instances,
@@ -174,9 +173,9 @@ func TestTool(t *testing.T) {
 		testLog.Println("Error initializing tests: " + err.Error())
 	}
 
-	suite.Run(t, &s)
+	defer s.cleanup()
 
-	s.cleanup()
+	suite.Run(t, &s)
 
 	testLog.Println("** TEST COMPLETE **")
 }
@@ -188,7 +187,7 @@ func (suite *toolSuite) Test1_AddServers() {
 	res, err := suite.executeCommand(cmd, false)
 	assert.NoError(suite.T(), err, "Add server successful")
 	testLog.Printf("%s", res)
-	server, err := suite.cli.Data.GetServer(serverName)
+	server, err := suite.pd.cli.Data.GetServer(serverName)
 	assert.NoError(suite.T(), err, "Add server successful")
 	assert.Equal(suite.T(), serverName, server.Alias, "Found server and matched")
 
@@ -206,59 +205,71 @@ func (suite *toolSuite) Test1_AddServers() {
 	assert.Contains(suite.T(), resultString, fmt.Sprintf("http://%s/jwks.json", suite.servers[1].server.Addr), "Has jwksuri")
 }
 
-func (suite *toolSuite) Test2_AddPushStream() {
-	serverName := suite.servers[0].provider.Name()
+func (suite *toolSuite) Test2_CreatePublisherKey() {
+	var pemFile = fmt.Sprintf("%s/pem-%s.pem", suite.testDir, server1name)
+	cmd := fmt.Sprintf("create key %s %s --file=%s", server1name, testIssuer, pemFile)
 
-	cmd := fmt.Sprintf("create stream receive push %s", serverName)
+	_, err := suite.executeCommand(cmd, false)
+	assert.NoError(suite.T(), err, "Error creating issuer certificate")
+
+	info, err := os.Stat(pemFile)
+	assert.Greater(suite.T(), info.Size(), int64(10), "PEM file present (> 0 bytes)")
+
+	cmd1 := fmt.Sprintf("get key %s --iss=%s", server1name, testIssuer)
+	resBytes1, err := suite.executeCommand(cmd1, false)
+	assert.NoError(suite.T(), err, "get key by server and iss parameter error")
+
+	cmd2 := fmt.Sprintf("get key http://%s/jwks/%s", suite.servers[0].server.Addr, testIssuer)
+	resBytes2, err := suite.executeCommand(cmd2, false)
+	assert.NoError(suite.T(), err, "get key by url error")
+	res1 := string(resBytes1)
+	res2 := string(resBytes2)
+	assert.Truef(suite.T(), res1 == res2, "Was same key returned")
+}
+
+func (suite *toolSuite) Test3_AddPushStream() {
+	serverName := suite.servers[0].provider.Name()
+	server1Addr := suite.servers[0].server.Addr
+	cmd := fmt.Sprintf("create stream push receive %s --name=scim1Push --mode=FORWARD --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:full,*:prov:delete --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", serverName, server1Addr)
 
 	res, err := suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
 	result := string(res)
-	assert.Contains(suite.T(), result, "\"iss\": \"DEFAULT\"")
-	endpoint := fmt.Sprintf("\"endpoint\": \"http://%s/events\"", suite.servers[0].server.Addr)
+	assert.Contains(suite.T(), result, "\"Issuer\": \"cluster.scim.example.com\"")
+	endpoint := fmt.Sprintf("\"endpoint\": \"http://%s/events\"", server1Addr)
 	assert.Contains(suite.T(), result, endpoint, "Event endpoint present")
 	testLog.Println(fmt.Sprintf("Result:\n%s", res))
 
-	var inbound = true
-	reg := model.RegisterParameters{
-		Audience:      []string{"TEST2ndStream"},
-		Issuer:        "DEFAULT",
-		Inbound:       &inbound,
-		RouteMode:     model.RouteModeImport,
-		Method:        model.DeliveryPush,
-		IssuerJWKSUrl: suite.cli.Create.Stream.IssJwksUrl,
-		EventUris:     []string{"*:prov:*:full", "*:prov:delete"},
-	}
-
-	server, _ := suite.cli.Data.GetServer(serverName)
-
-	_ = suite.cli.executeCreateRequest("test2", reg, server, "Test PUSH Receiver")
-
-	assert.NoError(suite.T(), err, "Add stream has no error")
-	result = string(res)
-	assert.Contains(suite.T(), result, "\"iss\": \"DEFAULT\"")
-	endpoint = fmt.Sprintf("\"endpoint\": \"http://%s/events\"", suite.servers[0].server.Addr)
-	assert.Contains(suite.T(), result, endpoint, "Event endpoint present")
-	testLog.Println(fmt.Sprintf("Result:\n%s", res))
-
-	streamConfig, err := suite.cli.Data.GetStreamConfig("test2")
+	streamConfig, err := suite.pd.cli.Data.GetStreamConfig("scim1Push")
 
 	assert.Len(suite.T(), streamConfig.EventsDelivered, 4, "Should be 6 events delivered")
 
 }
 
-func (suite *toolSuite) Test3_GetTest() {
+func (suite *toolSuite) Test4_UpdateStream() {
+	// this test will modify scim1Push and change events to notice and full events
+	cmd := fmt.Sprintf("set stream config scim1Push -e *:prov:*")
+
+	updateBytes, err := suite.executeCommand(cmd, true)
+	assert.NoError(suite.T(), err, "Check for update error")
+	result := string(updateBytes)
+	assert.Contains(suite.T(), result, ":notice", "Check info events present")
+	streamConfig, err := suite.pd.cli.Data.GetStreamConfig("scim1Push")
+	assert.NoError(suite.T(), err, "Get updated stream had no error")
+	assert.Equal(suite.T(), len(streamConfig.EventsDelivered), 9)
+}
+
+func (suite *toolSuite) Test8_GetStreamConfigTest() {
 	serverName := suite.servers[0].provider.Name()
 
-	serverSsf := suite.cli.Data.Servers[serverName]
+	serverSsf := suite.pd.cli.Data.Servers[serverName]
 
 	streams := serverSsf.Streams
 	assert.Len(suite.T(), streams, 2, "Should be 2 streams")
-	// dir, err := os.MkdirTemp("", "TestCfg*")
 
 	for s := range streams {
 
-		name := fmt.Sprintf("%scfg-%s.json", dir, s)
+		name := fmt.Sprintf("%s/stream-%s.json", suite.testDir, s)
 		// assert.NoError(suite.T(), err, "Temp file create error")
 
 		cmd := fmt.Sprintf("get stream config %s -o %s", s, name)

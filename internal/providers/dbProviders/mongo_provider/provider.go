@@ -668,7 +668,10 @@ func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConf
 
 	config := &streamRec.StreamConfiguration
 
-	config.EventsDelivered = calculatedDeliveredEvents(configReq.EventsRequested, configReq.EventsSupported)
+	if len(configReq.EventsRequested) > 0 {
+		config.EventsRequested = configReq.EventsRequested
+		config.EventsDelivered = calculatedDeliveredEvents(configReq.EventsRequested, configReq.EventsSupported)
+	}
 
 	if configReq.Format != "" {
 		config.Format = configReq.Format

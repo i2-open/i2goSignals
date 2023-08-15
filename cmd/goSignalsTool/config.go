@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SsfServer struct {
@@ -37,8 +38,8 @@ type ConfigData struct {
 	Selected      string
 	Servers       map[string]SsfServer
 	Pems          map[string][]byte
-	keys          map[string]*rsa.PrivateKey            `json:"-"` // don't persist
-	streamConfigs map[string]*model.StreamConfiguration `json:"-"`
+	keys          map[string]*rsa.PrivateKey            `json:"-"` // parsed keys - don't persist
+	streamConfigs map[string]*model.StreamConfiguration `json:"-"` // don't store (cached)
 }
 
 func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
@@ -62,10 +63,22 @@ func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
 }
 
 /*
-GetStream returns either the specified stream by alias or nil
+GetStreamAndServer returns either the specified stream, server, or server and stream when using <server>.<stream> notation
 */
-func (c *ConfigData) GetStream(alias string) (*Stream, *SsfServer) {
-	for _, server := range c.Servers {
+func (c *ConfigData) GetStreamAndServer(alias string) (*Stream, *SsfServer) {
+	if strings.Contains(alias, ".") {
+		parts := strings.Split(alias, ".")
+		server, exists := c.Servers[parts[0]]
+		if !exists {
+			return nil, nil
+		}
+		stream := server.Streams[parts[1]]
+		return &stream, &server
+	}
+	for ks, server := range c.Servers {
+		if ks == alias {
+			return nil, &server
+		}
 		for k, stream := range server.Streams {
 			if k == alias {
 				return &stream, &server
@@ -76,6 +89,15 @@ func (c *ConfigData) GetStream(alias string) (*Stream, *SsfServer) {
 	return nil, nil
 }
 
+func (c *ConfigData) ResetStreamConfig(streamAlias string) {
+	if c.streamConfigs == nil {
+		c.streamConfigs = map[string]*model.StreamConfiguration{}
+	}
+	_, exist := c.streamConfigs[streamAlias]
+	if exist {
+		c.streamConfigs[streamAlias] = nil
+	}
+}
 func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfiguration, error) {
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
@@ -85,7 +107,7 @@ func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfigura
 		return config, nil
 	}
 	client := http.Client{}
-	stream, server := c.GetStream(streamAlias)
+	stream, server := c.GetStreamAndServer(streamAlias)
 	if stream == nil {
 		return nil, errors.New("stream alias not defined")
 	}
@@ -137,6 +159,18 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 }
 
 func (c *ConfigData) Load(g *Globals) error {
+	if g.Config == "" {
+		g.Config = "~/.goSignals/config.json"
+	}
+
+	// Default all the maps to empty
+	if c.Pems == nil {
+		c.Pems = map[string][]byte{}
+		c.Servers = map[string]SsfServer{}
+		c.keys = map[string]*rsa.PrivateKey{}
+		c.streamConfigs = map[string]*model.StreamConfiguration{}
+	}
+
 	if _, err := os.Stat(g.Config); os.IsNotExist(err) {
 		return nil // No existing configuration
 	}
@@ -145,17 +179,20 @@ func (c *ConfigData) Load(g *Globals) error {
 	if err != nil {
 		return nil
 	}
-	err = json.Unmarshal(configBytes, c)
-	if c.Pems == nil {
-		c.Pems = map[string][]byte{}
+	if len(configBytes) == 0 {
+		return nil
 	}
+	err = json.Unmarshal(configBytes, c)
+
 	return err
 }
 
 func (c *ConfigData) Save(g *Globals) error {
 
 	configPath := g.Config
-
+	if configPath == "" {
+		configPath = "~/.goSignals/config.json"
+	}
 	configDir := filepath.Dir(configPath)
 	if _, err := os.Stat(configDir); os.IsNotExist(err) {
 		// path/to/whatever does not exist
@@ -168,6 +205,9 @@ func (c *ConfigData) Save(g *Globals) error {
 	if err != nil {
 		return err
 	}
-
-	return os.WriteFile(configPath, out, 0660)
+	err = os.WriteFile(configPath, out, 0660)
+	if err != nil {
+		fmt.Println("Error saving configuration: " + err.Error())
+	}
+	return err
 }

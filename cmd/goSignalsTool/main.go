@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+
 	"log"
 	"os"
 	"strings"
@@ -11,8 +12,13 @@ import (
 	"github.com/alecthomas/kong"
 )
 
+type ParserData struct {
+	parser *kong.Kong
+	cli    *CLI
+}
+
 type Globals struct {
-	Config       string     `help:"Location of client config files" default:"~/.goSignals/config.json" type:"path"`
+	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
 	Server       string     `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
 	StreamToken  string     `help:"A token used to manage a stream"`
 	Data         ConfigData `kong:"-"`
@@ -113,16 +119,14 @@ func (o *OutputWriter) Close() {
 
 }
 
-func main() {
-
-	configNotLoaded := true
-
-	cli := &CLI{}
+func initParser(cli *CLI) (*ParserData, error) {
+	if cli == nil {
+		cli = &CLI{}
+	}
 
 	cli.Data = ConfigData{
 		Servers: map[string]SsfServer{},
 	}
-
 	parser, err := kong.New(cli,
 		kong.Name("goSignals"),
 		kong.Description("i2goSignals client administration tool"),
@@ -139,6 +143,18 @@ func main() {
 		kong.Bind(&cli.Globals),
 		kong.Exit(func(int) {}),
 	)
+	td := ParserData{
+		parser: parser,
+		cli:    cli,
+	}
+	_ = cli.Data.Load(&cli.Globals)
+
+	return &td, err
+}
+
+func main() {
+
+	td, err := initParser(&CLI{})
 
 	// ctx.FatalIfErrorf(err)
 	if err != nil {
@@ -165,16 +181,13 @@ func main() {
 		}
 
 		var ctx *kong.Context
-		ctx, err = parser.Parse(args)
+		ctx, err = td.parser.Parse(args)
 		// ctx.Bind(&cli.Globals)
 		// ctx.Bind(args)
-		if configNotLoaded {
-			_ = cli.Data.Load(&cli.Globals)
-			configNotLoaded = false
-		}
-		if err != nil {
 
-			parser.Errorf("%s", err.Error())
+		if err != nil {
+			// Put out the help text response
+			td.parser.Errorf("%s", err.Error())
 			if err, ok := err.(*kong.ParseError); ok {
 				log.Println(err.Error())
 				_ = err.Context.PrintUsage(false)
@@ -182,10 +195,10 @@ func main() {
 			continue
 		}
 
-		err = ctx.Run(&cli.Globals)
+		err = ctx.Run(&td.cli.Globals)
 
 		if err != nil {
-			parser.Errorf("%s", err)
+			td.parser.Errorf("%s", err)
 			continue
 		}
 		if oneCommand {
