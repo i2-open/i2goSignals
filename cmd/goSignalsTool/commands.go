@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"i2goSignals/internal/model"
+	"i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"i2goSignals/pkg/goScim/resource"
+	"regexp"
 
 	"i2goSignals/pkg/goSet"
 	"io"
@@ -127,7 +129,7 @@ func (p *CreatePollPublisherCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(c.Name, reg, server, "Poll Publisher")
+	return cli.executeCreateRequest(c.Name, reg, server, "Poll Publisher", "")
 }
 
 type CreatePushPublisherCmd struct {
@@ -186,7 +188,7 @@ func (p CreatePushPublisherCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(c.Name, reg, server, "Push Publisher")
+	return cli.executeCreateRequest(c.Name, reg, server, "Push Publisher", "")
 }
 
 type CreatePollReceiverCmd struct {
@@ -258,7 +260,7 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver")
+	return cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver", "")
 }
 
 type CreatePushReceiverCmd struct {
@@ -301,48 +303,313 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(c.Name, reg, server, "Push Receiver")
+	return cli.executeCreateRequest(c.Name, reg, server, "Push Receiver", "")
 }
 
 type CreatePollConnectionCmd struct {
-	Alias     string `arg:"" help:"The alias of the publishing server or existing stream alias."`
-	DestAlias string `arg:"" help:"The alias of receiving server."`
-	Mode      string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias string `arg:"" help:"The alias of the publishing server or existing stream alias."`
+	DestAlias   string `arg:"" help:"The alias of receiving server."`
+	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+}
+
+func createRegRequestFromParams(method string, modeParam string, inbound bool, cli *CLI, config *model.StreamConfiguration) *model.RegisterParameters {
+	reg := &model.RegisterParameters{
+		Method: method,
+	}
+	if modeParam != "" {
+		var mode string
+		switch modeParam {
+		case "IMPORT", "I":
+			mode = model.RouteModeImport
+		case "FORWARD", "F":
+			mode = model.RouteModeForward
+		case "REPUBLISH", "R", "P":
+			mode = model.RouteModePublish
+		}
+		reg.RouteMode = mode
+	}
+	if inbound {
+		reg.Inbound = &inbound
+	}
+
+	if config != nil {
+		reg.EventUris = config.EventsDelivered
+		reg.Audience = config.Aud
+		reg.Issuer = config.Iss
+		reg.IssuerJWKSUrl = config.IssuerJWKSUrl
+	}
+
+	// command parameters always override existing configuration
+	streamParams := cli.Create.Stream
+
+	if len(streamParams.Events) > 0 && streamParams.Events[0] != "*" {
+		supportedEvents := mongo_provider.GetSupportedEvents()
+		if config != nil {
+			supportedEvents = config.EventsDelivered
+		}
+		reg.EventUris = calculateEvents(streamParams.Events, supportedEvents)
+	}
+
+	if len(streamParams.Aud) > 0 {
+		reg.Audience = streamParams.Aud
+	}
+
+	if streamParams.Iss != "" {
+		reg.Issuer = streamParams.Iss
+	}
+
+	if streamParams.IssJwksUrl != "" {
+		reg.IssuerJWKSUrl = streamParams.IssJwksUrl
+	}
+
+	return reg
+}
+
+func calculateEvents(requested []string, supported []string) []string {
+	var delivered []string
+	if len(requested) == 0 {
+		return []string{}
+	}
+	if requested[0] == "*" {
+		delivered = supported
+		return delivered
+	}
+
+	for _, reqUri := range requested {
+		compUri := "(?i)" + reqUri
+		if strings.Contains(reqUri, "*") {
+			compUri = strings.Replace(compUri, "*", ".*", -1)
+		}
+
+		for _, eventUri := range supported {
+			match, err := regexp.MatchString(compUri, eventUri)
+			if err != nil {
+				continue
+			} // ignore bad input
+			if match {
+				delivered = append(delivered, eventUri)
+			}
+		}
+	}
+	return delivered
 }
 
 func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 	// In this request, the PUSH Server is created first
-	strCmd := cli.Create.Stream
-	streamPub, serverPub := cli.Data.GetStreamAndServer(p.Alias)
+	strCmdParams := cli.Create.Stream
+	streamPub, serverPub := cli.Data.GetStreamAndServer(p.SourceAlias)
 	streamRcv, serverRcv := cli.Data.GetStreamAndServer(p.DestAlias)
-	if strCmd.IssJwksUrl == "" {
-		// check if there is an issuer key on the publishing server.
 
-	}
 	if serverPub == nil {
-		return errors.New("unable to match publication server for alias: " + p.Alias)
+		return errors.New("unable to match publication server for alias: " + p.SourceAlias)
 	}
+
 	if serverRcv == nil {
 		return errors.New("unable to match destination server for destination alias: " + p.DestAlias)
 	}
 	if streamRcv != nil {
-		return errors.New(fmt.Sprintf("connecting to an existing receiver stream (%s) is not supported for polling", streamRcv.Alias))
+		return errors.New(fmt.Sprintf("connecting to an existing receiver stream (%s) is not supported for POLLING connections", streamRcv.Alias))
 	}
+
+	var regReceiveStreamRequest, regPublisherStreamRequest *model.RegisterParameters
+
+	name := generateAlias(3)
+	pubName := name + "-pub"
+	rcvName := name + "-rcv"
 	if streamPub != nil {
-		// we only need to create the receiver
-		fmt.Println("Will configure a polling receiver for: " + serverPub.Alias)
+		name = streamPub.Alias
+		pubName = name
+		rcvName = name + "-rcv"
+	} else {
+		if strCmdParams.Name != "" {
+			name = strCmdParams.Name
+			pubName = name + "-pub"
+			rcvName = name + "-rcv"
+		}
 	}
-	fmt.Println("Not implemented")
+
+	if streamPub != nil {
+		streamConfig, err := cli.Data.GetStreamConfig(streamPub.Alias)
+		if err != nil {
+			return errors.New("Unable to load existing publisher stream configuration: " + err.Error())
+		}
+		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPoll, p.Mode, true, cli, streamConfig)
+		regReceiveStreamRequest.EventUrl = streamPub.Endpoint
+		regReceiveStreamRequest.EventAuth = streamPub.Token
+		regReceiveStreamRequest.IssuerJWKSUrl = streamPub.IssJwksUrl
+		fmt.Printf("Create a polling receiver to work with %s with the following request:", streamPub.Alias)
+		jsonBytes, _ := json.MarshalIndent(regReceiveStreamRequest, "", " ")
+		fmt.Println(string(jsonBytes))
+		if !ConfirmProceed("") {
+			return nil
+		}
+	} else {
+		// Both a publisher and receiver must be generated
+
+		// If issJwksUrl was omitted try to see if available on publisher
+		if strCmdParams.IssJwksUrl == "" {
+			// check if there is an issuer key on the publishing server.
+			if strCmdParams.Iss == "" {
+				return errors.New("a value for issuer 'iss' is required")
+			}
+			tryUrl := fmt.Sprintf("%s/jwks/%s", serverPub.Host, strCmdParams.Iss)
+			jwks, err := goSet.GetJwks(tryUrl)
+			if jwks != nil && err == nil {
+				strCmdParams.IssJwksUrl = tryUrl
+			} else {
+				return errors.New("a value for 'issJwksUrl' is required")
+			}
+		}
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPoll, "", false, cli, nil)
+		fmt.Printf("Creating publishing and receiver poll streams on %s and %s based on the following:", serverPub.Alias, serverRcv.Alias)
+		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
+		fmt.Println(string(jsonBytes))
+		if !ConfirmProceed("") {
+			return nil
+		}
+	}
+
+	if regPublisherStreamRequest != nil {
+		fmt.Println("Creating publisher stream...")
+		err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Poll Publisher Connection to "+rcvName, rcvName)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Error creating polling publisher stream on %s: %s", serverPub.Alias, err.Error()))
+		}
+		fmt.Printf("... %s created.", pubName)
+		streamPub, _ = cli.Data.GetStreamAndServer(pubName)
+	}
+	if regReceiveStreamRequest == nil {
+		// if this is null it is because the publisher was created in the previous block (rather than pre-existing)
+		streamConfig, _ := cli.Data.GetStreamConfig(pubName)
+		// Now, build the receiver stream based on the new publisher stream
+		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPoll, p.Mode, true, cli, streamConfig)
+		regReceiveStreamRequest.EventUrl = streamPub.Endpoint
+		regReceiveStreamRequest.EventAuth = streamPub.Token
+		regReceiveStreamRequest.IssuerJWKSUrl = streamPub.IssJwksUrl
+	}
+
+	fmt.Println("Creating polling receiver stream...")
+	err := cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error creating polling receiver stream on %s: %s", serverRcv.Alias, err.Error()))
+	}
+	fmt.Printf("... %s created.", rcvName)
 	return nil
 }
 
 type CreatePushConnectionCmd struct {
-	Alias     string `arg:"" help:"The alias of the publishing server."`
-	DestAlias string `arg:"" help:"The alias of receiving server or existing stream alias."`
-	Mode      string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias string `arg:"" help:"The alias of the publishing server."`
+	DestAlias   string `arg:"" help:"The alias of receiving server or existing stream alias."`
+	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
 }
 
-func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string) error {
+func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
+	// In this request, the PUSH Receiver is created first
+	strCmdParams := cli.Create.Stream
+	streamPub, serverPub := cli.Data.GetStreamAndServer(p.SourceAlias)
+	streamRcv, serverRcv := cli.Data.GetStreamAndServer(p.DestAlias)
+	if strCmdParams.IssJwksUrl == "" {
+		// check if there is an issuer key on the publishing server.
+
+	}
+	if serverPub == nil {
+		return errors.New("unable to match publication server for alias: " + p.SourceAlias)
+	}
+	if serverRcv == nil {
+		return errors.New("unable to match destination server for destination alias: " + p.DestAlias)
+	}
+	if streamPub != nil {
+		return errors.New(fmt.Sprintf("connecting to an existing publisher stream (%s) is not supported for PUSH connections", streamPub.Alias))
+	}
+
+	var regReceiveStreamRequest, regPublisherStreamRequest *model.RegisterParameters
+
+	name := generateAlias(3)
+	pubName := name + "-pub"
+	rcvName := name + "-rcv"
+	if streamRcv != nil {
+		name = streamRcv.Alias
+		pubName = name + "-pub"
+		rcvName = name
+	} else {
+		if strCmdParams.Name != "" {
+			name = strCmdParams.Name
+			pubName = name + "-pub"
+			rcvName = name + "-rcv"
+		}
+	}
+
+	if streamRcv != nil {
+		// The Stream Receiver already exists
+
+		streamConfig, err := cli.Data.GetStreamConfig(streamRcv.Alias)
+		if err != nil {
+			return errors.New("Unable to load existing receiver stream configuration: " + err.Error())
+		}
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, "", false, cli, streamConfig)
+		regPublisherStreamRequest.EventUrl = streamRcv.Endpoint
+		regPublisherStreamRequest.EventAuth = streamRcv.Token
+		regPublisherStreamRequest.IssuerJWKSUrl = streamRcv.IssJwksUrl
+		fmt.Printf("Create a PUSH publisher to work with %s with the following request:\n", streamRcv.Alias)
+		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
+		fmt.Println(string(jsonBytes))
+		if !ConfirmProceed("") {
+			return nil
+		}
+	} else {
+		// The stream receiver must be created
+		// Both a publisher and receiver must be generated
+		// If issJwksUrl was omitted try to see if available on publisher
+		if strCmdParams.IssJwksUrl == "" {
+			// check if there is an issuer key on the publishing server.
+			if strCmdParams.Iss == "" {
+				return errors.New("a value for issuer 'iss' is required")
+			}
+			tryUrl := fmt.Sprintf("%s/jwks/%s", serverPub.Host, strCmdParams.Iss)
+			jwks, err := goSet.GetJwks(tryUrl)
+			if jwks != nil && err == nil {
+				strCmdParams.IssJwksUrl = tryUrl
+			} else {
+				return errors.New("a value for 'issJwksUrl' is required")
+			}
+		}
+		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, true, cli, nil)
+		fmt.Printf("Creating publishing and receiver push streams on %s and %s based on the following:\n", serverPub.Alias, serverRcv.Alias)
+		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
+		fmt.Println(string(jsonBytes))
+		if !ConfirmProceed("") {
+			return nil
+		}
+	}
+
+	if regReceiveStreamRequest != nil {
+		fmt.Println("Creating push receiver stream...")
+		err := cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Push Receiver Connection from "+pubName, pubName)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Error creating polling publisher stream on %s: %s", serverPub.Alias, err.Error()))
+		}
+		fmt.Printf("... %s created.", rcvName)
+		streamRcv, _ = cli.Data.GetStreamAndServer(rcvName)
+	}
+	if regPublisherStreamRequest == nil {
+		streamConfig, _ := cli.Data.GetStreamConfig(rcvName)
+		// Now, build the receiver stream based on the new publisher stream
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, "", false, cli, streamConfig)
+		regPublisherStreamRequest.EventUrl = streamRcv.Endpoint
+		regPublisherStreamRequest.EventAuth = streamRcv.Token
+		regPublisherStreamRequest.IssuerJWKSUrl = streamRcv.IssJwksUrl
+	}
+
+	fmt.Println("Creating push publisher stream...")
+	err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error creating push publisher stream on %s: %s", serverPub.Alias, err.Error()))
+	}
+	fmt.Printf("... %s created.", pubName)
+	return nil
+}
+
+func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string, connectAlias string) error {
 
 	serverUrl, err := url.Parse(server.Host)
 	if err != nil {
@@ -392,14 +659,15 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 	_ = json.Unmarshal(bodyBytes, &config)
 
 	stream := Stream{
-		Alias:       streamAlias,
-		Token:       registration.Token,
-		Id:          config.Id,
-		Endpoint:    registration.PushUrl,
-		Description: typeDescription,
-		Iss:         config.Iss,
-		Aud:         strings.Join(config.Aud[:], ","),
-		IssJwksUrl:  config.IssuerJWKSUrl,
+		Alias:        streamAlias,
+		Token:        registration.Token,
+		Id:           config.Id,
+		Endpoint:     registration.PushUrl,
+		Description:  typeDescription,
+		Iss:          config.Iss,
+		Aud:          strings.Join(config.Aud[:], ","),
+		IssJwksUrl:   config.IssuerJWKSUrl,
+		ConnectAlias: connectAlias,
 	}
 	server.Streams[streamAlias] = stream
 
@@ -414,7 +682,6 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 	if err != nil {
 		return err
 	}
-	fmt.Println("\nThe stream token has been cached for future requests.  Save the token for use in future sessions")
 
 	return nil
 }
@@ -434,8 +701,8 @@ type CreateStreamPushCmd struct {
 type CreateStreamCmd struct {
 	Push       CreateStreamPushCmd `cmd:"" help:"Create a SET PUSH Stream (RFC8935)"`
 	Poll       CreateStreamPollCmd `cmd:"" help:"Create a SET Polling Stream (RFC8936)"`
-	Aud        []string            `default:"example.com" sep:"," help:"One or more audience values separated by commas"`
-	Iss        string              `optional:"" help:"The event issuer value (default: DEFAULT" default:"DEFAULT"`
+	Aud        []string            `optional:"" sep:"," help:"One or more audience values separated by commas"`
+	Iss        string              `optional:"" help:"The event issuer value (e.g. scim.example.com)"`
 	Name       string              `optional:"" short:"n" help:"An alias name for the stream to be created"`
 	IssJwksUrl string              `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
 	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
