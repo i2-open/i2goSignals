@@ -10,11 +10,12 @@ package main
 
 import (
 	"fmt"
-	"i2goSignals/internal/providers/dbProviders"
-	"i2goSignals/internal/providers/dbProviders/mongo_provider"
-	ssef "i2goSignals/pkg/goSSEF/server"
 	"log"
 	"os"
+
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	ssef "github.com/independentid/i2goSignals/pkg/goSSEF/server"
 )
 
 var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)

@@ -10,8 +10,8 @@ package server
 
 import (
 	"encoding/json"
-	"i2goSignals/internal/eventRouter"
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/eventRouter"
+	"github.com/independentid/i2goSignals/internal/model"
 	"net/http"
 
 	"github.com/gorilla/mux"

@@ -5,9 +5,9 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	model2 "i2goSignals/internal/model"
-	dbProviders "i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"i2goSignals/pkg/goSet"
+	model2 "github.com/independentid/i2goSignals/internal/model"
+	dbProviders "github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"

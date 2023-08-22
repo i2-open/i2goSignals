@@ -3,8 +3,8 @@ package dbProviders
 import (
 	"crypto/rsa"
 	"encoding/json"
-	"i2goSignals/internal/model"
-	"i2goSignals/pkg/goSet"
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 	"time"
 
 	"github.com/MicahParks/keyfunc"

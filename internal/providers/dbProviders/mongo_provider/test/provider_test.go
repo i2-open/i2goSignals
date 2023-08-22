@@ -2,9 +2,9 @@ package test
 
 import (
 	"fmt"
-	"i2goSignals/internal/model"
-	"i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"i2goSignals/pkg/goSet"
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 	"log"
 	"os"
 	"testing"

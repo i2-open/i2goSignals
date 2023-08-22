@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"i2goSignals/internal/model"
-	"i2goSignals/pkg/goSet"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 )
 
 type ClientPollStream struct {

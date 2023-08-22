@@ -5,12 +5,13 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"i2goSignals/internal/eventRouter/buffer"
-	"i2goSignals/internal/model"
-	"i2goSignals/internal/providers/dbProviders"
-	"i2goSignals/pkg/goSet"
 	"io"
 	"net/http"
+
+	"github.com/independentid/i2goSignals/internal/eventRouter/buffer"
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 
 	"log"
 	"os"

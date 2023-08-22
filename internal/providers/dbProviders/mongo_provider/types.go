@@ -1,7 +1,7 @@
 package mongo_provider
 
 import (
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/model"
 	"time"
 
 	"github.com/MicahParks/keyfunc"

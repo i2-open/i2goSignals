@@ -7,7 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/model"
 	"io"
 	"net/http"
 	"os"

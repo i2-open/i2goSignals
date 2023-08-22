@@ -1,7 +1,7 @@
 package buffer
 
 import (
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/model"
 	"log"
 	"sync"
 	"time"

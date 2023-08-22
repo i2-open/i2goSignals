@@ -2,7 +2,7 @@ package handler
 
 import (
 	"crypto/rsa"
-	model "i2goSignals/internal/model"
+	model "github.com/independentid/i2goSignals/internal/model"
 
 	"github.com/MicahParks/keyfunc"
 )

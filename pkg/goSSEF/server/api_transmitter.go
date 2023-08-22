@@ -3,8 +3,9 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"i2goSignals/internal/model"
 	"net/http"
+
+	"github.com/independentid/i2goSignals/internal/model"
 
 	"github.com/gorilla/mux"
 )

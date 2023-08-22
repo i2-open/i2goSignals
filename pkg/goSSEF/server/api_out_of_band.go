@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/model"
 	"net/http"
 
 	"github.com/gorilla/mux"

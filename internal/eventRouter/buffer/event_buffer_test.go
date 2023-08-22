@@ -2,7 +2,7 @@ package buffer
 
 import (
 	"fmt"
-	"i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/model"
 	"math/rand"
 	"sync"
 	"testing"

@@ -1,7 +1,7 @@
 package model
 
 import (
-	"i2goSignals/pkg/goSet"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 	"time"
 )
 

@@ -2,14 +2,15 @@ package server
 
 import (
 	"context"
-	"i2goSignals/internal/eventRouter"
-	"i2goSignals/internal/model"
-	"i2goSignals/internal/providers/dbProviders"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/independentid/i2goSignals/internal/eventRouter"
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
 )
 
 // var sa *SignalsApplication

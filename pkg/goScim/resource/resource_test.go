@@ -2,7 +2,7 @@ package resource
 
 import (
 	"fmt"
-	"i2goSignals/pkg/goSet"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 	"testing"
 
 	"github.com/brianvoe/gofakeit/v6"
