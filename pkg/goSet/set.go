@@ -173,6 +173,9 @@ func (set *SecurityEventToken) JsonBytes() []byte {
 }
 
 func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims map[string]interface{}) {
+	if set.Events == nil {
+		set.Events = map[string]interface{}{}
+	}
 	set.Events[eventUri] = eventClaims
 }
 
@@ -249,7 +252,7 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 	return token.Claims.(*SecurityEventToken), nil
 	/*
 		if claims, ok := token.Claims.(*SecurityEventToken); ok && token.Valid {
-			fmt.Println("***** Token Valid!!")
+			fmt.Println("***** Auth Valid!!")
 			return claims, nil
 		}
 		return nil, errors.New("****** Failed to validate")

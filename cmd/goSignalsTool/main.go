@@ -18,19 +18,21 @@ type ParserData struct {
 }
 
 type Globals struct {
-	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
-	Server       string     `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
-	StreamToken  string     `help:"A token used to manage a stream"`
+	Config    string `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
+	ServerUrl string `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
+	// StreamToken  string     `help:"A token used to manage a stream"`
 	Data         ConfigData `kong:"-"`
 	Output       string     `short:"o" help:"To redirect output to a file" type:"path" `
 	AppendOutput bool       `short:"a" default:"false" help:"When true, output to file (--output) will be appended"`
+
 	// Authorization string     `help:"The authorization token to use to access an i2goSignals server"`
 }
 
 type CLI struct {
 	Globals
 	Add      AddCmd      `cmd:"" help:"Define a new server to be managed"`
-	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM."`
+	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM"`
+	Delete   DeleteCmd   `cmd:"" help:"Delete a stream"`
 	Select   SelectCmd   `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
 	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
 	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`

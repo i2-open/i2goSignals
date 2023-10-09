@@ -3,9 +3,11 @@ package dbProviders
 import (
 	"crypto/rsa"
 	"encoding/json"
+	"time"
+
+	"github.com/independentid/i2goSignals/internal/authUtil"
 	"github.com/independentid/i2goSignals/internal/model"
 	"github.com/independentid/i2goSignals/pkg/goSet"
-	"time"
 
 	"github.com/MicahParks/keyfunc"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -19,15 +21,15 @@ type DbProviderInterface interface {
 	GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 	GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error)
 	GetAuthValidatorPubKey() *keyfunc.JWKS
+	GetAuthIssuer() *authUtil.AuthIssuer
 	GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS
-	CreateIssuerJwkKeyPair(issuer string) *rsa.PrivateKey
+	CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey
 
-	RegisterStream(request model.RegisterParameters) *model.RegisterResponse
-	UpdateStream(streamId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error)
+	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
+	CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error)
+	UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error)
 	DeleteStream(streamId string) error
 	GetStream(id string) (*model.StreamConfiguration, error)
-
-	AuthenticateToken(token string) (string, error)
 
 	GetStreamState(id string) (*model.StreamStateRecord, error)
 	UpdateStreamStatus(streamId string, status string, errorMsg string)

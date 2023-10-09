@@ -1,8 +1,9 @@
 package mongo_provider
 
 import (
-	"github.com/independentid/i2goSignals/internal/model"
 	"time"
+
+	"github.com/independentid/i2goSignals/internal/model"
 
 	"github.com/MicahParks/keyfunc"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -11,7 +12,8 @@ import (
 type JwkKeyRec struct {
 	Id              primitive.ObjectID `json:"id" bson:"_id"`
 	Iss             string             `json:"iss,omitempty" bson:"iss"`
-	Aud             string             `bson:"aud,omitempty" bson:"aud"`
+	Aud             string             `json:"aud,omitempty" bson:"aud"`
+	ProjectId       string             `bson:"project_id" json:"projectId,omitempty"`
 	StreamId        string             `json:"streamId" bson:"stream_id"`
 	KeyBytes        []byte             `json:"keyBytes" bson:"key_bytes"`
 	PubKeyBytes     []byte             `json:"pubJwks" bson:"pub_jwks"`

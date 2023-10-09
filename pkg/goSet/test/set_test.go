@@ -5,8 +5,8 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+
 	model2 "github.com/independentid/i2goSignals/internal/model"
-	dbProviders "github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/independentid/i2goSignals/pkg/goSet"
 
 	"github.com/MicahParks/keyfunc"
@@ -21,12 +21,12 @@ var testStream model2.StreamConfiguration = model2.StreamConfiguration{
 	Id:              primitive.NewObjectID().Hex(),
 	Iss:             "TestIssuer",
 	Aud:             []string{"TestAudience"},
-	EventsSupported: dbProviders.GetSupportedEvents(),
-	EventsRequested: dbProviders.GetSupportedEvents(),
-	EventsDelivered: dbProviders.GetSupportedEvents(),
+	EventsSupported: model2.GetSupportedEvents(),
+	EventsRequested: model2.GetSupportedEvents(),
+	EventsDelivered: model2.GetSupportedEvents(),
 	Delivery: &model2.OneOfStreamConfigurationDelivery{
-		PollDeliveryMethod: &model2.PollDeliveryMethod{
-			Method:      "https://schemas.openid.net/secevent/risc/delivery-method/poll",
+		PollTransmitMethod: &model2.PollTransmitMethod{
+			Method:      model2.DeliveryPoll,
 			EndpointUrl: "/streams/"},
 	},
 	MinVerificationInterval: 15,

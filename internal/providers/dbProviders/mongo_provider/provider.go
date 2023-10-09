@@ -8,10 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
-	"github.com/independentid/i2goSignals/pkg/goSSEF/server"
-	"github.com/independentid/i2goSignals/pkg/goSet"
 	"log"
 	"os"
 	"regexp"
@@ -20,11 +16,15 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/independentid/i2goSignals/internal/authUtil"
+	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
+	"github.com/independentid/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 )
 
 const CDbName = "ssef"
@@ -33,6 +33,7 @@ const CDbKeys = "keys"
 const CDbEvents = "events"
 const CDbPending = "pendingEvents"
 const CDbDelivered = "deliveredEvents"
+const CDbClients = "clients"
 
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
@@ -41,31 +42,12 @@ const CEnvDbName = "I2SIG_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CDefTokenIssuer = "DEFAULT"
 
-var pLog = log.New(os.Stdout, "DBMONG: ", log.Ldate|log.Ltime)
-
-func GetSupportedEvents() []string {
-	return []string{
-		"urn:ietf:params:SCIM:event:feed:add",
-		"urn:ietf:params:SCIM:event:feed:remove",
-		"urn:ietf:params:SCIM:event:prov:create:full",
-		"urn:ietf:params:SCIM:event:prov:patch:full",
-		"urn:ietf:params:SCIM:event:prov:put:full",
-		"urn:ietf:params:SCIM:event:prov:create:notice",
-		"urn:ietf:params:SCIM:event:prov:patch:notice",
-		"urn:ietf:params:SCIM:event:prov:put:notice",
-		"urn:ietf:params:SCIM:event:prov:delete",
-		"urn:ietf:params:SCIM:event:prov:activate",
-		"urn:ietf:params:SCIM:event:prov:deactivate",
-		"urn:ietf:params:SCIM:event:sig:authMethod",
-		"urn:ietf:params:SCIM:event:sig:pwdReset",
-		"urn:ietf:params:SCIM:event:misc:asyncResp",
-	}
-}
+var pLog = log.New(os.Stdout, "MONGO:  ", log.Ldate|log.Ltime)
 
 type MongoProvider struct {
-	DbUrl  string
-	DbName string
-	client *mongo.Client
+	DbUrl       string
+	DbName      string
+	mongoClient *mongo.Client
 
 	// dbInit is a flag confirming a valid SSEF database is connected and initialized
 	dbInit bool
@@ -78,6 +60,7 @@ type MongoProvider struct {
 	pendingCol      *mongo.Collection
 	deliveredCol    *mongo.Collection
 	receivedEvents  *mongo.Collection
+	clientCol       *mongo.Collection
 	DefaultIssuer   string
 	TokenIssuer     string
 	tokenKey        *rsa.PrivateKey
@@ -100,14 +83,14 @@ func (m *MongoProvider) GetResumeTokens() *watchtokens.TokenData {
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 
-	dbNames, err := m.client.ListDatabaseNames(ctx, bson.M{})
+	dbNames, err := m.mongoClient.ListDatabaseNames(ctx, bson.M{})
 	if err != nil {
 		pLog.Fatal(err)
 	}
 
 	for _, name := range dbNames {
 		if name == dbName {
-			m.ssefDb = m.client.Database(name)
+			m.ssefDb = m.mongoClient.Database(name)
 			pLog.Println(fmt.Sprintf("Connected to existing database [%s] ", name))
 			m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
 
@@ -116,6 +99,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 			m.deliveredCol = m.ssefDb.Collection(CDbDelivered)
 			m.pendingCol = m.ssefDb.Collection(CDbPending)
 			m.eventCol = m.ssefDb.Collection(CDbEvents)
+			m.clientCol = m.ssefDb.Collection(CDbClients)
+
 			m.dbInit = true
 
 			m.tokenKey, _ = m.GetIssuerPrivateKey(m.TokenIssuer)
@@ -127,7 +112,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	pLog.Println("Initializing new database [" + m.DbName + "]")
 	m.resumeTokens.Reset()
 
-	m.ssefDb = m.client.Database(m.DbName)
+	m.ssefDb = m.mongoClient.Database(m.DbName)
 
 	m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
 
@@ -136,12 +121,12 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	m.deliveredCol = m.ssefDb.Collection(CDbDelivered)
 	m.pendingCol = m.ssefDb.Collection(CDbPending)
 	m.eventCol = m.ssefDb.Collection(CDbEvents)
-
-	m.tokenKey = m.CreateIssuerJwkKeyPair(m.DefaultIssuer)
+	m.clientCol = m.ssefDb.Collection(CDbClients)
+	m.tokenKey = m.CreateIssuerJwkKeyPair(m.DefaultIssuer, "")
 
 	// If tokenIssuer and event issuer are not the same, create the new key pair
 	if m.DefaultIssuer != m.TokenIssuer {
-		m.tokenKey = m.CreateIssuerJwkKeyPair(m.TokenIssuer)
+		m.tokenKey = m.CreateIssuerJwkKeyPair(m.TokenIssuer, "")
 	}
 	m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
 
@@ -159,11 +144,21 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	if err != nil {
 		pLog.Println(err.Error())
 	}
+
+	indexIss := mongo.IndexModel{
+		Keys: bson.D{
+			{"iss", 1},
+		},
+	}
+	_, err = m.keyCol.Indexes().CreateOne(context.TODO(), indexIss)
+	if err != nil {
+		pLog.Println(err.Error())
+	}
 	m.dbInit = true
 }
 
 func (m *MongoProvider) Check() error {
-	return m.client.Ping(context.Background(), nil)
+	return m.mongoClient.Ping(context.Background(), nil)
 }
 
 func (m *MongoProvider) ResetDb(initialize bool) error {
@@ -219,26 +214,30 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		pLog.Printf("Defaulting Mongo Database to local: %s", mongoUrl)
 	}
 	opts := options.Client().ApplyURI(mongoUrl)
-	client, err := mongo.NewClient(opts)
+	opts.WriteConcern = &writeconcern.WriteConcern{
+		W: "majority",
+	}
+	client, err := mongo.Connect(ctx, opts)
 	if err != nil {
 		pLog.Fatal(err)
 		return nil, err
-	}
-
-	// Do a ping test to see that the database is actually there
-	if err := client.Connect(ctx); err != nil {
-		pLog.Printf("Error connecting to: %s.", mongoUrl)
-		pLog.Fatal(err)
 	}
 
 	resumeToken := watchtokens.Load()
 	m := MongoProvider{
 		DbName:        dbName,
 		DbUrl:         mongoUrl,
-		client:        client,
+		mongoClient:   client,
 		DefaultIssuer: defaultIssuer,
 		TokenIssuer:   tknIssuer,
 		resumeTokens:  resumeToken,
+	}
+
+	// Do a ping test to see that the database is actually there
+	err = m.Check()
+	if err != nil {
+		pLog.Fatal(err)
+		return nil, err
 	}
 
 	m.initialize(dbName, ctx)
@@ -250,7 +249,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 
 func (m *MongoProvider) Close() error {
 	m.resumeTokens.Store() // Save the mongo watch context to enable resumption on restart
-	return m.client.Disconnect(context.Background())
+	return m.mongoClient.Disconnect(context.Background())
 }
 
 func (m *MongoProvider) getStates() []model.StreamStateRecord {
@@ -288,7 +287,7 @@ func (m *MongoProvider) LoadReceiverStreams() map[string]*model.StreamStateRecor
 
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
-		if streamState.Inbound != nil && *streamState.Inbound {
+		if streamState.IsReceiver() {
 			res[streamState.StreamConfiguration.Id] = &streamState
 			m.loadJwksForReceiver(&streamState)
 		}
@@ -298,7 +297,7 @@ func (m *MongoProvider) LoadReceiverStreams() map[string]*model.StreamStateRecor
 
 func (m *MongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord) {
 
-	if streamState.Status == model.StreamStateActive {
+	if streamState.Status == model.StreamStateEnabled {
 		// Create the keyfunc keyOptions. Use an error handler that logs. Refresh the JWKS when a JWT signed by an unknown KID
 		// is found or at the specified interval. Rate limit these refreshes. Timeout the initial JWKS refresh request after
 		// 10 seconds. This timeout is also used to create the initial context.Context for keyfunc.Get.
@@ -359,13 +358,13 @@ func (m *MongoProvider) DeleteStream(streamId string) error {
 	return err
 }
 
-func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string) *rsa.PrivateKey {
+func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
 
-	err = m.storeJwkKeyPair(issuer, privateKey)
+	err = m.storeJwkKeyPair(issuer, privateKey, projectId)
 	if err == nil {
 		return privateKey
 	}
@@ -374,8 +373,8 @@ func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string) *rsa.PrivateKey {
 	return nil
 }
 
-func (m *MongoProvider) storeJwkKeyPair(issuer string, privateKey *rsa.PrivateKey) error {
-	privKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+func (m *MongoProvider) storeJwkKeyPair(issuer string, privateKey *rsa.PrivateKey, projectId string) error {
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
 	publicKey := privateKey.PublicKey
 
 	pubKeyBytes := x509.MarshalPKCS1PublicKey(&publicKey)
@@ -383,11 +382,12 @@ func (m *MongoProvider) storeJwkKeyPair(issuer string, privateKey *rsa.PrivateKe
 	keyPairRec := JwkKeyRec{
 		Id:          primitive.NewObjectID(),
 		Iss:         issuer,
-		KeyBytes:    privKeyBytes,
+		ProjectId:   projectId,
+		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
 	}
 
-	_, err := m.keyCol.InsertOne(context.TODO(), &keyPairRec)
+	_, err := m.keyCol.InsertOne(context.TODO(), &keyPairRec, &options.InsertOneOptions{})
 	return err
 }
 
@@ -431,11 +431,11 @@ func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc
 	pubKeyBytes := rec.PubKeyBytes
 	pubKey, err := x509.ParsePKCS1PublicKey(pubKeyBytes)
 
-	gkey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
+	givenKey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
 		Algorithm: "RS256",
 	})
 	givenKeys := make(map[string]keyfunc.GivenKey)
-	givenKeys[issuer] = gkey
+	givenKeys[issuer] = givenKey
 	return keyfunc.NewGiven(givenKeys)
 
 }
@@ -489,37 +489,16 @@ func (m *MongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, err
 	return x509.ParsePKCS1PrivateKey(rec.KeyBytes)
 }
 
-func (m *MongoProvider) RegisterStream(request model.RegisterParameters) *model.RegisterResponse {
+func (m *MongoProvider) RegisterClient(client model.SsfClient, projectId string) *model.RegisterResponse {
+	_, err := m.clientCol.InsertOne(context.TODO(), client)
 
-	issuer := m.DefaultIssuer
-	if request.Issuer != "" {
-		issuer = request.Issuer
-	}
-
-	resp, err := m.CreateStream(request, issuer)
+	token, err := m.GetAuthIssuer().IssueStreamClientToken(client, projectId, true)
 	if err != nil {
-		pLog.Printf("Error registering stream: " + err.Error())
+		pLog.Println("Error issuing stream admin token: " + err.Error())
 		return nil
 	}
-	eventAuthToken, err := m.IssueStreamToken(resp)
-	inbound := false
-	if request.Inbound != nil {
-		inbound = *request.Inbound
-	}
 
-	if inbound && resp.Delivery.PushDeliveryMethod != nil {
-		return &model.RegisterResponse{
-			Token:   eventAuthToken,
-			PushUrl: resp.Delivery.PushDeliveryMethod.EndpointUrl,
-			Inbound: &inbound,
-		}
-	} else if !inbound && resp.Delivery.PollDeliveryMethod != nil {
-		return &model.RegisterResponse{
-			Token:   eventAuthToken,
-			PushUrl: resp.Delivery.PollDeliveryMethod.EndpointUrl,
-		}
-	}
-	return &model.RegisterResponse{Token: eventAuthToken}
+	return &model.RegisterResponse{Token: token}
 }
 
 func (m *MongoProvider) insertStream(streamRec *model.StreamStateRecord) error {
@@ -528,41 +507,78 @@ func (m *MongoProvider) insertStream(streamRec *model.StreamStateRecord) error {
 	return err
 }
 
-func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer string) (model.StreamConfiguration, error) {
+func (m *MongoProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
 	mid := primitive.NewObjectID()
 
 	var config model.StreamConfiguration
-	{
+
+	if request.Iss == "" {
+		config.Iss = m.DefaultIssuer
+	} else {
+		config.Iss = request.Iss
 	}
 
 	config.Id = mid.Hex()
-	config.Aud = request.Audience
-	config.Iss = issuer
-	config.EventsSupported = GetSupportedEvents()
+	config.Aud = request.Aud
 
-	if len(request.EventUris) > 0 {
-		config.EventsRequested = request.EventUris
-		config.EventsDelivered = calculatedDeliveredEvents(request.EventUris, config.EventsSupported)
+	config.EventsSupported = model.GetSupportedEvents()
 
+	if len(request.EventsRequested) > 0 {
+		config.EventsRequested = request.EventsRequested
+		config.EventsDelivered = calculatedDeliveredEvents(request.EventsRequested, config.EventsSupported)
 	}
 
-	if request.Method == model.DeliveryPush {
-		pushMethod := &model.OneOfStreamConfigurationDelivery{
-			PushDeliveryMethod: &model.PushDeliveryMethod{
-				Method:              model.DeliveryPush,
-				EndpointUrl:         request.EventUrl,
-				AuthorizationHeader: request.EventAuth,
+	delivery := request.Delivery
+	config.RouteMode = request.RouteMode
+	switch delivery.GetMethod() {
+	case model.DeliveryPush:
+		config.Delivery = request.Delivery
+		if request.RouteMode == "" {
+			config.RouteMode = model.RouteModePublish // default is publish
+		}
+
+	case model.DeliveryPoll, "DEFAULT":
+		authToken, _ := m.GetAuthIssuer().IssueStreamToken(mid.Hex(), projectId)
+		delivery := &model.OneOfStreamConfigurationDelivery{
+			PollTransmitMethod: &model.PollTransmitMethod{
+				Method:              model.DeliveryPoll,
+				EndpointUrl:         fmt.Sprintf("/poll/%s", mid.Hex()),
+				AuthorizationHeader: "Bearer " + authToken,
 			},
 		}
-		config.Delivery = pushMethod
-	} else {
-		method := &model.OneOfStreamConfigurationDelivery{
-			PollDeliveryMethod: &model.PollDeliveryMethod{
-				Method:      model.DeliveryPoll,
-				EndpointUrl: "/poll"},
+		if request.RouteMode == "" {
+			config.RouteMode = model.RouteModePublish // default is publish
 		}
-		config.Delivery = method
+		config.Delivery = delivery
+
+	case model.ReceivePush:
+		config.Delivery = request.Delivery
+		method := config.Delivery.PushReceiveMethod
+		if request.RouteMode == "" {
+			config.RouteMode = model.RouteModeImport
+		}
+		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
+		authToken, _ := m.GetAuthIssuer().IssueStreamToken(mid.Hex(), projectId)
+		method.AuthorizationHeader = "Bearer " + authToken
+
+	case model.ReceivePoll:
+		config.Delivery = request.Delivery
+		method := config.Delivery.PollReceiveMethod
+
+		if request.RouteMode == "" {
+			config.RouteMode = model.RouteModeImport
+		}
+
+		if method.PollConfig == nil {
+			// Set the default polling if missing
+			config.Delivery.PollReceiveMethod.PollConfig = &model.PollParameters{
+				MaxEvents:         1000,
+				ReturnImmediately: false,
+				TimeoutSecs:       10,
+			}
+		}
 	}
+
 	config.MinVerificationInterval = 15
 	// config.IssuerJWKSUrl = "/jwks/" + issuer
 
@@ -572,57 +588,18 @@ func (m *MongoProvider) CreateStream(request model.RegisterParameters, issuer st
 	if request.IssuerJWKSUrl != "" {
 		config.IssuerJWKSUrl = request.IssuerJWKSUrl
 	} else {
-		config.IssuerJWKSUrl = "/jwks/" + issuer
+		config.IssuerJWKSUrl = "/jwks/" + config.Iss
 	}
 
 	now := time.Now()
-	inbound := false
-	if request.Inbound != nil {
-		inbound = *request.Inbound
-	}
+
 	streamRec := model.StreamStateRecord{
 		Id:                  mid,
+		ProjectId:           projectId,
 		StreamConfiguration: config,
 		StartDate:           now,
-		Status:              model.StreamStateActive,
+		Status:              model.StreamStateEnabled,
 		CreatedAt:           now,
-		Inbound:             &inbound,
-	}
-	if inbound {
-		// streamRec.IssuerJWKSUrl = request.IssuerJWKSUrl
-		receiverConfiguration := model.ReceiveConfig{
-			RouteMode: request.RouteMode,
-			Method:    request.Method,
-		}
-		if receiverConfiguration.RouteMode == "" {
-			receiverConfiguration.RouteMode = model.RouteModeImport
-		}
-		switch request.Method {
-		case model.DeliveryPoll:
-			receiverConfiguration.PollAuth = request.EventAuth
-			receiverConfiguration.PollUrl = request.EventUrl
-
-			// TODO: These are just defaulted for now
-			receiverConfiguration.PollParams = model.PollParameters{
-				MaxEvents:         1000,
-				ReturnImmediately: false,
-				TimeoutSecs:       10,
-			}
-		case model.DeliveryPush:
-			// pushToken, _ := m.IssueStreamToken(config)
-			pushMethod := &model.OneOfStreamConfigurationDelivery{
-				PushDeliveryMethod: &model.PushDeliveryMethod{
-					Method:      model.DeliveryPush,
-					EndpointUrl: "/events",
-					// AuthorizationHeader: pushToken,
-				},
-			}
-			config.Delivery = pushMethod
-		}
-
-		streamRec.Receiver = receiverConfiguration
-	} else {
-
 	}
 
 	err := m.insertStream(&streamRec)
@@ -659,11 +636,16 @@ func calculatedDeliveredEvents(requested []string, supported []string) []string 
 	return delivered
 }
 
-func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+const ErrorInvalidProject = "invalid project_id - invalid token"
+
+func (m *MongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
 
 	streamRec, err := m.GetStreamState(streamId)
 	if err != nil {
 		return nil, err
+	}
+	if streamRec.ProjectId != projectId {
+		return nil, errors.New(ErrorInvalidProject)
 	}
 
 	config := &streamRec.StreamConfiguration
@@ -687,6 +669,13 @@ func (m *MongoProvider) UpdateStream(streamId string, configReq model.StreamConf
 	}
 
 	if res.ModifiedCount == 0 {
+		if res.MatchedCount > 0 {
+			// there was no change (e.g. stream reset to jti or date)
+			return config, nil
+		}
+		if res.MatchedCount == 0 {
+			return nil, errors.New("not found")
+		}
 		return nil, nil
 	}
 	return config, nil
@@ -697,7 +686,7 @@ func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, err
 	filter := bson.M{"_id": docId}
 
 	res := m.streamCol.FindOne(context.TODO(), filter)
-	if res.Err() == mongo.ErrNoDocuments {
+	if errors.Is(res.Err(), mongo.ErrNoDocuments) {
 		return nil, errors.New("not found")
 	}
 	var rec model.StreamStateRecord
@@ -712,6 +701,11 @@ func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, err
 
 func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
 	streamState, _ := m.GetStreamState(streamId)
+	if streamState == nil {
+		msg := fmt.Sprintf("Stream [%s] not found (deleted?)", streamId)
+		pLog.Println(msg)
+		return
+	}
 	streamState.Status = status
 	streamState.ErrorMsg = errorMsg
 	docId, _ := primitive.ObjectIDFromHex(streamId)
@@ -730,6 +724,9 @@ func (m *MongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) 
 
 	status := model.StreamStatus{
 		Status: state.Status,
+	}
+	if state.ErrorMsg != "" {
+		status.Reason = state.ErrorMsg
 	}
 	return &status, nil
 }
@@ -753,7 +750,7 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, ra
 	}
 
 	/*
-		The event time for searching is in order of preference the toe, iat, or current time.  This value is used for sorting and reseting
+		The event time for searching is in order of preference the toe, iat, or current time.  This value is used for sorting and resetting
 	*/
 	var sortTime time.Time
 	if event.TimeOfEvent != nil {
@@ -1040,32 +1037,13 @@ func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
 	return res
 }
 
-func (m *MongoProvider) IssueStreamToken(record model.StreamConfiguration) (string, error) {
-	exp := time.Now().AddDate(0, 0, 90)
+func (m *MongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
 
-	eat := server.EventAuthToken{
-		StreamId: record.Id,
-		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(exp),
-			Audience:  []string{m.TokenIssuer},
-			Issuer:    m.TokenIssuer,
-			ID:        goSet.GenerateJti(),
-		},
+	return &authUtil.AuthIssuer{
+		TokenIssuer: m.TokenIssuer,
+		PrivateKey:  m.tokenKey,
+		PublicKey:   m.tokenPubKey,
 	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-	token.Header["typ"] = "jwt"
-	token.Header["kid"] = m.TokenIssuer
-	return token.SignedString(m.tokenKey)
-}
-
-func (m *MongoProvider) AuthenticateToken(token string) (string, error) {
-	tkn, err := server.ParseAuthToken(token, m.tokenPubKey)
-	if err != nil {
-		return "", err
-	}
-	return tkn.StreamId, nil
 }
 
 func (m *MongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {

@@ -8,6 +8,11 @@
  */
 package model
 
+type AuthorizationServerDescriptor struct {
+	Scopes  []string `json:"scopes"`
+	Servers []string `json:"servers"`
+}
+
 // Transmitters have metadata describing their configuration. [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#discovery-meta)
 type TransmitterConfiguration struct {
 	// URL using the https scheme with no query or fragment component that the Transmitter asserts as its Issuer Identifier. This MUST be identical to the iss claim value in Security Event Tokens issued from this Transmitter.
@@ -28,4 +33,10 @@ type TransmitterConfiguration struct {
 	VerificationEndpoint string `json:"verification_endpoint,omitempty"`
 	// List of member names in a Complex Subject which, if present in a Subject Member in an event, MUST be interpreted by a Receiver.
 	CriticalSubjectMembers []string `json:"critical_subject_members,omitempty"`
+
+	SupportedScopes map[string][]string `json:"supported_scopes,omitempty"`
+
+	ClientRegistrationEndpoint string `json:"client_registration_endpoint,omitempty"`
+
+	AuthorizationServers []AuthorizationServerDescriptor `json:"authorization_servers,omitempty"`
 }

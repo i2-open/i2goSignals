@@ -16,7 +16,7 @@ func GetJwks(jwksUrl string) (*keyfunc.JWKS, error) {
 		},
 		RefreshInterval:   time.Hour,
 		RefreshRateLimit:  time.Minute * 5,
-		RefreshTimeout:    time.Second * 10,
+		RefreshTimeout:    time.Second * 60,
 		RefreshUnknownKID: true,
 	}
 
@@ -24,5 +24,6 @@ func GetJwks(jwksUrl string) (*keyfunc.JWKS, error) {
 		return nil, nil
 	}
 	log.Printf("Loading JWKS key from: %s", jwksUrl)
+
 	return keyfunc.Get(jwksUrl, keyOptions)
 }

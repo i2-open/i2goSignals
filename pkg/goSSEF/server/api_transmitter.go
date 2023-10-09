@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/independentid/i2goSignals/internal/authUtil"
 	"github.com/independentid/i2goSignals/internal/model"
 
 	"github.com/gorilla/mux"
@@ -45,18 +46,18 @@ func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Requ
 
 // PollEvents implements the server side of RFC8936 Poll-based delivery of SET Tokens
 func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
-	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
 	}
-	if sid == "" {
+	if authCtx == nil || authCtx.StreamId == "" {
 		// The authorization token had no stream identifier in it
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	streamState, err := sa.Provider.GetStreamState(sid)
+	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -71,8 +72,8 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
-		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]", sid, jti))
-		sa.Provider.AckEvent(jti, sid)
+		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
+		sa.Provider.AckEvent(jti, authCtx.StreamId)
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
 		sa.EventRouter.IncrementCounter(streamState, event, false)
@@ -80,16 +81,21 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 	// Second, log any errors received
 	for jti, setError := range request.SetErrs {
-		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s", sid, jti, setError.Error, setError.Description)
+		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s", authCtx.StreamId, jti, setError.Error, setError.Description)
 		serverLog.Println(errMsg)
 		// TODO Nothing to do except log it?
 	}
 
-	sets, more := sa.EventRouter.PollStreamHandler(sid, request)
+	sets, more, status := sa.EventRouter.PollStreamHandler(authCtx.StreamId, request)
 
 	resp := model.PollResponse{
 		Sets:          sets,
 		MoreAvailable: more,
+	}
+
+	if status != http.StatusOK {
+		http.Error(w, "Stream not found or not ready", status)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)

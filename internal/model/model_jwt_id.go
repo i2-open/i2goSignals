@@ -8,7 +8,7 @@
  */
 package model
 
-// [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#rfc.section.3.4.1)  The \"JWT ID\" Subject Identifier Format specifies a JSON Web Token (JWT) identifier, defined in [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519).
+// [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#rfc.section.3.4.1)  The \"JWT ID\" Subject Identifier Format specifies a JSON Web Auth (JWT) identifier, defined in [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519).
 type JwtId struct {
 	Format string `json:"format"`
 	// The \"iss\" (issuer) claim of the JWT being identified, defined in [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519)

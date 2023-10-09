@@ -15,58 +15,108 @@ import (
 )
 
 type OneOfStreamConfigurationDelivery struct {
-	*PushDeliveryMethod
-	*PollDeliveryMethod
+	*PushTransmitMethod
+	*PushReceiveMethod
+	*PollTransmitMethod
+	*PollReceiveMethod
 }
 
 func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
 	// Required because json.Marshal doesn't seem to handle two optional structures.
-	if d.PushDeliveryMethod != nil {
-		return json.Marshal(d.PushDeliveryMethod)
-	} else {
-		if d.PollDeliveryMethod != nil {
-			return json.Marshal(d.PollDeliveryMethod)
-		} else {
-			return []byte("{}"), nil
-		}
+	if d.PushTransmitMethod != nil {
+		return json.Marshal(d.PushTransmitMethod)
 	}
+	if d.PollTransmitMethod != nil {
+		return json.Marshal(d.PollTransmitMethod)
+	}
+	if d.PollReceiveMethod != nil {
+		return json.Marshal(d.PollReceiveMethod)
+	}
+	if d.PushReceiveMethod != nil {
+		return json.Marshal(d.PushReceiveMethod)
+	}
+	return []byte("{}"), nil
 }
 
 func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
-	if d.PushDeliveryMethod != nil {
+	if d.PushTransmitMethod != nil {
 		return DeliveryPush
 	}
-	if d.PollDeliveryMethod != nil {
+
+	if d.PushReceiveMethod != nil {
+		return ReceivePush
+	}
+
+	if d.PollTransmitMethod != nil {
 		return DeliveryPoll
 	}
-	return "-"
+
+	if d.PollReceiveMethod != nil {
+		return ReceivePoll
+	}
+	return "DEFAULT"
+}
+
+func (d *OneOfStreamConfigurationDelivery) GetAuthorizationHeader() string {
+	switch d.GetMethod() {
+	case DeliveryPush:
+		return d.PushTransmitMethod.AuthorizationHeader
+	case DeliveryPoll:
+		return d.PollTransmitMethod.AuthorizationHeader
+	case ReceivePush:
+		return d.PushReceiveMethod.AuthorizationHeader
+	case ReceivePoll:
+		return d.PollReceiveMethod.AuthorizationHeader
+	}
+	return "" // won't happen unless a new method defined
 }
 
 func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
 	dataString := string(data)
 	if dataString == "null" || dataString == `""` {
-		d.PollDeliveryMethod = nil
-		d.PushDeliveryMethod = nil
+		d.PollTransmitMethod = nil
+		d.PushTransmitMethod = nil
 		return nil
 	}
 
-	if strings.Contains(strings.ToLower(dataString), DeliveryPoll) {
-		var poll PollDeliveryMethod
-		err := json.Unmarshal(data, &poll)
-		if err != nil {
-			return err
-		}
-		d.PollDeliveryMethod = &poll
-		return nil
-	} else {
-		if strings.Contains(strings.ToLower(dataString), DeliveryPush) {
-			var push PushDeliveryMethod
-			err := json.Unmarshal(data, &push)
+	lowString := strings.ToLower(dataString)
+	if strings.Contains(lowString, DeliveryPoll) {
+		if strings.Contains(lowString, ReceivePoll) {
+			var poll PollReceiveMethod
+			err := json.Unmarshal(data, &poll)
 			if err != nil {
 				return err
 			}
-			d.PushDeliveryMethod = &push
+			d.PollReceiveMethod = &poll
 			return nil
+		} else {
+			var poll PollTransmitMethod
+			err := json.Unmarshal(data, &poll)
+			if err != nil {
+				return err
+			}
+			d.PollTransmitMethod = &poll
+			return nil
+		}
+	} else {
+		if strings.Contains(lowString, DeliveryPush) {
+			if strings.Contains(lowString, ReceivePush) {
+				var push PushReceiveMethod
+				err := json.Unmarshal(data, &push)
+				if err != nil {
+					return err
+				}
+				d.PushReceiveMethod = &push
+				return nil
+			} else {
+				var push PushTransmitMethod
+				err := json.Unmarshal(data, &push)
+				if err != nil {
+					return err
+				}
+				d.PushTransmitMethod = &push
+				return nil
+			}
 		}
 	}
 	return errors.New("Unknown Stream delivery_method value.")

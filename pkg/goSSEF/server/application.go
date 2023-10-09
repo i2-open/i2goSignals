@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/independentid/i2goSignals/internal/authUtil"
 	"github.com/independentid/i2goSignals/internal/eventRouter"
 	"github.com/independentid/i2goSignals/internal/model"
 	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
@@ -27,6 +28,7 @@ type SignalsApplication struct {
 	AdminRole     string
 	AdminUser     string
 	AdminPwd      string
+	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
 	pushReceivers map[string]model.StreamStateRecord
 	Stats         *PrometheusHandler
@@ -63,6 +65,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		AdminRole:     role,
 		AdminUser:     user,
 		AdminPwd:      pwd,
+		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
 	}
@@ -73,7 +76,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		Addr:    addr,
 		Handler: httpRouter.router,
 	}
-	serverLog.Printf("Server[%s] listening on %s", provider.Name(), addr)
+	serverLog.Printf("ServerUrl[%s] listening on %s", provider.Name(), addr)
 
 	sa.Server = &server
 	sa.EventRouter = eventRouter.NewRouter(provider)
