@@ -57,6 +57,20 @@ func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
 	return "DEFAULT"
 }
 
+func (d *OneOfStreamConfigurationDelivery) GetEndpointUrl() string {
+	switch d.GetMethod() {
+	case DeliveryPush:
+		return d.PushTransmitMethod.EndpointUrl
+	case DeliveryPoll:
+		return d.PollTransmitMethod.EndpointUrl
+	case ReceivePush:
+		return d.PushReceiveMethod.EndpointUrl
+	case ReceivePoll:
+		return d.PollReceiveMethod.EndpointUrl
+	}
+	return "" // won't happen unless a new method defined
+}
+
 func (d *OneOfStreamConfigurationDelivery) GetAuthorizationHeader() string {
 	switch d.GetMethod() {
 	case DeliveryPush:

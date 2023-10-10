@@ -31,7 +31,11 @@ type Stream struct {
 	Alias        string `json:"alias"`
 	Id           string `json:"id"`
 	Description  string `json:"description"`
-	Token        string `json:"token"` // Used for stream mgmt
+	Token        string `json:"token"`
+	Endpoint     string `json:"endpoint"`
+	Iss          string `json:"iss"`
+	Aud          string `json:"aud"` // Note this is a comma separated list because of the way i2scim consumes it
+	IssJwksUrl   string `json:"issJwksUrl"`
 	ConnectAlias string `json:"connectAlias,omitempty"`
 }
 

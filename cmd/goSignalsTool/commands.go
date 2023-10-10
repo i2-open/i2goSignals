@@ -319,7 +319,7 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create receiver POLL stream on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create receiver POLL stream on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 	fmt.Println(out)
 
 	if !ConfirmProceed("") {
@@ -353,7 +353,8 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create receiver PUSH stream  on: %s/register\n%s", server.Host, jsonString)
+
+	out := fmt.Sprintf("Create receiver PUSH stream  on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 
 	fmt.Println(out)
 
@@ -729,11 +730,22 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		}
 	}
 
+	var audString string
+	for i, v := range config.Aud {
+		if i == 0 {
+			audString = v
+		} else {
+			audString = audString + "," + v
+		}
+	}
 	stream := Stream{
 		Alias:        streamAlias,
 		Id:           config.Id,
 		Description:  typeDescription,
 		ConnectAlias: connectAlias,
+		Iss:          config.Iss,
+		Aud:          audString,
+		Endpoint:     config.Delivery.GetEndpointUrl(),
 		Token:        config.Delivery.GetAuthorizationHeader(),
 	}
 	server.Streams[streamAlias] = stream

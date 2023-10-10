@@ -46,7 +46,7 @@ To deploy the server, build an i2goSignals image with Pack. The newly created im
 
 Building with Docker (in the project root):
 ```bash
-go build ./...
+go install ./...
 docker build . --tag i2gosignals
 ```
 
@@ -63,7 +63,7 @@ To configure the demonstration do the following:
 1. Build the goSignals project (see above)
 2. In /ect/hosts or your localdns configuration, define goSignals1 and goSignals2 to point to the corresponding goSignals server in docker (e.g. 127.0.0.1).
 3. Start all the service in `docker-compose.yml`
-4. Start the goSignalsTool and perform the following configuration
+4. Start the `goSignals` tool and perform the following configuration
 ```bash
-./cmd/goSignalsTool/goSignals
+to be determined
 ```
