@@ -177,8 +177,13 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 
 func (c *ConfigData) Load(g *Globals) error {
 	if g.Config == "" {
-		g.Config = "~/.goSignals/config.json"
+		g.Config = ".goSignals/config.json"
+		usr, err := user.Current()
+		if err == nil {
+			g.Config = filepath.Join(usr.HomeDir, g.Config)
+		}
 	}
+	// fmt.Println("Loading from " + g.Config)
 
 	// Default all the maps to empty
 	if c.Pems == nil {
@@ -194,13 +199,16 @@ func (c *ConfigData) Load(g *Globals) error {
 
 	configBytes, err := os.ReadFile(g.Config)
 	if err != nil {
+		fmt.Println("Error reading configuration: " + err.Error())
 		return nil
 	}
 	if len(configBytes) == 0 {
 		return nil
 	}
 	err = json.Unmarshal(configBytes, c)
-
+	if err != nil {
+		fmt.Println("Error parsing stored configuration: " + err.Error())
+	}
 	return err
 }
 

@@ -747,6 +747,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		Aud:          audString,
 		Endpoint:     config.Delivery.GetEndpointUrl(),
 		Token:        config.Delivery.GetAuthorizationHeader(),
+		IssJwksUrl:   config.IssuerJWKSUrl,
 	}
 	server.Streams[streamAlias] = stream
 
@@ -797,8 +798,9 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	if err != nil {
 		return err
 	}
-	baseUrl := fmt.Sprintf("%sjwks/%s", server.Host, c.IssuerId)
-	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	hostUrl, _ := url.Parse(server.Host)
+	certUrl := hostUrl.JoinPath("/jwks", c.IssuerId)
+	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
 	if server.ClientToken != "" {
 		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	} else {
@@ -1211,9 +1213,11 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Stream configuration for " + streamAlias)
-	jsonBytes, _ := json.MarshalIndent(config, "", "  ")
-	fmt.Println(string(jsonBytes))
+	/*
+		fmt.Println("Stream configuration for " + streamAlias)
+		jsonBytes, _ := json.MarshalIndent(config, "", "  ")
+		fmt.Println(string(jsonBytes))
+	*/
 
 	// Update the configuration...
 	if s.RJwksUrl != "" {
@@ -1239,32 +1243,8 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	}
 
 	if len(s.Events) > 0 {
-		switch s.Events[0][0:0] {
-		case "+", "-":
-			config.EventsRequested = config.EventsDelivered
-			for _, value := range s.Events {
-				defaultAddMode := true
-				switch value[0:0] {
-				case "+":
-					config.EventsRequested = append(config.EventsRequested, value[1:])
-					defaultAddMode = true
-				case "-":
-					defaultAddMode = false
-					removeEvent := value[1:]
-					config.EventsRequested = removeValue(config.EventsRequested, removeEvent)
-				default:
-					if defaultAddMode {
-						config.EventsRequested = append(config.EventsRequested, value)
-					} else {
-						config.EventsRequested = removeValue(config.EventsRequested, value)
-					}
-				}
-			}
-		default:
-			config.EventsRequested = s.Events
-		}
+		config.EventsRequested = s.Events
 		fmt.Println(fmt.Sprintf("Requesting events:\n%+q", config.EventsRequested))
-
 	}
 	if ConfirmProceed("Update stream configuration Y|[n]?") {
 

@@ -149,6 +149,7 @@ func initParser(cli *CLI) (*ParserData, error) {
 		parser: parser,
 		cli:    cli,
 	}
+	fmt.Println("Loading existing configuration...")
 	_ = cli.Data.Load(&cli.Globals)
 
 	return &td, err
