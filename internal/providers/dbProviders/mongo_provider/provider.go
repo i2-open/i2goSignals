@@ -1021,7 +1021,7 @@ func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	cursor := m.eventCol.FindOne(context.TODO(), filter)
 	err := cursor.Decode(&res)
 	if err != nil {
-		// pLog.Println(err.Error())
+		pLog.Println(fmt.Sprintf("Error decoding event record: %s", err.Error()))
 		return nil
 	}
 	return &res

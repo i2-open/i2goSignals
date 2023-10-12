@@ -314,6 +314,10 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis := *jtiSlice
 			for _, jti := range jtis {
 				eventRecord := r.provider.GetEventRecord(jti)
+				if eventRecord == nil {
+					eventLogger.Println(fmt.Sprintf("POLL-SRV[%s] WARNING: JTI Not found: %s"), sid, jti)
+					continue
+				}
 				sets[jti] = eventRecord.Original
 			}
 		} else {
