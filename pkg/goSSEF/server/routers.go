@@ -199,7 +199,7 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"WellKnownSsfConfigurationGet",
 			http.MethodGet,
-			"/.well-known/sse-configuration",
+			"/.well-known/ssf-configuration",
 			h.sa.WellKnownSsfConfigurationGet,
 			false,
 		},
@@ -207,7 +207,7 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"WellKnownSsfConfigurationIssuerGet",
 			http.MethodGet,
-			"/.well-known/sse-configuration/{issuer}",
+			"/.well-known/ssf-configuration/{issuer}",
 			h.sa.WellKnownSsfConfigurationIssuerGet,
 			false,
 		},

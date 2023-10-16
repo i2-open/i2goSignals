@@ -174,7 +174,7 @@ func (suite *ServerSuite) Test1_Certificate() {
 }
 
 func (suite *ServerSuite) Test2_WellKnownConfigs() {
-	serverUrl := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].server.Addr)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
@@ -203,7 +203,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	// Step 0.
 
 	testLog.Println("0. Retrieving well-known configuration...")
-	serverUrl := fmt.Sprintf("http://%s/.well-known/sse-configuration", suite.servers[0].server.Addr)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].server.Addr)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
