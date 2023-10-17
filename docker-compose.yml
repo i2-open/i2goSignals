@@ -151,7 +151,7 @@ services:
       - scim.prov.memory.backup.mins=2
       - scim.event.enable=true
       - scim.security.enable=false
-      - scim.prov.providerClass="com.independentid.scim.backend.memory.MemoryProvider"
+      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
       - scim.signals.enable=true
       - scim.signals.pub.config.file=/scim/pubStream.json
       - scim.signals.rcv.config.file=/scim/receiveStream.json
