@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -92,7 +93,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	} else {
 		baseUrl, err = url.Parse(baseUrlString)
 		if err != nil {
-			serverLog.Println("FATAL: Invalid Baseurl[%s]: %s", baseUrlString, err.Error())
+			serverLog.Println(fmt.Sprintf("FATAL: Invalid BaseUrl[%s]: %s", baseUrlString, err.Error()))
 		}
 	}
 	sa.BaseUrl = baseUrl

@@ -274,7 +274,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int) {
 	state, exist := r.pollStreams[sid]
 	if !exist {
-		eventLogger.Printf("POLL-SRV[%S]: Error Poll Transmitter not found.", sid)
+		eventLogger.Printf("POLL-SRV[%s]: Error Poll Transmitter not found.", sid)
 		return nil, false, http.StatusNotFound
 	}
 
@@ -315,7 +315,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			for _, jti := range jtis {
 				eventRecord := r.provider.GetEventRecord(jti)
 				if eventRecord == nil {
-					eventLogger.Println(fmt.Sprintf("POLL-SRV[%s] WARNING: JTI Not found: %s"), sid, jti)
+					eventLogger.Println(fmt.Sprintf("POLL-SRV[%s] WARNING: JTI Not found: %s", sid, jti))
 					continue
 				}
 				sets[jti] = eventRecord.Original
@@ -329,7 +329,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
 				if err != nil {
-					eventLogger.Printf("POLL-SRV[%s]: Error signing: ", sid, err.Error())
+					eventLogger.Printf("POLL-SRV[%s]: Error signing: %s", sid, err.Error())
 				}
 			}
 		}
@@ -399,7 +399,7 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		var err error
 		tokenString, err = token.JWS(jwt.SigningMethodRS256, key)
 		if err != nil {
-			eventLogger.Printf("PUSH-SRV[%s] Error signing event: ", configuration.Id, err.Error())
+			eventLogger.Printf("PUSH-SRV[%s] Error signing event: %s", configuration.Id, err.Error())
 		}
 	}
 
@@ -427,12 +427,12 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
-				eventLogger.Println("PUSH-SRV[%s] Error reading response: ", configuration.Id, err.Error())
+				eventLogger.Printf("PUSH-SRV[%s] Error reading response: %s", configuration.Id, err.Error())
 				return false
 			}
 			err = json.Unmarshal(body, &errorMsg)
 			if err != nil {
-				eventLogger.Println("PUSH-SRV[%s] Error parsing error response: ", configuration.Id, err.Error())
+				eventLogger.Println(fmt.Sprintf("PUSH-SRV[%s] Error parsing error response: %s", configuration.Id, err.Error()))
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
 				return false
 			}
