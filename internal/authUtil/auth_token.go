@@ -164,6 +164,10 @@ func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error)
 	if a.PublicKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
 	}
+
+	// In case of cut/paste error, trim extra spaces
+	tokenString = strings.TrimSpace(tokenString)
+
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, a.PublicKey.Keyfunc)
 	if err != nil {

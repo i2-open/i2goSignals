@@ -65,7 +65,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		Host:    serverUrl.String(),
 		Streams: map[string]Stream{},
 	}
-	tryUrl, _ := serverUrl.Parse("/.well-known/sse-configuration")
+	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
@@ -93,7 +93,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	server.ServerConfiguration = &transmitterConfiguration
 
 	if as.Iat != "" {
-		server.IatToken = as.Iat
+		server.IatToken = cleanQuotes(as.Iat)
 	} else if as.Token == "" {
 		// Load tokens and register client
 		iatUrl, _ := serverUrl.Parse("/iat")
@@ -242,7 +242,7 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 		}
 	}
 
-	// Should override be allow if destAlias is set?
+	// Should override be allowed if destAlias is set?
 
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -262,7 +262,7 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 type CreatePollReceiverCmd struct {
 	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
 	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
-	Auth     string `group:"man" help:"An authorization header used to poll for events. Required u.nless Connect specified"`
+	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
 	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
 	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
@@ -807,6 +807,7 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		fmt.Println(fmt.Sprintf("No authorization information for %s, attempting anonymous request.", server.Alias))
 	}
 	client := http.Client{}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -829,9 +830,51 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	return nil
 }
 
+type CreateIatCmd struct {
+	Alias string `arg:"" help:"The alias of a server to obtain an IAT from."`
+	New   bool   `default:"false" help:"When NEW is set, a new project id will be used, otherwise the IAT will be from the current project"`
+}
+
+func (g *CreateIatCmd) Run(c *CLI) error {
+	server, err := c.Data.GetServer(g.Alias)
+	if err != nil {
+		return err
+	}
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	iatUrl := hostUrl.JoinPath("/iat")
+	req, _ := http.NewRequest(http.MethodGet, iatUrl.String(), nil)
+	if !g.New {
+		// This will cause the IAT to be associated with the current client token (same project id)
+		if server.ClientToken != "" {
+			req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+		}
+	}
+	client := http.Client{}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("Received response: %s", resp.Status)
+		fmt.Println(msg)
+		return errors.New(msg)
+	}
+	regBytes, err := io.ReadAll(resp.Body)
+	var tokenResponse model.RegisterResponse
+	err = json.Unmarshal(regBytes, &tokenResponse)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("IAT:\n%s", tokenResponse.Token)
+	c.GetOutputWriter().WriteBytes([]byte(tokenResponse.Token), true)
+	return nil
+}
+
 type CreateCmd struct {
-	Stream CreateStreamCmd `cmd:"" aliases:"s"`
-	Key    CreateKeyCmd    `cmd:"" help:"Obtain an issuer key from an i2goSignals server"`
+	Stream CreateStreamCmd `cmd:"" aliases:"s" help:"Create a stream on a specified server."`
+	Key    CreateKeyCmd    `cmd:"" help:"Obtain an issuer key from an i2goSignals server (returns a PEM)."`
+	Iat    CreateIatCmd    `cmd:"" help:"Create/obtain an initial access token (IAT) from a server which allows a stream client to register."`
 }
 
 type ExitCmd struct {
@@ -1276,15 +1319,6 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	return nil
 }
 
-func removeValue(events []string, value string) []string {
-	for i, other := range events {
-		if strings.EqualFold(other, value) {
-			return append(events[:i], events[i+1:]...)
-		}
-	}
-	return events
-}
-
 type SetStreamStatusCmd struct {
 	Alias  string `arg:"" optional:"" help:"Specify a stream alias, *, or blank to show all streams for the selected server"`
 	State  string `required:"" short:"m" enum:"active,pause,disabled,a,p,d" help:"Enter a valid new state (active,pause,inactive)"`
@@ -1607,7 +1641,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	if gen.Alias != "" {
 		stream, server = c.Data.GetStreamAndServer(gen.Alias)
 		if server == nil || stream == nil {
-			return errors.New("enter the Alias name for a push receiver stream.")
+			return errors.New("enter the Alias name for a push receiver stream")
 		}
 		config, err = c.Data.GetStreamConfig(gen.Alias)
 		issuer = config.Iss

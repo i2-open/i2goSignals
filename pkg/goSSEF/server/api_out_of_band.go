@@ -53,7 +53,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Error generating project IAT", http.StatusInternalServerError)
 	}
 	response := model.RegisterResponse{Token: projectIat}
-	regBytes, _ := json.MarshalIndent(response, "", " ")
+	regBytes, _ := json.Marshal(response)
 	_, _ = w.Write(regBytes)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }

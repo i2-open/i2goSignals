@@ -230,6 +230,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		assert.Equal(suite.T(), project, cat.ProjectId, "Check project ids match")
 		instance.projectId = eat.ProjectId
 	}
+
 }
 func (suite *toolSuite) Test1_AddServers() {
 	testLog.Println("Test 1 - Add Server Test")
@@ -255,6 +256,28 @@ func (suite *toolSuite) Test1_AddServers() {
 	resultString := string(res)
 	testLog.Printf("\n%s", resultString)
 	assert.Contains(suite.T(), resultString, fmt.Sprintf("http://%s/jwks.json", suite.servers[1].server.Addr), "Has jwksuri")
+
+	testLog.Println("  Test issuing IAT and Register Client with it")
+	serverName = suite.servers[0].provider.Name()
+
+	var iatFile = fmt.Sprintf("%s/iat-%s.txt", suite.testDir, server1name)
+	cmd = fmt.Sprintf("create iat %s -o %s", serverName, iatFile)
+	testLog.Println("Executing:\n" + cmd)
+	res, err = suite.executeCommand(cmd, false)
+	fmt.Println(string(res))
+	info, err := os.Stat(iatFile)
+	assert.Greater(suite.T(), info.Size(), int64(10), "IAT file present (> 10 bytes)")
+
+	tokenBytes, err := os.ReadFile(iatFile)
+	assert.NoError(suite.T(), err, "No error reading token file")
+
+	testLog.Println("  Test adding server with IAT")
+	// iat := res[5:]
+	cmd = fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com --iat=%s", serverName+"-a", suite.servers[0].server.Addr, tokenBytes)
+	testLog.Println("Executing:\n" + cmd)
+	res, err = suite.executeCommand(cmd, false)
+	assert.NoError(suite.T(), err, "No error executing add server with iat")
+	fmt.Println(string(res))
 }
 
 func (suite *toolSuite) Test2_CreatePublisherKey() {
@@ -267,7 +290,7 @@ func (suite *toolSuite) Test2_CreatePublisherKey() {
 	assert.NoError(suite.T(), err, "Error creating issuer certificate")
 
 	info, err := os.Stat(pemFile)
-	assert.Greater(suite.T(), info.Size(), int64(10), "PEM file present (> 0 bytes)")
+	assert.Greater(suite.T(), info.Size(), int64(10), "PEM file present (> 10 bytes)")
 
 	testLog.Println("  Get Key...")
 	cmd1 := fmt.Sprintf("get key %s --iss=%s", server1name, testIssuer)

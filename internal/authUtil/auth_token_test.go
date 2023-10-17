@@ -1,8 +1,10 @@
 package authUtil
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/independentid/i2goSignals/internal/model"
 	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -297,6 +300,60 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			}
 		})
 	}
+}
+
+/*
+*
+TestIssueProjectIat tests the ability for a stream mgmt client token to issue a new IAT within the current project
+*/
+func TestIssueProjectIat(t1 *testing.T) {
+	clientToken := testTokens.client
+	eat, err := auth.ParseAuthToken(clientToken)
+	assert.NoError(t1, err, "Parsing client token was valid")
+
+	projId1 := eat.ProjectId
+	fmt.Println("ProjectId1:\t" + projId1)
+
+	testRequest, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
+	testRequest.Header.Set("Authorization", "Bearer "+clientToken)
+
+	authCtx, stat := auth.ValidateAuthorization(testRequest, []string{ScopeStreamAdmin})
+	assert.Equal(t1, 200, stat, "Should be status 200")
+
+	projId2 := authCtx.ProjectId
+	fmt.Println("ProjectID2:\t" + projId2)
+
+	assert.Equal(t1, projId1, projId2, "Client token id and authctx id are equal")
+
+	newIat, err := auth.IssueProjectIat(authCtx)
+	assert.NoError(t1, err, "New IAT issued with projectid")
+
+	testRequest2, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
+	testRequest2.Header.Set("Authorization", "Bearer "+newIat)
+
+	authCtx2, stat := auth.ValidateAuthorization(testRequest2, []string{ScopeRegister})
+	assert.Equal(t1, 200, stat, "Should be status 200")
+
+	fmt.Println("ProjectID3:\t" + authCtx2.ProjectId)
+
+	assert.Equal(t1, projId1, authCtx2.ProjectId, "ProjectId shoudl all be same")
+
+	regUrl := "http://example.com/register"
+	clientReg := model.RegisterParameters{
+		Scopes:      []string{ScopeStreamAdmin, ScopeStreamMgmt},
+		Email:       "joe@example.com",
+		Description: "just another test",
+	}
+	regBytes, _ := json.Marshal(&clientReg)
+	testRequest3, err := http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
+	testRequest3.Header.Set("Authorization", "Bearer "+newIat)
+
+	authCtx3, stat := auth.ValidateAuthorization(testRequest3, []string{ScopeRegister})
+	assert.Equal(t1, 200, stat, "Should be status 200")
+	assert.NotNil(t1, authCtx3, "Should be authenticated")
+
+	fmt.Println("ProjectID4:\t" + authCtx3.ProjectId)
+
 }
 
 func TestParseAuthToken(t *testing.T) {
