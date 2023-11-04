@@ -13,4 +13,5 @@ type StreamStatus struct {
 	Status string `json:"status"`
 	// OPTIONAL. The Subject to which the status applies.
 	Subject *AllOfStreamStatusSubject `json:"subject,omitempty"`
+	Reason  string                    `json:"reason,omitempty"`
 }

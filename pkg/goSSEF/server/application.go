@@ -2,15 +2,17 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
 
-	"github.com/independentid/i2goSignals/internal/eventRouter"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 )
 
 // var sa *SignalsApplication
@@ -27,6 +29,7 @@ type SignalsApplication struct {
 	AdminRole     string
 	AdminUser     string
 	AdminPwd      string
+	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
 	pushReceivers map[string]model.StreamStateRecord
 	Stats         *PrometheusHandler
@@ -63,6 +66,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		AdminRole:     role,
 		AdminUser:     user,
 		AdminPwd:      pwd,
+		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
 	}
@@ -73,7 +77,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		Addr:    addr,
 		Handler: httpRouter.router,
 	}
-	serverLog.Printf("Server[%s] listening on %s", provider.Name(), addr)
+	serverLog.Printf("ServerUrl[%s] listening on %s", provider.Name(), addr)
 
 	sa.Server = &server
 	sa.EventRouter = eventRouter.NewRouter(provider)
@@ -89,7 +93,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	} else {
 		baseUrl, err = url.Parse(baseUrlString)
 		if err != nil {
-			serverLog.Println("FATAL: Invalid Baseurl[%s]: %s", baseUrlString, err.Error())
+			serverLog.Println(fmt.Sprintf("FATAL: Invalid BaseUrl[%s]: %s", baseUrlString, err.Error()))
 		}
 	}
 	sa.BaseUrl = baseUrl

@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 type ClientPollStream struct {
@@ -27,11 +28,11 @@ InitializeReceivers handles updates to a receiver client polling stream when cha
 func (sa *SignalsApplication) InitializeReceivers() {
 	states := sa.Provider.GetStateMap()
 	for _, stream := range states {
-		if stream.Inbound == nil || !*stream.Inbound {
+		if !stream.IsReceiver() {
 			continue
 		}
 
-		if stream.Receiver.Method == model.DeliveryPush {
+		if stream.GetType() == model.DeliveryPush {
 			serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id)
 			sa.pushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
@@ -62,11 +63,11 @@ func (sa *SignalsApplication) ClosePollReceiver(sid string) {
 }
 
 /*
-HandleClientPollReceiver checks if a poll receiver is already defined, the config is updated and returns the ClientPollStream. If not, a new receivers
-is started and its handle is returned. If the stream isn't an inbound Polling receiver the request is ignored.
+HandleClientPollReceiver checks if a stream is already defined and updates the configuration returning the ClientPollStream.
+Otherwise, if new, a new receiver is started and its handle is returned. Transmitter streams are ignored automatically.
 */
 func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
-	if (streamState.Inbound == nil || !*streamState.Inbound) || streamState.Receiver.Method == model.DeliveryPush {
+	if !(streamState.GetType() == model.ReceivePoll) {
 		return nil // nothing to do
 	}
 	ps, ok := sa.pollClients[streamState.StreamConfiguration.Id]
@@ -81,7 +82,8 @@ func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.Stream
 			cancel: cancel,
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
-		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, EventUrl: %s", streamState.StreamConfiguration.Id, streamState.Receiver.PollUrl)
+		pollUrl := streamState.Delivery.PollReceiveMethod.EndpointUrl
+		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, EventUrl: %s", streamState.StreamConfiguration.Id, pollUrl)
 		go ps.pollEventsReceiver()
 		return ps
 	}
@@ -107,12 +109,13 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	var setErrs map[string]model.SetErrorType
 	client := http.Client{}
 
-	authorization := ps.stream.Receiver.PollAuth
-	eventUrl := ps.stream.Receiver.PollUrl
+	receiveMethod := ps.stream.Delivery.PollReceiveMethod
+	authorization := receiveMethod.AuthorizationHeader
+	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
 
-	for ps.stream.Status == model.StreamStateActive && ps.active {
-		pollBody := ps.stream.Receiver.PollParams // should be a copy ( by value)
+	for ps.stream.Status == model.StreamStateEnabled && ps.active {
+		pollBody := receiveMethod.PollConfig // should be a copy ( by value)
 		pollBody.Acks = acks
 		pollBody.SetErrs = setErrs
 
@@ -125,6 +128,13 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		serverLog.Printf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs))
 		resp, err := client.Do(pollRequest)
 		if err != nil || resp.StatusCode > 400 {
+			if resp.StatusCode == http.StatusNotFound {
+				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
+				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
+				serverLog.Println(errMsg)
+				ps.stream.ErrorMsg = errMsg
+				continue
+			}
 			if err == nil {
 				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
@@ -168,12 +178,12 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			serverLog.Printf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti)
 
 			token, err := goSet.Parse(setString, jwks)
-			// Token validation and diagnostics
+			// Auth validation and diagnostics
 
 			// TODO: Need to detect invalid_key errors (signing and/or decryption error)
 
 			if err != nil {
-				errMsg := fmt.Sprintf("POLL-RCV[%s] Token parsing error:\n%s\n", ps.stream.StreamConfiguration.Id, err.Error())
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Auth parsing error:\n%s\n", ps.stream.StreamConfiguration.Id, err.Error())
 				serverLog.Printf(errMsg)
 				// fmt.Println(setString)
 				setErrs[jti] = model.SetErrorType{
@@ -227,9 +237,10 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 // ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
-	sid, status := ValidateAuthorization(r, sa.Provider.GetAuthValidatorPubKey())
+	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
 
-	if sid == "" {
+	sid := authContext.StreamId
+	if authContext.StreamId == "" {
 		// The authorization token had no stream identifier in it
 		processPushError(w, "access_denied", "The authorization did not contain a stream identifier")
 		return
@@ -238,7 +249,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 	if config == nil || err != nil {
 
 		serverLog.Printf("PUSH-RCV[%s] Unable to locate stream configuration.", sid)
-		processPushError(w, "not_found", "Stream "+sid+" could not be located or was deleted")
+		processPushError(w, "not_found", "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
 	}
 	fmt.Println("***********Config.iss=" + config.Iss)
@@ -265,9 +276,9 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 
 		token, err := goSet.Parse(tokenString, jwksKey)
 
-		// Token validation and diagnostics
+		// Auth validation and diagnostics
 		if err != nil {
-			errMsg := fmt.Sprintf("PUSH-RCV[%s] Token parsing error: %s", config.Id, err.Error())
+			errMsg := fmt.Sprintf("PUSH-RCV[%s] Auth parsing error: %s", config.Id, err.Error())
 			serverLog.Printf(errMsg)
 			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
 			return
@@ -275,13 +286,13 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 
 		if !token.VerifyIssuer(config.Iss, true) {
 			errMsg := fmt.Sprintf("invalid issuer received: %s does not match %s", token.Issuer, config.Iss)
-			serverLog.Printf("PUSH-RCV[%s] Token has %s", sid, errMsg)
+			serverLog.Printf("PUSH-RCV[%s] Auth has %s", sid, errMsg)
 			processPushError(w, "invalid_issuer", "The SET Issuer is invalid for the SET Recipient.")
 			return
 		}
 		audMatch := false
 		if len(config.Aud) > 0 {
-			fmt.Println(fmt.Sprintf("Token Aud Vals: %v", token.Audience))
+			fmt.Println(fmt.Sprintf("Auth Aud Vals: %v", token.Audience))
 			for _, value := range config.Aud {
 				fmt.Println("*****Checking aud match against: " + value)
 				if token.VerifyAudience(value, false) {
@@ -291,7 +302,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 			}
 			if !audMatch {
 				errMsg := fmt.Sprintf("audience was not matched: %s", config.Aud)
-				serverLog.Printf("PUSH-RCV[%s] Token %s", sid, errMsg)
+				serverLog.Printf("PUSH-RCV[%s] Auth %s", sid, errMsg)
 				processPushError(w, "invalid_audience", "The SET Audience does not correspond to the SET Recipient")
 				return
 			}

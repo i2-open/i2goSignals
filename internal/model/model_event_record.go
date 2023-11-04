@@ -1,8 +1,9 @@
 package model
 
 import (
-	"github.com/independentid/i2goSignals/pkg/goSet"
 	"time"
+
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // EventRecord is stored in MongoProvider.eventCol
@@ -10,7 +11,7 @@ type EventRecord struct {
 	// Id        primitive.ObjectID       `json:"id" bson:"_id"`
 	Jti string `json:"jti" bson:"jti"`
 
-	// A parsed Security Event Token
+	// A parsed Security Event Auth
 	Event goSet.SecurityEventToken `json:"event"`
 
 	// Original holds the original token received. This is useful for scenarios when the original

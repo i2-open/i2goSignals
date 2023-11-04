@@ -11,7 +11,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -22,6 +21,7 @@ type Route struct {
 	Method      string
 	Pattern     string
 	HandlerFunc http.HandlerFunc
+	IsIdQuery   bool
 }
 
 type HttpRouter struct {
@@ -46,12 +46,21 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 		var handler http.Handler
 		handler = route.HandlerFunc
 		handler = application.Logger(handler, route.Name)
+		if route.IsIdQuery {
+			httpRouter.router.
+				Methods(route.Method).
+				Path(route.Pattern).
+				Name(route.Name).
+				Handler(handler).
+				Queries("stream_id", "{stream_id:[a-fA-F0-9]+}")
+		} else {
+			httpRouter.router.
+				Methods(route.Method).
+				Path(route.Pattern).
+				Name(route.Name).
+				Handler(handler)
+		}
 
-		httpRouter.router.
-			Methods(route.Method).
-			Path(route.Pattern).
-			Name(route.Name).
-			Handler(handler)
 	}
 
 	// Add prometheus handler at metrics endpoint
@@ -72,123 +81,165 @@ func (h *HttpRouter) getRoutes() Routes {
 			"GET",
 			"/",
 			h.sa.Index,
+			false,
 		},
 
 		Route{
-			"Register",
+			"GenerateIat",
+			http.MethodGet,
+			"/iat",
+			h.sa.IssuerProjectIat,
+			false,
+		},
+
+		Route{
+			"RegisterClient",
 			http.MethodPost,
 			"/register",
-			h.sa.Register,
+			h.sa.RegisterClient,
+			false,
 		},
 
 		Route{
 			"TriggerEvent",
-			strings.ToUpper("Post"),
+			http.MethodPost,
 			"/trigger-event",
 			h.sa.TriggerEvent,
+			false,
 		},
 
 		Route{
 			"ReceivePushEvent",
-			strings.ToUpper("Post"),
-			"/events",
+			http.MethodPost,
+			"/events/{id}",
 			h.sa.ReceivePushEvent,
+			false,
 		},
 
 		Route{
 			"AddSubject",
-			strings.ToUpper("Post"),
+			http.MethodPost,
 			"/add-subject",
 			h.sa.AddSubject,
+			false,
 		},
 
 		Route{
 			"GetStatus",
-			strings.ToUpper("Get"),
+			http.MethodGet,
 			"/status",
 			h.sa.GetStatus,
+			true,
 		},
 
 		Route{
 			"RemoveSubject",
-			strings.ToUpper("Post"),
+			http.MethodPost,
 			"/remove-subject",
 			h.sa.RemoveSubject,
+			false,
 		},
 
 		Route{
 			"StreamDelete",
-			strings.ToUpper("Delete"),
+			http.MethodDelete,
 			"/stream",
 			h.sa.StreamDelete,
+			true,
 		},
 
 		Route{
 			"StreamGet",
-			strings.ToUpper("Get"),
+			http.MethodGet,
 			"/stream",
 			h.sa.StreamGet,
+			true,
 		},
 
 		Route{
-			"StreamPost",
-			strings.ToUpper("Post"),
+			"StreamCreate",
+			http.MethodPost,
 			"/stream",
-			h.sa.StreamPost,
+			h.sa.StreamCreate,
+			false,
+		},
+
+		Route{
+			"StreamReplace",
+			http.MethodPut,
+			"/stream",
+			h.sa.StreamUpdate,
+			false,
+		},
+
+		Route{
+			"StreamPatch",
+			http.MethodPatch,
+			"/stream",
+			h.sa.StreamUpdate,
+			false,
 		},
 
 		Route{
 			"UpdateStatus",
-			strings.ToUpper("Post"),
+			http.MethodPost,
 			"/status",
 			h.sa.UpdateStatus,
+			true,
 		},
 
 		Route{
 			"VerificationRequest",
-			strings.ToUpper("Post"),
+			http.MethodPost,
 			"/verification",
 			h.sa.VerificationRequest,
+			false,
 		},
 
 		Route{
-			"WellKnownSseConfigurationGet",
-			strings.ToUpper("Get"),
-			"/.well-known/sse-configuration",
-			h.sa.WellKnownSseConfigurationGet,
+			"WellKnownSsfConfigurationGet",
+			http.MethodGet,
+			"/.well-known/ssf-configuration",
+			h.sa.WellKnownSsfConfigurationGet,
+			false,
 		},
 
 		Route{
-			"WellKnownSseConfigurationIssuerGet",
-			strings.ToUpper("Get"),
-			"/.well-known/sse-configuration/{issuer}",
-			h.sa.WellKnownSseConfigurationIssuerGet,
+			"WellKnownSsfConfigurationIssuerGet",
+			http.MethodGet,
+			"/.well-known/ssf-configuration/{issuer}",
+			h.sa.WellKnownSsfConfigurationIssuerGet,
+			false,
 		},
 		Route{
 			"JwksJsonCreate",
-			strings.ToUpper("POST"),
+			http.MethodPost,
 			"/jwks/{issuer}",
 			h.sa.CreateJwksIssuer,
+			false,
 		},
 		Route{
 			"JwksJson",
-			strings.ToUpper("Get"),
+			http.MethodGet,
 			"/jwks.json",
 			h.sa.JwksJson,
+			false,
 		},
 
 		Route{
 			"JwksJsonTenant",
-			strings.ToUpper("Get"),
+			http.MethodGet,
 			"/jwks/{issuer}",
 			h.sa.JwksJsonIssuer,
+			false,
 		},
 
 		Route{
 			"PollEvents",
-			strings.ToUpper("Post"),
-			"/poll",
+			http.MethodPost,
+			"/poll/{id}",
 			h.sa.PollEvents,
+			false,
 		},
 	}
 	return routes

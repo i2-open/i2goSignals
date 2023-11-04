@@ -9,12 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"github.com/independentid/i2goSignals/pkg/goScim/resource"
 	"regexp"
 
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	jwt "github.com/golang-jwt/jwt/v4"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
+
 	"io"
 	"net/http"
 	"net/url"
@@ -23,8 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+
 	"github.com/alecthomas/kong"
-	"github.com/golang-jwt/jwt/v4"
+	_ "github.com/golang-jwt/jwt/v4"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -32,6 +35,10 @@ import (
 type AddServerCmd struct {
 	Alias string `arg:"" help:"A unique name to identify the server"`
 	Host  string `arg:"" required:"" help:"Http URL for a goSignals server"`
+	Desc  string `help:"Description of project"`
+	Email string `help:"Contact email for project"`
+	Iat   string `help:"Registration Initial Access Auth if provided"`
+	Token string `help:"Administration authorization token"`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -43,17 +50,10 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	var err error
 	if strings.Index(strings.ToUpper(as.Host), "HTTP") == -1 {
 		serverUrl = &url.URL{
-			Scheme:      "https",
-			Opaque:      "",
-			User:        nil,
-			Host:        as.Host,
-			Path:        "",
-			RawPath:     "",
-			OmitHost:    false,
-			ForceQuery:  false,
-			RawQuery:    "",
-			Fragment:    "",
-			RawFragment: "",
+			Scheme:     "https",
+			Host:       as.Host,
+			OmitHost:   false,
+			ForceQuery: false,
 		}
 	} else {
 		serverUrl, err = url.Parse(as.Host)
@@ -66,13 +66,14 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		Host:    serverUrl.String(),
 		Streams: map[string]Stream{},
 	}
-	tryUrl, _ := serverUrl.Parse("/.well-known/sse-configuration")
+	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
 	if err != nil {
 		if strings.Contains(err.Error(), "gave HTTP response") {
 			tryUrl.Scheme = "http"
+			serverUrl.Scheme = "http"
 			fmt.Println("Warning: HTTPS not supported trying HTTP at: " + tryUrl.String())
 			resp, err = http.Get(tryUrl.String())
 			if err != nil {
@@ -91,9 +92,56 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		return err
 	}
 	server.ServerConfiguration = &transmitterConfiguration
+
+	if as.Iat != "" {
+		server.IatToken = cleanQuotes(as.Iat)
+	} else if as.Token == "" {
+		// Load tokens and register client
+		iatUrl, _ := serverUrl.Parse("/iat")
+		fmt.Println("Obtaining authorization...")
+		resp, err = http.Get(iatUrl.String())
+		if resp.StatusCode != http.StatusOK {
+			fmt.Println("Error: unable to obtain registration IAT token")
+			return err
+		}
+		regBytes, err := io.ReadAll(resp.Body)
+		var registration model.RegisterResponse
+		err = json.Unmarshal(regBytes, &registration)
+		if err != nil {
+			return err
+		}
+		server.IatToken = registration.Token
+	}
+
+	if as.Token != "" {
+		server.ClientToken = as.Token
+	} else {
+		as.Desc = cleanQuotes(as.Desc)
+		regUrl, _ := serverUrl.Parse("/register")
+		clientReg := model.RegisterParameters{
+			Scopes:      []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+			Email:       as.Email,
+			Description: as.Desc,
+		}
+		regBytes, _ := json.Marshal(&clientReg)
+		req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(regBytes))
+		req.Header.Set("Authorization", "Bearer "+server.IatToken)
+		client := http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return errors.New("Unexpected status response: " + resp.Status)
+		}
+		var clientResponse model.RegisterResponse
+		regBytes, err = io.ReadAll(resp.Body)
+		err = json.Unmarshal(regBytes, &clientResponse)
+		server.ClientToken = clientResponse.Token
+	}
+
 	c.Data.Servers[as.Alias] = server
 	c.Data.Selected = as.Alias
-
 	cmd := ShowServerCmd{Alias: as.Alias}
 	_ = cmd.Run(c)
 	return c.Data.Save(&c.Globals)
@@ -105,197 +153,209 @@ type AddCmd struct {
 
 type CreatePollPublisherCmd struct {
 	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	Mode  string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
 }
 
 func (p *CreatePollPublisherCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
 
-	reg := model.RegisterParameters{
-		Audience:      c.Aud,
-		Issuer:        c.Iss,
-		Method:        model.DeliveryPoll,
-		EventUris:     c.Events,
-		IssuerJWKSUrl: c.IssJwksUrl,
+	reg := model.StreamConfiguration{
+		Aud: c.Aud,
+		Iss: c.Iss,
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			PollTransmitMethod: &model.PollTransmitMethod{
+				Method: model.DeliveryPoll,
+			},
+		},
+		EventsRequested: c.Events,
+		IssuerJWKSUrl:   c.IssJwksUrl,
+		RouteMode:       parseMode(p.Mode),
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create publish POLL stream on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create publish POLL stream on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 	fmt.Println(out)
 
 	if !ConfirmProceed("") {
 		return nil
 	}
-
-	return cli.executeCreateRequest(c.Name, reg, server, "Poll Publisher", "")
+	_, err = cli.executeCreateRequest(c.Name, reg, server, "Poll Publisher", "")
+	return err
 }
 
 type CreatePushPublisherCmd struct {
-	Alias     string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl  string `short:"e" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if DestAlias not provided."`
-	Token     string `optional:"" help:"Provide the authorization token used to submit events at the endpoint url. Required if DestAlias not provided."`
-	DestAlias string `optional:"" help:"The Alias of a stream which is publishing events. Specify in serverAlias.StreamAlias form."`
+	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl string `short:"e" group:"man" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if Connect not provided."`
+	Auth     string `group:"man" help:"Provide the authorization header to used to submit events at the endpoint url. Required if Connect not provided."`
+	Connect  string `short:"c" group:"auto" xor:"auto,man" help:"The Alias of a stream which is receiving events."`
+	Mode     string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
 }
 
-func (p CreatePushPublisherCmd) Run(cli *CLI) error {
+func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
 
-	eventUrl := p.EventUrl
-	eventAuthorization := p.Token
+	var eventUrl string
+	var eventAuthorization string
+	var reg model.StreamConfiguration
 
-	if p.DestAlias != "" {
-		parts := strings.Split(p.DestAlias, ".")
-		if len(parts) != 2 {
-			return errors.New("specify destAlias in `.` form. For example:  goSignals1.Xv1")
+	if p.Connect != "" {
+
+		stream, _ := cli.Data.GetStreamAndServer(p.Connect)
+
+		if stream == nil {
+			return errors.New("Could not find a stream identified by " + p.Connect)
 		}
-
-		server, err := cli.Data.GetServer(parts[0])
+		config, err := cli.Data.GetStreamConfig(stream.Alias)
 		if err != nil {
-			return err
+			return errors.New("Error obtaining destination stream configuration: " + err.Error())
 		}
-		stream, exist := server.Streams[parts[1]]
-		if !exist {
-			return errors.New("Could not find a stream identified by " + parts[1] + " for server " + parts[0])
+		if config.Delivery.GetMethod() != model.ReceivePush {
+			return errors.New(fmt.Sprintf("The specified connection %s is not a Push Receiver", p.Connect))
 		}
-		eventUrl = stream.Endpoint
-		eventAuthorization = stream.Token
+		reg = *createRegRequestFromParams(model.DeliveryPush, p.Mode, cli, config)
+
+	} else {
+		if p.EventUrl != "" {
+			eventUrl = p.EventUrl
+		}
+		if p.Auth != "" {
+			eventAuthorization = cleanQuotes(p.Auth)
+		}
+
+		if eventUrl == "" || eventAuthorization == "" {
+			return errors.New("either --url and --token parameters or --connect parameters must be specified")
+		}
+		method := &model.PushTransmitMethod{
+			Method:              model.DeliveryPush,
+			EndpointUrl:         eventUrl,
+			AuthorizationHeader: eventAuthorization,
+		}
+		reg = model.StreamConfiguration{
+			Aud:             c.Aud,
+			Iss:             c.Iss,
+			EventsRequested: c.Events,
+			Delivery:        &model.OneOfStreamConfigurationDelivery{PushTransmitMethod: method},
+			IssuerJWKSUrl:   c.IssJwksUrl,
+			RouteMode:       parseMode(p.Mode),
+		}
 	}
 
-	if eventUrl == "" || eventAuthorization == "" {
-		return errors.New("either --url and --token parameters or --destAlias parameters must be specified")
-	}
+	// Should override be allowed if destAlias is set?
 
-	reg := model.RegisterParameters{
-		Audience:      c.Aud,
-		Issuer:        c.Iss,
-		Method:        model.DeliveryPush,
-		EventUrl:      eventUrl,
-		EventAuth:     eventAuthorization,
-		EventUris:     c.Events,
-		IssuerJWKSUrl: c.IssJwksUrl,
-	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create publish PUSH stream on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create publish PUSH stream on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 	fmt.Println(out)
 
 	if !ConfirmProceed("") {
 		return nil
 	}
-
-	return cli.executeCreateRequest(c.Name, reg, server, "Push Publisher", "")
+	_, err = cli.executeCreateRequest(c.Name, reg, server, "Push Publisher", "")
+	return err
 }
 
 type CreatePollReceiverCmd struct {
-	Alias       string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl    string `short:"e" help:"The event publishers polling endpoint URL. Required unless SourceAlias specified."`
-	Token       string `help:"An authorization token used to poll for events. Required unless SourceAlias specified"`
-	SourceAlias string `optional:"" help:"The Alias of a stream which is publishing events. Specify in serverAlias.StreamAlias form."`
-	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
+	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
+	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
+	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
 
 func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
-	var mode string
-	switch p.Mode {
-	case "IMPORT", "I":
-		mode = model.RouteModeImport
-	case "FORWARD", "F":
-		mode = model.RouteModeForward
-	case "REPUBLISH", "R", "P":
-		mode = model.RouteModePublish
-	}
-	var inbound = true
 
-	eventUrl := p.EventUrl
-	eventAuthorization := p.Token
+	var eventUrl string
+	var eventAuthorization string
+	var reg model.StreamConfiguration
 
-	if p.SourceAlias != "" {
-		parts := strings.Split(p.SourceAlias, ".")
-		if len(parts) != 2 {
-			return errors.New("specify sourceAlias in `.` form. For example:  goSignals1.Xv1")
+	if p.Connect != "" {
+		stream, _ := cli.Data.GetStreamAndServer(p.Connect)
+		if stream == nil {
+			return errors.New("Could not find a stream identified by " + p.Connect)
 		}
-
-		server, err := cli.Data.GetServer(parts[0])
+		config, err := cli.Data.GetStreamConfig(stream.Alias)
 		if err != nil {
-			return err
+			return errors.New("Error obtaining source stream configuration: " + err.Error())
 		}
-		stream, exist := server.Streams[parts[1]]
-		if !exist {
-			return errors.New("Could not find a stream identified by " + parts[1] + " for server " + parts[0])
+		reg = *createRegRequestFromParams(model.ReceivePoll, p.Mode, cli, config)
+	} else {
+		if p.EventUrl != "" {
+			eventUrl = p.EventUrl
 		}
-		eventUrl = stream.Endpoint
-		eventAuthorization = stream.Token
+		if p.Auth != "" {
+			eventAuthorization = cleanQuotes(p.Auth)
+		}
+
+		if eventUrl == "" || eventAuthorization == "" {
+			return errors.New("either --url and --token parameters or --connect parameters must be specified")
+		}
+
+		method := &model.PollReceiveMethod{
+			Method:              model.ReceivePoll,
+			EndpointUrl:         eventUrl,
+			AuthorizationHeader: eventAuthorization,
+		}
+		if eventAuthorization != "" {
+			method.AuthorizationHeader = eventAuthorization
+		}
+		reg = model.StreamConfiguration{
+			Aud:             c.Aud,
+			Iss:             c.Iss,
+			Delivery:        &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: method},
+			EventsRequested: c.Events,
+			IssuerJWKSUrl:   c.IssJwksUrl,
+			RouteMode:       parseMode(p.Mode),
+		}
 	}
 
-	if eventUrl == "" || eventAuthorization == "" {
-		return errors.New("either --url and --token parameters or --sourceAlias parameters must be specified")
-	}
-
-	reg := model.RegisterParameters{
-		Audience:      c.Aud,
-		Issuer:        c.Iss,
-		Inbound:       &inbound,
-		Method:        model.DeliveryPoll,
-		RouteMode:     mode,
-		EventUrl:      eventUrl,
-		EventAuth:     eventAuthorization,
-		EventUris:     c.Events,
-		IssuerJWKSUrl: c.IssJwksUrl,
-	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create receiver POLL stream on: %s/register\n%s", server.Host, jsonString)
+	out := fmt.Sprintf("Create receiver POLL stream on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 	fmt.Println(out)
 
 	if !ConfirmProceed("") {
 		return nil
 	}
-
-	return cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver", "")
+	_, err = cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver", "")
+	return err
 }
 
 type CreatePushReceiverCmd struct {
 	Alias string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	Mode  string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	Mode  string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
 
 func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 	c := cli.Create.Stream
-	var mode string
-	switch p.Mode {
-	case "IMPORT", "I":
-		mode = model.RouteModeImport
-	case "FORWARD", "F":
-		mode = model.RouteModeForward
-	case "REPUBLISH", "R", "P":
-		mode = model.RouteModePublish
-	}
-	var inbound = true
 
-	reg := model.RegisterParameters{
-		Audience:      c.Aud,
-		Issuer:        c.Iss,
-		Inbound:       &inbound,
-		Method:        model.DeliveryPush,
-		RouteMode:     mode,
-		EventUris:     c.Events,
-		IssuerJWKSUrl: c.IssJwksUrl,
+	method := &model.PushReceiveMethod{
+		Method: model.ReceivePush,
+	}
+	reg := model.StreamConfiguration{
+		Aud:             c.Aud,
+		Iss:             c.Iss,
+		Delivery:        &model.OneOfStreamConfigurationDelivery{PushReceiveMethod: method},
+		EventsRequested: c.Events,
+		IssuerJWKSUrl:   c.IssJwksUrl,
+		RouteMode:       parseMode(p.Mode),
 	}
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
 		return err
 	}
-	out := fmt.Sprintf("Create receiver PUSH stream  on: %s/register\n%s", server.Host, jsonString)
+
+	out := fmt.Sprintf("Create receiver PUSH stream  on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, jsonString)
 
 	fmt.Println(out)
 
@@ -303,7 +363,8 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 		return nil
 	}
 
-	return cli.executeCreateRequest(c.Name, reg, server, "Push Receiver", "")
+	_, err = cli.executeCreateRequest(c.Name, reg, server, "Push Receiver", "")
+	return err
 }
 
 type CreatePollConnectionCmd struct {
@@ -312,50 +373,71 @@ type CreatePollConnectionCmd struct {
 	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
 }
 
-func createRegRequestFromParams(method string, modeParam string, inbound bool, cli *CLI, config *model.StreamConfiguration) *model.RegisterParameters {
-	reg := &model.RegisterParameters{
-		Method: method,
-	}
-	if modeParam != "" {
-		var mode string
-		switch modeParam {
-		case "IMPORT", "I":
-			mode = model.RouteModeImport
-		case "FORWARD", "F":
-			mode = model.RouteModeForward
-		case "REPUBLISH", "R", "P":
-			mode = model.RouteModePublish
+// createRegRequestFromParams creates the complimentary connecting stream based on an input stream.
+//
+// Parameters include:
+// - method indicates the delivery type desired (one of urn:ietf:rfc:8935|8936|8935:receive|8936:receive )
+// - modParam indicates what a receiver should do with a received event (import-IM, forward-FW,or republish-PB)
+// - connectingConfig is the configuration of a stream that will be connected to.
+func createRegRequestFromParams(method string, modeParam string, cli *CLI, connectingConfig *model.StreamConfiguration) *model.StreamConfiguration {
+	reg := &model.StreamConfiguration{}
+
+	delivery := &model.OneOfStreamConfigurationDelivery{}
+
+	switch method {
+	case model.DeliveryPush:
+		delivery.PushTransmitMethod = &model.PushTransmitMethod{
+			Method:              model.DeliveryPush,
+			EndpointUrl:         connectingConfig.Delivery.PushReceiveMethod.EndpointUrl,
+			AuthorizationHeader: connectingConfig.Delivery.PushReceiveMethod.AuthorizationHeader,
 		}
-		reg.RouteMode = mode
-	}
-	if inbound {
-		reg.Inbound = &inbound
+
+	case model.ReceivePush:
+		delivery.PushReceiveMethod = &model.PushReceiveMethod{
+			Method: model.ReceivePush,
+		}
+
+	case model.DeliveryPoll:
+		delivery.PollTransmitMethod = &model.PollTransmitMethod{
+			Method: model.DeliveryPoll,
+		}
+
+	case model.ReceivePoll:
+		delivery.PollReceiveMethod = &model.PollReceiveMethod{
+			Method:              model.ReceivePoll,
+			EndpointUrl:         connectingConfig.Delivery.PollTransmitMethod.EndpointUrl,
+			AuthorizationHeader: connectingConfig.Delivery.PollTransmitMethod.AuthorizationHeader,
+		}
 	}
 
-	if config != nil {
-		reg.EventUris = config.EventsDelivered
-		reg.Audience = config.Aud
-		reg.Issuer = config.Iss
-		reg.IssuerJWKSUrl = config.IssuerJWKSUrl
+	reg.Delivery = delivery
+
+	reg.RouteMode = parseMode(modeParam)
+
+	if connectingConfig != nil {
+		reg.EventsRequested = connectingConfig.EventsDelivered
+		reg.Aud = connectingConfig.Aud
+		reg.Iss = connectingConfig.Iss
+		reg.IssuerJWKSUrl = connectingConfig.IssuerJWKSUrl
 	}
 
 	// command parameters always override existing configuration
 	streamParams := cli.Create.Stream
 
 	if len(streamParams.Events) > 0 && streamParams.Events[0] != "*" {
-		supportedEvents := mongo_provider.GetSupportedEvents()
-		if config != nil {
-			supportedEvents = config.EventsDelivered
+		supportedEvents := model.GetSupportedEvents()
+		if connectingConfig != nil {
+			supportedEvents = connectingConfig.EventsDelivered
 		}
-		reg.EventUris = calculateEvents(streamParams.Events, supportedEvents)
+		reg.EventsRequested = calculateEvents(streamParams.Events, supportedEvents)
 	}
 
 	if len(streamParams.Aud) > 0 {
-		reg.Audience = streamParams.Aud
+		reg.Aud = streamParams.Aud
 	}
 
 	if streamParams.Iss != "" {
-		reg.Issuer = streamParams.Iss
+		reg.Iss = streamParams.Iss
 	}
 
 	if streamParams.IssJwksUrl != "" {
@@ -395,7 +477,7 @@ func calculateEvents(requested []string, supported []string) []string {
 }
 
 func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
-	// In this request, the PUSH Server is created first
+	// In this request, the PUSH ServerUrl is created first
 	strCmdParams := cli.Create.Stream
 	streamPub, serverPub := cli.Data.GetStreamAndServer(p.SourceAlias)
 	streamRcv, serverRcv := cli.Data.GetStreamAndServer(p.DestAlias)
@@ -411,7 +493,7 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		return errors.New(fmt.Sprintf("connecting to an existing receiver stream (%s) is not supported for POLLING connections", streamRcv.Alias))
 	}
 
-	var regReceiveStreamRequest, regPublisherStreamRequest *model.RegisterParameters
+	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
 	name := generateAlias(3)
 	pubName := name + "-pub"
@@ -433,10 +515,8 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		if err != nil {
 			return errors.New("Unable to load existing publisher stream configuration: " + err.Error())
 		}
-		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPoll, p.Mode, true, cli, streamConfig)
-		regReceiveStreamRequest.EventUrl = streamPub.Endpoint
-		regReceiveStreamRequest.EventAuth = streamPub.Token
-		regReceiveStreamRequest.IssuerJWKSUrl = streamPub.IssJwksUrl
+		regReceiveStreamRequest = createRegRequestFromParams(model.ReceivePoll, p.Mode, cli, streamConfig)
+
 		fmt.Printf("Create a polling receiver to work with %s with the following request:", streamPub.Alias)
 		jsonBytes, _ := json.MarshalIndent(regReceiveStreamRequest, "", " ")
 		fmt.Println(string(jsonBytes))
@@ -460,7 +540,7 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 				return errors.New("a value for 'issJwksUrl' is required")
 			}
 		}
-		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPoll, "", false, cli, nil)
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPoll, p.Mode, cli, nil)
 		fmt.Printf("Creating publishing and receiver poll streams on %s and %s based on the following:", serverPub.Alias, serverRcv.Alias)
 		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
 		fmt.Println(string(jsonBytes))
@@ -469,9 +549,11 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		}
 	}
 
+	var pubConfig *model.StreamConfiguration
+	var err error
 	if regPublisherStreamRequest != nil {
 		fmt.Println("Creating publisher stream...")
-		err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Poll Publisher Connection to "+rcvName, rcvName)
+		pubConfig, err = cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Poll Publisher Connection to "+rcvName, rcvName)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error creating polling publisher stream on %s: %s", serverPub.Alias, err.Error()))
 		}
@@ -480,16 +562,13 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 	}
 	if regReceiveStreamRequest == nil {
 		// if this is null it is because the publisher was created in the previous block (rather than pre-existing)
-		streamConfig, _ := cli.Data.GetStreamConfig(pubName)
-		// Now, build the receiver stream based on the new publisher stream
-		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPoll, p.Mode, true, cli, streamConfig)
-		regReceiveStreamRequest.EventUrl = streamPub.Endpoint
-		regReceiveStreamRequest.EventAuth = streamPub.Token
-		regReceiveStreamRequest.IssuerJWKSUrl = streamPub.IssJwksUrl
+
+		// Build the receiver stream based on the new publisher stream
+		regReceiveStreamRequest = createRegRequestFromParams(model.ReceivePoll, p.Mode, cli, pubConfig)
 	}
 
 	fmt.Println("Creating polling receiver stream...")
-	err := cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
+	_, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating polling receiver stream on %s: %s", serverRcv.Alias, err.Error()))
 	}
@@ -522,7 +601,7 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		return errors.New(fmt.Sprintf("connecting to an existing publisher stream (%s) is not supported for PUSH connections", streamPub.Alias))
 	}
 
-	var regReceiveStreamRequest, regPublisherStreamRequest *model.RegisterParameters
+	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
 	name := generateAlias(3)
 	pubName := name + "-pub"
@@ -546,10 +625,8 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		if err != nil {
 			return errors.New("Unable to load existing receiver stream configuration: " + err.Error())
 		}
-		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, "", false, cli, streamConfig)
-		regPublisherStreamRequest.EventUrl = streamRcv.Endpoint
-		regPublisherStreamRequest.EventAuth = streamRcv.Token
-		regPublisherStreamRequest.IssuerJWKSUrl = streamRcv.IssJwksUrl
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, cli, streamConfig)
+
 		fmt.Printf("Create a PUSH publisher to work with %s with the following request:\n", streamRcv.Alias)
 		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
 		fmt.Println(string(jsonBytes))
@@ -573,7 +650,7 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 				return errors.New("a value for 'issJwksUrl' is required")
 			}
 		}
-		regReceiveStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, true, cli, nil)
+		regReceiveStreamRequest = createRegRequestFromParams(model.ReceivePush, p.Mode, cli, nil)
 		fmt.Printf("Creating publishing and receiver push streams on %s and %s based on the following:\n", serverPub.Alias, serverRcv.Alias)
 		jsonBytes, _ := json.MarshalIndent(regPublisherStreamRequest, "", " ")
 		fmt.Println(string(jsonBytes))
@@ -582,9 +659,11 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		}
 	}
 
+	var streamConfig *model.StreamConfiguration
+	var err error
 	if regReceiveStreamRequest != nil {
 		fmt.Println("Creating push receiver stream...")
-		err := cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Push Receiver Connection from "+pubName, pubName)
+		streamConfig, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Push Receiver Connection from "+pubName, pubName)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error creating polling publisher stream on %s: %s", serverPub.Alias, err.Error()))
 		}
@@ -592,16 +671,12 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		streamRcv, _ = cli.Data.GetStreamAndServer(rcvName)
 	}
 	if regPublisherStreamRequest == nil {
-		streamConfig, _ := cli.Data.GetStreamConfig(rcvName)
 		// Now, build the receiver stream based on the new publisher stream
-		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, "", false, cli, streamConfig)
-		regPublisherStreamRequest.EventUrl = streamRcv.Endpoint
-		regPublisherStreamRequest.EventAuth = streamRcv.Token
-		regPublisherStreamRequest.IssuerJWKSUrl = streamRcv.IssJwksUrl
+		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, cli, streamConfig)
 	}
 
 	fmt.Println("Creating push publisher stream...")
-	err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
+	_, err = cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating push publisher stream on %s: %s", serverPub.Alias, err.Error()))
 	}
@@ -609,69 +684,74 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 	return nil
 }
 
-func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParameters, server *SsfServer, typeDescription string, connectAlias string) error {
+func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
 
 	serverUrl, err := url.Parse(server.Host)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	requestUrl, err := serverUrl.Parse("/register")
+
+	regUrl, err := serverUrl.Parse(server.ServerConfiguration.ConfigurationEndpoint)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	regBytes, err := json.MarshalIndent(&reg, "", " ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	resp, err := http.Post(requestUrl.String(), "application/json", bytes.NewReader(regBytes))
+	req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(regBytes))
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if server.ClientToken != "" {
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	} else {
+		fmt.Println("No server client token detected. Attempting anonymous request...")
+	}
+
+	client := http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	body, _ := io.ReadAll(resp.Body)
 
-	var registration model.RegisterResponse
-	err = json.Unmarshal(body, &registration)
+	var config model.StreamConfiguration
+	err = json.Unmarshal(body, &config)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if streamAlias == "" {
-
 		streamAlias = generateAlias(3)
 		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
 			streamAlias = generateAlias(3)
 		}
-
 	}
 
-	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint, nil)
-	req.Header.Set("Authorization", "Bearer "+registration.Token)
-	client := http.Client{}
-	resp, err = client.Do(req)
-	if err != nil {
-		return err
+	var audString string
+	for i, v := range config.Aud {
+		if i == 0 {
+			audString = v
+		} else {
+			audString = audString + "," + v
+		}
 	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	var config model.StreamConfiguration
-	_ = json.Unmarshal(bodyBytes, &config)
-
 	stream := Stream{
 		Alias:        streamAlias,
-		Token:        registration.Token,
 		Id:           config.Id,
-		Endpoint:     registration.PushUrl,
 		Description:  typeDescription,
-		Iss:          config.Iss,
-		Aud:          strings.Join(config.Aud[:], ","),
-		IssJwksUrl:   config.IssuerJWKSUrl,
 		ConnectAlias: connectAlias,
+		Iss:          config.Iss,
+		Aud:          audString,
+		Endpoint:     config.Delivery.GetEndpointUrl(),
+		Token:        config.Delivery.GetAuthorizationHeader(),
+		IssJwksUrl:   config.IssuerJWKSUrl,
 	}
 	server.Streams[streamAlias] = stream
 
-	SessionGlobals.StreamToken = registration.Token
 	jsonBytes, _ := json.MarshalIndent(stream, "", "  ")
 
 	cli.GetOutputWriter().WriteBytes(jsonBytes, true)
@@ -680,10 +760,10 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.RegisterParam
 	fmt.Println(out)
 	err = cli.Data.Save(&cli.Globals)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return &config, nil
 }
 
 type CreateStreamPollCmd struct {
@@ -708,20 +788,27 @@ type CreateStreamCmd struct {
 	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
 }
 
-type CreateIssuerKeyCmd struct {
-	Alias    string `arg:"" help:"The alias of the server to issue the key (default is selected server)"`
-	IssuerId string `arg:"" help:"The issuer value associated with the key (e.g. example.com)"`
+type CreateKeyCmd struct {
+	Alias    string `arg:"" required:"" help:"The alias of the server to issue the key (default is selected server)"`
+	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
 	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
 }
 
-func (c *CreateIssuerKeyCmd) Run(g *Globals) error {
+func (c *CreateKeyCmd) Run(g *Globals) error {
 	server, err := g.Data.GetServer(c.Alias)
 	if err != nil {
 		return err
 	}
-	baseUrl := fmt.Sprintf("%sjwks/%s", server.Host, c.IssuerId)
-	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	hostUrl, _ := url.Parse(server.Host)
+	certUrl := hostUrl.JoinPath("/jwks", c.IssuerId)
+	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
+	if server.ClientToken != "" {
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	} else {
+		fmt.Println(fmt.Sprintf("No authorization information for %s, attempting anonymous request.", server.Alias))
+	}
 	client := http.Client{}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -744,9 +831,51 @@ func (c *CreateIssuerKeyCmd) Run(g *Globals) error {
 	return nil
 }
 
+type CreateIatCmd struct {
+	Alias string `arg:"" help:"The alias of a server to obtain an IAT from."`
+	New   bool   `default:"false" help:"When NEW is set, a new project id will be used, otherwise the IAT will be from the current project"`
+}
+
+func (g *CreateIatCmd) Run(c *CLI) error {
+	server, err := c.Data.GetServer(g.Alias)
+	if err != nil {
+		return err
+	}
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	iatUrl := hostUrl.JoinPath("/iat")
+	req, _ := http.NewRequest(http.MethodGet, iatUrl.String(), nil)
+	if !g.New {
+		// This will cause the IAT to be associated with the current client token (same project id)
+		if server.ClientToken != "" {
+			req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+		}
+	}
+	client := http.Client{}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("Received response: %s", resp.Status)
+		fmt.Println(msg)
+		return errors.New(msg)
+	}
+	regBytes, err := io.ReadAll(resp.Body)
+	var tokenResponse model.RegisterResponse
+	err = json.Unmarshal(regBytes, &tokenResponse)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("IAT:\n%s", tokenResponse.Token)
+	c.GetOutputWriter().WriteBytes([]byte(tokenResponse.Token), true)
+	return nil
+}
+
 type CreateCmd struct {
-	Stream CreateStreamCmd    `cmd:"" aliases:"s"`
-	Key    CreateIssuerKeyCmd `cmd:"" help:"Obtain an issuer key from an i2goSignals server"`
+	Stream CreateStreamCmd `cmd:"" aliases:"s" help:"Create a stream on a specified server."`
+	Key    CreateKeyCmd    `cmd:"" help:"Obtain an issuer key from an i2goSignals server (returns a PEM)."`
+	Iat    CreateIatCmd    `cmd:"" help:"Create/obtain an initial access token (IAT) from a server which allows a stream client to register."`
 }
 
 type ExitCmd struct {
@@ -777,6 +906,8 @@ func (h *HelpCmd) Run(realCtx *kong.Context) error {
 	if ctx.Error != nil {
 		return ctx.Error
 	}
+	// fmt.Printf("Args:\t%v\n", ctx.Args)
+	// fmt.Printf("Command:\t%s\n", ctx.Command())
 	err = ctx.PrintUsage(false)
 	if err != nil {
 		return err
@@ -785,27 +916,30 @@ func (h *HelpCmd) Run(realCtx *kong.Context) error {
 	return nil
 }
 
-type ShowTokenCmd struct {
+type ShowAuthorizationCmd struct {
 	Alias string `arg:"" optional:"" help:"The alias of a stream, or defaults to currently selected stream"`
 }
 
-func (s *ShowTokenCmd) Run(c *CLI) error {
+func (s *ShowAuthorizationCmd) Run(c *CLI) error {
 	out := "Stream token: \n<undefined>"
 
+	alias := s.Alias
 	if s.Alias == "" {
-		if c.StreamToken != "" {
-			c.GetOutputWriter().WriteString(c.StreamToken, true)
-			out = fmt.Sprintf("Stream token: \n%s", c.StreamToken)
-			fmt.Println(out)
-			return nil
-		}
+		alias = c.Data.Selected
 	}
+	stream, _ := c.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("stream alias not found")
+	}
+	config, err := c.Data.GetStreamConfig(alias)
+	if err != nil {
+		return err
+	}
+	if config != nil {
+		authorization := config.Delivery.GetAuthorizationHeader()
+		c.GetOutputWriter().WriteString(authorization, true)
 
-	stream, _ := c.Data.GetStreamAndServer(s.Alias)
-	if stream != nil {
-		c.GetOutputWriter().WriteString(c.StreamToken, true)
-
-		out = fmt.Sprintf("Stream token: \n%s", c.StreamToken)
+		out = fmt.Sprintf("Stream authorization: \n%s", authorization)
 		fmt.Println(out)
 	}
 	return nil
@@ -839,7 +973,7 @@ func (s *ShowServerCmd) Run(c *CLI) error {
 	server, exists := c.Data.Servers[s.Alias]
 	if exists {
 		output, _ := json.MarshalIndent(server, "", "  ")
-		fmt.Println("Server configured:")
+		fmt.Println("ServerUrl configured:")
 		fmt.Println(string(output))
 		c.GetOutputWriter().WriteBytes(output, true)
 		return nil
@@ -898,32 +1032,35 @@ func (s *ShowStreamCmd) Run(c *CLI) error {
 }
 
 type ShowCmd struct {
-	Token  ShowTokenCmd  `cmd:"" help:"Show the current stream access token"`
-	Server ShowServerCmd `cmd:"" help:"Show information about locally defined servers"`
-	Stream ShowStreamCmd `cmd:"" help:"Show locally defined streams"`
+	Auth   ShowAuthorizationCmd `cmd:"" help:"Retrieve/generate an event authorization header for a stream"`
+	Server ShowServerCmd        `cmd:"" help:"Show information about locally defined servers"`
+	Stream ShowStreamCmd        `cmd:"" help:"Show locally defined streams"`
 }
 
 type GetStreamStatusCmd struct {
-	Alias string `arg:"" optional:"" help:"Specify a stream alias, *, or blank to show all streams for the selected server"`
+	Alias string `arg:"" optional:"" help:"Specify a stream alias to retrieve status (defaults to selected stream)."`
 }
 
 func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 
 	streamAlias := s.Alias
-	if streamAlias == "" {
-		return errors.New("please provide the alias of a stream to get status")
+
+	if s.Alias == "" {
+		streamAlias = cli.Data.Selected
 	}
 
-	streamConfig, server := cli.Data.GetStreamAndServer(streamAlias)
-	if streamConfig == nil {
+	stream, server := cli.Data.GetStreamAndServer(streamAlias)
+	if stream == nil {
 		return errors.New("Could not locate locally defined stream alias: " + streamAlias)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.StatusEndpoint, nil)
+	reqUrl := fmt.Sprintf("%s?stream_id=%s", server.ServerConfiguration.StatusEndpoint, stream.Id)
+
+	req, err := http.NewRequest(http.MethodGet, reqUrl, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+streamConfig.Token)
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -975,7 +1112,7 @@ type GetStreamCmd struct {
 
 func PrintServerStreamsInfo(server *SsfServer, brief bool, outWriter *OutputWriter) {
 	if len(server.Streams) == 0 {
-		fmt.Println("Server: " + server.Alias + "\nHas no streams defined.")
+		fmt.Println("ServerUrl: " + server.Alias + "\nHas no streams defined.")
 		return
 	}
 	for _, v := range server.Streams {
@@ -1010,15 +1147,29 @@ type GetKeyCmd struct {
 func (g *GetKeyCmd) Run(c *CLI) error {
 	jwksUrl := g.Alias
 	if !strings.Contains(g.Alias, "/") {
-		stream, server := c.Data.GetStreamAndServer(g.Alias)
-
+		// stream, server := c.Data.GetStreamAndServer(g.Alias)
+		stream, _ := c.Data.GetStreamConfig(g.Alias)
 		if stream != nil {
-			jwksUrl = stream.IssJwksUrl
+			jwksUrl = stream.IssuerJWKSUrl
 		} else {
-			if g.Iss == "" || server == nil {
+			if g.Iss == "" {
 				return errors.New("invalid server alias and/or missing iss value")
 			}
-			jwksUrl = fmt.Sprintf("%s/jwks/%s", server.Host, g.Iss)
+			server, err := c.Data.GetServer(g.Alias)
+			if err != nil {
+				return err
+			}
+			if server == nil {
+				return errors.New(fmt.Sprintf("unable to locate server %s", g.Alias))
+			}
+			serverUrl, _ := url.Parse(server.Host)
+			if g.Iss == "" {
+				jwksLoc, _ := serverUrl.Parse("/jwks.json")
+				jwksUrl = jwksLoc.String()
+			} else {
+				jwksLoc, _ := serverUrl.Parse(fmt.Sprintf("/jwks/%s", g.Iss))
+				jwksUrl = jwksLoc.String()
+			}
 		}
 	}
 
@@ -1036,6 +1187,47 @@ func (g *GetKeyCmd) Run(c *CLI) error {
 type GetCmd struct {
 	Stream GetStreamCmd `cmd:"" aliases:"s" help:"Get stream configurations or stream status"`
 	Key    GetKeyCmd    `cmd:"" help:"Retrieves the issuer public key"`
+}
+
+type DeleteStreamCmd struct {
+	Alias string `arg:"" help:"The alias of a stream to delete"`
+}
+
+func (d *DeleteStreamCmd) Run(cli *CLI) error {
+	client := http.Client{}
+	defer client.CloseIdleConnections()
+
+	stream, server := cli.Data.GetStreamAndServer(d.Alias)
+	if stream == nil {
+		return errors.New(fmt.Sprintf("Stream %s not found, delete cancelled.", d.Alias))
+	}
+
+	reqUrl := fmt.Sprintf("%s?stream_id=%s", server.ServerConfiguration.ConfigurationEndpoint, stream.Id)
+	req, err := http.NewRequest(http.MethodDelete, reqUrl, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return errors.New(fmt.Sprintf("Error completing delete request: %s", resp.Status))
+	}
+	if _, ok := cli.Data.streamConfigs[stream.Alias]; ok {
+		delete(cli.Data.streamConfigs, stream.Alias)
+	}
+	if _, ok := server.Streams[stream.Alias]; ok {
+		delete(server.Streams, stream.Alias)
+	}
+
+	fmt.Println(d.Alias + " deleted.")
+	return nil
+}
+
+type DeleteCmd struct {
+	Stream DeleteStreamCmd `cmd:"" aliases:"s" help:"Delete a stream"`
 }
 
 type SetStreamConfigCmd struct {
@@ -1065,9 +1257,11 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Stream configuration for " + streamAlias)
-	jsonBytes, _ := json.MarshalIndent(config, "", "  ")
-	fmt.Println(string(jsonBytes))
+	/*
+		fmt.Println("Stream configuration for " + streamAlias)
+		jsonBytes, _ := json.MarshalIndent(config, "", "  ")
+		fmt.Println(string(jsonBytes))
+	*/
 
 	// Update the configuration...
 	if s.RJwksUrl != "" {
@@ -1093,41 +1287,17 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	}
 
 	if len(s.Events) > 0 {
-		switch s.Events[0][0:0] {
-		case "+", "-":
-			config.EventsRequested = config.EventsDelivered
-			for _, value := range s.Events {
-				defaultAddMode := true
-				switch value[0:0] {
-				case "+":
-					config.EventsRequested = append(config.EventsRequested, value[1:])
-					defaultAddMode = true
-				case "-":
-					defaultAddMode = false
-					removeEvent := value[1:]
-					config.EventsRequested = removeValue(config.EventsRequested, removeEvent)
-				default:
-					if defaultAddMode {
-						config.EventsRequested = append(config.EventsRequested, value)
-					} else {
-						config.EventsRequested = removeValue(config.EventsRequested, value)
-					}
-				}
-			}
-		default:
-			config.EventsRequested = s.Events
-		}
+		config.EventsRequested = s.Events
 		fmt.Println(fmt.Sprintf("Requesting events:\n%+q", config.EventsRequested))
-
 	}
 	if ConfirmProceed("Update stream configuration Y|[n]?") {
 
 		reqBytes, err := json.MarshalIndent(config, "", " ")
-		req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.ConfigurationEndpoint, bytes.NewReader(reqBytes))
+		req, err := http.NewRequest(http.MethodPut, server.ServerConfiguration.ConfigurationEndpoint+"?stream_id="+config.Id, bytes.NewReader(reqBytes))
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+streamConfig.Token)
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 		client := http.Client{}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -1150,18 +1320,9 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 	return nil
 }
 
-func removeValue(events []string, value string) []string {
-	for i, other := range events {
-		if strings.EqualFold(other, value) {
-			return append(events[:i], events[i+1:]...)
-		}
-	}
-	return events
-}
-
 type SetStreamStatusCmd struct {
 	Alias  string `arg:"" optional:"" help:"Specify a stream alias, *, or blank to show all streams for the selected server"`
-	State  string `required:"" short:"m" enum:"active,pause,inactive,a,p,i" help:"Enter a valid new state (active,pause,inactive)"`
+	State  string `required:"" short:"m" enum:"active,pause,disabled,a,p,d" help:"Enter a valid new state (active,pause,inactive)"`
 	Reason string `optional:"" short:"r" help:"Enter the reason for the state change request in quotes"`
 }
 
@@ -1169,40 +1330,45 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	setStatus := "A"
 	switch s.State {
 	case "a", "active":
-		setStatus = "A"
+		setStatus = model.StreamStateEnabled
 	case "p", "pause":
-		setStatus = "P"
-	case "i", "inactive":
-		setStatus = "I"
+		setStatus = model.StreamStatePause
+	case "d", "disabled":
+		setStatus = model.StreamStateDisable
 	}
 
 	var server *SsfServer
 	var stream *Stream
-	var token string
+
 	if s.Alias != "" {
 		stream, server = cli.Data.GetStreamAndServer(s.Alias)
-		token = stream.Token
+		// token = stream.Auth
 	} else {
 		server, _ = cli.Data.GetServer(cli.Data.Selected)
-		token = cli.StreamToken
+		// token = cli.StreamToken
 	}
 
-	if server == nil || token == "" {
+	if server == nil {
 		return errors.New("please select or provide a valid stream")
 	}
 
 	updateStatus := model.UpdateStreamStatus{
 		Status:  setStatus,
 		Subject: nil,
-		Reason:  s.Reason,
+		Reason:  cleanQuotes(s.Reason),
 	}
 
 	bodyBytes, err := json.MarshalIndent(updateStatus, "", " ")
-	req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.StatusEndpoint, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequest(http.MethodPost, server.ServerConfiguration.StatusEndpoint+"?stream_id="+stream.Id, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if server.ClientToken != "" {
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	} else {
+		fmt.Println(fmt.Sprintf("No client admin token for %s, attempting anonymous request.", server.Alias))
+	}
+
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1213,7 +1379,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	_ = json.Unmarshal(bodyBytes, &status)
 
 	fmt.Println("Returned status:")
-	fmt.Println(json.MarshalIndent(status, "", "  "))
+	fmt.Println(string(bodyBytes))
 
 	return nil
 }
@@ -1247,18 +1413,9 @@ type SelectCmd struct {
 }
 
 func (s *SelectCmd) Run(g *Globals) error {
-	_, exists := g.Data.Servers[s.Alias]
-	if exists {
+	_, server := g.Data.GetStreamAndServer(s.Alias)
+	if server != nil {
 		g.Data.Selected = s.Alias
-		fmt.Println("Server: " + s.Alias + " selected.")
-		g.StreamToken = ""
-		return nil
-	}
-	stream, server := g.Data.GetStreamAndServer(s.Alias)
-	if stream != nil {
-		g.Data.Selected = server.Alias
-		g.StreamToken = stream.Token
-		fmt.Println(fmt.Sprintf("Server: %s, Stream: %s selected.", server.Alias, stream.Alias))
 	}
 	return errors.New("server not found")
 }
@@ -1330,6 +1487,12 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		return
 	}
 
+	if config.Delivery.GetMethod() != model.DeliveryPoll {
+		fmt.Println("Selected stream is not a polling publisher")
+		return
+	}
+	delivery := config.Delivery.PollTransmitMethod
+
 	// Get the issuer public key
 	jwks, err := goSet.GetJwks(config.IssuerJWKSUrl)
 	if err != nil {
@@ -1341,7 +1504,7 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		fmt.Println(fmt.Sprintf("Initiating polling to %s, stream %s...", server.Alias, stream.Alias))
 		params.Acks = p.Acks
 
-		pollResponse, err := p.DoPollRequest(ctx, client, params, stream, exitCh)
+		pollResponse, err := p.DoPollRequest(ctx, client, params, delivery.EndpointUrl, stream.Token, exitCh)
 		if err != nil {
 			if strings.Contains(err.Error(), "context canceled") {
 				exitCh <- struct{}{}
@@ -1359,7 +1522,11 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		if setCnt > 0 {
 			for jti, setString := range pollResponse.Sets {
 				token, err := goSet.Parse(setString, jwks)
+
 				if err != nil {
+					if setErrs == nil {
+						setErrs = map[string]model.SetErrorType{}
+					}
 					fmt.Println(fmt.Sprintf("Error parsing/validating token [%s]: %s", jti, err.Error()))
 					setErrs[jti] = model.SetErrorType{
 						Error:       "invalid_request",
@@ -1380,12 +1547,14 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 		}
 		if !p.Loop {
 			// Do one pass, but we may still need to ack
-			p.DoAckOnly(ctx, client, stream, exitCh)
+			p.DoAckOnly(ctx, client, delivery.EndpointUrl, stream.Token, exitCh)
+			exitCh <- struct{}{}
+			return
 		}
 		select {
 		case <-ctx.Done():
 			fmt.Println("Received cancel!")
-			p.DoAckOnly(ctx, client, stream, exitCh)
+			p.DoAckOnly(ctx, client, delivery.EndpointUrl, stream.Token, exitCh)
 			exitCh <- struct{}{}
 			return
 		default:
@@ -1393,16 +1562,17 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 	}
 }
 
-func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params model.PollParameters, stream *Stream, exitCh chan struct{}) (*model.PollResponse, error) {
+func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params model.PollParameters, endpoint string, token string, exitCh chan struct{}) (*model.PollResponse, error) {
 	bodyBytes, err := json.MarshalIndent(params, "", " ")
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, stream.Endpoint, bytes.NewReader(bodyBytes))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+stream.Token)
+	req.Header.Set("Authorization", token)
 
 	resp, err := client.Do(req)
 	select {
@@ -1432,20 +1602,20 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params 
 	return &pollResponse, nil
 }
 
-func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, stream *Stream, exitCh chan struct{}) {
+func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, endpoint string, token string, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
 			Acks:              p.Acks,
 		}
-		pollResponse, err := p.DoPollRequest(ctx, client, pollRequest, stream, exitCh)
+		pollResponse, err := p.DoPollRequest(ctx, client, pollRequest, endpoint, token, exitCh)
 		if err != nil {
 			fmt.Println("Error occurred performing polling acknowledgement: " + err.Error())
 			return
 		}
 		if len(pollResponse.Sets) > 0 {
-			fmt.Println(fmt.Sprintf("Warning, %d SETs were returned from a maxevents=0 request (ack only) to %s", len(pollResponse.Sets), stream.Alias))
+			fmt.Println(fmt.Sprintf("Warning, %d SETs were returned from a maxevents=0 request (ack only) to %s", len(pollResponse.Sets), endpoint))
 		}
 	}
 	return
@@ -1453,8 +1623,8 @@ func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, stream *Str
 }
 
 type GenerateCmd struct {
-	Event string `arg:"" help:"An event type URI (or the last portion of it) of the event to create"`
-	Alias string `arg:"" optional:"" help:"The stream alias to submit the event to, otherwise event is displayed to console"`
+	Alias string `arg:"" optional:"" help:"The stream alias of a Push Receiver Stream to submit the event to, otherwise event is displayed to console"`
+	Event string `help:"An event type URI (or the last portion of it) of the event to create"`
 }
 
 func (gen *GenerateCmd) Run(c *CLI) error {
@@ -1466,10 +1636,13 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	var config *model.StreamConfiguration
 	var key *rsa.PrivateKey
 	var err error
+	var endpoint string
+	var token string
+
 	if gen.Alias != "" {
 		stream, server = c.Data.GetStreamAndServer(gen.Alias)
 		if server == nil || stream == nil {
-			return errors.New("enter the Alias name for a stream defined locally. See Show Stream *")
+			return errors.New("enter the Alias name for a push receiver stream")
 		}
 		config, err = c.Data.GetStreamConfig(gen.Alias)
 		issuer = config.Iss
@@ -1478,22 +1651,24 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		}
 		audience = config.Aud
 
-		pushDelivery := config.Delivery.PushDeliveryMethod
-		if pushDelivery == nil {
-			return errors.New("generate event currently requires a push event stream to submit")
+		if config.Delivery.GetMethod() != model.ReceivePush {
+			return errors.New("generate event currently requires a push event receiver stream to submit")
 		}
 		key, err = c.Data.GetKey(config.Iss)
 		if err != nil {
 			return err
 		}
+		endpoint = config.Delivery.PushReceiveMethod.EndpointUrl
+		token = stream.Token
 	}
 
 	genResource := resource.GenerateFakeUser(issuer)
 	subjectIdentifier := goSet.NewScimSubjectIdentifier(genResource.Meta.Location)
-	event := goSet.SecurityEventToken{}
-	event.SubjectId = subjectIdentifier
-	event.Issuer = issuer
-	event.Audience = audience
+
+	event := goSet.CreateSet(&goSet.EventSubject{
+		SubjectIdentifier: *subjectIdentifier,
+	}, issuer, audience)
+
 	event.TransactionId = primitive.NewObjectID().Hex()
 	switch gen.Event {
 	case "create:full":
@@ -1521,8 +1696,11 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, stream.Endpoint, strings.NewReader(signString))
-	req.Header.Set("Authorization", "Bearer "+stream.Token)
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(signString))
+	if token != "" {
+		req.Header.Set("Authorization", stream.Token)
+	}
+
 	req.Header.Set("Content-Type", "application/secevent+jwt")
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
@@ -1543,13 +1721,35 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		if err != nil {
 			return errors.New("Error parsing stream push response: " + err.Error())
 		}
-		fmt.Println(fmt.Sprintf("Error:\n\tDescription:\t%s\n\tError:\t%s", errorMsg.Description, errorMsg.ErrCode))
-		return nil
+		return errors.New(fmt.Sprintf("Error:\n\tDescription:\t%s\n\tError:\t%s", errorMsg.Description, errorMsg.ErrCode))
 	}
 	if resp.StatusCode > 400 {
-		errMsg := fmt.Sprintf("HTTP Error: %s, POSTING to %s", resp.Status, stream.Endpoint)
+		errMsg := fmt.Sprintf("HTTP Error: %s, POSTING to %s", resp.Status, endpoint)
 		return errors.New(errMsg)
 	}
 	c.GetOutputWriter().WriteString(event.String(), true)
 	return nil
+}
+
+func cleanQuotes(quoted string) string {
+	if len(quoted) > 0 && quoted[0] == '"' {
+		return quoted[1 : len(quoted)-1]
+	}
+	return quoted
+}
+
+func parseMode(param string) string {
+	if param == "" {
+		return ""
+	}
+	var mode string
+	switch param {
+	case "IMPORT", "I":
+		mode = model.RouteModeImport
+	case "FORWARD", "F":
+		mode = model.RouteModeForward
+	case "PUBLISH", "P":
+		mode = model.RouteModePublish
+	}
+	return mode
 }

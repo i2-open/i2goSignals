@@ -7,18 +7,22 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/independentid/i2goSignals/internal/model"
 	"io"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
+
+	"github.com/i2-open/i2goSignals/internal/model"
 )
 
 type SsfServer struct {
-	Alias string
-	Host  string
-	// Authorization string
+	Alias               string
+	Host                string
+	ClientToken         string // Used to administer streams (scope admin) within a project
+	IatToken            string // Used to register new client in the same project
+	ProjectId           string
 	Streams             map[string]Stream
 	ServerConfiguration *model.TransmitterConfiguration
 }
@@ -73,7 +77,10 @@ func (c *ConfigData) GetStreamAndServer(alias string) (*Stream, *SsfServer) {
 		if !exists {
 			return nil, nil
 		}
-		stream := server.Streams[parts[1]]
+		stream, exists := server.Streams[parts[1]]
+		if !exists {
+			return nil, &server
+		}
 		return &stream, &server
 	}
 	for ks, server := range c.Servers {
@@ -123,14 +130,23 @@ func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfigura
 
 func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*model.StreamConfiguration, error) {
 	fmt.Println("Retrieving stream configuration...")
-	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint, nil)
+
+	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint+"?stream_id="+stream.Id, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+stream.Token)
+	if server.ClientToken != "" {
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	} else if stream.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+stream.Token)
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New(fmt.Sprintf("Error retrieving configuration for %s: %s", stream.Alias, resp.Status))
 	}
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	var config model.StreamConfiguration
@@ -161,8 +177,13 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 
 func (c *ConfigData) Load(g *Globals) error {
 	if g.Config == "" {
-		g.Config = "~/.goSignals/config.json"
+		g.Config = ".goSignals/config.json"
+		usr, err := user.Current()
+		if err == nil {
+			g.Config = filepath.Join(usr.HomeDir, g.Config)
+		}
 	}
+	// fmt.Println("Loading from " + g.Config)
 
 	// Default all the maps to empty
 	if c.Pems == nil {
@@ -178,13 +199,16 @@ func (c *ConfigData) Load(g *Globals) error {
 
 	configBytes, err := os.ReadFile(g.Config)
 	if err != nil {
+		fmt.Println("Error reading configuration: " + err.Error())
 		return nil
 	}
 	if len(configBytes) == 0 {
 		return nil
 	}
 	err = json.Unmarshal(configBytes, c)
-
+	if err != nil {
+		fmt.Println("Error parsing stored configuration: " + err.Error())
+	}
 	return err
 }
 
@@ -192,7 +216,11 @@ func (c *ConfigData) Save(g *Globals) error {
 
 	configPath := g.Config
 	if configPath == "" {
-		configPath = "~/.goSignals/config.json"
+		configPath = ".goSignals/config.json"
+		usr, err := user.Current()
+		if err == nil {
+			configPath = filepath.Join(usr.HomeDir, configPath)
+		}
 	}
 	configDir := filepath.Dir(configPath)
 	if _, err := os.Stat(configDir); os.IsNotExist(err) {

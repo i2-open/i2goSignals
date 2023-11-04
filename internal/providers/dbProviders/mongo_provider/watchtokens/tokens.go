@@ -18,7 +18,7 @@ type TokenData struct {
 func (tok *TokenData) Store() {
 	tf, err := os.Create(storeFilename())
 	if err != nil {
-		log.Default().Println("Token file creation failed", err)
+		log.Default().Println("Auth file creation failed", err)
 		return
 	}
 	jsonOut, _ := json.Marshal(tok)
@@ -42,7 +42,7 @@ func Load() *TokenData {
 	var tokenData TokenData
 	dataBytes, err := os.ReadFile(storeFilename())
 	if err != nil {
-		log.Println("Token file not found or not yet initialized", err)
+		log.Println("Auth file not found or not yet initialized", err)
 		tokenData = TokenData{}
 	} else {
 		err = json.Unmarshal(dataBytes, &tokenData)

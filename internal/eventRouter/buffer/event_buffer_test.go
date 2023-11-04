@@ -2,11 +2,12 @@ package buffer
 
 import (
 	"fmt"
-	"github.com/independentid/i2goSignals/internal/model"
 	"math/rand"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/i2-open/i2goSignals/internal/model"
 
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson/primitive"

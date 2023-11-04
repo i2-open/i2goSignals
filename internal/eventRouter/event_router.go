@@ -8,10 +8,10 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/independentid/i2goSignals/internal/eventRouter/buffer"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 
 	"log"
 	"os"
@@ -29,7 +29,7 @@ type EventRouter interface {
 	RemoveStream(sid string)
 	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
-	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool)
+	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	GetPushStreamCnt() float64
@@ -97,7 +97,8 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	}
 
 	tfr := "PUSH"
-	if stream.Delivery.PushDeliveryMethod == nil {
+	switch stream.GetType() {
+	case model.DeliveryPoll, model.ReceivePoll:
 		tfr = "POLL"
 	}
 
@@ -149,9 +150,65 @@ func (r *router) initPushStream(sid string, state *model.StreamStateRecord, jtis
 	go r.PushStreamHandler(state, pushBuffer)
 }
 
+func (r *router) checkAndLoadKey(streamID string, issuer string) *rsa.PrivateKey {
+	key, ok := r.issuerKeys[issuer]
+	if !ok {
+		key, err := r.provider.GetIssuerPrivateKey(issuer)
+		if err != nil {
+			eventLogger.Printf("WARNING [%s]: Unable to locate key for issuer %s, retrying...", streamID, issuer)
+
+			return nil
+		}
+		copyKey := *key
+		r.issuerKeys[issuer] = &copyKey
+	}
+	return key
+}
+
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
-	if stream.Inbound == nil || !*stream.Inbound {
-		// Preload any outstanding pending events (because we may be re-starting)
+
+	if stream.IsReceiver() {
+		return
+	}
+
+	// Preload the issuer keys to avoid necessary provider lookups
+	issuer := stream.StreamConfiguration.Iss
+	if stream.GetRouteMode() == model.RouteModePublish {
+		r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer)
+	}
+
+	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
+
+		currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
+
+		if ok {
+			fmt.Println("Found existing match: " + currentState.StreamConfiguration.Id)
+			currentState.Update(stream)
+		} else {
+			fmt.Println("Adding stream to Pollers: " + stream.StreamConfiguration.Id)
+			r.pollStreams[stream.StreamConfiguration.Id] = *stream
+		}
+		_, ok = r.pollBuffers[stream.StreamConfiguration.Id]
+		if !ok {
+			// Preload any outstanding pending events (because we may be re-starting)
+			jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
+				MaxEvents:         0,
+				ReturnImmediately: true,
+				Acks:              nil,
+				SetErrs:           nil,
+				TimeoutSecs:       10,
+			})
+			// TODO:  might have to check for existing events!
+			r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis)
+		}
+		return
+	}
+	// The stream is delivery PUSH
+	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
+	if ok {
+		currentState.Update(stream)
+	} else {
+		// preload the buffer with any existing events
 		jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
@@ -159,43 +216,10 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			SetErrs:           nil,
 			TimeoutSecs:       10,
 		})
-		// Preload the issuer keys to avoid necessary provider lookups
-		issuer := stream.StreamConfiguration.Iss
-		_, ok := r.issuerKeys[issuer]
-		if !ok {
-			key, err := r.provider.GetIssuerPrivateKey(issuer)
-			if err != nil {
-				eventLogger.Printf("ERROR[%s]: Unable to locate key for issuer %s", stream.StreamConfiguration.Id, issuer)
-			}
-			r.issuerKeys[issuer] = key
-		}
-
-		if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
-
-			currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
-
-			if ok {
-				fmt.Println("Found existing match: " + currentState.StreamConfiguration.Id)
-				currentState.Update(stream)
-			} else {
-				fmt.Println("Adding stream to Pollers: " + stream.StreamConfiguration.Id)
-				r.pollStreams[stream.StreamConfiguration.Id] = *stream
-			}
-			_, ok = r.pollBuffers[stream.StreamConfiguration.Id]
-			if !ok {
-				// TODO:  might have to check for existing events!
-				r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis)
-			}
-		} else {
-			currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
-			if ok {
-				currentState.Update(stream)
-			} else {
-				r.pushStreams[stream.StreamConfiguration.Id] = *stream
-				r.initPushStream(stream.StreamConfiguration.Id, stream, jtis)
-			}
-		}
+		r.pushStreams[stream.StreamConfiguration.Id] = *stream
+		r.initPushStream(stream.StreamConfiguration.Id, stream, jtis)
 	}
+
 }
 
 /*
@@ -205,20 +229,21 @@ evaluates if it should be added to any streams for outgoing propagation
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
-	inboundStream, err := r.provider.GetStreamState(sid)
+	streamState, err := r.provider.GetStreamState(sid)
 	if err != nil {
 		return err
 	}
 
 	event := r.provider.AddEvent(eventToken, sid, rawEvent)
-	r.IncrementCounter(inboundStream, eventToken, true)
+	r.IncrementCounter(streamState, eventToken, true)
 
-	if (inboundStream != nil && *inboundStream.Inbound) && inboundStream.Receiver.RouteMode == model.RouteModeImport {
+	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
 		return nil
 	}
-	for _, stream := range r.pushStreams {
 
+	// Check to see if the event should be routed to outbound push streams
+	for _, stream := range r.pushStreams {
 		if StreamEventMatch(&stream, event) {
 
 			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: PUSH, Types: %v", stream.StreamConfiguration.Id, event.Jti, event.Types)
@@ -230,8 +255,9 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		}
 	}
 
+	// Check to see if the event should be routed to outbound polling stream
 	for k, pollStream := range r.pollStreams {
-		eventLogger.Printf("ROUTER: Checking: %s, ConfigId: %s", k, pollStream.StreamConfiguration.Id)
+		eventLogger.Printf("ROUTER: Checking: Stream %s", k)
 
 		if StreamEventMatch(&pollStream, event) {
 			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: POLL, Types: %v", pollStream.StreamConfiguration.Id, event.Jti, event.Types)
@@ -245,22 +271,33 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	return nil
 }
 
-func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool) {
-	state := r.pollStreams[sid]
-	if state.Status != model.StreamStateActive {
-		eventLogger.Printf("POLL-SRV[%s]: Error Poll request but stream is not active", sid)
-		return nil, false
+func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int) {
+	state, exist := r.pollStreams[sid]
+	if !exist {
+		eventLogger.Printf("POLL-SRV[%s]: Error Poll Transmitter not found.", sid)
+		return nil, false, http.StatusNotFound
 	}
 
+	if state.Status != model.StreamStateEnabled {
+		stateString, _ := json.MarshalIndent(&state, "", "  ")
+		eventLogger.Printf("Stream State:\n%s", string(stateString))
+		eventLogger.Printf("POLL-SRV[%s]: Error Poll request but stream is not active", sid)
+		return nil, false, http.StatusConflict
+	}
+	var key *rsa.PrivateKey
 	forwardMode := false
-	if state.Receiver.RouteMode == model.RouteModeForward {
+	if state.GetRouteMode() == model.RouteModeForward {
 		forwardMode = true
+	} else {
+		key = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss)
 	}
-	key, ok := r.issuerKeys[state.StreamConfiguration.Iss]
-	if (!ok || key == nil) && !forwardMode {
-		eventLogger.Printf("POLL-SRV[%s]: Error no issuer key available for %s", sid, state.StreamConfiguration.Iss)
-		return nil, false
-	}
+
+	/*
+		if (key == nil) && !forwardMode {
+			eventLogger.Printf("POLL-SRV[%s] WARNING: no issuer key available for %s", sid, state.StreamConfiguration.Iss)
+			return nil, false, http.StatusConflict
+		}
+	*/
 
 	pollBuffer := r.pollBuffers[sid]
 	jtiSlice, more := pollBuffer.GetEvents(params)
@@ -277,6 +314,10 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis := *jtiSlice
 			for _, jti := range jtis {
 				eventRecord := r.provider.GetEventRecord(jti)
+				if eventRecord == nil {
+					eventLogger.Println(fmt.Sprintf("POLL-SRV[%s] WARNING: JTI Not found: %s", sid, jti))
+					continue
+				}
 				sets[jti] = eventRecord.Original
 			}
 		} else {
@@ -288,13 +329,13 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
 				if err != nil {
-					eventLogger.Printf("POLL-SRV[%s]: Error signing: ", sid, err.Error())
+					eventLogger.Printf("POLL-SRV[%s]: Error signing: %s", sid, err.Error())
 				}
 			}
 		}
-		return sets, more
+		return sets, more, http.StatusOK
 	}
-	return map[string]string{}, false
+	return map[string]string{}, false, http.StatusOK
 }
 
 /*
@@ -303,10 +344,13 @@ PushStreamHandler is started as a separate thread during the initialization of t
 func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer) {
 	eventLogger.Printf("PUSH-HANDLER[%s]: Starting..", stream.StreamConfiguration.Id)
 
-	rsaKey, ok := r.issuerKeys[stream.StreamConfiguration.Iss]
-	if !ok || rsaKey == nil {
-		eventLogger.Printf("PUSH-SRV[%s]: Error no issuer key available for %s", stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
-		// TODO: What should be done about undelivered events?
+	var rsaKey *rsa.PrivateKey
+	if stream.GetRouteMode() == model.RouteModePublish {
+		rsaKey = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
+		if rsaKey == nil {
+			eventLogger.Printf("PUSH-SRV[%s] WARNING: no issuer key available for %s", stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+			// TODO: What should be done about undelivered events?
+		}
 	}
 
 	out := eventBuf.Out
@@ -314,7 +358,7 @@ eventLoop:
 	for v := range out {
 		jti := v.(string)
 		r.prepareAndSendEvent(jti, stream, rsaKey)
-		if stream.Status != model.StreamStateActive {
+		if stream.Status != model.StreamStateEnabled {
 			eventLogger.Printf("PUSH-SRV[%s] is no longer active. PushHandler exiting.", stream.Id.Hex())
 			break eventLoop
 		}
@@ -323,31 +367,40 @@ eventLoop:
 }
 
 func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey) {
-	event := r.provider.GetEvent(jti) // Get the event
-	if event != nil {
-		delivered := r.pushEvent(config.StreamConfiguration, event, rsaKey)
+	eventRecord := r.provider.GetEventRecord(jti)
+	// Get the event
+	if eventRecord != nil {
+
+		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey)
 		if delivered {
 			r.provider.AckEvent(jti, config.StreamConfiguration.Id)
-			r.IncrementCounter(config, event, false)
+			r.IncrementCounter(config, &eventRecord.Event, false)
 		}
 	}
 }
 
 // pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
 // Note: Moved from the api_transmitter.go in server package
-func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet.SecurityEventToken, key *rsa.PrivateKey) bool {
-	pushConfig := configuration.Delivery.PushDeliveryMethod
+func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey) bool {
+	pushConfig := configuration.Delivery.PushTransmitMethod
 
 	client := http.Client{Timeout: 60 * time.Second}
 
+	var tokenString string
 	url := pushConfig.EndpointUrl
 
-	token.Issuer = configuration.Iss
-	token.Audience = configuration.Aud
-	token.IssuedAt = jwt.NewNumericDate(time.Now())
-	tokenString, err := token.JWS(jwt.SigningMethodRS256, key)
-	if err != nil {
-		eventLogger.Printf("PUSH-SRV[%s] Error signing event: ", configuration.Id, err.Error())
+	if configuration.RouteMode == model.RouteModeForward {
+		tokenString = event.Original // In forward mode, we just pass on the raw event
+	} else {
+		token := &event.Event
+		token.Issuer = configuration.Iss
+		token.Audience = configuration.Aud
+		token.IssuedAt = jwt.NewNumericDate(time.Now())
+		var err error
+		tokenString, err = token.JWS(jwt.SigningMethodRS256, key)
+		if err != nil {
+			eventLogger.Printf("PUSH-SRV[%s] Error signing event: %s", configuration.Id, err.Error())
+		}
 	}
 
 	req, err := http.NewRequest("POST", url, strings.NewReader(tokenString))
@@ -374,12 +427,12 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
-				eventLogger.Println("PUSH-SRV[%s] Error reading response: ", configuration.Id, err.Error())
+				eventLogger.Printf("PUSH-SRV[%s] Error reading response: %s", configuration.Id, err.Error())
 				return false
 			}
 			err = json.Unmarshal(body, &errorMsg)
 			if err != nil {
-				eventLogger.Println("PUSH-SRV[%s] Error parsing error response: ", configuration.Id, err.Error())
+				eventLogger.Println(fmt.Sprintf("PUSH-SRV[%s] Error parsing error response: %s", configuration.Id, err.Error()))
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
 				return false
 			}
@@ -395,7 +448,7 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, token *goSet
 		}
 	}
 
-	eventLogger.Printf("PUSH-SRV[%s] JTIs delivered: %s", configuration.Id, token.ID)
+	eventLogger.Printf("PUSH-SRV[%s] JTIs delivered: %s", configuration.Id, event.Jti)
 	return true
 }
 
@@ -406,7 +459,7 @@ will be considered a wildcard leading to the event being a match.
 */
 func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
-	if (stream.Inbound != nil && *stream.Inbound == true) && stream.Receiver.RouteMode == model.RouteModeImport {
+	if stream.IsReceiver() && stream.GetRouteMode() == model.RouteModeImport {
 		return false
 	}
 
@@ -418,7 +471,6 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord)
 			return false
 		}
 	}
-	// fmt.Println("Checking match for " + stream.StreamConfiguration.Id)
 
 	// Check for Aud match
 	if len(stream.Aud) > 0 {
