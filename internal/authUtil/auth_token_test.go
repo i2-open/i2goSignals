@@ -16,8 +16,8 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )

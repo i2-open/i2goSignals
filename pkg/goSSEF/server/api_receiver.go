@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/independentid/i2goSignals/internal/authUtil"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 type ClientPollStream struct {

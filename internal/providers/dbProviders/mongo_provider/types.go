@@ -3,7 +3,7 @@ package mongo_provider
 import (
 	"time"
 
-	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/model"
 
 	"github.com/MicahParks/keyfunc"
 	"go.mongodb.org/mongo-driver/bson/primitive"

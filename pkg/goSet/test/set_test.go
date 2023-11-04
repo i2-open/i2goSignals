@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	model2 "github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	model2 "github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"

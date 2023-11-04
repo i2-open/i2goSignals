@@ -1,10 +1,11 @@
 package buffer
 
 import (
-	"github.com/independentid/i2goSignals/internal/model"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/i2-open/i2goSignals/internal/model"
 )
 
 type EventBuf interface {

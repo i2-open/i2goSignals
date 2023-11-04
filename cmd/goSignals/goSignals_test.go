@@ -15,14 +15,14 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/independentid/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	ssef "github.com/independentid/i2goSignals/pkg/goSSEF/server"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"

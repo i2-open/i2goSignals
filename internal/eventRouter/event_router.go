@@ -8,10 +8,10 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/independentid/i2goSignals/internal/eventRouter/buffer"
-	"github.com/independentid/i2goSignals/internal/model"
-	"github.com/independentid/i2goSignals/internal/providers/dbProviders"
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 
 	"log"
 	"os"

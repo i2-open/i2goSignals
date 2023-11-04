@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/model"
 )
 
 type SsfServer struct {

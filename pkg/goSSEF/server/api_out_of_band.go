@@ -9,8 +9,8 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/independentid/i2goSignals/internal/authUtil"
-	"github.com/independentid/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/model"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 

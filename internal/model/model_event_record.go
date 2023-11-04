@@ -3,7 +3,7 @@ package model
 import (
 	"time"
 
-	"github.com/independentid/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // EventRecord is stored in MongoProvider.eventCol
