@@ -2,7 +2,7 @@ module github.com/i2-open/i2goSignals
 
 go 1.19
 
-replace github.com/i2-open/i2goSignals => ../i2goSignals
+// replace github.com/i2-open/i2goSignals => ../i2goSignals
 
 require (
 	github.com/MicahParks/jwkset v0.3.1

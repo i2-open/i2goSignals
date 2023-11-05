@@ -2,19 +2,23 @@
 
 <div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300 /></div>
 
-**i2goSignals** is an open source signals router implementing the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html) as well 
-as the SET[ Security Event Token specification RFC8417](https://www.rfc-editor.org/rfc/rfc8417). i2goSignals is 
-able to receive, validate, route, and forward Security Event Tokens (SETs) in logical streams to registered receivers. A 
-SET token is a specialized type of Json Web Token traditionally used in [OAuth2](https://www.rfc-editor.org/rfc/rfc6749) 
-based authentication and authorization systems. SET tokens are used to convey event signals between event publishers and 
-receivers. 
+**_i2goSignals_** is a signals router implementing the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html) as well 
+as the SET[ Security Event Token specification RFC8417](https://www.rfc-editor.org/rfc/rfc8417). A SET token is a 
+specialized type of Json Web Token traditionally used in [OAuth2](https://www.rfc-editor.org/rfc/rfc6749)
+based authentication and authorization systems. SET tokens are used to convey security event signals between publishers and
+receivers. The i2goSignals server works as a gateway intended to operate as a router connecting one or more security 
+event generators to one or more receivers across domains. An i2goSignals server is able to receive, validate, route, and 
+forward Security Event Tokens (SETs) in logical streams to registered receivers. 
 
-To transfer SET Event Tokens between parties, the HTTP SET PUSH (RFC8935) and SET POLL (RFC8936) are used. Series of SET 
-Events are organized into "streams" where by each individual SET is acknowledged by receivers in order to guarantee lossless 
-transfer of information.  Standard JOSE signing and encryption is used to validate and authenticate messages and optionally
+The protocols used to transfer SET Event Tokens between parties are:
+* [RFC8935](https://www.rfc-editor.org/rfc/rfc8935) - Push-Based Security Event Token (SET) Delivery Using HTTP, and
+* [RFC8936](https://www.rfc-editor.org/rfc/rfc8936) - Poll-Based Security Event Token (SET) Delivery Using HTTP.
+
+In practice, series of events are organized into "streams" where by each individual SET is acknowledged by receivers in order to guarantee lossless 
+transfer and optional recovery of information.  Standard JOSE signing and encryption is used to validate and authenticate messages and optionally
 the receiver of events.
 
-i2goSignals has the following capabilities:
+The i2goSignals server has the following capabilities:
 * Implementation of both SET PUSH (RFC8935) and SET POLL (RFC8936) Protocols
 * Supports logical relationships between publishers and receivers in the form of "streams" (as defined in RFC8935/8936)
 * Support for multiple inbound and outbound streams
@@ -42,8 +46,7 @@ cd /home/user/workspace/
 git clone git@github.com:i2-open/i2gosignals.git
 ```
 
-To use in Golang code, `import github.com/i2-open/i2goSignals`
-To deploy the server, build an i2goSignals image with Pack. The newly created image will contain the ssef server.
+To use in Golang code, `go get github.com/i2-open/i2goSignals`
 
 Building with Docker (in the project root):
 ```bash
@@ -51,10 +54,10 @@ go install ./...
 docker build . --tag i2gosignals
 ```
 
-This project currently uses MongoDB for event, key, and stream management.
+This project uses MongoDB for event, key, and stream storage, management, and recovery.
 
 
-Run the ssef server and the database using docker-compose
+Run the i2goSignals server and Mongo database using docker-compose
 
 ## Demonstration Set Up
 in the file `docker-compose.yml` is a sample set up that demonstrates both Push and Pull stream scenarios between 2 separate i2goSignals
