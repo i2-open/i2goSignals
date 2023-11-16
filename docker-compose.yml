@@ -1,10 +1,10 @@
-version: '3.1'
+version: '3.8'
 volumes:
   prometheus_data: {}
 services:
   mongo1:
     container_name: mongo1
-    image: mongo:6.0.3
+    image: mongo:6.0.4
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -17,7 +17,7 @@ services:
       - ".mongo/mongo1:/data/db"
   mongo2:
     container_name: mongo2
-    image: mongo:6.0.3
+    image: mongo:6.0.4
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -30,7 +30,7 @@ services:
       - ".mongo/mongo2:/data/db"
   mongo3:
     container_name: mongo3
-    image: mongo:6.0.3
+    image: mongo:6.0.4
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -42,7 +42,7 @@ services:
       - ".mongo/replica.key:/data/replica.key"
       - ".mongo/mongo3:/data/db"
   mongoSetup:
-    image: mongo:6.0.3
+    image: mongo:6.0.4
     depends_on:
       - mongo1
       - mongo2
@@ -113,7 +113,7 @@ services:
       - BASE_URL=http://goSignals2:8889/
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.7.0-SNAPSHOT
+    image: independentid/i2scim-universal:0.7.0
     container_name: scim_cluster1
     ports:
       - "9000:8080"
@@ -135,7 +135,7 @@ services:
       - scim.signals.rcv.config.file=/scim/receiveStream.json
       - scim.signals.pub.pem.path=/scim/issuer.pem
   scim_cluster2:
-    image: independentid/i2scim-universal:0.7.0-SNAPSHOT
+    image: independentid/i2scim-universal:0.7.0
     container_name: scim_cluster2
     ports:
       - "9001:8080"
