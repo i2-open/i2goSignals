@@ -77,7 +77,7 @@ services:
       - ".monitor/grafana:/etc/grafana/provisioning/datasources"
 
   goSignals1:
-    image: i2gosignals:latest
+    image: ghcr.io/i2-open/i2gosignals:0.7.0
     command: /goSignalsServer
     container_name: gosignals1
     hostname: goSignals1
@@ -95,7 +95,7 @@ services:
       - BASE_URL=http://goSignals1:8888/
 
   goSignals2:
-    image: i2gosignals:latest
+    image: ghcr.io/i2-open/i2gosignals:0.7.0
     command: /goSignalsServer
     container_name: gosignals2
     hostname: goSignals2
