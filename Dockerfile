@@ -2,6 +2,9 @@
 
 FROM golang:1.19
 
+LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
+LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
+
 # Set destination for COPY
 WORKDIR /app
 
@@ -27,3 +30,4 @@ EXPOSE 8888
 
 # Run
 CMD ["/goSignalsServer"]
+
