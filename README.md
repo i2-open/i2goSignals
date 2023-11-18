@@ -1,6 +1,6 @@
 # i2goSignals
 
-<div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300 /></div>
+<div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300  alt="i2GoSignals!"/></div>
 
 **_i2goSignals_** is a security signals processor implementing the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html) as well 
 as the SET [Security Event Token specification RFC8417](https://www.rfc-editor.org/rfc/rfc8417) and SET Event transfer protocols (RFC8935 and RFC8936). A SET Event token is a 
@@ -46,16 +46,16 @@ Clone or download the codebase from GitHub to your local machine and install the
 cd /home/user/workspace/
 git clone git@github.com:i2-open/i2gosignals.git
 ```
+To run the demonstration configuration, see Demonstration Set Up below.
 
-To use in Golang code, `go get github.com/i2-open/i2goSignals`
 
-Building with Docker (in the project root):
+Building a local docker image (starting from the main project directory):
 ```bash
 go install ./...
 docker build . --tag i2gosignals
 ```
 > [!NOTE] 
-> The 0.7.0 release image is also available at independentid/i2goSignals:0.7.0
+> The 0.7.0 release image is also available at ghcr.io/i2-open/i2gosignals:0.7.0
 
 This project uses MongoDB for event, key, and stream storage, management, and recovery. By default, unit testing is done with the MongoDb server defined in [docker-compose.yml](docker-compose.yml).
 
@@ -63,8 +63,12 @@ The use of Mongo can be changed out to other database systems. However at this t
 
 Run the i2goSignals server and Mongo database using docker-compose
 
+## Documentation
+* [Supported environment properties](docs/configuration_properties.md)
+* [goSignals administration tool](docs/gosignals_tool.md)
+
 ## Demonstration Set Up
-in the file `docker-compose.yml` is a sample set up that demonstrates both Push and Pull stream scenarios between 2 separate i2goSignals
+in the file [docker-compose.yml](docker-compose.yml) is a sample set up that demonstrates both Push and Pull stream scenarios between 2 separate i2goSignals
 servers. Additionally, 2 i2scim.io servers are used to demonstrate multi-master replication using SCIM defined provisioning events.
 
 To configure the demonstration do the following:
