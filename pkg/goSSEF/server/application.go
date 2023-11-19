@@ -27,8 +27,6 @@ type SignalsApplication struct {
 	HostName      string
 	DefIssuer     string
 	AdminRole     string
-	AdminUser     string
-	AdminPwd      string
 	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
 	pushReceivers map[string]model.StreamStateRecord
@@ -57,15 +55,9 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		role = "ADMIN"
 	}
 
-	user := os.Getenv("SSEF_ADMIN_USER")
-
-	pwd := os.Getenv("SSEF_ADMIN_SECRET")
-
 	sa := &SignalsApplication{
 		Provider:      provider,
 		AdminRole:     role,
-		AdminUser:     user,
-		AdminPwd:      pwd,
 		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
