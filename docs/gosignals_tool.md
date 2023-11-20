@@ -156,33 +156,64 @@ When registering with an i2goSignals server, the `--desc` and `--email` paramete
 > Create a stream on a specified server.
 > 
 > Flags:
-> --config=STRING          Location of client config files ($GOSIGNALS_HOME)
-> --server-url=STRING      The URL of an i2goServer or use an environment variable GOSIGNALS_URL ($GOSIGNALS_URL)
-> -o, --output=STRING          To redirect output to a file
-> -a, --append-output          When true, output to file (--output) will be appended
+> --config=STRING       Location of client config files ($GOSIGNALS_HOME)
+> --server-url=STRING   The URL of an i2goServer or use an environment variable GOSIGNALS_URL ($GOSIGNALS_URL)
+> -o, --output=STRING   To redirect output to a file
+> -a, --append-output   When true, output to file (--output) will be appended
 > 
->       --aud=AUD,...            One or more audience values separated by commas
->       --iss=STRING             The event issuer value (e.g. scim.example.com)
-> -n, --name=STRING            An alias name for the stream to be created
-> --iss-jwks-url=STRING    The issuer JwksUrl value. Used for SET Event token validation.
-> --events=*,...           The event uris (types) requested for a stream. Use '*' to match by wildcard.
+>     --aud=AUD,...     One or more audience values separated by commas
+>     --iss=STRING      The event issuer value (e.g. scim.example.com)
+> -n, --name=STRING     An alias name for the stream to be created
+> --iss-jwks-url=STRING The issuer JwksUrl value. Used for SET Event token validation.
+> --events=*,...        The event uris (types) requested for a stream. Use '*' to match by wildcard.
 > 
 > Commands:
 > push                  Create a SET PUSH Stream (RFC8935)
-> receive (r)         Create PUSH Receiver stream
-> [<alias>]         The alias of the server to create the stream on (default is selected server)
-> publish (p)         Create PUSH Publisher stream
-> [<alias>]         The alias of the server to create the stream on (default is selected server)
-> connection (c)      Create a push stream connection between servers
-> <source-alias>    The alias of the publishing server.
-> <dest-alias>      The alias of receiving server or existing stream alias.
+>   receive | publish     Create PUSH Receiver|Publisher stream
+>     <alias>               The alias of the server to create the stream on (default is selected server)
+>   connection (c)        Create a push stream connection between servers
+>     <source-alias>        The alias of the publishing server.
+>     <dest-alias>          The alias of receiving server or existing stream alias.
 > 
 > poll                  Create a SET Polling Stream (RFC8936)
-> receive             Create a POLLING Receiver stream
-> [<alias>]         The alias of the server to create the stream on (default is selected server)
-> publish             Create a POLLING Publisher stream
-> [<alias>]         The alias of the server to create the stream on (default is selected server)
-> connection (c)      Create a polling stream connection between servers
-> <source-alias>    The alias of the publishing server or existing stream alias.
-> <dest-alias>      The alias of receiving server.
+>   receive | punlidsh    Create a POLLING Receiver|Publisher stream
+>     <alias>               The alias of the server to create the stream on (default is selected server)
+>   connection (c)        Create a polling stream connection between servers
+>     <source-alias>    The alias of the publishing server or existing stream alias.
+>     <dest-alias>      The alias of receiving server.
 > ```
+
+Create Stream Parameters:
+
+| Parameter         | Description                                                                                                                                  | Default                                          |
+|-------------------|----------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------|
+| `--name`, `-n`    | Optional local alias name for the stream created.                                                                                            | generated value                                  |
+| `--aud`           | A string containing one or more audience values separated by comma (e.g. `aud.example.com`)                                                  | none                                             |
+| `--iss`           | A string containing the issuer (e.g. `iss.example.com`). Note value usually corresponds to the key id (`kid`) for the signing key for events | none                                             |
+| `--iss-jwks-url`  | A url for the public key for signed events                                                                                                   | none                                             |
+| `--events`        | A comma separated list of event URIs that are being requested. Note: i2goSignals servers accepts `*` as a wildcard to select multiple events | *                                                |
+| `--mode`          | For i2goSignals servers mode informs the server what it does with events.  See below.                                                        | `IMPORT` for receiver<BR>`PUBLISH` for publisher |
+| `--event-url`     | Used to tell Push Publishers where to deliver events using RFC8935. For Poll receivers, indicates where to retrieve events using RFC8936     | none                                             |
+| `--auth`          | The authorization header value to use when communicating with a polling or push endpoint (i.e. `--event-url`)                                | none                                             |
+| `--connect`, `-c` | Partially automates stream creation by providing the local alias for the stream being connected to.                                          | none                                             |      
+
+### Stream Modes
+
+In order to move events received by an i2goSignal receiver stream to an outbound publisher stream, the following `mode` values are defined for a receiver or transmitter stream. 
+
+For a _publisher_ stream, the supported `--mode` values are:
+`PUBLISH` or `P` (default)
+ : Events routed to this transmitter (e.g. due to a match in audience and issuer) are signed and delivered to the identified receiver.
+
+`FORWARD` or `F`
+ : Events are forwarded as received to the specified receiver. This may be because the server is forwarding an already signed event.
+
+For a _receiver_ stream, the supported `--mode` values are:
+`IMPORT` or `I` (default) 
+: Received events are stored in the database and no further action is taken. This may be because the event will be picked up directly from the database.
+
+`FORWARD` or `F` 
+: The event is to be forwarding to one or more matching outbound publisher streams. Forwarding indicates the received event is to be sent as-is.
+
+`PUBLISH` or `P` 
+: The same as `FORWARD`, except that events will be re-signed by the server (e.g. an internally signed event needs to be signed with an externally visible key)
