@@ -64,8 +64,9 @@ The use of Mongo can be changed out to other database systems. However at this t
 Run the i2goSignals server and Mongo database using docker-compose
 
 ## Documentation
-* [Supported environment properties](docs/configuration_properties.md)
 * [goSignals administration tool](docs/gosignals_tool.md)
+* [Supported environment properties](docs/configuration_properties.md)
+
 
 ## Demonstration Set Up
 in the file [docker-compose.yml](docker-compose.yml) is a sample set up that demonstrates both Push and Pull stream scenarios between 2 separate i2goSignals
