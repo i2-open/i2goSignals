@@ -18,9 +18,7 @@ type ParserData struct {
 }
 
 type Globals struct {
-	Config    string `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
-	ServerUrl string `help:"The URL of an i2goServer or use an environment variable GOSIGNALS_URL" env:"GOSIGNALS_URL"`
-	// StreamToken  string     `help:"A token used to manage a stream"`
+	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
 	Data         ConfigData `kong:"-"`
 	Output       string     `short:"o" help:"To redirect output to a file" type:"path" `
 	AppendOutput bool       `short:"a" default:"false" help:"When true, output to file (--output) will be appended"`
