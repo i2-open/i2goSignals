@@ -1231,7 +1231,7 @@ type DeleteCmd struct {
 }
 
 type SetStreamConfigCmd struct {
-	Alias     string     `arg:"" optional:"" help:"Specify a stream alias, *, or blank to show all streams for the selected server"`
+	Alias     string     `arg:"" optional:"" help:"Alias of stream to be modified"`
 	Events    []string   `optional:"" short:"e" help:"Comma separated list of events to request. Or use +/- for delta to add or remove events" sep:"," `
 	RJwksUrl  string     `optional:"" short:"r" help:"Set the receiver JWKS url"`
 	IJwksUrl  string     `optional:"" short:"i" help:"Set the issuer JWKS url"`
