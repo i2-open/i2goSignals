@@ -54,9 +54,6 @@ gosignals add server go1 http://goSignals1.example.com:8888 --iat=eyJhbGciOiJSUz
 
 ## Adding A Server
 
-<details>
-<summary>Details</summary>
-
 Adding a server allows the configuration tool to contact and load SSF server information from a running server. The information gathered is used in subsequent requests such as stream management. Loaded
 information is stored in the local session store.
 
@@ -154,11 +151,8 @@ The token parameter is typically used with SSF servers where the authorization t
 the SSF service provider.
 
 When registering with an i2goSignals server, the `--desc` and `--email` parameters can be used to provide additional contact or use data.
-</details>
 
 ## Show Server
-
-<details><summary>Details</summary>
 
 The `show server` command is used to show the configuration and streams for a previously added server. The command has one
 parameter which is the server alias.
@@ -260,12 +254,7 @@ include streams created by other means.  `ServerConfiguration` contains the SSF 
 > The information returned in many responses includes access tokens that should be kept confidential. They are persisted
 > in the goSignals tool configuration file (typically `~/.goSignals/config.json`).
 
-</details>
-
 ## Creating Streams
-
-<details>
-<summary>Details</summary>
 
 > ```
 > Create a stream on a specified server.
@@ -375,12 +364,7 @@ provided is intended for a Transmitter to be manually configured, or, semi-autom
 
 In the above JSON structure, a unique local alias `sQs` is assigned. This can be used in goSignals commands to update and retrieve the current stream configuration.
 
-</details>
-
 ## Get Stream Configuration
-
-<details>
-<summary>Details</summary>
 
 To retrieve the current stream configuration from an SSF or i2goSignals server, use the `get stream config` command. 
 
@@ -449,12 +433,7 @@ Stream configuration for: sQs
 }
 ```
 
-</details>
-
 ## Setting Stream Config
-
-<details>
-<summary>Details</summary>
 
 > ```
 > Modify stream configuration
@@ -482,7 +461,7 @@ a specified `jti` value. Once set, the server will look in its database and atte
 the stream as of the specified date or jti value.
 
 When the update is accepted, goSignals will show the updated configuration provided by the SSF or i2goSignals server.
-</details>
+
 
 
 
