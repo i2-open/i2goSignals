@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 
 	"log"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/alecthomas/kong"
+	"github.com/chzyer/readline"
 )
 
 type ParserData struct {
@@ -155,6 +155,18 @@ func initParser(cli *CLI) (*ParserData, error) {
 
 func main() {
 
+	console, err := readline.NewEx(&readline.Config{
+		Prompt: "goSignals> ",
+		// HistoryFile:            os.TempDir() + "/goSignals-history",
+		DisableAutoSaveHistory: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer func(console *readline.Instance) {
+		_ = console.Close()
+	}(console)
+
 	td, err := initParser(&CLI{})
 
 	// ctx.FatalIfErrorf(err)
@@ -172,12 +184,21 @@ func main() {
 		var args []string
 		if len(initialArgs) > 0 {
 			args = initialArgs
+			fullCommand := initialArgs[0]
+			for i, arg := range initialArgs {
+				if i > 0 {
+					fullCommand = fullCommand + " " + arg
+				}
+			}
 			initialArgs = []string{}
+			_ = console.SaveHistory(fullCommand)
 		} else {
-			fmt.Print("goSignals> ")
-			reader := bufio.NewReader(os.Stdin)
-			line, _ := reader.ReadString('\n')
-			line = line[0 : len(line)-1]
+			line, err := console.Readline()
+			if err != nil {
+				panic(err)
+			}
+			//line = line[0 : len(line)-1]
+			_ = console.SaveHistory(line)
 			args = strings.Split(line, " ")
 		}
 
