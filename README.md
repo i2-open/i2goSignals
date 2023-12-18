@@ -2,30 +2,26 @@
 
 <div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300  alt="i2GoSignals!"/></div>
 
-**_i2goSignals_** is a security signals processor implementing the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html) as well 
-as the SET [Security Event Token specification RFC8417](https://www.rfc-editor.org/rfc/rfc8417) and SET Event transfer protocols (RFC8935 and RFC8936). A SET Event token is a 
-specialized type of Json Web Token traditionally used in [OAuth2](https://www.rfc-editor.org/rfc/rfc6749)
-based authentication and authorization systems. SET tokens are used to convey security event signals between publishers and
-receivers. The i2goSignals server works as a gateway router intended connecting one or more security 
-event generators to one or more receivers across domains using streams. An i2goSignals server is able to receive, validate, route, and 
-forward Security Event Tokens (SETs) in streams to registered receivers. 
+**_goSignals_** is a security signals processor that provides the ability to route Security Events between systems.
+A Security Event is a token that describes an event that has occurred within the domain of an issuer. A 
+[Security Event Token RFC8417](https://www.rfc-editor.org/rfc/rfc8417) is a specialized type of Json Web Token 
+traditionally used in [OAuth2](https://www.rfc-editor.org/rfc/rfc6749) based authentication and authorization systems. Typically a series of "SET" tokens
+are shared in a series called a stream between a publisher and receiver. The management of these streams is defined by
+the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html).  The mechanism for the transfer of Security Event Tokens is defined
+by the SET Event transfer protocols ([RFC8935](https://www.rfc-editor.org/rfc/rfc8935) and [RFC8936](https://www.rfc-editor.org/rfc/rfc8936)). 
 
-The protocols used to transfer SET Event Tokens between parties are:
-* [RFC8935](https://www.rfc-editor.org/rfc/rfc8935) - Push-Based Security Event Token (SET) Delivery Using HTTP, and
-* [RFC8936](https://www.rfc-editor.org/rfc/rfc8936) - Poll-Based Security Event Token (SET) Delivery Using HTTP.
-
-In practice, series of events are organized into "streams" where by each individual SET is acknowledged by receivers in order to guarantee lossless 
-transfer and optional recovery of information.  Standard JOSE signing and encryption is used to validate and authenticate messages and optionally
-the receiver of events.
+The **_goSignals_** server works as a gateway router or store and forward server connecting one or more security 
+event generators to one or more receivers across domains using streams. An **_goSignals_** server is able to receive, 
+validate, route, and forward Security Event Tokens (SETs) in streams to registered receivers.
 
 The i2goSignals server has the following capabilities:
 * Implementation of both SET PUSH (RFC8935) and SET POLL (RFC8936) Protocols
-* Supports logical relationships between publishers and receivers in the form of "streams" (as defined in RFC8935/8936). For example, i2goSignals can take a single stream from a security event generator and distribute them to more than one outbound streams.
-* Support for multiple inbound and outbound streams
-* The ability act as protocol converter such as enabling Receivers that support Poll transfer only (e.g. from behind a firewall) to pick up events from SET Push-only transmitters.
-* Support for fault-tolerant stream recovery including automatic re-transmission and stream resets
-* Routing controls how received events are forwarded, and/or re-published to one or more outbound streams
-* Each stream defines the issuer, audience and event types available and configured to be transmitted
+* Organizes SETS into streams between publishers (event generators) and receivers (as defined in RFC8935/8936). 
+* Support for multiple inbound and outbound streams and routing between them
+* Acts as a protocol converter such as enabling Receivers that support Poll transfer only (e.g. from behind a firewall) to pick up events from SET Push-only transmitters.
+* Support for fault-tolerant stream recovery including automatic re-transmission and stream resets as well as configurable stream resets to a specified date or event identifier (`JTI`).
+* Supports routing which controls how events are forwarded, and/or re-published to one or more outbound streams
+* Validates events based on configured stream signing and encryption requirements.
 
 The i2goSignals project is currently under development and is published for feedback and community involvement at this time.  This 
 preview code is not yet ready for production. Key features such as administration API security, multi-node co-ordination and TLS are still in progress.
@@ -39,8 +35,8 @@ There are 3 main components to this project
 
 Clone or download the codebase from GitHub to your local machine and install the following prerequisites.
 
-* [Go 1.19](https://go.dev)
-* [Docker Desktop](https://www.docker.com/products/docker-desktop)
+* [Go 1.21.5](https://go.dev)
+* [Docker Desktop](https://www.docker.com/products/docker-desktop) for local testing and development
 
 ```bash
 cd /home/user/workspace/
