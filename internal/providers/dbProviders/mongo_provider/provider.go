@@ -457,13 +457,28 @@ func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 	pubKeyBytes := rec.PubKeyBytes
 	pubKey, err := x509.ParsePKCS1PublicKey(pubKeyBytes)
 
-	jwkSet := jwkset.NewMemory[any]()
+	jwkstore := jwkset.NewMemoryStorage()
 
-	err = jwkSet.Store.WriteKey(context.Background(), jwkset.NewKey[any](pubKey, issuer))
+	// Create the JWK options.
+	metadata := jwkset.JWKMetadataOptions{
+		KID: issuer,
+	}
+	jwkOptions := jwkset.JWKOptions{
+		Metadata: metadata,
+	}
+
+	jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
+	if err != nil {
+		pLog.Println("Error parsing rsa key into jwk: " + err.Error())
+		return nil
+	}
+	err = jwkstore.KeyWrite(context.Background(), jwkSet)
+
 	if err != nil {
 		pLog.Println("Error creating JWKS for key issuer: " + issuer + ": " + err.Error())
+		return nil
 	}
-	response, err := jwkSet.JSONPublic(context.Background())
+	response, err := jwkstore.JSONPublic(context.Background())
 	if err != nil {
 		pLog.Println("Error creating JWKS response: " + err.Error())
 	}
