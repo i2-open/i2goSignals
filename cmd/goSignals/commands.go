@@ -856,6 +856,9 @@ func (g *CreateIatCmd) Run(c *CLI) error {
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("Received response: %s", resp.Status)
 		fmt.Println(msg)
