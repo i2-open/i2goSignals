@@ -20,6 +20,7 @@ type ParserData struct {
 type Globals struct {
 	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
 	Data         ConfigData `kong:"-"`
+	ConfigFile   string     `kong:"-"`
 	Output       string     `short:"o" help:"To redirect output to a file" type:"path" `
 	AppendOutput bool       `short:"a" default:"false" help:"When true, output to file (--output) will be appended"`
 
@@ -147,8 +148,6 @@ func initParser(cli *CLI) (*ParserData, error) {
 		parser: parser,
 		cli:    cli,
 	}
-	fmt.Println("Loading existing configuration...")
-	_ = cli.Data.Load(&cli.Globals)
 
 	return &td, err
 }
@@ -174,15 +173,36 @@ func main() {
 		fmt.Println(err.Error())
 	}
 	oneCommand := false
-	var initialArgs []string
-	if len(os.Args) > 1 {
-		initialArgs = os.Args[1:]
-		oneCommand = true
+	initialArgs := os.Args
+	if len(initialArgs) > 1 {
+		initialArgs = initialArgs[1:]
+		firstArg := initialArgs[0]
+		if firstArg[0:1] != "-" {
+			oneCommand = true
+		} else {
+			for i, arg := range initialArgs {
+				prefix := arg[0:8]
+				if strings.EqualFold("--config", prefix) {
+					filepath := arg[strings.Index(arg, "=")+1:]
+					td.cli.Globals.Config = filepath
+					initialArgs = append(initialArgs[0:i], initialArgs[i+1:]...)
+				}
+			}
+		}
+
 	}
+
+	// fmt.Println("Loading existing configuration...")
+	err = td.cli.Data.checkConfigPath(&td.cli.Globals)
+	if err != nil {
+		fmt.Println("Error reading config directory: " + err.Error())
+		panic(-1)
+	}
+	_ = td.cli.Data.Load(&td.cli.Globals)
 
 	for true {
 		var args []string
-		if len(initialArgs) > 0 {
+		if oneCommand {
 			args = initialArgs
 			fullCommand := initialArgs[0]
 			for i, arg := range initialArgs {

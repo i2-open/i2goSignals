@@ -17,6 +17,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 )
 
+var ConfigFile = "config.json"
+
 type SsfServer struct {
 	Alias               string
 	Host                string
@@ -175,15 +177,44 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 	return &server, nil
 }
 
-func (c *ConfigData) Load(g *Globals) error {
-	if g.Config == "" {
-		g.Config = ".goSignals/config.json"
+func (c *ConfigData) checkConfigPath(g *Globals) error {
+	configPath := g.Config
+	if configPath == "" {
+		configPath = ".goSignals/" + ConfigFile
 		usr, err := user.Current()
 		if err == nil {
-			g.Config = filepath.Join(usr.HomeDir, g.Config)
+			configPath = filepath.Join(usr.HomeDir, configPath)
 		}
 	}
-	// fmt.Println("Loading from " + g.Config)
+
+	dirPath := filepath.Dir(configPath)
+	i := len(dirPath)
+	if dirPath[i-1:i-1] != "/" {
+		dirPath = dirPath + "/"
+	}
+	baseFile := filepath.Base(configPath)
+	if filepath.Ext(baseFile) == "" {
+		dirPath = configPath
+		baseFile = ConfigFile
+	}
+
+	_, err := os.Stat(dirPath)
+	if os.IsNotExist(err) {
+
+		// path/to/whatever does not exist
+		err = os.Mkdir(dirPath, 0770)
+		if err != nil {
+			return err
+		}
+	}
+
+	g.ConfigFile = configPath
+
+	return nil
+}
+
+func (c *ConfigData) Load(g *Globals) error {
+	// configFile := filepath.Join(g.Config, ConfigFile)
 
 	// Default all the maps to empty
 	if c.Pems == nil {
@@ -193,11 +224,11 @@ func (c *ConfigData) Load(g *Globals) error {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
 	}
 
-	if _, err := os.Stat(g.Config); os.IsNotExist(err) {
+	if _, err := os.Stat(g.ConfigFile); os.IsNotExist(err) {
 		return nil // No existing configuration
 	}
 
-	configBytes, err := os.ReadFile(g.Config)
+	configBytes, err := os.ReadFile(g.ConfigFile)
 	if err != nil {
 		fmt.Println("Error reading configuration: " + err.Error())
 		return nil
@@ -214,27 +245,11 @@ func (c *ConfigData) Load(g *Globals) error {
 
 func (c *ConfigData) Save(g *Globals) error {
 
-	configPath := g.Config
-	if configPath == "" {
-		configPath = ".goSignals/config.json"
-		usr, err := user.Current()
-		if err == nil {
-			configPath = filepath.Join(usr.HomeDir, configPath)
-		}
-	}
-	configDir := filepath.Dir(configPath)
-	if _, err := os.Stat(configDir); os.IsNotExist(err) {
-		// path/to/whatever does not exist
-		err = os.Mkdir(configDir, 0770)
-		if err != nil {
-			return err
-		}
-	}
 	out, err := json.MarshalIndent(c, "", " ")
 	if err != nil {
 		return err
 	}
-	err = os.WriteFile(configPath, out, 0660)
+	err = os.WriteFile(g.ConfigFile, out, 0660)
 	if err != nil {
 		fmt.Println("Error saving configuration: " + err.Error())
 	}
