@@ -143,10 +143,10 @@ func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error)
 
 	if err != nil {
 		suite.pd.parser.Errorf("%s", err.Error())
-		var err *kong.ParseError
-		if errors.As(err, &err) {
+		var errParse *kong.ParseError
+		if errors.As(err, &errParse) {
 			log.Println(err.Error())
-			_ = err.Context.PrintUsage(false)
+			_ = errParse.Context.PrintUsage(false)
 			return nil, err
 		}
 	}
