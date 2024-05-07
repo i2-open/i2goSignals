@@ -1,0 +1,5 @@
+add server gosignals1 http://goSignals1:8888
+add server gosignals2 http://goSignals2:8889
+create iat gosignals1 --output=/scim/iat1.txt
+create iat gosignals2 --output=/scim/iat2.txt
+exit

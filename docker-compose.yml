@@ -112,6 +112,19 @@ services:
       - PORT=8889
       - BASE_URL=http://goSignals2:8889/
 
+  scimSsfSetup:
+    image: ghcr.io/i2-open/i2gosignals:0.7.0
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+      - goSignals1
+      - goSignals2
+    volumes:
+      - "./config/scim:/scim"
+    restart: "no"
+    entrypoint: [ "bash", "/scim/scim_iat.sh"]
+
   scim_cluster1:
     image: independentid/i2scim-universal:0.7.0
     container_name: scim_cluster1
@@ -120,6 +133,8 @@ services:
     depends_on:
       goSignals1:
         condition: service_started
+      scimSsfSetup:
+        condition: service_completed_successfully
     volumes:
       - ./config/scim/data1:/scim
     environment:
@@ -142,6 +157,8 @@ services:
     depends_on:
       goSignals1:
         condition: service_started
+      scimSsfSetup:
+        condition: service_completed_successfully
     volumes:
       - ./config/scim/data2:/scim
     environment:

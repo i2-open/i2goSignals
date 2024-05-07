@@ -35,7 +35,7 @@ There are 3 main components to this project
 
 Clone or download the codebase from GitHub to your local machine and install the following prerequisites.
 
-* [Go 1.21.5](https://go.dev)
+* [Go 1.21.5](https://go.dev) - Note: in GoLand make sure to select the correct version of go `Preferences > Go > GOROOT`.
 * [Docker Desktop](https://www.docker.com/products/docker-desktop) for local testing and development
 
 ```bash
