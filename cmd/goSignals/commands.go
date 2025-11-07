@@ -815,6 +815,9 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	}
 	body, _ := io.ReadAll(resp.Body)
 
+	if g.Data.Pems == nil {
+		g.Data.Pems = map[string][]byte{}
+	}
 	g.Data.Pems[c.IssuerId] = body
 
 	outputPath := "issuer.pem"

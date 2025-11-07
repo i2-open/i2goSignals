@@ -50,20 +50,34 @@ type ConfigData struct {
 }
 
 func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
-	key := c.keys[issuerId]
-	if key != nil {
+	// Ensure cache map is initialized
+	if c.keys == nil {
+		c.keys = map[string]*rsa.PrivateKey{}
+	}
+	// Return from cache if present
+	if key := c.keys[issuerId]; key != nil {
 		return key, nil
 	}
 
-	var pemBytes []byte
-	pemBytes = c.Pems[issuerId]
+	// Validate PEM storage
+	if c.Pems == nil {
+		return nil, errors.New("no PEMs loaded; configuration not initialized")
+	}
+	pemBytes, ok := c.Pems[issuerId]
+	if !ok || len(pemBytes) == 0 {
+		return nil, fmt.Errorf("no PEM found for issuer '%s'", issuerId)
+	}
+
 	block, _ := pem.Decode(pemBytes)
+	if block == nil || len(block.Bytes) == 0 {
+		return nil, errors.New("invalid or corrupt PEM data")
+	}
 
 	pkcs8PrivateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, err
 	}
-	key = pkcs8PrivateKey.(*rsa.PrivateKey)
+	key := pkcs8PrivateKey.(*rsa.PrivateKey)
 	c.keys[issuerId] = key // cache the result
 
 	return key, nil
@@ -216,11 +230,17 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 func (c *ConfigData) Load(g *Globals) error {
 	// configFile := filepath.Join(g.Config, ConfigFile)
 
-	// Default all the maps to empty
+	// Default all the maps to empty (initialize each independently)
 	if c.Pems == nil {
 		c.Pems = map[string][]byte{}
+	}
+	if c.Servers == nil {
 		c.Servers = map[string]SsfServer{}
+	}
+	if c.keys == nil {
 		c.keys = map[string]*rsa.PrivateKey{}
+	}
+	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
 	}
 
@@ -239,8 +259,24 @@ func (c *ConfigData) Load(g *Globals) error {
 	err = json.Unmarshal(configBytes, c)
 	if err != nil {
 		fmt.Println("Error parsing stored configuration: " + err.Error())
+		return err
 	}
-	return err
+
+	// After unmarshal, ensure non-persisted and optional maps are non-nil
+	if c.Pems == nil {
+		c.Pems = map[string][]byte{}
+	}
+	if c.Servers == nil {
+		c.Servers = map[string]SsfServer{}
+	}
+	if c.keys == nil {
+		c.keys = map[string]*rsa.PrivateKey{}
+	}
+	if c.streamConfigs == nil {
+		c.streamConfigs = map[string]*model.StreamConfiguration{}
+	}
+
+	return nil
 }
 
 func (c *ConfigData) Save(g *Globals) error {
@@ -249,6 +285,7 @@ func (c *ConfigData) Save(g *Globals) error {
 	if err != nil {
 		return err
 	}
+	fmt.Println("Writing to: " + g.ConfigFile)
 	err = os.WriteFile(g.ConfigFile, out, 0660)
 	if err != nil {
 		fmt.Println("Error saving configuration: " + err.Error())
