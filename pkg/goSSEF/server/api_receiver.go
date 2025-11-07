@@ -156,13 +156,13 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		if err != nil {
 			ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
 			errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
-			serverLog.Printf(errMsg)
+			serverLog.Print(errMsg)
 			continue
 		}
 		err = json.Unmarshal(bodyBytes, &pollResponse)
 		if err != nil {
 			errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
-			serverLog.Printf(errMsg)
+			serverLog.Print(errMsg)
 			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
 			continue
 		}
@@ -184,7 +184,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 			if err != nil {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Auth parsing error:\n%s\n", ps.stream.StreamConfiguration.Id, err.Error())
-				serverLog.Printf(errMsg)
+				serverLog.Print(errMsg)
 				// fmt.Println(setString)
 				setErrs[jti] = model.SetErrorType{
 					Error:       "invalid_request",
@@ -194,7 +194,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			}
 			if !token.VerifyIssuer(ps.stream.Iss, true) {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Invalid issuer received: %s does not match %s", ps.stream.StreamConfiguration.Id, token.Issuer, ps.stream.Iss)
-				serverLog.Printf(errMsg)
+				serverLog.Print(errMsg)
 				setErrs[jti] = model.SetErrorType{
 					Error:       "invalid_issuer",
 					Description: "The SET Issuer is invalid for the SET Recipient.",
@@ -210,7 +210,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 				}
 				if !audMatch {
 					errMsg := fmt.Sprintf("POLL-RCV[%s] Audience was not matched: %s", ps.stream.StreamConfiguration.Id, token.RegisteredClaims.Audience)
-					serverLog.Printf(errMsg)
+					serverLog.Print(errMsg)
 					setErrs[jti] = model.SetErrorType{
 						Error:       "invalid_audience",
 						Description: "The SET Audience does not correspond to the SET Recipient",
@@ -279,7 +279,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		// Auth validation and diagnostics
 		if err != nil {
 			errMsg := fmt.Sprintf("PUSH-RCV[%s] Auth parsing error: %s", config.Id, err.Error())
-			serverLog.Printf(errMsg)
+			serverLog.Print(errMsg)
 			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
 			return
 		}
