@@ -436,7 +436,7 @@ func TestValidateAuthorization(t *testing.T) {
 	testRequest, err := http.NewRequest(http.MethodPost, "http://example.com/events/1", nil)
 	testRequest.Header.Set("Authorization", "Bearer "+testTokens.streamToken)
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err.Error())
 	}
 	vars := map[string]string{
 		"id": "1",
@@ -507,7 +507,7 @@ func TestValidateAuthorization(t *testing.T) {
 				scopes: []string{ScopeEventDelivery},
 			},
 			want:  nil,
-			want1: http.StatusOK,
+			want1: http.StatusUnauthorized,
 		},
 		{
 			name: "Test event good stream query",

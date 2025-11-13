@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"log"
@@ -170,7 +171,10 @@ func main() {
 
 	// ctx.FatalIfErrorf(err)
 	if err != nil {
-		fmt.Println(err.Error())
+		log.Fatalf("Unexpected error initializing goSignals parser: %s\n", err.Error())
+	}
+	if td == nil {
+		log.Fatalln("Unexpected error initializing goSignals parser: nil parser")
 	}
 	oneCommand := false
 	initialArgs := os.Args
@@ -230,7 +234,8 @@ func main() {
 		if err != nil {
 			// Put out the help text response
 			td.parser.Errorf("%s", err.Error())
-			if err, ok := err.(*kong.ParseError); ok {
+			var err *kong.ParseError
+			if errors.As(err, &err) {
 				log.Println(err.Error())
 				_ = err.Context.PrintUsage(false)
 			}

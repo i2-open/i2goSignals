@@ -71,7 +71,7 @@ func (suite *toolSuite) initialize() error {
 	fmt.Println("Test working directory: " + dir)
 	suite.pd, err = initParser(cli)
 	if err != nil {
-		testLog.Printf(err.Error())
+		testLog.Print(err.Error())
 	}
 
 	instance, err := createServer(server1name)
@@ -150,6 +150,9 @@ func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error)
 			return nil, err
 		}
 	}
+
+	// Because we are bypassing normal invocation of Kong we need to initialize the configuration file value.
+	_ = suite.pd.cli.Data.checkConfigPath(&suite.pd.cli.Globals)
 
 	output := os.Stdout
 	input := os.Stdin

@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -38,7 +38,8 @@ var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/
 var testLog = log.New(os.Stdout, "TEST: ", log.Ldate|log.Ltime)
 
 type ssfInstance struct {
-	server          *http.Server
+	ts              *httptest.Server
+	host            string
 	client          *http.Client
 	provider        *mongo_provider.MongoProvider
 	stream          model.StreamConfiguration
@@ -58,19 +59,22 @@ type ServerSuite struct {
 func TestServer(t *testing.T) {
 	serverSuite := ServerSuite{}
 
+	testLog.Println("Tests must be completed in order. Tests may not be run individually as each test builds on previous state.")
+	testLog.Println("A Mongo replica set is required for this test.")
+
 	testLog.Println("NOTE: This test will generate a series of Prometheus duplicate collector registration errors. This is due to the test environment only.")
 	instances := make([]*ssfInstance, 2)
 
-	testLog.Println("** Starting SSF1...")
-	instance, err := createServer("ssf1")
+	testLog.Println("** Starting GoSignals (ssf1)...")
+	instance, err := createServer(t, "ssf1")
 	if err != nil {
 		testLog.Printf("Error starting %s: %s", "ssf1", err.Error())
 	}
 	assert.NotEqualf(t, instance.projectId, "", "Check project id is not empty")
 
 	instances[0] = instance
-	testLog.Println("** Starting SSF2...")
-	instance, err = createServer("ssf2")
+	testLog.Println("** Starting GoSignals (ssf2)...")
+	instance, err = createServer(t, "ssf2")
 	if err != nil {
 		testLog.Printf("Error starting %s: %s", "ssf2", err.Error())
 	}
@@ -85,40 +89,49 @@ func TestServer(t *testing.T) {
 	for i := 1; i > -1; i-- {
 		instance := serverSuite.servers[i]
 		testLog.Printf("** Shutting down server %s...", instance.provider.Name())
+		if instance.ts != nil {
+			instance.ts.Close()
+		}
 		instance.app.Shutdown()
 		time.Sleep(time.Second)
 	}
 	testLog.Println("** TEST COMPLETE **")
 }
 
-func createServer(dbName string) (*ssfInstance, error) {
+func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
+	t.Helper()
 	var err error
 	var instance ssfInstance
 	mongo, err := mongo_provider.Open(TestDbUrl, dbName)
 	if err != nil {
-		testLog.Println("Mongo client error: " + err.Error())
+		t.Log("A valid MongoDB is required for this test.")
+		t.Error("Mongo client error: " + err.Error())
 		return nil, err
 	}
 
 	_ = mongo.ResetDb(true)
 
-	listener, _ := net.Listen("tcp", "localhost:0")
-
-	signalsApplication := ssef.StartServer(listener.Addr().String(), &*mongo, "")
-	instance.app = *signalsApplication
-	instance.server = signalsApplication.Server
-	instance.client = &http.Client{}
+	// Build application and wrap with httptest.Server
+	app := ssef.NewApplication(&*mongo, "")
+	ts := httptest.NewServer(app.Handler)
+	instance.ts = ts
+	instance.app = *app
+	u, _ := url.Parse(ts.URL)
+	instance.host = u.Host
+	// Set BaseUrl on app for any logic that depends on it
+	app.BaseUrl, _ = url.Parse(ts.URL + "/")
+	instance.client = ts.Client()
 	instance.provider = mongo
 	nowTime := time.Now()
 	instance.startTime = &nowTime
 
 	instance.iatToken, err = instance.provider.GetAuthIssuer().IssueProjectIat(nil)
 	if err != nil {
-		fmt.Printf("Error creating iat: %s", err.Error())
+		t.Logf("Error creating iat: %s\n", err.Error())
 	}
 	eat, err := instance.provider.GetAuthIssuer().ParseAuthToken(instance.iatToken)
 	if err != nil {
-		fmt.Printf("Error parsing iat: %s", err.Error())
+		t.Logf("Error parsing iat: %s\n", err.Error())
 	}
 
 	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
@@ -132,23 +145,17 @@ func createServer(dbName string) (*ssfInstance, error) {
 
 	instance.projectId = eat.ProjectId
 
-	go func() {
-		_ = signalsApplication.Server.Serve(listener)
-	}()
 	return &instance, nil
 }
 
-func (suite *ServerSuite) SetupTest() {
-	// log.Println("TEST!")
-}
-
 func (suite *ServerSuite) TearDownTest() {
-
+	// Wait for tests to settle (database updates to complete
+	time.Sleep(500 * time.Millisecond)
 }
 
 // Test1_Certificate loads the servers default certificate in a couple of ways and attempts to parse it.
 func (suite *ServerSuite) Test1_Certificate() {
-	serverUrl := fmt.Sprintf("http://%s/jwks.json", suite.servers[0].server.Addr)
+	serverUrl := fmt.Sprintf("http://%s/jwks.json", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
@@ -167,14 +174,14 @@ func (suite *ServerSuite) Test1_Certificate() {
 
 	assert.Equal(suite.T(), body, issPub2.RawJWKS(), "Check JWKS issuers are equal")
 
-	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].server.Addr)
+	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT", suite.servers[0].host)
 	issPub3, err := keyfunc.Get(serverUrl, keyfunc.Options{})
 	assert.NoError(suite.T(), err, "Check no error keyfunc retrieval of /jwks/issuer")
 	assert.Equal(suite.T(), body, issPub3.RawJWKS(), "Check JWKS issuers are equal")
 }
 
 func (suite *ServerSuite) Test2_WellKnownConfigs() {
-	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].server.Addr)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
@@ -184,9 +191,9 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	err = json.Unmarshal(body, &config)
 	assert.NoError(suite.T(), err, "Configuration parsed and returned")
 
-	verifyUrlString := fmt.Sprintf("http://%s/verification", suite.servers[0].server.Addr)
+	verifyUrlString := fmt.Sprintf("http://%s/verification", suite.servers[0].host)
 	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
-	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
 	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Selected issuer matched")
 }
@@ -203,7 +210,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	// Step 0.
 
 	testLog.Println("0. Retrieving well-known configuration...")
-	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].server.Addr)
+	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
 	if err != nil {
 		testLog.Println(err.Error())
@@ -311,7 +318,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	assert.NotEmpty(suite.T(), registration2.Delivery.PushReceiveMethod.AuthorizationHeader, "Auth empty error")
 
 	// Calculate the predicated push URL and compare
-	pushUrlString := fmt.Sprintf("http://%s/events/%s", suite.servers[0].server.Addr, registration2.Id)
+	pushUrlString := fmt.Sprintf("http://%s/events/%s", suite.servers[0].host, registration2.Id)
 	assert.Equal(suite.T(), pushUrlString, registration2.Delivery.PushReceiveMethod.EndpointUrl, "Confirm PUSH URL calculation correct")
 
 	// Step 5.
@@ -345,7 +352,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 	suite.servers[0].stream = config
 
 	suite.servers[0].stream.EventsRequested = suite.servers[0].stream.EventsSupported
-	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].server.Addr, suite.servers[0].stream.Id)
+	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].host, suite.servers[0].stream.Id)
 
 	// check that the delivery structure was serialized and deserialized correctly
 	assert.NotNil(suite.T(), config.Delivery, "Delivery is not null")
@@ -444,13 +451,14 @@ func (suite *ServerSuite) Test6_ResetStream() {
 
 	testLog.Println("Resetting stream to beginning")
 	// Post the new config with reset request to the handler
-	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].server.Addr, outboundStreamConfig.Id)
+	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].host, outboundStreamConfig.Id)
 	bodyBytes, err := json.MarshalIndent(outboundStreamConfig, "", " ")
 	assert.NoError(suite.T(), err, "JSON Marshalling error")
 	req, err := http.NewRequest(http.MethodPut, streamUrl, bytes.NewReader(bodyBytes))
 	assert.NoError(suite.T(), err, "no request builder error")
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check reset stream ok")
 	assert.NoError(suite.T(), err, "Update request successful")
 	assert.NotNil(suite.T(), resp, "Response is not null")
 
@@ -462,7 +470,25 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	assert.Nil(suite.T(), configResp.ResetDate, "Reset date should be nil")
 	assert.Equal(suite.T(), "", configResp.ResetJti, "JTI should be empty")
 
+	/*
+	   time.Sleep(time.Millisecond * 500)
+	   // After PUT reset request
+	   require.Eventually(suite.T(), func() bool {
+	       jtis, more := suite.servers[0].app.Provider.GetEventIds(
+	           suite.servers[0].stream.Id,
+	           model.PollParameters{ReturnImmediately: true},
+	       )
+	       if more {
+	           log.Println("More should not be true")
+	           return false
+	       }
+	       log.Printf("Received %d events.\n", len(jtis))
+	       return len(jtis) == 2
+	   }, 5*time.Second, 100*time.Millisecond, "expected two pending events after reset")
+	*/
+
 	// Check that there are pending events
+	time.Sleep(time.Millisecond * 1500)
 	jtis, more = suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
@@ -476,9 +502,9 @@ func (suite *ServerSuite) Test6_ResetStream() {
 // Test7_PushStreamDelivery sets up a push stream from SSF1 to SSF2 and then send test events
 func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	testLog.Println("Setting up Push Receiver on SSF2")
-	baseUrl := fmt.Sprintf("http://%s/stream", suite.servers[1].server.Addr)
+	baseUrl := fmt.Sprintf("http://%s/stream", suite.servers[1].host)
 	base, _ := url.Parse(baseUrl)
-	base0Url := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	base0Url := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	base0, _ := url.Parse(base0Url)
 	jwksUrl, _ := url.Parse("/jwks/DEFAULT")
 	jwksIssuer := base0.ResolveReference(jwksUrl)
@@ -533,7 +559,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	testLog.Println("Generating event on SSF1...")
 	jti, err := suite.generateEvent(suite.servers[0].stream)
 	assert.NoError(suite.T(), err, "No error generating event")
-	// time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.EventRecord
 	event = suite.servers[1].provider.GetEventRecord(jti)
@@ -552,7 +578,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	testLog.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
 	assert.Equal(suite.T(), 1, pushCnt1, "Should be 1 PUSH servers")
 
-	assert.Equal(suite.T(), 0, pollCnt1, "Should be 1 POLL server")
+	assert.Equal(suite.T(), 0, pollCnt1, "Should be 0 POLL server")
 
 	testLog.Println("Resetting streams")
 	suite.resetStreams(suite.servers[1].stream.Id, suite.servers[0].stream.Id)
@@ -667,7 +693,7 @@ func (suite *ServerSuite) Test8_Prometheus() {
 func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	testLog.Println("Creating new issuer key..")
 	issuer := "example.com"
-	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].server.Addr, issuer)
+	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuer)
 
 	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
 	resp, err := suite.servers[0].client.Do(req)
@@ -742,7 +768,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 	testLog.Println("  initializing poll receiver on SSF2...")
 	// Use the polling transmitter information to base the receiver on
 
-	baseUrl := fmt.Sprintf("http://%s/stream", suite.servers[0].server.Addr)
+	baseUrl := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	base, _ := url.Parse(baseUrl)
 	target, _ := url.Parse(stream.Delivery.PollTransmitMethod.EndpointUrl)
 	targetJwks, _ := url.Parse(stream.IssuerJWKSUrl)
@@ -773,7 +799,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 		RouteMode:       model.RouteModeImport,
 	}
 
-	baseUrl2 := fmt.Sprintf("http://%s/stream", suite.servers[1].server.Addr)
+	baseUrl2 := fmt.Sprintf("http://%s/stream", suite.servers[1].host)
 	regBytes, _ := json.Marshal(req)
 	reqCreate, _ := http.NewRequest(http.MethodPost, baseUrl2, bytes.NewReader(regBytes))
 	reqCreate.Header.Set("Authorization", "Bearer "+suite.servers[1].streamMgmtToken)

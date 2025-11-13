@@ -22,6 +22,7 @@ var serverLog = log.New(os.Stdout, "SERVER: ", log.Ldate|log.Ltime)
 type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
 	Server        *http.Server
+	Handler       http.Handler
 	EventRouter   eventRouter.EventRouter
 	BaseUrl       *url.URL
 	HostName      string
@@ -49,7 +50,7 @@ func (sa *SignalsApplication) HealthCheck() bool {
 	return true
 }
 
-func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
+func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
 	role := os.Getenv("SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"
@@ -64,25 +65,14 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	}
 
 	httpRouter := NewRouter(sa)
+	// expose the handler for external server usage (e.g., httptest.Server)
+	sa.Handler = httpRouter.router
 
-	server := http.Server{
-		Addr:    addr,
-		Handler: httpRouter.router,
-	}
-	serverLog.Printf("ServerUrl[%s] listening on %s", provider.Name(), addr)
-
-	sa.Server = &server
 	sa.EventRouter = eventRouter.NewRouter(provider)
-	name := ""
-	if server.TLSConfig != nil {
-		name = server.TLSConfig.ServerName
-	}
 
 	var baseUrl *url.URL
 	var err error
-	if baseUrlString == "" {
-		baseUrl, _ = url.Parse("http://" + server.Addr + "/")
-	} else {
+	if baseUrlString != "" {
 		baseUrl, err = url.Parse(baseUrlString)
 		if err != nil {
 			serverLog.Println(fmt.Sprintf("FATAL: Invalid BaseUrl[%s]: %s", baseUrlString, err.Error()))
@@ -92,14 +82,7 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 
 	sa.InitializePrometheus()
 
-	if name != "" {
-		serverLog.Println("TLS hostname: [" + name + "]")
-	} else {
-		serverLog.Println("TLS not configured.")
-	}
-
-	sa.HostName = name
-
+	// Set defaults
 	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
 	if !issDefined {
 		defaultIssuer = "DEFAULT"
@@ -111,6 +94,23 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	return sa
 }
 
+// StartServer creates a real net/http server wrapping the application handler.
+// This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
+func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
+	sa := NewApplication(provider, baseUrlString)
+	server := http.Server{
+		Addr:    addr,
+		Handler: sa.Handler,
+	}
+	sa.Server = &server
+	if sa.BaseUrl == nil {
+		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
+		sa.BaseUrl = baseUrl
+	}
+	serverLog.Printf("ServerUrl[%s] listening on %s", provider.Name(), addr)
+	return sa
+}
+
 func (sa *SignalsApplication) Shutdown() {
 	name := sa.Provider.Name()
 	serverLog.Printf("[%s] Shutdown initiated...", name)
@@ -118,8 +118,10 @@ func (sa *SignalsApplication) Shutdown() {
 	// Turn off Polling Clients
 	sa.shutdownReceivers()
 
-	// Turn off the server
-	_ = sa.Server.Shutdown(context.Background())
+	// Turn off the server (if present)
+	if sa.Server != nil {
+		_ = sa.Server.Shutdown(context.Background())
+	}
 
 	// Turn off client connections
 	for _, client := range sa.pollClients {
