@@ -15,7 +15,7 @@ type StreamConfigHandler interface {
 	// Open the provider and insure DB connection working
 	Open(url string) (*StreamConfigHandler, error)
 
-	// Returns the name of the provider
+	// Name Returns the name of the provider
 	Name(token string) string
 
 	// ListStreams returns all configured streams

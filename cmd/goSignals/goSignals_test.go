@@ -152,7 +152,7 @@ func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error)
 	}
 
 	// Because we are bypassing normal invocation of Kong we need to initialize the configuration file value.
-	suite.pd.cli.Data.checkConfigPath(&suite.pd.cli.Globals)
+	_ = suite.pd.cli.Data.checkConfigPath(&suite.pd.cli.Globals)
 
 	output := os.Stdout
 	input := os.Stdin

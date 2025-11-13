@@ -50,6 +50,10 @@ func (t *testData) InitStream(events []string) {
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
+	if tkn == nil {
+		log.Fatalln("ERROR: Stream initialization: IAT token is nil")
+		return
+	}
 	t.project = tkn.ProjectId
 
 	if len(events) > 0 {
@@ -71,7 +75,7 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	_ = provider.ResetDb(true)
+	err = provider.ResetDb(true)
 
 	if err != nil {
 		log.Println("Received error generating test token")

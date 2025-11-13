@@ -132,8 +132,9 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 	if authorization == "" {
 		// return streamRequested, http.StatusUnauthorized
 
-		return nil, http.StatusOK // For testing purposes only
+		return nil, http.StatusUnauthorized
 	}
+
 	parts := strings.Split(authorization, " ")
 	if len(parts) < 2 {
 		return nil, http.StatusUnauthorized

@@ -1,5 +1,4 @@
-/*
- * Stream Management API for OpenID Shared Security Events
+/* Package server implements the Stream Management API for OpenID Shared Security Events
  *
  * [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#management)  HTTP API to be implemented by Event Transmitters. This API can be used by Event Receivers to query and update the Event Stream configuration and status, to add and remove subjects, and to trigger verification.
  *

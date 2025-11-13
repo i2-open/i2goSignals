@@ -507,7 +507,7 @@ func TestValidateAuthorization(t *testing.T) {
 				scopes: []string{ScopeEventDelivery},
 			},
 			want:  nil,
-			want1: http.StatusOK,
+			want1: http.StatusUnauthorized,
 		},
 		{
 			name: "Test event good stream query",

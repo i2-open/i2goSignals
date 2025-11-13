@@ -127,8 +127,8 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 		serverLog.Printf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs))
 		resp, err := client.Do(pollRequest)
-		if err != nil || resp.StatusCode > 400 {
-			if resp.StatusCode == http.StatusNotFound {
+		if err != nil || (resp != nil && resp.StatusCode > 400) {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
 				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
 				serverLog.Println(errMsg)
@@ -151,20 +151,22 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		}
 
 		var pollResponse model.PollResponse
-		bodyBytes, err = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
-			errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
-			serverLog.Print(errMsg)
-			continue
-		}
-		err = json.Unmarshal(bodyBytes, &pollResponse)
-		if err != nil {
-			errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
-			serverLog.Print(errMsg)
-			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-			continue
+		if resp != nil {
+			bodyBytes, err = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
+				serverLog.Print(errMsg)
+				continue
+			}
+			err = json.Unmarshal(bodyBytes, &pollResponse)
+			if err != nil {
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
+				serverLog.Print(errMsg)
+				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
+				continue
+			}
 		}
 
 		// reset the error list
@@ -238,6 +240,10 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 // ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
 	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	if status != http.StatusOK || authContext == nil {
+		processPushError(w, "authentication_failed", "The authorization was not successfully validated")
+		return
+	}
 
 	sid := authContext.StreamId
 	if authContext.StreamId == "" {
@@ -253,11 +259,6 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		return
 	}
 	fmt.Println("***********Config.iss=" + config.Iss)
-
-	if status != http.StatusOK {
-		processPushError(w, "authentication_failed", "The authorization was not successfully validated")
-		return
-	}
 
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" || strings.EqualFold("application/secevent+jwt", contentType) {
