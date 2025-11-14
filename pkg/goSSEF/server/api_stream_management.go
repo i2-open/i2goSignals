@@ -182,16 +182,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 
 		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
-	}
-
-	if err != nil {
-		if err.Error() == "not found" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		_, _ = w.Write([]byte(err.Error()))
-		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	// Update the event router
