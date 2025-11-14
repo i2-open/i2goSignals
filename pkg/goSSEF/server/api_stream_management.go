@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"net/url"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
@@ -94,15 +96,32 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	serverLog.Printf("Stream %s inactivated and deleted.", authContext.StreamId)
 }
 
+func replaceBase(original string, baseUrl *url.URL) string {
+	originalUrl, err := url.Parse(original)
+	if err != nil {
+		return original // if this is not parseable, do nothing
+	}
+
+	if baseUrl == nil {
+		log.Println("Warning: Detected base url is nil")
+		return original
+	}
+
+	modifiedUrl := *originalUrl
+	modifiedUrl.Scheme = baseUrl.Scheme
+	modifiedUrl.Host = baseUrl.Host
+	return modifiedUrl.String()
+}
+
 func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) model.StreamConfiguration {
 	res := config
 	switch config.Delivery.GetMethod() {
 	case model.DeliveryPoll:
 		endpoint := res.Delivery.PollTransmitMethod.EndpointUrl
-		res.Delivery.PollTransmitMethod.EndpointUrl = sa.BaseUrl.JoinPath(endpoint).String()
+		res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
 	case model.ReceivePush:
 		endpoint := res.Delivery.PushReceiveMethod.EndpointUrl
-		res.Delivery.PushReceiveMethod.EndpointUrl = sa.BaseUrl.JoinPath(endpoint).String()
+		res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
 	default:
 		// do nothing
 	}
