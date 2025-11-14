@@ -21,11 +21,13 @@ func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, _ *http.Request)
 
 func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
 	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt})
-	sid := authCtx.StreamId
+
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
 	}
+
+	sid := authCtx.StreamId
 	if sid == "" {
 		// The authorization token had no stream identifier in it
 		w.WriteHeader(http.StatusForbidden)
