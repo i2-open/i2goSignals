@@ -19,7 +19,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -41,7 +41,7 @@ type ssfInstance struct {
 	ts              *httptest.Server
 	host            string
 	client          *http.Client
-	provider        *mongo_provider.MongoProvider
+	provider        dbProviders.DbProviderInterface
 	stream          model.StreamConfiguration
 	app             ssef.SignalsApplication
 	streamToken     string
@@ -60,13 +60,13 @@ func TestServer(t *testing.T) {
 	serverSuite := ServerSuite{}
 
 	testLog.Println("Tests must be completed in order. Tests may not be run individually as each test builds on previous state.")
-	testLog.Println("A Mongo replica set is required for this test.")
+	testLog.Println("By default, tests are run against a mock provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
 
 	testLog.Println("NOTE: This test will generate a series of Prometheus duplicate collector registration errors. This is due to the test environment only.")
 	instances := make([]*ssfInstance, 2)
 
 	testLog.Println("** Starting GoSignals (ssf1)...")
-	instance, err := createServer(t, "ssf1")
+	instance, err := createServer(t, "ssf1", true) // Reset DB for first instance
 	if err != nil {
 		testLog.Printf("Error starting %s: %s", "ssf1", err.Error())
 	}
@@ -74,7 +74,7 @@ func TestServer(t *testing.T) {
 
 	instances[0] = instance
 	testLog.Println("** Starting GoSignals (ssf2)...")
-	instance, err = createServer(t, "ssf2")
+	instance, err = createServer(t, "ssf2", false) // Don't reset DB for second instance (shared storage)
 	if err != nil {
 		testLog.Printf("Error starting %s: %s", "ssf2", err.Error())
 	}
@@ -98,21 +98,28 @@ func TestServer(t *testing.T) {
 	testLog.Println("** TEST COMPLETE **")
 }
 
-func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
+func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, error) {
 	t.Helper()
 	var err error
 	var instance ssfInstance
-	mongo, err := mongo_provider.Open(TestDbUrl, dbName)
+
+	dbUrl := "mockdb:"
+	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
+		dbUrl = TestDbUrl
+	}
+	// mongo, err := mongo_provider.Open(TestDbUrl, dbName)
+	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
 	if err != nil {
-		t.Log("A valid MongoDB is required for this test.")
 		t.Error("Mongo client error: " + err.Error())
 		return nil, err
 	}
 
-	_ = mongo.ResetDb(true)
+	if resetDb {
+		_ = mongo.ResetDb(true)
+	}
 
 	// Build application and wrap with httptest.Server
-	app := ssef.NewApplication(&*mongo, "")
+	app := ssef.NewApplication(mongo, "")
 	ts := httptest.NewServer(app.Handler)
 	instance.ts = ts
 	instance.app = *app
@@ -430,6 +437,7 @@ Test6_ResetStream tests the time reset functionality which causes the server to 
 to the stream
 */
 func (suite *ServerSuite) Test6_ResetStream() {
+	// time.Sleep(2 * time.Second)
 	outboundStreamConfig := suite.servers[0].stream
 
 	// Kill the polling client on SSF2

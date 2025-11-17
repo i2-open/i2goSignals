@@ -46,6 +46,7 @@ type DbProviderInterface interface {
 	AddEventToStream(jti string, streamId primitive.ObjectID)
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 
+	ResetDb(initialize bool) error
 	// handler.PushStreamHandler
 	// handler.StreamConfigHandler
 }

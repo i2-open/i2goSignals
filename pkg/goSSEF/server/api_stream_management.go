@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"net/url"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
@@ -19,11 +21,13 @@ func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, _ *http.Request)
 
 func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
 	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt})
-	sid := authCtx.StreamId
+
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
 	}
+
+	sid := authCtx.StreamId
 	if sid == "" {
 		// The authorization token had no stream identifier in it
 		w.WriteHeader(http.StatusForbidden)
@@ -94,15 +98,32 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	serverLog.Printf("Stream %s inactivated and deleted.", authContext.StreamId)
 }
 
+func replaceBase(original string, baseUrl *url.URL) string {
+	originalUrl, err := url.Parse(original)
+	if err != nil {
+		return original // if this is not parseable, do nothing
+	}
+
+	if baseUrl == nil {
+		log.Println("Warning: Detected base url is nil")
+		return original
+	}
+
+	modifiedUrl := *originalUrl
+	modifiedUrl.Scheme = baseUrl.Scheme
+	modifiedUrl.Host = baseUrl.Host
+	return modifiedUrl.String()
+}
+
 func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) model.StreamConfiguration {
 	res := config
 	switch config.Delivery.GetMethod() {
 	case model.DeliveryPoll:
 		endpoint := res.Delivery.PollTransmitMethod.EndpointUrl
-		res.Delivery.PollTransmitMethod.EndpointUrl = sa.BaseUrl.JoinPath(endpoint).String()
+		res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
 	case model.ReceivePush:
 		endpoint := res.Delivery.PushReceiveMethod.EndpointUrl
-		res.Delivery.PushReceiveMethod.EndpointUrl = sa.BaseUrl.JoinPath(endpoint).String()
+		res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
 	default:
 		// do nothing
 	}
@@ -161,16 +182,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 
 		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
-	}
-
-	if err != nil {
-		if err.Error() == "not found" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		_, _ = w.Write([]byte(err.Error()))
-		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	// Update the event router
@@ -210,11 +222,11 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 
 	configResp, err := sa.Provider.UpdateStream(authCtx.StreamId, authCtx.ProjectId, jsonRequest)
 	if err != nil || configResp == nil {
-		if err.Error() == mongo_provider.ErrorInvalidProject {
+		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
 			return
 		}
-		if err.Error() == "not found" || configResp == nil {
+		if err != nil && err.Error() == "not found" || configResp == nil {
 			http.Error(w, "No stream found", http.StatusNotFound)
 			return
 		}
@@ -273,6 +285,21 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 	}
 	modified := false
 	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	if err != nil {
+		if err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		log.Printf("Error getting streamState: %s\n", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if streamState == nil {
+		// should not happen!
+		log.Printf("Error stream %s returned nil", authCtx.StreamId)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	if jsonRequest.Status != "" {
 		if streamState.Status != jsonRequest.Status {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
