@@ -16,12 +16,12 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
 )
 
@@ -39,7 +39,7 @@ var server2name = "test2server"
 type ssfInstance struct {
 	server          *http.Server
 	client          *http.Client
-	provider        *mongo_provider.MongoProvider
+	provider        dbProviders.DbProviderInterface
 	stream          model.StreamConfiguration
 	app             ssef.SignalsApplication
 	streamToken     string
@@ -56,7 +56,8 @@ type toolSuite struct {
 	testDir string
 }
 
-func (suite *toolSuite) initialize() error {
+func (suite *toolSuite) initialize(t *testing.T) error {
+	t.Helper()
 
 	var err error
 	dir, _ := os.MkdirTemp(os.TempDir(), "goSignals-*")
@@ -68,21 +69,21 @@ func (suite *toolSuite) initialize() error {
 	cli := &CLI{}
 	cli.Globals.Config = configName
 
-	fmt.Println("Test working directory: " + dir)
+	t.Log("Test working directory: " + dir)
 	suite.pd, err = initParser(cli)
 	if err != nil {
 		testLog.Print(err.Error())
 	}
 
-	instance, err := createServer(server1name)
+	instance, err := createServer(t, server1name)
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", server1name, err.Error())
+		t.Logf("Error starting %s: %s\n", server1name, err.Error())
 		return err
 	}
 	suite.servers[0] = instance
-	instance, err = createServer(server2name)
+	instance, err = createServer(t, server2name)
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", server2name, err.Error())
+		t.Logf("Error starting %s: %s\n", server2name, err.Error())
 		return err
 	}
 	suite.servers[1] = instance
@@ -101,12 +102,22 @@ func (suite *toolSuite) cleanup() {
 
 }
 
-func createServer(dbName string) (*ssfInstance, error) {
+func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
+	t.Helper()
 	var err error
 	var instance ssfInstance
-	mongo, err := mongo_provider.Open(TestDbUrl, dbName)
+
+	dbUrl := "mockdb:"
+	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
+		t.Log("Tests running against Mongo cluster.")
+		dbUrl = TestDbUrl
+	} else {
+		t.Log("Tests running against Mock provider.")
+	}
+
+	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
 	if err != nil {
-		testLog.Println("Mongo client error: " + err.Error())
+		t.Log("Mongo client error: " + err.Error())
 		return nil, err
 	}
 
@@ -114,7 +125,7 @@ func createServer(dbName string) (*ssfInstance, error) {
 
 	listener, _ := net.Listen("tcp", "localhost:0")
 
-	signalsApplication := ssef.StartServer(listener.Addr().String(), &*mongo, "")
+	signalsApplication := ssef.StartServer(listener.Addr().String(), mongo, "")
 	instance.app = *signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
@@ -184,11 +195,14 @@ func (suite *toolSuite) executeCommand(cmd string, confirm bool) ([]byte, error)
 
 func TestGoSignalsTool(t *testing.T) {
 
+	testLog.Println("Tests must be completed in order. Tests may not be run individually as each test builds on previous state.")
+	testLog.Println("By default, tests are run against a mock provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
+
 	instances := make([]*ssfInstance, 2)
 	s := toolSuite{
 		servers: instances,
 	}
-	err := s.initialize()
+	err := s.initialize(t)
 	if err != nil {
 		testLog.Println("Error initializing tests: " + err.Error())
 	}
@@ -207,12 +221,13 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		testLog.Printf("  Getting registration IAT for %s...", instance.provider.Name())
 		instance.iatToken, err = instance.provider.GetAuthIssuer().IssueProjectIat(nil)
 		if err != nil {
-			fmt.Printf("Error creating iat: %s", err.Error())
+			suite.T().Fatalf("Error creating iat: %s\n", err.Error())
 		}
 		eat, err := instance.provider.GetAuthIssuer().ParseAuthToken(instance.iatToken)
 		if err != nil {
-			fmt.Printf("Error parsing iat: %s", err.Error())
+			suite.T().Fatalf("Error parsing iat: %s\n", err.Error())
 		}
+
 		project := eat.ProjectId
 		assert.NotEqualf(suite.T(), "", project, "Check project not empty")
 
@@ -229,6 +244,12 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 
 		testLog.Println("  Checking validation and project ids...")
 		cat, err := instance.provider.GetAuthIssuer().ParseAuthToken(clientToken)
+		if err != nil {
+			suite.T().Fatalf("Error parsing client token: %s\n", err.Error())
+		}
+		if cat == nil {
+			suite.T().Fatal("Error client token was nil.")
+		}
 		assert.True(suite.T(), cat.IsAuthorized("", []string{authUtil.ScopeStreamAdmin}), "Check is authorized for mgmt")
 		assert.Equal(suite.T(), project, cat.ProjectId, "Check project ids match")
 		instance.projectId = eat.ProjectId
@@ -269,6 +290,8 @@ func (suite *toolSuite) Test1_AddServers() {
 	res, err = suite.executeCommand(cmd, false)
 	fmt.Println(string(res))
 	info, err := os.Stat(iatFile)
+	assert.NoError(suite.T(), err, "IAT file exists")
+	assert.NotNil(suite.T(), info, "IAT File doesn't exist")
 	assert.Greater(suite.T(), info.Size(), int64(10), "IAT file present (> 10 bytes)")
 
 	tokenBytes, err := os.ReadFile(iatFile)
@@ -293,6 +316,8 @@ func (suite *toolSuite) Test2_CreatePublisherKey() {
 	assert.NoError(suite.T(), err, "Error creating issuer certificate")
 
 	info, err := os.Stat(pemFile)
+	assert.NoError(suite.T(), err, "pem file should exist")
+	assert.NotNil(suite.T(), info, "pem file info should be returned")
 	assert.Greater(suite.T(), info.Size(), int64(10), "PEM file present (> 10 bytes)")
 
 	testLog.Println("  Get Key...")

@@ -222,11 +222,11 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 
 	configResp, err := sa.Provider.UpdateStream(authCtx.StreamId, authCtx.ProjectId, jsonRequest)
 	if err != nil || configResp == nil {
-		if err.Error() == mongo_provider.ErrorInvalidProject {
+		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
 			return
 		}
-		if err.Error() == "not found" || configResp == nil {
+		if err != nil && err.Error() == "not found" || configResp == nil {
 			http.Error(w, "No stream found", http.StatusNotFound)
 			return
 		}
@@ -285,6 +285,21 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 	}
 	modified := false
 	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	if err != nil {
+		if err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		log.Printf("Error getting streamState: %s\n", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if streamState == nil {
+		// should not happen!
+		log.Printf("Error stream %s returned nil", authCtx.StreamId)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	if jsonRequest.Status != "" {
 		if streamState.Status != jsonRequest.Status {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
