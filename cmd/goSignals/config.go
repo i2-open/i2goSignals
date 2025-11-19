@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/i2-open/i2goSignals/internal/model"
 )
@@ -194,10 +195,17 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 func (c *ConfigData) checkConfigPath(g *Globals) error {
 	configPath := g.Config
 	if configPath == "" {
-		configPath = ".goSignals/" + ConfigFile
-		usr, err := user.Current()
-		if err == nil {
-			configPath = filepath.Join(usr.HomeDir, configPath)
+		configPath = stripQuotes(os.Getenv("GOSIGNALS_HOME"))
+		if configPath == "" {
+			configPath = ".goSignals/" + ConfigFile
+			usr, err := user.Current()
+			if err == nil {
+				configPath = filepath.Join(usr.HomeDir, configPath)
+			}
+		} else {
+			fmt.Printf("Using GOSIGNALS_HOME path: %s\n", configPath)
+			g.ConfigFile = configPath
+			return nil
 		}
 	}
 
@@ -214,10 +222,14 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 
 	_, err := os.Stat(dirPath)
 	if os.IsNotExist(err) {
-
+		fmt.Printf("Config path does not exist check: %s\n", dirPath)
+		err = nil
 		// path/to/whatever does not exist
+		fmt.Printf("Creating new config path: %s\n", dirPath)
 		err = os.Mkdir(dirPath, 0770)
 		if err != nil {
+			fmt.Printf("Error creating directory %s: %s", dirPath, err)
+			time.Sleep(5 * time.Minute) // wait long enough to check files in docker
 			return err
 		}
 	}

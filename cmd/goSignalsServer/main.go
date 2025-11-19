@@ -20,10 +20,69 @@ import (
 
 var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)
 
+// stripQuotes removes surrounding double or single quotes from a string
+func stripQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// startAdminServer begins serving the built admin UI (Vite) from a separate port.
+// Config via environment variables:
+//
+//	ADMIN_PORT  - port to serve admin UI (default 8899)
+//	ADMIN_UI_DIR - directory of static build (default "adminUi/build" relative to CWD)
+func startAdminServer() {
+	adminPort := stripQuotes(os.Getenv("ADMIN_PORT"))
+	if adminPort == "" {
+		adminPort = "8899"
+	}
+	// Determine UI directory
+	uiDir := stripQuotes(os.Getenv("ADMIN_UI_DIR"))
+	if uiDir == "" {
+		cwd, _ := os.Getwd()
+		uiDir = filepath.Join(cwd, "adminUi", "build")
+	}
+
+	// Check that index.html exists; if not, do not start server
+	indexPath := filepath.Join(uiDir, "index.html")
+	if _, err := os.Stat(indexPath); err != nil {
+		mLog.Printf("Admin UI not started: index.html not found at %s (set ADMIN_UI_DIR or build adminUi)", indexPath)
+		return
+	}
+
+	fs := http.FileServer(http.Dir(uiDir))
+
+	// SPA fallback: if file not found, serve index.html
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try to serve the static file
+		p := filepath.Join(uiDir, filepath.Clean(r.URL.Path))
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			fs.ServeHTTP(w, r)
+			return
+		}
+		// Otherwise, serve index.html
+		http.ServeFile(w, r, indexPath)
+	})
+
+	addr := ":" + adminPort
+	server := &http.Server{Addr: addr, Handler: handler}
+
+	go func() {
+		mLog.Printf("Admin UI serving %s on http://localhost%s", uiDir, addr)
+		if err := server.ListenAndServe(); err != nil && err.Error() != "http: Server closed" {
+			mLog.Printf("Admin UI server error: %v", err)
+		}
+	}()
+}
+
 func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 	name := "ssef"
-	if found := os.Getenv("DBNAME"); found != "" {
+	if found := stripQuotes(os.Getenv("DBNAME")); found != "" {
 		mLog.Println("Using dbname " + found)
 		name = found
 	}
@@ -38,14 +97,14 @@ func main() {
 	mLog.Printf("i2goSignals server starting...")
 	mLog.Printf("Version: 0.0.1")
 	port := "8888"
-	if found := os.Getenv("PORT"); found != "" {
+	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found
 	}
 
 	mLog.Printf("Listening on port: %v", port)
 
 	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
-	if found := os.Getenv("MONGO_URL"); found != "" {
+	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
 		mLog.Printf("Connecting to MONGO_URL service at: [%s]", dbUrl)
 	}
@@ -57,7 +116,7 @@ func main() {
 	}
 
 	baseUrl := "127.0.0.1:" + port + "/"
-	if found := os.Getenv("BASE_URL"); found != "" {
+	if found := stripQuotes(os.Getenv("BASE_URL")); found != "" {
 		baseUrl = found
 	}
 	mLog.Println("Base URL: " + baseUrl)

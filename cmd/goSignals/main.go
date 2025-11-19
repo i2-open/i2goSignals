@@ -2,9 +2,10 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
-
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -19,7 +20,7 @@ type ParserData struct {
 }
 
 type Globals struct {
-	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME," type:"path"`
+	Config       string     `help:"Location of client config files" env:"GOSIGNALS_HOME" type:"path"`
 	Data         ConfigData `kong:"-"`
 	ConfigFile   string     `kong:"-"`
 	Output       string     `short:"o" help:"To redirect output to a file" type:"path" `
@@ -153,7 +154,35 @@ func initParser(cli *CLI) (*ParserData, error) {
 	return &td, err
 }
 
+// stripQuotes removes surrounding double or single quotes from a string
+func stripQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
 func main() {
+
+	// Check for script file in environment variable
+	scriptFile := stripQuotes(os.Getenv("GOSIGNALS_SCRIPT"))
+	var scriptReader *bufio.Reader
+	useScriptFile := false
+
+	if scriptFile != "" {
+		log.Printf("Using script file: %s", scriptFile)
+		file, err := os.Open(scriptFile)
+		if err != nil {
+			log.Fatalf("Error opening script file %s: %s\n", scriptFile, err.Error())
+		}
+		scriptReader = bufio.NewReader(file)
+		useScriptFile = true
+		defer func(file *os.File) {
+			_ = file.Close()
+		}(file)
+	}
 
 	console, err := readline.NewEx(&readline.Config{
 		Prompt: "goSignals> ",
@@ -216,9 +245,30 @@ func main() {
 			}
 			initialArgs = []string{}
 			_ = console.SaveHistory(fullCommand)
+		} else if useScriptFile {
+			line, err := scriptReader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					// End of script file
+					return
+				}
+				fmt.Printf("Error reading script file: %s\n", err.Error())
+				panic(err)
+			}
+			// Remove trailing newline
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+			// Skip empty lines and comments
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			log.Printf("goSignals > %s", line)
+			args = strings.Split(line, " ")
 		} else {
 			line, err := console.Readline()
 			if err != nil {
+				fmt.Printf("Error reading console: %s\n", err.Error())
 				panic(err)
 			}
 			//line = line[0 : len(line)-1]

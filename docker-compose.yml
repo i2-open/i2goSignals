@@ -1,10 +1,12 @@
-version: '3.8'
+name: i2gosignals
+
 volumes:
   prometheus_data: {}
+
 services:
   mongo1:
     container_name: mongo1
-    image: mongo:6.0.4
+    image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -17,7 +19,7 @@ services:
       - ".mongo/mongo1:/data/db"
   mongo2:
     container_name: mongo2
-    image: mongo:6.0.4
+    image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -30,7 +32,7 @@ services:
       - ".mongo/mongo2:/data/db"
   mongo3:
     container_name: mongo3
-    image: mongo:6.0.4
+    image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -42,7 +44,7 @@ services:
       - ".mongo/replica.key:/data/replica.key"
       - ".mongo/mongo3:/data/db"
   mongoSetup:
-    image: mongo:6.0.4
+    image: mongo:latest
     depends_on:
       - mongo1
       - mongo2
@@ -77,8 +79,8 @@ services:
       - ".monitor/grafana:/etc/grafana/provisioning/datasources"
 
   goSignals1:
-    image: ghcr.io/i2-open/i2gosignals:0.7.0
-    command: /goSignalsServer
+    image: i2gosignals:v0.8
+    command: /app/goSignalsServer
     container_name: gosignals1
     hostname: goSignals1
     depends_on:
@@ -95,8 +97,8 @@ services:
       - BASE_URL=http://goSignals1:8888/
 
   goSignals2:
-    image: ghcr.io/i2-open/i2gosignals:0.7.0
-    command: /goSignalsServer
+    image: i2gosignals:v0.8
+    command: /app/goSignalsServer
     container_name: gosignals2
     hostname: goSignals2
     depends_on:
@@ -113,7 +115,8 @@ services:
       - BASE_URL=http://goSignals2:8889/
 
   scimSsfSetup:
-    image: ghcr.io/i2-open/i2gosignals:0.7.0
+    image: i2gosignals:v0.8
+    command: /app/goSignals
     depends_on:
       - mongo1
       - mongo2
@@ -123,7 +126,10 @@ services:
     volumes:
       - "./config/scim:/scim"
     restart: "no"
-    entrypoint: [ "bash", "/scim/scim_iat.sh"]
+    environment:
+      - GOSIGNALS_HOME=/scim/config.json
+      - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
+    # entrypoint: [ "/app/goSignals", "</scim/auto-reg.gosignals"]
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.7.0
@@ -174,6 +180,10 @@ services:
       - scim.signals.rcv.config.file=/scim/receiveStream.json
       - scim.signals.pub.pem.path=/scim/issuer.pem
 secrets:
+  iat1:
+    file: config/scim/iat1.txt
+  iat2:
+    file: config/scim/iat2.txt
   rcvfile:
     file: config/scim/data2/receiveStream.json
   pubfile:

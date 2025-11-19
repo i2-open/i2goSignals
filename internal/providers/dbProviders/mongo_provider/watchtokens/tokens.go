@@ -1,3 +1,5 @@
+// Package watchtokens is used to store resume tokens so that goSignalsServer can resume monitoring for change events
+// in the MongoDB.
 package watchtokens
 
 import (
@@ -18,13 +20,13 @@ type TokenData struct {
 func (tok *TokenData) Store() {
 	tf, err := os.Create(storeFilename())
 	if err != nil {
-		log.Default().Println("Auth file creation failed", err)
+		log.Default().Println("Mongo resume token file creation failed", err)
 		return
 	}
 	jsonOut, _ := json.Marshal(tok)
 	_, err = tf.Write(jsonOut)
 	if err != nil {
-		log.Default().Println("Failed to save token data", err)
+		log.Default().Println("Failed to save Mongo resume token data", err)
 		return
 	}
 	_ = tf.Close()
@@ -42,7 +44,7 @@ func Load() *TokenData {
 	var tokenData TokenData
 	dataBytes, err := os.ReadFile(storeFilename())
 	if err != nil {
-		log.Println("Auth file not found or not yet initialized", err)
+		log.Println("Mongo resume token file not found or not yet initialized", err)
 		tokenData = TokenData{}
 	} else {
 		err = json.Unmarshal(dataBytes, &tokenData)
