@@ -116,7 +116,7 @@ services:
 
   scimSsfSetup:
     image: i2gosignals:v0.8
-    command: /app/goSignals
+   # command: sh /scim/register.sh
     depends_on:
       - mongo1
       - mongo2
@@ -126,10 +126,10 @@ services:
     volumes:
       - "./config/scim:/scim"
     restart: "no"
-    environment:
-      - GOSIGNALS_HOME=/scim/config.json
-      - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
-    # entrypoint: [ "/app/goSignals", "</scim/auto-reg.gosignals"]
+   # environment:
+   #   - GOSIGNALS_HOME=/scim/config.json
+   #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
+    entrypoint: [ "sh", "/scim/register.sh"]
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.7.0
@@ -143,6 +143,8 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./config/scim/data1:/scim
+    env_file:
+      - ./config/scim/registration-iat.env
     environment:
       - scim.prov.memory.dir=/scim/data
       - scim.prov.memory.file=scimdb.json
@@ -152,8 +154,13 @@ services:
       - scim.security.enable=false
       - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
       - scim.signals.enable=true
-      - scim.signals.pub.config.file=/scim/pubStream.json
-      - scim.signals.rcv.config.file=/scim/receiveStream.json
+      - scim.signals.ssf.serverUrl=http://gosignals1:8888
+  #    - scim.signals.ssf.authorization=<add iat here>  loaded in /scim/registration-iat.env
+      - scim.signals.pub.iss=cluster.scim.example.com
+      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
+      - scim.signals.rcv.iss=cluster.scim.example.com
+      - scim.signals.rcv.aud=cluster.example.com
+      - scim.signals.rcv.iss.jwksUrl=http://localhost:8888/jwks/cluster.scim.example.com
       - scim.signals.pub.pem.path=/scim/issuer.pem
   scim_cluster2:
     image: independentid/i2scim-universal:0.7.0
@@ -167,6 +174,8 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./config/scim/data2:/scim
+    env_file:
+      - ./config/scim/registration-iat.env
     environment:
       - scim.prov.memory.dir=/scim/data
       - scim.prov.memory.file=scimdb.json
@@ -175,19 +184,15 @@ services:
       - scim.event.enable=true
       - scim.security.enable=false
       - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.enable=true
-      - scim.signals.pub.config.file=/scim/pubStream.json
-      - scim.signals.rcv.config.file=/scim/receiveStream.json
+      - scim.signals.ssf.serverUrl=http://localhost:8888
+  #    - scim.signals.ssf.authorization=<add iat here> loaded in /scim/registration-iat.env
+      - scim.signals.pub.iss=cluster.scim.example.com
+      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
+      - scim.signals.rcv.iss=cluster.scim.example.com
+      - scim.signals.rcv.aud=cluster.example.com
+      - scim.signals.rcv.iss.jwksUrl=http://localhost:8888/jwks/cluster.scim.example.com
       - scim.signals.pub.pem.path=/scim/issuer.pem
 secrets:
-  iat1:
-    file: config/scim/iat1.txt
-  iat2:
-    file: config/scim/iat2.txt
-  rcvfile:
-    file: config/scim/data2/receiveStream.json
-  pubfile:
-    file: config/scim/data1/pubStream.json
   pemfile:
     file: config/cluster-scim-example-com.pem
 

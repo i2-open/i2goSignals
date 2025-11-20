@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/chainguard/static:latest
+FROM cgr.dev/chainguard/bash:latest
 
 LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
 LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
