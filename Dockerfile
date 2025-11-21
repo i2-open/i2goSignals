@@ -1,25 +1,26 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.25.4-bookworm
+FROM cgr.dev/chainguard/bash:latest
 
 LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
 LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
 
+# Create a working directory to store mongo resume tokens
+
+ARG USER=1000:1000
+
 # Set destination for COPY
 WORKDIR /app
 
-# Download Go modules
-COPY go.mod go.sum ./
-RUN go mod download
+# Any non-zero number will do, and unfortunately a named user will not, as k8s
+# pod securityContext runAsNonRoot can't resolve the user ID:
+# https://github.com/kubernetes/kubernetes/issues/40958.
 
-# Copy the source code. Note the slash at the end, as explained in
-# https://docs.docker.com/engine/reference/builder/#copy
-COPY cmd cmd/
-COPY internal internal/
-COPY pkg pkg/
+USER ${USER}
 
-# Build
-RUN CGO_ENABLED=0 GOOS=linux go build -o /goSignalsServer cmd/goSignalsServer/main.go
+ADD --chmod=0755 ./goSignals ./goSignals
+ADD --chmod=0755 ./goSignalsServer ./goSignalsServer
+ADD --chmod=0766 --chown=${USER} ./cmd/goSignals/resources ./resources
 
 # Optional:
 # To bind to a TCP port, runtime parameters must be supplied to the docker command.
@@ -29,5 +30,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /goSignalsServer cmd/goSignalsServer/ma
 EXPOSE 8888
 
 # Run
-CMD ["/goSignalsServer"]
+CMD ["/app/goSignalsServer"]
 

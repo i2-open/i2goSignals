@@ -184,8 +184,9 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 }
 
 /*
-Open will open an SSEF database using Mongo and if necessary initialize the SSEF Streams database at the URL and dbName specified. If omitted, the default
-dbName is "ssef". If successful a MongoProvider handle is returned otherwise an error. If dbName is specified this will override environmental variables
+Open will open an SSEF database using Mongo and if necessary, initialize the SSEF Streams database at the URL and dbName
+specified. If omitted, the default dbName is "ssef". If successful, a MongoProvider handle is returned otherwise an
+error. If dbName is specified, this will override environmental variables
 */
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 	ctx := context.Background()

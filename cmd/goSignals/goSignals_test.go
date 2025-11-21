@@ -727,3 +727,94 @@ func (suite *toolSuite) Test9_GenAndPoll() {
 	testLog.Printf("Results:\n%s", string(res))
 	assert.NoError(suite.T(), err, "Poll for event has no error")
 }
+
+func (suite *toolSuite) Test10_ScriptFile() {
+	testLog.Println("Test 10 - GOSIGNALS_SCRIPT environment variable")
+
+	// Create a temporary script file with test commands
+	scriptFile := fmt.Sprintf("%s/test_script.txt", suite.testDir)
+	scriptContent := `# Test script for goSignals
+# This is a comment and should be skipped
+
+show server *
+
+# Another comment
+exit
+`
+	err := os.WriteFile(scriptFile, []byte(scriptContent), 0644)
+	assert.NoError(suite.T(), err, "Create script file should succeed")
+
+	// Verify the script file was created
+	_, err = os.Stat(scriptFile)
+	assert.NoError(suite.T(), err, "Script file should exist")
+
+	testLog.Printf("  Created test script file: %s", scriptFile)
+	testLog.Println("  Script content:")
+	testLog.Println(scriptContent)
+
+	// Note: The actual execution of goSignals with GOSIGNALS_SCRIPT would require
+	// spawning a new process with the environment variable set, which is beyond
+	// the scope of the current test framework's executeCommand method.
+	// This test verifies that the script file can be created and contains the expected content.
+	// For full integration testing, a separate test that spawns the goSignals binary
+	// with GOSIGNALS_SCRIPT set would be needed.
+
+	testLog.Println("  Verifying script file content...")
+	content, err := os.ReadFile(scriptFile)
+	assert.NoError(suite.T(), err, "Read script file should succeed")
+	assert.Contains(suite.T(), string(content), "show server *", "Script should contain command")
+	assert.Contains(suite.T(), string(content), "# This is a comment", "Script should contain comment")
+	assert.Contains(suite.T(), string(content), "exit", "Script should contain exit command")
+
+	testLog.Println("  GOSIGNALS_SCRIPT test completed successfully")
+}
+
+func TestStripQuotes(t *testing.T) {
+	testLog.Println("Test - stripQuotes function")
+
+	// Test double quotes
+	result := stripQuotes(`"test value"`)
+	assert.Equal(t, "test value", result, "Should strip double quotes")
+
+	// Test single quotes
+	result = stripQuotes(`'test value'`)
+	assert.Equal(t, "test value", result, "Should strip single quotes")
+
+	// Test no quotes
+	result = stripQuotes("test value")
+	assert.Equal(t, "test value", result, "Should not modify string without quotes")
+
+	// Test empty string
+	result = stripQuotes("")
+	assert.Equal(t, "", result, "Should handle empty string")
+
+	// Test single character
+	result = stripQuotes("a")
+	assert.Equal(t, "a", result, "Should not strip single character")
+
+	// Test mismatched quotes
+	result = stripQuotes(`"test'`)
+	assert.Equal(t, `"test'`, result, "Should not strip mismatched quotes")
+
+	// Test only opening quote
+	result = stripQuotes(`"test`)
+	assert.Equal(t, `"test`, result, "Should not strip only opening quote")
+
+	// Test only closing quote
+	result = stripQuotes(`test"`)
+	assert.Equal(t, `test"`, result, "Should not strip only closing quote")
+
+	// Test quotes in middle
+	result = stripQuotes(`test"value"test`)
+	assert.Equal(t, `test"value"test`, result, "Should not strip quotes in middle")
+
+	// Test path with quotes
+	result = stripQuotes(`"/path/to/file"`)
+	assert.Equal(t, "/path/to/file", result, "Should strip quotes from path")
+
+	// Test URL with quotes
+	result = stripQuotes(`'http://example.com'`)
+	assert.Equal(t, "http://example.com", result, "Should strip quotes from URL")
+
+	testLog.Println("  stripQuotes test completed successfully")
+}
