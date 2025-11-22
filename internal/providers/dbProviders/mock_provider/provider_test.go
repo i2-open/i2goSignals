@@ -3,7 +3,6 @@ package mock_provider
 import (
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,7 +17,7 @@ func TestMockProviderOpen(t *testing.T) {
 }
 
 func TestMockProviderViaFactory(t *testing.T) {
-	provider, err := dbProviders.OpenProvider("mockdb:", "test_db")
+	provider, err := Open("mockdb:", "test_db")
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
 	assert.Equal(t, "test_db", provider.Name())
