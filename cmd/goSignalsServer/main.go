@@ -11,7 +11,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
@@ -121,7 +123,8 @@ func main() {
 	}
 	mLog.Println("Base URL: " + baseUrl)
 
-	// listener, _ := net.Dial("tcp", addr)
+	// Start Admin UI server in parallel if build directory exists
+	startAdminServer()
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
 	err = signalsApplication.Server.ListenAndServe()
