@@ -1,5 +1,12 @@
 package server
 
+/*
+api_stream_management.go implements the SSF API requirements to register and stream and allow updates to them.
+These functions require an authorization token that includes a project id and stream id value. Because of this
+simplification, there is no way for a client to ask for a specific stream or all streams unless they have a token.
+
+Because of this, administrative access is via admin.go
+*/
 import (
 	"encoding/json"
 	"log"
