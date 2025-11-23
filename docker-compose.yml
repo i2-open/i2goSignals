@@ -2,6 +2,8 @@ name: i2gosignals
 
 volumes:
   prometheus_data: {}
+  postgres_data:
+    driver: local
 
 services:
   mongo1:
@@ -157,7 +159,7 @@ services:
       - scim.signals.enable=true
       - scim.signals.ssf.serverUrl=http://gosignals1:8888
   #    - scim.signals.ssf.authorization=<add iat here>  loaded in /scim/registration-iat.env
-      - scim.signals.pub.iss=cluster.scim.example.com
+      - scim.signals.pub.iss=${SCIM_CLUSTER_ISSUER}
       - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
       - scim.signals.rcv.iss=cluster.scim.example.com
       - scim.signals.rcv.aud=cluster.example.com
@@ -185,7 +187,7 @@ services:
       - scim.event.enable=true
       - scim.security.enable=false
       - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.ssf.serverUrl=http://localhost:8888
+      - scim.signals.ssf.serverUrl=http://gosignals1:8888
   #    - scim.signals.ssf.authorization=<add iat here> loaded in /scim/registration-iat.env
       - scim.signals.pub.iss=cluster.scim.example.com
       - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
@@ -193,7 +195,48 @@ services:
       - scim.signals.rcv.aud=cluster.example.com
       - scim.signals.rcv.iss.jwksUrl=http://gosignals1:8888/jwks/cluster.scim.example.com
       - scim.signals.pub.pem.path=/scim/issuer.pem
+
+  postgres:
+    image: postgres:alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - keycloak_network
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.5
+    container_name: keycloak-signals
+    hostname: keycloak
+    command: start --import-realm
+    environment:
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: 8080
+      KC_HOSTNAME_STRICT_BACKCHANNEL: false
+      KC_HTTP_ENABLED: true
+      KC_HOSTNAME_STRICT_HTTPS: false
+      KC_HEALTH_ENABLED: true
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - 8080:8080
+    depends_on:
+      - postgres
+    networks:
+      - keycloak_network
+    volumes:
+      - "./config/keycloak/realm:/opt/keycloak/data/import"
+      - "./config/keycloak/theme:/opt/keycloak/themes/gosignals"
 secrets:
   pemfile:
     file: config/cluster-scim-example-com.pem
+networks:
+  keycloak_network:
+    driver: bridge
 

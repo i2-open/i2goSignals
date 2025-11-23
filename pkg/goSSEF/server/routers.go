@@ -240,6 +240,14 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.PollEvents,
 			false,
 		},
+
+		Route{
+			"OidcConfiguration",
+			http.MethodGet,
+			"/.well-known/openid-configuration",
+			h.sa.OidcConfiguration,
+			false,
+		},
 	}
 	return routes
 }

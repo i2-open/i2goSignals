@@ -272,3 +272,70 @@ func generateAlias(n int) string {
 
 	return sb.String()
 }
+
+// OidcClaims represents the claims from an OIDC token (from Keycloak)
+type OidcClaims struct {
+	Email             string `json:"email"`
+	PreferredUsername string `json:"preferred_username"`
+	Name              string `json:"name"`
+	GivenName         string `json:"given_name"`
+	FamilyName        string `json:"family_name"`
+	RealmAccess       struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
+	jwt.RegisteredClaims
+}
+
+// ValidateOidcToken validates an OIDC token from Keycloak and returns the claims
+// This is used by the adminUI to authenticate users
+func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*OidcClaims, error) {
+	if a.PublicKey == nil {
+		return nil, errors.New("ERROR: No public key provided to validate OIDC token.")
+	}
+
+	// In case of cut/paste error, trim extra spaces
+	tokenString = strings.TrimSpace(tokenString)
+
+	valid := true
+	token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, a.PublicKey.Keyfunc)
+	if err != nil {
+		log.Printf("Error validating OIDC token: %s", err.Error())
+		valid = false
+	}
+
+	if claims, ok := token.Claims.(*OidcClaims); ok && valid {
+		return claims, nil
+	}
+
+	return nil, err
+}
+
+// ValidateOidcAuthorizationMiddleware is middleware to validate OIDC tokens from adminUI
+func (a *AuthIssuer) ValidateOidcAuthorizationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization := r.Header.Get("Authorization")
+
+		if authorization == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		parts := strings.Split(authorization, " ")
+		if len(parts) < 2 || parts[0] != "Bearer" {
+			http.Error(w, "Invalid authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		claims, err := a.ValidateOidcToken(parts[1])
+		if err != nil {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Add user info to request context for downstream handlers
+		r.Header.Set("X-User-Email", claims.Email)
+		r.Header.Set("X-User-Name", claims.PreferredUsername)
+
+		next.ServeHTTP(w, r)
+	})
+}
