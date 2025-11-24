@@ -12,6 +12,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/chzyer/readline"
+	"github.com/google/shlex"
 )
 
 type ParserData struct {
@@ -93,6 +94,12 @@ func (cli *CLI) GetOutputWriter() *OutputWriter {
 
 }
 
+func (o *OutputWriter) GetOutput() io.Writer {
+	if o.isReady {
+		return o.output
+	}
+	return nil
+}
 func (o *OutputWriter) WriteString(msg string, andClose bool) {
 
 	if msg != "" && o.isReady {
@@ -116,6 +123,7 @@ func (o *OutputWriter) WriteBytes(msgBytes []byte, andClose bool) {
 
 func (o *OutputWriter) Close() {
 	if o.isReady {
+		_ = o.output.Sync()
 		o.isReady = false
 		_ = o.output.Close()
 	}
@@ -164,6 +172,13 @@ func stripQuotes(s string) string {
 	return s
 }
 
+// breakIntoArgs separates the command by spaces while preserving escaped space
+func breakIntoArgs(command string) []string {
+	res, _ := shlex.Split(command)
+
+	return res
+}
+
 func main() {
 
 	// Check for script file in environment variable
@@ -200,10 +215,8 @@ func main() {
 
 	// ctx.FatalIfErrorf(err)
 	if err != nil {
-		log.Fatalf("Unexpected error initializing goSignals parser: %s\n", err.Error())
-	}
-	if td == nil {
-		log.Fatalln("Unexpected error initializing goSignals parser: nil parser")
+		fmt.Println(err.Error())
+		panic(err)
 	}
 	oneCommand := false
 	initialArgs := os.Args
@@ -226,6 +239,9 @@ func main() {
 	}
 
 	// fmt.Println("Loading existing configuration...")
+	if td == nil {
+		panic(errors.New("CLI parser failed to initialize"))
+	}
 	err = td.cli.Data.checkConfigPath(&td.cli.Globals)
 	if err != nil {
 		fmt.Println("Error reading config directory: " + err.Error())
@@ -273,7 +289,7 @@ func main() {
 			}
 			//line = line[0 : len(line)-1]
 			_ = console.SaveHistory(line)
-			args = strings.Split(line, " ")
+			args = breakIntoArgs(line)
 		}
 
 		var ctx *kong.Context
@@ -284,10 +300,11 @@ func main() {
 		if err != nil {
 			// Put out the help text response
 			td.parser.Errorf("%s", err.Error())
-			var err *kong.ParseError
-			if errors.As(err, &err) {
-				log.Println(err.Error())
-				_ = err.Context.PrintUsage(false)
+			var kerr *kong.ParseError
+			if errors.As(err, &kerr) {
+				kerr = err.(*kong.ParseError)
+				log.Println(kerr.Error())
+				_ = kerr.Context.PrintUsage(false)
 			}
 			continue
 		}
