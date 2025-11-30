@@ -17,7 +17,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
+	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
 
 var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)

@@ -20,8 +20,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/MicahParks/keyfunc"
