@@ -2,10 +2,14 @@ package authUtil
 
 import (
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	mathRand "math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,9 +27,86 @@ type AuthContext struct {
 }
 
 type AuthIssuer struct {
-	TokenIssuer string
-	PrivateKey  *rsa.PrivateKey
-	PublicKey   *keyfunc.JWKS
+	TokenIssuer  string
+	PrivateKey   *rsa.PrivateKey
+	PublicKey    *keyfunc.JWKS
+	OAuthPubKeys []*keyfunc.JWKS
+	// OAuth Token
+	OAuthServer []string // OAuth Authorization Server identifiers
+
+}
+
+func (a *AuthIssuer) GetOAuthServers() []string {
+	if a.OAuthServer == nil {
+		as_env := os.Getenv("OAUTH_SERVERS")
+		if as_env == "" {
+			return nil
+		}
+		urls := strings.Split(as_env, ",")
+		for i := range urls {
+			urls[i] = strings.TrimSpace(strings.Trim(urls[i], "\"'"))
+		}
+		a.OAuthServer = urls
+	}
+	return a.OAuthServer
+}
+
+// oidcDiscovery represents a minimal subset of the OpenID Provider Configuration
+// as defined in https://openid.net/specs/openid-connect-discovery-1_0.html
+type oidcDiscovery struct {
+	JWKSURI string `json:"jwks_uri"`
+}
+
+// loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
+// and caches them in AuthIssuer.OAuthPubKeys for subsequent validations.
+func (a *AuthIssuer) loadOAuthJWKS() error {
+	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) > 0 {
+		return nil
+	}
+	servers := a.GetOAuthServers()
+	if len(servers) == 0 {
+		return errors.New("no OAUTH_SERVERS configured")
+	}
+	jwksList := make([]*keyfunc.JWKS, 0, len(servers))
+	for _, srv := range servers {
+		// Expect srv to be the discovery URL (e.g., .../.well-known/openid-configuration)
+		// Fetch discovery doc
+		resp, err := http.Get(srv)
+		if err != nil {
+			log.Printf("Failed to fetch OIDC discovery from %s: %v", srv, err)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Printf("Failed to read OIDC discovery from %s: %v", srv, err)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			log.Printf("OIDC discovery HTTP %d from %s: %s", resp.StatusCode, srv, string(body))
+			continue
+		}
+		var disc oidcDiscovery
+		if err := json.Unmarshal(body, &disc); err != nil {
+			log.Printf("Failed to parse OIDC discovery from %s: %v", srv, err)
+			continue
+		}
+		if disc.JWKSURI == "" {
+			log.Printf("OIDC discovery missing jwks_uri at %s", srv)
+			continue
+		}
+		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{})
+		if err != nil {
+			log.Printf("Failed to load JWKS from %s: %v", disc.JWKSURI, err)
+			continue
+		}
+		jwksList = append(jwksList, jwks)
+	}
+	if len(jwksList) == 0 {
+		return fmt.Errorf("failed to load JWKS from any configured OAUTH_SERVERS")
+	}
+	a.OAuthPubKeys = jwksList
+	return nil
 }
 
 // IssueProjectIat issues a new registration token. If authCtx is nil, a new project is generated. If an authCtx is asserted,
@@ -142,22 +223,108 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 	if parts[0] == "Bearer" {
 
 		tkn, err := a.ParseAuthToken(parts[1])
-		if err != nil {
-			log.Printf("Authorization invalid: [%s]\n", err.Error())
-			return nil, http.StatusUnauthorized
-		}
-		if tkn.IsAuthorized(streamRequested, scopes) {
+		if err == nil && tkn.IsAuthorized(streamRequested, scopes) {
 			return &AuthContext{
 				StreamId:  streamRequested,
 				ProjectId: tkn.ProjectId,
 				Eat:       tkn,
 			}, http.StatusOK
 		}
+		// Try validating against configured OAuth servers as a fallback
+		if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
+			return authCtx, http.StatusOK
+		}
+		log.Printf("Authorization invalid: [%v]", err)
 		return nil, http.StatusUnauthorized
 	}
 	log.Printf("Received invalid authorization: %s\n", parts[0])
 	return nil, http.StatusUnauthorized
 
+}
+
+// ValidateAuthorizationAny validates the Authorization header against either a locally issued token
+// or any configured OAuth/OIDC servers defined in OAUTH_SERVERS. It returns 200 OK when authorized.
+func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) (*AuthContext, int) {
+	authorization := r.Header.Get("Authorization")
+
+	// first look for stream id as a query
+	queries := r.URL.Query()
+	id := queries["stream_id"]
+	streamRequested := ""
+	if id != nil && len(id) > 0 {
+		streamRequested = id[0]
+	} else {
+		// check for stream id in the path
+		params := mux.Vars(r)
+		val, exist := params["id"]
+		if exist {
+			streamRequested = val
+		}
+	}
+
+	if authorization == "" {
+		return nil, http.StatusUnauthorized
+	}
+	parts := strings.Split(authorization, " ")
+	if len(parts) < 2 || parts[0] != "Bearer" {
+		return nil, http.StatusUnauthorized
+	}
+
+	// Try local token first
+	if tkn, err := a.ParseAuthToken(parts[1]); err == nil && tkn.IsAuthorized(streamRequested, scopes) {
+		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn}, http.StatusOK
+	}
+
+	// Try OAuth servers
+	if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
+		return authCtx, http.StatusOK
+	}
+	return nil, http.StatusUnauthorized
+}
+
+// validateOAuthToken attempts to validate the token using configured OAuth/OIDC servers.
+// Returns an AuthContext when token roles match accepted scopes.
+func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested string, scopesAccepted []string) (*AuthContext, bool) {
+	if err := a.loadOAuthJWKS(); err != nil {
+		return nil, false
+	}
+	tokenString = strings.TrimSpace(tokenString)
+	for _, jwks := range a.OAuthPubKeys {
+		valid := true
+		token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc)
+		if err != nil {
+			valid = false
+		}
+		if !valid {
+			continue
+		}
+		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
+			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
+			if oidcRolesMatchScopes(claims.RealmAccess.Roles, scopesAccepted) {
+				// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
+				return &AuthContext{
+					StreamId:  streamRequested,
+					ProjectId: "",
+					Eat:       nil,
+				}, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
+	for _, accepted := range scopesAccepted {
+		for _, role := range roles {
+			if strings.EqualFold(role, ScopeRoot) {
+				return true
+			}
+			if strings.EqualFold(role, accepted) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ParseAuthToken parses and validates an authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
