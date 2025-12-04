@@ -242,10 +242,10 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"OidcConfiguration",
+			"ProtectedResourceMetadata",
 			http.MethodGet,
-			"/.well-known/openid-configuration",
-			h.sa.OidcConfiguration,
+			"/.well-known/oauth-provisioned-resource",
+			h.sa.ProtectedResourceMetadata,
 			false,
 		},
 	}

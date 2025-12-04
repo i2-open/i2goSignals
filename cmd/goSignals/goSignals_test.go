@@ -22,7 +22,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/i2-open/i2goSignals/internal/model"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
+	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"

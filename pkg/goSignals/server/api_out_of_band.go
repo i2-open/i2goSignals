@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
-	"os"
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
@@ -117,51 +116,20 @@ func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, _ *http.Reques
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// OidcConfiguration returns the OIDC discovery document for the adminUI
-func (sa *SignalsApplication) OidcConfiguration(w http.ResponseWriter, _ *http.Request) {
-	serverLog.Println("GET OIDC Configuration")
+// ProtectedResourceMetadata returns the RFC9728 based data describing OAuth access
+func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+	serverLog.Println("GET ProtectedResourceMetadata")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	// Parse Keycloak endpoints - assuming Keycloak runs on localhost:8080
-	keycloakBaseUrl := "http://localhost:8080/realms/gosignals"
-
-	// Check environment variable for Keycloak URL
-	if keycloakUrl := os.Getenv("KEYCLOAK_URL"); keycloakUrl != "" {
-		keycloakBaseUrl = keycloakUrl
+	prMeta := map[string]interface{}{
+		"resource":                 sa.BaseUrl.String(),
+		"authorization_servers":    sa.Auth.GetOAuthServers(),
+		"scopes_supported":         []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery, authUtil.StreamAny},
+		"bearer_methods_supported": []string{"header"},
+		"resource_name":            "GoSignals SSF Service",
 	}
 
-	oidcConfig := map[string]interface{}{
-		"issuer":                 keycloakBaseUrl,
-		"authorization_endpoint": keycloakBaseUrl + "/protocol/openid-connect/auth",
-		"token_endpoint":         keycloakBaseUrl + "/protocol/openid-connect/token",
-		"userinfo_endpoint":      keycloakBaseUrl + "/protocol/openid-connect/userinfo",
-		"end_session_endpoint":   keycloakBaseUrl + "/protocol/openid-connect/logout",
-		"jwks_uri":               keycloakBaseUrl + "/protocol/openid-connect/certs",
-		"response_types_supported": []string{
-			"code",
-			"id_token",
-			"token id_token",
-		},
-		"subject_types_supported": []string{"public"},
-		"id_token_signing_alg_values_supported": []string{
-			"RS256",
-		},
-		"scopes_supported": []string{
-			"openid",
-			"profile",
-			"email",
-		},
-		"token_endpoint_auth_methods_supported": []string{
-			"client_secret_basic",
-			"client_secret_post",
-		},
-		"grant_types_supported": []string{
-			"authorization_code",
-			"refresh_token",
-		},
-	}
-
-	resp, _ := json.MarshalIndent(oidcConfig, "", "  ")
+	resp, _ := json.MarshalIndent(prMeta, "", "  ")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }
