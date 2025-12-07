@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+
+# Dev image for debugging goSignalsServer inside Docker with Delve
+FROM golang:1.25.4-bookworm
+
+LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
+LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
+
+WORKDIR /app
+
+# Install Delve debugger
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Make sure GOPATH/bin is on PATH for dlv
+ENV PATH="/go/bin:${PATH}"
+
+# Configure Go module behavior and pre-fetch dependencies to avoid network at runtime
+ENV GO111MODULE=on \
+    GOPROXY=https://proxy.golang.org,direct
+
+# Prime module cache during image build to prevent `go mod download` during container start
+# Copy only go.mod/go.sum first to leverage Docker layer cache
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+# Expose application and Delve ports
+EXPOSE 8888
+EXPOSE 2345
+
+# Default command: build and run goSignalsServer under Delve in headless mode.
+# Source must be mounted into /app for this to work.
+# Add --continue so the server starts immediately even if a debugger hasn't attached yet.
+CMD ["dlv", "debug", "./cmd/goSignalsServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]

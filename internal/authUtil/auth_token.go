@@ -36,6 +36,7 @@ type AuthIssuer struct {
 
 }
 
+// GetOAuthServers checks the environment variable OAUTH_SERVERS for OAuth Authorization server discovery endpoints
 func (a *AuthIssuer) GetOAuthServers() []string {
 	if a.OAuthServer == nil {
 		as_env := os.Getenv("OAUTH_SERVERS")
@@ -58,7 +59,7 @@ type oidcDiscovery struct {
 }
 
 // loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
-// and caches them in AuthIssuer.OAuthPubKeys for subsequent validations.
+// and caches them in AuthIssuer.OAuthPubKeys for later validation.
 func (a *AuthIssuer) loadOAuthJWKS() error {
 	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) > 0 {
 		return nil

@@ -61,9 +61,9 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-// RegisterClient handles initial SSF client registrations and issues tokens enabling stream management.
-// In order to access the registration endpoint an initial access token with scope 'register' is required.
-// If 'root' scope is provided, a registration token is issued which can be used to start the client registration process.
+// RegisterClient is used in scenarios where there is no external OAuth infrastructure to manage access.
+// Using RegisterClient allows a goSignals command line client or admin server to register with an IAT.
+// When successful, the client is is issued an administrative token which can be used to register new streams.
 func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Request) {
 	authCtx, stat := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeRegister})
 	if stat != http.StatusOK {

@@ -4,6 +4,9 @@ volumes:
   prometheus_data: {}
   postgres_data:
     driver: local
+  # Caches for Go modules and build output to speed up dev container and reduce network needs
+  go_mod_cache: {}
+  go_build_cache: {}
 
 services:
   mongo1:
@@ -81,8 +84,10 @@ services:
       - ".monitor/grafana:/etc/grafana/provisioning/datasources"
 
   goSignals1:
-    image: i2gosignals:v0.8
-    command: /app/goSignalsServer
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
     container_name: gosignals1
     hostname: goSignals1
     depends_on:
@@ -93,6 +98,14 @@ services:
     ports:
       - "8888:8888"
       - "2345:2345"
+    # Optional DNS override can help if Docker Desktop DNS is flaky on your network/VPN
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals1.env
 
@@ -117,8 +130,8 @@ services:
       - mongo1
       - mongo2
       - mongo3
-      - goSignals1
-      - goSignals2
+#      - goSignals1
+#      - goSignals2
     volumes:
       - "./config/scim:/scim"
     restart: "no"
@@ -133,11 +146,11 @@ services:
     container_name: scim_cluster1
     ports:
       - "9000:8080"
-    depends_on:
-      goSignals1:
-        condition: service_started
-      scimSsfSetup:
-        condition: service_completed_successfully
+    #depends_on:
+    #  goSignals1:
+    #    condition: service_started
+    #  scimSsfSetup:
+    #    condition: service_completed_successfully
     volumes:
       - ./config/scim/data1:/scim
     env_file:

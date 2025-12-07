@@ -147,6 +147,13 @@ func (h *HttpRouter) getRoutes() Routes {
 			true,
 		},
 
+		Route{"ListStreamStates",
+			http.MethodGet,
+			"/streams",
+			h.sa.ListStreamStates,
+			false,
+		},
+
 		Route{
 			"StreamGet",
 			http.MethodGet,

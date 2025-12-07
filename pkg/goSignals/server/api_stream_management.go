@@ -122,6 +122,12 @@ func replaceBase(original string, baseUrl *url.URL) string {
 	return modifiedUrl.String()
 }
 
+func (sa *SignalsApplication) adjustStateBaseUrl(config model.StreamStateRecord) model.StreamStateRecord {
+	streamConfig := config.StreamConfiguration
+	config.StreamConfiguration = sa.adjustBaseUrl(streamConfig)
+	return config
+}
+
 func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) model.StreamConfiguration {
 	res := config
 	switch config.Delivery.GetMethod() {
@@ -135,6 +141,26 @@ func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) mo
 		// do nothing
 	}
 	return res
+}
+
+// ListStreamStates allows the ability to list all streams associated with the current server project. Requires "admin" or "root" scope.
+// If the authentication credential includes a project id, the result set is limited to the project.
+func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	projectId := authCtx.ProjectId
+	mapStreams := sa.Provider.GetStateMap()
+	result := make([]model.StreamStateRecord, 0)
+	for _, stream := range mapStreams {
+		if projectId == "" || stream.ProjectId == projectId {
+			result = append(result, sa.adjustStateBaseUrl(stream))
+		}
+	}
+	serverLog.Printf("ListStreamStates: %d returned", len(result))
+
 }
 
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
