@@ -6,6 +6,8 @@ GO?=go
 ADMIN_DIR=adminUI
 ADMIN_BUILD_DIR=$(ADMIN_DIR)/build
 SERVER_DIR=cmd/goSignalsServer
+CONFIG_DIR=config
+SCIM_CONFIG=$(CONFIG_DIR)/scim
 BIN_DIR=bin
 SERVER_BIN=$(BIN_DIR)/goSignalsServer
 
@@ -35,8 +37,9 @@ server-build: adminui-build
 build: adminui-build server-build
 
 # Remove build artifacts
-clean:
+clean: dev-clean
 	 rm -rf $(ADMIN_BUILD_DIR) $(SERVER_BIN)
+	 # rm -f $(SCIM_CONFIG)/iat*.txt $(SCIM_CONFIG)/registration-iat.env $(SCIM_CONFIG)/scim_cluster.env $(SCIM_CONFIG)/cluster-scim-issuer.pem
 
 # --- Dev/debug in Docker with Delve ---
 # Build the dev image used by docker-compose-dev (installs Delve and mounts source)
@@ -62,3 +65,4 @@ dev-logs:
 # Remove dev containers and caches (module/build caches)
 dev-clean:
 	 docker compose -f docker-compose-dev.yml down -v
+	 find $(SCIM_CONFIG) -maxdepth 1 -type f -delete

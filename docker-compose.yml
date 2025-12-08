@@ -124,9 +124,9 @@ services:
     restart: "no"
     environment:
       - ISSUER=cluster.scim.example.com
-   #   - GOSIGNALS_HOME=/scim/config.json
+      - GOSIGNALS_HOME=/scim/config.json
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
-    entrypoint: [ "sh", "/scim/register.sh"]
+    entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.7.0
@@ -141,24 +141,7 @@ services:
     volumes:
       - ./config/scim/data1:/scim
     env_file:
-      - ./config/scim/registration-iat.env
-    environment:
-      - scim.prov.memory.dir=/scim/data
-      - scim.prov.memory.file=scimdb.json
-      - scim.prov.memory.maxbackups=10
-      - scim.prov.memory.backup.mins=2
-      - scim.event.enable=true
-      - scim.security.enable=false
-      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.enable=true
-      - scim.signals.ssf.serverUrl=http://goSignals1:8888
-  #    - scim.signals.ssf.authorization=<add iat here>  loaded in /scim/registration-iat.env
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://goSignals1:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.pem.path=/scim/issuer.pem
+      - ./config/scim/scim_cluster.env
   scim_cluster2:
     image: independentid/i2scim-universal:0.7.0
     container_name: scim_cluster2
@@ -172,24 +155,7 @@ services:
     volumes:
       - ./config/scim/data2:/scim
     env_file:
-      - ./config/scim/registration-iat.env
-    environment:
-      - scim.prov.memory.dir=/scim/data
-      - scim.prov.memory.file=scimdb.json
-      - scim.prov.memory.maxbackups=10
-      - scim.prov.memory.backup.mins=2
-      - scim.event.enable=true
-      - scim.security.enable=false
-      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.ssf.serverUrl=http://host.docker.internal:8888
-  #    - scim.signals.ssf.authorization=<add iat here> loaded in /scim/registration-iat.env
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://host.docker.internal:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.pem.path=/scim/issuer.pem
-
+      - ./config/scim/scim_cluster.env
   postgres:
     image: postgres:alpine
     volumes:
@@ -227,9 +193,6 @@ services:
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
       - "./config/keycloak/theme:/opt/keycloak/themes/gosignals"
-secrets:
-  pemfile:
-    file: config/cluster-scim-example-com.pem
 networks:
   keycloak_network:
     driver: bridge
