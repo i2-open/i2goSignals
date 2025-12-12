@@ -183,7 +183,7 @@ services:
     image: quay.io/keycloak/keycloak:26.4.5
     container_name: keycloak-signals
     hostname: keycloak
-    command: start --import-realm
+    command: start --import-realm --spi-theme-static-max-age=-1 --spi-theme-cache-themes=false --spi-theme-cache-templates=false --log-level=org.keycloak.theme:DEBUG
     environment:
       KC_HOSTNAME: localhost
       KC_HOSTNAME_PORT: 8080
@@ -205,7 +205,7 @@ services:
       - keycloak_network
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
-      - "./config/keycloak/theme:/opt/keycloak/themes/gosignals"
+      - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
 networks:
   keycloak_network:
     driver: bridge

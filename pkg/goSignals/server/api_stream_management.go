@@ -369,7 +369,11 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 	remSubUri, _ := sa.BaseUrl.Parse("/remove-subject")
 	verifyUri, _ := sa.BaseUrl.Parse("/verification")
 	regUri, _ := sa.BaseUrl.Parse("/register")
-
+	authServers := []model.AuthorizationServerDescriptor{
+		{
+			Servers: sa.Auth.GetOAuthServers(),
+		},
+	}
 	return &model.TransmitterConfiguration{
 		Issuer:  sa.DefIssuer,
 		JwksUri: jwksUri.String(),
@@ -396,6 +400,7 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 			"poll":                         {authUtil.ScopeEventDelivery},
 			"client_registration_endpoint": {authUtil.ScopeRegister},
 		},
+		AuthorizationServers: authServers,
 	}
 }
 

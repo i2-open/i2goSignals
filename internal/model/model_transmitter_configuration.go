@@ -38,5 +38,7 @@ type TransmitterConfiguration struct {
 
 	ClientRegistrationEndpoint string `json:"client_registration_endpoint,omitempty"`
 
+	AuthorizationSchemes []string `json:"authorization_schemes,omitempty"`
+
 	AuthorizationServers []AuthorizationServerDescriptor `json:"authorization_servers,omitempty"`
 }

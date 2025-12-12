@@ -1,7 +1,9 @@
 {
   "realm": "gosignals",
+  "displayName": "GoSignals OAuth Realm",
   "enabled": true,
   "sslRequired": "none",
+  "loginTheme": "gosignals-mui",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
@@ -39,6 +41,20 @@
       "attributes": {
         "pkce.code.challenge.method": "S256"
       },
+      "protocolMappers": [
+        {
+          "name": "adminui-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "included.client.audience": "adminui",
+            "included.custom.audience": "adminui"
+          }
+        }
+      ],
       "defaultClientScopes": [
         "web-origins",
         "profile",
@@ -46,6 +62,49 @@
         "email"
       ],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "goSignalsAdminService",
+      "name": "GoSignals Admin Service",
+      "description": "Service client for Admin UI token exchange to service bearer tokens",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "admin-service-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "oauth2.token.exchange.grant.enabled": "true"
+      },
+      "redirectUris": [],
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles"
+      ],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "roles-as-scope",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "claim.name": "scope",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "usermodel.realmRoleMapping.rolePrefix": ""
+          }
+        }
+      ]
     }
   ],
   "roles": {
@@ -57,6 +116,22 @@
       {
         "name": "user",
         "description": "Regular user with read access"
+      },
+      {
+        "name": "goSignalsRootRole",
+        "description": "Root scope for goSignals"
+      },
+      {
+        "name": "goSignalsAdminRole",
+        "description": "Admin scope for goSignals"
+      },
+      {
+        "name": "goSignalsEventRole",
+        "description": "Event scope for goSignals"
+      },
+      {
+        "name": "goSignalsStreamRole",
+        "description": "Stream scope for goSignals"
       }
     ]
   },
@@ -76,7 +151,9 @@
         }
       ],
       "realmRoles": [
-        "admin"
+        "admin",
+        "goSignalsRootRole",
+        "goSignalsAdminRole"
       ]
     },
     {
@@ -94,7 +171,8 @@
         }
       ],
       "realmRoles": [
-        "user"
+        "user",
+        "goSignalsAdminRole"
       ]
     }
   ],

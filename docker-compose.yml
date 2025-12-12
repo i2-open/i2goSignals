@@ -192,7 +192,7 @@ services:
       - keycloak_network
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
-      - "./config/keycloak/theme:/opt/keycloak/themes/gosignals"
+      - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
 networks:
   keycloak_network:
     driver: bridge
