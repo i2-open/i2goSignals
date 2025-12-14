@@ -57,6 +57,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
+
 	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -72,16 +73,22 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
-		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
+		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
 		sa.Provider.AckEvent(jti, authCtx.StreamId)
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
 		sa.EventRouter.IncrementCounter(streamState, event, false)
 	}
 
+	wait := ""
+	if !request.ReturnImmediately {
+		wait = "Long "
+	}
+	serverLog.Printf("TRANSMIT POLL Stream[%s] %sPoll request...\n", authCtx.StreamId, wait)
+
 	// Second, log any errors received
 	for jti, setError := range request.SetErrs {
-		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s", authCtx.StreamId, jti, setError.Error, setError.Description)
+		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s\n", authCtx.StreamId, jti, setError.Error, setError.Description)
 		serverLog.Println(errMsg)
 		// TODO Nothing to do except log it?
 	}
@@ -97,6 +104,12 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Stream not found or not ready", status)
 		return
 	}
+	isMore := ""
+	if more {
+		isMore = "More available"
+	}
+	serverLog.Printf("TRANSMIT POLL Stream[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore)
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	respBytes, err := json.MarshalIndent(resp, "", "  ")
