@@ -13,6 +13,14 @@ type AuthorizationServerDescriptor struct {
 	Servers []string `json:"servers"`
 }
 
+type ProtectedResourceMetadata struct {
+	Resource               *string  `json:"resource,omitempty"`
+	AuthorizationServers   []string `json:"authorization_servers,omitempty"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
+	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
+	ResourceName           *string  `json:"resource_name,omitempty"`
+}
+
 // Transmitters have metadata describing their configuration. [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#discovery-meta)
 type TransmitterConfiguration struct {
 	// URL using the https scheme with no query or fragment component that the Transmitter asserts as its Issuer Identifier. This MUST be identical to the iss claim value in Security Event Tokens issued from this Transmitter.
@@ -40,5 +48,9 @@ type TransmitterConfiguration struct {
 
 	AuthorizationSchemes []string `json:"authorization_schemes,omitempty"`
 
-	AuthorizationServers []AuthorizationServerDescriptor `json:"authorization_servers,omitempty"`
+	AuthorizationServers   []string `json:"authorization_servers,omitempty"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
+	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
+
+	GoSignalsVersion string `json:"gosignals_version,omitempty"`
 }

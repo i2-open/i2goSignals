@@ -71,6 +71,12 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 
+	wait := ""
+	if !request.ReturnImmediately {
+		wait = "Long "
+	}
+	serverLog.Printf("TRANSMIT POLL Stream[%s] %sPoll received...\n", authCtx.StreamId, wait)
+
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		serverLog.Println(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
@@ -79,12 +85,6 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		serverLog.Printf("EventOut [%s]: Type: POLL ", sa.Name())
 		sa.EventRouter.IncrementCounter(streamState, event, false)
 	}
-
-	wait := ""
-	if !request.ReturnImmediately {
-		wait = "Long "
-	}
-	serverLog.Printf("TRANSMIT POLL Stream[%s] %sPoll request...\n", authCtx.StreamId, wait)
 
 	// Second, log any errors received
 	for jti, setError := range request.SetErrs {
@@ -107,6 +107,9 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	isMore := ""
 	if more {
 		isMore = "More available"
+	}
+	if !request.ReturnImmediately && len(sets) == 0 {
+		isMore = " Timed out."
 	}
 	serverLog.Printf("TRANSMIT POLL Stream[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore)
 

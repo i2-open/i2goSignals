@@ -20,6 +20,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
+var authLog = log.New(os.Stdout, "AUTH:   ", log.Ldate|log.Ltime)
+
 type AuthContext struct {
 	StreamId  string
 	ProjectId string
@@ -61,6 +63,7 @@ type oidcDiscovery struct {
 // loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
 // and caches them in AuthIssuer.OAuthPubKeys for later validation.
 func (a *AuthIssuer) loadOAuthJWKS() error {
+	var err error
 	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) > 0 {
 		return nil
 	}
@@ -72,42 +75,43 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 	for _, srv := range servers {
 		// Expect srv to be the discovery URL (e.g., .../.well-known/openid-configuration)
 		// Fetch discovery doc
-		resp, err := http.Get(srv)
+		var resp *http.Response
+		resp, err = http.Get(srv)
 		if err != nil {
-			log.Printf("Failed to fetch OIDC discovery from %s: %v", srv, err)
+			authLog.Printf("Failed to fetch OIDC discovery from %s: %v", srv, err)
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
-			log.Printf("Failed to read OIDC discovery from %s: %v", srv, err)
+			authLog.Printf("Failed to read OIDC discovery from %s: %v", srv, err)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			log.Printf("OIDC discovery HTTP %d from %s: %s", resp.StatusCode, srv, string(body))
+			authLog.Printf("OIDC discovery HTTP %d from %s: %s", resp.StatusCode, srv, string(body))
 			continue
 		}
 		var disc oidcDiscovery
 		if err := json.Unmarshal(body, &disc); err != nil {
-			log.Printf("Failed to parse OIDC discovery from %s: %v", srv, err)
+			authLog.Printf("Failed to parse OIDC discovery from %s: %v", srv, err)
 			continue
 		}
 		if disc.JWKSURI == "" {
-			log.Printf("OIDC discovery missing jwks_uri at %s", srv)
+			authLog.Printf("OIDC discovery missing jwks_uri at %s", srv)
 			continue
 		}
 		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{})
 		if err != nil {
-			log.Printf("Failed to load JWKS from %s: %v", disc.JWKSURI, err)
+			authLog.Printf("Failed to load JWKS from %s: %v", disc.JWKSURI, err)
 			continue
 		}
 		jwksList = append(jwksList, jwks)
 	}
-	if len(jwksList) == 0 {
+	if len(jwksList) == 0 && err == nil {
 		return fmt.Errorf("failed to load JWKS from any configured OAUTH_SERVERS")
 	}
 	a.OAuthPubKeys = jwksList
-	return nil
+	return err
 }
 
 // IssueProjectIat issues a new registration token. If authCtx is nil, a new project is generated. If an authCtx is asserted,
@@ -235,10 +239,10 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 		if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
 			return authCtx, http.StatusOK
 		}
-		log.Printf("Authorization invalid: [%v]", err)
+		authLog.Printf("Authorization invalid: [%v]", err)
 		return nil, http.StatusUnauthorized
 	}
-	log.Printf("Received invalid authorization: %s\n", parts[0])
+	authLog.Printf("Received invalid authorization: %s\n", parts[0])
 	return nil, http.StatusUnauthorized
 
 }
@@ -291,17 +295,21 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 	}
 	tokenString = strings.TrimSpace(tokenString)
 	for _, jwks := range a.OAuthPubKeys {
-		valid := true
 		token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc)
 		if err != nil {
-			valid = false
-		}
-		if !valid {
+			authLog.Printf("Not validated with key %v: %v\n", jwks.KIDs(), err)
 			continue
 		}
 		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
 			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
-			if oidcRolesMatchScopes(claims.RealmAccess.Roles, scopesAccepted) {
+			hasScopes := []string{}
+			if claims.RealmAccess.Roles != nil {
+				hasScopes = claims.RealmAccess.Roles
+			}
+			if claims.Scope != "" {
+				hasScopes = append(hasScopes, strings.Split(claims.Scope, " ")...)
+			}
+			if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
 				// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
 				return &AuthContext{
 					StreamId:  streamRequested,
@@ -328,7 +336,7 @@ func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 	return false
 }
 
-// ParseAuthToken parses and validates an authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
+// ParseAuthToken parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
 func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error) {
 	if a.PublicKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
@@ -340,17 +348,17 @@ func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error)
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, a.PublicKey.Keyfunc)
 	if err != nil {
-		log.Printf("Error validating token: %s", err.Error())
+		authLog.Printf("Error validating token: %s", err.Error())
 		valid = false
 	}
-	if token.Header["typ"] != "jwt" {
-		log.Printf("token is not an authorization token (JWT)")
+	if token.Header["typ"] != "jwt" && token.Header["typ"] != "JWT" {
+		authLog.Printf("token is not an authorization token (JWT)")
 		return nil, errors.New("token type is not an authorization token (`jwt`)")
 	}
 
 	// jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
 	// claimString := string(jsonByte)
-	// log.Println(claimString)
+	// authLog.Println(claimString)
 	if claims, ok := token.Claims.(*EventAuthToken); ok && valid {
 		return claims, nil
 	}
@@ -367,16 +375,20 @@ const (
 	StreamAny          = "any"
 )
 
+// EventAuthToken is an internally issued token used for stream management by SSF clients.
 type EventAuthToken struct {
-	StreamIds []string `json:"sid,omitempty"`
+	StreamIds []string `json:"streams,omitempty"`
 	ProjectId string   `json:"project_id"`
 	Scopes    []string `json:"roles,omitempty"`
 	ClientId  string   `json:"client_id,omitempty"`
 	jwt.RegisteredClaims
+	OAuthScope string `json:"scope,omitempty"`
 }
 
+// IsScopeMatch checks both Event token scopes array and oauth style space delimited scope claim
 func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
-
+	oauthScope := t.OAuthScope
+	oauthScopes := strings.Split(oauthScope, " ")
 	for _, acceptedScope := range scopesAccepted {
 		for _, scope := range t.Scopes {
 			if strings.EqualFold(scope, ScopeRoot) {
@@ -387,6 +399,16 @@ func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
 			}
 
 		}
+		for _, scope := range oauthScopes {
+			if strings.
+				EqualFold(scope, ScopeRoot) {
+				return true
+			}
+			if strings.EqualFold(scope, acceptedScope) {
+				return true
+			}
+		}
+
 	}
 	return false
 }
@@ -448,6 +470,7 @@ type OidcClaims struct {
 	Name              string `json:"name"`
 	GivenName         string `json:"given_name"`
 	FamilyName        string `json:"family_name"`
+	Scope             string `json:"scope"`
 	RealmAccess       struct {
 		Roles []string `json:"roles"`
 	} `json:"realm_access"`
@@ -467,7 +490,7 @@ func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*OidcClaims, error) 
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, a.PublicKey.Keyfunc)
 	if err != nil {
-		log.Printf("Error validating OIDC token: %s", err.Error())
+		authLog.Printf("Error validating OIDC token: %s", err.Error())
 		valid = false
 	}
 

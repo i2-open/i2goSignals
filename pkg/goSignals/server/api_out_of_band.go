@@ -121,12 +121,14 @@ func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _
 	serverLog.Println("GET ProtectedResourceMetadata")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	prMeta := map[string]interface{}{
-		"resource":                 sa.BaseUrl.String(),
-		"authorization_servers":    sa.Auth.GetOAuthServers(),
-		"scopes_supported":         []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery, authUtil.StreamAny},
-		"bearer_methods_supported": []string{"header"},
-		"resource_name":            "GoSignals SSF Service",
+	baseURl := sa.BaseUrl.String()
+	name := "GoSignals"
+	prMeta := model.ProtectedResourceMetadata{
+		Resource:               &baseURl,
+		AuthorizationServers:   sa.Auth.GetOAuthServers(),
+		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery, authUtil.ScopeRegister},
+		BearerMethodsSupported: []string{"header"},
+		ResourceName:           &name,
 	}
 
 	resp, _ := json.MarshalIndent(prMeta, "", "  ")

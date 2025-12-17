@@ -53,6 +53,18 @@
             "included.client.audience": "adminui",
             "included.custom.audience": "adminui"
           }
+        },
+        {
+          "name": "aud-goSignalsAdminService",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "included.client.audience": "goSignalsAdminService",
+            "included.custom.audience": "goSignalsAdminService"
+          }
         }
       ],
       "defaultClientScopes": [
@@ -78,16 +90,20 @@
       "serviceAccountsEnabled": true,
       "fullScopeAllowed": false,
       "attributes": {
+        "standard.token.exchange.enabled": "true",
         "oauth2.token.exchange.grant.enabled": "true"
       },
       "redirectUris": [],
       "webOrigins": [],
-      "defaultClientScopes": [
-        "profile",
-        "email",
-        "roles"
+      "defaultClientScopes": [],
+      "optionalClientScopes": [
+        "stream",
+        "event",
+        "admin",
+        "reg",
+        "root",
+        "any"
       ],
-      "optionalClientScopes": [],
       "protocolMappers": [
         {
           "name": "roles-as-scope",
@@ -102,6 +118,30 @@
             "jsonType.label": "String",
             "multivalued": "true",
             "usermodel.realmRoleMapping.rolePrefix": ""
+          }
+        },
+        {
+          "name": "aud-include-resource-param",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-script-based-protocol-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "script": "// Add the OAuth token exchange request parameter 'resource' (if present) to the access token audience.\n// Fallback to 'audience' if 'resource' is not provided.\nvar res = clientSession != null ? clientSession.getNote('resource') : null;\nif (res == null || res === '') {\n  res = clientSession != null ? clientSession.getNote('audience') : null;\n}\nif (res != null && res !== '') {\n  // Add dynamic audience value to the access token\n  token.addAudience(res);\n}"
+          }
+        },
+        {
+          "name": "aud-self-goSignalsAdminService",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "included.client.audience": "goSignalsAdminService",
+            "included.custom.audience": "goSignalsAdminService"
           }
         }
       ]
@@ -177,6 +217,66 @@
     }
   ],
   "clientScopes": [
+    {
+      "name": "stream",
+      "description": "Permits goSignals stream management per SSF",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "event",
+      "description": "Permission to deliver an event",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "admin",
+      "description": "Full administration rights on a goSignals server",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "reg",
+      "description": "The ability to create a new event stream",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "root",
+      "description": "Root level access to a GoSignals server",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "any",
+      "description": "Ability to perform stream management on any stream",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
     {
       "name": "web-origins",
       "description": "OpenID Connect scope for add allowed web origins to the access token",

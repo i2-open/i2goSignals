@@ -143,10 +143,10 @@ func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) mo
 	return res
 }
 
-// ListStreamStates allows the ability to list all streams associated with the current server project. Requires "admin" or "root" scope.
+// ListStreamStates allows the ability to list all stream states associated with the current server project. Requires "admin" or "root" scope.
 // If the authentication credential includes a project id, the result set is limited to the project.
 func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -159,8 +159,18 @@ func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Re
 			result = append(result, sa.adjustStateBaseUrl(stream))
 		}
 	}
+
 	serverLog.Printf("ListStreamStates: %d returned", len(result))
 
+	resp, err := json.Marshal(result)
+	if err != nil {
+		serverLog.Printf("Internal error ListStreamStates: %s\n", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
 }
 
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
@@ -369,11 +379,7 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 	remSubUri, _ := sa.BaseUrl.Parse("/remove-subject")
 	verifyUri, _ := sa.BaseUrl.Parse("/verification")
 	regUri, _ := sa.BaseUrl.Parse("/register")
-	authServers := []model.AuthorizationServerDescriptor{
-		{
-			Servers: sa.Auth.GetOAuthServers(),
-		},
-	}
+
 	return &model.TransmitterConfiguration{
 		Issuer:  sa.DefIssuer,
 		JwksUri: jwksUri.String(),
@@ -400,7 +406,11 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 			"poll":                         {authUtil.ScopeEventDelivery},
 			"client_registration_endpoint": {authUtil.ScopeRegister},
 		},
-		AuthorizationServers: authServers,
+		AuthorizationServers:   sa.Auth.GetOAuthServers(),
+		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt, authUtil.ScopeRegister},
+		BearerMethodsSupported: []string{"header"},
+
+		GoSignalsVersion: "0.8",
 	}
 }
 
