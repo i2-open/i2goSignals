@@ -9,10 +9,14 @@ package server
 
 import (
 	"fmt"
+	"io/fs"
+	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/i2-open/i2goSignals/pkg/goSSEF"
 )
 
 type Route struct {
@@ -38,9 +42,15 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 
 	// Add the Prometheus middleware first so logging happens inside
 	httpRouter.router.Use(PrometheusHttpMiddleware)
-	// httpRouter.router.Use()
-	routes := httpRouter.getRoutes()
 
+	// Host swagger-ui
+	dist, err := fs.Sub(goSSEF.SwaggerUI, "swagger-ui")
+	if err != nil {
+		log.Fatal(err)
+	}
+	httpRouter.router.PathPrefix("/swagger/").Handler(http.StripPrefix("/swagger/", http.FileServer(http.FS(dist))))
+
+	routes := httpRouter.getRoutes()
 	for _, route := range routes {
 		var handler http.Handler
 		handler = route.HandlerFunc
