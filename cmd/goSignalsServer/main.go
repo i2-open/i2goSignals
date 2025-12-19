@@ -124,7 +124,10 @@ func main() {
 	mLog.Println("Base URL: " + baseUrl)
 
 	// Start Admin UI server in parallel if build directory exists
-	startAdminServer()
+	adminPort := stripQuotes(os.Getenv("ADMIN_PORT"))
+	if adminPort != "" {
+		startAdminServer()
+	}
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
 	err = signalsApplication.Server.ListenAndServe()
