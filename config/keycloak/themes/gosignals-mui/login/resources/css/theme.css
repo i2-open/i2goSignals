@@ -1,0 +1,296 @@
+/*
+ MUI-inspired Keycloak login themes styles
+ - Keeps HTML templates from parent themes (keycloak)
+ - Applies a dark MUI palette like this app's src/themes.ts tokens
+*/
+
+:root {
+  /* Primary (dark) */
+  --mui-bg: #141b2d;           /* tokens.primary.500 */
+  --mui-bg-alt: #1F2A40;       /* tokens.primary.400 (dark mode primary surface) */
+  --mui-text: #dbf5ee;         /* tokens.greenAccent.900 (light green) */
+  --mui-text-muted: #c3c6fd;   /* tokens.blueAccent.200 */
+
+  /* Accents */
+  --mui-primary: #4cceac;      /* tokens.greenAccent.500 */
+  --mui-primary-600: #3da58a;  /* tokens.greenAccent.600 */
+  --mui-primary-700: #2e7c67;  /* tokens.greenAccent.700 */
+  --mui-danger: #db4f4a;       /* tokens.redAccent.500 */
+
+  /* Borders & inputs */
+  --mui-border: #2a2d64;       /* tokens.blueAccent.800 */
+  --mui-input-bg: #101624;     /* tokens.primary.600 */
+  --mui-input-text: #e0e0e0;   /* tokens.grey.100 */
+  --mui-focus: #6870fa;        /* tokens.blueAccent.500 */
+  --mui-shadow: rgba(0,0,0,0.6);
+}
+
+/* Page background */
+body, html {
+  background-color: var(--mui-bg) !important;
+}
+
+#kc-container-wrapper, #kc-container {
+  background: transparent !important;
+}
+
+/* Header */
+#kc-header {
+  background: transparent !important;
+  border: 0 !important;
+}
+
+#kc-header-wrapper {
+  display: flex;
+  flex-direction: column;    /* stack name above logo */
+  align-items: center;       /* center horizontally */
+  text-align: center;
+  gap: 8px;
+  color: var(--mui-text) !important;
+  font-weight: 600;
+}
+
+/* Centered realm name above logo */
+#kc-realm-name {
+  color: var(--mui-text) !important;
+  font-weight: 700;
+  font-size: 1.25rem; /* ~20px */
+  line-height: 1.2;
+  margin: 16px 0 4px 0;
+  text-align: center;
+}
+
+/* Ensure explicit logo block remains centered */
+#kc-logo-above {
+  display: block;
+  margin: 0 auto 8px auto;
+}
+
+#kc-header-wrapper .kc-logo, #kc-header-wrapper img {
+  height: 28px;
+  width: auto;
+}
+
+/* Card */
+.card-pf, .login-pf-page .card-pf, #kc-page-content .card-pf {
+  background-color: var(--mui-bg-alt) !important;
+  color: var(--mui-text) !important;
+  border: 1px solid var(--mui-border) !important;
+  box-shadow: 0 8px 24px var(--mui-shadow) !important;
+  border-radius: 8px !important;
+}
+
+#kc-page-title {
+  color: var(--mui-text) !important;
+}
+
+/* Labels & help text */
+label, .pf-c-form__label, .control-label, .instruction, .subtitle, .pf-c-form__helper-text {
+  color: var(--mui-text-muted) !important;
+}
+
+/* Inputs */
+input[type="text"], input[type="password"], input[type="email"],
+input[type="tel"], input[type="url"], input[type="number"],
+textarea, select, .pf-c-form-control {
+  background-color: var(--mui-input-bg) !important;
+  color: var(--mui-input-text) !important;
+  border: 1px solid var(--mui-border) !important;
+  border-radius: 6px !important;
+  outline: none !important;
+}
+
+input:focus, textarea:focus, select:focus, .pf-c-form-control:focus {
+  border-color: var(--mui-focus) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mui-focus) 30%, transparent) !important;
+}
+
+/* Buttons */
+input[type="submit"], button[type="submit"],
+.btn, .pf-c-button {
+  background-color: var(--mui-primary) !important;
+  color: #04130e !important; /* good contrast on green */
+  border: 0 !important;
+  border-radius: 6px !important;
+  text-transform: none !important;
+  font-weight: 600 !important;
+}
+
+.btn:disabled, .pf-c-button:disabled {
+  opacity: 0.6;
+}
+
+.btn:hover, .pf-c-button:hover {
+  background-color: var(--mui-primary-600) !important;
+}
+
+.btn:active, .pf-c-button:active {
+  background-color: var(--mui-primary-700) !important;
+}
+
+/* Links */
+a, .kc-feedback-text a, .pf-c-button.pf-m-link {
+  color: var(--mui-focus) !important;
+}
+
+a:hover { opacity: 0.9; }
+
+/* Error messages */
+.alert-error, .pf-c-alert.pf-m-danger, .kc-feedback-text-error {
+  background: color-mix(in srgb, var(--mui-danger) 15%, transparent);
+  border: 1px solid var(--mui-danger) !important;
+  color: #fff !important;
+}
+
+/* Footer, links area */
+#kc-info, #kc-form-options, #kc-registration {
+  color: var(--mui-text-muted) !important;
+}
+
+/* Center the card a bit nicer on wide screens */
+.login-pf-page .login-pf-page-header { margin-top: 24px; }
+.login-pf-page .card-pf { margin-top: 12px; }
+
+/* (removed duplicate small inline logo block to ensure centered large logo) */
+
+/* Note: Do not hide #kc-page-title globally; the duplicate title is suppressed via
+   a template override in login.ftl (section "title"). Keeping CSS neutral here
+   avoids unintended side-effects on other flows (registration/reset). */
+
+/* Hide the duplicate in-form header (kc-header) that appears to the right of the inputs.
+   Scope the rule so we only affect the header rendered inside the content/card area,
+   not the main header that contains the centered realm name and logo. */
+#kc-content header#kc-header,
+#kc-page-content header#kc-header,
+#kc-content-wrapper .card-pf header#kc-header {
+  display: none !important;
+}
+
+/* Future-proof: PatternFly v5/v4 scoped suppression of the in-form duplicate header
+   (do not affect the top/left main header with realm name + logo). This targets the
+   header rendered inside the login "main" area across PF v5 (.pf-v5-c-login__main)
+   and PF v4 (.pf-c-login__main), plus a legacy .card-pf fallback. */
+.login-pf #kc-page-content :where(.pf-v5-c-login__main, .pf-c-login__main) header#kc-header,
+.login-pf #kc-content-wrapper :where(.pf-v5-c-login__main, .pf-c-login__main) header#kc-header,
+.login-pf #kc-page-content :where(.pf-v5-c-login__main, .pf-c-login__main) #kc-header-wrapper,
+.login-pf #kc-content-wrapper :where(.pf-v5-c-login__main, .pf-c-login__main) #kc-header-wrapper,
+/* Legacy container fallback */
+.login-pf #kc-page-content .card-pf header#kc-header,
+.login-pf #kc-content-wrapper .card-pf header#kc-header {
+  display: none !important;
+}
+
+/* Safety: ensure we never hide a top-level page header outside the content area */
+body > header#kc-header { display: revert !important; }
+
+/* Keycloak 26 / PatternFly v5: hide the OUTER container header so content renders only inside main. */
+.pf-v5-c-login > .pf-v5-c-login__container > header#kc-header.pf-v5-c-login__header {
+  display: none !important;
+}
+
+/* PF v4 fallback */
+.pf-c-login > .pf-c-login__container > header#kc-header.pf-c-login__header {
+  display: none !important;
+}
+
+/* Allow the in-main title area to host our realm name + logo */
+#kc-page-title {
+  display: block;
+  text-align: center;
+  margin: 0 0 8px 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+/* ------------------------------
+   Single-column layout override
+   ------------------------------
+   Keycloak 26 (PatternFly v5) renders the login container as a grid with
+   a header column and a main column on wide screens. Force a single column
+   so only the login main content is shown.
+*/
+
+/* PF v5: remove grid behavior and stack vertically */
+body[data-page-id^="login-"] .pf-v5-c-login > .pf-v5-c-login__container {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important; /* center inner column similar to stock layout */
+  /* neutralize any grid definitions just in case */
+  grid-template-columns: none !important;
+  grid-template-areas: none !important;
+}
+
+/* Ensure the main area spans full width and centers nicely */
+body[data-page-id^="login-"] .pf-v5-c-login__main {
+  grid-column: 1 / -1 !important; /* if grid leaks through */
+  width: 100%;
+  max-width: 520px; /* approximate stock KC/PF width */
+  align-self: center;
+}
+
+/* Hide the outer header block so only the main column content remains */
+body[data-page-id^="login-"] .pf-v5-c-login > .pf-v5-c-login__container > header#kc-header.pf-v5-c-login__header {
+  display: none !important;
+}
+
+/* Constrain inner body and form wrappers to the same column width and center */
+body[data-page-id^="login-"] .pf-v5-c-login__main-header,
+body[data-page-id^="login-"] .pf-v5-c-login__main-body,
+body[data-page-id^="login-"] #kc-form,
+body[data-page-id^="login-"] #kc-form-wrapper,
+body[data-page-id^="login-"] .pf-v5-c-form {
+  width: 100%;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* PF v4 fallback: also enforce single column */
+body[data-page-id^="login-"] .pf-c-login > .pf-c-login__container {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  grid-template-columns: none !important;
+  grid-template-areas: none !important;
+}
+
+body[data-page-id^="login-"] .pf-c-login__main {
+  grid-column: 1 / -1 !important;
+  width: 100%;
+  max-width: 520px;
+}
+
+body[data-page-id^="login-"] .pf-c-login > .pf-c-login__container > header#kc-header.pf-c-login__header {
+  display: none !important;
+}
+
+/* PF v4: match inner widths to column */
+body[data-page-id^="login-"] .pf-c-login__main-header,
+body[data-page-id^="login-"] .pf-c-login__main-body,
+body[data-page-id^="login-"] #kc-form,
+body[data-page-id^="login-"] #kc-form-wrapper,
+body[data-page-id^="login-"] .pf-c-form {
+  width: 100%;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Responsive tweaks: allow full-width on small screens with safe padding */
+@media (max-width: 480px) {
+  body[data-page-id^="login-"] .pf-v5-c-login__main,
+  body[data-page-id^="login-"] .pf-v5-c-login__main-header,
+  body[data-page-id^="login-"] .pf-v5-c-login__main-body,
+  body[data-page-id^="login-"] #kc-form,
+  body[data-page-id^="login-"] #kc-form-wrapper,
+  body[data-page-id^="login-"] .pf-v5-c-form,
+  body[data-page-id^="login-"] .pf-c-login__main,
+  body[data-page-id^="login-"] .pf-c-login__main-header,
+  body[data-page-id^="login-"] .pf-c-login__main-body,
+  body[data-page-id^="login-"] .pf-c-form {
+    max-width: 100%;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}

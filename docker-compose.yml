@@ -2,6 +2,8 @@ name: i2gosignals
 
 volumes:
   prometheus_data: {}
+  postgres_data:
+    driver: local
 
 services:
   mongo1:
@@ -90,11 +92,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "8888:8888"
-    environment:
-      - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256
-      - DBNAME=goSignals1
-      - PORT=8888
-      - BASE_URL=http://goSignals1:8888/
+      - "2345:2345"
+    env_file:
+      - ./config/goSignals1.env
 
   goSignals2:
     image: i2gosignals:v0.8
@@ -108,12 +108,8 @@ services:
         condition: service_completed_successfully
     ports:
       - "8889:8889"
-    environment:
-      - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256
-      - DBNAME=goSignals2
-      - PORT=8889
-      - BASE_URL=http://goSignals2:8889/
-
+    env_file:
+      - ./config/goSignals2.env
   scimSsfSetup:
     image: i2gosignals:v0.8
    # command: sh /scim/register.sh
@@ -128,9 +124,9 @@ services:
     restart: "no"
     environment:
       - ISSUER=cluster.scim.example.com
-   #   - GOSIGNALS_HOME=/scim/config.json
+      - GOSIGNALS_HOME=/scim/config.json
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
-    entrypoint: [ "sh", "/scim/register.sh"]
+    entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.7.0
@@ -145,24 +141,7 @@ services:
     volumes:
       - ./config/scim/data1:/scim
     env_file:
-      - ./config/scim/registration-iat.env
-    environment:
-      - scim.prov.memory.dir=/scim/data
-      - scim.prov.memory.file=scimdb.json
-      - scim.prov.memory.maxbackups=10
-      - scim.prov.memory.backup.mins=2
-      - scim.event.enable=true
-      - scim.security.enable=false
-      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.enable=true
-      - scim.signals.ssf.serverUrl=http://gosignals1:8888
-  #    - scim.signals.ssf.authorization=<add iat here>  loaded in /scim/registration-iat.env
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://gosignals1:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.pem.path=/scim/issuer.pem
+      - ./config/scim/scim_cluster.env
   scim_cluster2:
     image: independentid/i2scim-universal:0.7.0
     container_name: scim_cluster2
@@ -176,24 +155,40 @@ services:
     volumes:
       - ./config/scim/data2:/scim
     env_file:
-      - ./config/scim/registration-iat.env
+      - ./config/scim/scim_cluster.env
+  postgres:
+    image: postgres:alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     environment:
-      - scim.prov.memory.dir=/scim/data
-      - scim.prov.memory.file=scimdb.json
-      - scim.prov.memory.maxbackups=10
-      - scim.prov.memory.backup.mins=2
-      - scim.event.enable=true
-      - scim.security.enable=false
-      - scim.prov.providerClass=com.independentid.scim.backend.memory.MemoryProvider
-      - scim.signals.ssf.serverUrl=http://localhost:8888
-  #    - scim.signals.ssf.authorization=<add iat here> loaded in /scim/registration-iat.env
-      - scim.signals.pub.iss=cluster.scim.example.com
-      - scim.signals.pub.aud=cluster.example.com,monitor.example.com,partner.example.com
-      - scim.signals.rcv.iss=cluster.scim.example.com
-      - scim.signals.rcv.aud=cluster.example.com
-      - scim.signals.rcv.iss.jwksUrl=http://gosignals1:8888/jwks/cluster.scim.example.com
-      - scim.signals.pub.pem.path=/scim/issuer.pem
-secrets:
-  pemfile:
-    file: config/cluster-scim-example-com.pem
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.7
+    container_name: keycloak-signals
+    hostname: keycloak
+    command: start --import-realm
+    environment:
+      KC_HEALTH_ENABLED: true
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_URL: http://keycloak
+      KC_HTTP_ENABLED: true
+      KC_FEATURES: scripts
+      KC_SCRIPT_UPLOAD_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      QUARKUS_HTTP_HOST: 0.0.0.0
+    ports:
+      - 8080:8080
+    depends_on:
+      - postgres
+    volumes:
+      - "./config/keycloak/realm:/opt/keycloak/data/import"
+      - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
+
 

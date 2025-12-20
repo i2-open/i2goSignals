@@ -76,3 +76,48 @@ To configure the demonstration do the following:
 ```bash
 To be completed.
 ```
+
+## Developing and debugging inside Docker (GoLand/JetBrains)
+
+Use the dev stack to run `goSignalsServer` under the Delve debugger in Docker so you can attach from GoLand or IntelliJ with the Go plugin.
+
+Prerequisites:
+- Docker Desktop running
+- GoLand or IntelliJ IDEA Ultimate with Go plugin
+
+Start the dev stack with the debug-enabled service:
+
+```bash
+# Build the dev image (installs Delve)
+make dev-build-image
+
+# Start Mongo, Prometheus, Grafana, and goSignals1 under Delve
+make dev-up
+
+# Follow logs if desired
+make dev-logs
+```
+
+Notes:
+- The dev image is defined in `Dockerfile-dev` and started by `docker-compose-dev.yml`.
+- The project source is volume-mounted into the container at `/app`. Delve recompiles the server inside the container, so first start may take a little longer while modules download.
+- Ports exposed:
+  - 8888: application API/UI
+  - 2345: Delve debug port
+
+Attach the debugger from JetBrains (GoLand/IntelliJ):
+1. Run > Edit Configurations… > add “Go Remote”.
+2. Set Host to `localhost` and Port to `2345`.
+3. Open “Paths mapping” and add a mapping from your local project root to `/app` (container path).
+4. Click Debug to attach. Set breakpoints in server code under `cmd/goSignalsServer` or packages it uses.
+
+Iterating:
+```bash
+# Rebuild the dev image (if Dockerfile-dev changed) and restart just goSignals1
+make dev-rebuild
+
+# Stop the dev stack
+make dev-down
+```
+
+Production image builds are unchanged; continue to use `./build.sh` to create the normal release image `i2gosignals:<tag>` and `docker-compose.yml` for the full demo stack.

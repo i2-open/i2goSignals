@@ -17,7 +17,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSSEF/server"
+	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
 
 var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)
@@ -124,7 +124,10 @@ func main() {
 	mLog.Println("Base URL: " + baseUrl)
 
 	// Start Admin UI server in parallel if build directory exists
-	startAdminServer()
+	adminPort := stripQuotes(os.Getenv("ADMIN_PORT"))
+	if adminPort != "" {
+		startAdminServer()
+	}
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
 	err = signalsApplication.Server.ListenAndServe()

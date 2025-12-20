@@ -32,3 +32,4 @@ EXPOSE 8888
 # Run
 CMD ["/app/goSignalsServer"]
 
+#CMD ["dlv", "debug", "--listen=:2345", "--headless=true", "--api-version=2", "--accept-multiclient", "/app/goSignalsServer"]

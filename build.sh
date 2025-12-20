@@ -1,4 +1,5 @@
 echo "\nGo Signals builder utility\n"
+echo "\nThis utility is meant for building docker images only.\nUse the Make utility for normal development.\n"
 
 tag="v0.8"
 test="N"

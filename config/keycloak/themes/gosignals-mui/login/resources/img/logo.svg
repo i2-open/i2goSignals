@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="http://www.w3.org/2000/svg" xmlns:xl="http://www.w3.org/1999/xlink" version="1.1" viewBox="1656.5 1638 1136 738" width="1136" height="738">
+  <defs>
+    <filter id="Shadow" filterUnits="userSpaceOnUse" x="1542.9" y="1564.2">
+      <feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="1.308"/>
+      <feOffset in="blur" result="offset" dx="0" dy="2"/>
+      <feFlood flood-color="black" flood-opacity=".5" result="flood"/>
+      <feComposite in="flood" in2="offset" operator="in" result="color"/>
+      <feMerge>
+        <feMergeNode in="color"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g id="GoSign_1" stroke-opacity="1" stroke-dasharray="none" fill-opacity="1" stroke="none" fill="none">
+    <title>GoSign 1</title>
+    <g id="GoSign_1_Layer_1">
+      <title>Layer 1</title>
+      <g id="Group_91">
+        <g id="Graphic_8">
+          <rect x="1818" y="1890.5" width="582" height="43" fill="#666"/>
+          <rect x="1818" y="1890.5" width="582" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_9">
+          <rect x="1818" y="1952.5" width="582" height="43" fill="#666"/>
+          <rect x="1818" y="1952.5" width="582" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_10">
+          <rect x="1818" y="2014.5" width="582" height="43" fill="#666"/>
+          <rect x="1818" y="2014.5" width="582" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_11">
+          <rect x="1818" y="2076.5" width="582" height="43" fill="#666"/>
+          <rect x="1818" y="2076.5" width="582" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Group_90">
+          <g id="Group_58">
+            <g id="Graphic_22">
+              <rect x="1761" y="1890.5" width="44" height="43" fill="#4e8f00"/>
+              <rect x="1761" y="1890.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_23">
+              <rect x="1709" y="1890.5" width="44" height="43" fill="lime"/>
+              <rect x="1709" y="1890.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_24">
+              <rect x="1657" y="1890.5" width="44" height="43" fill="#68bc36"/>
+              <rect x="1657" y="1890.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+          </g>
+          <g id="Group_59">
+            <g id="Graphic_32">
+              <rect x="1761" y="1952.5" width="44" height="43" fill="lime"/>
+              <rect x="1761" y="1952.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_31">
+              <rect x="1709" y="1952.5" width="44" height="43" fill="#68bc36"/>
+              <rect x="1709" y="1952.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_30">
+              <rect x="1657" y="1952.5" width="44" height="43" fill="#4f8e02"/>
+              <rect x="1657" y="1952.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+          </g>
+          <g id="Group_60">
+            <g id="Graphic_36">
+              <rect x="1761" y="2014.5" width="44" height="43" fill="#68bc36"/>
+              <rect x="1761" y="2014.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_35">
+              <rect x="1709" y="2014.5" width="44" height="43" fill="#4f8d03"/>
+              <rect x="1709" y="2014.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_34">
+              <rect x="1657" y="2014.5" width="44" height="43" fill="lime"/>
+              <rect x="1657" y="2014.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+          </g>
+          <g id="Group_61">
+            <g id="Graphic_57">
+              <rect x="1761" y="2076.5" width="44" height="43" fill="#4e8f00"/>
+              <rect x="1761" y="2076.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_56">
+              <rect x="1709" y="2076.5" width="44" height="43" fill="lime"/>
+              <rect x="1709" y="2076.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+            <g id="Graphic_55">
+              <rect x="1657" y="2076.5" width="44" height="43" fill="#68bc36"/>
+              <rect x="1657" y="2076.5" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+            </g>
+          </g>
+        </g>
+      </g>
+      <g id="Group_21">
+        <g id="Graphic_14">
+          <path d="M 2234 1785.125 L 2234 1742.375 L 2599 1742.375 L 2599 1721 L 2642 1763.75 L 2599 1806.5 L 2599 1785.125 Z" fill="#666"/>
+          <path d="M 2234 1785.125 L 2234 1742.375 L 2599 1742.375 L 2599 1721 L 2642 1763.75 L 2599 1806.5 L 2599 1785.125 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_15">
+          <path d="M 2234 1884.275 L 2234 1841.525 L 2599 1841.525 L 2599 1820.15 L 2642 1862.9 L 2599 1905.65 L 2599 1884.275 Z" fill="#666"/>
+          <path d="M 2234 1884.275 L 2234 1841.525 L 2599 1841.525 L 2599 1820.15 L 2642 1862.9 L 2599 1905.65 L 2599 1884.275 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_16">
+          <path d="M 2234 1983.425 L 2234 1940.675 L 2599 1940.675 L 2599 1919.3 L 2642 1962.05 L 2599 2004.8 L 2599 1983.425 Z" fill="#666"/>
+          <path d="M 2234 1983.425 L 2234 1940.675 L 2599 1940.675 L 2599 1919.3 L 2642 1962.05 L 2599 2004.8 L 2599 1983.425 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_17">
+          <path d="M 2234 2082.575 L 2234 2039.825 L 2599 2039.825 L 2599 2018.45 L 2642 2061.2 L 2599 2103.95 L 2599 2082.575 Z" fill="#666"/>
+          <path d="M 2234 2082.575 L 2234 2039.825 L 2599 2039.825 L 2599 2018.45 L 2642 2061.2 L 2599 2103.95 L 2599 2082.575 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_18">
+          <path d="M 2234 2181.725 L 2234 2138.975 L 2599 2138.975 L 2599 2117.6 L 2642 2160.35 L 2599 2203.1 L 2599 2181.725 Z" fill="#666"/>
+          <path d="M 2234 2181.725 L 2234 2138.975 L 2599 2138.975 L 2599 2117.6 L 2642 2160.35 L 2599 2203.1 L 2599 2181.725 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_19">
+          <path d="M 2234 2280.875 L 2234 2238.125 L 2599 2238.125 L 2599 2216.75 L 2642 2259.5 L 2599 2302.25 L 2599 2280.875 Z" fill="#666"/>
+          <path d="M 2234 2280.875 L 2234 2238.125 L 2599 2238.125 L 2599 2216.75 L 2642 2259.5 L 2599 2302.25 L 2599 2280.875 Z" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_7">
+        <g id="Graphic_3" filter="url(#Shadow)">
+          <path d="M 2480.3866 1747.6134 C 2622.538 1889.7642 2622.538 2120.2358 2480.3866 2262.3866 C 2338.2358 2404.538 2107.7642 2404.538 1965.6134 2262.3866 C 1823.462 2120.2358 1823.462 1889.7642 1965.6134 1747.6134 C 2107.7642 1605.462 2338.2358 1605.462 2480.3866 1747.6134" fill="#036515"/>
+          <path d="M 2480.3866 1747.6134 C 2622.538 1889.7642 2622.538 2120.2358 2480.3866 2262.3866 C 2338.2358 2404.538 2107.7642 2404.538 1965.6134 2262.3866 C 1823.462 2120.2358 1823.462 1889.7642 1965.6134 1747.6134 C 2107.7642 1605.462 2338.2358 1605.462 2480.3866 1747.6134" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"/>
+        </g>
+        <g id="Group_6">
+          <g id="Graphic_4">
+            <text transform="translate(1889 1839)" fill="white">
+              <tspan font-family="Gill Sans" font-weight="bold" font-size="288" fill="white" x="5.46875" y="272">GO</tspan>
+            </text>
+          </g>
+          <g id="Graphic_5">
+            <path d="M 2371 1915.5 L 2562 2011 L 2371 2106.5 Z" fill="white"/>
+          </g>
+        </g>
+      </g>
+      <g id="Group_65">
+        <g id="Graphic_68">
+          <rect x="2748" y="1741" width="44" height="43" fill="#68bc36"/>
+          <rect x="2748" y="1741" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_67">
+          <rect x="2696" y="1741" width="44" height="43" fill="#68bc36"/>
+          <rect x="2696" y="1741" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_66">
+          <rect x="2644" y="1741" width="44" height="43" fill="#68bc36"/>
+          <rect x="2644" y="1741" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_69">
+        <g id="Graphic_72">
+          <rect x="2748" y="1840.4" width="44" height="43" fill="lime"/>
+          <rect x="2748" y="1840.4" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_71">
+          <rect x="2696" y="1840.4" width="44" height="43" fill="lime"/>
+          <rect x="2696" y="1840.4" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_70">
+          <rect x="2644" y="1840.4" width="44" height="43" fill="lime"/>
+          <rect x="2644" y="1840.4" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_73">
+        <g id="Graphic_76">
+          <rect x="2748" y="1939.8" width="44" height="43" fill="#4e8f00"/>
+          <rect x="2748" y="1939.8" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_75">
+          <rect x="2696" y="1939.8" width="44" height="43" fill="#4e9000"/>
+          <rect x="2696" y="1939.8" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_74">
+          <rect x="2644" y="1939.8" width="44" height="43" fill="#4e9000"/>
+          <rect x="2644" y="1939.8" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_100">
+        <g id="Graphic_103">
+          <rect x="2748" y="2039.2" width="44" height="43" fill="#68bc36"/>
+          <rect x="2748" y="2039.2" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_102">
+          <rect x="2696" y="2039.2" width="44" height="43" fill="#68bc36"/>
+          <rect x="2696" y="2039.2" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_101">
+          <rect x="2644" y="2039.2" width="44" height="43" fill="#68bc36"/>
+          <rect x="2644" y="2039.2" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_96">
+        <g id="Graphic_99">
+          <rect x="2748" y="2138.6" width="44" height="43" fill="lime"/>
+          <rect x="2748" y="2138.6" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_98">
+          <rect x="2696" y="2138.6" width="44" height="43" fill="lime"/>
+          <rect x="2696" y="2138.6" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_97">
+          <rect x="2644" y="2138.6" width="44" height="43" fill="lime"/>
+          <rect x="2644" y="2138.6" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+      <g id="Group_92">
+        <g id="Graphic_95">
+          <rect x="2748" y="2238" width="44" height="43" fill="#4e8f00"/>
+          <rect x="2748" y="2238" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_94">
+          <rect x="2696" y="2238" width="44" height="43" fill="#4e9000"/>
+          <rect x="2696" y="2238" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+        <g id="Graphic_93">
+          <rect x="2644" y="2238" width="44" height="43" fill="#4e9000"/>
+          <rect x="2644" y="2238" width="44" height="43" stroke="gray" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

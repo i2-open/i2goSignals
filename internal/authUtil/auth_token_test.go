@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -546,6 +548,173 @@ func TestValidateAuthorization(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+// --- OAuth/OIDC validation tests for new functionality ---
+
+// helper to spin up a local OIDC discovery + JWKS server for tests
+func startOIDCTestServer(t *testing.T) (*httptest.Server, string, *rsa.PrivateKey) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed generating rsa key: %v", err)
+	}
+	pub := &priv.PublicKey
+	// base64url-encode modulus and exponent
+	n := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+	// exponent is usually 65537
+	eBytes := []byte{0x01, 0x00, 0x01} // 65537 big-endian
+	e := base64.RawURLEncoding.EncodeToString(eBytes)
+	kid := "oauth-kid-1"
+
+	var jwksURL string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			disc := map[string]string{"jwks_uri": jwksURL}
+			_ = json.NewEncoder(w).Encode(disc)
+		case "/jwks":
+			w.Header().Set("Content-Type", "application/json")
+			jwks := map[string]any{
+				"keys": []map[string]string{
+					{
+						"kty": "RSA",
+						"kid": kid,
+						"use": "sig",
+						"alg": "RS256",
+						"n":   n,
+						"e":   e,
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(jwks)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	jwksURL = srv.URL + "/jwks"
+	return srv, kid, priv
+}
+
+func mintOAuthToken(t *testing.T, priv *rsa.PrivateKey, kid string, roles []string) string {
+	t.Helper()
+	claims := OidcClaims{
+		RealmAccess: struct {
+			Roles []string `json:"roles"`
+		}{Roles: roles},
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			Issuer:    "http://example-issuer",
+			Audience:  []string{"gosignals"},
+			ID:        goSet.GenerateJti(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = kid
+	s, err := token.SignedString(priv)
+	if err != nil {
+		t.Fatalf("failed signing oauth token: %v", err)
+	}
+	return s
+}
+
+func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	// Point OAUTH_SERVERS to the discovery endpoint
+	prev := os.Getenv("OAUTH_SERVERS")
+	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	// Reset caches on issuer
+	auth.OAuthServer = nil
+	auth.OAuthPubKeys = nil
+
+	// Create an OAuth token with role that maps to ScopeEventDelivery
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeEventDelivery})
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from ValidateAuthorizationAny, got %d", code)
+	}
+	if got == nil || got.StreamId != "1" {
+		t.Fatalf("expected non-nil AuthContext with StreamId=1, got %+v", got)
+	}
+}
+
+func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	prev := os.Getenv("OAUTH_SERVERS")
+	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	auth.OAuthServer = nil
+	auth.OAuthPubKeys = nil
+
+	// Token signed with external key (not local), so local ParseAuthToken should fail
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeEventDelivery})
+
+	req, _ := http.NewRequest(http.MethodPost, "http://example.com/events/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorization(req, []string{ScopeEventDelivery})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from ValidateAuthorization via OAuth fallback, got %d", code)
+	}
+	if got == nil || got.StreamId != "1" {
+		t.Fatalf("expected non-nil AuthContext with StreamId=1, got %+v", got)
+	}
+}
+
+func Test_oidcRolesMatchScopes(t *testing.T) {
+	cases := []struct {
+		roles  []string
+		scopes []string
+		want   bool
+	}{
+		{[]string{"stream"}, []string{ScopeStreamMgmt}, true},
+		{[]string{"EVENT"}, []string{ScopeEventDelivery}, true},
+		{[]string{"root"}, []string{"anything"}, true},
+		{[]string{"viewer"}, []string{ScopeStreamAdmin}, false},
+	}
+	for _, c := range cases {
+		if got := oidcRolesMatchScopes(c.roles, c.scopes); got != c.want {
+			t.Fatalf("oidcRolesMatchScopes(%v,%v)=%v want %v", c.roles, c.scopes, got, c.want)
+		}
+	}
+}
+
+func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	prev := os.Getenv("OAUTH_SERVERS")
+	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	auth.OAuthServer = nil
+	auth.OAuthPubKeys = nil
+
+	tok := mintOAuthToken(t, priv, kid, []string{"viewer"})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeStreamMgmt})
+	if code != http.StatusUnauthorized || got != nil {
+		t.Fatalf("expected Unauthorized with nil context, got code=%d ctx=%+v", code, got)
 	}
 }
 
