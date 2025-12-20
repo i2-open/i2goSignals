@@ -1,0 +1,1453 @@
+openapi: 3.0.3
+info:
+  title: Stream Management API for OpenID Shared Security Events
+  description: |
+    [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#management)
+
+    HTTP API to be implemented by Event Transmitters. This API can be used by
+    Event Receivers to query and update the Event Stream configuration and
+    status, to add and remove subjects, and to trigger verification.
+  license:
+    name: MIT
+  version: 1.0.0
+servers:
+- url: /
+tags:
+- name: StreamManagement
+  description: |-
+    [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#management)
+    Stream Management endpoints provided by an Event Transmitter so that Event Transmitters may configure Event Streams.
+- name: Transmitter
+  description: |-
+    Additional endpoints provided by an Event Transmitter. These are not needed during Stream Managment, but are used
+    by Event Receivers for event processing.
+- name: OutOfBand
+  description: |-
+    Endpoints that are NOT a part of the [Open ID Spec](https://openid.net/specs/openid-sse-framework-1_0.html), but
+    that exist for convenience within this demo.
+paths:
+  /.well-known/sse-configuration:
+    get:
+      tags:
+      - StreamManagement
+      summary: Transmitter Configuration Request (without path)
+      description: Return Transmitter Configuration information.
+      responses:
+        "200":
+          description: |
+            A set of Claims about the Transmitter's configuration,
+            including all necessary endpoints and public key location information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransmitterConfiguration'
+  /.well-known/sse-configuration/{issuer}:
+    get:
+      tags:
+      - StreamManagement
+      summary: Transmitter Configuration Request (with path)
+      description: Return Transmitter Configuration information (with support for
+        specifying an issuer).
+      parameters:
+      - name: issuer
+        in: path
+        description: |
+          Using path components enables supporting multiple issuers per host.
+          This is required in some multi-tenant hosting configurations.
+          This use of .well-known is for supporting multiple issuers per host;
+          unlike its use in [RFC5785](https://openid.net/specs/openid-sse-framework-1_0.html#RFC5785),
+          it does not provide general information about the host.
+        required: true
+        style: simple
+        explode: false
+        schema:
+          type: string
+        example: tenant-a
+      responses:
+        "200":
+          description: |
+            A set of Claims about the Transmitter's configuration,
+            including all necessary endpoints and public key location information.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransmitterConfiguration'
+  /stream:
+    get:
+      tags:
+      - StreamManagement
+      summary: Request to retrieve the configuration of an event stream
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#reading-a-streams-configuration)
+
+        An Event Receiver gets the current configuration of a stream by making an HTTP GET request to the Configuration
+        Endpoint. On receiving a valid request the Event Transmitter responds with a 200 OK response containing a JSON
+        representation of the stream’s configuration in the body.
+      responses:
+        "200":
+          description: The Event Stream's configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamConfiguration'
+        "401":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: The Event Receiver is not allowed to read the stream configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: There is no Event Stream configured for this Event Receiver.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+    post:
+      tags:
+      - StreamManagement
+      summary: Request to update the configuration of an event stream
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#updating-a-streams-configuration)
+
+        An Event Receiver updates the current configuration of a stream by making an HTTP POST request to the Configuration
+        Endpoint. The POST body contains a JSON representation of the updated configuration. On receiving a valid request
+        the Event Transmitter responds with a 200 OK response containing a JSON representation of the updated stream
+        configuration in the body.
+
+        The full set of editable properties must be present in the POST body, not only the ones that are specifically
+        intended to be changed. Missing properties SHOULD be interpreted as requested to be deleted. Event Receivers should
+        read the configuration first, modify the JSON representation, then make an update request.
+
+        Properties that cannot be updated MAY be present, but they MUST match the expected value.
+      requestBody:
+        description: Request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamConfiguration'
+        required: true
+      responses:
+        "200":
+          description: The Event Stream's updated configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamConfiguration'
+        "202":
+          description: |-
+            The update request has been accepted, but not processed.
+            Receiver MAY try the same request later in order to get processing result.
+
+            If a Receiver makes a request to update the stream to enable it for a specific Subject, and the Transmitter is
+            unable to decide whether or not to complete the request, then the Transmitter MUST respond with a 202 status
+            code.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "400":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: The Event Receiver is not allowed to update the stream configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: There is no Event Stream configured for this Event Receiver.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+    delete:
+      tags:
+      - StreamManagement
+      summary: Request to remove the configuration of an event stream
+      description: |-
+        An Event Receiver removes the configuration of a stream by making an HTTP DELETE request to the Configuration
+        Endpoint. On receiving a request the Event Transmitter responds with a 200 OK response if the configuration was
+        successfully removed.
+      responses:
+        "200":
+          description: |-
+            On receiving a request the Event Transmitter responds with a 200 OK response if the configuration was
+            successfully removed.
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: The Event Receiver is not allowed to update the stream configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+  /status:
+    get:
+      tags:
+      - StreamManagement
+      summary: Request to get the status of an Event Stream
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#reading-a-streams-status)
+
+        An Event Receiver checks the current status of an event stream by making an
+        HTTP GET request to the stream’s Status Endpoint.
+      operationId: get_status
+      parameters:
+      - name: subject
+        in: query
+        description: |-
+          OPTIONAL. The subject for which the stream status is requested.
+          Content is a string-encoded json representation of a Subject
+          (see Subject schema)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: string
+          example: "{\"user\":{\"format\":\"email\",\"email\":\"reginold@popular-app.com\"\
+            }}"
+      responses:
+        "200":
+          description: |-
+            On receiving a valid request the Event Transmitter responds with a 200
+            OK response containing a JSON object with an attribute status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamStatus'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: The Event Receiver is not allowed to read this stream's status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: |-
+            There is no Event Stream configured for this Event Receiver,
+            or the Subject specified is invalid or
+            the Receiver is not authorized to get status for the specified Subject.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+    post:
+      tags:
+      - StreamManagement
+      summary: Request to update an Event Stream's status
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0-ID1.html#updating-a-streams-status)
+
+        An Event Receiver updates the current status of a stream by making an HTTP
+        POST request to the Status Endpoint.
+      operationId: update_status
+      requestBody:
+        description: Request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStreamStatus'
+        required: true
+      responses:
+        "200":
+          description: Event Stream status successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateStreamStatus'
+        "202":
+          description: |-
+            The update request has been accepted, but not processed.
+            Receiver MAY try the same request later in order to get processing result.
+        "400":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: The Event Receiver is not allowed to update the stream status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: |-
+            There is no Event Stream configured for this Event Receiver,
+            or an invalid Subject is specified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+  /add-subject:
+    post:
+      tags:
+      - StreamManagement
+      summary: Request to add a subject to an Event Stream
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#adding-a-subject-to-a-stream)
+
+        Event Receivers can send requests to an Event Transmitter's Add Subject endpoint to add a subject to an Event Stream.
+      operationId: add_subject
+      requestBody:
+        description: Request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddSubjectParameters'
+        required: true
+      responses:
+        "200":
+          description: |-
+            On a successful response, the Event Transmitter responds with an empty 200 OK response.
+            The Event Transmitter MAY choose to silently ignore the request, for example if the subject has previously
+            indicated to the transmitter that they do not want events to be transmitted to the Event Receiver.
+            In this case, the transmitter MAY return an empty 200 OK response or an appropriate error code.
+            See [Security Considerations](https://openid.net/specs/openid-sse-framework-1_0.html#management-sec).
+        "400":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: "The Event Receiver is not allowed to add this particular subject,\
+            \ or not allowed to add in general."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: |-
+            The subject is not recognized by the Event Transmitter,
+            the Event Transmitter may chose to stay silent in this case and respond with 200.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "429":
+          description: Event Receiver is sending too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+  /remove-subject:
+    post:
+      tags:
+      - StreamManagement
+      summary: Request to add a subject to an Event Stream
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#removing-a-subject)
+
+        Event Receivers can send requests to an Event Transmitter's Remove Subject endpoint to remove a subject from an Event Stream.
+      operationId: remove_subject
+      requestBody:
+        description: Request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveSubjectParameters'
+        required: true
+      responses:
+        "204":
+          description: "On a successful response, the Event Transmitter responds with\
+            \ a 204 No Content response."
+        "400":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: "The Event Receiver is not allowed to remove this particular\
+            \ subject, or not allowed to remove in general."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: |-
+            The subject is not recognized by the Event Transmitter,
+            the Event Transmitter may chose to stay silent in this case and respond with 204.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "429":
+          description: Event Receiver is sending too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+  /verification:
+    post:
+      tags:
+      - StreamManagement
+      summary: Request that a verification event be sent over an Event Stream
+      operationId: verification_request
+      requestBody:
+        description: Optional request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerificationParameters'
+        required: false
+      responses:
+        "204":
+          description: |
+            Request for verification event was successfully received. A
+            successful response from a POST to the Verification Endpoint does
+            not indicate that the verification event was transmitted
+            successfully, only that the Event Transmitter has transmitted the
+            event or will do so at some point in the future.
+        "400":
+          description: Request body cannot be parsed or the request is otherwise invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Authorization failed or is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "429":
+          description: Event Receiver is sending too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - BearerAuth: []
+  /jwks.json:
+    get:
+      tags:
+      - Transmitter
+      summary: The JSON Web Key Set of the Event Transmitter.
+      description: "[Spec](https://datatracker.ietf.org/doc/html/rfc7517)"
+      operationId: jwks_json
+      responses:
+        "200":
+          description: "[Spec](https://www.rfc-editor.org/rfc/rfc8936.html#name-polling-http-response)"
+          content:
+            application/json:
+              schema:
+                type: object
+                example:
+                  keys:
+                  - alg: ES256
+                    crv: P-256
+                    kid: transmitter-ES256-001
+                    kty: EC
+                    x: Js-Hzhls17UL1JI2EL0AB6Ta2B282me2niBGc0s1-Lo
+                    "y": PCsSWYCixwZgEyYKbGDFpzaooP6_Z-4CEfV62cbNBQw
+                x-content-type: application/json
+  /poll:
+    post:
+      tags:
+      - Transmitter
+      summary: Request for queued events to be returned.
+      description: "[Spec](https://www.rfc-editor.org/rfc/rfc8936.html#name-polling-http-request)"
+      operationId: poll_events
+      requestBody:
+        description: Optional request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PollParameters'
+        required: false
+      responses:
+        "200":
+          description: "[Spec](https://www.rfc-editor.org/rfc/rfc8936.html#name-polling-http-response)"
+          content:
+            application/json:
+              schema:
+                type: object
+                x-content-type: application/json
+      security:
+      - BearerAuth: []
+  /register:
+    post:
+      tags:
+      - OutOfBand
+      summary: Request the transmitter to setup a stream for a given receiver.
+      description: |-
+        This endpoint is not part of the spec, but rather a quick-and-dirty way to allow a receiver to pass along its
+        audience claim in exchange for a bearer token.
+      operationId: register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterParameters'
+        required: true
+      responses:
+        "200":
+          description: "On successful creation of a stream, returns a bearer token\
+            \ that will be used for subsequent requests."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+  /trigger-event:
+    post:
+      tags:
+      - OutOfBand
+      summary: Request the transmitter to create a SSE event of certain type and subject
+        and send it to the (streams)receivers that care about the subject.
+      description: "This endpoint is not part of the spec, but rather a quick-and-dirty\
+        \ way to  test out sample security events other than verification."
+      operationId: trigger_event
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriggerEventParameters'
+        required: true
+      responses:
+        "200":
+          description: "On successful creation of an event, it will be sent out as\
+            \ per SSE spec (i.e. push or poll)."
+components:
+  schemas:
+    StreamStatus:
+      required:
+      - status
+      type: object
+      properties:
+        status:
+          type: string
+          description: |-
+            REQUIRED. The status of the stream. Values can be one of:
+
+            enabled:
+              The Transmitter MUST transmit events over the stream,
+              according to the stream’s configured delivery method.
+
+            paused:
+              The Transmitter MUST NOT transmit events over the stream.
+              The transmitter will hold any events it would have transmitted while paused,
+              and SHOULD transmit them when the stream’s status becomes enabled.
+              If a Transmitter holds successive events that affect the same Subject Principal,
+              then the Transmitter MUST make sure that those events are transmitted in
+              the order of time that they were generated OR the Transmitter MUST send
+              only the last events that do not require the previous events affecting
+              the same Subject Principal to be processed by the Receiver,
+              because the previous events are either cancelled by the later events or
+              the previous events are outdated.
+
+            disabled:
+              The Transmitter MUST NOT transmit events over the stream,
+              and will not hold any events for later transmission.
+          example: disabled
+          enum:
+          - enabled
+          - paused
+          - disabled
+        subject:
+          description: OPTIONAL. The Subject to which the status applies.
+          example:
+            format: email
+            email: reginold@popular-app.com
+          allOf:
+          - $ref: '#/components/schemas/Subject'
+      example:
+        subject:
+          format: email
+          email: reginold@popular-app.com
+        status: disabled
+    TransmitterConfiguration:
+      title: Transmitter Configuration Response
+      required:
+      - issuer
+      - jwks_uri
+      type: object
+      properties:
+        issuer:
+          type: string
+          description: |
+            URL using the https scheme with no query or fragment component that the Transmitter asserts as its
+            Issuer Identifier.
+            This MUST be identical to the iss claim value in Security Event Tokens issued from this Transmitter.
+          format: uri
+          example: https://most-secure.com
+        jwks_uri:
+          type: string
+          description: |
+            URL of the Transmitter's [JSON Web Key Set](https://openid.net/specs/openid-sse-framework-1_0.html#RFC7517)
+            document. This contains the signing key(s) the Receiver uses to validate signatures from the Transmitter.
+          format: uri
+          example: https://transmitter.most-secure.com/jwks.json
+        delivery_methods_supported:
+          type: array
+          description: List of supported delivery method URIs. Recommended.
+          example:
+          - https://schemas.openid.net/secevent/risc/delivery-method/push
+          - https://schemas.openid.net/secevent/risc/delivery-method/poll
+          items:
+            type: string
+            format: uri
+        configuration_endpoint:
+          type: string
+          description: The URL of the Configuration Endpoint.
+          format: uri
+          example: https://transmitter.most-secure.com/stream
+        status_endpoint:
+          type: string
+          description: The URL of the Status Endpoint.
+          format: uri
+          example: https://transmitter.most-secure.com/status
+        add_subject_endpoint:
+          type: string
+          description: The URL of the Add Subject Endpoint.
+          format: uri
+          example: https://transmitter.most-secure.com/add-subject
+        remove_subject_endpoint:
+          type: string
+          description: The URL of the Remove Subject Endpoint.
+          format: uri
+          example: https://transmitter.most-secure.com/remove-subject
+        verification_endpoint:
+          type: string
+          description: The URL of the Verification Endpoint.
+          format: uri
+          example: https://transmitter.most-secure.com/verification
+        critical_subject_members:
+          type: array
+          description: |
+            List of member names in a Complex Subject which, if present in a Subject Member in an event,
+            MUST be interpreted by a Receiver.
+          example:
+          - tenant
+          - user
+          items:
+            type: string
+      description: |
+        Transmitters have metadata describing their configuration.
+        [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#discovery-meta)
+      example:
+        delivery_methods_supported:
+        - https://schemas.openid.net/secevent/risc/delivery-method/push
+        - https://schemas.openid.net/secevent/risc/delivery-method/poll
+        configuration_endpoint: https://transmitter.most-secure.com/stream
+        critical_subject_members:
+        - tenant
+        - user
+        add_subject_endpoint: https://transmitter.most-secure.com/add-subject
+        remove_subject_endpoint: https://transmitter.most-secure.com/remove-subject
+        status_endpoint: https://transmitter.most-secure.com/status
+        jwks_uri: https://transmitter.most-secure.com/jwks.json
+        issuer: https://most-secure.com
+        verification_endpoint: https://transmitter.most-secure.com/verification
+    StreamConfiguration:
+      title: Event Stream Configuration
+      required:
+      - delivery
+      - events_requested
+      type: object
+      properties:
+        iss:
+          type: string
+          description: |-
+            Read-Only.
+            A URL using the https scheme with no query or fragment component that the Transmitter asserts as its Issuer
+            Identifier. This MUST be identical to the iss Claim value in Security Event Tokens issued from this Transmitter.
+          format: uri
+          example: https://most-secure.com
+        aud:
+          description: |-
+            Read-Only.
+            A string or an array of strings containing an audience claim as defined in
+            [JSON Web Token (JWT)](https://openid.net/specs/openid-sse-framework-1_0.html#RFC7519) that identifies
+            the Event Receiver(s) for the Event Stream. This property cannot be updated. If multiple Receivers are specified
+            then the Transmitter SHOULD know that these Receivers are the same entity.
+          example: https://popular-app.com
+          oneOf:
+          - type: string
+            format: uri
+          - type: array
+            items:
+              type: string
+              format: uri
+        events_supported:
+          type: array
+          description: |-
+            Read-Only.
+            An array of URIs identifying the set of events supported by the Transmitter for this Receiver.
+            If omitted, Event Transmitters SHOULD make this set available to the Event Receiver via some other means
+            (e.g. publishing it in online documentation).
+          example:
+          - https://schemas.openid.net/secevent/caep/event-type/session-revoked
+          - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+          items:
+            type: string
+            format: uri
+        events_requested:
+          type: array
+          description: |-
+            Read-Write.
+            An array of URIs identifying the set of events that the Receiver requested.
+            A Receiver SHOULD request only the events that it understands and it can act on.
+            This is configurable by the Receiver.
+          example:
+          - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+          items:
+            type: string
+            format: uri
+        events_delivered:
+          type: array
+          description: |-
+            Read-Only.
+            An array of URIs which is the intersection of events_supported and events_requested.
+            These events MAY be delivered over the Event Stream.
+          example:
+          - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+          items:
+            type: string
+            format: uri
+        delivery:
+          description: |-
+            Read-Write.
+            A JSON object containing a set of name/value pairs specifying configuration parameters for the SET delivery
+            method. The actual delivery method is identified by the special key method with the value being a URI as defined
+            in [Section 11.2.1](https://openid.net/specs/openid-sse-framework-1_0.html#delivery-meta).
+          example:
+            method: https://schemas.openid.net/secevent/risc/delivery-method/poll
+            endpoint_url: null
+          discriminator:
+            propertyName: method
+          oneOf:
+          - $ref: '#/components/schemas/PushDeliveryMethod'
+          - $ref: '#/components/schemas/PollDeliveryMethod'
+        min_verification_interval:
+          type: integer
+          description: |-
+            Read-Only.
+            An integer indicating the minimum amount of time in seconds that must pass in between verification requests.
+            If an Event Receiver submits verification requests more frequently than this, the Event Transmitter MAY respond
+            with a 429 status code. An Event Transmitter SHOULD NOT respond with a 429 status code if an Event Receiver is not
+            exceeding this frequency.
+        format:
+          type: string
+          description: |-
+            Read-Write.
+            The Subject Identifier Format that the Receiver wants for the events.
+            If not set then the Transmitter might decide to use a type that discloses more information than necessary.
+      description: |
+        JSON Object describing and Event Stream's configuration
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#stream-config)"
+      example:
+        aud: https://popular-app.com
+        delivery:
+          method: https://schemas.openid.net/secevent/risc/delivery-method/poll
+          endpoint_url: null
+        events_supported:
+        - https://schemas.openid.net/secevent/caep/event-type/session-revoked
+        - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+        iss: https://most-secure.com
+        format: format
+        events_delivered:
+        - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+        events_requested:
+        - https://schemas.openid.net/secevent/risc/event-type/credential-compromise
+        min_verification_interval: 0
+    UpdateStreamStatus:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: OPTIONAL. A short text description that explains the reason
+            for the change.
+          example: Disabled by administrator action.
+      example:
+        reason: Disabled by administrator action.
+      allOf:
+      - $ref: '#/components/schemas/StreamStatus'
+    PollDeliveryMethod:
+      required:
+      - method
+      type: object
+      properties:
+        method:
+          type: string
+          default: https://schemas.openid.net/secevent/risc/delivery-method/poll
+          enum:
+          - https://schemas.openid.net/secevent/risc/delivery-method/poll
+        endpoint_url:
+          type: string
+          description: The URL where events can be retrieved from. This is specified
+            by the Transmitter.
+          format: uri
+          nullable: true
+      example:
+        method: https://schemas.openid.net/secevent/risc/delivery-method/poll
+        endpoint_url: https://transmitter.most-secure.com/poll
+    PushDeliveryMethod:
+      required:
+      - endpoint_url
+      - method
+      type: object
+      properties:
+        method:
+          type: string
+          default: https://schemas.openid.net/secevent/risc/delivery-method/push
+          enum:
+          - https://schemas.openid.net/secevent/risc/delivery-method/push
+        endpoint_url:
+          type: string
+          description: The URL where events are pushed through HTTP POST. This is
+            set by the Receiver.
+          format: uri
+        authorization_header:
+          type: string
+          description: |-
+            The HTTP Authorization header that the Transmitter MUST set with each event delivery,
+            if the configuration is present. The value is optional and it is set by the Receiver.
+      example:
+        method: https://schemas.openid.net/secevent/risc/delivery-method/push
+        endpoint_url: https://receiver.example.com/push
+    RegisterResponse:
+      required:
+      - token
+      type: object
+      properties:
+        token:
+          type: string
+          description: The Bearer Token that the receiver will need to use for all
+            Stream Management API calls that require authorization.
+      example:
+        token: 49e5e7785e4e4f688aa49e2585970370
+    TriggerEventParameters:
+      title: Trigger Event Parameters
+      required:
+      - event_type
+      - subject
+      type: object
+      properties:
+        event_type:
+          type: string
+          description: "Supports all [RISC](https://openid.net/specs/openid-risc-profile-specification-1_0-01.html)\
+            \ and [CAEP](https://openid.net/specs/openid-caep-specification-1_0-ID1.html)\
+            \ event types."
+          example: credential-compromise
+          enum:
+          - session-revoked
+          - token-claims-change
+          - credential-change
+          - assurance-level-change
+          - device-compliance-change
+          - account-purged
+          - account-disabled
+          - account-enabled
+          - identifier-changed
+          - identifier-recycled
+          - credential-compromise
+          - opt-in
+          - opt-out-initiated
+          - opt-out-cancelled
+          - opt-out-effective
+          - recovery-activated
+          - recovery-information-changed
+        subject:
+          allOf:
+          - $ref: '#/components/schemas/Subject'
+          - description: |
+              REQUIRED. ONLY EMAIL format supported currently.
+              SHOULD be same as subjects receiver cares about.
+              A Subject claim identifying the subject of the event to be generated.
+      description: "JSON Object describing request to create a security event to test\
+        \ SSE receiver/transmitter \n"
+      example:
+        event_type: session-revoked
+        subject:
+          format: email
+          email: user@example.com
+    AddSubjectParameters:
+      required:
+      - subject
+      type: object
+      properties:
+        subject:
+          allOf:
+          - $ref: '#/components/schemas/Subject'
+          - description: REQUIRED. A Subject claim identifying the subject to be added.
+        verified:
+          type: boolean
+          description: |-
+            OPTIONAL. A boolean value; when true, it indicates that the Event Receiver has verified the Subject claim.
+            When false, it indicates that the Event Receiver has not verified the Subject claim.
+            If omitted, Event Transmitters SHOULD assume that the subject has been verified.
+      example:
+        subject:
+          format: email
+          email: reginold@popular-app.com
+        verified: true
+    PollParameters:
+      type: object
+      properties:
+        maxEvents:
+          type: integer
+          description: |-
+            An OPTIONAL integer value indicating the maximum number of unacknowledged SETs to be returned.
+            The SET Transmitter SHOULD NOT send more SETs than the specified maximum.
+            If more than the maximum number of SETs are available, the SET Transmitter determines which to return first;
+            the oldest SETs available MAY be returned first, or another selection algorithm MAY be used,
+            such as prioritizing SETs in some manner that makes sense for the use case.
+            A value of 0 MAY be used by SET Recipients that would like to perform an acknowledge-only request.
+            This enables the Recipient to use separate HTTP requests for acknowledgement and reception of SETs.
+            If this parameter is omitted, no limit is placed on the number of SETs to be returned.
+        returnImmediately:
+          type: boolean
+          description: |-
+            An OPTIONAL JSON boolean value that indicates the SET Transmitter SHOULD return an immediate response even if no
+            results are available (short polling). The default value is false, which indicates the request is to be treated
+            as an HTTP long poll, per [Section 2](https://www.rfc-editor.org/rfc/rfc6202#section-2) of
+            [RFC6202](https://www.rfc-editor.org/rfc/rfc8936.html#RFC6202).
+            The timeout for the request is part of the configuration between the participants, which is out of scope of this specification.
+        acks:
+          type: array
+          description: List of event JTIs that the receiver is acknowledging. The
+            Transmitter can stop keeping track of these.
+          items:
+            type: string
+    RegisterParameters:
+      type: object
+      properties:
+        audience:
+          type: string
+          description: The audience claim to be used for all events on this stream.
+          format: uri
+          example: https://popular-app.com
+    RemoveSubjectParameters:
+      required:
+      - subject
+      type: object
+      properties:
+        subject:
+          allOf:
+          - $ref: '#/components/schemas/Subject'
+          - description: REQUIRED. A Subject claim identifying the subject to be removed.
+      example:
+        subject:
+          format: email
+          email: reginold@popular-app.com
+    VerificationParameters:
+      type: object
+      properties:
+        state:
+          type: string
+          description: |
+            OPTIONAL. An arbitrary string that the Event Transmitter
+            MUST echo back to the Event Receiver in the verification
+            event’s payload. Event Receivers MAY use the value of this
+            parameter to correlate a verification event with a
+            verification request. If the verification event is
+            initiated by the transmitter then this parameter MUST not
+            be set.
+    Account:
+      title: Account
+      required:
+      - format
+      - uri
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: account
+          enum:
+          - account
+        uri:
+          title: Uri
+          pattern: "^acct:[^\\s]+$"
+          type: string
+          example: acct:reginold@popular-app.com
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.1)
+
+        The Account Identifier Format identifies a subject using an account
+        at a service provider, identified with an "acct" URI as defined in
+        [RFC7565](https://datatracker.ietf.org/doc/html/rfc7565).
+        Subject Identifiers in this format MUST contain a "uri"
+        member whose value is the "acct" URI for the subject.  The "uri"
+        member is REQUIRED and MUST NOT be null or empty.  The Account
+        Identifier Format is identified by the name "account".
+    DID:
+      title: DID
+      required:
+      - format
+      - url
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: did
+          enum:
+          - did
+        url:
+          title: Url
+          pattern: "^did:[^\\s]+$"
+          type: string
+          example: did:example:123456/did/url/path?versionId=1
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.3)
+
+        The Decentralized Identifier Format identifies a subject using a
+        Decentralized Identifier (DID) URL as defined in [DID](https://www.w3.org/TR/did-core/).
+        Subject Identifiers in this format MUST contain a "url" member whose value is
+        a DID URL for the DID Subject being identified.  The value of the
+        "url" member MUST be a valid DID URL and MAY be a bare DID.  The
+        "url" member is REQUIRED and MUST NOT be null or empty.  The
+        Decentralized Identifier Format is identified by the name "did".
+    Email:
+      title: Email
+      required:
+      - email
+      - format
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: email
+          enum:
+          - email
+        email:
+          title: Email
+          pattern: "(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|\"\
+            (?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21\\x23-\\x5b\\x5d-\\x7f]|\\\\\
+            [\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])*\")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\\
+            .)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\\[(?:(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9]))\\\
+            .){3}(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9])|[a-z0-9-]*[a-z0-9]:(?:[\\\
+            x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21-\\x5a\\x53-\\x7f]|\\\\[\\x01-\\x09\\\
+            x0b\\x0c\\x0e-\\x7f])+)\\])"
+          type: string
+          example: reginold@popular-app.com
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.4)
+
+        The Email Identifier Format identifies a subject using an email
+        address.  Subject Identifiers in this format MUST contain an "email"
+        member whose value is a string containing the email address of the
+        subject, formatted as an "addr-spec" as defined in Section 3.4.1 of
+        [RFC5322](https://datatracker.ietf.org/doc/html/rfc5322).
+        The "email" member is REQUIRED and MUST NOT be null or
+        empty.  The value of the "email" member SHOULD identify a mailbox to
+        which email may be delivered, in accordance with [RFC5321](https://datatracker.ietf.org/doc/html/rfc5321).
+        The Email Identifier Format is identified by the name "email".
+    IssSub:
+      title: IssSub
+      required:
+      - format
+      - iss
+      - sub
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: iss_sub
+          enum:
+          - iss_sub
+        iss:
+          title: iss
+          type: string
+          example: https://most-secure.com
+        sub:
+          title: sub
+          type: string
+          example: "145234573"
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.5)
+
+        The Issuer and Subject Identifier Format identifies a subject using a
+        pair of "iss" and "sub" members, analagous to how subjects are
+        identified using the "iss" and "sub" claims in OpenID Connect
+        [OpenID.Core](http://openid.net/specs/openid-connect-core-1_0.html) ID Tokens.
+        These members MUST follow the formats of the "iss" member and "sub" member
+        defined by [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519), respectively.
+        Both the "iss" member and the "sub" member are REQUIRED and MUST NOT
+        be null or empty.  The Issuer and Subject Identifier Format is
+        identified by the name "iss_sub".
+    JwtID:
+      title: JwtID
+      required:
+      - format
+      - iss
+      - jti
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: jwt_id
+          enum:
+          - jwt_id
+        iss:
+          title: iss
+          type: string
+          description: |-
+            The "iss" (issuer) claim of the JWT being identified, defined in
+            [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519)
+          example: https://most-secure.com
+        jti:
+          title: jti
+          type: string
+          description: |-
+            The "jti" (JWT token ID) claim of the JWT being identified, defined in
+            [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519)
+          example: B70BA622-9515-4353-A866-823539EECBC8
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#rfc.section.3.4.1)
+
+        The "JWT ID" Subject Identifier Format specifies a JSON Web Token (JWT)
+        identifier, defined in [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519).
+    Opaque:
+      title: Opaque
+      required:
+      - format
+      - id
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: opaque
+          enum:
+          - opaque
+        id:
+          title: Id
+          type: string
+          example: "11112222333344445555"
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.6)
+
+        The Opaque Identifier Format describes a subject that is identified
+        with a string with no semantics asserted beyond its usage as an
+        identifier for the subject, such as a UUID or hash used as a
+        surrogate identifier for a record in a database.  Subject Identifiers
+        in this format MUST contain an "id" member whose value is a JSON
+        string containing the opaque string identifier for the subject.  The
+        "id" member is REQUIRED and MUST NOT be null or empty.  The Opaque
+        Identifier Format is identified by the name "opaque".
+    PhoneNumber:
+      title: PhoneNumber
+      required:
+      - format
+      - phone_number
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: phone_number
+          enum:
+          - phone_number
+        phone_number:
+          title: Phone Number
+          type: string
+          example: +12065550100
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.7)
+
+        The Phone Number Identifier Format identifies a subject using a
+        telephone number.  Subject Identifiers in this format MUST contain a
+        "phone_number" member whose value is a string containing the full
+        telephone number of the subject, including international dialing
+        prefix, formatted according to E.164
+        [E164](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#ref-E164).
+        The "phone_number" member is REQUIRED and MUST NOT be null or empty.
+        The Phone Number Identifier Format is identified by the name "phone_number".
+    SamlAssertionID:
+      title: SamlAssertionID
+      required:
+      - assertion_id
+      - format
+      - issuer
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: saml_assertion_id
+          enum:
+          - saml_assertion_id
+        issuer:
+          title: Issuer
+          type: string
+          description: |-
+            The "Issuer" value of the SAML assertion being identified, defined in
+            [OASIS.saml-core-2.0-os](https://openid.net/specs/openid-sse-framework-1_0.html#OASIS.saml-core-2.0-os)
+          example: https://most-secure.com
+        assertion_id:
+          title: Assertion ID
+          type: string
+          description: |-
+            The "ID" value of the SAML assertion being identified, defined in
+            [OASIS.saml-core-2.0-os](https://openid.net/specs/openid-sse-framework-1_0.html#OASIS.saml-core-2.0-os)
+          example: _8e8dc5f69a98cc4c1ff3427e5ce34606fd672f91e6
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#rfc.section.3.4.2)
+
+        The "SAML Assertion ID" Subject Identifier Format specifies a SAML 2.0
+        [OASIS.saml-core-2.0-os](https://openid.net/specs/openid-sse-framework-1_0.html#OASIS.saml-core-2.0-os)
+        assertion identifier.
+    SimpleSubject:
+      title: Simple Subject
+      discriminator:
+        propertyName: Format
+      oneOf:
+      - $ref: '#/components/schemas/Account'
+      - $ref: '#/components/schemas/DID'
+      - $ref: '#/components/schemas/Email'
+      - $ref: '#/components/schemas/IssSub'
+      - $ref: '#/components/schemas/JwtID'
+      - $ref: '#/components/schemas/Opaque'
+      - $ref: '#/components/schemas/PhoneNumber'
+      - $ref: '#/components/schemas/SamlAssertionID'
+    Aliases:
+      title: Aliases
+      required:
+      - format
+      - identifiers
+      type: object
+      properties:
+        format:
+          title: Format
+          type: string
+          default: aliases
+          enum:
+          - aliases
+        identifiers:
+          minItems: 1
+          type: array
+          items:
+            $ref: '#/components/schemas/SimpleSubject'
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3.2.2)
+
+        The Aliases Identifier Format describes a subject that is identified
+        with a list of different Subject Identifiers.  It is intended for use
+        when a variety of identifiers have been shared with the party that
+        will be interpreting the Subject Identifier, and it is unknown which
+        of those identifiers they will recognize or support.  Subject
+        Identifiers in this format MUST contain an "identifiers" member whose
+        value is a JSON array containing one or more Subject Identifiers.
+        Each Subject Identifier in the array MUST identify the same entity.
+        The "identifiers" member is REQUIRED and MUST NOT be null or empty.
+        It MAY contain multiple instances of the same Identifier Format
+        (e.g., multiple Email Subject Identifiers), but SHOULD NOT contain
+        exact duplicates.  This format is identified by the name "aliases".
+
+        "alias" Subject Identifiers MUST NOT be nested; i.e., the
+        "identifiers" member of an "alias" Subject Identifier MUST NOT
+        contain a Subject Identifier in the "aliases" format.'
+    ComplexSubject:
+      title: ComplexSubject
+      minProperties: 1
+      type: object
+      properties:
+        application:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies an application.
+        device:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies a device.
+        group:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies a group.
+        org_unit:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies an organizational unit.
+        session:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies a session.
+        tenant:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies a tenant.
+        user:
+          allOf:
+          - $ref: '#/components/schemas/SimpleSubject'
+          - description: A Subject Identifier that identifies a user.
+      additionalProperties: false
+      description: |-
+        [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#rfc.section.3.2)
+
+        A Complex Subject Member has a name and a value that is a JSON object that
+        has one or more Simple Subject Members. All members within a Complex Subject
+        MUST represent attributes of the same Subject Principal.
+        As a whole, the Complex Subject MUST refer to exactly one Subject Principal.
+    Subject:
+      type: object
+      description: |-
+        [Spec](https://datatracker.ietf.org/doc/html/draft-ietf-secevent-subject-identifiers#section-3)
+
+        As described in Section 1.2 of SET [RFC8417](https://datatracker.ietf.org/doc/html/rfc8417),
+        subjects related to security events may take a variety of forms,
+        including but not limited to a JWT [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519)
+        principal, an IP address, a URL, etc. Different types of subjects may need
+        to be identified in different ways. (e.g., a host might be identified by an
+        IP or MAC address, while a user might be identified by an email address)
+        Furthermore, even in the case where the type of the subject is known,
+        there may be multiple ways by which a given subject may be identified.
+        For example, an account may be identified by an opaque identifier, an
+        email address, a phone number, a JWT "iss" claim and "sub" claim,
+        etc., depending on the nature and needs of the transmitter and
+        receiver.  Even within the context of a given transmitter and
+        receiver relationship, it may be appropriate to identify different
+        accounts in different ways, for example if some accounts only have
+        email addresses associated with them while others only have phone
+        numbers.  Therefore it can be necessary to indicate within a SET the
+        mechanism by which a subject is being identified.
+
+        To address this problem, this specification defines Subject
+        Identifiers - JSON [RFC7519](https://datatracker.ietf.org/doc/html/rfc7519)
+        objects containing information identifying a subject - and Identifier Formats -
+        named sets of rules describing how to encode different kinds of subject
+        identifying information (e.g., an email address, or an issuer and subject pair)
+        as a Subject Identifier.
+      discriminator:
+        propertyName: Format
+      oneOf:
+      - $ref: '#/components/schemas/SimpleSubject'
+      - $ref: '#/components/schemas/Aliases'
+      - $ref: '#/components/schemas/ComplexSubject'
+    Error:
+      required:
+      - code
+      - message
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+  responses:
+    BadRequest:
+      description: Request body cannot be parsed or the request is otherwise invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Authorization failed or is missing
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: User not authorized to access resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Event Receiver is sending too many requests
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  parameters:
+    issuer:
+      name: issuer
+      in: path
+      description: |
+        Using path components enables supporting multiple issuers per host.
+        This is required in some multi-tenant hosting configurations.
+        This use of .well-known is for supporting multiple issuers per host;
+        unlike its use in [RFC5785](https://openid.net/specs/openid-sse-framework-1_0.html#RFC5785),
+        it does not provide general information about the host.
+      required: true
+      style: simple
+      explode: false
+      schema:
+        type: string
+      example: tenant-a
+    subject:
+      name: subject
+      in: query
+      description: |-
+        OPTIONAL. The subject for which the stream status is requested.
+        Content is a string-encoded json representation of a Subject
+        (see Subject schema)
+      required: false
+      style: form
+      explode: true
+      schema:
+        type: string
+        example: "{\"user\":{\"format\":\"email\",\"email\":\"reginold@popular-app.com\"\
+          }}"
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
