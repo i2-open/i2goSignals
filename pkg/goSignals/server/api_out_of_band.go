@@ -1,5 +1,5 @@
 // Package server - Stream Management API for OpenID Shared Security Events
-// [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#management)  HTTP API to be implemented by Event Transmitters. This API can be used by Event Receivers to query and update the Event Stream configuration and status, to add and remove subjects, and to trigger verification.
+// "API Out of band" is for administrative tasks not directly part of the SSF spec or specifically with stream management.
 package server
 
 import (
@@ -132,6 +132,70 @@ func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _
 	}
 
 	resp, _ := json.MarshalIndent(prMeta, "", "  ")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// ListStreamStates allows the ability to list all stream states associated with the current server project. Requires "admin" or "root" scope.
+// If the authentication credential includes a project id, the result set is limited to the project.
+func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	projectId := authCtx.ProjectId
+	mapStreams := sa.Provider.GetStateMap()
+	result := make([]model.StreamStateRecord, 0)
+	for _, stream := range mapStreams {
+		if projectId == "" || stream.ProjectId == projectId {
+			result = append(result, sa.adjustStateBaseUrl(stream))
+		}
+	}
+
+	serverLog.Printf("ListStreamStates: %d returned", len(result))
+
+	resp, err := json.Marshal(result)
+	if err != nil {
+		serverLog.Printf("Internal error ListStreamStates: %s\n", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// GetStreamState allows the ability to retrieve a specific stream state associated with the current server project. Requires "admin" or "root" scope.
+// If the authentication credential includes a project id, the result set is limited to the project.
+func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	if authCtx.StreamId == "" {
+		// The authorization and request had no streamId detected
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	config, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	serverLog.Printf("GetStreamState: %s returned", config.StreamConfiguration.Id)
+
+	resp, err := json.Marshal(config)
+	if err != nil {
+		serverLog.Printf("Internal error GetStreamState: %s\n", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }

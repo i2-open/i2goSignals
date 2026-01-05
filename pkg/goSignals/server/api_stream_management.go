@@ -143,36 +143,6 @@ func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) mo
 	return res
 }
 
-// ListStreamStates allows the ability to list all stream states associated with the current server project. Requires "admin" or "root" scope.
-// If the authentication credential includes a project id, the result set is limited to the project.
-func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
-	if status != http.StatusOK {
-		w.WriteHeader(status)
-		return
-	}
-	projectId := authCtx.ProjectId
-	mapStreams := sa.Provider.GetStateMap()
-	result := make([]model.StreamStateRecord, 0)
-	for _, stream := range mapStreams {
-		if projectId == "" || stream.ProjectId == projectId {
-			result = append(result, sa.adjustStateBaseUrl(stream))
-		}
-	}
-
-	serverLog.Printf("ListStreamStates: %d returned", len(result))
-
-	resp, err := json.Marshal(result)
-	if err != nil {
-		serverLog.Printf("Internal error ListStreamStates: %s\n", err.Error())
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(resp)
-}
-
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
 	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
