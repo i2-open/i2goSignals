@@ -616,6 +616,7 @@ func (m *MongoProvider) CreateStream(request model.StreamConfiguration, projectI
 		StartDate:           now,
 		Status:              model.StreamStateEnabled,
 		CreatedAt:           now,
+		ModifiedAt:          now,
 	}
 
 	err := m.insertStream(&streamRec)

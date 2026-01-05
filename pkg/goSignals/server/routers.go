@@ -162,6 +162,12 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.ListStreamStates,
 			false,
 		},
+		Route{"GetStreamState",
+			http.MethodGet,
+			"/state",
+			h.sa.GetStreamState,
+			true,
+		},
 
 		Route{
 			"StreamGet",
