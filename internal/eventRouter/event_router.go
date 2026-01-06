@@ -121,9 +121,10 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	}
 
 	label := prometheus.Labels{
-		"type": eventTypes,
-		"iss":  token.Issuer,
-		"tfr":  tfr,
+		"type":      eventTypes,
+		"iss":       token.Issuer,
+		"tfr":       tfr,
+		"stream_id": stream.StreamConfiguration.Id,
 	}
 
 	isOut := true

@@ -19,6 +19,71 @@ type PrometheusHandler struct {
 	RcvPushCnt, RcvPollCnt prometheus.GaugeFunc
 }
 
+type streamCollector struct {
+	sa           *SignalsApplication
+	statusDesc   *prometheus.Desc
+	errorDesc    *prometheus.Desc
+	createdDesc  *prometheus.Desc
+	startDesc    *prometheus.Desc
+	modifiedDesc *prometheus.Desc
+}
+
+func newStreamCollector(sa *SignalsApplication) *streamCollector {
+	return &streamCollector{
+		sa: sa,
+		statusDesc: prometheus.NewDesc(
+			"goSignals_router_stream_status_info",
+			"Information about the stream status.",
+			[]string{"stream_id", "status"},
+			nil,
+		),
+		errorDesc: prometheus.NewDesc(
+			"goSignals_router_stream_error_info",
+			"Information about the stream error message.",
+			[]string{"stream_id", "error_msg"},
+			nil,
+		),
+		createdDesc: prometheus.NewDesc(
+			"goSignals_router_stream_created_at_seconds",
+			"Stream creation date in unix seconds.",
+			[]string{"stream_id"},
+			nil,
+		),
+		startDesc: prometheus.NewDesc(
+			"goSignals_router_stream_start_date_seconds",
+			"Stream start date in unix seconds.",
+			[]string{"stream_id"},
+			nil,
+		),
+		modifiedDesc: prometheus.NewDesc(
+			"goSignals_router_stream_modified_at_seconds",
+			"Stream last modification date in unix seconds.",
+			[]string{"stream_id"},
+			nil,
+		),
+	}
+}
+
+func (c *streamCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.statusDesc
+	ch <- c.errorDesc
+	ch <- c.createdDesc
+	ch <- c.startDesc
+	ch <- c.modifiedDesc
+}
+
+func (c *streamCollector) Collect(ch chan<- prometheus.Metric) {
+	states := c.sa.Provider.GetStateMap()
+	for _, state := range states {
+		streamID := state.StreamConfiguration.Id
+		ch <- prometheus.MustNewConstMetric(c.statusDesc, prometheus.GaugeValue, 1, streamID, state.Status)
+		ch <- prometheus.MustNewConstMetric(c.errorDesc, prometheus.GaugeValue, 1, streamID, state.ErrorMsg)
+		ch <- prometheus.MustNewConstMetric(c.createdDesc, prometheus.GaugeValue, float64(state.CreatedAt.Unix()), streamID)
+		ch <- prometheus.MustNewConstMetric(c.startDesc, prometheus.GaugeValue, float64(state.StartDate.Unix()), streamID)
+		ch <- prometheus.MustNewConstMetric(c.modifiedDesc, prometheus.GaugeValue, float64(state.ModifiedAt.Unix()), streamID)
+	}
+}
+
 var (
 	httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "goSignals_http_duration_seconds",
@@ -47,7 +112,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 				Name:      "events_in",
 				Help:      "Events received",
 			},
-			[]string{"type", "iss", "tfr"},
+			[]string{"type", "iss", "tfr", "stream_id"},
 		),
 		EventsOut: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -56,7 +121,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 				Name:      "events_out",
 				Help:      "Events delivered",
 			},
-			[]string{"type", "iss", "tfr"},
+			[]string{"type", "iss", "tfr", "stream_id"},
 		),
 		PubPollCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -108,6 +173,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 	registerCollector(prometheusHandler.RcvPushCnt)
 	registerCollector(prometheusHandler.PubPollCnt)
 	registerCollector(prometheusHandler.PubPushCnt)
+	registerCollector(newStreamCollector(sa))
 
 	sa.Stats = &prometheusHandler
 }
