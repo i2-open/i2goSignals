@@ -605,8 +605,8 @@ func (suite *ServerSuite) Test8_Prometheus() {
 	app1 := suite.servers[0].app
 
 	metricName := "goSignals_router_events"
-	outCounters1 := testutil.CollectAndCount(app1.Stats.EventsOut, metricName+"_out")
-	inCounters1 := testutil.CollectAndCount(app1.Stats.EventsIn, metricName+"_in")
+	outCounters1 := testutil.CollectAndCount(app1.Stats.EventsOut, metricName+"_out_total")
+	inCounters1 := testutil.CollectAndCount(app1.Stats.EventsIn, metricName+"_in_total")
 	testLog.Printf("SSF1 Counters in: %d, out: %d\n", inCounters1, outCounters1)
 
 	// Since we added stream_id label, the cardinality changed but the fact that metrics are recorded remains.

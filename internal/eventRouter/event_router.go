@@ -32,6 +32,7 @@ type EventRouter interface {
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
+	PreInitializeCounter(stream *model.StreamStateRecord)
 	GetPushStreamCnt() float64
 	GetPollStreamCnt() float64
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
@@ -145,6 +146,37 @@ func (r *router) SetEventCounter(inCounter, outCounter *prometheus.CounterVec) {
 	r.eventsIn = inCounter
 }
 
+func (r *router) PreInitializeCounter(stream *model.StreamStateRecord) {
+	if r.eventsOut == nil || r.eventsIn == nil {
+		return
+	}
+
+	tfr := "PUSH"
+	switch stream.GetType() {
+	case model.DeliveryPoll, model.ReceivePoll:
+		tfr = "POLL"
+	}
+
+	iss := stream.StreamConfiguration.Iss
+	if iss == "" {
+		iss = "DEFAULT"
+	}
+
+	// For pre-initialization, we don't know the event type yet, but we can initialize
+	// the counter with "UNKNOWN" or just wait for the first event.
+	// Actually, the user wants to see the metric. If we initialize it with a specific label set,
+	// it will show up.
+	labels := prometheus.Labels{
+		"type":      "NONE",
+		"iss":       iss,
+		"tfr":       tfr,
+		"stream_id": stream.StreamConfiguration.Id,
+	}
+
+	r.eventsIn.With(labels).Add(0)
+	r.eventsOut.With(labels).Add(0)
+}
+
 func (r *router) initPushStream(sid string, state *model.StreamStateRecord, jtis []string) {
 	pushBuffer := buffer.CreateEventPushBuffer(jtis)
 	r.pushBuffers[sid] = pushBuffer
@@ -179,6 +211,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	}
 
 	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
+		r.PreInitializeCounter(stream)
 
 		currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
 
@@ -205,6 +238,8 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		return
 	}
 	// The stream is delivery PUSH
+	r.PreInitializeCounter(stream)
+
 	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
 	if ok {
 		currentState.Update(stream)

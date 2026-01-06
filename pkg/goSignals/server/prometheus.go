@@ -109,7 +109,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 			prometheus.CounterOpts{
 				Namespace: "goSignals",
 				Subsystem: "router",
-				Name:      "events_in",
+				Name:      "events_in_total",
 				Help:      "Events received",
 			},
 			[]string{"type", "iss", "tfr", "stream_id"},
@@ -118,7 +118,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 			prometheus.CounterOpts{
 				Namespace: "goSignals",
 				Subsystem: "router",
-				Name:      "events_out",
+				Name:      "events_out_total",
 				Help:      "Events delivered",
 			},
 			[]string{"type", "iss", "tfr", "stream_id"},
@@ -164,16 +164,24 @@ func (sa *SignalsApplication) InitializePrometheus() {
 				return sa.GetPushReceiverCnt()
 			}),
 	}
+
+	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
+
 	registerCollector(prometheusHandler.EventsIn)
 
 	registerCollector(prometheusHandler.EventsOut)
-	// this is to handle poll
-	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut) // this is to handle push
+
 	registerCollector(prometheusHandler.RcvPollCnt)
 	registerCollector(prometheusHandler.RcvPushCnt)
 	registerCollector(prometheusHandler.PubPollCnt)
 	registerCollector(prometheusHandler.PubPushCnt)
 	registerCollector(newStreamCollector(sa))
+
+	// Pre-initialize counters for existing streams
+	states := sa.Provider.GetStateMap()
+	for _, state := range states {
+		sa.EventRouter.PreInitializeCounter(&state)
+	}
 
 	sa.Stats = &prometheusHandler
 }
@@ -182,6 +190,10 @@ func registerCollector(collector prometheus.Collector) {
 
 	err := prometheus.Register(collector)
 	if err != nil {
+		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			// Already registered, this is fine (e.g. in tests)
+			return
+		}
 		pLog.Println("WARNING: instrumentation error:" + err.Error())
 	}
 

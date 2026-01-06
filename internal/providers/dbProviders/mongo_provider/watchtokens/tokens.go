@@ -41,19 +41,31 @@ func (tok *TokenData) Reset() {
 
 func Load() *TokenData {
 
-	var tokenData TokenData
-	dataBytes, err := os.ReadFile(storeFilename())
+	tokenData := &TokenData{}
+	filename := storeFilename()
+
+	dataBytes, err := os.ReadFile(filename)
 	if err != nil {
-		log.Println("Mongo resume token file not found or not yet initialized", err)
-		tokenData = TokenData{}
-	} else {
-		err = json.Unmarshal(dataBytes, &tokenData)
-		if err != nil {
-			log.Println("Error parsing token data file", err)
-			tokenData = TokenData{}
+		if os.IsNotExist(err) {
+			log.Println("Mongo resume token file not found. Initializing new token file.")
+			tokenData.Reset()
+			return tokenData
 		}
+		if os.IsPermission(err) {
+			log.Println("Permission denied accessing Mongo resume token file or directory:", err)
+		} else {
+			log.Println("Error reading Mongo resume token file:", err)
+		}
+		return tokenData
 	}
-	return &tokenData
+
+	err = json.Unmarshal(dataBytes, tokenData)
+	if err != nil {
+		log.Println("Error parsing token data file, returning empty state:", err)
+		return &TokenData{StreamTokens: make(map[primitive.ObjectID]bson.Raw)}
+	}
+
+	return tokenData
 
 }
 
