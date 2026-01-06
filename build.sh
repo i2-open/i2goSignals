@@ -26,7 +26,7 @@ while getopts ${optString} OPTION; do
       ;;
     c)
       echo "* Installing goSignals CLI"
-      if ! command -v hexa &> /dev/null
+      if ! command -v goSignals &> /dev/null
       then
           go install github.com/i2-open/i2goSignals/cmd/goSignals@latest
           exit 1

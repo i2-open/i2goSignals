@@ -227,7 +227,7 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 	}
 	if parts[0] == "Bearer" {
 
-		tkn, err := a.ParseAuthToken(parts[1])
+		tkn, err := a.ParseAuthTokenVerbose(parts[1], false)
 		if err == nil && tkn.IsAuthorized(streamRequested, scopes) {
 			return &AuthContext{
 				StreamId:  streamRequested,
@@ -239,7 +239,9 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 		if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
 			return authCtx, http.StatusOK
 		}
-		authLog.Printf("Authorization invalid: [%v]", err)
+		if err != nil {
+			authLog.Printf("Authorization invalid: [%v]", err)
+		}
 		return nil, http.StatusUnauthorized
 	}
 	authLog.Printf("Received invalid authorization: %s\n", parts[0])
@@ -276,7 +278,7 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 	}
 
 	// Try local token first
-	if tkn, err := a.ParseAuthToken(parts[1]); err == nil && tkn.IsAuthorized(streamRequested, scopes) {
+	if tkn, err := a.ParseAuthTokenVerbose(parts[1], false); err == nil && tkn.IsAuthorized(streamRequested, scopes) {
 		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn}, http.StatusOK
 	}
 
@@ -338,6 +340,12 @@ func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 
 // ParseAuthToken parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
 func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error) {
+	return a.ParseAuthTokenVerbose(tokenString, true)
+}
+
+// ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
+// When verbose is false, it does not log "Error validating token"
+func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*EventAuthToken, error) {
 	if a.PublicKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
 	}
@@ -348,19 +356,25 @@ func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error)
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, a.PublicKey.Keyfunc)
 	if err != nil {
-		authLog.Printf("Error validating token: %s", err.Error())
+		if verbose {
+			authLog.Printf("Error validating token: %s", err.Error())
+		}
 		valid = false
 	}
-	if token.Header["typ"] != "jwt" && token.Header["typ"] != "JWT" {
-		authLog.Printf("token is not an authorization token (JWT)")
+	if token != nil && (token.Header["typ"] != "jwt" && token.Header["typ"] != "JWT") {
+		if verbose {
+			authLog.Printf("token is not an authorization token (JWT)")
+		}
 		return nil, errors.New("token type is not an authorization token (`jwt`)")
 	}
 
 	// jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
 	// claimString := string(jsonByte)
 	// authLog.Println(claimString)
-	if claims, ok := token.Claims.(*EventAuthToken); ok && valid {
-		return claims, nil
+	if token != nil {
+		if claims, ok := token.Claims.(*EventAuthToken); ok && valid {
+			return claims, nil
+		}
 	}
 
 	return nil, err

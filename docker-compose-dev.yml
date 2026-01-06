@@ -110,8 +110,10 @@ services:
       - ./config/goSignals1.env
 
   goSignals2:
-    image: i2gosignals:v0.8
-    command: /app/goSignalsServer
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
     container_name: gosignals2
     hostname: goSignals2
     depends_on:
@@ -121,6 +123,13 @@ services:
         condition: service_completed_successfully
     ports:
       - "8889:8889"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-bui
     env_file:
       - ./config/goSignals2.env
   scimSsfSetup:
