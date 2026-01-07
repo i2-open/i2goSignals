@@ -1422,6 +1422,7 @@ func (s *SelectCmd) Run(g *Globals) error {
 	_, server := g.Data.GetStreamAndServer(s.Alias)
 	if server != nil {
 		g.Data.Selected = s.Alias
+		return nil
 	}
 	return errors.New("server not found")
 }

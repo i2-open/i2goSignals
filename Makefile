@@ -3,38 +3,31 @@
 # Variables
 NPM?=npm
 GO?=go
-ADMIN_DIR=adminUI
-ADMIN_BUILD_DIR=$(ADMIN_DIR)/build
+
+CONSOLE_DIR=cmd/goSignals
 SERVER_DIR=cmd/goSignalsServer
 CONFIG_DIR=config
 SCIM_CONFIG=$(CONFIG_DIR)/scim
 BIN_DIR=bin
 SERVER_BIN=$(BIN_DIR)/goSignalsServer
 
-.PHONY: all adminui-install adminui-build server-build build clean \
+.PHONY: all console-build server-build build clean \
     dev-build-image dev-up dev-down dev-logs dev-rebuild dev-clean
 
 all: build
 
-# Install JS deps (uses ci if package-lock.json exists)
-adminui-install:
-	@if [ -f "$(ADMIN_DIR)/package-lock.json" ]; then \
-		$(NPM) --prefix $(ADMIN_DIR) ci; \
-	else \
-		$(NPM) --prefix $(ADMIN_DIR) install; \
-	fi
+# Build and install the command line console gosignals
+console-build:
+	$(GO) build ./$(CONSOLE_DIR)
+	$(GO) install ./$(CONSOLE_DIR)
 
-# Build the React admin UI with Vite
-adminui-build: adminui-install
-	$(NPM) --prefix $(ADMIN_DIR) run build
-
-# Build the Go server. Depends on adminui-build so UI is available at runtime.
-server-build: adminui-build
+# Build the Go server.
+server-build:
 	@mkdir -p $(BIN_DIR)
 	$(GO) build -o $(SERVER_BIN) ./$(SERVER_DIR)
 
 # Build everything
-build: adminui-build server-build
+build: console-build server-build
 
 # Remove build artifacts
 clean: dev-clean
