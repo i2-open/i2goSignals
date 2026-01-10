@@ -26,50 +26,92 @@ type ClientPollStream struct {
 InitializeReceivers handles updates to a receiver client polling stream when changes occur.
 */
 func (sa *SignalsApplication) InitializeReceivers() {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	states := sa.Provider.GetStateMap()
+
+	newPushReceivers := make(map[string]model.StreamStateRecord)
+	currentPollClients := make(map[string]bool)
+
 	for _, stream := range states {
 		if !stream.IsReceiver() {
 			continue
 		}
 
-		if stream.GetType() == model.DeliveryPush {
+		if stream.GetType() == model.ReceivePush {
 			serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id)
-			sa.pushReceivers[stream.StreamConfiguration.Id] = stream
+			newPushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
 		}
+
 		// Stream is a Polling receiver
-		sa.HandleClientPollReceiver(&stream)
+		if stream.GetType() == model.ReceivePoll {
+			sa.handleClientPollReceiverLocked(&stream)
+			currentPollClients[stream.StreamConfiguration.Id] = true
+		}
+	}
+
+	// Update push receivers
+	sa.pushReceivers = newPushReceivers
+
+	// Clean up poll clients that are no longer present or no longer receivers
+	for sid, ps := range sa.pollClients {
+		if !currentPollClients[sid] {
+			serverLog.Printf("Closing removed or changed Poll Receiver: %s", sid)
+			ps.Close()
+			delete(sa.pollClients, sid)
+		}
 	}
 }
 
 func (sa *SignalsApplication) GetPushReceiverCnt() float64 {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
 	return float64(len(sa.pushReceivers))
 }
 
 func (sa *SignalsApplication) shutdownReceivers() {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	for _, ps := range sa.pollClients {
 		ps.Close()
 	}
 }
 
-func (sa *SignalsApplication) ClosePollReceiver(sid string) {
-
+func (sa *SignalsApplication) CloseReceiver(sid string) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	ps, ok := sa.pollClients[sid]
 	if ok {
 		ps.Close()
 		delete(sa.pollClients, sid)
 	}
 
+	// Remove so that the count is correct. The provider holds the true state
+	_, ok = sa.pushReceivers[sid]
+	if ok {
+		delete(sa.pushReceivers, sid)
+	}
+
 }
 
 /*
-HandleClientPollReceiver checks if a stream is already defined and updates the configuration returning the ClientPollStream.
+HandleReceiver checks if a stream is already defined and updates the configuration returning the ClientPollStream.
 Otherwise, if new, a new receiver is started and its handle is returned. Transmitter streams are ignored automatically.
 */
-func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
+func (sa *SignalsApplication) HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
 	if !(streamState.GetType() == model.ReceivePoll) {
+		if streamState.GetType() == model.ReceivePush {
+			sa.pushReceivers[streamState.StreamConfiguration.Id] = *streamState
+		}
 		return nil // nothing to do
 	}
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	return sa.handleClientPollReceiverLocked(streamState)
+}
+
+func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.StreamStateRecord) *ClientPollStream {
 	ps, ok := sa.pollClients[streamState.StreamConfiguration.Id]
 	if !ok {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -92,6 +134,8 @@ func (sa *SignalsApplication) HandleClientPollReceiver(streamState *model.Stream
 }
 
 func (sa *SignalsApplication) GetPollReceiverCnt() float64 {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
 	return float64(len(sa.pollClients))
 }
 

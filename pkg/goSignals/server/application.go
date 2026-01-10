@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
@@ -31,6 +32,7 @@ type SignalsApplication struct {
 	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
 	pushReceivers map[string]model.StreamStateRecord
+	mu            sync.RWMutex
 	Stats         *PrometheusHandler
 }
 
@@ -124,9 +126,11 @@ func (sa *SignalsApplication) Shutdown() {
 	}
 
 	// Turn off client connections
+	sa.mu.Lock()
 	for _, client := range sa.pollClients {
 		client.Close()
 	}
+	sa.mu.Unlock()
 	time.Sleep(time.Second)
 
 	// Stop processing new events

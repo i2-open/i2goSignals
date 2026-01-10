@@ -39,7 +39,7 @@ type EventRouter interface {
 }
 
 type router struct {
-	pushStreams         map[string]model.StreamStateRecord
+	pushStreams         map[string]model.StreamStateRecord // These are transmitters
 	pollStreams         map[string]model.StreamStateRecord
 	ctx                 context.Context
 	enabled             bool
@@ -51,6 +51,7 @@ type router struct {
 }
 
 func (r *router) GetPushStreamCnt() float64 {
+	log.Printf("GetPushStreamCnt request: %d", len(r.pushStreams))
 	return float64(len(r.pushStreams))
 }
 
@@ -201,6 +202,7 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) *rsa.PrivateKey
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 	if stream.IsReceiver() {
+		// TODO WHY are we not updating stream state?
 		return
 	}
 

@@ -85,7 +85,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	sa.EventRouter.UpdateStreamState(state)
 
 	// Stop all the inbound traffic if Polling
-	sa.ClosePollReceiver(authContext.StreamId)
+	sa.CloseReceiver(authContext.StreamId)
 
 	// Stop any outbound activity
 	sa.EventRouter.RemoveStream(authContext.StreamId)
@@ -201,7 +201,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 	// Update the event router
 	state, _ := sa.Provider.GetStreamState(configResp.Id)
 	sa.EventRouter.UpdateStreamState(state)
-	sa.HandleClientPollReceiver(state)
+	sa.HandleReceiver(state)
 
 	serverLog.Printf("Stream %s CREATED", configResp.Id)
 
@@ -267,7 +267,7 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	// Update the event router
 	state, _ := sa.Provider.GetStreamState(authCtx.StreamId)
 	sa.EventRouter.UpdateStreamState(state)
-	sa.HandleClientPollReceiver(state)
+	sa.HandleReceiver(state)
 
 	serverLog.Printf("Stream %s UPDATED", authCtx.StreamId)
 
@@ -325,7 +325,7 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 
 	if modified {
 		sa.EventRouter.UpdateStreamState(streamState)
-		sa.HandleClientPollReceiver(streamState)
+		sa.HandleReceiver(streamState)
 	}
 
 	statusResp, _ := sa.Provider.GetStatus(authCtx.StreamId)

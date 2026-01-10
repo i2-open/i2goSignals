@@ -123,6 +123,7 @@ services:
         condition: service_completed_successfully
     ports:
       - "8889:8889"
+      - "2346:2345"
     dns:
       - 8.8.8.8
       - 1.1.1.1

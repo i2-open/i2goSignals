@@ -446,7 +446,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 
 	// Kill the polling client on SSF2
 	ssf2Stream := suite.servers[1].stream.Id
-	suite.servers[1].app.ClosePollReceiver(ssf2Stream)
+	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
 	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
 
@@ -683,7 +683,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 }
 
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
-	suite.servers[1].app.ClosePollReceiver(ssf2Stream)
+	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
 	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
 
