@@ -24,6 +24,30 @@ func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(keyBytes)
 }
 
+type IssuerResponse struct {
+	Issuers []string `json:"issuers"`
+}
+
+func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
+	if stat != http.StatusOK || authCtx == nil {
+		if stat != http.StatusUnauthorized {
+			w.WriteHeader(stat)
+			return
+		}
+		w.WriteHeader(stat)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	names := sa.Provider.GetIssuerKeyNames()
+	issuerResponse := IssuerResponse{
+		Issuers: names,
+	}
+	jsonIssuers, _ := json.Marshal(issuerResponse)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(jsonIssuers)
+}
+
 func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]

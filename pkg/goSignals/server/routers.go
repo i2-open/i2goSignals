@@ -248,6 +248,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"JwksIssuers",
+			http.MethodGet,
+			"/issuers",
+			h.sa.JwksIssuers,
+			false,
+		},
+
+		Route{
 			"JwksJsonTenant",
 			http.MethodGet,
 			"/jwks/{issuer}",

@@ -24,6 +24,7 @@ type DbProviderInterface interface {
 	GetAuthIssuer() *authUtil.AuthIssuer
 	GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS
 	CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey
+	GetIssuerKeyNames() []string
 
 	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
 	CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error)

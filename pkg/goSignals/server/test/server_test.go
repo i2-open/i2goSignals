@@ -682,6 +682,27 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	testLog.Println("Signed event: \n" + val)
 }
 
+func (suite *ServerSuite) TestA_GetIssuers() {
+	baseUrl := fmt.Sprintf("http://%s/issuers", suite.servers[0].host)
+
+	req, _ := http.NewRequest(http.MethodGet, baseUrl, nil)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "No error getting issuers")
+	assert.Equal(suite.T(), http.StatusUnauthorized, resp.StatusCode, "Check authorize should fail")
+
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "No error getting issuers")
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check authorize should fail")
+
+	body, _ := io.ReadAll(resp.Body)
+	var names ssef.IssuerResponse
+	err = json.Unmarshal(body, &names)
+	assert.NoError(suite.T(), err, "No error parsing issuers")
+	assert.Len(suite.T(), names.Issuers, 2, "Issuer was not returned")
+	assert.Contains(suite.T(), names.Issuers, "example.com", "Issuer example.com returned")
+}
+
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
 	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)

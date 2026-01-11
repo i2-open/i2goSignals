@@ -290,6 +290,11 @@ func Test_F_IssuerKeys(t *testing.T) {
 	assert.NoError(t, err, "No error parsing json into JWKS")
 	assert.Contains(t, issPub.KIDs(), issuer, "Confirm issuer present")
 
+	keys := data.provider.GetIssuerKeyNames()
+	assert.Len(t, keys, 2, "Should be 2 keys")
+	assert.Contains(t, keys, issuer, "Confirm issuer i2test.example.org present")
+	assert.Contains(t, keys, "DEFAULT", "Confirm issuer DEFAULT present")
+
 }
 
 func Test_G_ReceiverKeys(t *testing.T) {

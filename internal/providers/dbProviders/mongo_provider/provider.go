@@ -224,6 +224,9 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		return nil, err
 	}
 
+	pLog.Print("Pausing to allow debug to load")
+	time.Sleep(10 * time.Second)
+
 	resumeToken := watchtokens.Load()
 	m := MongoProvider{
 		DbName:        dbName,
@@ -353,7 +356,7 @@ func (m *MongoProvider) DeleteStream(streamId string) error {
 
 	resp, err := m.streamCol.DeleteOne(context.TODO(), filter)
 
-	if resp.DeletedCount == 0 {
+	if resp != nil && resp.DeletedCount == 0 {
 		return errors.New("not Found")
 	}
 	return err
@@ -439,6 +442,30 @@ func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc
 	givenKeys[issuer] = givenKey
 	return keyfunc.NewGiven(givenKeys)
 
+}
+
+func (m *MongoProvider) GetIssuerKeyNames() []string {
+	cursor, err := m.keyCol.Find(context.TODO(), bson.D{})
+	if err != nil {
+		pLog.Printf("Error retrieving issuer keys: %v", err)
+		return nil
+	}
+
+	var keys []JwkKeyRec
+	err = cursor.All(context.TODO(), &keys)
+	if err != nil {
+		pLog.Printf("Error parsing issuer keys: %v", err)
+		return nil
+	}
+
+	issuers := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key.Iss != "" {
+			issuers = append(issuers, key.Iss)
+		}
+	}
+
+	return issuers
 }
 
 func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {

@@ -18,7 +18,7 @@ import (
 // Generates a PEM-encoded private key and writes it to the HTTP response with Content-Type as application/json.
 // Responds with HTTP status Forbidden if permissions are invalid or Internal Server Error for unknown issues.
 func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return

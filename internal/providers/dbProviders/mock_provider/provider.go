@@ -415,6 +415,18 @@ func (m *MockMongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *key
 	return m.getInternalPublicTransmitterJWKSUnlocked(issuer)
 }
 
+func (m *MockMongoProvider) GetIssuerKeyNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	issuers := make([]string, 0, len(m.keys))
+	for issuer := range m.keys {
+		issuers = append(issuers, issuer)
+	}
+
+	return issuers
+}
+
 func (m *MockMongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
