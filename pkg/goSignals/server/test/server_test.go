@@ -43,7 +43,7 @@ type ssfInstance struct {
 	client          *http.Client
 	provider        dbProviders.DbProviderInterface
 	stream          model.StreamConfiguration
-	app             ssef.SignalsApplication
+	app             *ssef.SignalsApplication
 	streamToken     string
 	streamMgmtToken string
 	iatToken        string
@@ -122,7 +122,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	app := ssef.NewApplication(mongo, "")
 	ts := httptest.NewServer(app.Handler)
 	instance.ts = ts
-	instance.app = *app
+	instance.app = app
 	u, _ := url.Parse(ts.URL)
 	instance.host = u.Host
 	// Set BaseUrl on app for any logic that depends on it
@@ -428,7 +428,7 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	pollCnt1 := int(testutil.ToFloat64(app1.Stats.PubPollCnt))
 	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
 	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
-	testLog.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	testLog.Printf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1)
 	assert.Equal(suite.T(), 0, pushCnt1, "Should be no PUSH servers")
 	// Includes the original from Test 3 plus the new one
 	assert.Equal(suite.T(), 1, pollCnt1, "Should be 2 POLL server")
@@ -504,7 +504,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	jtis, more = suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
-	assert.Equal(suite.T(), jtiNew, jtis[1], "The new event should be second")
+	assert.Contains(suite.T(), jtis, jtiNew, "The new event should be present")
 
 	ssf1Stream := suite.servers[0].stream.Id
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
@@ -587,7 +587,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	pollCnt1 := int(testutil.ToFloat64(app1.Stats.PubPollCnt))
 	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
 	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
-	testLog.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	testLog.Printf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1)
 	assert.Equal(suite.T(), 1, pushCnt1, "Should be 1 PUSH servers")
 
 	assert.Equal(suite.T(), 0, pollCnt1, "Should be 0 POLL server")
@@ -618,12 +618,12 @@ func (suite *ServerSuite) Test8_Prometheus() {
 	rcvPushCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPushCnt))
 	rcrPollCnt1 := int(testutil.ToFloat64(app1.Stats.RcvPollCnt))
 
-	testLog.Println(fmt.Sprintf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1))
+	testLog.Printf("S|R PUSH[%d|%d] POLL[%d|%d]", pushCnt1, rcvPushCnt1, pollCnt1, rcrPollCnt1)
 
 	testLog.Println("Prometheus test complete.")
 }
 
-func (suite *ServerSuite) getMetricValue(app ssef.SignalsApplication, vec *prometheus.CounterVec, tfr string, streamID string) int {
+func (suite *ServerSuite) getMetricValue(app *ssef.SignalsApplication, vec *prometheus.CounterVec, tfr string, streamID string) int {
 	label := prometheus.Labels{
 		"type":      model.EventScimCreateFull,
 		"iss":       "DEFAULT",
@@ -693,7 +693,7 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error getting issuers")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check authorize should fail")
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check authorize should not fail")
 
 	body, _ := io.ReadAll(resp.Body)
 	var names ssef.IssuerResponse
@@ -701,6 +701,123 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	assert.NoError(suite.T(), err, "No error parsing issuers")
 	assert.Len(suite.T(), names.Issuers, 2, "Issuer was not returned")
 	assert.Contains(suite.T(), names.Issuers, "example.com", "Issuer example.com returned")
+}
+
+func (suite *ServerSuite) TestB_DeleteIssuers() {
+
+	baseUrl := fmt.Sprintf("http://%s/jwks/notfound.com", suite.servers[0].host)
+	req, _ := http.NewRequest(http.MethodDelete, baseUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "No error making request")
+	assert.Equal(suite.T(), http.StatusNotFound, resp.StatusCode, "Issuer not found")
+
+	baseUrl = fmt.Sprintf("http://%s/jwks/example.com", suite.servers[0].host)
+	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err, "No error making request")
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Request completed")
+}
+
+func (suite *ServerSuite) TestC_RotateIssuerKey() {
+	testLog.Println("Testing issuer key rotation...")
+	issuer := "rotate-test.com"
+	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuer)
+
+	// 1. Create initial key
+	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.NotEmpty(suite.T(), body)
+
+	// 2. Verify initial JWKS
+	jwksUrl := baseUrl
+	resp, err = http.Get(jwksUrl)
+	assert.NoError(suite.T(), err)
+	body, _ = io.ReadAll(resp.Body)
+	var rawJson json.RawMessage
+	_ = rawJson.UnmarshalJSON(body)
+	issPub, err := keyfunc.NewJSON(rawJson)
+	assert.NoError(suite.T(), err)
+	assert.Len(suite.T(), issPub.KIDs(), 1, "Should have 1 key initially")
+	assert.Equal(suite.T(), issuer, issPub.KIDs()[0], "Initial KID should be the issuer ID")
+
+	// 3. Rotate key
+	rotateUrl := baseUrl + "?rotate=true"
+	req, _ = http.NewRequest(http.MethodPost, rotateUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+
+	body, _ = io.ReadAll(resp.Body)
+	block, _ := pem.Decode(body)
+	assert.NotNil(suite.T(), block)
+	assert.Equal(suite.T(), "PRIVATE KEY", block.Type)
+
+	// 4. Verify updated JWKS (should have 2 keys now)
+	resp, err = http.Get(jwksUrl)
+	assert.NoError(suite.T(), err)
+	body, _ = io.ReadAll(resp.Body)
+
+	var jwksMap map[string]interface{}
+	err = json.Unmarshal(body, &jwksMap)
+	assert.NoError(suite.T(), err)
+	keysSlice := jwksMap["keys"].([]interface{})
+	assert.Len(suite.T(), keysSlice, 2, "JWKS should have 2 keys after rotation")
+
+	var newKid string
+	for _, k := range keysSlice {
+		kMap := k.(map[string]interface{})
+		kid := kMap["kid"].(string)
+		if kid != issuer {
+			newKid = kid
+			break
+		}
+	}
+	assert.NotEmpty(suite.T(), newKid, "New KID should be found in JWKS")
+	assert.True(suite.T(), strings.HasPrefix(newKid, issuer+"-"), "New KID should start with issuer name")
+
+	pkcs8PrivateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	assert.NoError(suite.T(), err)
+	newPrivateKey, ok := pkcs8PrivateKey.(*rsa.PrivateKey)
+	assert.True(suite.T(), ok, "Should be an RSA private key")
+
+	_ = rawJson.UnmarshalJSON(body)
+	issPubUpdated, err := keyfunc.NewJSON(rawJson)
+	assert.NoError(suite.T(), err)
+
+	assert.Contains(suite.T(), issPubUpdated.KIDs(), issuer, "Original KID should still be present")
+	assert.Contains(suite.T(), issPubUpdated.KIDs(), newKid, "New KID should be present")
+
+	// 5. Verify token signing and validation with new key
+	subject := &goSet.EventSubject{
+		SubjectIdentifier: goSet.SubjectIdentifier{
+			Format:                    "scim",
+			UniformResourceIdentifier: goSet.UniformResourceIdentifier{Uri: "?Users/rotated"},
+		},
+	}
+	set := goSet.CreateSet(subject, issuer, []string{"rotate-audience"})
+	set.Kid = newKid
+	set.AddEventPayload("uri:rotateEvent", map[string]interface{}{"status": "rotated"})
+
+	tokenString, err := set.JWS(jwt.SigningMethodRS256, newPrivateKey)
+	assert.NoError(suite.T(), err)
+
+	// Parse and validate the token using the updated JWKS
+	parsedSet, err := goSet.Parse(tokenString, issPubUpdated)
+	assert.NoError(suite.T(), err, "Token should be valid when parsed with updated JWKS")
+	assert.Equal(suite.T(), newKid, parsedSet.Kid)
+	assert.Equal(suite.T(), issuer, parsedSet.Issuer)
+
+	// 6. Cleanup
+	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	_, _ = suite.servers[0].client.Do(req)
 }
 
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {

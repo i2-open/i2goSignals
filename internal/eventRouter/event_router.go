@@ -44,6 +44,7 @@ type router struct {
 	ctx                 context.Context
 	enabled             bool
 	issuerKeys          map[string]*rsa.PrivateKey
+	issuerKids          map[string]string
 	pollBuffers         map[string]*buffer.EventPollBuffer
 	pushBuffers         map[string]*buffer.EventPushBuffer
 	provider            dbProviders.DbProviderInterface
@@ -60,13 +61,14 @@ func (r *router) GetPollStreamCnt() float64 {
 }
 
 func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
-	router := router{
+	router := &router{
 		provider:    provider,
 		pushStreams: map[string]model.StreamStateRecord{},
 		pollStreams: map[string]model.StreamStateRecord{},
 		pushBuffers: map[string]*buffer.EventPushBuffer{},
 		pollBuffers: map[string]*buffer.EventPollBuffer{},
 		issuerKeys:  map[string]*rsa.PrivateKey{},
+		issuerKids:  map[string]string{},
 		enabled:     false,
 		ctx:         context.WithValue(context.Background(), "provider", provider),
 	}
@@ -78,7 +80,7 @@ func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 		router.UpdateStreamState(&state)
 	}
 	router.enabled = true
-	return &router
+	return router
 }
 
 func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool) {
@@ -184,32 +186,45 @@ func (r *router) initPushStream(sid string, state *model.StreamStateRecord, jtis
 	go r.PushStreamHandler(state, pushBuffer)
 }
 
-func (r *router) checkAndLoadKey(streamID string, issuer string) *rsa.PrivateKey {
+func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
 	key, ok := r.issuerKeys[issuer]
+	kid := r.issuerKids[issuer]
 	if !ok {
-		key, err := r.provider.GetIssuerPrivateKey(issuer)
+		var err error
+		key, kid, err = r.provider.GetIssuerPrivateKeyWithKid(issuer)
 		if err != nil {
 			eventLogger.Printf("WARNING [%s]: Unable to locate key for issuer %s, retrying...", streamID, issuer)
 
-			return nil
+			return nil, ""
 		}
 		copyKey := *key
 		r.issuerKeys[issuer] = &copyKey
+		r.issuerKids[issuer] = kid
 	}
-	return key
+	return key, kid
 }
 
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
+	if stream == nil {
+		return
+	}
 
-	if stream.IsReceiver() {
+	if stream.StreamConfiguration.Id != "" && stream.IsReceiver() {
 		// TODO WHY are we not updating stream state?
 		return
 	}
 
 	// Preload the issuer keys to avoid necessary provider lookups
 	issuer := stream.StreamConfiguration.Iss
-	if stream.GetRouteMode() == model.RouteModePublish {
-		r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer)
+	if issuer != "" {
+		if stream.StreamConfiguration.Id == "" || stream.GetRouteMode() == model.RouteModePublish || stream.GetRouteMode() == "" {
+			r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer)
+		}
+	}
+
+	if stream.StreamConfiguration.Id == "" {
+		// This might be a partial update (e.g. from rotateIssuer)
+		return
 	}
 
 	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
@@ -323,11 +338,12 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		return nil, false, http.StatusConflict
 	}
 	var key *rsa.PrivateKey
+	var kid string
 	forwardMode := false
 	if state.GetRouteMode() == model.RouteModeForward {
 		forwardMode = true
 	} else {
-		key = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss)
+		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss)
 	}
 
 	/*
@@ -364,6 +380,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 				token.Issuer = state.StreamConfiguration.Iss
 				token.Audience = state.StreamConfiguration.Aud
 				token.IssuedAt = jwt.NewNumericDate(time.Now())
+				token.Kid = kid
 
 				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
 				if err != nil {
@@ -383,8 +400,9 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 	eventLogger.Printf("PUSH-HANDLER[%s]: Starting..", stream.StreamConfiguration.Id)
 
 	var rsaKey *rsa.PrivateKey
+	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
-		rsaKey = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
+		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
 		if rsaKey == nil {
 			eventLogger.Printf("PUSH-SRV[%s] WARNING: no issuer key available for %s", stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
 			// TODO: What should be done about undelivered events?
@@ -395,7 +413,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 eventLoop:
 	for v := range out {
 		jti := v.(string)
-		r.prepareAndSendEvent(jti, stream, rsaKey)
+		r.prepareAndSendEvent(jti, stream, rsaKey, kid)
 		if stream.Status != model.StreamStateEnabled {
 			eventLogger.Printf("PUSH-SRV[%s] is no longer active. PushHandler exiting.", stream.Id.Hex())
 			break eventLoop
@@ -404,12 +422,12 @@ eventLoop:
 	eventLogger.Printf("PUSH-SRV[%s]: Stopped.", stream.StreamConfiguration.Id)
 }
 
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey) {
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string) {
 	eventRecord := r.provider.GetEventRecord(jti)
 	// Get the event
 	if eventRecord != nil {
 
-		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey)
+		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey, kid)
 		if delivered {
 			r.provider.AckEvent(jti, config.StreamConfiguration.Id)
 			r.IncrementCounter(config, &eventRecord.Event, false)
@@ -419,7 +437,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 
 // pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
 // Note: Moved from the api_transmitter.go in server package
-func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey) bool {
+func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
 	client := http.Client{Timeout: 60 * time.Second}
@@ -434,6 +452,7 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		token.Issuer = configuration.Iss
 		token.Audience = configuration.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
+		token.Kid = kid
 		var err error
 		tokenString, err = token.JWS(jwt.SigningMethodRS256, key)
 		if err != nil {

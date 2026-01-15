@@ -264,6 +264,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"JwksJsonIssuerDelete",
+			http.MethodDelete,
+			"/jwks/{issuer}",
+			h.sa.DeleteJwksIssuerKey,
+			false,
+		},
+
+		Route{
 			"PollEvents",
 			http.MethodPost,
 			"/poll/{id}",

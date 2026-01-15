@@ -14,6 +14,45 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+// rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
+// remain available when JwksJsonIssuer is requested.
+func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+	// This function is called by CreateJwksIssuer so authentication has already been checked.
+
+	vars := mux.Vars(r)
+	issuer := vars["issuer"]
+
+	issuerKey, kid, err := sa.Provider.RotateIssuerKey(issuer, authCtx.ProjectId)
+	if err != nil {
+		serverLog.Printf("Error rotating issuer keys for issuer %s: %v", issuer, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Update the router with the new key/kid
+	if sa.EventRouter != nil {
+		sa.EventRouter.UpdateStreamState(&model.StreamStateRecord{
+			StreamConfiguration: model.StreamConfiguration{
+				Iss: issuer,
+			},
+		})
+	}
+
+	pkcs8bytes, _ := x509.MarshalPKCS8PrivateKey(issuerKey)
+	keyPemBytes := pem.EncodeToMemory(
+		&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: pkcs8bytes,
+			Headers: map[string]string{
+				"kid": kid,
+			},
+		})
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(keyPemBytes)
+}
+
 // CreateJwksIssuer handles the creation of a JWK key pair for the specified issuer and authorizes access permissions.
 // Generates a PEM-encoded private key and writes it to the HTTP response with Content-Type as application/json.
 // Responds with HTTP status Forbidden if permissions are invalid or Internal Server Error for unknown issues.
@@ -23,9 +62,24 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
 	}
+
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	key := sa.Provider.GetIssuerJwksForReceiver(issuer)
+	serverLog.Printf("CreateJwksIssuer: key exists: %v", key != nil)
+	if key != nil {
+		// Do they want to rotate?
+		queryParams := r.URL.Query()
+		_, rotate := queryParams["rotate"]
+		if rotate {
+			sa.rotateIssuer(w, r, authCtx)
+			return
+		}
+		http.Error(w, "Already exists, specify rotate=true to rotate issuer", http.StatusForbidden)
+		return
+	}
 
 	issuerKey := sa.Provider.CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
 
@@ -40,6 +94,28 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	_, _ = w.Write(keyPemBytes)
 	return
 	// http.Error(w, "Unknown error generating private key", http.StatusInternalServerError)
+}
+
+func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		http.Error(w, "Invalid permission", http.StatusForbidden)
+		return
+	}
+	vars := mux.Vars(r)
+	issuer := vars["issuer"]
+	err := sa.Provider.DeleteIssuer(issuer)
+	if err != nil {
+		serverLog.Printf("Error deleting issuer keys for issuer %s: %v", issuer, err)
+		if err.Error() == "issuer not found" {
+			http.Error(w, "Issuer not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	return
 }
 
 // IssuerProjectIat generates an Initial Access Auth (IAT) which can be used at the registration endpoint. The

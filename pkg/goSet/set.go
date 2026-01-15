@@ -105,6 +105,7 @@ type SecurityEventToken struct {
 	SubjectId     *SubjectIdentifier `json:"sub_id,omitempty"`
 
 	Events map[string]interface{} `json:"events"`
+	Kid    string                 `json:"kid,omitempty"`
 }
 
 /*
@@ -213,7 +214,11 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	//		"issuer": givenKey,
 	//	})
 
-	token.Header["kid"] = set.Issuer
+	if set.Kid != "" {
+		token.Header["kid"] = set.Kid
+	} else {
+		token.Header["kid"] = set.Issuer
+	}
 
 	if key == nil {
 		return token.SignedString(jwt.UnsafeAllowNoneSignatureType)

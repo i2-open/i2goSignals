@@ -12,6 +12,7 @@ import (
 type JwkKeyRec struct {
 	Id              primitive.ObjectID `json:"id" bson:"_id"`
 	Iss             string             `json:"iss,omitempty" bson:"iss"`
+	Kid             string             `json:"kid,omitempty" bson:"kid"`
 	Aud             string             `json:"aud,omitempty" bson:"aud"`
 	ProjectId       string             `bson:"project_id" json:"projectId,omitempty"`
 	StreamId        string             `json:"streamId" bson:"stream_id"`

@@ -18,13 +18,16 @@ type DbProviderInterface interface {
 	Check() error
 	Close() error
 
+	DeleteIssuer(issuer string) error
 	GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 	GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error)
 	GetAuthValidatorPubKey() *keyfunc.JWKS
 	GetAuthIssuer() *authUtil.AuthIssuer
 	GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS
 	CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey
+	RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error)
 	GetIssuerKeyNames() []string
+	GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error)
 
 	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
 	CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error)

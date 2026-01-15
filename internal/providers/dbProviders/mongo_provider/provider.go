@@ -91,7 +91,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	for _, name := range dbNames {
 		if name == dbName {
 			m.ssefDb = m.mongoClient.Database(name)
-			pLog.Println(fmt.Sprintf("Connected to existing database [%s] ", name))
+			pLog.Printf("Connected to existing database [%s] ", dbName)
 			m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
 
 			m.keyCol = m.ssefDb.Collection(CDbKeys)
@@ -131,8 +131,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
 
 	indexSid := mongo.IndexModel{
-		Keys: bson.D{
-			{"sid", 1},
+		Keys: bson.M{
+			"sid": 1,
 		},
 	}
 
@@ -146,8 +146,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 	}
 
 	indexIss := mongo.IndexModel{
-		Keys: bson.D{
-			{"iss", 1},
+		Keys: bson.M{
+			"iss": 1,
 		},
 	}
 	_, err = m.keyCol.Indexes().CreateOne(context.TODO(), indexIss)
@@ -368,7 +368,7 @@ func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) 
 		panic(err)
 	}
 
-	err = m.storeJwkKeyPair(issuer, privateKey, projectId)
+	err = m.storeJwkKeyPair(issuer, issuer, privateKey, projectId)
 	if err == nil {
 		return privateKey
 	}
@@ -377,7 +377,22 @@ func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) 
 	return nil
 }
 
-func (m *MongoProvider) storeJwkKeyPair(issuer string, privateKey *rsa.PrivateKey, projectId string) error {
+func (m *MongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, "", err
+	}
+
+	kid := fmt.Sprintf("%s-%s", issuer, primitive.NewObjectID().Hex())
+	err = m.storeJwkKeyPair(issuer, kid, privateKey, projectId)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return privateKey, kid, nil
+}
+
+func (m *MongoProvider) storeJwkKeyPair(issuer string, kid string, privateKey *rsa.PrivateKey, projectId string) error {
 	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
 	publicKey := privateKey.PublicKey
 
@@ -386,6 +401,7 @@ func (m *MongoProvider) storeJwkKeyPair(issuer string, privateKey *rsa.PrivateKe
 	keyPairRec := JwkKeyRec{
 		Id:          primitive.NewObjectID(),
 		Iss:         issuer,
+		Kid:         kid,
 		ProjectId:   projectId,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
@@ -409,7 +425,7 @@ func (m *MongoProvider) StoreReceiverKey(streamId string, audience string, jwksU
 }
 
 func (m *MongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
-	filter := bson.D{{"stream_id", streamId}}
+	filter := bson.M{"stream_id": streamId}
 	res := m.keyCol.FindOne(context.TODO(), filter)
 
 	var rec JwkKeyRec
@@ -422,26 +438,39 @@ func (m *MongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
 }
 
 func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc.JWKS {
-	filter := bson.D{{"iss", issuer}}
+	filter := bson.M{"iss": issuer}
 
-	res := m.keyCol.FindOne(context.TODO(), filter)
-
-	var rec JwkKeyRec
-	err := res.Decode(&rec)
+	cursor, err := m.keyCol.Find(context.TODO(), filter)
 	if err != nil {
-		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		pLog.Printf("Error retrieving keys for issuer %s: %v", issuer, err)
+		return nil
 	}
 
-	pubKeyBytes := rec.PubKeyBytes
-	pubKey, err := x509.ParsePKCS1PublicKey(pubKeyBytes)
+	var keys []JwkKeyRec
+	err = cursor.All(context.TODO(), &keys)
+	if err != nil {
+		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		return nil
+	}
 
-	givenKey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
-		Algorithm: "RS256",
-	})
 	givenKeys := make(map[string]keyfunc.GivenKey)
-	givenKeys[issuer] = givenKey
-	return keyfunc.NewGiven(givenKeys)
+	for _, rec := range keys {
+		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
+		if err != nil {
+			pLog.Printf("Error parsing public key for kid %s: %v", rec.Kid, err)
+			continue
+		}
+		kid := rec.Kid
+		if kid == "" {
+			kid = rec.Iss
+		}
 
+		givenKey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
+			Algorithm: "RS256",
+		})
+		givenKeys[kid] = givenKey
+	}
+	return keyfunc.NewGiven(givenKeys)
 }
 
 func (m *MongoProvider) GetIssuerKeyNames() []string {
@@ -468,68 +497,115 @@ func (m *MongoProvider) GetIssuerKeyNames() []string {
 	return issuers
 }
 
-func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
-	filter := bson.D{{"iss", issuer}}
-
-	res := m.keyCol.FindOne(context.TODO(), filter)
+func (m *MongoProvider) DeleteIssuer(issuer string) error {
+	filter := bson.M{"iss": issuer}
+	res := m.keyCol.FindOne(context.Background(), filter)
 	if res.Err() != nil {
-		// should be not found
+		err := res.Err()
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return errors.New("issuer not found")
+		}
+	}
+	delResult, err := m.keyCol.DeleteOne(context.Background(), filter)
+	if err != nil {
+		pLog.Printf("Error deleting issuer keys for issuer %s: %v", issuer, err)
+	}
+	if delResult.DeletedCount == 0 {
+		return errors.New("issuer not found")
+	}
+	pLog.Printf("Deleted issuer keys for issuer %s", issuer)
+	return nil
+}
+
+func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
+	filter := bson.M{"iss": issuer}
+
+	cursor, err := m.keyCol.Find(context.TODO(), filter)
+	if err != nil {
+		pLog.Printf("Error retrieving keys for issuer %s: %v", issuer, err)
 		return nil
 	}
-	var rec JwkKeyRec
-	err := res.Decode(&rec)
+
+	var keys []JwkKeyRec
+	err = cursor.All(context.TODO(), &keys)
 	if err != nil {
 		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		return nil
 	}
-
-	pubKeyBytes := rec.PubKeyBytes
-	pubKey, err := x509.ParsePKCS1PublicKey(pubKeyBytes)
 
 	jwkstore := jwkset.NewMemoryStorage()
 
-	// Create the JWK options.
-	metadata := jwkset.JWKMetadataOptions{
-		KID: issuer,
-	}
-	jwkOptions := jwkset.JWKOptions{
-		Metadata: metadata,
+	for _, rec := range keys {
+		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
+		if err != nil {
+			pLog.Printf("Error parsing public key for kid %s: %v", rec.Kid, err)
+			continue
+		}
+
+		kid := rec.Kid
+		if kid == "" {
+			kid = rec.Iss
+		}
+
+		// Create the JWK options.
+		metadata := jwkset.JWKMetadataOptions{
+			KID: kid,
+		}
+		jwkOptions := jwkset.JWKOptions{
+			Metadata: metadata,
+		}
+
+		jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
+		if err != nil {
+			pLog.Println("Error parsing rsa key into jwk: " + err.Error())
+			continue
+		}
+		err = jwkstore.KeyWrite(context.Background(), jwkSet)
+		if err != nil {
+			pLog.Println("Error adding key to JWKS for kid: " + kid + ": " + err.Error())
+		}
 	}
 
-	jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
-	if err != nil {
-		pLog.Println("Error parsing rsa key into jwk: " + err.Error())
-		return nil
-	}
-	err = jwkstore.KeyWrite(context.Background(), jwkSet)
-
-	if err != nil {
-		pLog.Println("Error creating JWKS for key issuer: " + issuer + ": " + err.Error())
-		return nil
-	}
 	response, err := jwkstore.JSONPublic(context.Background())
 	if err != nil {
 		pLog.Println("Error creating JWKS response: " + err.Error())
 	}
 
 	return &response
-
 }
 
 func (m *MongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error) {
-	filter := bson.D{{"iss", issuer}}
+	key, _, err := m.GetIssuerPrivateKeyWithKid(issuer)
+	return key, err
+}
 
-	res := m.keyCol.FindOne(context.TODO(), filter)
+func (m *MongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
+	filter := bson.M{"iss": issuer}
+	opts := options.FindOne().SetSort(bson.M{"_id": -1}) // Newest first based on ObjectID
+
+	res := m.keyCol.FindOne(context.TODO(), filter, opts)
 
 	var rec JwkKeyRec
 	err := res.Decode(&rec)
 	if err != nil {
-		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		pLog.Printf("Error parsing JwkKeyRec for issuer %s: %s", issuer, err.Error())
+		return nil, "", err
 	}
 	if len(rec.KeyBytes) == 0 {
-		return nil, errors.New("No key found for: " + issuer)
+		return nil, "", errors.New("No key found for: " + issuer)
 	}
 
-	return x509.ParsePKCS1PrivateKey(rec.KeyBytes)
+	key, err := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
+	if err != nil {
+		return nil, "", err
+	}
+
+	kid := rec.Kid
+	if kid == "" {
+		kid = rec.Iss
+	}
+
+	return key, kid, nil
 }
 
 func (m *MongoProvider) RegisterClient(client model.SsfClient, projectId string) *model.RegisterResponse {
@@ -706,7 +782,7 @@ func (m *MongoProvider) UpdateStream(streamId string, projectId string, configRe
 	streamRec.StreamConfiguration = *config
 
 	docId := streamRec.Id
-	filter := bson.D{{"_id", docId}}
+	filter := bson.M{"_id": docId}
 	res, err := m.streamCol.ReplaceOne(context.TODO(), filter, streamRec)
 	if err != nil {
 		return nil, errors.New("Stream update error: " + err.Error())
@@ -858,7 +934,7 @@ func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate 
 	// first clear any currently pending events (in order to prevent sequencing issues)
 
 	filter := bson.D{
-		{"sid", stream.Id},
+		bson.E{Key: "sid", Value: stream.Id},
 	}
 	many, err := m.pendingCol.DeleteMany(context.TODO(), filter)
 	if err != nil {
@@ -871,11 +947,11 @@ func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate 
 	// Now search and re-assign events from the event store
 	if jti != "" {
 		fromFilter = bson.D{
-			{"jti", bson.D{{"$gte", jti}}},
+			bson.E{Key: "jti", Value: bson.D{bson.E{Key: "$gte", Value: jti}}},
 		}
 	} else if resetDate != nil {
 		fromFilter = bson.D{
-			{"sortTime", bson.D{{"$gte", resetDate}}},
+			bson.E{Key: "sortTime", Value: bson.D{bson.E{Key: "$gte", Value: resetDate}}},
 		}
 	} else {
 		return errors.New("no reset date or JTI reset point provided")
@@ -915,7 +991,8 @@ func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate 
 	*/
 
 	var eventRecord model.EventRecord
-	cursor, err := m.eventCol.Find(context.TODO(), filter)
+	opts := options.Find().SetSort(bson.D{bson.E{Key: "jti", Value: 1}})
+	cursor, err := m.eventCol.Find(context.TODO(), filter, opts)
 	if err != nil {
 		return err
 	}
@@ -935,9 +1012,9 @@ func (m *MongoProvider) AckEvent(jtiString string, streamId string) {
 
 	sid, _ := primitive.ObjectIDFromHex(streamId)
 
-	filter := bson.D{
-		{"jti", jtiString},
-		{"sid", sid}}
+	filter := bson.M{
+		"jti": jtiString,
+		"sid": sid}
 
 	res := m.pendingCol.FindOne(context.TODO(), filter)
 	if res.Err() == nil {
@@ -960,8 +1037,8 @@ func (m *MongoProvider) AckEvent(jtiString string, streamId string) {
 func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
 	sid, _ := primitive.ObjectIDFromHex(streamId)
 
-	filter := bson.D{
-		{"sid", sid},
+	filter := bson.M{
+		"sid": sid,
 	}
 
 	opts := options.Find()
@@ -990,10 +1067,10 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 
 		*/
 		matchInserts := bson.D{
-			{
-				"$match", bson.D{
-					{"operationType", "insert"},
-					{"fullDocument.sid", sid}},
+			bson.E{
+				Key: "$match", Value: bson.D{
+					bson.E{Key: "operationType", Value: "insert"},
+					bson.E{Key: "fullDocument.sid", Value: sid}},
 			},
 		}
 
@@ -1058,9 +1135,7 @@ func (m *MongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
 }
 
 func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
-	filter := bson.D{
-		{"jti", jti},
-	}
+	filter := bson.M{"jti": jti}
 	var res model.EventRecord
 	cursor := m.eventCol.FindOne(context.TODO(), filter)
 	err := cursor.Decode(&res)
