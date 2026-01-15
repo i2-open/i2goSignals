@@ -93,7 +93,7 @@ func TestServer(t *testing.T) {
 			instance.ts.Close()
 		}
 		instance.app.Shutdown()
-		time.Sleep(time.Second)
+		// time.Sleep(time.Second)
 	}
 	testLog.Println("** TEST COMPLETE **")
 }
@@ -500,7 +500,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	*/
 
 	// Check that there are pending events
-	time.Sleep(time.Millisecond * 1500)
+	time.Sleep(time.Millisecond * 150)
 	jtis, more = suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
