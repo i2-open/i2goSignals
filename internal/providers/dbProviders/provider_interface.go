@@ -28,6 +28,7 @@ type DbProviderInterface interface {
 	RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error)
 	GetIssuerKeyNames() []string
 	GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error)
+	AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error
 
 	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
 	CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error)

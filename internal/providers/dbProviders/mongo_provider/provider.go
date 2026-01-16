@@ -411,6 +411,37 @@ func (m *MongoProvider) storeJwkKeyPair(issuer string, kid string, privateKey *r
 	return err
 }
 
+func (m *MongoProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+	var privateKeyBytes []byte
+	if privateKey != nil {
+		privateKeyBytes = x509.MarshalPKCS1PrivateKey(privateKey)
+		if publicKey == nil {
+			publicKey = &privateKey.PublicKey
+		}
+	}
+
+	var pubKeyBytes []byte
+	if publicKey != nil {
+		pubKeyBytes = x509.MarshalPKCS1PublicKey(publicKey)
+	}
+
+	if kid == "" {
+		kid = issuer
+	}
+
+	keyPairRec := JwkKeyRec{
+		Id:          primitive.NewObjectID(),
+		Iss:         issuer,
+		Kid:         kid,
+		ProjectId:   projectId,
+		KeyBytes:    privateKeyBytes,
+		PubKeyBytes: pubKeyBytes,
+	}
+
+	_, err := m.keyCol.InsertOne(context.TODO(), &keyPairRec, &options.InsertOneOptions{})
+	return err
+}
+
 func (m *MongoProvider) StoreReceiverKey(streamId string, audience string, jwksUri string) error {
 
 	keyPairRec := JwkKeyRec{

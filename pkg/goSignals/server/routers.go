@@ -233,6 +233,13 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 		Route{
+			"LoadKey",
+			http.MethodPost,
+			"/key/{issuer}",
+			h.sa.LoadKey,
+			false,
+		},
+		Route{
 			"JwksJsonCreate",
 			http.MethodPost,
 			"/jwks/{issuer}",

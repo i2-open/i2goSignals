@@ -1,6 +1,8 @@
 package test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"log"
 	"os"
@@ -295,6 +297,35 @@ func Test_F_IssuerKeys(t *testing.T) {
 	assert.Contains(t, keys, issuer, "Confirm issuer i2test.example.org present")
 	assert.Contains(t, keys, "DEFAULT", "Confirm issuer DEFAULT present")
 
+}
+
+func Test_F2_AddIssuerKey(t *testing.T) {
+	issuer := "addkey-test.example.org"
+	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	// Test adding private key
+	err := data.provider.AddIssuerKey(issuer, "key-1", privateKey, nil, "")
+	assert.NoError(t, err)
+
+	keyRetrieved, err := data.provider.GetIssuerPrivateKey(issuer)
+	assert.NoError(t, err)
+	assert.Equal(t, privateKey, keyRetrieved)
+
+	// Test adding only public key
+	issuerPub := "addkey-pub.example.org"
+	err = data.provider.AddIssuerKey(issuerPub, "key-pub", nil, &privateKey.PublicKey, "")
+	assert.NoError(t, err)
+
+	issPubJson := data.provider.GetPublicTransmitterJWKS(issuerPub)
+	assert.NotNil(t, issPubJson)
+	issPub, err := keyfunc.NewJSON(*issPubJson)
+	assert.NoError(t, err)
+	assert.Contains(t, issPub.KIDs(), "key-pub")
+
+	// Verify private key is NOT there
+	keyFail, err := data.provider.GetIssuerPrivateKey(issuerPub)
+	assert.Error(t, err)
+	assert.Nil(t, keyFail)
 }
 
 func Test_G_ReceiverKeys(t *testing.T) {

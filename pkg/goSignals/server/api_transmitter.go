@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
-
-	"github.com/gorilla/mux"
 )
 
 func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, _ *http.Request) {
@@ -19,7 +18,6 @@ func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
 	keyBytes, _ := jsonKey.MarshalJSON()
 	_, _ = w.Write(keyBytes)
 }
@@ -38,6 +36,7 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(stat)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	names := sa.Provider.GetIssuerKeyNames()
 	issuerResponse := IssuerResponse{
@@ -51,20 +50,43 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
-
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-
 	jsonKey := sa.Provider.GetPublicTransmitterJWKS(issuer)
-
-	if jsonKey != nil {
-		keyBytes, _ := jsonKey.MarshalJSON()
-
-		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(keyBytes)
+	if jsonKey == nil {
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.WriteHeader(http.StatusNotFound)
+
+	queryParams := r.URL.Query()
+	respType, isFormat := queryParams["format"]
+	if isFormat {
+		resp, err := convertKey(jsonKey, respType[0])
+		if err != nil {
+			serverLog.Println(err)
+			http.Error(w, fmt.Sprintf("Error converting key: %v", err), http.StatusBadRequest)
+			return
+		}
+		switch respType[0] {
+		case "pem":
+			w.Header().Set("Content-Type", "application/x-pem-file")
+		case "x509":
+			w.Header().Set("Content-Type", "application/pkix-cert")
+		case "pkcs":
+			w.Header().Set("Content-Type", "application/pkcs7-mime")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(resp)
+		return
+	}
+
+	// This is the normal JWKS response
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	keyBytes, _ := jsonKey.MarshalJSON()
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(keyBytes)
+	return
 
 }
 

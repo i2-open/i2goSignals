@@ -3,11 +3,16 @@
 package server
 
 import (
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
+	"github.com/MicahParks/keyfunc"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
@@ -96,6 +101,100 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	// http.Error(w, "Unknown error generating private key", http.StatusInternalServerError)
 }
 
+func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
+	authCtx, stat := sa.Auth.ValidateAuthorizationAny(request, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		http.Error(writer, "Invalid permission", http.StatusForbidden)
+		return
+	}
+	vars := mux.Vars(request)
+	issuer := vars["issuer"]
+
+	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
+	contentType = strings.TrimSpace(contentType)
+
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		http.Error(writer, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	var priv *rsa.PrivateKey
+	var pub *rsa.PublicKey
+
+	switch contentType {
+	case "application/x-pem-file":
+		block, _ := pem.Decode(body)
+		if block == nil {
+			http.Error(writer, "Invalid PEM data", http.StatusBadRequest)
+			return
+		}
+		if block.Type == "PRIVATE KEY" || block.Type == "RSA PRIVATE KEY" {
+			if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+				priv = key
+				pub = &key.PublicKey
+			} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+				if rsaKey, ok := key.(*rsa.PrivateKey); ok {
+					priv = rsaKey
+					pub = &rsaKey.PublicKey
+				}
+			}
+		} else if block.Type == "PUBLIC KEY" || block.Type == "RSA PUBLIC KEY" {
+			if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+				pub = key
+			} else if key, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+				if rsaKey, ok := key.(*rsa.PublicKey); ok {
+					pub = rsaKey
+				}
+			}
+		} else if block.Type == "CERTIFICATE" {
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				http.Error(writer, "Invalid certificate", http.StatusBadRequest)
+				return
+			}
+			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
+				pub = rsaKey
+			}
+		}
+
+	case "application/pkix-cert":
+		// Try parsing as certificate first
+		cert, err := x509.ParseCertificate(body)
+		if err == nil {
+			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
+				pub = rsaKey
+			}
+		} else {
+			// Try parsing as PKIX public key
+			if key, err := x509.ParsePKIXPublicKey(body); err == nil {
+				if rsaKey, ok := key.(*rsa.PublicKey); ok {
+					pub = rsaKey
+				}
+			}
+		}
+
+	case "application/pkcs7-mime":
+		// For this project, it seems pkcs7-mime means PKCS#1 DER for public keys
+		if key, err := x509.ParsePKCS1PublicKey(body); err == nil {
+			pub = key
+		}
+	}
+
+	if priv == nil && pub == nil {
+		http.Error(writer, "Could not parse key or unsupported key type", http.StatusBadRequest)
+		return
+	}
+
+	err = sa.Provider.AddIssuerKey(issuer, "", priv, pub, authCtx.ProjectId)
+	if err != nil {
+		http.Error(writer, "Error saving key", http.StatusInternalServerError)
+		return
+	}
+
+	writer.WriteHeader(http.StatusOK)
+}
+
 func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
 	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
@@ -116,6 +215,71 @@ func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http
 	}
 	w.WriteHeader(http.StatusOK)
 	return
+}
+
+func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
+	jwks, err := keyfunc.NewJSON(*jwksJson)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := jwks.ReadOnlyKeys()
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no keys found in JWKS")
+	}
+
+	switch format {
+	case "pem":
+		var pemData []byte
+		for _, kid := range jwks.KIDs() {
+			if pubKey, ok := keys[kid]; ok {
+				der, err := x509.MarshalPKIXPublicKey(pubKey)
+				if err != nil {
+					return nil, err
+				}
+				block := &pem.Block{
+					Type:  "PUBLIC KEY",
+					Bytes: der,
+				}
+				pemData = append(pemData, pem.EncodeToMemory(block)...)
+			}
+		}
+		return pemData, nil
+
+	case "x509":
+		// Return the first key in DER format (PKIX)
+		for _, kid := range jwks.KIDs() {
+			if pubKey, ok := keys[kid]; ok {
+				der, err := x509.MarshalPKIXPublicKey(pubKey)
+				if err != nil {
+					return nil, err
+				}
+				return der, nil
+			}
+		}
+		return nil, fmt.Errorf("no keys found")
+
+	case "pkcs":
+		// Return the first key in PKCS#1 format
+		for _, kid := range jwks.KIDs() {
+			if pubKey, ok := keys[kid]; ok {
+				if rsaPubKey, ok := pubKey.(*rsa.PublicKey); ok {
+					der := x509.MarshalPKCS1PublicKey(rsaPubKey)
+					return der, nil
+				}
+				// Fallback to PKIX if not RSA
+				der, err := x509.MarshalPKIXPublicKey(pubKey)
+				if err != nil {
+					return nil, err
+				}
+				return der, nil
+			}
+		}
+		return nil, fmt.Errorf("no keys found")
+
+	default:
+		return nil, fmt.Errorf("unsupported format: %s", format)
+	}
 }
 
 // IssuerProjectIat generates an Initial Access Auth (IAT) which can be used at the registration endpoint. The

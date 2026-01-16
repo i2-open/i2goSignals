@@ -374,6 +374,40 @@ func (m *MockMongoProvider) storeJwkKeyPair(issuer string, kid string, privateKe
 	return m.storeJwkKeyPairUnlocked(issuer, kid, privateKey, projectId)
 }
 
+func (m *MockMongoProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var privateKeyBytes []byte
+	if privateKey != nil {
+		privateKeyBytes = x509.MarshalPKCS1PrivateKey(privateKey)
+		if publicKey == nil {
+			publicKey = &privateKey.PublicKey
+		}
+	}
+
+	var pubKeyBytes []byte
+	if publicKey != nil {
+		pubKeyBytes = x509.MarshalPKCS1PublicKey(publicKey)
+	}
+
+	if kid == "" {
+		kid = issuer
+	}
+
+	keyPairRec := JwkKeyRec{
+		Id:          primitive.NewObjectID(),
+		Iss:         issuer,
+		Kid:         kid,
+		ProjectId:   projectId,
+		KeyBytes:    privateKeyBytes,
+		PubKeyBytes: pubKeyBytes,
+	}
+
+	m.keys[issuer] = append(m.keys[issuer], &keyPairRec)
+	return nil
+}
+
 func (m *MockMongoProvider) StoreReceiverKey(streamId string, audience string, jwksUri string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

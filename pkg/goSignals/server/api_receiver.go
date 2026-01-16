@@ -4,10 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
@@ -147,6 +154,43 @@ func (ps *ClientPollStream) Close() {
 	}
 }
 
+// isConnectionError returns true if the error is related to connection failure
+// and we should consider the server offline.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context cancellation is usually a client-side thing, not a server offline thing
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Context deadline exceeded is a timeout, which we DO consider a connection error
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Unwrap url.Error
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return isConnectionError(urlErr.Err)
+	}
+
+	// Net errors are usually connection related
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	// EOF during read is often a connection reset or server crash
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	return true
+}
+
 // PollEventsReceiver implements the client-side receiver of SET events using RFC8936
 func (ps *ClientPollStream) pollEventsReceiver() {
 	var acks []string
@@ -157,6 +201,27 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	authorization := receiveMethod.AuthorizationHeader
 	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
+
+	// Exponential backoff configuration
+	baseDelay := 1.0 // default 1 second
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_BASE_DELAY"), 64); err == nil {
+		baseDelay = v
+	}
+	maxDelay := 300.0 // default 5 minutes
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_MAX_DELAY"), 64); err == nil {
+		maxDelay = v
+	}
+	backoffFactor := 2.0 // default factor of 2
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_BACKOFF_FACTOR"), 64); err == nil {
+		backoffFactor = v
+	}
+	retryLimit := 6 * time.Hour
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_LIMIT"), 64); err == nil {
+		retryLimit = time.Duration(v) * time.Second
+	}
+
+	retryCount := 0
+	var firstErrorTime time.Time
 
 	for ps.stream.Status == model.StreamStateEnabled && ps.active {
 		pollBody := receiveMethod.PollConfig // should be a copy ( by value)
@@ -172,6 +237,45 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		serverLog.Printf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs))
 		resp, err := client.Do(pollRequest)
 		if err != nil || (resp != nil && resp.StatusCode > 400) {
+			if isConnectionError(err) {
+				if firstErrorTime.IsZero() {
+					firstErrorTime = time.Now()
+				}
+
+				if time.Since(firstErrorTime) > retryLimit {
+					errMsg := "connection error"
+					if err != nil {
+						errMsg = fmt.Sprintf("connection error: %s", err.Error())
+					}
+					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, errMsg)
+					serverLog.Printf("POLL-RCV[%s] Max retry time exceeded. Disabling stream.", ps.stream.StreamConfiguration.Id)
+					break
+				}
+
+				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "retry being attempted")
+
+				delaySeconds := baseDelay * math.Pow(backoffFactor, float64(retryCount))
+				if delaySeconds > maxDelay {
+					delaySeconds = maxDelay
+				}
+				delay := time.Duration(delaySeconds * float64(time.Second))
+
+				serverLog.Printf("POLL-RCV[%s] Connection error, retrying in %v (retry %d)", ps.stream.StreamConfiguration.Id, delay, retryCount+1)
+
+				select {
+				case <-time.After(delay):
+					retryCount++
+					// Refresh stream state to check if it's still enabled/active
+					updatedStream, _ := ps.sa.Provider.GetStreamState(ps.stream.StreamConfiguration.Id)
+					if updatedStream != nil {
+						ps.stream = updatedStream
+						ps.stream.Status = model.StreamStateEnabled // temporarily treat as enabled to continue loop
+					}
+					continue
+				case <-ps.ctx.Done():
+					return
+				}
+			}
 			if resp != nil && resp.StatusCode == http.StatusNotFound {
 				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
@@ -369,6 +473,10 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 	serverLog.Printf("PUSH-RCV[%s] Received invalid format received: %s", sid, contentType)
 	processPushError(w, "invalid_request", "Expecting Content-Type application/secevent+jwt")
 	return
+}
+
+func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode string, reason string) {
+	sa.Provider.UpdateStreamStatus(streamId, mode, reason)
 }
 
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {

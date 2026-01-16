@@ -2,6 +2,7 @@ package test
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -820,6 +821,62 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	_, _ = suite.servers[0].client.Do(req)
 }
 
+func (suite *ServerSuite) TestD_LoadKey() {
+	testLog.Println("Testing LoadKey endpoint...")
+	issuer := "loadkey-test.com"
+	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	// 1. Test loading PEM Private Key
+	pkcs8Bytes, _ := x509.MarshalPKCS8PrivateKey(privateKey)
+	pemBlock := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: pkcs8Bytes,
+	}
+	pemData := pem.EncodeToMemory(pemBlock)
+
+	url := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(pemData))
+	req.Header.Set("Content-Type", "application/x-pem-file")
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+
+	// Verify it was saved
+	savedKey, err := suite.servers[0].provider.GetIssuerPrivateKey(issuer)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), privateKey.N, savedKey.N)
+
+	// 2. Test loading PKIX Public Key (DER)
+	issuerPub := "loadkey-pub-test.com"
+	pubDer, _ := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	urlPub := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuerPub)
+	reqPub, _ := http.NewRequest(http.MethodPost, urlPub, bytes.NewReader(pubDer))
+	reqPub.Header.Set("Content-Type", "application/pkix-cert")
+	reqPub.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+
+	respPub, err := suite.servers[0].client.Do(reqPub)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, respPub.StatusCode)
+
+	// Verify it was saved as public key
+	issPubJson := suite.servers[0].provider.GetPublicTransmitterJWKS(issuerPub)
+	assert.NotNil(suite.T(), issPubJson)
+
+	// 3. Test loading PKCS#1 Public Key (DER)
+	issuerPkcs1 := "loadkey-pkcs1-test.com"
+	pkcs1Der := x509.MarshalPKCS1PublicKey(&privateKey.PublicKey)
+	urlPkcs1 := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuerPkcs1)
+	reqPkcs1, _ := http.NewRequest(http.MethodPost, urlPkcs1, bytes.NewReader(pkcs1Der))
+	reqPkcs1.Header.Set("Content-Type", "application/pkcs7-mime")
+	reqPkcs1.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+
+	respPkcs1, err := suite.servers[0].client.Do(reqPkcs1)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, respPkcs1.StatusCode)
+}
+
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
 	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
@@ -926,4 +983,34 @@ func (suite *ServerSuite) generateEvent(stream model.StreamConfiguration) (strin
 	event.AddEventPayload(model.EventScimCreateFull, payloadClaims)
 
 	return event.ID, suite.servers[0].app.EventRouter.HandleEvent(&event, "", stream.Id)
+}
+
+func (suite *ServerSuite) Test_ConvertKey() {
+	// Test PEM format
+	serverUrl := fmt.Sprintf("http://%s/jwks/DEFAULT?format=pem", suite.servers[0].host)
+	resp, err := http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.Equal(suite.T(), "application/x-pem-file", resp.Header.Get("Content-Type"))
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(suite.T(), string(body), "-----BEGIN PUBLIC KEY-----")
+
+	// Test X509 format (DER)
+	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT?format=x509", suite.servers[0].host)
+	resp, err = http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.Equal(suite.T(), "application/pkix-cert", resp.Header.Get("Content-Type"))
+	body, _ = io.ReadAll(resp.Body)
+	// DER bytes won't be printable but should not be empty
+	assert.NotEmpty(suite.T(), body)
+
+	// Test PKCS format (PKCS#1 DER)
+	serverUrl = fmt.Sprintf("http://%s/jwks/DEFAULT?format=pkcs", suite.servers[0].host)
+	resp, err = http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.Equal(suite.T(), "application/pkcs7-mime", resp.Header.Get("Content-Type"))
+	body, _ = io.ReadAll(resp.Body)
+	assert.NotEmpty(suite.T(), body)
 }
