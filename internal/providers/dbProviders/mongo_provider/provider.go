@@ -81,11 +81,11 @@ func (m *MongoProvider) GetResumeTokens() *watchtokens.TokenData {
 	return m.resumeTokens
 }
 
-func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
+func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 
 	dbNames, err := m.mongoClient.ListDatabaseNames(ctx, bson.M{})
 	if err != nil {
-		pLog.Fatal(err)
+		return err
 	}
 
 	for _, name := range dbNames {
@@ -105,7 +105,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 
 			m.tokenKey, _ = m.GetIssuerPrivateKey(m.TokenIssuer)
 			m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
-			return
+			return nil
 		}
 	}
 
@@ -155,16 +155,24 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) {
 		pLog.Println(err.Error())
 	}
 	m.dbInit = true
+	return nil
 }
 
 func (m *MongoProvider) Check() error {
+	if m.mongoClient == nil {
+		return errors.New("mongo client not initialized")
+	}
 	return m.mongoClient.Ping(context.Background(), nil)
 }
 
 func (m *MongoProvider) ResetDb(initialize bool) error {
+	if m.ssefDb == nil {
+		return errors.New("database not initialized")
+	}
 	err := m.ssefDb.Drop(context.TODO())
 	if err != nil {
-		pLog.Fatalln("Error resetting database: " + err.Error())
+		pLog.Println("Error resetting database: " + err.Error())
+		return err
 	}
 	m.dbInit = false
 
@@ -177,10 +185,59 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 		m.keyCol = nil
 		m.deliveredCol = nil
 		m.resumeTokens.Reset()
-		m.initialize(m.DbName, context.TODO())
+		_ = m.initialize(m.DbName, context.TODO())
 	}
 
 	return err
+}
+
+func (m *MongoProvider) connect() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	opts := options.Client().ApplyURI(m.DbUrl)
+	opts.WriteConcern = &writeconcern.WriteConcern{
+		W: "majority",
+	}
+	client, err := mongo.Connect(ctx, opts)
+	if err != nil {
+		return err
+	}
+	m.mongoClient = client
+
+	err = m.Check()
+	if err != nil {
+		return err
+	}
+
+	err = m.initialize(m.DbName, ctx)
+	if err != nil {
+		return err
+	}
+
+	m.receiverStreams = m.LoadReceiverStreams()
+	return nil
+}
+
+func (m *MongoProvider) monitor() {
+	ticker := time.NewTicker(1 * time.Minute)
+	for range ticker.C {
+		if !m.dbInit {
+			pLog.Println("Attempting to reconnect to Mongo...")
+			err := m.connect()
+			if err != nil {
+				pLog.Printf("Reconnect failed: %v", err)
+			} else {
+				pLog.Println("Reconnect successful")
+			}
+		} else {
+			err := m.Check()
+			if err != nil {
+				pLog.Printf("Mongo availability check failed: %v", err)
+				m.dbInit = false
+			}
+		}
+	}
 }
 
 /*
@@ -189,8 +246,6 @@ specified. If omitted, the default dbName is "ssef". If successful, a MongoProvi
 error. If dbName is specified, this will override environmental variables
 */
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
-	ctx := context.Background()
-
 	defaultIssuer, issDefined := os.LookupEnv(CEnvIssuer)
 	if !issDefined {
 		defaultIssuer = CDefIssuer
@@ -214,39 +269,27 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		mongoUrl = "mongodb://localhost:27017/"
 		pLog.Printf("Defaulting Mongo Database to local: %s", mongoUrl)
 	}
-	opts := options.Client().ApplyURI(mongoUrl)
-	opts.WriteConcern = &writeconcern.WriteConcern{
-		W: "majority",
-	}
-	client, err := mongo.Connect(ctx, opts)
-	if err != nil {
-		pLog.Fatal(err)
-		return nil, err
-	}
-
-	pLog.Print("Pausing to allow debug to load")
-	time.Sleep(10 * time.Second)
 
 	resumeToken := watchtokens.Load()
 	m := MongoProvider{
 		DbName:        dbName,
 		DbUrl:         mongoUrl,
-		mongoClient:   client,
 		DefaultIssuer: defaultIssuer,
 		TokenIssuer:   tknIssuer,
 		resumeTokens:  resumeToken,
 	}
 
-	// Do a ping test to see that the database is actually there
-	err = m.Check()
+	pLog.Print("Pausing to allow debug to load")
+	time.Sleep(10 * time.Second)
+
+	err := m.connect()
 	if err != nil {
-		pLog.Fatal(err)
-		return nil, err
+		pLog.Printf("Warning: initial Mongo connection failed: %v. Retrying in background.", err)
+	} else {
+		pLog.Println("Initial Mongo connection successful")
 	}
 
-	m.initialize(dbName, ctx)
-
-	m.receiverStreams = m.LoadReceiverStreams()
+	go m.monitor()
 
 	return &m, nil
 }
@@ -258,7 +301,8 @@ func (m *MongoProvider) Close() error {
 
 func (m *MongoProvider) getStates() []model.StreamStateRecord {
 	if !m.dbInit {
-		pLog.Fatal("Mongo DB Provider not initialized while attempting to retrieve Stream Configs")
+		pLog.Println("Mongo DB Provider not initialized while attempting to retrieve Stream Configs")
+		return nil
 	}
 
 	cursor, err := m.streamCol.Find(context.TODO(), bson.D{})
