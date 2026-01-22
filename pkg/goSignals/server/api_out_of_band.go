@@ -29,7 +29,7 @@ func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Reques
 
 	issuerKey, kid, err := sa.Provider.RotateIssuerKey(issuer, authCtx.ProjectId)
 	if err != nil {
-		serverLog.Printf("Error rotating issuer keys for issuer %s: %v", issuer, err)
+		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -73,7 +73,6 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	key := sa.Provider.GetIssuerJwksForReceiver(issuer)
-	serverLog.Printf("CreateJwksIssuer: key exists: %v", key != nil)
 	if key != nil {
 		// Do they want to rotate?
 		queryParams := r.URL.Query()
@@ -205,7 +204,7 @@ func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http
 	issuer := vars["issuer"]
 	err := sa.Provider.DeleteIssuer(issuer)
 	if err != nil {
-		serverLog.Printf("Error deleting issuer keys for issuer %s: %v", issuer, err)
+		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
 		if err.Error() == "issuer not found" {
 			http.Error(w, "Issuer not found", http.StatusNotFound)
 			return
@@ -292,7 +291,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 	authCtx, _ := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin})
 	projectIat, err := sa.Auth.IssueProjectIat(authCtx)
 	if err != nil {
-		serverLog.Printf("Error generating IAT: %s", err.Error())
+		serverLog.Error("Error generating IAT", "error", err.Error())
 		http.Error(w, "Error generating project IAT", http.StatusInternalServerError)
 	}
 	response := model.RegisterResponse{Token: projectIat}
@@ -307,8 +306,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Request) {
 	authCtx, stat := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeRegister})
 	if stat != http.StatusOK {
-		serverLog.Printf("ERROR: Issued token was not validated: HTTP Status %d", stat)
-
+		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
 		http.Error(w, "Failed to register client. Invalid registration token", stat)
 		return
 	}
@@ -358,7 +356,7 @@ func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, _ *http.Reques
 
 // ProtectedResourceMetadata returns the RFC9728 based data describing OAuth access
 func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
-	serverLog.Println("GET ProtectedResourceMetadata")
+	serverLog.Debug("GET ProtectedResourceMetadata")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	baseURl := sa.BaseUrl.String()
@@ -393,11 +391,11 @@ func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	serverLog.Printf("ListStreamStates: %d returned", len(result))
+	serverLog.Debug("ListStreamStates:", "returned", len(result))
 
 	resp, err := json.Marshal(result)
 	if err != nil {
-		serverLog.Printf("Internal error ListStreamStates: %s\n", err.Error())
+		serverLog.Error("Internal error ListStreamStates:", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -427,11 +425,11 @@ func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	serverLog.Printf("GetStreamState: %s returned", config.StreamConfiguration.Id)
+	serverLog.Debug("GetStreamState:", "returned", config.StreamConfiguration.Id)
 
 	resp, err := json.Marshal(config)
 	if err != nil {
-		serverLog.Printf("Internal error GetStreamState: %s\n", err.Error())
+		serverLog.Error("Internal error GetStreamState:", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

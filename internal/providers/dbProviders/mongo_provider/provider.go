@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -42,7 +42,7 @@ const CEnvDbName = "I2SIG_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CDefTokenIssuer = "DEFAULT"
 
-var pLog = log.New(os.Stdout, "MONGO:  ", log.Ldate|log.Ltime)
+var pLog = logger.Sub("MONGO")
 
 type MongoProvider struct {
 	DbUrl       string
@@ -91,7 +91,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	for _, name := range dbNames {
 		if name == dbName {
 			m.ssefDb = m.mongoClient.Database(name)
-			pLog.Printf("Connected to existing database [%s] ", dbName)
+			pLog.Info("Connected to existing database", "dbName", dbName)
 			m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
 
 			m.keyCol = m.ssefDb.Collection(CDbKeys)
@@ -109,7 +109,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		}
 	}
 
-	pLog.Println("Initializing new database [" + m.DbName + "]")
+	pLog.Info("Initializing new database", "dbName", m.DbName)
 	m.resumeTokens.Reset()
 
 	m.ssefDb = m.mongoClient.Database(m.DbName)
@@ -138,11 +138,11 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 
 	_, err = m.pendingCol.Indexes().CreateOne(context.TODO(), indexSid)
 	if err != nil {
-		pLog.Println(err.Error())
+		pLog.Error("Error creating index for pendingCol", "error", err)
 	}
 	_, err = m.deliveredCol.Indexes().CreateOne(context.TODO(), indexSid)
 	if err != nil {
-		pLog.Println(err.Error())
+		pLog.Error("Error creating index for deliveredCol", "error", err)
 	}
 
 	indexIss := mongo.IndexModel{
@@ -152,7 +152,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	}
 	_, err = m.keyCol.Indexes().CreateOne(context.TODO(), indexIss)
 	if err != nil {
-		pLog.Println(err.Error())
+		pLog.Error("Error creating index for keyCol", "error", err)
 	}
 	m.dbInit = true
 	return nil
@@ -171,7 +171,7 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	}
 	err := m.ssefDb.Drop(context.TODO())
 	if err != nil {
-		pLog.Println("Error resetting database: " + err.Error())
+		pLog.Error("Error resetting database", "error", err)
 		return err
 	}
 	m.dbInit = false
@@ -223,17 +223,17 @@ func (m *MongoProvider) monitor() {
 	ticker := time.NewTicker(1 * time.Minute)
 	for range ticker.C {
 		if !m.dbInit {
-			pLog.Println("Attempting to reconnect to Mongo...")
+			pLog.Info("Attempting to reconnect to Mongo...")
 			err := m.connect()
 			if err != nil {
-				pLog.Printf("Reconnect failed: %v", err)
+				pLog.Error("Reconnect failed", "error", err)
 			} else {
-				pLog.Println("Reconnect successful")
+				pLog.Info("Reconnect successful")
 			}
 		} else {
 			err := m.Check()
 			if err != nil {
-				pLog.Printf("Mongo availability check failed: %v", err)
+				pLog.Warn("Mongo availability check failed", "error", err)
 				m.dbInit = false
 			}
 		}
@@ -267,7 +267,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 
 	if mongoUrl == "" {
 		mongoUrl = "mongodb://localhost:27017/"
-		pLog.Printf("Defaulting Mongo Database to local: %s", mongoUrl)
+		pLog.Info("Defaulting Mongo Database to local", "url", mongoUrl)
 	}
 
 	resumeToken := watchtokens.Load()
@@ -279,14 +279,16 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		resumeTokens:  resumeToken,
 	}
 
-	pLog.Print("Pausing to allow debug to load")
-	time.Sleep(10 * time.Second)
+	if logger.IsDebugEnabled() {
+		pLog.Info("Pausing to allow debug to load")
+		time.Sleep(10 * time.Second)
+	}
 
 	err := m.connect()
 	if err != nil {
-		pLog.Printf("Warning: initial Mongo connection failed: %v. Retrying in background.", err)
+		pLog.Warn("initial Mongo connection failed. Retrying in background.", "error", err)
 	} else {
-		pLog.Println("Initial Mongo connection successful")
+		pLog.Info("Initial Mongo connection successful")
 	}
 
 	go m.monitor()
@@ -301,19 +303,19 @@ func (m *MongoProvider) Close() error {
 
 func (m *MongoProvider) getStates() []model.StreamStateRecord {
 	if !m.dbInit {
-		pLog.Println("Mongo DB Provider not initialized while attempting to retrieve Stream Configs")
+		pLog.Warn("Mongo DB Provider not initialized while attempting to retrieve Stream Configs")
 		return nil
 	}
 
 	cursor, err := m.streamCol.Find(context.TODO(), bson.D{})
 	if err != nil {
-		pLog.Printf("Error listing Stream Configs: %v", err)
+		pLog.Error("Error listing Stream Configs", "error", err)
 		return nil
 	}
 	var recs []model.StreamStateRecord
 	err = cursor.All(context.TODO(), &recs)
 	if err != nil {
-		pLog.Printf("Error parsing Stream Configs: %v", err)
+		pLog.Error("Error parsing Stream Configs", "error", err)
 		return nil
 	}
 	return recs
@@ -353,11 +355,11 @@ func (m *MongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord
 		if streamState.IssuerJWKSUrl == "" {
 			return
 		}
-		pLog.Printf("Loading JWKS key from: %s", streamState.IssuerJWKSUrl)
+		pLog.Info("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
 		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
 		if err != nil {
 			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
-			pLog.Println(msg)
+			pLog.Error(msg)
 			streamState.Status = model.StreamStatePause
 			streamState.ErrorMsg = msg
 			return
@@ -374,7 +376,7 @@ func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 		// this will typically when stream created after server startup.
 		streamState, err = m.GetStreamState(sid)
 		if err != nil {
-			pLog.Println("Error loading receiver stream during JWKS initialization: " + sid)
+			pLog.Error("Error loading receiver stream during JWKS initialization", "sid", sid)
 			return nil
 		}
 		m.loadJwksForReceiver(streamState)
@@ -417,7 +419,7 @@ func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) 
 		return privateKey
 	}
 
-	pLog.Printf("Error generating key pair: %s", err.Error())
+	pLog.Error("Error generating key pair", "error", err)
 	return nil
 }
 
@@ -506,7 +508,7 @@ func (m *MongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
 	var rec JwkKeyRec
 	err := res.Decode(&rec)
 	if err != nil {
-		pLog.Println("Error locating receiver key for " + streamId + ": " + err.Error())
+		pLog.Error("Error locating receiver key", "streamId", streamId, "error", err)
 		return nil
 	}
 	return &rec
@@ -517,14 +519,14 @@ func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc
 
 	cursor, err := m.keyCol.Find(context.TODO(), filter)
 	if err != nil {
-		pLog.Printf("Error retrieving keys for issuer %s: %v", issuer, err)
+		pLog.Error("Error retrieving keys for issuer", "issuer", issuer, "error", err)
 		return nil
 	}
 
 	var keys []JwkKeyRec
 	err = cursor.All(context.TODO(), &keys)
 	if err != nil {
-		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		pLog.Error("Error parsing JwkKeyRec", "error", err)
 		return nil
 	}
 
@@ -532,7 +534,7 @@ func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc
 	for _, rec := range keys {
 		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
 		if err != nil {
-			pLog.Printf("Error parsing public key for kid %s: %v", rec.Kid, err)
+			pLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)
 			continue
 		}
 		kid := rec.Kid
@@ -551,14 +553,14 @@ func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc
 func (m *MongoProvider) GetIssuerKeyNames() []string {
 	cursor, err := m.keyCol.Find(context.TODO(), bson.D{})
 	if err != nil {
-		pLog.Printf("Error retrieving issuer keys: %v", err)
+		pLog.Error("Error retrieving issuer keys", "error", err)
 		return nil
 	}
 
 	var keys []JwkKeyRec
 	err = cursor.All(context.TODO(), &keys)
 	if err != nil {
-		pLog.Printf("Error parsing issuer keys: %v", err)
+		pLog.Error("Error parsing issuer keys", "error", err)
 		return nil
 	}
 
@@ -583,12 +585,12 @@ func (m *MongoProvider) DeleteIssuer(issuer string) error {
 	}
 	delResult, err := m.keyCol.DeleteOne(context.Background(), filter)
 	if err != nil {
-		pLog.Printf("Error deleting issuer keys for issuer %s: %v", issuer, err)
+		pLog.Error("Error deleting issuer keys for issuer", "issuer", issuer, "error", err)
 	}
 	if delResult.DeletedCount == 0 {
 		return errors.New("issuer not found")
 	}
-	pLog.Printf("Deleted issuer keys for issuer %s", issuer)
+	pLog.Info("Deleted issuer keys for issuer", "issuer", issuer)
 	return nil
 }
 
@@ -597,14 +599,14 @@ func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 
 	cursor, err := m.keyCol.Find(context.TODO(), filter)
 	if err != nil {
-		pLog.Printf("Error retrieving keys for issuer %s: %v", issuer, err)
+		pLog.Error("Error retrieving keys for issuer", "issuer", issuer, "error", err)
 		return nil
 	}
 
 	var keys []JwkKeyRec
 	err = cursor.All(context.TODO(), &keys)
 	if err != nil {
-		pLog.Printf("Error parsing JwkKeyRec: %s", err.Error())
+		pLog.Error("Error parsing JwkKeyRec", "error", err)
 		return nil
 	}
 
@@ -613,7 +615,7 @@ func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 	for _, rec := range keys {
 		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
 		if err != nil {
-			pLog.Printf("Error parsing public key for kid %s: %v", rec.Kid, err)
+			pLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)
 			continue
 		}
 
@@ -632,18 +634,18 @@ func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 
 		jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
 		if err != nil {
-			pLog.Println("Error parsing rsa key into jwk: " + err.Error())
+			pLog.Error("Error parsing rsa key into jwk", "error", err)
 			continue
 		}
 		err = jwkstore.KeyWrite(context.Background(), jwkSet)
 		if err != nil {
-			pLog.Println("Error adding key to JWKS for kid: " + kid + ": " + err.Error())
+			pLog.Error("Error adding key to JWKS", "kid", kid, "error", err)
 		}
 	}
 
 	response, err := jwkstore.JSONPublic(context.Background())
 	if err != nil {
-		pLog.Println("Error creating JWKS response: " + err.Error())
+		pLog.Error("Error creating JWKS response", "error", err)
 	}
 
 	return &response
@@ -663,7 +665,7 @@ func (m *MongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateK
 	var rec JwkKeyRec
 	err := res.Decode(&rec)
 	if err != nil {
-		pLog.Printf("Error parsing JwkKeyRec for issuer %s: %s", issuer, err.Error())
+		pLog.Error("Error parsing JwkKeyRec for issuer", "issuer", issuer, "error", err)
 		return nil, "", err
 	}
 	if len(rec.KeyBytes) == 0 {
@@ -688,7 +690,7 @@ func (m *MongoProvider) RegisterClient(client model.SsfClient, projectId string)
 
 	token, err := m.GetAuthIssuer().IssueStreamClientToken(client, projectId, true)
 	if err != nil {
-		pLog.Println("Error issuing stream admin token: " + err.Error())
+		pLog.Error("Error issuing stream admin token", "error", err)
 		return nil
 	}
 
@@ -888,7 +890,7 @@ func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, err
 
 	err := res.Decode(&rec)
 	if err != nil {
-		pLog.Printf("Error parsing StreamStateRecord: %s", err.Error())
+		pLog.Error("Error parsing StreamStateRecord", "error", err)
 		return nil, err
 	}
 	return &rec, nil
@@ -897,8 +899,7 @@ func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, err
 func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
 	streamState, _ := m.GetStreamState(streamId)
 	if streamState == nil {
-		msg := fmt.Sprintf("Stream [%s] not found (deleted?)", streamId)
-		pLog.Println(msg)
+		pLog.Error("Stream not found (deleted?)", "sid", streamId)
 		return
 	}
 	streamState.Status = status
@@ -907,7 +908,7 @@ func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, error
 	filter := bson.M{"_id": docId}
 	_, err := m.streamCol.ReplaceOne(context.TODO(), filter, streamState)
 	if err != nil {
-		pLog.Println("Error pausing stream: " + err.Error())
+		pLog.Error("Error pausing stream", "error", err)
 	}
 }
 
@@ -966,7 +967,7 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, ra
 	}
 	_, err := m.eventCol.InsertOne(context.TODO(), &rec)
 	if err != nil {
-		pLog.Println(err.Error())
+		pLog.Error("Error inserting event", "error", err)
 		return nil
 	}
 
@@ -1096,7 +1097,7 @@ func (m *MongoProvider) AckEvent(jtiString string, streamId string) {
 		var event DeliverableEvent
 		err := res.Decode(&event)
 		if err != nil {
-			pLog.Println(err.Error())
+			pLog.Error("Error decoding deliverable event", "error", err)
 			return
 		}
 		acked := DeliveredEvent{
@@ -1158,7 +1159,7 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 
 		eventStream, err := m.pendingCol.Watch(context.TODO(), mongo.Pipeline{matchInserts}, &opts)
 		if err != nil {
-			pLog.Println("Error: Unable to initialize event stream: " + err.Error())
+			pLog.Error("Error: Unable to initialize event stream", "error", err)
 		}
 
 		// resToken := eventStream.ResumeToken()
@@ -1178,7 +1179,7 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 			return m.GetEventIds(streamId, params)
 		} else {
 			if routineCtx.Err() != nil {
-				pLog.Printf("Error occurred waiting for events on sid [%v]: %s", streamId, routineCtx.Err().Error())
+				pLog.Error("Error occurred waiting for events", "sid", streamId, "error", routineCtx.Err())
 			}
 		}
 	}
@@ -1186,7 +1187,7 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 	var events []DeliverableEvent
 	cursor, err := m.pendingCol.Find(context.TODO(), filter, opts)
 	if err = cursor.All(context.TODO(), &events); err != nil {
-		pLog.Println("Error getting event batch: " + err.Error())
+		pLog.Error("Error getting event batch", "error", err)
 	}
 
 	ids := make([]string, len(events))
@@ -1215,7 +1216,7 @@ func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	cursor := m.eventCol.FindOne(context.TODO(), filter)
 	err := cursor.Decode(&res)
 	if err != nil {
-		pLog.Println(fmt.Sprintf("Error decoding event record: %s", err.Error()))
+		pLog.Error("Error decoding event record", "error", err)
 		return nil
 	}
 	return &res

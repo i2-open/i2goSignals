@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,13 +10,14 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 )
 
 // var sa *SignalsApplication
 
-var serverLog = log.New(os.Stdout, "SERVER: ", log.Ldate|log.Ltime)
+var serverLog = logger.Sub("SERVER")
 
 type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
@@ -46,7 +45,7 @@ func (sa *SignalsApplication) Name() string {
 func (sa *SignalsApplication) HealthCheck() bool {
 	err := sa.Provider.Check()
 	if err != nil {
-		log.Println("MongoProvider ping failed: " + err.Error())
+		serverLog.Error("MongoProvider ping failed", "error", err)
 		return false
 	}
 	return true
@@ -77,7 +76,7 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	if baseUrlString != "" {
 		baseUrl, err = url.Parse(baseUrlString)
 		if err != nil {
-			serverLog.Println(fmt.Sprintf("FATAL: Invalid BaseUrl[%s]: %s", baseUrlString, err.Error()))
+			serverLog.Error("FATAL: Invalid BaseUrl", "url", baseUrlString, "error", err)
 		}
 	}
 	sa.BaseUrl = baseUrl
@@ -90,7 +89,7 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		defaultIssuer = "DEFAULT"
 	}
 	sa.DefIssuer = defaultIssuer
-	serverLog.Printf("Selected issuer id: %s", sa.DefIssuer)
+	serverLog.Info("Selected issuer id", "issuer", sa.DefIssuer)
 
 	sa.InitializeReceivers()
 	return sa
@@ -109,13 +108,13 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
 		sa.BaseUrl = baseUrl
 	}
-	serverLog.Printf("ServerUrl[%s] listening on %s", provider.Name(), addr)
+	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)
 	return sa
 }
 
 func (sa *SignalsApplication) Shutdown() {
 	name := sa.Provider.Name()
-	serverLog.Printf("[%s] Shutdown initiated...", name)
+	serverLog.Info("Shutdown initiated", "db", name)
 
 	// Turn off Polling Clients
 	sa.shutdownReceivers()
@@ -142,5 +141,5 @@ func (sa *SignalsApplication) Shutdown() {
 	// Shutdown the provider
 	_ = sa.Provider.Close()
 
-	serverLog.Printf("[%s] Shutdown Complete.", name)
+	serverLog.Info("Shutdown Complete", "db", name)
 }

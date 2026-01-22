@@ -1,12 +1,14 @@
 package buffer
 
 import (
-	"log"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 )
+
+var bLog = logger.Sub("BUFFER")
 
 type EventBuf interface {
 	SubmitEvent(jti string)
@@ -67,7 +69,7 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 		}
 
 		if len(buffer.events) > 0 {
-			log.Printf("WARNING: The following JTIs were not read:\n%v", buffer.events)
+			bLog.Warn("The following JTIs were not read", "jtis", buffer.events)
 		}
 	}()
 
@@ -213,9 +215,9 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 			}
 		}
 		close(buffer.Out)
-		log.Println("Stream buffer closing")
+		bLog.Info("Stream buffer closing")
 		if len(buffer.events) > 0 {
-			log.Printf("WARNING: The following JTIs were not read:\n%v", buffer.events)
+			bLog.Warn("The following JTIs were not read", "jtis", buffer.events)
 		}
 	}()
 	return buffer

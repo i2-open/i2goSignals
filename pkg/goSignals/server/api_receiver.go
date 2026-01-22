@@ -46,7 +46,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 		}
 
 		if stream.GetType() == model.ReceivePush {
-			serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id)
+			serverLog.Info(fmt.Sprintf("Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id))
 			newPushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
 		}
@@ -64,7 +64,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 	// Clean up poll clients that are no longer present or no longer receivers
 	for sid, ps := range sa.pollClients {
 		if !currentPollClients[sid] {
-			serverLog.Printf("Closing removed or changed Poll Receiver: %s", sid)
+			serverLog.Info(fmt.Sprintf("Closing removed or changed Poll Receiver: %s", sid))
 			ps.Close()
 			delete(sa.pollClients, sid)
 		}
@@ -132,7 +132,7 @@ func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
 		pollUrl := streamState.Delivery.PollReceiveMethod.EndpointUrl
-		serverLog.Printf("Initialized Stream: %s, Type: Inbound Method: POLL, EventUrl: %s", streamState.StreamConfiguration.Id, pollUrl)
+		serverLog.Info(fmt.Sprintf("Initialized Stream: %s, Type: Inbound Method: POLL, EventUrl: %s", streamState.StreamConfiguration.Id, pollUrl))
 		go ps.pollEventsReceiver()
 		return ps
 	}
@@ -147,7 +147,7 @@ func (sa *SignalsApplication) GetPollReceiverCnt() float64 {
 }
 
 func (ps *ClientPollStream) Close() {
-	serverLog.Printf("POLL-RCV[%s] Polling client shutdown requested. ", ps.stream.StreamConfiguration.Id)
+	serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Polling client shutdown requested. ", ps.stream.StreamConfiguration.Id))
 	if ps.active {
 		ps.active = false // do this first to prevent cancelled request from looping
 		ps.cancel()
@@ -234,7 +234,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		pollRequest.Header.Set("Authorization", authorization)
 		pollRequest.WithContext(ps.ctx)
 
-		serverLog.Printf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs))
+		serverLog.Info(fmt.Sprintf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs)))
 		resp, err := client.Do(pollRequest)
 		if err != nil || (resp != nil && resp.StatusCode > 400) {
 			if isConnectionError(err) {
@@ -248,7 +248,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 						errMsg = fmt.Sprintf("connection error: %s", err.Error())
 					}
 					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, errMsg)
-					serverLog.Printf("POLL-RCV[%s] Max retry time exceeded. Disabling stream.", ps.stream.StreamConfiguration.Id)
+					serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Max retry time exceeded. Disabling stream.", ps.stream.StreamConfiguration.Id))
 					break
 				}
 
@@ -260,7 +260,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 				}
 				delay := time.Duration(delaySeconds * float64(time.Second))
 
-				serverLog.Printf("POLL-RCV[%s] Connection error, retrying in %v (retry %d)", ps.stream.StreamConfiguration.Id, delay, retryCount+1)
+				serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Connection error, retrying in %v (retry %d)", ps.stream.StreamConfiguration.Id, delay, retryCount+1))
 
 				select {
 				case <-time.After(delay):
@@ -279,21 +279,21 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			if resp != nil && resp.StatusCode == http.StatusNotFound {
 				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
-				serverLog.Println(errMsg)
+				serverLog.Error(errMsg)
 				ps.stream.ErrorMsg = errMsg
 				continue
 			}
 			if err == nil {
 				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-				serverLog.Println(errMsg)
+				serverLog.Error(errMsg)
 				ps.stream.ErrorMsg = errMsg
 				continue
 			}
 
 			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s]\nError: %s", ps.stream.Id.Hex(), eventUrl, err.Error())
 			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-			serverLog.Println(errMsg)
+			serverLog.Error(errMsg)
 			ps.stream.ErrorMsg = errMsg
 			continue
 		}
@@ -305,13 +305,13 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			if err != nil {
 				ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Error reading response: %s", ps.stream.Id.Hex(), err.Error())
-				serverLog.Print(errMsg)
+				serverLog.Error(errMsg)
 				continue
 			}
 			err = json.Unmarshal(bodyBytes, &pollResponse)
 			if err != nil {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
-				serverLog.Print(errMsg)
+				serverLog.Error(errMsg)
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
 				continue
 			}
@@ -322,10 +322,10 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		acks = []string{}
 
 		setCnt := len(pollResponse.Sets)
-		serverLog.Printf("POLL-RCV[%s url: %s] Response: SETs=%d, More=%t", ps.stream.StreamConfiguration.Id, eventUrl, setCnt, pollResponse.MoreAvailable)
+		serverLog.Info(fmt.Sprintf("POLL-RCV[%s url: %s] Response: SETs=%d, More=%t", ps.stream.StreamConfiguration.Id, eventUrl, setCnt, pollResponse.MoreAvailable))
 
 		for jti, setString := range pollResponse.Sets {
-			serverLog.Printf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti)
+			serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti))
 
 			token, err := goSet.Parse(setString, jwks)
 			// Auth validation and diagnostics
@@ -334,7 +334,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 			if err != nil {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Auth parsing error:\n%s\n", ps.stream.StreamConfiguration.Id, err.Error())
-				serverLog.Print(errMsg)
+				serverLog.Error(errMsg)
 				// fmt.Println(setString)
 				setErrs[jti] = model.SetErrorType{
 					Error:       "invalid_request",
@@ -344,7 +344,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			}
 			if !token.VerifyIssuer(ps.stream.Iss, true) {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Invalid issuer received: %s does not match %s", ps.stream.StreamConfiguration.Id, token.Issuer, ps.stream.Iss)
-				serverLog.Print(errMsg)
+				serverLog.Error(errMsg)
 				setErrs[jti] = model.SetErrorType{
 					Error:       "invalid_issuer",
 					Description: "The SET Issuer is invalid for the SET Recipient.",
@@ -360,7 +360,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 				}
 				if !audMatch {
 					errMsg := fmt.Sprintf("POLL-RCV[%s] Audience was not matched: %s", ps.stream.StreamConfiguration.Id, token.RegisteredClaims.Audience)
-					serverLog.Print(errMsg)
+					serverLog.Error(errMsg)
 					setErrs[jti] = model.SetErrorType{
 						Error:       "invalid_audience",
 						Description: "The SET Audience does not correspond to the SET Recipient",
@@ -369,7 +369,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 				}
 			}
 			// sa.Provider.AddEvent(token, true)
-			serverLog.Printf("POLL-RCV[%s] Handling Event: %s", ps.stream.StreamConfiguration.Id, token.ID)
+			serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Handling Event: %s", ps.stream.StreamConfiguration.Id, token.ID))
 			_ = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
 
 			acks = append(acks, jti)
@@ -377,9 +377,9 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 	}
 	if !ps.active {
-		serverLog.Printf("POLL-RCV[%s] Polling stopped.", ps.stream.StreamConfiguration.Id)
+		serverLog.Warn(fmt.Sprintf("POLL-RCV[%s] Polling stopped.", ps.stream.StreamConfiguration.Id))
 	} else {
-		serverLog.Printf("POLL-RCV[%s] Stream state changed to: [%s] %s", ps.stream.StreamConfiguration.Id, ps.stream.Status, ps.stream.ErrorMsg)
+		serverLog.Warn(fmt.Sprintf("POLL-RCV[%s] Stream state changed to: [%s] %s", ps.stream.StreamConfiguration.Id, ps.stream.Status, ps.stream.ErrorMsg))
 	}
 
 	return
@@ -402,7 +402,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 	config, err := sa.Provider.GetStream(sid)
 	if config == nil || err != nil {
 
-		serverLog.Printf("PUSH-RCV[%s] Unable to locate stream configuration.", sid)
+		serverLog.Error(fmt.Sprintf("PUSH-RCV[%s] Unable to locate stream configuration.", sid))
 		processPushError(w, "not_found", "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
 	}
@@ -415,7 +415,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
-			serverLog.Printf("PUSH-RCV[%s] Unable to read Push Request body", sid)
+			serverLog.Error(fmt.Sprintf("PUSH-RCV[%s] Unable to read Push Request body", sid))
 			processPushError(w, "invalid_request", "Expecting body with Content-Type application/secevent+jwt")
 			return
 		}
@@ -428,14 +428,14 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		// Auth validation and diagnostics
 		if err != nil {
 			errMsg := fmt.Sprintf("PUSH-RCV[%s] Auth parsing error: %s", config.Id, err.Error())
-			serverLog.Print(errMsg)
+			serverLog.Error(errMsg)
 			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
 			return
 		}
 
 		if !token.VerifyIssuer(config.Iss, true) {
 			errMsg := fmt.Sprintf("invalid issuer received: %s does not match %s", token.Issuer, config.Iss)
-			serverLog.Printf("PUSH-RCV[%s] Auth has %s", sid, errMsg)
+			serverLog.Error(fmt.Sprintf("PUSH-RCV[%s] Auth has %s", sid, errMsg))
 			processPushError(w, "invalid_issuer", "The SET Issuer is invalid for the SET Recipient.")
 			return
 		}
@@ -451,7 +451,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 			}
 			if !audMatch {
 				errMsg := fmt.Sprintf("audience was not matched: %s", config.Aud)
-				serverLog.Printf("PUSH-RCV[%s] Auth %s", sid, errMsg)
+				serverLog.Error(fmt.Sprintf("PUSH-RCV[%s] Auth %s", sid, errMsg))
 				processPushError(w, "invalid_audience", "The SET Audience does not correspond to the SET Recipient")
 				return
 			}
@@ -470,7 +470,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	serverLog.Printf("PUSH-RCV[%s] Received invalid format received: %s", sid, contentType)
+	serverLog.Warn(fmt.Sprintf("PUSH-RCV[%s] Received invalid format received: %s", sid, contentType))
 	processPushError(w, "invalid_request", "Expecting Content-Type application/secevent+jwt")
 	return
 }
@@ -494,7 +494,7 @@ func processPushError(w http.ResponseWriter, errorCode string, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	_, err := w.Write(responseBytes)
 	if err != nil {
-		serverLog.Printf("Stream[] Error writing error response message: [%s]%s", errorCode, msg)
+		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg))
 		return
 	}
 }

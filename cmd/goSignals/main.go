@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 
 	"github.com/alecthomas/kong"
 	"github.com/chzyer/readline"
 	"github.com/google/shlex"
+	"github.com/i2-open/i2goSignals/internal/logger"
 )
 
 type ParserData struct {
@@ -180,6 +180,7 @@ func breakIntoArgs(command string) []string {
 }
 
 func main() {
+	logger.Init(os.Getenv("LOG_LEVEL"))
 
 	// Check for script file in environment variable
 	scriptFile := stripQuotes(os.Getenv("GOSIGNALS_SCRIPT"))
@@ -187,10 +188,11 @@ func main() {
 	useScriptFile := false
 
 	if scriptFile != "" {
-		log.Printf("Using script file: %s", scriptFile)
+		fmt.Printf("Using script file: %s\n", scriptFile)
 		file, err := os.Open(scriptFile)
 		if err != nil {
-			log.Fatalf("Error opening script file %s: %s\n", scriptFile, err.Error())
+			fmt.Printf("Error opening script file %s: %s\n", scriptFile, err.Error())
+			os.Exit(1)
 		}
 		scriptReader = bufio.NewReader(file)
 		useScriptFile = true
@@ -279,7 +281,7 @@ func main() {
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
-			log.Printf("goSignals > %s", line)
+			fmt.Printf("goSignals > %s\n", line)
 			args = strings.Split(line, " ")
 		} else {
 			line, err := console.Readline()
@@ -303,7 +305,7 @@ func main() {
 			var kerr *kong.ParseError
 			if errors.As(err, &kerr) {
 				kerr = err.(*kong.ParseError)
-				log.Println(kerr.Error())
+				fmt.Println(kerr.Error())
 				_ = kerr.Context.PrintUsage(false)
 			}
 			continue

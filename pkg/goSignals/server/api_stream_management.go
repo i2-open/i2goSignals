@@ -9,6 +9,7 @@ Because of this, administrative access is via admin.go
 */
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -74,7 +75,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	serverLog.Printf("Stream %s DELETE requested.", authContext.StreamId)
+	serverLog.Warn(fmt.Sprintf("Stream %s DELETE requested.", authContext.StreamId))
 
 	state, err := sa.Provider.GetStreamState(authContext.StreamId)
 	if err != nil {
@@ -102,7 +103,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	}
 	// sa.EventRouter.RemoveStream(authContext)
 	w.WriteHeader(http.StatusOK)
-	serverLog.Printf("Stream %s inactivated and deleted.", authContext.StreamId)
+	serverLog.Info(fmt.Sprintf("Stream %s inactivated and deleted.", authContext.StreamId))
 }
 
 func replaceBase(original string, baseUrl *url.URL) string {
@@ -162,7 +163,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	serverLog.Printf("Stream GET %s", authCtx.StreamId)
+	serverLog.Debug(fmt.Sprintf("Stream GET %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 
@@ -203,7 +204,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 	sa.EventRouter.UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
-	serverLog.Printf("Stream %s CREATED", configResp.Id)
+	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, _ := json.MarshalIndent(sa.adjustBaseUrl(configResp), "", "  ")
@@ -269,7 +270,7 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	sa.EventRouter.UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
-	serverLog.Printf("Stream %s UPDATED", authCtx.StreamId)
+	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", authCtx.StreamId))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, _ := json.MarshalIndent(sa.adjustBaseUrl(*configResp), "", "  ")
@@ -385,7 +386,7 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 }
 
 func (sa *SignalsApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter, _ *http.Request) {
-	serverLog.Println("GET WellKnownSsfConfiguration")
+	serverLog.Debug("GET WellKnownSsfConfiguration")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	resp, _ := json.Marshal(sa.getTransmitterConfig())
@@ -397,7 +398,7 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter
 func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
-	serverLog.Printf("GET WellKnownSsfConfigurationIssuer/%s", issuer)
+	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuer))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 

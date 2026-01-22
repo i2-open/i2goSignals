@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"sort"
@@ -19,6 +18,7 @@ import (
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -32,7 +32,7 @@ const CEnvDbName = "I2SIG_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CDefTokenIssuer = "DEFAULT"
 
-var pLog = log.New(os.Stdout, "MOCK_MONGO:  ", log.Ldate|log.Ltime)
+var pLog = logger.Sub("MOCK_MONGO")
 
 // Global shared storage for all mock instances
 var (
@@ -70,7 +70,7 @@ func (m *MockMongoProvider) initialize(dbName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	pLog.Println("Initializing new in-memory mock database [" + m.DbName + "]")
+	pLog.Info("Initializing new in-memory mock database", "dbName", m.DbName)
 
 	m.streams = make(map[string]*model.StreamStateRecord)
 	m.keys = make(map[string][]*JwkKeyRec)
@@ -146,7 +146,7 @@ func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 
 	if mongoUrl == "" {
 		mongoUrl = "mockdb://localhost:27017/"
-		pLog.Printf("Defaulting Mock Mongo Database URL: %s", mongoUrl)
+		pLog.Info("Defaulting Mock Mongo Database URL", "url", mongoUrl)
 	}
 
 	// Use URL as key for shared storage (ignore dbName for sharing)
@@ -157,7 +157,7 @@ func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 
 	// Check if shared instance already exists
 	if existing, ok := sharedStorage[storageKey]; ok {
-		pLog.Printf("Reusing existing mock database for URL: %s (dbName: %s)", mongoUrl, dbName)
+		pLog.Info("Reusing existing mock database", "url", mongoUrl, "dbName", dbName)
 		// Return a new wrapper with the specified dbName but sharing the same storage
 		wrapper := &MockMongoProvider{
 			DbName: dbName,
@@ -197,7 +197,7 @@ func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 
 	// Store in shared storage
 	sharedStorage[storageKey] = m
-	pLog.Printf("Created new shared mock database for URL: %s (dbName: %s)", mongoUrl, dbName)
+	pLog.Info("Created new shared mock database", "url", mongoUrl, "dbName", dbName)
 
 	return m, nil
 }
@@ -212,7 +212,7 @@ func (m *MockMongoProvider) getStates() []model.StreamStateRecord {
 	defer m.mu.RUnlock()
 
 	if !m.dbInit {
-		pLog.Fatal("Mock DB Provider not initialized while attempting to retrieve Stream Configs")
+		pLog.Error("Mock DB Provider not initialized while attempting to retrieve Stream Configs")
 	}
 
 	var recs []model.StreamStateRecord
@@ -320,7 +320,7 @@ func (m *MockMongoProvider) createIssuerJwkKeyPairUnlocked(issuer string, projec
 		return privateKey
 	}
 
-	pLog.Printf("Error generating key pair: %s", err.Error())
+	pLog.Error("Error generating key pair", "error", err)
 	return nil
 }
 
@@ -439,7 +439,7 @@ func (m *MockMongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
 func (m *MockMongoProvider) getInternalPublicTransmitterJWKSUnlocked(issuer string) *keyfunc.JWKS {
 	recs, ok := m.keys[issuer]
 	if !ok {
-		pLog.Printf("Error: Key not found for issuer: %s", issuer)
+		pLog.Error("Key not found for issuer", "issuer", issuer)
 		return nil
 	}
 
@@ -447,7 +447,7 @@ func (m *MockMongoProvider) getInternalPublicTransmitterJWKSUnlocked(issuer stri
 	for _, rec := range recs {
 		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
 		if err != nil {
-			pLog.Printf("Error parsing public key: %s", err.Error())
+			pLog.Error("Error parsing public key", "error", err)
 			continue
 		}
 
@@ -510,7 +510,7 @@ func (m *MockMongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMes
 	for _, rec := range recs {
 		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
 		if err != nil {
-			pLog.Printf("Error parsing public key: %s", err.Error())
+			pLog.Error("Error parsing public key", "error", err)
 			continue
 		}
 
@@ -519,7 +519,6 @@ func (m *MockMongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMes
 			kid = rec.Iss
 		}
 
-		// Create the JWK options.
 		metadata := jwkset.JWKMetadataOptions{
 			KID: kid,
 		}
@@ -529,18 +528,18 @@ func (m *MockMongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMes
 
 		jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
 		if err != nil {
-			pLog.Println("Error parsing rsa key into jwk: " + err.Error())
+			pLog.Error("Error parsing rsa key into jwk", "error", err)
 			continue
 		}
 		err = jwkstore.KeyWrite(context.Background(), jwkSet)
 		if err != nil {
-			pLog.Println("Error adding key to JWKS for kid: " + kid + ": " + err.Error())
+			pLog.Error("Error adding key to JWKS", "kid", kid, "error", err)
 		}
 	}
 
 	response, err := jwkstore.JSONPublic(context.Background())
 	if err != nil {
-		pLog.Println("Error creating JWKS response: " + err.Error())
+		pLog.Error("Error creating JWKS response", "error", err)
 	}
 
 	return &response
@@ -585,7 +584,7 @@ func (m *MockMongoProvider) RegisterClient(client model.SsfClient, projectId str
 
 	token, err := m.GetAuthIssuer().IssueStreamClientToken(client, projectId, true)
 	if err != nil {
-		pLog.Println("Error issuing stream admin token: " + err.Error())
+		pLog.Error("Error issuing stream admin token", "error", err)
 		return nil
 	}
 
@@ -993,7 +992,7 @@ func (m *MockMongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken
 func (m *MockMongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
 	privateKey, err := m.GetIssuerPrivateKey(m.TokenIssuer)
 	if err != nil {
-		pLog.Printf("Error getting token private key: %s", err.Error())
+		pLog.Error("Error getting token private key", "error", err)
 		return nil
 	}
 
