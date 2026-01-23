@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/jwkset"
@@ -45,6 +46,7 @@ const CDefTokenIssuer = "DEFAULT"
 var pLog = logger.Sub("MONGO")
 
 type MongoProvider struct {
+	mu          sync.RWMutex
 	DbUrl       string
 	DbName      string
 	mongoClient *mongo.Client
@@ -67,6 +69,7 @@ type MongoProvider struct {
 	tokenPubKey     *keyfunc.JWKS
 	resumeTokens    *watchtokens.TokenData
 	receiverStreams map[string]*model.StreamStateRecord
+	stopMonitor     chan struct{}
 }
 
 func (m *MongoProvider) Name() string {
@@ -103,8 +106,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 
 			m.dbInit = true
 
-			m.tokenKey, _ = m.GetIssuerPrivateKey(m.TokenIssuer)
-			m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
+			m.tokenKey, _ = m.getIssuerPrivateKeyLocked(m.TokenIssuer)
+			m.tokenPubKey = m.getInternalPublicTransmitterJWKSLocked(m.TokenIssuer)
 			return nil
 		}
 	}
@@ -122,13 +125,13 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.pendingCol = m.ssefDb.Collection(CDbPending)
 	m.eventCol = m.ssefDb.Collection(CDbEvents)
 	m.clientCol = m.ssefDb.Collection(CDbClients)
-	m.tokenKey = m.CreateIssuerJwkKeyPair(m.DefaultIssuer, "")
+	m.tokenKey = m.createIssuerJwkKeyPairLocked(m.DefaultIssuer, "")
 
 	// If tokenIssuer and event issuer are not the same, create the new key pair
 	if m.DefaultIssuer != m.TokenIssuer {
-		m.tokenKey = m.CreateIssuerJwkKeyPair(m.TokenIssuer, "")
+		m.tokenKey = m.createIssuerJwkKeyPairLocked(m.TokenIssuer, "")
 	}
-	m.tokenPubKey = m.GetInternalPublicTransmitterJWKS(m.TokenIssuer)
+	m.tokenPubKey = m.getInternalPublicTransmitterJWKSLocked(m.TokenIssuer)
 
 	indexSid := mongo.IndexModel{
 		Keys: bson.M{
@@ -192,6 +195,9 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 }
 
 func (m *MongoProvider) connect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -215,27 +221,39 @@ func (m *MongoProvider) connect() error {
 		return err
 	}
 
-	m.receiverStreams = m.LoadReceiverStreams()
+	m.receiverStreams = m.loadReceiverStreamsLocked()
 	return nil
 }
 
 func (m *MongoProvider) monitor() {
 	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		if !m.dbInit {
-			pLog.Info("Attempting to reconnect to Mongo...")
-			err := m.connect()
-			if err != nil {
-				pLog.Error("Reconnect failed", "error", err)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.mu.RLock()
+			dbInit := m.dbInit
+			m.mu.RUnlock()
+			if !dbInit {
+				pLog.Info("Attempting to reconnect to Mongo...")
+				err := m.connect()
+				if err != nil {
+					pLog.Error("Reconnect failed", "error", err)
+				} else {
+					pLog.Info("Reconnect successful")
+				}
 			} else {
-				pLog.Info("Reconnect successful")
+				err := m.Check()
+				if err != nil {
+					pLog.Warn("Mongo availability check failed", "error", err)
+					m.mu.Lock()
+					m.dbInit = false
+					m.mu.Unlock()
+				}
 			}
-		} else {
-			err := m.Check()
-			if err != nil {
-				pLog.Warn("Mongo availability check failed", "error", err)
-				m.dbInit = false
-			}
+		case <-m.stopMonitor:
+			pLog.Info("Stopping Mongo monitor goroutine")
+			return
 		}
 	}
 }
@@ -277,6 +295,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		DefaultIssuer: defaultIssuer,
 		TokenIssuer:   tknIssuer,
 		resumeTokens:  resumeToken,
+		stopMonitor:   make(chan struct{}),
 	}
 
 	if logger.IsDebugEnabled() {
@@ -297,11 +316,33 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 }
 
 func (m *MongoProvider) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.resumeTokens.Store() // Save the mongo watch context to enable resumption on restart
-	return m.mongoClient.Disconnect(context.Background())
+	if m.stopMonitor != nil {
+		select {
+		case <-m.stopMonitor:
+			// already closed
+		default:
+			close(m.stopMonitor)
+		}
+	}
+	if m.mongoClient != nil {
+		err := m.mongoClient.Disconnect(context.Background())
+		m.mongoClient = nil
+		m.dbInit = false
+		return err
+	}
+	return nil
 }
 
 func (m *MongoProvider) getStates() []model.StreamStateRecord {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getStatesLocked()
+}
+
+func (m *MongoProvider) getStatesLocked() []model.StreamStateRecord {
 	if !m.dbInit {
 		pLog.Warn("Mongo DB Provider not initialized while attempting to retrieve Stream Configs")
 		return nil
@@ -333,7 +374,13 @@ func (m *MongoProvider) GetStateMap() map[string]model.StreamStateRecord {
 
 // LoadReceiverStreams looks up the inbound streams and loads the issuers JWKS for validation
 func (m *MongoProvider) LoadReceiverStreams() map[string]*model.StreamStateRecord {
-	recs := m.getStates()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.loadReceiverStreamsLocked()
+}
+
+func (m *MongoProvider) loadReceiverStreamsLocked() map[string]*model.StreamStateRecord {
+	recs := m.getStatesLocked()
 
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
@@ -370,19 +417,31 @@ func (m *MongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord
 
 // GetIssuerJwksForReceiver returns the public key for the issuer based on stream id.
 func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
+	m.mu.RLock()
 	streamState, ok := m.receiverStreams[sid]
-	if !ok {
-		var err error
-		// this will typically when stream created after server startup.
-		streamState, err = m.GetStreamState(sid)
-		if err != nil {
-			pLog.Error("Error loading receiver stream during JWKS initialization", "sid", sid)
-			return nil
-		}
-		m.loadJwksForReceiver(streamState)
-		m.receiverStreams[sid] = streamState
+	m.mu.RUnlock()
 
+	if !ok {
+		m.mu.Lock()
+		// Double check
+		streamState, ok = m.receiverStreams[sid]
+		if !ok {
+			var err error
+			// this will typically when stream created after server startup.
+			streamState, err = m.getStreamStateLocked(sid)
+			if err != nil {
+				pLog.Error("Error loading receiver stream during JWKS initialization", "sid", sid)
+				m.mu.Unlock()
+				return nil
+			}
+			m.loadJwksForReceiver(streamState)
+			m.receiverStreams[sid] = streamState
+		}
+		m.mu.Unlock()
 	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return streamState.ValidateJwks
 }
 
@@ -409,12 +468,18 @@ func (m *MongoProvider) DeleteStream(streamId string) error {
 }
 
 func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createIssuerJwkKeyPairLocked(issuer, projectId)
+}
+
+func (m *MongoProvider) createIssuerJwkKeyPairLocked(issuer string, projectId string) *rsa.PrivateKey {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
 
-	err = m.storeJwkKeyPair(issuer, issuer, privateKey, projectId)
+	err = m.storeJwkKeyPairLocked(issuer, issuer, privateKey, projectId)
 	if err == nil {
 		return privateKey
 	}
@@ -424,13 +489,15 @@ func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) 
 }
 
 func (m *MongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, "", err
 	}
 
 	kid := fmt.Sprintf("%s-%s", issuer, primitive.NewObjectID().Hex())
-	err = m.storeJwkKeyPair(issuer, kid, privateKey, projectId)
+	err = m.storeJwkKeyPairLocked(issuer, kid, privateKey, projectId)
 	if err != nil {
 		return nil, "", err
 	}
@@ -439,6 +506,12 @@ func (m *MongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.P
 }
 
 func (m *MongoProvider) storeJwkKeyPair(issuer string, kid string, privateKey *rsa.PrivateKey, projectId string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.storeJwkKeyPairLocked(issuer, kid, privateKey, projectId)
+}
+
+func (m *MongoProvider) storeJwkKeyPairLocked(issuer string, kid string, privateKey *rsa.PrivateKey, projectId string) error {
 	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
 	publicKey := privateKey.PublicKey
 
@@ -515,6 +588,15 @@ func (m *MongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
 }
 
 func (m *MongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc.JWKS {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getInternalPublicTransmitterJWKSLocked(issuer)
+}
+
+func (m *MongoProvider) getInternalPublicTransmitterJWKSLocked(issuer string) *keyfunc.JWKS {
+	if !m.dbInit {
+		return nil
+	}
 	filter := bson.M{"iss": issuer}
 
 	cursor, err := m.keyCol.Find(context.TODO(), filter)
@@ -652,11 +734,26 @@ func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage
 }
 
 func (m *MongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error) {
-	key, _, err := m.GetIssuerPrivateKeyWithKid(issuer)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getIssuerPrivateKeyLocked(issuer)
+}
+
+func (m *MongoProvider) getIssuerPrivateKeyLocked(issuer string) (*rsa.PrivateKey, error) {
+	key, _, err := m.getIssuerPrivateKeyWithKidLocked(issuer)
 	return key, err
 }
 
 func (m *MongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getIssuerPrivateKeyWithKidLocked(issuer)
+}
+
+func (m *MongoProvider) getIssuerPrivateKeyWithKidLocked(issuer string) (*rsa.PrivateKey, string, error) {
+	if !m.dbInit {
+		return nil, "", errors.New("mongo provider not initialized")
+	}
 	filter := bson.M{"iss": issuer}
 	opts := options.FindOne().SetSort(bson.M{"_id": -1}) // Newest first based on ObjectID
 
@@ -879,6 +976,15 @@ func (m *MongoProvider) UpdateStream(streamId string, projectId string, configRe
 }
 
 func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getStreamStateLocked(id)
+}
+
+func (m *MongoProvider) getStreamStateLocked(id string) (*model.StreamStateRecord, error) {
+	if !m.dbInit {
+		return nil, errors.New("mongo provider not initialized")
+	}
 	docId, _ := primitive.ObjectIDFromHex(id)
 	filter := bson.M{"_id": docId}
 
@@ -1017,7 +1123,7 @@ func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate 
 		return err
 	}
 	deleteCount := many.DeletedCount
-	fmt.Println(fmt.Sprintf("DEBUG: removed %d pending events before reset", deleteCount))
+	pLog.Debug("Removed pending events before reset", "count", deleteCount)
 
 	var fromFilter bson.D
 	// Now search and re-assign events from the event store

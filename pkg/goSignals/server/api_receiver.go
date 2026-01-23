@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
@@ -22,6 +23,7 @@ import (
 )
 
 type ClientPollStream struct {
+	mu     sync.RWMutex
 	sa     *SignalsApplication
 	stream *model.StreamStateRecord
 	ctx    context.Context
@@ -107,14 +109,14 @@ HandleReceiver checks if a stream is already defined and updates the configurati
 Otherwise, if new, a new receiver is started and its handle is returned. Transmitter streams are ignored automatically.
 */
 func (sa *SignalsApplication) HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	if !(streamState.GetType() == model.ReceivePoll) {
 		if streamState.GetType() == model.ReceivePush {
 			sa.pushReceivers[streamState.StreamConfiguration.Id] = *streamState
 		}
 		return nil // nothing to do
 	}
-	sa.mu.Lock()
-	defer sa.mu.Unlock()
 	return sa.handleClientPollReceiverLocked(streamState)
 }
 
@@ -136,7 +138,9 @@ func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.
 		go ps.pollEventsReceiver()
 		return ps
 	}
+	ps.mu.Lock()
 	ps.stream = streamState
+	ps.mu.Unlock()
 	return ps
 }
 
@@ -147,6 +151,8 @@ func (sa *SignalsApplication) GetPollReceiverCnt() float64 {
 }
 
 func (ps *ClientPollStream) Close() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Polling client shutdown requested. ", ps.stream.StreamConfiguration.Id))
 	if ps.active {
 		ps.active = false // do this first to prevent cancelled request from looping
@@ -223,8 +229,19 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	retryCount := 0
 	var firstErrorTime time.Time
 
-	for ps.stream.Status == model.StreamStateEnabled && ps.active {
-		pollBody := receiveMethod.PollConfig // should be a copy ( by value)
+	for {
+		ps.mu.RLock()
+		stream := ps.stream
+		active := ps.active
+		ps.mu.RUnlock()
+
+		if stream.Status != model.StreamStateEnabled || !active {
+			break
+		}
+		var pollBody model.PollParameters
+		if receiveMethod.PollConfig != nil {
+			pollBody = *receiveMethod.PollConfig
+		}
 		pollBody.Acks = acks
 		pollBody.SetErrs = setErrs
 
@@ -266,10 +283,12 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 				case <-time.After(delay):
 					retryCount++
 					// Refresh stream state to check if it's still enabled/active
-					updatedStream, _ := ps.sa.Provider.GetStreamState(ps.stream.StreamConfiguration.Id)
+					updatedStream, _ := ps.sa.Provider.GetStreamState(stream.StreamConfiguration.Id)
 					if updatedStream != nil {
+						ps.mu.Lock()
 						ps.stream = updatedStream
 						ps.stream.Status = model.StreamStateEnabled // temporarily treat as enabled to continue loop
+						ps.mu.Unlock()
 					}
 					continue
 				case <-ps.ctx.Done():
@@ -406,7 +425,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		processPushError(w, "not_found", "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
 	}
-	fmt.Println("***********Config.iss=" + config.Iss)
+	serverLog.Debug("Config issuer", "iss", config.Iss)
 
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" || strings.EqualFold("application/secevent+jwt", contentType) {
@@ -441,9 +460,9 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		}
 		audMatch := false
 		if len(config.Aud) > 0 {
-			fmt.Println(fmt.Sprintf("Auth Aud Vals: %v", token.Audience))
+			serverLog.Debug("Auth audience values", "audience", token.Audience)
 			for _, value := range config.Aud {
-				fmt.Println("*****Checking aud match against: " + value)
+				serverLog.Debug("Checking audience match", "target", value)
 				if token.VerifyAudience(value, false) {
 					audMatch = true
 					break

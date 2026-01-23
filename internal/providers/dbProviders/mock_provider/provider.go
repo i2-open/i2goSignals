@@ -773,7 +773,8 @@ func (m *MockMongoProvider) GetStreamState(id string) (*model.StreamStateRecord,
 	defer m.mu.RUnlock()
 
 	if state, ok := m.streams[id]; ok {
-		return state, nil
+		copyState := *state
+		return &copyState, nil
 	}
 	return nil, errors.New("stream not found")
 }
@@ -961,7 +962,8 @@ func (m *MockMongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
 	defer m.mu.RUnlock()
 
 	if eventRec, ok := m.events[jti]; ok {
-		return &eventRec.Event
+		copyEvent := eventRec.Event
+		return &copyEvent
 	}
 	return nil
 }
@@ -971,7 +973,8 @@ func (m *MockMongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	defer m.mu.RUnlock()
 
 	if eventRec, ok := m.events[jti]; ok {
-		return eventRec
+		copyRec := *eventRec
+		return &copyRec
 	}
 	return nil
 }
@@ -983,7 +986,8 @@ func (m *MockMongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken
 	var events []*goSet.SecurityEventToken
 	for _, jti := range jtis {
 		if eventRec, ok := m.events[jti]; ok {
-			events = append(events, &eventRec.Event)
+			copyEvent := eventRec.Event
+			events = append(events, &copyEvent)
 		}
 	}
 	return events

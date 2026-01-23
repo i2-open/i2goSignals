@@ -267,6 +267,9 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 
 	// Update the event router
 	state, _ := sa.Provider.GetStreamState(authCtx.StreamId)
+	if resetDate != nil || resetJti != "" {
+		sa.EventRouter.RemoveStream(authCtx.StreamId)
+	}
 	sa.EventRouter.UpdateStreamState(state)
 	sa.HandleReceiver(state)
 

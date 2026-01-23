@@ -211,6 +211,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 	for i := 4; i < 10; i++ {
 		buffer.SubmitEvent(testVals[i])
 	}
+	time.Sleep(100 * time.Millisecond) // Wait for async processing
 	jtis, more = buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: true,
 		MaxEvents:         1000,
