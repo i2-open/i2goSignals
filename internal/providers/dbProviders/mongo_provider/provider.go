@@ -125,6 +125,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.pendingCol = m.ssefDb.Collection(CDbPending)
 	m.eventCol = m.ssefDb.Collection(CDbEvents)
 	m.clientCol = m.ssefDb.Collection(CDbClients)
+	m.dbInit = true
 	m.tokenKey = m.createIssuerJwkKeyPairLocked(m.DefaultIssuer, "")
 
 	// If tokenIssuer and event issuer are not the same, create the new key pair
@@ -157,7 +158,6 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
 	}
-	m.dbInit = true
 	return nil
 }
 
@@ -1100,6 +1100,55 @@ func (m *MongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID
 	_, _ = m.pendingCol.InsertOne(context.TODO(), &deliverable)
 }
 
+func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
+	matchInserts := bson.D{
+		bson.E{
+			Key: "$match", Value: bson.D{
+				bson.E{Key: "operationType", Value: "insert"}},
+		},
+	}
+
+	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+
+	// Note: In a production environment, we should use the resume tokens from m.resumeTokens
+	// For now, we'll start from the current time.
+
+	eventStream, err := m.pendingCol.Watch(ctx, mongo.Pipeline{matchInserts}, opts)
+	if err != nil {
+		pLog.Error("Unable to initialize background event stream", "error", err)
+		return
+	}
+	defer eventStream.Close(ctx)
+
+	pLog.Info("Background pending event watcher started")
+
+	for eventStream.Next(ctx) {
+		var change bson.M
+		if err := eventStream.Decode(&change); err != nil {
+			pLog.Error("Error decoding change event", "error", err)
+			continue
+		}
+
+		fullDoc, ok := change["fullDocument"].(bson.M)
+		if !ok {
+			continue
+		}
+
+		jti, _ := fullDoc["jti"].(string)
+		sid, _ := fullDoc["sid"].(primitive.ObjectID)
+
+		if jti != "" && !sid.IsZero() {
+			callback(jti, sid)
+		}
+	}
+
+	if err := eventStream.Err(); err != nil {
+		pLog.Error("Background event stream stopped with error", "error", err)
+	} else {
+		pLog.Info("Background event stream stopped")
+	}
+}
+
 func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
 	// validate the request
 	if jti == "" && resetDate == nil {
@@ -1231,63 +1280,10 @@ func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters
 	totalCount, _ := m.pendingCol.CountDocuments(context.TODO(), filter, options.Count())
 
 	if totalCount == 0 {
-		// TODO: check pending
-		if params.ReturnImmediately {
-			// no events to return at the moment
-			return []string{}, false
-		}
-
-		// wait for pending changes
-		/*
-			matchInserts := bson.D{
-				{
-					"$match", bson.D{
-					{"operationType", "insert"},
-				},
-				},
-			}
-
-		*/
-		matchInserts := bson.D{
-			bson.E{
-				Key: "$match", Value: bson.D{
-					bson.E{Key: "operationType", Value: "insert"},
-					bson.E{Key: "fullDocument.sid", Value: sid}},
-			},
-		}
-
-		var opts options.ChangeStreamOptions
-		if params.TimeoutSecs > 0 {
-
-			wait := time.Duration(float64(time.Second) * float64(params.TimeoutSecs))
-			opts.SetMaxAwaitTime(wait)
-		}
-
-		eventStream, err := m.pendingCol.Watch(context.TODO(), mongo.Pipeline{matchInserts}, &opts)
-		if err != nil {
-			pLog.Error("Error: Unable to initialize event stream", "error", err)
-		}
-
-		// resToken := eventStream.ResumeToken()
-		// resToken.String()
-
-		routineCtx := context.WithValue(context.Background(), "streamid", streamId)
-		defer func(eventStream *mongo.ChangeStream, ctx context.Context) {
-			_ = eventStream.Close(ctx)
-		}(eventStream, routineCtx)
-
-		if eventStream.Next(routineCtx) {
-			// now that there are events to return, re-poll
-			// changeEvent := eventStream.Current
-			// pLog.Printf("ChangeEvent: %v", changeEvent.String())
-			time.Sleep(time.Millisecond * 50) // Give a pause in case more events are available
-
-			return m.GetEventIds(streamId, params)
-		} else {
-			if routineCtx.Err() != nil {
-				pLog.Error("Error occurred waiting for events", "sid", streamId, "error", routineCtx.Err())
-			}
-		}
+		// In the centralized watcher model, we rely on the EventRouter to notify the caller.
+		// If there are no events and it's long polling, we return empty and let the
+		// higher layer (EventRouter) handle the waiting via its buffers.
+		return []string{}, false
 	}
 
 	var events []DeliverableEvent

@@ -861,6 +861,13 @@ func (m *MockMongoProvider) AddEventToStream(jti string, streamId primitive.Obje
 	}
 }
 
+func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
+	// Mock implementation: for now, we don't need to do anything here
+	// since HandleEvent already updates local buffers in the router.
+	// In a real mock test, we might want to simulate external events.
+	<-ctx.Done()
+}
+
 func (m *MockMongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

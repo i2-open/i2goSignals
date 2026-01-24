@@ -1,6 +1,7 @@
 package dbProviders
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/json"
 	"time"
@@ -49,6 +50,7 @@ type DbProviderInterface interface {
 	AckEvent(jtiString string, streamId string)
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord)
 	AddEventToStream(jti string, streamId primitive.ObjectID)
+	WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 
 	ResetDb(initialize bool) error

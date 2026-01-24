@@ -14,6 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type router struct {
 	pushStreams         map[string]model.StreamStateRecord // These are transmitters
 	pollStreams         map[string]model.StreamStateRecord
 	ctx                 context.Context
+	cancel              context.CancelFunc
 	enabled             bool
 	issuerKeys          map[string]*rsa.PrivateKey
 	issuerKids          map[string]string
@@ -66,6 +68,7 @@ func (r *router) GetPollStreamCnt() float64 {
 }
 
 func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
+	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
 		provider:    provider,
 		pushStreams: map[string]model.StreamStateRecord{},
@@ -75,7 +78,8 @@ func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 		issuerKeys:  map[string]*rsa.PrivateKey{},
 		issuerKids:  map[string]string{},
 		enabled:     false,
-		ctx:         context.WithValue(context.Background(), "provider", provider),
+		ctx:         context.WithValue(ctx, "provider", provider),
+		cancel:      cancel,
 	}
 
 	states := router.provider.GetStateMap()
@@ -85,6 +89,25 @@ func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 		router.UpdateStreamState(&state)
 	}
 	router.enabled = true
+
+	// Start the background watcher
+	go router.provider.WatchPending(ctx, func(jti string, streamId primitive.ObjectID) {
+		sid := streamId.Hex()
+		router.mu.RLock()
+		pollBuf, pollOk := router.pollBuffers[sid]
+		pushBuf, pushOk := router.pushBuffers[sid]
+		router.mu.RUnlock()
+
+		if pollOk {
+			eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
+			pollBuf.SubmitEvent(jti)
+		}
+		if pushOk {
+			eventLogger.Debug("Background watcher: submitting event to push buffer", "sid", sid, "jti", jti)
+			pushBuf.SubmitEvent(jti)
+		}
+	})
+
 	return router
 }
 
@@ -643,6 +666,9 @@ func (r *router) Shutdown() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.enabled = false
+	if r.cancel != nil {
+		r.cancel()
+	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
 	}
