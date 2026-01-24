@@ -1,0 +1,183 @@
+package memory
+
+import (
+	"context"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/model"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+type EventDAOMemory struct {
+	mu              sync.RWMutex
+	events          map[string]*model.EventRecord
+	pendingEvents   map[string][]interfaces.DeliverableEvent // streamId -> events
+	deliveredEvents map[string][]interfaces.DeliveredEvent   // streamId -> events
+}
+
+func NewEventDAO() interfaces.EventDAO {
+	return &EventDAOMemory{
+		events:          make(map[string]*model.EventRecord),
+		pendingEvents:   make(map[string][]interfaces.DeliverableEvent),
+		deliveredEvents: make(map[string][]interfaces.DeliveredEvent),
+	}
+}
+
+func (d *EventDAOMemory) Insert(ctx context.Context, record *model.EventRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.events[record.Jti] = record
+	return nil
+}
+
+func (d *EventDAOMemory) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if eventRec, ok := d.events[jti]; ok {
+		copyRec := *eventRec
+		return &copyRec, nil
+	}
+	return nil, nil
+}
+
+func (d *EventDAOMemory) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var records []*model.EventRecord
+	for _, jti := range jtis {
+		if eventRec, ok := d.events[jti]; ok {
+			copyRec := *eventRec
+			records = append(records, &copyRec)
+		}
+	}
+	return records, nil
+}
+
+func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	// Truncate resetDate to second precision to match JWT NumericDate behavior
+	fromTruncated := from.Truncate(time.Second)
+
+	var sortedEvents []*model.EventRecord
+	for _, event := range d.events {
+		// Check time range
+		inRange := event.SortTime.Equal(fromTruncated) || event.SortTime.After(fromTruncated)
+		if to != nil {
+			toTruncated := to.Truncate(time.Second)
+			inRange = inRange && (event.SortTime.Equal(toTruncated) || event.SortTime.Before(toTruncated))
+		}
+
+		if inRange {
+			if filter == nil || filter(event) {
+				sortedEvents = append(sortedEvents, event)
+			}
+		}
+	}
+
+	// Sort events by JTI to ensure consistent ordering (KSUIDs are sortable by time)
+	sort.Slice(sortedEvents, func(i, j int) bool {
+		return sortedEvents[i].Jti < sortedEvents[j].Jti
+	})
+
+	return sortedEvents, nil
+}
+
+func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID primitive.ObjectID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, ok := d.events[jti]; ok {
+		streamIdHex := streamID.Hex()
+		deliverable := interfaces.DeliverableEvent{
+			Jti:      jti,
+			StreamId: streamID,
+		}
+		d.pendingEvents[streamIdHex] = append(d.pendingEvents[streamIdHex], deliverable)
+	}
+	return nil
+}
+
+func (d *EventDAOMemory) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	pending, ok := d.pendingEvents[streamID]
+	if !ok || len(pending) == 0 {
+		return []string{}, 0, nil
+	}
+
+	maxEvents := limit
+	if maxEvents <= 0 {
+		maxEvents = 10
+	}
+
+	var jtiList []string
+	for i, event := range pending {
+		if int32(i) >= maxEvents {
+			break
+		}
+		jtiList = append(jtiList, event.Jti)
+	}
+
+	return jtiList, int64(len(pending)), nil
+}
+
+func (d *EventDAOMemory) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Remove from pending
+	if pending, ok := d.pendingEvents[streamID]; ok {
+		var newPending []interfaces.DeliverableEvent
+		var acknowledged *interfaces.DeliverableEvent
+		for _, event := range pending {
+			if event.Jti == jti {
+				evt := event
+				acknowledged = &evt
+			} else {
+				newPending = append(newPending, event)
+			}
+		}
+		d.pendingEvents[streamID] = newPending
+		return acknowledged, nil
+	}
+	return nil, nil
+}
+
+func (d *EventDAOMemory) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	count := int64(len(d.pendingEvents[streamID]))
+	delete(d.pendingEvents, streamID)
+	return count, nil
+}
+
+func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	streamID := event.StreamId.Hex()
+	delivered := interfaces.DeliveredEvent{
+		DeliverableEvent: *event,
+		AckDate:          ackDate,
+	}
+	d.deliveredEvents[streamID] = append(d.deliveredEvents[streamID], delivered)
+	return nil
+}
+
+func (d *EventDAOMemory) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) error {
+	// Mock implementation: for now, we don't need to do anything here
+	// since HandleEvent already updates local buffers in the router.
+	// In a real mock test, we might want to simulate external events.
+	<-ctx.Done()
+	return nil
+}
