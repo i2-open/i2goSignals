@@ -24,7 +24,8 @@ func (d *StreamDAOMemory) Create(ctx context.Context, state *model.StreamStateRe
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.streams[state.StreamConfiguration.Id] = state
+	newState := *state
+	d.streams[state.StreamConfiguration.Id] = &newState
 	return nil
 }
 
@@ -33,7 +34,10 @@ func (d *StreamDAOMemory) FindByID(ctx context.Context, id string) (*model.Strea
 	defer d.mu.RUnlock()
 
 	if state, ok := d.streams[id]; ok {
+		// Deep copy the struct to avoid data races
 		copyState := *state
+		// If there are pointers inside StreamConfiguration, they might still race if not deep-copied.
+		// For now, copying the top-level struct should resolve the direct race on Status/ErrorMsg.
 		return &copyState, nil
 	}
 	return nil, errors.New("stream not found")
@@ -46,7 +50,9 @@ func (d *StreamDAOMemory) Update(ctx context.Context, state *model.StreamStateRe
 	if _, exists := d.streams[state.StreamConfiguration.Id]; !exists {
 		return errors.New("not found")
 	}
-	d.streams[state.StreamConfiguration.Id] = state
+	// Copy the provided state into a new object to avoid sharing pointers
+	newState := *state
+	d.streams[state.StreamConfiguration.Id] = &newState
 	return nil
 }
 

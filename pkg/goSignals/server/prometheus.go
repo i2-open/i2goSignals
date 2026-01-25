@@ -16,6 +16,9 @@ type PrometheusHandler struct {
 	EventsIn, EventsOut    *prometheus.CounterVec
 	PubPushCnt, PubPollCnt prometheus.GaugeFunc
 	RcvPushCnt, RcvPollCnt prometheus.GaugeFunc
+	ClusterLeasesHeld      prometheus.Gauge
+	ClusterLeaseAcq        *prometheus.CounterVec
+	ClusterNodes           prometheus.GaugeFunc
 }
 
 type streamCollector struct {
@@ -101,6 +104,28 @@ func PrometheusHttpMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (h *PrometheusHandler) TrackLeaseAcquisition(resource string, success bool) {
+	if h != nil && h.ClusterLeaseAcq != nil {
+		status := "failure"
+		if success {
+			status = "success"
+		}
+		h.ClusterLeaseAcq.WithLabelValues(resource, status).Inc()
+	}
+}
+
+func (h *PrometheusHandler) IncLeasesHeld() {
+	if h != nil && h.ClusterLeasesHeld != nil {
+		h.ClusterLeasesHeld.Inc()
+	}
+}
+
+func (h *PrometheusHandler) DecLeasesHeld() {
+	if h != nil && h.ClusterLeasesHeld != nil {
+		h.ClusterLeasesHeld.Dec()
+	}
+}
+
 func (sa *SignalsApplication) InitializePrometheus() {
 	prometheusHandler := PrometheusHandler{
 		App: sa,
@@ -162,18 +187,47 @@ func (sa *SignalsApplication) InitializePrometheus() {
 			func() float64 {
 				return sa.GetPushReceiverCnt()
 			}),
+		ClusterLeasesHeld: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: "goSignals",
+				Subsystem: "cluster",
+				Name:      "leases_held_total",
+				Help:      "Number of leases currently held by this node",
+			}),
+		ClusterLeaseAcq: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "cluster",
+				Name:      "lease_acquisition_total",
+				Help:      "Total lease acquisition attempts",
+			},
+			[]string{"resource", "status"},
+		),
+		ClusterNodes: prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: "goSignals",
+				Subsystem: "cluster",
+				Name:      "nodes_count",
+				Help:      "Number of active nodes in the cluster",
+			},
+			func() float64 {
+				count, _ := sa.Provider.GetActiveNodeCount()
+				return float64(count)
+			}),
 	}
 
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
 
 	registerCollector(prometheusHandler.EventsIn)
-
 	registerCollector(prometheusHandler.EventsOut)
 
 	registerCollector(prometheusHandler.RcvPollCnt)
 	registerCollector(prometheusHandler.RcvPushCnt)
 	registerCollector(prometheusHandler.PubPollCnt)
 	registerCollector(prometheusHandler.PubPushCnt)
+	registerCollector(prometheusHandler.ClusterLeasesHeld)
+	registerCollector(prometheusHandler.ClusterLeaseAcq)
+	registerCollector(prometheusHandler.ClusterNodes)
 	registerCollector(newStreamCollector(sa))
 
 	// Pre-initialize counters for existing streams
@@ -183,6 +237,7 @@ func (sa *SignalsApplication) InitializePrometheus() {
 	}
 
 	sa.Stats = &prometheusHandler
+	sa.EventRouter.SetStatsHandler(sa.Stats)
 }
 
 func registerCollector(collector prometheus.Collector) {

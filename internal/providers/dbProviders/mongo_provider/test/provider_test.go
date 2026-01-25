@@ -152,7 +152,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	s.provider.AckEvent(eventIds[0], s.stream.Id)
+	s.provider.AckEvent(eventIds[0], s.stream.Id, 0)
 
 	nextIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(0, len(nextIds), "Should be no pending events")
@@ -170,7 +170,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 
 	finalIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(1, len(finalIds), "should be 1 event")
-	s.provider.AckEvent(finalIds[0], s.stream.Id)
+	s.provider.AckEvent(finalIds[0], s.stream.Id, 0)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -226,7 +226,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			s.provider.AckEvent(id, s.stream.Id)
+			s.provider.AckEvent(id, s.stream.Id, 0)
 		}
 	}
 }

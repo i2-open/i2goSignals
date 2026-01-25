@@ -360,7 +360,11 @@ func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _
 	serverLog.Debug("GET ProtectedResourceMetadata")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	baseURl := sa.BaseUrl.String()
+	baseUrl := sa.GetBaseUrl()
+	var baseURl string
+	if baseUrl != nil {
+		baseURl = baseUrl.String()
+	}
 	name := "GoSignals"
 	prMeta := model.ProtectedResourceMetadata{
 		Resource:               &baseURl,

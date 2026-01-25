@@ -37,6 +37,7 @@ type EventRouter interface {
 	GetPushStreamCnt() float64
 	GetPollStreamCnt() float64
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
+	SetStatsHandler(stats interface{})
 }
 
 type router struct {
@@ -46,12 +47,20 @@ type router struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	enabled             bool
+	nodeId              string
 	issuerKeys          map[string]*rsa.PrivateKey
 	issuerKids          map[string]string
 	pollBuffers         map[string]*buffer.EventPollBuffer
 	pushBuffers         map[string]*buffer.EventPushBuffer
 	provider            dbProviders.DbProviderInterface
 	eventsIn, eventsOut *prometheus.CounterVec
+	stats               statsTracker
+}
+
+type statsTracker interface {
+	TrackLeaseAcquisition(resource string, success bool)
+	IncLeasesHeld()
+	DecLeasesHeld()
 }
 
 func (r *router) GetPushStreamCnt() float64 {
@@ -67,10 +76,11 @@ func (r *router) GetPollStreamCnt() float64 {
 	return float64(len(r.pollStreams))
 }
 
-func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
+func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
 		provider:    provider,
+		nodeId:      nodeId,
 		pushStreams: map[string]model.StreamStateRecord{},
 		pollStreams: map[string]model.StreamStateRecord{},
 		pushBuffers: map[string]*buffer.EventPushBuffer{},
@@ -182,6 +192,14 @@ func (r *router) SetEventCounter(inCounter, outCounter *prometheus.CounterVec) {
 	defer r.mu.Unlock()
 	r.eventsOut = outCounter
 	r.eventsIn = inCounter
+}
+
+func (r *router) SetStatsHandler(stats interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := stats.(statsTracker); ok {
+		r.stats = s
+	}
 }
 
 func (r *router) PreInitializeCounter(stream *model.StreamStateRecord) {
@@ -462,43 +480,123 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	return map[string]string{}, false, http.StatusOK
 }
 
-/*
-PushStreamHandler is started as a separate thread during the initialization of the eventRouter. To stop the handler the buffer is closed.
-*/
+// PushStreamHandler manages the lifecycle of a push stream, including lease handling and event transmission.
 func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer) {
-	eventLogger.Info("PUSH-HANDLER: Starting", "sid", stream.StreamConfiguration.Id)
+	sid := stream.StreamConfiguration.Id
+	resource := fmt.Sprintf("push-transmitter:%s", sid)
+
+	for {
+		if stream.Status != model.StreamStateEnabled {
+			eventLogger.Info("PUSH-SRV is no longer enabled. PushHandler exiting.", "sid", sid)
+			return
+		}
+
+		// Attempt to acquire or renew the lease
+		acquired, fencingToken, err := r.provider.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
+		if r.stats != nil {
+			r.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
+		}
+		if err != nil {
+			eventLogger.Error("PUSH-RCV: Lease acquisition error", "sid", sid, "error", err)
+		}
+
+		if !acquired {
+			eventLogger.Debug("PUSH-RCV: Lease not held, waiting...", "sid", sid)
+			select {
+			case <-time.After(15 * time.Second): // Retry after 15s
+				continue
+			case <-r.ctx.Done():
+				return
+			}
+		}
+
+		// Lease acquired, start the actual push loop
+		eventLogger.Info("PUSH-RCV: Lease acquired, starting transmission", "sid", sid)
+		shouldRetry := r.runPushLoop(resource, stream, eventBuf, fencingToken)
+		if !shouldRetry {
+			return
+		}
+
+		// Check if we should exit entirely
+		select {
+		case <-r.ctx.Done():
+			return
+		default:
+			// Loop back to try and re-acquire if runPushLoop exited for some reason
+		}
+	}
+}
+
+// runPushLoop handles the event push loop for a given stream, including lease renewal and event processing.
+func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer, fencingToken int64) bool {
+	sid := stream.StreamConfiguration.Id
+	eventLogger.Info("PUSH-HANDLER: Starting loop", "sid", sid)
+	if r.stats != nil {
+		r.stats.IncLeasesHeld()
+		defer r.stats.DecLeasesHeld()
+	}
 
 	var rsaKey *rsa.PrivateKey
 	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
 		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
 		if rsaKey == nil {
-			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", stream.StreamConfiguration.Id, "issuer", stream.StreamConfiguration.Iss)
-			// TODO: What should be done about undelivered events?
+			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", sid, "issuer", stream.StreamConfiguration.Iss)
 		}
 	}
+
+	// Heartbeat for lease renewal
+	heartbeatCtx, heartbeatCancel := context.WithCancel(r.ctx)
+	defer heartbeatCancel()
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ok, _, err := r.provider.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
+				if r.stats != nil {
+					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
+				}
+				if err != nil || !ok {
+					eventLogger.Warn("PUSH-HANDLER: Lease lost or renewal failed", "sid", sid)
+					heartbeatCancel()
+					return
+				}
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
+	}()
 
 	out := eventBuf.Out
-eventLoop:
-	for v := range out {
-		jti := v.(string)
-		r.prepareAndSendEvent(jti, stream, rsaKey, kid)
-		if stream.Status != model.StreamStateEnabled {
-			eventLogger.Info("PUSH-SRV is no longer active. PushHandler exiting.", "sid", stream.Id.Hex())
-			break eventLoop
+	for {
+		select {
+		case <-heartbeatCtx.Done():
+			return true // Heartbeat lost, but should try to re-acquire
+		case v, ok := <-out:
+			if !ok {
+				return false // Buffer closed, stop entirely
+			}
+			jti := v.(string)
+			r.prepareAndSendEvent(jti, stream, rsaKey, kid, fencingToken)
+			if stream.Status != model.StreamStateEnabled {
+				eventLogger.Info("PUSH-SRV is no longer active. PushHandler exiting.", "sid", stream.Id.Hex())
+				return false
+			}
 		}
 	}
-	eventLogger.Info("PUSH-SRV: Stopped", "sid", stream.StreamConfiguration.Id)
 }
 
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string) {
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) {
 	eventRecord := r.provider.GetEventRecord(jti)
 	// Get the event
 	if eventRecord != nil {
 
 		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey, kid)
 		if delivered {
-			r.provider.AckEvent(jti, config.StreamConfiguration.Id)
+			r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
 			r.IncrementCounter(config, &eventRecord.Event, false)
 		}
 	}

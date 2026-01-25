@@ -267,8 +267,8 @@ func (m *MockMongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	return m.eventService.GetEventRecord(context.Background(), jti)
 }
 
-func (m *MockMongoProvider) AckEvent(jtiString string, streamId string) {
-	m.eventService.AckEvent(context.Background(), jtiString, streamId)
+func (m *MockMongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) {
+	m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
 }
 
 func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord) {
@@ -285,4 +285,20 @@ func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti 
 
 func (m *MockMongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
 	return m.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
+}
+
+func (m *MockMongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+	return true, 1, nil
+}
+
+func (m *MockMongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
+	return nil
+}
+
+func (m *MockMongoProvider) RegisterNode(node model.ClusterNode) error {
+	return nil
+}
+
+func (m *MockMongoProvider) GetActiveNodeCount() (int64, error) {
+	return 1, nil
 }

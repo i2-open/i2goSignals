@@ -109,7 +109,8 @@ func (s *EventService) GetEventIds(ctx context.Context, streamID string, params 
 	return jtis, more
 }
 
-func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string) {
+func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) {
+	// TODO: Use fencingToken to verify lease ownership before marking delivered
 	event, err := s.eventDAO.RemovePending(ctx, jtiString, streamID)
 	if err != nil {
 		esLog.Error("Error removing pending event", "error", err)

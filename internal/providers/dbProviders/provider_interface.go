@@ -47,13 +47,25 @@ type DbProviderInterface interface {
 	GetEvent(jti string) *goSet.SecurityEventToken
 	GetEvents(jtis []string) []*goSet.SecurityEventToken
 	GetEventRecord(jti string) *model.EventRecord
-	AckEvent(jtiString string, streamId string)
+	AckEvent(jtiString string, streamId string, fencingToken int64)
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord)
 	AddEventToStream(jti string, streamId primitive.ObjectID)
 	WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 
 	ResetDb(initialize bool) error
-	// handler.PushStreamHandler
-	// handler.StreamConfigHandler
+
+	// --- Cluster coordination (Mongo-backed leases) ---
+	// TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.
+	// Returns (acquired=true, fencingToken) only when this node is (or remains) owner.
+	TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (acquired bool, fencingToken int64, err error)
+
+	// ReleaseLeaseIfOwned clears/shortens the lease if (and only if) it's owned by nodeId.
+	ReleaseLeaseIfOwned(resource string, nodeId string) error
+
+	// RegisterNode updates the node registry with heartbeats and metadata.
+	RegisterNode(node model.ClusterNode) error
+
+	// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
+	GetActiveNodeCount() (int64, error)
 }

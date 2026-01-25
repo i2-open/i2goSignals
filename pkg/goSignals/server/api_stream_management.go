@@ -131,13 +131,14 @@ func (sa *SignalsApplication) adjustStateBaseUrl(config model.StreamStateRecord)
 
 func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) model.StreamConfiguration {
 	res := config
+	baseUrl := sa.GetBaseUrl()
 	switch config.Delivery.GetMethod() {
 	case model.DeliveryPoll:
 		endpoint := res.Delivery.PollTransmitMethod.EndpointUrl
-		res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
+		res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
 	case model.ReceivePush:
 		endpoint := res.Delivery.PushReceiveMethod.EndpointUrl
-		res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, sa.BaseUrl)
+		res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
 	default:
 		// do nothing
 	}
@@ -346,13 +347,14 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, _ *http
 }
 
 func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfiguration {
-	jwksUri, _ := sa.BaseUrl.Parse("/jwks.json")
-	configUri, _ := sa.BaseUrl.Parse("/stream")
-	statusUri, _ := sa.BaseUrl.Parse("/status")
-	addSubUri, _ := sa.BaseUrl.Parse("/add-subject")
-	remSubUri, _ := sa.BaseUrl.Parse("/remove-subject")
-	verifyUri, _ := sa.BaseUrl.Parse("/verification")
-	regUri, _ := sa.BaseUrl.Parse("/register")
+	baseUrl := sa.GetBaseUrl()
+	jwksUri, _ := baseUrl.Parse("/jwks.json")
+	configUri, _ := baseUrl.Parse("/stream")
+	statusUri, _ := baseUrl.Parse("/status")
+	addSubUri, _ := baseUrl.Parse("/add-subject")
+	remSubUri, _ := baseUrl.Parse("/remove-subject")
+	verifyUri, _ := baseUrl.Parse("/verification")
+	regUri, _ := baseUrl.Parse("/register")
 
 	return &model.TransmitterConfiguration{
 		Issuer:  sa.DefIssuer,
@@ -407,7 +409,8 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.Response
 
 	// TODO: Check that issuer is valid (ie. that there is a key that matches)
 
-	jwksUri, _ := sa.BaseUrl.Parse("/jwks/" + issuer)
+	baseUrl := sa.GetBaseUrl()
+	jwksUri, _ := baseUrl.Parse("/jwks/" + issuer)
 	config := sa.getTransmitterConfig()
 	config.JwksUri = jwksUri.String()
 	config.Issuer = issuer

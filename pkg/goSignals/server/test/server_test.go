@@ -127,7 +127,8 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	u, _ := url.Parse(ts.URL)
 	instance.host = u.Host
 	// Set BaseUrl on app for any logic that depends on it
-	app.BaseUrl, _ = url.Parse(ts.URL + "/")
+	baseUrl, _ := url.Parse(ts.URL + "/")
+	app.SetBaseUrl(baseUrl)
 	instance.client = ts.Client()
 	instance.provider = mongo
 	nowTime := time.Now()

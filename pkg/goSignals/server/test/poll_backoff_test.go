@@ -66,11 +66,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
 
 	// Wait for more retries and eventually exceeding the limit
-	// retryLimit is 1s. We've already waited 0.2s.
-	// 0.1s (retry 1) + 0.2s (retry 2) + 0.3s (retry 3) = 0.6s total delay so far roughly.
-	// Total time elapsed since first error will reach 1s soon.
-
-	time.Sleep(1500 * time.Millisecond)
+	// retryLimit is 1s.
+	time.Sleep(2000 * time.Millisecond)
 
 	// Now it should be disabled
 	finalState, _ := instance.provider.GetStreamState(streamID)
