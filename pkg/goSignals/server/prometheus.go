@@ -1,16 +1,15 @@
 package server
 
 import (
-	"log"
 	"net/http"
-	"os"
 
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var pLog = log.New(os.Stdout, "PROMTH: ", log.Ldate|log.Ltime)
+var pLog = logger.Sub("PROMTH")
 
 type PrometheusHandler struct {
 	App                    *SignalsApplication
@@ -194,7 +193,7 @@ func registerCollector(collector prometheus.Collector) {
 			// Already registered, this is fine (e.g. in tests)
 			return
 		}
-		pLog.Println("WARNING: instrumentation error:" + err.Error())
+		pLog.Error("instrumentation error", "error", err)
 	}
 
 }

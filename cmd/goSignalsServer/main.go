@@ -10,15 +10,15 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
 
-var mLog = log.New(os.Stdout, "MAIN:   ", log.Ldate|log.Ltime)
+var mLog = logger.Sub("MAIN")
 
 // stripQuotes removes surrounding double or single quotes from a string
 func stripQuotes(s string) string {
@@ -34,7 +34,7 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 	name := "ssef"
 	if found := stripQuotes(os.Getenv("DBNAME")); found != "" {
-		mLog.Println("Using dbname " + found)
+		mLog.Info("Using dbname", "name", found)
 		name = found
 	}
 
@@ -45,24 +45,25 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 }
 
 func main() {
-	mLog.Printf("i2goSignals server starting...")
-	mLog.Printf("Version: 0.0.1")
+	logger.Init(os.Getenv("LOG_LEVEL"))
+
+	mLog.Info("i2goSignals server starting...", "version", "0.0.1")
 	port := "8888"
 	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found
 	}
 
-	mLog.Printf("Listening on port: %v", port)
+	mLog.Info("Listening on port", "port", port)
 
 	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
 	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
-		mLog.Printf("Connecting to MONGO_URL service at: [%s]", dbUrl)
+		mLog.Info("Connecting to MONGO_URL service", "url", dbUrl)
 	}
 
 	provider, err := StartProvider(dbUrl)
 	if err != nil {
-		mLog.Println("Fatal: Unable to start database provider: " + err.Error())
+		mLog.Error("Fatal: Unable to start database provider", "error", err)
 		os.Exit(-1)
 	}
 
@@ -70,11 +71,12 @@ func main() {
 	if found := stripQuotes(os.Getenv("BASE_URL")); found != "" {
 		baseUrl = found
 	}
-	mLog.Println("Base URL: " + baseUrl)
+	mLog.Info("Base URL", "url", baseUrl)
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
 	err = signalsApplication.Server.ListenAndServe()
 	if err != nil {
-		mLog.Fatal(err.Error())
+		mLog.Error("Server error", "error", err)
+		os.Exit(-1)
 	}
 }

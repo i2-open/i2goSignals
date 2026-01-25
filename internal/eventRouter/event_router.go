@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var eventLogger = log.New(os.Stdout, "ROUTER: ", log.Ldate|log.Ltime)
+var eventLogger = logger.Sub("ROUTER")
 
 type EventRouter interface {
 	UpdateStreamState(stream *model.StreamStateRecord)
@@ -39,9 +40,11 @@ type EventRouter interface {
 }
 
 type router struct {
+	mu                  sync.RWMutex
 	pushStreams         map[string]model.StreamStateRecord // These are transmitters
 	pollStreams         map[string]model.StreamStateRecord
 	ctx                 context.Context
+	cancel              context.CancelFunc
 	enabled             bool
 	issuerKeys          map[string]*rsa.PrivateKey
 	issuerKids          map[string]string
@@ -52,15 +55,20 @@ type router struct {
 }
 
 func (r *router) GetPushStreamCnt() float64 {
-	log.Printf("GetPushStreamCnt request: %d", len(r.pushStreams))
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	eventLogger.Debug("GetPushStreamCnt request", "count", len(r.pushStreams))
 	return float64(len(r.pushStreams))
 }
 
 func (r *router) GetPollStreamCnt() float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return float64(len(r.pollStreams))
 }
 
 func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
+	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
 		provider:    provider,
 		pushStreams: map[string]model.StreamStateRecord{},
@@ -70,16 +78,36 @@ func NewRouter(provider dbProviders.DbProviderInterface) EventRouter {
 		issuerKeys:  map[string]*rsa.PrivateKey{},
 		issuerKids:  map[string]string{},
 		enabled:     false,
-		ctx:         context.WithValue(context.Background(), "provider", provider),
+		ctx:         context.WithValue(ctx, "provider", provider),
+		cancel:      cancel,
 	}
 
 	states := router.provider.GetStateMap()
 
 	for k, state := range states {
-		eventLogger.Printf("Initializing: StreamKey: %s, ConfigId: %s ", k, state.StreamConfiguration.Id)
+		eventLogger.Info("Initializing", "streamKey", k, "configId", state.StreamConfiguration.Id)
 		router.UpdateStreamState(&state)
 	}
 	router.enabled = true
+
+	// Start the background watcher
+	go router.provider.WatchPending(ctx, func(jti string, streamId primitive.ObjectID) {
+		sid := streamId.Hex()
+		router.mu.RLock()
+		pollBuf, pollOk := router.pollBuffers[sid]
+		pushBuf, pushOk := router.pushBuffers[sid]
+		router.mu.RUnlock()
+
+		if pollOk {
+			eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
+			pollBuf.SubmitEvent(jti)
+		}
+		if pushOk {
+			eventLogger.Debug("Background watcher: submitting event to push buffer", "sid", sid, "jti", jti)
+			pushBuf.SubmitEvent(jti)
+		}
+	})
+
 	return router
 }
 
@@ -91,8 +119,13 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 
 		    TODO:  Should the incrementer wait until r.eventsOut is not nil?  This will block the outbound stream
 	*/
-	if r.eventsOut == nil {
-		eventLogger.Println("WARNING: events counter not initialized.")
+	r.mu.RLock()
+	eventsOut := r.eventsOut
+	eventsIn := r.eventsIn
+	r.mu.RUnlock()
+
+	if eventsOut == nil {
+		eventLogger.Warn("events counter not initialized")
 		return
 	}
 	dir := "Out"
@@ -119,9 +152,9 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 		}
 	}
 
-	eventLogger.Printf("Event%s [%s] %s Types: %v", dir, stream.StreamConfiguration.Id, tfr, eventTypes)
+	eventLogger.Info("Event counter incremented", "dir", dir, "sid", stream.StreamConfiguration.Id, "tfr", tfr, "types", eventTypes)
 	if dir == "In" {
-		fmt.Println(token.String())
+		eventLogger.Debug("Inbound token", "token", token.String())
 	}
 
 	label := prometheus.Labels{
@@ -136,21 +169,32 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 		isOut = false
 	}
 	if isOut {
-		m := r.eventsOut.With(label)
+		m := eventsOut.With(label)
 		m.Inc()
 	} else {
-		m := r.eventsIn.With(label)
+		m := eventsIn.With(label)
 		m.Inc()
 	}
 }
 
 func (r *router) SetEventCounter(inCounter, outCounter *prometheus.CounterVec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.eventsOut = outCounter
 	r.eventsIn = inCounter
 }
 
 func (r *router) PreInitializeCounter(stream *model.StreamStateRecord) {
-	if r.eventsOut == nil || r.eventsIn == nil {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.preInitializeCounterLocked(stream)
+}
+
+func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
+	eventsOut := r.eventsOut
+	eventsIn := r.eventsIn
+
+	if eventsOut == nil || eventsIn == nil {
 		return
 	}
 
@@ -176,30 +220,32 @@ func (r *router) PreInitializeCounter(stream *model.StreamStateRecord) {
 		"stream_id": stream.StreamConfiguration.Id,
 	}
 
-	r.eventsIn.With(labels).Add(0)
-	r.eventsOut.With(labels).Add(0)
-}
-
-func (r *router) initPushStream(sid string, state *model.StreamStateRecord, jtis []string) {
-	pushBuffer := buffer.CreateEventPushBuffer(jtis)
-	r.pushBuffers[sid] = pushBuffer
-	go r.PushStreamHandler(state, pushBuffer)
+	eventsIn.With(labels).Add(0)
+	eventsOut.With(labels).Add(0)
 }
 
 func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
+	r.mu.RLock()
 	key, ok := r.issuerKeys[issuer]
 	kid := r.issuerKids[issuer]
+	r.mu.RUnlock()
 	if !ok {
-		var err error
-		key, kid, err = r.provider.GetIssuerPrivateKeyWithKid(issuer)
-		if err != nil {
-			eventLogger.Printf("WARNING [%s]: Unable to locate key for issuer %s, retrying...", streamID, issuer)
-
-			return nil, ""
+		r.mu.Lock()
+		// Double check
+		key, ok = r.issuerKeys[issuer]
+		if !ok {
+			var err error
+			key, kid, err = r.provider.GetIssuerPrivateKeyWithKid(issuer)
+			if err != nil {
+				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
+				r.mu.Unlock()
+				return nil, ""
+			}
+			copyKey := *key
+			r.issuerKeys[issuer] = &copyKey
+			r.issuerKids[issuer] = kid
 		}
-		copyKey := *key
-		r.issuerKeys[issuer] = &copyKey
-		r.issuerKids[issuer] = kid
+		r.mu.Unlock()
 	}
 	return key, kid
 }
@@ -227,21 +273,27 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		return
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
-		r.PreInitializeCounter(stream)
+		r.preInitializeCounterLocked(stream)
 
 		currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
 
 		if ok {
-			fmt.Println("Found existing match: " + currentState.StreamConfiguration.Id)
+			eventLogger.Info("Found existing match", "sid", currentState.StreamConfiguration.Id)
 			currentState.Update(stream)
+			r.pollStreams[stream.StreamConfiguration.Id] = currentState
 		} else {
-			fmt.Println("Adding stream to Pollers: " + stream.StreamConfiguration.Id)
+			eventLogger.Info("Adding stream to Pollers", "sid", stream.StreamConfiguration.Id)
 			r.pollStreams[stream.StreamConfiguration.Id] = *stream
 		}
 		_, ok = r.pollBuffers[stream.StreamConfiguration.Id]
 		if !ok {
 			// Preload any outstanding pending events (because we may be re-starting)
+			// We release the lock for provider call
+			r.mu.Unlock()
 			jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
 				MaxEvents:         0,
 				ReturnImmediately: true,
@@ -249,19 +301,23 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 				SetErrs:           nil,
 				TimeoutSecs:       10,
 			})
+			r.mu.Lock()
 			// TODO:  might have to check for existing events!
 			r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis)
 		}
 		return
 	}
 	// The stream is delivery PUSH
-	r.PreInitializeCounter(stream)
+	r.preInitializeCounterLocked(stream)
 
 	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
 	if ok {
 		currentState.Update(stream)
+		r.pushStreams[stream.StreamConfiguration.Id] = currentState
 	} else {
 		// preload the buffer with any existing events
+		// We release the lock for provider call
+		r.mu.Unlock()
 		jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
@@ -269,10 +325,17 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			SetErrs:           nil,
 			TimeoutSecs:       10,
 		})
+		r.mu.Lock()
 		r.pushStreams[stream.StreamConfiguration.Id] = *stream
-		r.initPushStream(stream.StreamConfiguration.Id, stream, jtis)
+		r.initPushStreamLocked(stream.StreamConfiguration.Id, stream, jtis)
 	}
 
+}
+
+func (r *router) initPushStreamLocked(sid string, state *model.StreamStateRecord, jtis []string) {
+	pushBuffer := buffer.CreateEventPushBuffer(jtis)
+	r.pushBuffers[sid] = pushBuffer
+	go r.PushStreamHandler(state, pushBuffer)
 }
 
 /*
@@ -295,11 +358,14 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return nil
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	// Check to see if the event should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
 		if StreamEventMatch(&stream, event) {
 
-			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: PUSH, Types: %v", stream.StreamConfiguration.Id, event.Jti, event.Types)
+			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
 			r.provider.AddEventToStream(event.Jti, stream.Id)
@@ -310,10 +376,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 
 	// Check to see if the event should be routed to outbound polling stream
 	for k, pollStream := range r.pollStreams {
-		eventLogger.Printf("ROUTER: Checking: Stream %s", k)
+		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
 
 		if StreamEventMatch(&pollStream, event) {
-			eventLogger.Printf("ROUTER: Selected:  Stream: %s Jti: %s, Mode: POLL, Types: %v", pollStream.StreamConfiguration.Id, event.Jti, event.Types)
+			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
 			r.provider.AddEventToStream(event.Jti, pollStream.Id)
@@ -325,16 +391,20 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 }
 
 func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int) {
+	r.mu.RLock()
 	state, exist := r.pollStreams[sid]
-	if !exist {
-		eventLogger.Printf("POLL-SRV[%s]: Error Poll Transmitter not found.", sid)
+	pollBuffer, bufExist := r.pollBuffers[sid]
+	r.mu.RUnlock()
+
+	if !exist || !bufExist {
+		eventLogger.Error("POLL-SRV: Error Poll Transmitter not found", "sid", sid)
 		return nil, false, http.StatusNotFound
 	}
 
 	if state.Status != model.StreamStateEnabled {
 		stateString, _ := json.MarshalIndent(&state, "", "  ")
-		eventLogger.Printf("Stream State:\n%s", string(stateString))
-		eventLogger.Printf("POLL-SRV[%s]: Error Poll request but stream is not active", sid)
+		eventLogger.Debug("Stream State", "state", string(stateString))
+		eventLogger.Error("POLL-SRV: Error Poll request but stream is not active", "sid", sid)
 		return nil, false, http.StatusConflict
 	}
 	var key *rsa.PrivateKey
@@ -353,7 +423,6 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 	*/
 
-	pollBuffer := r.pollBuffers[sid]
 	jtiSlice, more := pollBuffer.GetEvents(params)
 
 	jtiSize := 0
@@ -369,7 +438,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			for _, jti := range jtis {
 				eventRecord := r.provider.GetEventRecord(jti)
 				if eventRecord == nil {
-					eventLogger.Println(fmt.Sprintf("POLL-SRV[%s] WARNING: JTI Not found: %s", sid, jti))
+					eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
 					continue
 				}
 				sets[jti] = eventRecord.Original
@@ -384,7 +453,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
 				if err != nil {
-					eventLogger.Printf("POLL-SRV[%s]: Error signing: %s", sid, err.Error())
+					eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 				}
 			}
 		}
@@ -397,14 +466,14 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 PushStreamHandler is started as a separate thread during the initialization of the eventRouter. To stop the handler the buffer is closed.
 */
 func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer) {
-	eventLogger.Printf("PUSH-HANDLER[%s]: Starting..", stream.StreamConfiguration.Id)
+	eventLogger.Info("PUSH-HANDLER: Starting", "sid", stream.StreamConfiguration.Id)
 
 	var rsaKey *rsa.PrivateKey
 	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
 		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
 		if rsaKey == nil {
-			eventLogger.Printf("PUSH-SRV[%s] WARNING: no issuer key available for %s", stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", stream.StreamConfiguration.Id, "issuer", stream.StreamConfiguration.Iss)
 			// TODO: What should be done about undelivered events?
 		}
 	}
@@ -415,11 +484,11 @@ eventLoop:
 		jti := v.(string)
 		r.prepareAndSendEvent(jti, stream, rsaKey, kid)
 		if stream.Status != model.StreamStateEnabled {
-			eventLogger.Printf("PUSH-SRV[%s] is no longer active. PushHandler exiting.", stream.Id.Hex())
+			eventLogger.Info("PUSH-SRV is no longer active. PushHandler exiting.", "sid", stream.Id.Hex())
 			break eventLoop
 		}
 	}
-	eventLogger.Printf("PUSH-SRV[%s]: Stopped.", stream.StreamConfiguration.Id)
+	eventLogger.Info("PUSH-SRV: Stopped", "sid", stream.StreamConfiguration.Id)
 }
 
 func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string) {
@@ -456,7 +525,7 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		var err error
 		tokenString, err = token.JWS(jwt.SigningMethodRS256, key)
 		if err != nil {
-			eventLogger.Printf("PUSH-SRV[%s] Error signing event: %s", configuration.Id, err.Error())
+			eventLogger.Error("PUSH-SRV: Error signing event", "sid", configuration.Id, "error", err)
 		}
 	}
 
@@ -474,8 +543,7 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 
 	resp, err := client.Do(req)
 	if err != nil {
-		errMsg := fmt.Sprintf("PUSH-SRV[%s]Error sending: %s", configuration.Id, err.Error())
-		eventLogger.Println(errMsg)
+		eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", err)
 		return false
 	}
 	if resp.StatusCode != http.StatusAccepted {
@@ -484,28 +552,28 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
-				eventLogger.Printf("PUSH-SRV[%s] Error reading response: %s", configuration.Id, err.Error())
+				eventLogger.Error("PUSH-SRV: Error reading response", "sid", configuration.Id, "error", err)
 				return false
 			}
 			err = json.Unmarshal(body, &errorMsg)
 			if err != nil {
-				eventLogger.Println(fmt.Sprintf("PUSH-SRV[%s] Error parsing error response: %s", configuration.Id, err.Error()))
+				eventLogger.Error("PUSH-SRV: Error parsing error response", "sid", configuration.Id, "error", err)
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
 				return false
 			}
 			errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", errorMsg.ErrCode, errorMsg.Description)
-			eventLogger.Println(errMsg)
+			eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", errorMsg.ErrCode, "desc", errorMsg.Description)
 			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
 			return false
 		}
 		if resp.StatusCode > 400 {
 			errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %s, POSTING to %s", configuration.Id, resp.Status, url)
-			eventLogger.Println(errMsg)
+			eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", resp.Status, "url", url)
 			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
 		}
 	}
 
-	eventLogger.Printf("PUSH-SRV[%s] JTIs delivered: %s", configuration.Id, event.Jti)
+	eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
 	return true
 }
 
@@ -560,9 +628,15 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord)
 }
 
 func (r *router) RemoveStream(sid string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	r.CloseStream(sid)
-	_, ok := r.pushStreams[sid]
+	pb, ok := r.pushBuffers[sid]
+	if ok {
+		pb.Close()
+	}
+
+	_, ok = r.pushStreams[sid]
 	if ok {
 		delete(r.pushBuffers, sid)
 		delete(r.pushStreams, sid)
@@ -574,11 +648,13 @@ func (r *router) RemoveStream(sid string) {
 
 		delete(r.pollBuffers, sid)
 	}
-	eventLogger.Printf("STREAM [%s] Removed from router", sid)
+	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }
 
 func (r *router) CloseStream(sid string) {
+	r.mu.RLock()
 	pb, ok := r.pushBuffers[sid]
+	r.mu.RUnlock()
 	if ok {
 		pb.Close()
 	}
@@ -587,7 +663,12 @@ func (r *router) CloseStream(sid string) {
 // Shutdown closes all the PushHandlers. Events will continue to be routed but only delivered when server restarts
 func (r *router) Shutdown() {
 	// This will shut down the threads that are pushing events.
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.enabled = false
+	if r.cancel != nil {
+		r.cancel()
+	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
 	}

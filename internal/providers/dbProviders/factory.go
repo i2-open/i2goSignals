@@ -10,6 +10,7 @@ import (
 // OpenProvider detects the database URL and returns the appropriate provider implementation.
 // If the URL starts with "mockdb:", it returns a mock in-memory provider.
 // Otherwise, it returns a real MongoDB provider.
+// This uses the refactored providers with DAO pattern for better separation of concerns.
 func OpenProvider(mongoUrl string, dbName string) (DbProviderInterface, error) {
 	if strings.HasPrefix(mongoUrl, "mockdb:") {
 		return mock_provider.Open(mongoUrl, dbName)

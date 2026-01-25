@@ -257,7 +257,6 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 	return token.Claims.(*SecurityEventToken), nil
 	/*
 		if claims, ok := token.Claims.(*SecurityEventToken); ok && token.Valid {
-			fmt.Println("***** Auth Valid!!")
 			return claims, nil
 		}
 		return nil, errors.New("****** Failed to validate")

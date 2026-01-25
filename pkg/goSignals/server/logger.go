@@ -9,13 +9,13 @@
 package server
 
 import (
-	"log"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/i2-open/i2goSignals/internal/logger"
 )
 
-var httpLog = log.New(os.Stdout, "HTTP: ", log.Ldate|log.Ltime)
+var httpLog = logger.Sub("HTTP")
 
 func (sa *SignalsApplication) Logger(inner http.Handler, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -23,13 +23,12 @@ func (sa *SignalsApplication) Logger(inner http.Handler, name string) http.Handl
 
 		inner.ServeHTTP(w, r)
 
-		httpLog.Printf(
-			"[%s] %s %s %s %s",
-			sa.Provider.Name(),
-			r.Method,
-			r.RequestURI,
-			name,
-			time.Since(start),
+		httpLog.Info("Request",
+			"db", sa.Provider.Name(),
+			"method", r.Method,
+			"uri", r.RequestURI,
+			"handler", name,
+			"duration", time.Since(start),
 		)
 	})
 }

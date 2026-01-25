@@ -1,12 +1,14 @@
 package buffer
 
 import (
-	"log"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 )
+
+var bLog = logger.Sub("BUFFER")
 
 type EventBuf interface {
 	SubmitEvent(jti string)
@@ -29,82 +31,94 @@ type EventPollBuffer struct {
 func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 
 	buffer := &EventPollBuffer{
-		in: make(chan string),
-		// Out:    make(chan interface{}),
-		events:           []string{},
-		mutex:            sync.Mutex{},
-		pollReady:        false,
-		closed:           false,
-		triggerCondition: sync.NewCond(new(sync.Mutex)),
+		in:        make(chan string, 100),
+		events:    []string{},
+		pollReady: false,
+		closed:    false,
 	}
+	buffer.triggerCondition = sync.NewCond(&buffer.mutex)
+
 	if len(initialJtis) > 0 {
 		buffer.addEvents(initialJtis)
 	}
 
 	go func() {
-		for len(buffer.events) > 0 || buffer.in != nil {
-			select {
-			case v, ok := <-buffer.in:
-				if !ok {
-					buffer.in = nil
-				} else {
-					// log.Println("DEBUG: incoming JTI: " + v)
-					buffer.mutex.Lock()
-					buffer.events = append(buffer.events, v)
-					buffer.mutex.Unlock()
+		inCh := buffer.in
+		for {
+			buffer.mutex.Lock()
+			if inCh == nil && len(buffer.events) == 0 {
+				buffer.mutex.Unlock()
+				break
+			}
+			buffer.mutex.Unlock()
 
-					buffer.triggerCondition.L.Lock()
-					// log.Println("\t\t\tADDING NEW EVENT AND BROADCASTING")
+			select {
+			case v, ok := <-inCh:
+				buffer.mutex.Lock()
+				if !ok {
+					inCh = nil
+				} else {
+					buffer.events = append(buffer.events, v)
 					buffer.triggerCondition.Broadcast()
-					buffer.triggerCondition.L.Unlock()
-					// log.Println("\t\t\tDONE")
 				}
-				/*
-				   case outCh() <- nextEvent():
-				       buffer.events = buffer.events[1:]
-				*/
+				buffer.mutex.Unlock()
 			}
 		}
 
+		buffer.mutex.Lock()
 		if len(buffer.events) > 0 {
-			log.Printf("WARNING: The following JTIs were not read:\n%v", buffer.events)
+			bLog.Warn("The following JTIs were not read", "jtis", buffer.events)
 		}
+		buffer.mutex.Unlock()
 	}()
 
 	return buffer
 }
 
-func (b *EventPollBuffer) Cnt() float64 {
-	return float64(len(b.events))
+func (b *EventPollBuffer) Cnt() int {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return len(b.events)
 }
 
 func (b *EventPollBuffer) addEvents(jtis []string) {
-	defer b.mutex.Unlock()
 	b.mutex.Lock()
+	defer b.mutex.Unlock()
 	for _, jti := range jtis {
 		b.events = append(b.events, jti)
 	}
 }
 
 func (b *EventPollBuffer) SubmitEvent(jti string) {
-	// This avoids a panic. The submitted event will be recovered on restart
-	if b.IsClosed() {
+	b.mutex.Lock()
+	if b.closed {
+		b.mutex.Unlock()
 		return
 	}
-	b.in <- jti
+	in := b.in
+	b.mutex.Unlock()
+
+	defer func() {
+		recover()
+	}()
+	in <- jti
 }
 
 func (b *EventPollBuffer) IsClosed() bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
 	return b.closed
 }
 
 func (b *EventPollBuffer) Close() {
-	if b.IsClosed() {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	if b.closed {
 		return
 	}
 	b.closed = true
 	close(b.in)
-	b.in = nil
+	b.triggerCondition.Broadcast()
 }
 
 func (b *EventPollBuffer) waitForEventTrigger(result chan string) {
@@ -129,19 +143,21 @@ func (b *EventPollBuffer) waitForEventWithTimeout(waitTime time.Duration) {
 
 // GetEvents returns all events in the buffer and resets the buffer to empty
 func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, bool) {
+	b.mutex.Lock()
 	if len(b.events) == 0 {
 		if params.ReturnImmediately == false {
 			timeout := time.Duration(params.TimeoutSecs) * time.Second
 			if timeout == 0 {
 				timeout = 900 * time.Second
 			}
+			b.mutex.Unlock()
 			b.waitForEventWithTimeout(timeout)
+			b.mutex.Lock()
 		}
 	}
 	more := false
 	var values []string
 	defer b.mutex.Unlock()
-	b.mutex.Lock()
 	eventsAvailable := len(b.events)
 	if eventsAvailable == 0 {
 		return nil, false
@@ -176,7 +192,7 @@ type EventPushBuffer struct {
 func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 
 	buffer := &EventPushBuffer{
-		in:          make(chan interface{}),
+		in:          make(chan interface{}, 100),
 		Out:         make(chan interface{}),
 		events:      []interface{}{},
 		eventsMutex: sync.Mutex{},
@@ -187,66 +203,86 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 	}
 
 	go func() {
-		outCh := func() chan interface{} {
-			if len(buffer.events) == 0 {
-				return nil
+		inCh := buffer.in
+		for {
+			buffer.eventsMutex.Lock()
+			var outCh chan interface{}
+			var next interface{}
+			if len(buffer.events) > 0 {
+				outCh = buffer.Out
+				next = buffer.events[0]
 			}
-			return buffer.Out
-		}
-		nextEvent := func() interface{} {
-			if len(buffer.events) == 0 {
-				return nil
+
+			if inCh == nil && outCh == nil {
+				buffer.eventsMutex.Unlock()
+				break
 			}
-			return buffer.events[0]
-		}
-		for len(buffer.events) > 0 || buffer.in != nil {
+			buffer.eventsMutex.Unlock()
+
 			select {
-			case v, ok := <-buffer.in:
-				// log.Printf("DEBUG: incoming JTI: %s", v)
+			case v, ok := <-inCh:
+				buffer.eventsMutex.Lock()
 				if !ok {
-					buffer.in = nil
+					inCh = nil
 				} else {
 					buffer.events = append(buffer.events, v)
 				}
-			case outCh() <- nextEvent():
+				buffer.eventsMutex.Unlock()
+			case outCh <- next:
+				buffer.eventsMutex.Lock()
 				buffer.events = buffer.events[1:]
+				buffer.eventsMutex.Unlock()
 			}
 		}
 		close(buffer.Out)
-		log.Println("Stream buffer closing")
+		bLog.Info("Stream buffer closing")
+		buffer.eventsMutex.Lock()
 		if len(buffer.events) > 0 {
-			log.Printf("WARNING: The following JTIs were not read:\n%v", buffer.events)
+			bLog.Warn("The following JTIs were not read", "jtis", buffer.events)
 		}
+		buffer.eventsMutex.Unlock()
 	}()
 	return buffer
 }
 
-func (b *EventPushBuffer) Cnt() float64 {
-	return float64(len(b.events))
+func (b *EventPushBuffer) Cnt() int {
+	b.eventsMutex.Lock()
+	defer b.eventsMutex.Unlock()
+	return len(b.events)
 }
 
 func (b *EventPushBuffer) addEvents(jtis []string) {
-	defer b.eventsMutex.Unlock()
 	b.eventsMutex.Lock()
+	defer b.eventsMutex.Unlock()
 	for _, jti := range jtis {
 		b.events = append(b.events, jti)
 	}
 }
 
 func (b *EventPushBuffer) SubmitEvent(jti string) {
-	// To avoid a panic just return. This will be recovered on restart
-	if b.IsClosed() {
+	b.eventsMutex.Lock()
+	in := b.in
+	b.eventsMutex.Unlock()
+
+	if in == nil {
 		return
 	}
-	b.in <- jti
+	defer func() {
+		recover()
+	}()
+	in <- jti
 }
 
 func (b *EventPushBuffer) IsClosed() bool {
+	b.eventsMutex.Lock()
+	defer b.eventsMutex.Unlock()
 	return b.in == nil
 }
 
 func (b *EventPushBuffer) Close() {
-	if b.IsClosed() {
+	b.eventsMutex.Lock()
+	defer b.eventsMutex.Unlock()
+	if b.in == nil {
 		return
 	}
 	close(b.in)

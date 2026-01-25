@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	mathRand "math/rand"
 	"net/http"
 	"os"
@@ -16,11 +15,12 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
-var authLog = log.New(os.Stdout, "AUTH:   ", log.Ldate|log.Ltime)
+var authLog = logger.Sub("AUTH")
 
 type AuthContext struct {
 	StreamId  string
@@ -78,31 +78,31 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 		var resp *http.Response
 		resp, err = http.Get(srv)
 		if err != nil {
-			authLog.Printf("Failed to fetch OIDC discovery from %s: %v", srv, err)
+			authLog.Error("Failed to fetch OIDC discovery", "srv", srv, "error", err)
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
-			authLog.Printf("Failed to read OIDC discovery from %s: %v", srv, err)
+			authLog.Error("Failed to read OIDC discovery", "srv", srv, "error", err)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			authLog.Printf("OIDC discovery HTTP %d from %s: %s", resp.StatusCode, srv, string(body))
+			authLog.Error("OIDC discovery error", "status", resp.StatusCode, "srv", srv, "body", string(body))
 			continue
 		}
 		var disc oidcDiscovery
 		if err := json.Unmarshal(body, &disc); err != nil {
-			authLog.Printf("Failed to parse OIDC discovery from %s: %v", srv, err)
+			authLog.Error("Failed to parse OIDC discovery", "srv", srv, "error", err)
 			continue
 		}
 		if disc.JWKSURI == "" {
-			authLog.Printf("OIDC discovery missing jwks_uri at %s", srv)
+			authLog.Error("OIDC discovery missing jwks_uri", "srv", srv)
 			continue
 		}
 		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{})
 		if err != nil {
-			authLog.Printf("Failed to load JWKS from %s: %v", disc.JWKSURI, err)
+			authLog.Error("Failed to load JWKS", "jwks_uri", disc.JWKSURI, "error", err)
 			continue
 		}
 		jwksList = append(jwksList, jwks)
@@ -240,11 +240,11 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 			return authCtx, http.StatusOK
 		}
 		if err != nil {
-			authLog.Printf("Authorization invalid: [%v]", err)
+			authLog.Error("Authorization invalid", "error", err)
 		}
 		return nil, http.StatusUnauthorized
 	}
-	authLog.Printf("Received invalid authorization: %s\n", parts[0])
+	authLog.Error("Received invalid authorization", "authHeader", parts[0])
 	return nil, http.StatusUnauthorized
 
 }
@@ -299,7 +299,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 	for _, jwks := range a.OAuthPubKeys {
 		token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc)
 		if err != nil {
-			authLog.Printf("Not validated with key %v: %v\n", jwks.KIDs(), err)
+			authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
 			continue
 		}
 		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
@@ -357,13 +357,13 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*E
 	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, a.PublicKey.Keyfunc)
 	if err != nil {
 		if verbose {
-			authLog.Printf("Error validating token: %s", err.Error())
+			authLog.Error("Error validating token", "error", err)
 		}
 		valid = false
 	}
 	if token != nil && (token.Header["typ"] != "jwt" && token.Header["typ"] != "JWT") {
 		if verbose {
-			authLog.Printf("token is not an authorization token (JWT)")
+			authLog.Error("token is not an authorization token (JWT)")
 		}
 		return nil, errors.New("token type is not an authorization token (`jwt`)")
 	}
@@ -504,7 +504,7 @@ func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*OidcClaims, error) 
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, a.PublicKey.Keyfunc)
 	if err != nil {
-		authLog.Printf("Error validating OIDC token: %s", err.Error())
+		authLog.Error("Error validating OIDC token", "error", err)
 		valid = false
 	}
 
