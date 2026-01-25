@@ -72,8 +72,9 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	issuer := vars["issuer"]
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	key := sa.Provider.GetIssuerJwksForReceiver(issuer)
-	if key != nil {
+	// Check if issuer key already exists
+	existingKey, _ := sa.Provider.GetIssuerPrivateKey(issuer)
+	if existingKey != nil {
 		// Do they want to rotate?
 		queryParams := r.URL.Query()
 		_, rotate := queryParams["rotate"]

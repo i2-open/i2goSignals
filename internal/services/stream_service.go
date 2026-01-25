@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -300,6 +301,57 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 	return res
 }
 
+// isPermanentJwksError determines if a JWKS loading error is permanent (should disable stream)
+// or temporary (should allow retries). Permanent errors include:
+// - Invalid URL format/syntax
+// - Unsupported protocol scheme
+// - Invalid response format (not valid JWKS)
+func isPermanentJwksError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	// Check for URL parsing/format errors
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// Unsupported protocol scheme is permanent
+		if strings.Contains(urlErr.Err.Error(), "unsupported protocol scheme") {
+			return true
+		}
+		// Check if the underlying error is permanent
+		return isPermanentJwksError(urlErr.Err)
+	}
+
+	// Invalid URL format errors
+	if strings.Contains(errStr, "invalid URL") ||
+		strings.Contains(errStr, "unsupported protocol scheme") ||
+		strings.Contains(errStr, "parse") && strings.Contains(errStr, "URL") {
+		return true
+	}
+
+	// Invalid JWKS response format
+	if strings.Contains(errStr, "failed to decode") ||
+		strings.Contains(errStr, "invalid character") ||
+		strings.Contains(errStr, "unexpected end of JSON") ||
+		strings.Contains(errStr, "cannot unmarshal") {
+		return true
+	}
+
+	// HTTP 4xx errors (except 429 Too Many Requests) are permanent
+	if strings.Contains(errStr, "400 Bad Request") ||
+		strings.Contains(errStr, "401 Unauthorized") ||
+		strings.Contains(errStr, "403 Forbidden") ||
+		strings.Contains(errStr, "404 Not Found") ||
+		strings.Contains(errStr, "410 Gone") {
+		return true
+	}
+
+	// Everything else (connection errors, timeouts, 5xx errors) is temporary
+	return false
+}
+
 func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *model.StreamStateRecord) {
 	if streamState.Status == model.StreamStateEnabled {
 		if streamState.IssuerJWKSUrl == "" {
@@ -309,9 +361,20 @@ func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *mo
 		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
 		if err != nil {
 			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
-			ssLog.Error(msg)
-			streamState.Status = model.StreamStatePause
-			streamState.ErrorMsg = msg
+
+			// Determine if this is a permanent error that should disable the stream
+			if isPermanentJwksError(err) {
+				// Permanent error - disable the stream immediately
+				ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+				streamState.Status = model.StreamStateDisable
+				streamState.ErrorMsg = msg
+				// Update the stream in the database
+				_ = s.streamDAO.Update(ctx, streamState)
+			} else {
+				// Temporary error - log but don't change stream state
+				// Let the polling client handle retries with backoff
+				ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+			}
 			return
 		}
 		streamState.ValidateJwks = jwks

@@ -28,8 +28,9 @@ func TestPollBackoffRetry(t *testing.T) {
 	// Create a polling receiver stream with a bogus URL
 	streamID := "test-poll-backoff"
 	streamConfig := model.StreamConfiguration{
-		Id:  streamID,
-		Iss: "http://transmitter.example.com",
+		Id:            streamID,
+		Iss:           "transmitter.example.com",
+		IssuerJWKSUrl: "http://localhost:12345/.well-known/jwks.json", // Valid URL format but will cause connection error (temporary)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -75,4 +76,45 @@ func TestPollBackoffRetry(t *testing.T) {
 	finalState, _ := instance.provider.GetStreamState(streamID)
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
+}
+
+func TestPollReceiverPermanentJwksError(t *testing.T) {
+	// Create server with mock provider
+	instance, err := createServer(t, "test_jwks_error", true)
+	assert.NoError(t, err)
+	defer instance.app.Shutdown()
+
+	// Create a polling receiver stream with an invalid JWKS URL (permanent error)
+	streamID := "test-jwks-permanent-error"
+	streamConfig := model.StreamConfiguration{
+		Id:  streamID,
+		Iss: "http://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			PollReceiveMethod: &model.PollReceiveMethod{
+				Method:      model.ReceivePoll,
+				EndpointUrl: "http://localhost:8080/poll",
+				PollConfig: &model.PollParameters{
+					ReturnImmediately: true,
+				},
+			},
+		},
+	}
+
+	// Add stream to provider
+	createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	assert.NoError(t, err)
+	streamID = createdConfig.Id
+
+	// Give it a moment to process
+	time.Sleep(100 * time.Millisecond)
+
+	// Get the stream state - it should be disabled due to permanent JWKS error
+	streamState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
+	assert.NotNil(t, streamState)
+
+	// Stream should be disabled immediately due to permanent error
+	assert.Equal(t, model.StreamStateDisable, streamState.Status)
+	assert.Contains(t, streamState.ErrorMsg, "Error retrieving issuer JWKS public key")
+	assert.Contains(t, streamState.ErrorMsg, "unsupported protocol scheme")
 }

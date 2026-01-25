@@ -2,24 +2,20 @@ package mock_provider
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"regexp"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/dao/memory"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -34,58 +30,53 @@ const CDefTokenIssuer = "DEFAULT"
 
 var pLog = logger.Sub("MOCK_MONGO")
 
-// Global shared storage for all mock instances
-var (
-	sharedStorageMu sync.RWMutex
-	sharedStorage   = make(map[string]*MockMongoProvider)
-)
-
-// MockMongoProvider provides an in-memory implementation of the DbProviderInterface
+// MockMongoProvider provides an in-memory implementation using DAOs and services
 type MockMongoProvider struct {
 	DbUrl  string
 	DbName string
 	dbInit bool
-	mu     sync.RWMutex
 
-	// In-memory storage
-	streams         map[string]*model.StreamStateRecord
-	keys            map[string][]*JwkKeyRec // iss -> list of keys
-	events          map[string]*model.EventRecord
-	pendingEvents   map[string][]DeliverableEvent // streamId -> events
-	deliveredEvents map[string][]DeliveredEvent   // streamId -> events
-	clients         map[string]*model.SsfClient
+	// DAOs
+	streamDAO interfaces.StreamDAO
+	eventDAO  interfaces.EventDAO
+	keyDAO    interfaces.KeyDAO
+	clientDAO interfaces.ClientDAO
 
-	DefaultIssuer   string
-	TokenIssuer     string
-	tokenKey        *rsa.PrivateKey
-	tokenPubKey     *keyfunc.JWKS
-	receiverStreams map[string]*model.StreamStateRecord
+	// Services
+	keyService    *services.KeyService
+	streamService *services.StreamService
+	eventService  *services.EventService
+	clientService *services.ClientService
+
+	DefaultIssuer string
+	TokenIssuer   string
 }
 
 func (m *MockMongoProvider) Name() string {
 	return m.DbName
 }
 
-func (m *MockMongoProvider) initialize(dbName string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+func (m *MockMongoProvider) initialize() {
 	pLog.Info("Initializing new in-memory mock database", "dbName", m.DbName)
 
-	m.streams = make(map[string]*model.StreamStateRecord)
-	m.keys = make(map[string][]*JwkKeyRec)
-	m.events = make(map[string]*model.EventRecord)
-	m.pendingEvents = make(map[string][]DeliverableEvent)
-	m.deliveredEvents = make(map[string][]DeliveredEvent)
-	m.clients = make(map[string]*model.SsfClient)
+	// Initialize DAOs
+	m.streamDAO = memory.NewStreamDAO()
+	m.eventDAO = memory.NewEventDAO()
+	m.keyDAO = memory.NewKeyDAO()
+	m.clientDAO = memory.NewClientDAO()
 
-	m.tokenKey = m.createIssuerJwkKeyPairUnlocked(m.DefaultIssuer, "")
+	// Initialize Services
+	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer)
+	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
+	m.eventService = services.NewEventService(m.eventDAO)
+	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 
-	// If tokenIssuer and event issuer are not the same, create the new key pair
-	if m.DefaultIssuer != m.TokenIssuer {
-		m.tokenKey = m.createIssuerJwkKeyPairUnlocked(m.TokenIssuer, "")
+	// Initialize token keys
+	ctx := context.Background()
+	err := m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
+	if err != nil {
+		pLog.Error("Error initializing token key", "error", err)
 	}
-	m.tokenPubKey = m.getInternalPublicTransmitterJWKSUnlocked(m.TokenIssuer)
 
 	m.dbInit = true
 }
@@ -96,29 +87,30 @@ func (m *MockMongoProvider) Check() error {
 }
 
 func (m *MockMongoProvider) ResetDb(initialize bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.streams = make(map[string]*model.StreamStateRecord)
-	m.keys = make(map[string][]*JwkKeyRec)
-	m.events = make(map[string]*model.EventRecord)
-	m.pendingEvents = make(map[string][]DeliverableEvent)
-	m.deliveredEvents = make(map[string][]DeliveredEvent)
-	m.clients = make(map[string]*model.SsfClient)
+	// Create new DAOs to reset all data
+	m.streamDAO = memory.NewStreamDAO()
+	m.eventDAO = memory.NewEventDAO()
+	m.keyDAO = memory.NewKeyDAO()
+	m.clientDAO = memory.NewClientDAO()
 
 	if initialize {
-		m.tokenKey = m.createIssuerJwkKeyPairUnlocked(m.DefaultIssuer, "")
-		if m.DefaultIssuer != m.TokenIssuer {
-			m.tokenKey = m.createIssuerJwkKeyPairUnlocked(m.TokenIssuer, "")
+		// Re-initialize services with new DAOs
+		m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer)
+		m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
+		m.eventService = services.NewEventService(m.eventDAO)
+		m.clientService = services.NewClientService(m.clientDAO, m.keyService)
+
+		ctx := context.Background()
+		err := m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
+		if err != nil {
+			pLog.Error("Error reinitializing token key", "error", err)
 		}
-		m.tokenPubKey = m.getInternalPublicTransmitterJWKSUnlocked(m.TokenIssuer)
 	}
 
 	return nil
 }
 
 // Open creates and initializes a new MockMongoProvider
-// Multiple calls with the same mongoUrl will share the same underlying storage
 func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 	// Check if this is a mock URL
 	if !strings.HasPrefix(mongoUrl, "mockdb:") && mongoUrl != "" {
@@ -149,37 +141,6 @@ func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 		pLog.Info("Defaulting Mock Mongo Database URL", "url", mongoUrl)
 	}
 
-	// Use URL as key for shared storage (ignore dbName for sharing)
-	storageKey := mongoUrl
-
-	sharedStorageMu.Lock()
-	defer sharedStorageMu.Unlock()
-
-	// Check if shared instance already exists
-	if existing, ok := sharedStorage[storageKey]; ok {
-		pLog.Info("Reusing existing mock database", "url", mongoUrl, "dbName", dbName)
-		// Return a new wrapper with the specified dbName but sharing the same storage
-		wrapper := &MockMongoProvider{
-			DbName: dbName,
-			DbUrl:  existing.DbUrl,
-			dbInit: existing.dbInit,
-			// mu:              existing.mu, // Don't copy the lock
-			streams:         existing.streams,
-			keys:            existing.keys,
-			events:          existing.events,
-			pendingEvents:   existing.pendingEvents,
-			deliveredEvents: existing.deliveredEvents,
-			clients:         existing.clients,
-			DefaultIssuer:   existing.DefaultIssuer,
-			TokenIssuer:     existing.TokenIssuer,
-			tokenKey:        existing.tokenKey,
-			tokenPubKey:     existing.tokenPubKey,
-			receiverStreams: existing.receiverStreams,
-		}
-		return wrapper, nil
-	}
-
-	// Create new shared instance
 	m := &MockMongoProvider{
 		DbName:        dbName,
 		DbUrl:         mongoUrl,
@@ -192,12 +153,8 @@ func Open(mongoUrl string, dbName string) (*MockMongoProvider, error) {
 		return nil, err
 	}
 
-	m.initialize(dbName)
-	m.receiverStreams = m.LoadReceiverStreams()
-
-	// Store in shared storage
-	sharedStorage[storageKey] = m
-	pLog.Info("Created new shared mock database", "url", mongoUrl, "dbName", dbName)
+	m.initialize()
+	pLog.Info("Created new mock database", "dbName", dbName)
 
 	return m, nil
 }
@@ -207,814 +164,125 @@ func (m *MockMongoProvider) Close() error {
 	return nil
 }
 
-func (m *MockMongoProvider) getStates() []model.StreamStateRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if !m.dbInit {
-		pLog.Error("Mock DB Provider not initialized while attempting to retrieve Stream Configs")
-	}
-
-	var recs []model.StreamStateRecord
-	for _, state := range m.streams {
-		recs = append(recs, *state)
-	}
-	return recs
-}
-
-func (m *MockMongoProvider) GetStateMap() map[string]model.StreamStateRecord {
-	states := m.getStates()
-
-	stateMap := make(map[string]model.StreamStateRecord, len(states))
-	for _, state := range states {
-		stateMap[state.StreamConfiguration.Id] = state
-	}
-	return stateMap
-}
-
-// LoadReceiverStreams looks up the inbound streams and loads the issuers JWKS for validation
-func (m *MockMongoProvider) LoadReceiverStreams() map[string]*model.StreamStateRecord {
-	recs := m.getStates()
-
-	res := map[string]*model.StreamStateRecord{}
-	for _, streamState := range recs {
-		if streamState.IsReceiver() {
-			res[streamState.StreamConfiguration.Id] = &streamState
-			m.loadJwksForReceiver(&streamState)
-		}
-	}
-	return res
-}
-
-func (m *MockMongoProvider) loadJwksForReceiver(streamState *model.StreamStateRecord) {
-	if streamState.Status == model.StreamStateEnabled {
-		keyRec := m.GetReceiverKey(streamState.StreamConfiguration.Id)
-		if keyRec != nil {
-			jwksUri := keyRec.ReceiverJwksUrl
-			_, err := keyfunc.Get(jwksUri, keyfunc.Options{})
-			if err == nil {
-				m.mu.Lock()
-				m.receiverStreams[streamState.StreamConfiguration.Id] = streamState
-				m.mu.Unlock()
-			}
-		}
-	}
-}
-
-func (m *MockMongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Check if it's a known transmitter issuer first, as it's common for OOB tasks
-	if _, ok := m.keys[sid]; ok {
-		return m.getInternalPublicTransmitterJWKSUnlocked(sid)
-	}
-
-	if streamState, ok := m.receiverStreams[sid]; ok {
-		if streamState.Status == model.StreamStateEnabled {
-			keyRec := m.GetReceiverKey(sid)
-			if keyRec != nil {
-				jwksUri := keyRec.ReceiverJwksUrl
-				jwks, err := keyfunc.Get(jwksUri, keyfunc.Options{})
-				if err == nil {
-					return jwks
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (m *MockMongoProvider) ListStreams() []model.StreamConfiguration {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var streams []model.StreamConfiguration
-	for _, state := range m.streams {
-		streams = append(streams, state.StreamConfiguration)
-	}
-	return streams
-}
-
-func (m *MockMongoProvider) DeleteStream(streamId string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.streams[streamId]; !exists {
-		return errors.New("not Found")
-	}
-	delete(m.streams, streamId)
-	return nil
-}
-
-// createIssuerJwkKeyPairUnlocked generates and stores a key pair without acquiring a lock.
-// This is used when the caller already holds the lock (e.g., from initialize or ResetDb).
-func (m *MockMongoProvider) createIssuerJwkKeyPairUnlocked(issuer string, projectId string) *rsa.PrivateKey {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		panic(err)
-	}
-
-	err = m.storeJwkKeyPairUnlocked(issuer, issuer, privateKey, projectId)
-	if err == nil {
-		return privateKey
-	}
-
-	pLog.Error("Error generating key pair", "error", err)
-	return nil
-}
-
-func (m *MockMongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.createIssuerJwkKeyPairUnlocked(issuer, projectId)
-}
-
-func (m *MockMongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, "", err
-	}
-
-	kid := fmt.Sprintf("%s-%s", issuer, primitive.NewObjectID().Hex())
-	err = m.storeJwkKeyPairUnlocked(issuer, kid, privateKey, projectId)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return privateKey, kid, nil
-}
-
-// storeJwkKeyPairUnlocked is an internal helper that stores a key pair without acquiring a lock.
-// This is used when the caller already holds the lock (e.g., from initialize or ResetDb).
-func (m *MockMongoProvider) storeJwkKeyPairUnlocked(issuer string, kid string, privateKey *rsa.PrivateKey, projectId string) error {
-	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
-	publicKey := privateKey.PublicKey
-	pubKeyBytes := x509.MarshalPKCS1PublicKey(&publicKey)
-
-	keyPairRec := JwkKeyRec{
-		Id:          primitive.NewObjectID(),
-		Iss:         issuer,
-		Kid:         kid,
-		ProjectId:   projectId,
-		KeyBytes:    privateKeyBytes,
-		PubKeyBytes: pubKeyBytes,
-	}
-
-	m.keys[issuer] = append(m.keys[issuer], &keyPairRec)
-	return nil
-}
-
-func (m *MockMongoProvider) storeJwkKeyPair(issuer string, kid string, privateKey *rsa.PrivateKey, projectId string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.storeJwkKeyPairUnlocked(issuer, kid, privateKey, projectId)
-}
-
-func (m *MockMongoProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var privateKeyBytes []byte
-	if privateKey != nil {
-		privateKeyBytes = x509.MarshalPKCS1PrivateKey(privateKey)
-		if publicKey == nil {
-			publicKey = &privateKey.PublicKey
-		}
-	}
-
-	var pubKeyBytes []byte
-	if publicKey != nil {
-		pubKeyBytes = x509.MarshalPKCS1PublicKey(publicKey)
-	}
-
-	if kid == "" {
-		kid = issuer
-	}
-
-	keyPairRec := JwkKeyRec{
-		Id:          primitive.NewObjectID(),
-		Iss:         issuer,
-		Kid:         kid,
-		ProjectId:   projectId,
-		KeyBytes:    privateKeyBytes,
-		PubKeyBytes: pubKeyBytes,
-	}
-
-	m.keys[issuer] = append(m.keys[issuer], &keyPairRec)
-	return nil
-}
-
-func (m *MockMongoProvider) StoreReceiverKey(streamId string, audience string, jwksUri string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	keyPairRec := JwkKeyRec{
-		Id:              primitive.NewObjectID(),
-		Aud:             audience,
-		StreamId:        streamId,
-		ReceiverJwksUrl: jwksUri,
-	}
-
-	key := "receiver_" + streamId
-	m.keys[key] = append(m.keys[key], &keyPairRec)
-	return nil
-}
-
-func (m *MockMongoProvider) GetReceiverKey(streamId string) *JwkKeyRec {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if recs, ok := m.keys["receiver_"+streamId]; ok && len(recs) > 0 {
-		return recs[len(recs)-1]
-	}
-	return nil
-}
-
-// getInternalPublicTransmitterJWKSUnlocked retrieves public transmitter JWKS without acquiring a lock.
-// This is used when the caller already holds the lock (e.g., from initialize or ResetDb).
-func (m *MockMongoProvider) getInternalPublicTransmitterJWKSUnlocked(issuer string) *keyfunc.JWKS {
-	recs, ok := m.keys[issuer]
-	if !ok {
-		pLog.Error("Key not found for issuer", "issuer", issuer)
-		return nil
-	}
-
-	givenKeys := make(map[string]keyfunc.GivenKey)
-	for _, rec := range recs {
-		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
-		if err != nil {
-			pLog.Error("Error parsing public key", "error", err)
-			continue
-		}
-
-		kid := rec.Kid
-		if kid == "" {
-			kid = rec.Iss
-		}
-
-		givenKey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
-			Algorithm: "RS256",
-		})
-		givenKeys[kid] = givenKey
-	}
-	return keyfunc.NewGiven(givenKeys)
-}
-
-func (m *MockMongoProvider) GetInternalPublicTransmitterJWKS(issuer string) *keyfunc.JWKS {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.getInternalPublicTransmitterJWKSUnlocked(issuer)
-}
-
-func (m *MockMongoProvider) GetIssuerKeyNames() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	issuers := make([]string, 0, len(m.keys))
-	for iss := range m.keys {
-		if !strings.HasPrefix(iss, "receiver_") {
-			issuers = append(issuers, iss)
-		}
-	}
-
-	return issuers
-}
+// Provider Interface Implementation - delegating to services
 
 func (m *MockMongoProvider) DeleteIssuer(issuer string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, ok := m.keys[issuer]; !ok {
-		return errors.New("issuer not found")
-	}
-
-	delete(m.keys, issuer)
-	return nil
+	return m.keyService.DeleteIssuer(context.Background(), issuer)
 }
 
 func (m *MockMongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	recs, ok := m.keys[issuer]
-	if !ok {
-		return nil
-	}
-
-	jwkstore := jwkset.NewMemoryStorage()
-
-	for _, rec := range recs {
-		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
-		if err != nil {
-			pLog.Error("Error parsing public key", "error", err)
-			continue
-		}
-
-		kid := rec.Kid
-		if kid == "" {
-			kid = rec.Iss
-		}
-
-		metadata := jwkset.JWKMetadataOptions{
-			KID: kid,
-		}
-		jwkOptions := jwkset.JWKOptions{
-			Metadata: metadata,
-		}
-
-		jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
-		if err != nil {
-			pLog.Error("Error parsing rsa key into jwk", "error", err)
-			continue
-		}
-		err = jwkstore.KeyWrite(context.Background(), jwkSet)
-		if err != nil {
-			pLog.Error("Error adding key to JWKS", "kid", kid, "error", err)
-		}
-	}
-
-	response, err := jwkstore.JSONPublic(context.Background())
-	if err != nil {
-		pLog.Error("Error creating JWKS response", "error", err)
-	}
-
-	return &response
+	return m.keyService.GetPublicTransmitterJWKS(context.Background(), issuer)
 }
 
 func (m *MockMongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error) {
-	key, _, err := m.GetIssuerPrivateKeyWithKid(issuer)
-	return key, err
-}
-
-func (m *MockMongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	recs, ok := m.keys[issuer]
-	if !ok || len(recs) == 0 {
-		return nil, "", fmt.Errorf("issuer key not found: %s", issuer)
-	}
-
-	// Newest key is the last one in the slice
-	rec := recs[len(recs)-1]
-
-	privateKey, err := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
-	if err != nil {
-		return nil, "", err
-	}
-
-	kid := rec.Kid
-	if kid == "" {
-		kid = rec.Iss
-	}
-
-	return privateKey, kid, nil
-}
-
-func (m *MockMongoProvider) RegisterClient(client model.SsfClient, projectId string) *model.RegisterResponse {
-	m.mu.Lock()
-	client.Id = primitive.NewObjectID()
-	clientId := client.Id.Hex()
-	m.clients[clientId] = &client
-	m.mu.Unlock()
-
-	token, err := m.GetAuthIssuer().IssueStreamClientToken(client, projectId, true)
-	if err != nil {
-		pLog.Error("Error issuing stream admin token", "error", err)
-		return nil
-	}
-
-	return &model.RegisterResponse{Token: token}
-}
-
-func (m *MockMongoProvider) insertStream(streamRec *model.StreamStateRecord) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.streams[streamRec.StreamConfiguration.Id] = streamRec
-	return nil
-}
-
-func (m *MockMongoProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
-	mid := primitive.NewObjectID()
-
-	var config model.StreamConfiguration
-
-	if request.Iss == "" {
-		config.Iss = m.DefaultIssuer
-	} else {
-		config.Iss = request.Iss
-	}
-
-	config.Id = mid.Hex()
-	config.Aud = request.Aud
-
-	config.EventsSupported = model.GetSupportedEvents()
-
-	if len(request.EventsRequested) > 0 {
-		config.EventsRequested = request.EventsRequested
-		config.EventsDelivered = calculatedDeliveredEvents(request.EventsRequested, config.EventsSupported)
-	}
-
-	delivery := request.Delivery
-	config.RouteMode = request.RouteMode
-	switch delivery.GetMethod() {
-	case model.DeliveryPush:
-		config.Delivery = request.Delivery
-		if request.RouteMode == "" {
-			config.RouteMode = model.RouteModePublish // default is publish
-		}
-
-	case model.DeliveryPoll, "DEFAULT":
-		authToken, _ := m.GetAuthIssuer().IssueStreamToken(mid.Hex(), projectId)
-		delivery := &model.OneOfStreamConfigurationDelivery{
-			PollTransmitMethod: &model.PollTransmitMethod{
-				Method:              model.DeliveryPoll,
-				EndpointUrl:         fmt.Sprintf("/poll/%s", mid.Hex()),
-				AuthorizationHeader: "Bearer " + authToken,
-			},
-		}
-		if request.RouteMode == "" {
-			config.RouteMode = model.RouteModePublish // default is publish
-		}
-		config.Delivery = delivery
-
-	case model.ReceivePush:
-		config.Delivery = request.Delivery
-		method := config.Delivery.PushReceiveMethod
-		if request.RouteMode == "" {
-			config.RouteMode = model.RouteModeImport
-		}
-		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
-		authToken, _ := m.GetAuthIssuer().IssueStreamToken(mid.Hex(), projectId)
-		method.AuthorizationHeader = "Bearer " + authToken
-
-	case model.ReceivePoll:
-		config.Delivery = request.Delivery
-		method := config.Delivery.PollReceiveMethod
-
-		if request.RouteMode == "" {
-			config.RouteMode = model.RouteModeImport
-		}
-
-		if method.PollConfig == nil {
-			// Set the default polling if missing
-			config.Delivery.PollReceiveMethod.PollConfig = &model.PollParameters{
-				MaxEvents:         1000,
-				ReturnImmediately: false,
-				TimeoutSecs:       10,
-			}
-		}
-	}
-
-	config.MinVerificationInterval = 15
-
-	// SCIM services will generally use the SCIM ID
-	config.Format = CSubjectFmt
-
-	if request.IssuerJWKSUrl != "" {
-		config.IssuerJWKSUrl = request.IssuerJWKSUrl
-	} else {
-		config.IssuerJWKSUrl = "/jwks/" + config.Iss
-	}
-
-	now := time.Now()
-
-	streamRec := model.StreamStateRecord{
-		Id:                  mid,
-		ProjectId:           projectId,
-		StreamConfiguration: config,
-		StartDate:           now,
-		Status:              model.StreamStateEnabled,
-		CreatedAt:           now,
-	}
-
-	m.mu.Lock()
-	m.streams[config.Id] = &streamRec
-	m.mu.Unlock()
-
-	return config, nil
-}
-
-func calculatedDeliveredEvents(requested []string, supported []string) []string {
-	var delivered []string
-	if len(requested) == 0 {
-		return []string{}
-	}
-	if requested[0] == "*" {
-		delivered = supported
-		return delivered
-	}
-
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
-		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			} // ignore bad input
-			if match {
-				delivered = append(delivered, eventUri)
-			}
-		}
-	}
-	return delivered
-}
-
-func (m *MockMongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state, exists := m.streams[streamId]
-	if !exists {
-		return nil, errors.New("stream not found")
-	}
-
-	if state.ProjectId != projectId {
-		return nil, errors.New("invalid project_id - invalid token")
-	}
-
-	config := &state.StreamConfiguration
-
-	// Update the configuration
-	if configReq.Delivery != nil {
-		config.Delivery = configReq.Delivery
-	}
-
-	if len(configReq.EventsRequested) > 0 {
-		config.EventsRequested = configReq.EventsRequested
-		// Use EventsSupported from the request if provided, otherwise use what's already in config
-		eventsSupported := configReq.EventsSupported
-		if len(eventsSupported) == 0 {
-			eventsSupported = config.EventsSupported
-		}
-		config.EventsDelivered = calculatedDeliveredEvents(configReq.EventsRequested, eventsSupported)
-	}
-
-	if configReq.Format != "" {
-		config.Format = configReq.Format
-	}
-
-	state.StreamConfiguration = *config
-	m.streams[streamId] = state
-	return config, nil
-}
-
-func (m *MockMongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if state, ok := m.streams[id]; ok {
-		copyState := *state
-		return &copyState, nil
-	}
-	return nil, errors.New("stream not found")
-}
-
-func (m *MockMongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if state, ok := m.streams[streamId]; ok {
-		state.Status = status
-		state.ErrorMsg = errorMsg
-	}
-}
-
-func (m *MockMongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	state, ok := m.streams[streamId]
-	if !ok {
-		return nil, errors.New("stream not found")
-	}
-
-	return &model.StreamStatus{
-		Status: state.Status,
-		Reason: state.ErrorMsg,
-	}, nil
-}
-
-func (m *MockMongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if state, ok := m.streams[id]; ok {
-		return &state.StreamConfiguration, nil
-	}
-	return nil, errors.New("stream not found")
-}
-
-func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) *model.EventRecord {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Extract event types from event.Events map keys
-	keys := make([]string, 0, len(event.Events))
-	for k := range event.Events {
-		keys = append(keys, k)
-	}
-
-	// Determine sort time from toe, iat, or current time
-	var sortTime time.Time
-	if event.TimeOfEvent != nil {
-		sortTime = event.TimeOfEvent.Time
-	} else if event.IssuedAt != nil {
-		sortTime = event.IssuedAt.Time
-	} else {
-		sortTime = time.Now()
-	}
-
-	eventRecord := &model.EventRecord{
-		Jti:      event.ID,
-		Event:    *event,
-		Original: raw,
-		Sid:      sid,
-		Types:    keys,
-		SortTime: sortTime,
-	}
-
-	m.events[event.ID] = eventRecord
-	return eventRecord
-}
-
-func (m *MockMongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, ok := m.events[jti]; ok {
-		streamIdHex := streamId.Hex()
-		deliverable := DeliverableEvent{
-			Jti:      jti,
-			StreamId: streamId,
-		}
-		m.pendingEvents[streamIdHex] = append(m.pendingEvents[streamIdHex], deliverable)
-	}
-}
-
-func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
-	// Mock implementation: for now, we don't need to do anything here
-	// since HandleEvent already updates local buffers in the router.
-	// In a real mock test, we might want to simulate external events.
-	<-ctx.Done()
-}
-
-func (m *MockMongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Clear pending events for this stream
-	delete(m.pendingEvents, streamId)
-
-	// Optionally filter and re-add events based on criteria
-	if resetDate != nil {
-		// Truncate resetDate to second precision to match JWT NumericDate behavior
-		// JWT timestamps only have second precision, so events will have truncated sortTime
-		resetDateTruncated := resetDate.Truncate(time.Second)
-
-		var sortedEvents []*model.EventRecord
-		for _, event := range m.events {
-			if isStreamEvent != nil && isStreamEvent(event) {
-				// Use >= comparison to match MongoDB's $gte behavior
-				// Compare with truncated resetDate since event.SortTime comes from JWT and has second precision
-				if event.SortTime.Equal(resetDateTruncated) || event.SortTime.After(resetDateTruncated) {
-					sortedEvents = append(sortedEvents, event)
-				}
-			}
-		}
-
-		// Sort events by JTI to ensure consistent ordering (KSUIDs are sortable by time)
-		sort.Slice(sortedEvents, func(i, j int) bool {
-			return sortedEvents[i].Jti < sortedEvents[j].Jti
-		})
-
-		for _, event := range sortedEvents {
-			streamObjId, _ := primitive.ObjectIDFromHex(streamId)
-			deliverable := DeliverableEvent{
-				Jti:      event.Jti,
-				StreamId: streamObjId,
-			}
-			m.pendingEvents[streamId] = append(m.pendingEvents[streamId], deliverable)
-		}
-	}
-
-	return nil
-}
-
-func (m *MockMongoProvider) AckEvent(jtiString string, streamId string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Remove from pending
-	if pending, ok := m.pendingEvents[streamId]; ok {
-		var newPending []DeliverableEvent
-		var acknowledged *DeliverableEvent
-		for _, event := range pending {
-			if event.Jti == jtiString {
-				acknowledged = &event
-			} else {
-				newPending = append(newPending, event)
-			}
-		}
-		m.pendingEvents[streamId] = newPending
-
-		// Add to delivered
-		if acknowledged != nil {
-			delivered := DeliveredEvent{
-				DeliverableEvent: *acknowledged,
-				AckDate:          time.Now(),
-			}
-			m.deliveredEvents[streamId] = append(m.deliveredEvents[streamId], delivered)
-		}
-	}
-}
-
-func (m *MockMongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	pending, ok := m.pendingEvents[streamId]
-	if !ok || len(pending) == 0 {
-		return []string{}, false
-	}
-
-	maxEvents := params.MaxEvents
-	if maxEvents <= 0 {
-		maxEvents = 10
-	}
-
-	var jtis []string
-	for i, event := range pending {
-		if int32(i) >= maxEvents {
-			break
-		}
-		jtis = append(jtis, event.Jti)
-	}
-
-	moreAvailable := int32(len(pending)) > maxEvents
-	return jtis, moreAvailable
-}
-
-func (m *MockMongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if eventRec, ok := m.events[jti]; ok {
-		copyEvent := eventRec.Event
-		return &copyEvent
-	}
-	return nil
-}
-
-func (m *MockMongoProvider) GetEventRecord(jti string) *model.EventRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if eventRec, ok := m.events[jti]; ok {
-		copyRec := *eventRec
-		return &copyRec
-	}
-	return nil
-}
-
-func (m *MockMongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var events []*goSet.SecurityEventToken
-	for _, jti := range jtis {
-		if eventRec, ok := m.events[jti]; ok {
-			copyEvent := eventRec.Event
-			events = append(events, &copyEvent)
-		}
-	}
-	return events
-}
-
-func (m *MockMongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
-	privateKey, err := m.GetIssuerPrivateKey(m.TokenIssuer)
-	if err != nil {
-		pLog.Error("Error getting token private key", "error", err)
-		return nil
-	}
-
-	issuer := authUtil.AuthIssuer{
-		TokenIssuer: m.TokenIssuer,
-		PrivateKey:  privateKey,
-		PublicKey:   m.tokenPubKey,
-	}
-	return &issuer
+	return m.keyService.GetIssuerPrivateKey(context.Background(), issuer)
 }
 
 func (m *MockMongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
-	return m.tokenPubKey
+	return m.keyService.GetAuthValidatorPubKey()
+}
+
+func (m *MockMongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
+	return m.keyService.GetAuthIssuer()
+}
+
+func (m *MockMongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
+	return m.streamService.GetIssuerJwksForReceiver(context.Background(), sid)
+}
+
+func (m *MockMongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
+	return m.keyService.CreateIssuerJwkKeyPair(context.Background(), issuer, projectId)
+}
+
+func (m *MockMongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
+	return m.keyService.RotateIssuerKey(context.Background(), issuer, projectId)
+}
+
+func (m *MockMongoProvider) GetIssuerKeyNames() []string {
+	names, _ := m.keyService.GetIssuerKeyNames(context.Background())
+	return names
+}
+
+func (m *MockMongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
+	return m.keyService.GetIssuerPrivateKeyWithKid(context.Background(), issuer)
+}
+
+func (m *MockMongoProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+	return m.keyService.AddIssuerKey(context.Background(), issuer, kid, privateKey, publicKey, projectId)
+}
+
+func (m *MockMongoProvider) RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse {
+	return m.clientService.RegisterClient(context.Background(), request, projectId)
+}
+
+func (m *MockMongoProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
+	return m.streamService.CreateStream(context.Background(), request, projectId)
+}
+
+func (m *MockMongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+	return m.streamService.UpdateStream(context.Background(), streamId, projectId, configReq)
+}
+
+func (m *MockMongoProvider) DeleteStream(streamId string) error {
+	return m.streamService.DeleteStream(context.Background(), streamId)
+}
+
+func (m *MockMongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
+	return m.streamService.GetStream(context.Background(), id)
+}
+
+func (m *MockMongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
+	return m.streamService.GetStreamState(context.Background(), id)
+}
+
+func (m *MockMongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
+	m.streamService.UpdateStreamStatus(context.Background(), streamId, status, errorMsg)
+}
+
+func (m *MockMongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
+	return m.streamService.GetStatus(context.Background(), streamId)
+}
+
+func (m *MockMongoProvider) ListStreams() []model.StreamConfiguration {
+	return m.streamService.ListStreams(context.Background())
+}
+
+func (m *MockMongoProvider) GetStateMap() map[string]model.StreamStateRecord {
+	return m.streamService.GetStateMap(context.Background())
+}
+
+func (m *MockMongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
+	return m.eventService.GetEventIds(context.Background(), streamId, params)
+}
+
+func (m *MockMongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
+	return m.eventService.GetEvent(context.Background(), jti)
+}
+
+func (m *MockMongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
+	return m.eventService.GetEvents(context.Background(), jtis)
+}
+
+func (m *MockMongoProvider) GetEventRecord(jti string) *model.EventRecord {
+	return m.eventService.GetEventRecord(context.Background(), jti)
+}
+
+func (m *MockMongoProvider) AckEvent(jtiString string, streamId string) {
+	m.eventService.AckEvent(context.Background(), jtiString, streamId)
+}
+
+func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord) {
+	return m.eventService.AddEvent(context.Background(), event, sid, raw)
+}
+
+func (m *MockMongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID) {
+	m.eventService.AddEventToStream(context.Background(), jti, streamId)
+}
+
+func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
+	m.eventService.WatchPending(ctx, callback)
+}
+
+func (m *MockMongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+	return m.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }

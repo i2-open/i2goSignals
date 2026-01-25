@@ -7,8 +7,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
-func TestMockProviderV2Open(t *testing.T) {
-	provider, err := OpenV2("mockdb:", "test_db_v2")
+func TestMockProviderDAOOpen(t *testing.T) {
+	provider, err := Open("mockdb:", "test_db_v2")
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
@@ -24,8 +24,8 @@ func TestMockProviderV2Open(t *testing.T) {
 	}
 }
 
-func TestMockProviderV2StreamOperations(t *testing.T) {
-	provider, err := OpenV2("mockdb:", "test_db_v2_stream")
+func TestMockProviderDAOStreamOperations(t *testing.T) {
+	provider, err := Open("mockdb:", "test_db_v2_stream")
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
@@ -79,8 +79,8 @@ func TestMockProviderV2StreamOperations(t *testing.T) {
 	}
 }
 
-func TestMockProviderV2EventOperations(t *testing.T) {
-	provider, err := OpenV2("mockdb:", "test_db_v2_events")
+func TestMockProviderDAOEventOperations(t *testing.T) {
+	provider, err := Open("mockdb:", "test_db_v2_events")
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
@@ -107,8 +107,8 @@ func TestMockProviderV2EventOperations(t *testing.T) {
 	}
 }
 
-func TestMockProviderV2KeyOperations(t *testing.T) {
-	provider, err := OpenV2("mockdb:", "test_db_v2_keys")
+func TestMockProviderDAOKeyOperations(t *testing.T) {
+	provider, err := Open("mockdb:", "test_db_v2_keys")
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
