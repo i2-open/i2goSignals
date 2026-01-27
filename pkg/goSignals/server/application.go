@@ -55,6 +55,9 @@ func (sa *SignalsApplication) SetBaseUrl(u *url.URL) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 	sa.BaseUrl = u
+	if sa.Provider != nil {
+		sa.Provider.SetBaseUrl(u)
+	}
 }
 
 func (sa *SignalsApplication) HealthCheck() bool {
@@ -108,6 +111,9 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		}
 	}
 	sa.BaseUrl = baseUrl
+	if sa.Provider != nil {
+		sa.Provider.SetBaseUrl(baseUrl)
+	}
 
 	sa.InitializePrometheus()
 
@@ -197,6 +203,9 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	if sa.BaseUrl == nil {
 		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
 		sa.BaseUrl = baseUrl
+		if sa.Provider != nil {
+			sa.Provider.SetBaseUrl(baseUrl)
+		}
 	}
 	sa.mu.Unlock()
 	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)

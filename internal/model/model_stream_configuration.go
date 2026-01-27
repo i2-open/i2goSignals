@@ -42,4 +42,11 @@ type StreamConfiguration struct {
 	ResetJti string `json:"resetJti,omitempty"`
 
 	RouteMode string `json:"route_mode,omitempty"` // Is one of RouteModeImport, RouteModeForward or RouteModePublish
+
+	// TxWellKnownUrl Used to record the well-known endpoint for the SSF transmitter. Used by receivers to discover the transmitter's configuration and capabilities.
+	// When creating a receiver, providing a value without endpoint values for Delivery (other than method) will cause i2goSignals to initiate an SSF registration with the transmitter.
+	TxWellKnownUrl *string `json:"tx_well_known_url,omitempty"`
+
+	// TxToken holds the token used for automatic SSF stream creation with the transmitter and may be updated upon success to allow access to status & verify endpoints
+	TxToken *string `json:"tx_token,omitempty"`
 }

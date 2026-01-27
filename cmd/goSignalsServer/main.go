@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
 
@@ -47,7 +48,7 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
 
-	mLog.Info("i2goSignals server starting...", "version", "0.0.1")
+	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)
 	port := "8888"
 	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found

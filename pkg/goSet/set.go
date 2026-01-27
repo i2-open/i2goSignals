@@ -173,7 +173,7 @@ func (set *SecurityEventToken) JsonBytes() []byte {
 	return jsonBuf.Bytes()
 }
 
-func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims map[string]interface{}) {
+func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims interface{}) {
 	if set.Events == nil {
 		set.Events = map[string]interface{}{}
 	}

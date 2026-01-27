@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"net/url"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
@@ -68,4 +69,5 @@ type DbProviderInterface interface {
 
 	// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 	GetActiveNodeCount() (int64, error)
+	SetBaseUrl(u *url.URL)
 }

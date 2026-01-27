@@ -1,9 +1,10 @@
 package model
 
 type PollTransmitMethod struct {
-	Method              string `json:"method"`                 // urn:ietf:rfc:8936
-	EndpointUrl         string `json:"endpoint_url,omitempty"` // The URL where events can be retrieved from. This is specified by the Transmitter.
-	AuthorizationHeader string `json:"authorization_header,omitempty"`
+	Method              string          `json:"method"`                 // urn:ietf:rfc:8936
+	EndpointUrl         string          `json:"endpoint_url,omitempty"` // The URL where events can be retrieved from. This is specified by the Transmitter.
+	AuthorizationHeader string          `json:"authorization_header,omitempty"`
+	PollConfig          *PollParameters `json:"poll_config,omitempty"`
 }
 
 type PollReceiveMethod struct {

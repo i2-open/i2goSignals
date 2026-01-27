@@ -18,6 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 
 	"github.com/gorilla/mux"
 )
@@ -341,11 +342,6 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 
 }
 
-func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
 func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfiguration {
 	baseUrl := sa.GetBaseUrl()
 	jwksUri, _ := baseUrl.Parse("/jwks.json")
@@ -353,7 +349,7 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 	statusUri, _ := baseUrl.Parse("/status")
 	addSubUri, _ := baseUrl.Parse("/add-subject")
 	remSubUri, _ := baseUrl.Parse("/remove-subject")
-	verifyUri, _ := baseUrl.Parse("/verification")
+	verifyUri, _ := baseUrl.Parse("/verify")
 	regUri, _ := baseUrl.Parse("/register")
 
 	return &model.TransmitterConfiguration{
@@ -382,11 +378,16 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 			"poll":                         {authUtil.ScopeEventDelivery},
 			"client_registration_endpoint": {authUtil.ScopeRegister},
 		},
+		AuthorizationSchemes: []model.AuthScheme{
+			{SpecUrn: constants.BearerAuth},
+			{SpecUrn: constants.RFC6749},
+		},
 		AuthorizationServers:   sa.Auth.GetOAuthServers(),
 		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt, authUtil.ScopeRegister},
 		BearerMethodsSupported: []string{"header"},
 
-		GoSignalsVersion: "0.8",
+		GoSignalsVersion: constants.GoSignalsVersion,
+		SpecVersion:      constants.SSF_VERSION,
 	}
 }
 

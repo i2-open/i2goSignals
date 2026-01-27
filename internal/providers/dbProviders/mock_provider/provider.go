@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -301,4 +302,8 @@ func (m *MockMongoProvider) RegisterNode(node model.ClusterNode) error {
 
 func (m *MockMongoProvider) GetActiveNodeCount() (int64, error) {
 	return 1, nil
+}
+
+func (m *MockMongoProvider) SetBaseUrl(u *url.URL) {
+	m.streamService.SetBaseUrl(u)
 }

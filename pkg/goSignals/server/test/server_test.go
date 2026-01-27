@@ -200,7 +200,7 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	err = json.Unmarshal(body, &config)
 	assert.NoError(suite.T(), err, "Configuration parsed and returned")
 
-	verifyUrlString := fmt.Sprintf("http://%s/verification", suite.servers[0].host)
+	verifyUrlString := fmt.Sprintf("http://%s/verify", suite.servers[0].host)
 	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
 	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
