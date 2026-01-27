@@ -197,8 +197,62 @@ func isConnectionError(err error) bool {
 	return true
 }
 
-// PollEventsReceiver implements the client-side receiver of SET events using RFC8936
+// pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
+	sid := ps.stream.StreamConfiguration.Id
+	resource := fmt.Sprintf("poll-receiver:%s", sid)
+
+	for {
+		ps.mu.RLock()
+		stream := ps.stream
+		active := ps.active
+		ps.mu.RUnlock()
+
+		if stream.Status != model.StreamStateEnabled || !active {
+			serverLog.Info("POLL-RCV: Stream no longer enabled or active, exiting.", "sid", sid)
+			return
+		}
+
+		// Attempt to acquire or renew the lease
+		acquired, _, err := ps.sa.Provider.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+		if ps.sa.Stats != nil {
+			ps.sa.Stats.TrackLeaseAcquisition(resource, acquired && err == nil)
+		}
+		if err != nil {
+			serverLog.Error("POLL-RCV: Lease acquisition error", "sid", sid, "error", err)
+		}
+
+		if !acquired {
+			serverLog.Debug("POLL-RCV: Lease not held, waiting...", "sid", sid)
+			select {
+			case <-time.After(15 * time.Second): // Retry after 15s
+				continue
+			case <-ps.ctx.Done():
+				return
+			}
+		}
+
+		// Lease acquired, start the actual polling
+		serverLog.Info("POLL-RCV: Lease acquired, starting polling", "sid", sid)
+		ps.runPollLoop(resource)
+
+		// Check if we should exit entirely
+		select {
+		case <-ps.ctx.Done():
+			return
+		default:
+			// Loop back to try and re-acquire if runPollLoop exited for some reason
+		}
+	}
+}
+
+// runPollLoop processes polling events from a stream and manages lease renewal, error handling, and state transitions.
+func (ps *ClientPollStream) runPollLoop(resource string) {
+	sid := ps.stream.StreamConfiguration.Id
+	if ps.sa.Stats != nil {
+		ps.sa.Stats.IncLeasesHeld()
+		defer ps.sa.Stats.DecLeasesHeld()
+	}
 	var acks []string
 	var setErrs map[string]model.SetErrorType
 	client := http.Client{}
@@ -207,6 +261,31 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	authorization := receiveMethod.AuthorizationHeader
 	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
+
+	// Heartbeat for lease renewal
+	heartbeatCtx, heartbeatCancel := context.WithCancel(ps.ctx)
+	defer heartbeatCancel()
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ok, _, err := ps.sa.Provider.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+				if ps.sa.Stats != nil {
+					ps.sa.Stats.TrackLeaseAcquisition(resource, ok && err == nil)
+				}
+				if err != nil || !ok {
+					serverLog.Warn("POLL-RCV: Lease lost or renewal failed", "sid", sid)
+					heartbeatCancel()
+					return
+				}
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// Exponential backoff configuration
 	baseDelay := 1.0 // default 1 second
@@ -238,6 +317,14 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		if stream.Status != model.StreamStateEnabled || !active {
 			break
 		}
+
+		select {
+		case <-heartbeatCtx.Done():
+			serverLog.Info("POLL-RCV: Heartbeat cancelled, stopping poll loop", "sid", sid)
+			return
+		default:
+		}
+
 		var pollBody model.PollParameters
 		if receiveMethod.PollConfig != nil {
 			pollBody = *receiveMethod.PollConfig
@@ -249,7 +336,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 		pollRequest, _ := http.NewRequest(http.MethodPost, eventUrl, bytes.NewReader(bodyBytes))
 		pollRequest.Header.Set("Authorization", authorization)
-		pollRequest.WithContext(ps.ctx)
+		pollRequest.WithContext(heartbeatCtx)
 
 		serverLog.Info(fmt.Sprintf("POLL-RCV[%s url: %s] Request: Acks=%d, Errs=%d", ps.stream.StreamConfiguration.Id, eventUrl, len(acks), len(setErrs)))
 		resp, err := client.Do(pollRequest)
@@ -265,8 +352,10 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 						errMsg = fmt.Sprintf("connection error: %s", err.Error())
 					}
 					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, errMsg)
-					serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Max retry time exceeded. Disabling stream.", ps.stream.StreamConfiguration.Id))
-					break
+					ps.mu.Lock()
+					ps.active = false
+					ps.mu.Unlock()
+					return // Use return instead of break to ensure loop exits and goroutine stops
 				}
 
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "retry being attempted")
@@ -291,7 +380,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 						ps.mu.Unlock()
 					}
 					continue
-				case <-ps.ctx.Done():
+				case <-heartbeatCtx.Done():
 					return
 				}
 			}

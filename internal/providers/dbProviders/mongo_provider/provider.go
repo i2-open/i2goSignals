@@ -32,6 +32,8 @@ const CDbEvents = "events"
 const CDbPending = "pendingEvents"
 const CDbDelivered = "deliveredEvents"
 const CDbClients = "clients"
+const CDbLeases = "cluster_leases"
+const CDbNodes = "cluster_nodes"
 
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
@@ -60,6 +62,8 @@ type MongoProvider struct {
 	pendingCol   *mongo.Collection
 	deliveredCol *mongo.Collection
 	clientCol    *mongo.Collection
+	leaseCol     *mongo.Collection
+	nodeCol      *mongo.Collection
 
 	// DAOs
 	streamDAO interfaces.StreamDAO
@@ -113,6 +117,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.pendingCol = m.ssefDb.Collection(CDbPending)
 	m.eventCol = m.ssefDb.Collection(CDbEvents)
 	m.clientCol = m.ssefDb.Collection(CDbClients)
+	m.leaseCol = m.ssefDb.Collection(CDbLeases)
+	m.nodeCol = m.ssefDb.Collection(CDbNodes)
 
 	// Create indexes
 	if !dbExists {
@@ -440,8 +446,8 @@ func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	return m.eventService.GetEventRecord(context.Background(), jti)
 }
 
-func (m *MongoProvider) AckEvent(jtiString string, streamId string) {
-	m.eventService.AckEvent(context.Background(), jtiString, streamId)
+func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) {
+	m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
 }
 
 func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord) {
@@ -468,4 +474,100 @@ func (m *MongoProvider) StoreReceiverKey(streamID string, audience string, jwksU
 func (m *MongoProvider) GetReceiverKey(streamID string) *interfaces.JwkKeyRec {
 	rec, _ := m.keyService.GetReceiverKey(context.Background(), streamID)
 	return rec
+}
+
+// TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.
+func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	leaseUntil := now.Add(leaseDuration)
+
+	filter := bson.M{
+		"_id": resource,
+		"$or": []bson.M{
+			{"leaseUntil": bson.M{"$lte": now}},
+			{"ownerNodeId": nodeId},
+		},
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"ownerNodeId": nodeId,
+			"leaseUntil":  leaseUntil,
+			"updatedAt":   now,
+		},
+		"$inc":         bson.M{"fencingToken": 1},
+		"$setOnInsert": bson.M{"createdAt": now},
+	}
+
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+	var lease model.ClusterLease
+	err := m.leaseCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
+	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+
+	return lease.OwnerNodeId == nodeId, lease.FencingToken, nil
+}
+
+// ReleaseLeaseIfOwned clears/shortens the lease if (and only if) it's owned by nodeId.
+func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"_id":         resource,
+		"ownerNodeId": nodeId,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"leaseUntil": time.Now().UTC(),
+			"updatedAt":  time.Now().UTC(),
+		},
+	}
+
+	_, err := m.leaseCol.UpdateOne(ctx, filter, update)
+	return err
+}
+
+// RegisterNode updates the node registry with heartbeats and metadata.
+func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{"_id": node.Id}
+	update := bson.M{
+		"$set": bson.M{
+			"address":    node.Address,
+			"version":    node.Version,
+			"lastSeenAt": node.LastSeenAt,
+		},
+		"$setOnInsert": bson.M{
+			"startedAt": node.StartedAt,
+		},
+	}
+
+	opts := options.Update().SetUpsert(true)
+	_, err := m.nodeCol.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
+func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	threshold := time.Now().UTC().Add(-60 * time.Second)
+	filter := bson.M{
+		"lastSeenAt": bson.M{"$gte": threshold},
+	}
+
+	return m.nodeCol.CountDocuments(ctx, filter)
 }

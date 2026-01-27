@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +34,8 @@ type SignalsApplication struct {
 	pushReceivers map[string]model.StreamStateRecord
 	mu            sync.RWMutex
 	Stats         *PrometheusHandler
+	NodeID        string
+	StartedAt     time.Time
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -40,6 +43,18 @@ func (sa *SignalsApplication) Name() string {
 		return sa.Provider.Name()
 	}
 	return "goSignals"
+}
+
+func (sa *SignalsApplication) GetBaseUrl() *url.URL {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+	return sa.BaseUrl
+}
+
+func (sa *SignalsApplication) SetBaseUrl(u *url.URL) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	sa.BaseUrl = u
 }
 
 func (sa *SignalsApplication) HealthCheck() bool {
@@ -57,19 +72,32 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		role = "ADMIN"
 	}
 
+	nodeID := os.Getenv("NODE_ID")
+	if nodeID == "" {
+		nodeID = os.Getenv("POD_NAME")
+	}
+	if nodeID == "" {
+		hostname, _ := os.Hostname()
+		nodeID = fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
+	}
+
 	sa := &SignalsApplication{
 		Provider:      provider,
 		AdminRole:     role,
 		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
+		NodeID:        nodeID,
+		StartedAt:     time.Now().UTC(),
 	}
+
+	serverLog.Info("Starting goSignalsApplication", "nodeID", nodeID)
 
 	httpRouter := NewRouter(sa)
 	// expose the handler for external server usage (e.g., httptest.Server)
 	sa.Handler = httpRouter.router
 
-	sa.EventRouter = eventRouter.NewRouter(provider)
+	sa.EventRouter = eventRouter.NewRouter(provider, nodeID)
 
 	var baseUrl *url.URL
 	var err error
@@ -92,7 +120,68 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	serverLog.Info("Selected issuer id", "issuer", sa.DefIssuer)
 
 	sa.InitializeReceivers()
+
+	// Start background sync for clustering
+	go sa.backgroundSync()
+
 	return sa
+}
+
+// backgroundSync handles periodic tasks such as cluster node registration and state synchronization for event streams.
+func (sa *SignalsApplication) backgroundSync() {
+	ticker := time.NewTicker(10 * time.Second) // Heartbeat every 10s
+	defer ticker.Stop()
+
+	// Initial registration
+	sa.registerNode()
+
+	syncCounter := 0
+	for {
+		select {
+		case <-ticker.C:
+			sa.registerNode()
+
+			syncCounter++
+			if syncCounter >= 4 { // Every 40s
+				syncCounter = 0
+				serverLog.Debug("Periodic background sync starting")
+				sa.InitializeReceivers()
+
+				// Sync router state
+				states := sa.Provider.GetStateMap()
+				for _, state := range states {
+					sa.EventRouter.UpdateStreamState(&state)
+				}
+			}
+		}
+	}
+}
+
+// registerNode registers the current node in the cluster with its ID, address, version, and timestamps.
+func (sa *SignalsApplication) registerNode() {
+	sa.mu.RLock()
+	server := sa.Server
+	baseUrl := sa.BaseUrl
+	sa.mu.RUnlock()
+
+	addr := ""
+	if server != nil {
+		addr = server.Addr
+	} else if baseUrl != nil {
+		addr = baseUrl.Host
+	}
+
+	node := model.ClusterNode{
+		Id:         sa.NodeID,
+		Address:    addr,
+		Version:    "1.0.0", // TODO: use actual version
+		StartedAt:  sa.StartedAt,
+		LastSeenAt: time.Now().UTC(),
+	}
+	err := sa.Provider.RegisterNode(node)
+	if err != nil {
+		serverLog.Error("Failed to register node", "error", err)
+	}
 }
 
 // StartServer creates a real net/http server wrapping the application handler.
@@ -103,11 +192,13 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		Addr:    addr,
 		Handler: sa.Handler,
 	}
+	sa.mu.Lock()
 	sa.Server = &server
 	if sa.BaseUrl == nil {
 		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
 		sa.BaseUrl = baseUrl
 	}
+	sa.mu.Unlock()
 	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)
 	return sa
 }

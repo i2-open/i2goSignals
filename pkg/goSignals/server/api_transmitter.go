@@ -126,7 +126,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		serverLog.Info(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
-		sa.Provider.AckEvent(jti, authCtx.StreamId)
+		sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Info(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
 		sa.EventRouter.IncrementCounter(streamState, event, false)
