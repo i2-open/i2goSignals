@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -570,4 +571,8 @@ func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
 	}
 
 	return m.nodeCol.CountDocuments(ctx, filter)
+}
+
+func (m *MongoProvider) SetBaseUrl(u *url.URL) {
+	m.streamService.SetBaseUrl(u)
 }

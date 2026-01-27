@@ -218,6 +218,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"VerificationRequestSSF",
+			http.MethodPost,
+			"/verify",
+			h.sa.VerificationRequest,
+			false,
+		},
+
+		Route{
 			"WellKnownSsfConfigurationGet",
 			http.MethodGet,
 			"/.well-known/ssf-configuration",

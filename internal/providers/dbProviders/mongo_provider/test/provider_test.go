@@ -120,7 +120,7 @@ func (s *MongoProviderSuite) TestB_StreamConfig() {
 	s.Equal(1, len(configs), "should be one registered")
 
 	s.Equal(s.stream.Id, configs[0].Id, "should be the same s.stream id")
-	s.Equal(14, len(configs[0].EventsDelivered), "Should be 14 events configured for delivery")
+	s.Equal(26, len(configs[0].EventsDelivered), "Should be 26 events configured for delivery")
 	events, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{
 		MaxEvents: 5, ReturnImmediately: true,
 	})

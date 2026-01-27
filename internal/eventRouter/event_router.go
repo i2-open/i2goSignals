@@ -713,7 +713,14 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord)
 	}
 
 	for _, eventType := range event.Types {
+		// The following events should always be returned.
 		if eventType == "https://schemas.openid.net/secevent/sse/event-type/verification" {
+			return true
+		}
+		if eventType == "https://schemas.openid.net/secevent/ssf/event-type/verification" {
+			return true
+		}
+		if eventType == "https://schemas.openid.net/secevent/ssf/event-type/stream-updated" {
 			return true
 		}
 		for _, streamType := range stream.EventsDelivered {

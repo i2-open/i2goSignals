@@ -447,7 +447,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	streamConfig, err := suite.pd.cli.Data.GetStreamConfig("scimPoll")
 	assert.NoError(suite.T(), err, "Error getting stream config for scimPoll")
 	assert.NotNilf(suite.T(), streamConfig, "Stream config for scimPoll not null")
-	assert.Len(suite.T(), streamConfig.EventsDelivered, 4, "Should be 4 events delivered")
+	assert.Len(suite.T(), streamConfig.EventsDelivered, 2, "Should be 2 events delivered")
 	endpoint := fmt.Sprintf("http://%s/poll/%s", server1Addr, streamConfig.Id)
 	assert.Equal(suite.T(), endpoint, streamConfig.Delivery.PollTransmitMethod.EndpointUrl, "Event endpoint present")
 	testLog.Println(fmt.Sprintf("Result:\n%s", res))
@@ -459,7 +459,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	assert.NoError(suite.T(), err, "Add stream has no error")
 
 	streamConfigPoll, err := suite.pd.cli.Data.GetStreamConfig("scimPollRec")
-	assert.Len(suite.T(), streamConfigPoll.EventsDelivered, 4, "Should be 4 events delivered")
+	assert.Len(suite.T(), streamConfigPoll.EventsDelivered, 2, "Should be 2 events delivered")
 
 	// Reset so the next subtest can work.
 	res, err = suite.executeCommand("delete stream scimPollRec", true)
@@ -472,7 +472,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	assert.NoError(suite.T(), err, "Add stream has no error")
 
 	streamConfigPoll, err = suite.pd.cli.Data.GetStreamConfig("scimPollRec")
-	assert.Len(suite.T(), streamConfigPoll.EventsDelivered, 4, "Should be 4 events delivered")
+	assert.Len(suite.T(), streamConfigPoll.EventsDelivered, 2, "Should be 2 events delivered")
 
 	// Reset so the next subtest can work.
 	res, err = suite.executeCommand("delete stream scimPollRec", true)
