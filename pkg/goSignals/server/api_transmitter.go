@@ -121,11 +121,11 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	if !request.ReturnImmediately {
 		wait = "Long "
 	}
-	serverLog.Info(fmt.Sprintf("TRANSMIT POLL Stream[%s] %sPoll received...\n", authCtx.StreamId, wait))
+	serverLog.Info(fmt.Sprintf("POLL-SRV[%s] %sPoll received...\n", authCtx.StreamId, wait))
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
-		serverLog.Info(fmt.Sprintf("TRANSMIT POLL Stream[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
+		serverLog.Info(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
 		sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Info(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
@@ -134,7 +134,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 
 	// Second, log any errors received
 	for jti, setError := range request.SetErrs {
-		errMsg := fmt.Sprintf("TRANSMIT POLL Stream[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s\n", authCtx.StreamId, jti, setError.Error, setError.Description)
+		errMsg := fmt.Sprintf("POLL-SRV[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s\n", authCtx.StreamId, jti, setError.Error, setError.Description)
 		serverLog.Warn(errMsg)
 		// TODO Nothing to do except log it?
 	}
@@ -157,13 +157,13 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	if !request.ReturnImmediately && len(sets) == 0 {
 		isMore = " Timed out."
 	}
-	serverLog.Info(fmt.Sprintf("TRANSMIT POLL Stream[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore))
+	serverLog.Info(fmt.Sprintf("POLL-SRV[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	respBytes, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
-		serverLog.Warn("TRANSMIT POLL Error serializing response", "error", err.Error())
+		serverLog.Warn("POLL-SRV Error serializing response", "sid", authCtx.StreamId, "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	_, _ = w.Write(respBytes)
