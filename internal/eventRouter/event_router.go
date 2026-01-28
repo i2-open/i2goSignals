@@ -497,11 +497,11 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 			r.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
 		if err != nil {
-			eventLogger.Error("PUSH-RCV: Lease acquisition error", "sid", sid, "error", err)
+			eventLogger.Error("PUSH-SRV: Lease acquisition error", "sid", sid, "error", err)
 		}
 
 		if !acquired {
-			eventLogger.Debug("PUSH-RCV: Lease not held, waiting...", "sid", sid)
+			eventLogger.Debug("PUSH-SRV: Lease not held, waiting...", "sid", sid)
 			select {
 			case <-time.After(15 * time.Second): // Retry after 15s
 				continue
@@ -511,7 +511,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 		}
 
 		// Lease acquired, start the actual push loop
-		eventLogger.Info("PUSH-RCV: Lease acquired, starting transmission", "sid", sid)
+		eventLogger.Info("PUSH-SRV: Lease acquired, starting transmission", "sid", sid)
 		shouldRetry := r.runPushLoop(resource, stream, eventBuf, fencingToken)
 		if !shouldRetry {
 			return
@@ -530,7 +530,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 // runPushLoop handles the event push loop for a given stream, including lease renewal and event processing.
 func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer, fencingToken int64) bool {
 	sid := stream.StreamConfiguration.Id
-	eventLogger.Info("PUSH-HANDLER: Starting loop", "sid", sid)
+	eventLogger.Info("PUSH-SRV: Starting transmission loop", "sid", sid)
 	if r.stats != nil {
 		r.stats.IncLeasesHeld()
 		defer r.stats.DecLeasesHeld()
@@ -560,7 +560,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
 				}
 				if err != nil || !ok {
-					eventLogger.Warn("PUSH-HANDLER: Lease lost or renewal failed", "sid", sid)
+					eventLogger.Warn("PUSH-SRV: Lease lost or renewal failed", "sid", sid)
 					heartbeatCancel()
 					return
 				}
