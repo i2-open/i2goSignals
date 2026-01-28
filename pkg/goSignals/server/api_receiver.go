@@ -223,7 +223,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		}
 
 		if !acquired {
-			serverLog.Debug("POLL-RCV: Lease not held, waiting...", "sid", sid)
+			serverLog.Debug("POLL-RCV: Node lease not held, waiting...", "sid", sid)
 			select {
 			case <-time.After(15 * time.Second): // Retry after 15s
 				continue
@@ -233,7 +233,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		}
 
 		// Lease acquired, start the actual polling
-		serverLog.Info("POLL-RCV: Lease acquired, starting polling", "sid", sid)
+		serverLog.Info("POLL-RCV: Node lease acquired, starting polling", "sid", sid)
 		ps.runPollLoop(resource)
 
 		// Check if we should exit entirely

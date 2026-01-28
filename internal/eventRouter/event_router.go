@@ -497,11 +497,11 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 			r.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
 		if err != nil {
-			eventLogger.Error("PUSH-SRV: Lease acquisition error", "sid", sid, "error", err)
+			eventLogger.Error("PUSH-SRV: Node lease acquisition error", "sid", sid, "error", err)
 		}
 
 		if !acquired {
-			eventLogger.Debug("PUSH-SRV: Lease not held, waiting...", "sid", sid)
+			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
 			select {
 			case <-time.After(15 * time.Second): // Retry after 15s
 				continue
@@ -511,7 +511,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 		}
 
 		// Lease acquired, start the actual push loop
-		eventLogger.Info("PUSH-SRV: Lease acquired, starting transmission", "sid", sid)
+		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid)
 		shouldRetry := r.runPushLoop(resource, stream, eventBuf, fencingToken)
 		if !shouldRetry {
 			return
@@ -560,7 +560,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
 				}
 				if err != nil || !ok {
-					eventLogger.Warn("PUSH-SRV: Lease lost or renewal failed", "sid", sid)
+					eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
 					heartbeatCancel()
 					return
 				}
