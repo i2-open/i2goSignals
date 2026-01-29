@@ -300,7 +300,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		currentState, ok := r.pollStreams[stream.StreamConfiguration.Id]
 
 		if ok {
-			eventLogger.Info("Found existing match", "sid", currentState.StreamConfiguration.Id)
+			eventLogger.Debug("Syncing stream state", "sid", currentState.StreamConfiguration.Id)
 			currentState.Update(stream)
 			r.pollStreams[stream.StreamConfiguration.Id] = currentState
 		} else {

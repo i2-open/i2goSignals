@@ -48,7 +48,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 		}
 
 		if stream.GetType() == model.ReceivePush {
-			serverLog.Info(fmt.Sprintf("PUSH-RCV: Initialized Stream: %s, Type: Inbound Method: PUSH", stream.StreamConfiguration.Id))
+			serverLog.Info("PUSH-RCV: Initialized Stream", "sid", stream.StreamConfiguration.Id)
 			newPushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
 		}
@@ -64,10 +64,9 @@ func (sa *SignalsApplication) InitializeReceivers() {
 	sa.pushReceivers = newPushReceivers
 
 	// Clean up poll clients that are no longer present or no longer receivers
-	for sid, ps := range sa.pollClients {
+	for sid := range sa.pollClients {
 		if !currentPollClients[sid] {
-			serverLog.Info(fmt.Sprintf("POLL-RCV: Closing removed or changed Poll Receiver: %s", sid))
-			ps.Close()
+			serverLog.Info("POLL-RCV: Closing Poll Receiver", "sid", sid)
 			delete(sa.pollClients, sid)
 		}
 	}
@@ -134,7 +133,7 @@ func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
 		pollUrl := streamState.Delivery.PollReceiveMethod.EndpointUrl
-		serverLog.Info(fmt.Sprintf("POLL-RCV: Initialized poll receiver stream: %s, EventUrl: %s", streamState.StreamConfiguration.Id, pollUrl))
+		serverLog.Info("POLL-RCV: Initialized poll receiver stream", "sid", streamState.StreamConfiguration.Id, "url", pollUrl)
 		go ps.pollEventsReceiver()
 		return ps
 	}
@@ -153,7 +152,7 @@ func (sa *SignalsApplication) GetPollReceiverCnt() float64 {
 func (ps *ClientPollStream) Close() {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Polling client shutdown requested. ", ps.stream.StreamConfiguration.Id))
+	serverLog.Info("POLL-RCV: Polling client shutdown", "sid", ps.stream.StreamConfiguration.Id)
 	if ps.active {
 		ps.active = false // do this first to prevent cancelled request from looping
 		ps.cancel()
