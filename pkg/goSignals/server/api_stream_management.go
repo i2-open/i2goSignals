@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
@@ -165,7 +166,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	serverLog.Debug(fmt.Sprintf("Stream GET %s", authCtx.StreamId))
+	serverLog.Debug(fmt.Sprintf("Stream Config Get Request %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 
@@ -320,10 +321,15 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if jsonRequest.Status != "" {
-		if streamState.Status != jsonRequest.Status {
+		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
 				sa.Provider.UpdateStreamStatus(authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
+				// Refresh streamState after update
+				updatedState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+				if err == nil && updatedState != nil {
+					streamState = updatedState
+				}
 			}
 
 		}

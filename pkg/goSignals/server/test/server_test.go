@@ -1015,3 +1015,60 @@ func (suite *ServerSuite) Test_ConvertKey() {
 	body, _ = io.ReadAll(resp.Body)
 	assert.NotEmpty(suite.T(), body)
 }
+
+func (suite *ServerSuite) TestE_StatusUpdateReflection() {
+	server := suite.servers[0]
+
+	// 1. Create a stream
+	testLog.Println("Creating stream for status update test...")
+	transConfig := model.StreamConfiguration{
+		Aud: []string{"repro.example.com"},
+		Iss: "DEFAULT",
+	}
+	method := &model.PollTransmitMethod{Method: model.DeliveryPoll}
+	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
+	config, err := server.provider.CreateStream(transConfig, server.projectId)
+	assert.NoError(suite.T(), err)
+	streamId := config.Id
+
+	// 2. Update status to 'paused' via /status endpoint
+	statusUrl := fmt.Sprintf("http://%s/status?stream_id=%s", server.host, streamId)
+	updateReq := model.StreamStatus{
+		Status: model.StreamStatePause,
+		Reason: "Repro Test Pause",
+	}
+	bodyBytes, _ := json.Marshal(updateReq)
+
+	req, _ := http.NewRequest(http.MethodPost, statusUrl, bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+server.streamMgmtToken)
+	resp, err := server.client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+
+	var statusResp model.StreamStatus
+	body, _ := io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &statusResp)
+	assert.Equal(suite.T(), model.StreamStatePause, statusResp.Status, "Status in response should be paused")
+
+	// 3. List streams via /states and check if status is reflected
+	listUrl := fmt.Sprintf("http://%s/states", server.host)
+	req, _ = http.NewRequest(http.MethodGet, listUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+server.streamMgmtToken)
+	resp, err = server.client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+
+	var streams []model.StreamStateRecord
+	body, _ = io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &streams)
+
+	found := false
+	for _, s := range streams {
+		if s.StreamConfiguration.Id == streamId {
+			found = true
+			assert.Equal(suite.T(), model.StreamStatePause, s.Status, "Status in list should be paused")
+			assert.Equal(suite.T(), "Repro Test Pause", s.ErrorMsg, "Reason in list should be correct")
+		}
+	}
+	assert.True(suite.T(), found, "Stream should be found in list")
+}

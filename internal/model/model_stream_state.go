@@ -10,20 +10,20 @@ import (
 // StreamStateRecord is stored in MongoProvider.streamCol
 type StreamStateRecord struct {
 	Id        primitive.ObjectID `bson:"_id"`
-	ProjectId string             // ProjectId links SsfClient entities to streams.
+	ProjectId string             `json:"project_id" bson:"project_id"` // ProjectId links SsfClient entities to streams.
 	StreamConfiguration
-	StartDate  time.Time
-	CreatedAt  time.Time
-	ModifiedAt time.Time
+	StartDate  time.Time `json:"start_date" bson:"start_date"`
+	CreatedAt  time.Time `json:"created_at" bson:"created_at"`
+	ModifiedAt time.Time `json:"modified_at" bson:"modified_at"`
 
 	// Status indicates the current operational status and is one of StreamStateEnabled, StreamStatePause, StreamStateDisable
-	Status string
+	Status string `json:"status" bson:"status"`
 
 	// ValidateJwks is used when in Inbound mode to validate the inbound issuer. This value acts like a cache
 	ValidateJwks *keyfunc.JWKS `json:"-" bson:"-"` // not persisted
 
 	// ErrorMsg holds the reason a stream has been paused
-	ErrorMsg string
+	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty"`
 }
 
 func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {

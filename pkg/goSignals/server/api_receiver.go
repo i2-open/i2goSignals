@@ -48,7 +48,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 		}
 
 		if stream.GetType() == model.ReceivePush {
-			serverLog.Info("PUSH-RCV: Initialized Stream", "sid", stream.StreamConfiguration.Id)
+			serverLog.Info("PUSH-RCV: Stream Ready", "sid", stream.StreamConfiguration.Id)
 			newPushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
 		}
@@ -208,7 +208,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		ps.mu.RUnlock()
 
 		if stream.Status != model.StreamStateEnabled || !active {
-			serverLog.Info("POLL-RCV: Stream no longer enabled or active, exiting.", "sid", sid)
+			serverLog.Debug("POLL-RCV: Stream not enabled. Will not start.", "sid", sid)
 			return
 		}
 
@@ -344,7 +344,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				if firstErrorTime.IsZero() {
 					firstErrorTime = time.Now()
 				}
-
+				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err.Error())
 				if time.Since(firstErrorTime) > retryLimit {
 					errMsg := "connection error"
 					if err != nil {
@@ -357,14 +357,12 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					return // Use return instead of break to ensure loop exits and goroutine stops
 				}
 
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "retry being attempted")
-
 				delaySeconds := baseDelay * math.Pow(backoffFactor, float64(retryCount))
 				if delaySeconds > maxDelay {
 					delaySeconds = maxDelay
 				}
 				delay := time.Duration(delaySeconds * float64(time.Second))
-
+				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, fmt.Sprintf("retry being attempted (delay %d attempt %d", delay, retryCount+1))
 				serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", ps.stream.StreamConfiguration.Id, "delay", delay, "attempt", retryCount+1)
 
 				select {
@@ -376,6 +374,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 						ps.mu.Lock()
 						ps.stream = updatedStream
 						ps.stream.Status = model.StreamStateEnabled // temporarily treat as enabled to continue loop
+						ps.stream.ErrorMsg = ""                     // reset error message
 						ps.mu.Unlock()
 					}
 					continue
