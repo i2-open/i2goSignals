@@ -23,12 +23,13 @@ import (
 )
 
 type ClientPollStream struct {
-	mu     sync.RWMutex
-	sa     *SignalsApplication
-	stream *model.StreamStateRecord
-	ctx    context.Context
-	cancel context.CancelFunc
-	active bool
+	mu        sync.RWMutex
+	sa        *SignalsApplication
+	stream    *model.StreamStateRecord
+	ctx       context.Context
+	cancel    context.CancelFunc
+	active    bool
+	statusUrl string
 }
 
 /*
@@ -196,6 +197,148 @@ func isConnectionError(err error) bool {
 	return true
 }
 
+func (ps *ClientPollStream) getStatusEndpoint() string {
+	ps.mu.RLock()
+	if ps.statusUrl != "" {
+		ps.mu.RUnlock()
+		return ps.statusUrl
+	}
+	ps.mu.RUnlock()
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	// Double check
+	if ps.statusUrl != "" {
+		return ps.statusUrl
+	}
+
+	receiveMethod := ps.stream.Delivery.PollReceiveMethod
+	if receiveMethod == nil {
+		return ""
+	}
+
+	// Step a: Use TxWellKnownUrl if defined.
+	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
+		resp, err := http.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var txConfig model.TransmitterConfiguration
+				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
+					if txConfig.StatusEndpoint != "" {
+						ps.statusUrl = txConfig.StatusEndpoint
+						return ps.statusUrl
+					}
+				}
+			}
+		}
+	}
+
+	// Step b: Replace last path segment of EndpointUrl with /status
+	eventUrl := receiveMethod.EndpointUrl
+	if eventUrl != "" {
+		u, err := url.Parse(eventUrl)
+		if err == nil {
+			path := u.Path
+			if path != "" {
+				segments := strings.Split(strings.TrimSuffix(path, "/"), "/")
+				if len(segments) > 0 {
+					segments[len(segments)-1] = "status"
+					u.Path = strings.Join(segments, "/")
+					ps.statusUrl = u.String()
+					return ps.statusUrl
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
+	statusUrl := ps.getStatusEndpoint()
+	if statusUrl == "" {
+		return nil, errors.New("could not determine status endpoint")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	ps.mu.RLock()
+	authHeader := ps.stream.Delivery.PollReceiveMethod.AuthorizationHeader
+	ps.mu.RUnlock()
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status check failed with status %d", resp.StatusCode)
+	}
+
+	var streamStatus model.StreamStatus
+	if err := json.NewDecoder(resp.Body).Decode(&streamStatus); err != nil {
+		return nil, err
+	}
+
+	return &streamStatus, nil
+}
+
+func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusCheckInterval time.Duration) (bool, error) {
+	status, err := ps.checkTransmitterStatus(ctx)
+	if err != nil {
+		serverLog.Debug("POLL-RCV: Transmitter status check failed, proceeding with polling", "sid", ps.stream.StreamConfiguration.Id, "error", err)
+		return true, nil // continue
+	}
+
+	sid := ps.stream.StreamConfiguration.Id
+
+	for {
+		if status.Status == model.StreamStateEnabled {
+			return true, nil
+		}
+
+		if status.Status == model.StreamStateDisable {
+			serverLog.Info("POLL-RCV: Transmitter stream is disabled", "sid", sid, "reason", status.Reason)
+			ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, "Transmitter stream is disabled: "+status.Reason)
+			ps.mu.Lock()
+			ps.active = false
+			ps.mu.Unlock()
+			return false, nil // stop
+		}
+
+		// if the stream is paused, periodically check status until it is re-enabled.
+		if status.Status == model.StreamStatePause {
+			serverLog.Info("POLL-RCV: Transmitter stream is paused", "sid", sid, "reason", status.Reason)
+			ps.sa.pauseStreamOnError(sid, "Transmitter stream is paused: "+status.Reason)
+
+			select {
+			case <-time.After(statusCheckInterval):
+				status, err = ps.checkTransmitterStatus(ctx)
+				if err != nil {
+					serverLog.Debug("POLL-RCV: Transmitter status check failed during pause, attempting poll as fallback", "sid", sid, "error", err)
+					return true, nil
+				}
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+
+		// Unknown status, fallback to enabled
+		return true, nil
+	}
+}
+
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.stream.StreamConfiguration.Id
@@ -304,6 +447,16 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		retryLimit = time.Duration(v) * time.Second
 	}
 
+	statusCheckInterval := 30 * time.Second
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_STATUS_CHECK_INTERVAL"), 64); err == nil {
+		statusCheckInterval = time.Duration(v * float64(time.Second))
+	}
+
+	// Initial status check upon lease acquisition - verify that the transmitter is active
+	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+		return
+	}
+
 	retryCount := 0
 	var firstErrorTime time.Time
 
@@ -368,7 +521,13 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				select {
 				case <-time.After(delay):
 					retryCount++
-					// Refresh stream state to check if it's still enabled/active
+
+					// Complement retry with transmitter status check - if status is not active, abort retry
+					if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+						return
+					}
+
+					// Refresh the stream state to check if it's still enabled/active
 					updatedStream, _ := ps.sa.Provider.GetStreamState(stream.StreamConfiguration.Id)
 					if updatedStream != nil {
 						ps.mu.Lock()
