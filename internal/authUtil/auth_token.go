@@ -206,11 +206,16 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 	if id != nil && len(id) > 0 {
 		streamRequested = id[0]
 	} else {
-		// check for stream id in the path
+		// check for stream id in the path or captured by mux
 		params := mux.Vars(r)
 		val, exist := params["id"]
 		if exist {
 			streamRequested = val
+		} else {
+			val, exist = params["stream_id"]
+			if exist {
+				streamRequested = val
+			}
 		}
 	}
 
@@ -261,11 +266,16 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 	if id != nil && len(id) > 0 {
 		streamRequested = id[0]
 	} else {
-		// check for stream id in the path
+		// check for stream id in the path or captured by mux
 		params := mux.Vars(r)
 		val, exist := params["id"]
 		if exist {
 			streamRequested = val
+		} else {
+			val, exist = params["stream_id"]
+			if exist {
+				streamRequested = val
+			}
 		}
 	}
 
