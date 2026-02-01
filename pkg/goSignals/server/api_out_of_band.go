@@ -442,3 +442,25 @@ func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }
+
+func maskAuthorization(authHeader string) string {
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 {
+		return "Invalid authorization header"
+	}
+
+	authType := parts[0]
+	token := parts[1]
+
+	if len(token) <= 8 {
+		return authType + " [TOO SHORT]"
+	}
+
+	// Masking: Type + first 4 + ... + last 4
+	masked := fmt.Sprintf("%s %s...%s",
+		authType,
+		token[:4],
+		token[len(token)-4:])
+
+	return masked
+}

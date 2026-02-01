@@ -60,7 +60,7 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 				Path(route.Pattern).
 				Name(route.Name).
 				Handler(handler).
-				Queries("stream_id", "{stream_id:[a-fA-F0-9]+}")
+				Queries("stream_id", "{id:[^/]+}")
 		} else {
 			httpRouter.router.
 				Methods(route.Method).

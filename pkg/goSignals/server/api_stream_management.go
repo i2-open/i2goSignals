@@ -30,9 +30,9 @@ func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, _ *http.Request)
 }
 
 func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt})
-
+	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
+		serverLog.Debug("GetStatus request received: error", "authCtx", "invalid", "status", status)
 		w.WriteHeader(status)
 		return
 	}
@@ -40,19 +40,19 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 	sid := authCtx.StreamId
 	if sid == "" {
 		// The authorization token had no stream identifier in it
+		serverLog.Debug("GetStatus request received: invalid sid", "status", status)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
-	// vars := mux.Vars(r)
-	// subject := vars["subject"]
-
 	streamStatus, err := sa.Provider.GetStatus(sid)
 	if err != nil {
+		serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
+	serverLog.Debug("GetStatus result", "sid", sid, "status", streamStatus.Status, "reason", streamStatus.Reason)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	resp, _ := json.Marshal(*streamStatus)

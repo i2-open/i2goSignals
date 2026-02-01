@@ -220,14 +220,25 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 
 	// Step a: Use TxWellKnownUrl if defined.
 	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
-		resp, err := http.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				var txConfig model.TransmitterConfiguration
 				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
 					if txConfig.StatusEndpoint != "" {
-						ps.statusUrl = txConfig.StatusEndpoint
+						statusUrl := txConfig.StatusEndpoint
+						u, err := url.Parse(statusUrl)
+						if err == nil {
+							q := u.Query()
+							if q.Get("stream_id") == "" {
+								q.Set("stream_id", ps.stream.StreamConfiguration.Id)
+								u.RawQuery = q.Encode()
+								statusUrl = u.String()
+							}
+						}
+						ps.statusUrl = statusUrl
 						return ps.statusUrl
 					}
 				}
@@ -240,15 +251,40 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	if eventUrl != "" {
 		u, err := url.Parse(eventUrl)
 		if err == nil {
-			path := u.Path
-			if path != "" {
-				segments := strings.Split(strings.TrimSuffix(path, "/"), "/")
-				if len(segments) > 0 {
-					segments[len(segments)-1] = "status"
-					u.Path = strings.Join(segments, "/")
-					ps.statusUrl = u.String()
-					return ps.statusUrl
+			q := u.Query()
+			streamId := q.Get("stream_id")
+
+			path := strings.TrimSuffix(u.Path, "/")
+			segments := strings.Split(path, "/")
+
+			// Try to find "poll" in segments
+			pollIdx := -1
+			for i := len(segments) - 1; i >= 0; i-- {
+				if segments[i] == "poll" {
+					pollIdx = i
+					break
 				}
+			}
+
+			if pollIdx != -1 {
+				// If streamId was not in query, check if it's the segment after "poll"
+				if streamId == "" && pollIdx < len(segments)-1 {
+					streamId = segments[pollIdx+1]
+				}
+
+				// Replace "poll" with "status" and remove everything after it in the path
+				segments[pollIdx] = "status"
+				u.Path = strings.Join(segments[:pollIdx+1], "/")
+
+				// Ensure stream_id is in the query
+				if streamId == "" {
+					streamId = ps.stream.StreamConfiguration.Id
+				}
+				q.Set("stream_id", streamId)
+				u.RawQuery = q.Encode()
+
+				ps.statusUrl = u.String()
+				return ps.statusUrl
 			}
 		}
 	}
@@ -273,6 +309,7 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
+	serverLog.Debug("Checking transmitter status", "url", statusUrl, "auth", maskAuthorization(authHeader))
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -350,7 +387,8 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		if stream.Status != model.StreamStateEnabled || !active {
+		// do not start if disabled or marked inactive
+		if !active || stream.Status == model.StreamStateDisable {
 			serverLog.Debug("POLL-RCV: Stream not enabled. Will not start.", "sid", sid)
 			return
 		}
@@ -466,7 +504,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		if stream.Status != model.StreamStateEnabled || !active {
+		if !active || stream.Status == model.StreamStateDisable {
 			break
 		}
 
@@ -636,6 +674,18 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			acks = append(acks, jti)
 		}
 
+		// Successful poll - reset retry count and ensure status is enabled
+		retryCount = 0
+		ps.mu.RLock()
+		needsUpdate := ps.stream.Status != model.StreamStateEnabled
+		ps.mu.RUnlock()
+		if needsUpdate {
+			ps.sa.Provider.UpdateStreamStatus(sid, model.StreamStateEnabled, "")
+			ps.mu.Lock()
+			ps.stream.Status = model.StreamStateEnabled
+			ps.stream.ErrorMsg = ""
+			ps.mu.Unlock()
+		}
 	}
 	if !ps.active {
 		serverLog.Warn("POLL-RCV: Polling marked inactive", "sid", ps.stream.StreamConfiguration.Id)
