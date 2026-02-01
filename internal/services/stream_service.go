@@ -69,6 +69,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
+	config.TxWellKnownUrl = request.TxWellKnownUrl
 
 	authIssuer := s.keyService.GetAuthIssuer()
 
