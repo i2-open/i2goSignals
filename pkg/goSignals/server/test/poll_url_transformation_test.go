@@ -19,7 +19,7 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/jwks" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"keys":[]}`))
+			_, _ = w.Write([]byte(`{"keys":[]}`))
 			return
 		}
 
@@ -30,7 +30,7 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 			mu.Unlock()
 
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(model.StreamStatus{
+			_ = json.NewEncoder(w).Encode(model.StreamStatus{
 				Status: model.StreamStateEnabled,
 			})
 			return
@@ -40,7 +40,7 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 		if r.Method == http.MethodPost {
 			time.Sleep(100 * time.Millisecond) // Slow down the loop
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
+			_ = json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
 			return
 		}
 	}))

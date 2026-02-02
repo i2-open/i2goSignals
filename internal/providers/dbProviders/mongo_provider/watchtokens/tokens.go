@@ -18,6 +18,9 @@ type TokenData struct {
 
 func (tok *TokenData) Store() {
 	tf, err := os.Create(storeFilename())
+	defer func(tf *os.File) {
+		_ = tf.Close()
+	}(tf)
 	if err != nil {
 		log.Default().Println("Mongo resume token file creation failed", err)
 		return

@@ -20,7 +20,7 @@ func NewKeyDAO() interfaces.KeyDAO {
 	}
 }
 
-func (d *KeyDAOMemory) Insert(ctx context.Context, keyRec *interfaces.JwkKeyRec) error {
+func (d *KeyDAOMemory) Insert(_ context.Context, keyRec *interfaces.JwkKeyRec) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -32,7 +32,7 @@ func (d *KeyDAOMemory) Insert(ctx context.Context, keyRec *interfaces.JwkKeyRec)
 	return nil
 }
 
-func (d *KeyDAOMemory) FindByIssuer(ctx context.Context, issuer string) ([]*interfaces.JwkKeyRec, error) {
+func (d *KeyDAOMemory) FindByIssuer(_ context.Context, issuer string) ([]*interfaces.JwkKeyRec, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -44,13 +44,13 @@ func (d *KeyDAOMemory) FindByIssuer(ctx context.Context, issuer string) ([]*inte
 	// Return copies
 	result := make([]*interfaces.JwkKeyRec, len(recs))
 	for i, rec := range recs {
-		copy := *rec
-		result[i] = &copy
+		keyRec := *rec
+		result[i] = &keyRec
 	}
 	return result, nil
 }
 
-func (d *KeyDAOMemory) FindLatestByIssuer(ctx context.Context, issuer string) (*interfaces.JwkKeyRec, error) {
+func (d *KeyDAOMemory) FindLatestByIssuer(_ context.Context, issuer string) (*interfaces.JwkKeyRec, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -65,11 +65,11 @@ func (d *KeyDAOMemory) FindLatestByIssuer(ctx context.Context, issuer string) (*
 		return nil, interfaces.ErrKeyNotFound
 	}
 
-	copy := *rec
-	return &copy, nil
+	keyRec := *rec
+	return &keyRec, nil
 }
 
-func (d *KeyDAOMemory) DeleteByIssuer(ctx context.Context, issuer string) error {
+func (d *KeyDAOMemory) DeleteByIssuer(_ context.Context, issuer string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -81,7 +81,7 @@ func (d *KeyDAOMemory) DeleteByIssuer(ctx context.Context, issuer string) error 
 	return nil
 }
 
-func (d *KeyDAOMemory) ListIssuers(ctx context.Context) ([]string, error) {
+func (d *KeyDAOMemory) ListIssuers(_ context.Context) ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -95,7 +95,7 @@ func (d *KeyDAOMemory) ListIssuers(ctx context.Context) ([]string, error) {
 	return issuers, nil
 }
 
-func (d *KeyDAOMemory) InsertReceiverKey(ctx context.Context, streamID string, audience string, jwksUri string) error {
+func (d *KeyDAOMemory) InsertReceiverKey(_ context.Context, streamID string, audience string, jwksUri string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -111,13 +111,13 @@ func (d *KeyDAOMemory) InsertReceiverKey(ctx context.Context, streamID string, a
 	return nil
 }
 
-func (d *KeyDAOMemory) FindReceiverKeyByStreamID(ctx context.Context, streamID string) (*interfaces.JwkKeyRec, error) {
+func (d *KeyDAOMemory) FindReceiverKeyByStreamID(_ context.Context, streamID string) (*interfaces.JwkKeyRec, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	if recs, ok := d.keys["receiver_"+streamID]; ok && len(recs) > 0 {
-		copy := *recs[len(recs)-1]
-		return &copy, nil
+		keyRec := *recs[len(recs)-1]
+		return &keyRec, nil
 	}
 	return nil, nil
 }

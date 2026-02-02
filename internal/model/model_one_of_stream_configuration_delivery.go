@@ -39,6 +39,9 @@ func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
 }
 
 func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
+	if d == nil {
+		return "DEFAULT"
+	}
 	if d.PushTransmitMethod != nil {
 		return DeliveryPush
 	}
@@ -58,29 +61,51 @@ func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
 }
 
 func (d *OneOfStreamConfigurationDelivery) GetEndpointUrl() string {
+	if d == nil {
+		return ""
+	}
 	switch d.GetMethod() {
 	case DeliveryPush:
-		return d.PushTransmitMethod.EndpointUrl
+		if d.PushTransmitMethod != nil {
+			return d.PushTransmitMethod.EndpointUrl
+		}
 	case DeliveryPoll:
-		return d.PollTransmitMethod.EndpointUrl
+		if d.PollTransmitMethod != nil {
+			return d.PollTransmitMethod.EndpointUrl
+		}
 	case ReceivePush:
-		return d.PushReceiveMethod.EndpointUrl
+		if d.PushReceiveMethod != nil {
+			return d.PushReceiveMethod.EndpointUrl
+		}
 	case ReceivePoll:
-		return d.PollReceiveMethod.EndpointUrl
+		if d.PollReceiveMethod != nil {
+			return d.PollReceiveMethod.EndpointUrl
+		}
 	}
 	return "" // won't happen unless a new method defined
 }
 
 func (d *OneOfStreamConfigurationDelivery) GetAuthorizationHeader() string {
+	if d == nil {
+		return ""
+	}
 	switch d.GetMethod() {
 	case DeliveryPush:
-		return d.PushTransmitMethod.AuthorizationHeader
+		if d.PushTransmitMethod != nil {
+			return d.PushTransmitMethod.AuthorizationHeader
+		}
 	case DeliveryPoll:
-		return d.PollTransmitMethod.AuthorizationHeader
+		if d.PollTransmitMethod != nil {
+			return d.PollTransmitMethod.AuthorizationHeader
+		}
 	case ReceivePush:
-		return d.PushReceiveMethod.AuthorizationHeader
+		if d.PushReceiveMethod != nil {
+			return d.PushReceiveMethod.AuthorizationHeader
+		}
 	case ReceivePoll:
-		return d.PollReceiveMethod.AuthorizationHeader
+		if d.PollReceiveMethod != nil {
+			return d.PollReceiveMethod.AuthorizationHeader
+		}
 	}
 	return "" // won't happen unless a new method defined
 }
@@ -90,6 +115,8 @@ func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
 	if dataString == "null" || dataString == `""` {
 		d.PollTransmitMethod = nil
 		d.PushTransmitMethod = nil
+		d.PollReceiveMethod = nil
+		d.PushReceiveMethod = nil
 		return nil
 	}
 

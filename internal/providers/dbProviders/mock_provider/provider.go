@@ -288,15 +288,15 @@ func (m *MockMongoProvider) ResetEventStream(streamId string, jti string, resetD
 	return m.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }
 
-func (m *MockMongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (m *MockMongoProvider) TryAcquireOrRenewLease(_ string, _ string, _ time.Duration) (bool, int64, error) {
 	return true, 1, nil
 }
 
-func (m *MockMongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
+func (m *MockMongoProvider) ReleaseLeaseIfOwned(_ string, _ string) error {
 	return nil
 }
 
-func (m *MockMongoProvider) RegisterNode(node model.ClusterNode) error {
+func (m *MockMongoProvider) RegisterNode(_ model.ClusterNode) error {
 	return nil
 }
 

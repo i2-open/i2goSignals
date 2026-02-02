@@ -12,7 +12,9 @@ func TestMockProviderDAOOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
-	defer provider.Close()
+	defer func(provider *MockMongoProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	if provider.Name() != "test_db_v2" {
 		t.Errorf("Expected database name test_db_v2, got %s", provider.Name())
@@ -29,7 +31,9 @@ func TestMockProviderDAOStreamOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
-	defer provider.Close()
+	defer func(provider *MockMongoProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	// Create a stream
 	streamConfig := model.StreamConfiguration{
@@ -84,7 +88,9 @@ func TestMockProviderDAOEventOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
-	defer provider.Close()
+	defer func(provider *MockMongoProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	// Create an event using CreateSet
 	event := goSet.CreateSet(nil, "test-issuer", []string{"test-audience"})
@@ -112,7 +118,9 @@ func TestMockProviderDAOKeyOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open mock provider V2: %v", err)
 	}
-	defer provider.Close()
+	defer func(provider *MockMongoProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	// Create a key pair
 	privateKey, err := provider.CreateIssuerJwkKeyPair("test-issuer", "test-project")

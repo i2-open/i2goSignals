@@ -67,6 +67,12 @@ func main() {
 		mLog.Error("Fatal: Unable to start database provider", "error", err)
 		os.Exit(-1)
 	}
+	defer func(provider dbProviders.DbProviderInterface) {
+		err := provider.Close()
+		if err != nil {
+			mLog.Error("Fatal: Unable to close database provider", "error", err)
+		}
+	}(provider)
 
 	baseUrl := "127.0.0.1:" + port + "/"
 	if found := stripQuotes(os.Getenv("BASE_URL")); found != "" {

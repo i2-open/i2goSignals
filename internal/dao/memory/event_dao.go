@@ -26,7 +26,7 @@ func NewEventDAO() interfaces.EventDAO {
 	}
 }
 
-func (d *EventDAOMemory) Insert(ctx context.Context, record *model.EventRecord) error {
+func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -34,7 +34,7 @@ func (d *EventDAOMemory) Insert(ctx context.Context, record *model.EventRecord) 
 	return nil
 }
 
-func (d *EventDAOMemory) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -45,7 +45,7 @@ func (d *EventDAOMemory) FindByJTI(ctx context.Context, jti string) (*model.Even
 	return nil, nil
 }
 
-func (d *EventDAOMemory) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.EventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -59,7 +59,7 @@ func (d *EventDAOMemory) FindByJTIs(ctx context.Context, jtis []string) ([]*mode
 	return records, nil
 }
 
-func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -90,7 +90,7 @@ func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to
 	return sortedEvents, nil
 }
 
-func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error {
+func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID bson.ObjectID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -105,7 +105,7 @@ func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID bs
 	return nil
 }
 
-func (d *EventDAOMemory) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
+func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -130,7 +130,7 @@ func (d *EventDAOMemory) GetPendingForStream(ctx context.Context, streamID strin
 	return jtiList, int64(len(pending)), nil
 }
 
-func (d *EventDAOMemory) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
+func (d *EventDAOMemory) RemovePending(_ context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -152,7 +152,7 @@ func (d *EventDAOMemory) RemovePending(ctx context.Context, jti string, streamID
 	return nil, nil
 }
 
-func (d *EventDAOMemory) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -161,7 +161,7 @@ func (d *EventDAOMemory) ClearPendingForStream(ctx context.Context, streamID str
 	return count, nil
 }
 
-func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
+func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -174,7 +174,7 @@ func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.De
 	return nil
 }
 
-func (d *EventDAOMemory) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) error {
+func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID bson.ObjectID)) error {
 	// Mock implementation: for now, we don't need to do anything here
 	// since HandleEvent already updates local buffers in the router.
 	// In a real mock test, we might want to simulate external events.

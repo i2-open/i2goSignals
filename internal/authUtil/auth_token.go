@@ -321,7 +321,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		}
 		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
 			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
-			hasScopes := []string{}
+			var hasScopes []string
 			if claims.RealmAccess.Roles != nil {
 				hasScopes = claims.RealmAccess.Roles
 			}

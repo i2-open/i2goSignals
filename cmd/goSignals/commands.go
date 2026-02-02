@@ -69,12 +69,14 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
+	defer handleRespClose(resp)
 	if err != nil {
 		if strings.Contains(err.Error(), "gave HTTP response") {
 			tryUrl.Scheme = "http"
 			serverUrl.Scheme = "http"
 			fmt.Println("Warning: HTTPS not supported trying HTTP at: " + tryUrl.String())
 			resp, err = http.Get(tryUrl.String())
+			defer handleRespClose(resp)
 			if err != nil {
 				return err
 			}
@@ -99,6 +101,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		iatUrl, _ := serverUrl.Parse("/iat")
 		fmt.Println("Obtaining authorization...")
 		resp, err = http.Get(iatUrl.String())
+		defer handleRespClose(resp)
 		if resp.StatusCode != http.StatusOK {
 			fmt.Println("Error: unable to obtain registration IAT token")
 			return err
@@ -127,6 +130,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		req.Header.Set("Authorization", "Bearer "+server.IatToken)
 		client := http.Client{}
 		resp, err = client.Do(req)
+		defer handleRespClose(resp)
 		if err != nil {
 			return err
 		}
@@ -385,10 +389,16 @@ func createRegRequestFromParams(method string, modeParam string, cli *CLI, conne
 
 	switch method {
 	case model.DeliveryPush:
+		endpoint := ""
+		auth := ""
+		if connectingConfig != nil && connectingConfig.Delivery != nil && connectingConfig.Delivery.PushReceiveMethod != nil {
+			endpoint = connectingConfig.Delivery.PushReceiveMethod.EndpointUrl
+			auth = connectingConfig.Delivery.PushReceiveMethod.AuthorizationHeader
+		}
 		delivery.PushTransmitMethod = &model.PushTransmitMethod{
 			Method:              model.DeliveryPush,
-			EndpointUrl:         connectingConfig.Delivery.PushReceiveMethod.EndpointUrl,
-			AuthorizationHeader: connectingConfig.Delivery.PushReceiveMethod.AuthorizationHeader,
+			EndpointUrl:         endpoint,
+			AuthorizationHeader: auth,
 		}
 
 	case model.ReceivePush:
@@ -402,10 +412,16 @@ func createRegRequestFromParams(method string, modeParam string, cli *CLI, conne
 		}
 
 	case model.ReceivePoll:
+		endpoint := ""
+		auth := ""
+		if connectingConfig != nil && connectingConfig.Delivery != nil && connectingConfig.Delivery.PollTransmitMethod != nil {
+			endpoint = connectingConfig.Delivery.PollTransmitMethod.EndpointUrl
+			auth = connectingConfig.Delivery.PollTransmitMethod.AuthorizationHeader
+		}
 		delivery.PollReceiveMethod = &model.PollReceiveMethod{
 			Method:              model.ReceivePoll,
-			EndpointUrl:         connectingConfig.Delivery.PollTransmitMethod.EndpointUrl,
-			AuthorizationHeader: connectingConfig.Delivery.PollTransmitMethod.AuthorizationHeader,
+			EndpointUrl:         endpoint,
+			AuthorizationHeader: auth,
 		}
 	}
 
@@ -712,6 +728,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 
 	client := http.Client{}
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -809,6 +826,7 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -858,6 +876,7 @@ func (g *CreateIatCmd) Run(c *CLI) error {
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1068,6 +1087,7 @@ func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	client := http.Client{}
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1214,6 +1234,7 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1305,6 +1326,7 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 		client := http.Client{}
 		resp, err := client.Do(req)
+		defer handleRespClose(resp)
 		if err != nil {
 			return err
 		}
@@ -1376,6 +1398,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 
 	client := http.Client{}
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1664,7 +1687,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		if err != nil {
 			return err
 		}
-		endpoint = config.Delivery.PushReceiveMethod.EndpointUrl
+		endpoint = config.Delivery.GetEndpointUrl()
 		token = stream.Token
 	}
 
@@ -1703,13 +1726,14 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(signString))
-	if token != "" {
+	if token != "" && req != nil && stream != nil {
 		req.Header.Set("Authorization", stream.Token)
 	}
 
 	req.Header.Set("Content-Type", "application/secevent+jwt")
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
+	defer handleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1758,4 +1782,10 @@ func parseMode(param string) string {
 		mode = model.RouteModePublish
 	}
 	return mode
+}
+
+func handleRespClose(resp *http.Response) {
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -244,7 +245,8 @@ func registerCollector(collector prometheus.Collector) {
 
 	err := prometheus.Register(collector)
 	if err != nil {
-		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+		var alreadyRegisteredError prometheus.AlreadyRegisteredError
+		if errors.As(err, &alreadyRegisteredError) {
 			// Already registered, this is fine (e.g. in tests)
 			return
 		}

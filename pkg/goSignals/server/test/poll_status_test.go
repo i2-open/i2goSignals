@@ -14,8 +14,13 @@ import (
 
 func TestPollTransmitterStatus(t *testing.T) {
 	// Set short check interval for testing
-	os.Setenv("POLL_STATUS_CHECK_INTERVAL", "0.2")
-	defer os.Unsetenv("POLL_STATUS_CHECK_INTERVAL")
+	_ = os.Setenv("POLL_STATUS_CHECK_INTERVAL", "0.2")
+	defer func() {
+		err := os.Unsetenv("POLL_STATUS_CHECK_INTERVAL")
+		if err != nil {
+			t.Logf("Failed to unset POLL_STATUS_CHECK_INTERVAL: %v", err)
+		}
+	}()
 
 	statusResponse := model.StreamStatus{
 		Status: model.StreamStatePause,
@@ -26,17 +31,17 @@ func TestPollTransmitterStatus(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/status" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(statusResponse)
+			_ = json.NewEncoder(w).Encode(statusResponse)
 			return
 		}
 		if r.URL.Path == "/jwks" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"keys":[]}`))
+			_, _ = w.Write([]byte(`{"keys":[]}`))
 			return
 		}
 		if r.URL.Path == "/poll" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
+			_ = json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
 			return
 		}
 	}))
@@ -99,7 +104,7 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/status" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(model.StreamStatus{
+			_ = json.NewEncoder(w).Encode(model.StreamStatus{
 				Status: model.StreamStateDisable,
 				Reason: "testing disable",
 			})
@@ -107,7 +112,7 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 		}
 		if r.URL.Path == "/jwks" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"keys":[]}`))
+			_, _ = w.Write([]byte(`{"keys":[]}`))
 			return
 		}
 	}))

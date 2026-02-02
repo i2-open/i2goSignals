@@ -304,7 +304,7 @@ func main() {
 			td.parser.Errorf("%s", err.Error())
 			var kerr *kong.ParseError
 			if errors.As(err, &kerr) {
-				kerr = err.(*kong.ParseError)
+				errors.As(err, &kerr)
 				fmt.Println(kerr.Error())
 				_ = kerr.Context.PrintUsage(false)
 			}
