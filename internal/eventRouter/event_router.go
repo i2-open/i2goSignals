@@ -38,6 +38,7 @@ type EventRouter interface {
 	GetPollStreamCnt() float64
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
 	SetStatsHandler(stats interface{})
+	ResetStream(sid string)
 }
 
 type router struct {
@@ -121,6 +122,15 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	return router
 }
 
+func (r *router) ResetStream(sid string) {
+	r.mu.RLock()
+	buf, ok := r.pollBuffers[sid]
+	r.mu.RUnlock()
+	if ok {
+		buf.Clear()
+	}
+}
+
 func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool) {
 	/*
 			Note:  Because the event router must initialize before the server is initialized, the
@@ -166,10 +176,13 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	if dir == "In" {
 		eventLogger.Debug("Inbound token", "token", token.String())
 	}
-
+	tokenIssuer := ""
+	if token != nil {
+		tokenIssuer = token.Issuer
+	}
 	label := prometheus.Labels{
 		"type":      eventTypes,
-		"iss":       token.Issuer,
+		"iss":       tokenIssuer,
 		"tfr":       tfr,
 		"stream_id": stream.StreamConfiguration.Id,
 	}
@@ -417,6 +430,10 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	if !exist || !bufExist {
 		eventLogger.Error("POLL-SRV: Error Poll Transmitter not found", "sid", sid)
 		return nil, false, http.StatusNotFound
+	}
+
+	if len(params.Acks) > 0 {
+		pollBuffer.AckEvents(params.Acks)
 	}
 
 	if state.Status != model.StreamStateEnabled {

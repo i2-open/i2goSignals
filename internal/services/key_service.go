@@ -187,6 +187,7 @@ func (s *KeyService) GetPublicTransmitterJWKS(ctx context.Context, issuer string
 		metadata := jwkset.JWKMetadataOptions{
 			KID: kid,
 		}
+		metadata.USE = jwkset.UseSig
 		jwkOptions := jwkset.JWKOptions{
 			Metadata: metadata,
 		}

@@ -233,12 +233,19 @@ func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*A
 	if parts[0] == "Bearer" {
 
 		tkn, err := a.ParseAuthTokenVerbose(parts[1], false)
-		if err == nil && tkn.IsAuthorized(streamRequested, scopes) {
+		if err == nil {
+			if tkn.IsAuthorized(streamRequested, scopes) {
+				return &AuthContext{
+					StreamId:  streamRequested,
+					ProjectId: tkn.ProjectId,
+					Eat:       tkn,
+				}, http.StatusOK
+			}
 			return &AuthContext{
 				StreamId:  streamRequested,
 				ProjectId: tkn.ProjectId,
 				Eat:       tkn,
-			}, http.StatusOK
+			}, http.StatusForbidden
 		}
 		// Try validating against configured OAuth servers as a fallback
 		if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {

@@ -488,8 +488,12 @@ func TestValidateAuthorization(t *testing.T) {
 				r:      reqWithVars,
 				scopes: []string{ScopeStreamMgmt},
 			},
-			want:  nil,
-			want1: http.StatusUnauthorized,
+			want: &AuthContext{
+				StreamId:  "1",
+				ProjectId: "abc",
+				Eat:       streamEat,
+			},
+			want1: http.StatusForbidden,
 		},
 		{
 			name: "Test event expired token",

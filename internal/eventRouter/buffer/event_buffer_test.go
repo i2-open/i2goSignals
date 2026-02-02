@@ -122,6 +122,7 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 				noVals = true
 				continue
 			} else {
+				buffer.AckEvents(*jtis)
 				cnt := len(*jtis)
 				fmt.Printf("%d events returned\n", cnt)
 				if cnt == 1 {
@@ -131,10 +132,10 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 				}
 			}
 			for _, v := range *jtis {
-
-				receiveVals[i] = v
-				// fmt.Println(fmt.Sprintf("Received #%d: jti: %s", i, lastVal))
-				i++
+				if i < testSize {
+					receiveVals[i] = v
+					i++
+				}
 			}
 		}
 		assert.Equal(t, testSize, i, "Expected result size matches")
@@ -193,6 +194,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       0})
 	assert.Equal(t, 2, len(*jtis), "Should be 2 results")
 	assert.Equal(t, true, more, "should be more results")
+	buffer.AckEvents(*jtis)
 
 	jtis, more = buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: true,
@@ -200,6 +202,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       5})
 	assert.Equal(t, 2, len(*jtis), "Should be 2 results")
 	assert.Equal(t, false, more, "should be NO more results")
+	buffer.AckEvents(*jtis)
 
 	jtis, more = buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: true,
@@ -218,6 +221,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       5})
 	assert.Greater(t, len(*jtis), 2, "Should be several results")
 	assert.Equal(t, false, more, "should be NO more results")
+	buffer.AckEvents(*jtis)
 
 	go func() {
 		time.Sleep(time.Second)
@@ -244,7 +248,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 	testSize := 1000
 
 	testVals := make([]string, testSize)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < testSize; i++ {
 		testVals[i] = primitive.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, testSize)
@@ -266,6 +270,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 				// noVals = true
 				continue
 			} else {
+				buffer.AckEvents(*jtis)
 				cnt := len(*jtis)
 				fmt.Printf("Received %d events\n", cnt)
 				if cnt > 1 {
@@ -275,9 +280,10 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 				}
 			}
 			for _, v := range *jtis {
-				receiveVals[i] = v
-				// fmt.Println(fmt.Sprintf("Received #%d: jti: %s", i, lastVal))
-				i++
+				if i < testSize {
+					receiveVals[i] = v
+					i++
+				}
 			}
 
 		}
