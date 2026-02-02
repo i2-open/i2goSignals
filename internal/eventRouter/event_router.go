@@ -673,6 +673,12 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", err)
 		return false
 	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			eventLogger.Error("PUSH-SRV: Error closing response body", "sid", configuration.Id, "error", err)
+		}
+	}(resp.Body)
 	if resp.StatusCode != http.StatusAccepted {
 		if resp.StatusCode == http.StatusBadRequest {
 			var errorMsg model.SetDeliveryErr
