@@ -87,9 +87,7 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,
 						EndpointUrl: tt.endpointUrl,
-						PollConfig: &model.PollParameters{
-							ReturnImmediately: true,
-						},
+						PollConfig:  &model.PollParameters{},
 					},
 				},
 			}

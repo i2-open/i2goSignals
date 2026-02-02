@@ -137,7 +137,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/status",
 			h.sa.GetStatus,
-			true,
+			false,
 		},
 
 		Route{
@@ -153,9 +153,8 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodDelete,
 			"/stream",
 			h.sa.StreamDelete,
-			true,
+			false,
 		},
-
 		Route{"ListStreamStates",
 			http.MethodGet,
 			"/states",
@@ -166,7 +165,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/state",
 			h.sa.GetStreamState,
-			true,
+			false,
 		},
 
 		Route{
@@ -174,7 +173,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/stream",
 			h.sa.StreamGet,
-			true,
+			false,
 		},
 
 		Route{
@@ -206,7 +205,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodPost,
 			"/status",
 			h.sa.UpdateStatus,
-			true,
+			false,
 		},
 
 		Route{
@@ -297,7 +296,7 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"ProtectedResourceMetadata",
 			http.MethodGet,
-			"/.well-known/oauth-provisioned-resource",
+			"/.well-known/oauth-protected-resource",
 			h.sa.ProtectedResourceMetadata,
 			false,
 		},

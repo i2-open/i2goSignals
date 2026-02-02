@@ -57,9 +57,7 @@ func TestPollTransmitterStatus(t *testing.T) {
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
 				EndpointUrl: ts.URL + "/poll",
-				PollConfig: &model.PollParameters{
-					ReturnImmediately: true,
-				},
+				PollConfig:  &model.PollParameters{},
 			},
 		},
 	}
@@ -130,9 +128,7 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
 				EndpointUrl: ts.URL + "/poll",
-				PollConfig: &model.PollParameters{
-					ReturnImmediately: true,
-				},
+				PollConfig:  &model.PollParameters{},
 			},
 		},
 	}

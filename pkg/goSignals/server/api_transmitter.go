@@ -121,14 +121,14 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	if !request.ReturnImmediately {
 		wait = "Long "
 	}
-	serverLog.Info(fmt.Sprintf("POLL-SRV[%s] %sPoll received...\n", authCtx.StreamId, wait))
+	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...\n", authCtx.StreamId, wait))
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
-		serverLog.Info(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
+		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
 		sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
 		event := sa.Provider.GetEvent(jti)
-		serverLog.Info(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
+		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
 		sa.EventRouter.IncrementCounter(streamState, event, false)
 	}
 
@@ -157,15 +157,16 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	if !request.ReturnImmediately && len(sets) == 0 {
 		isMore = " Timed out."
 	}
-	serverLog.Info(fmt.Sprintf("POLL-SRV[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore))
+	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore))
 
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
 	respBytes, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
 		serverLog.Warn("POLL-SRV Error serializing response", "sid", authCtx.StreamId, "error", err.Error())
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, "Error serializing response", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
 	return
 

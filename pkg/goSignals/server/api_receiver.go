@@ -524,11 +524,10 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 		bodyBytes, _ := json.MarshalIndent(pollBody, "", "  ")
 
-		pollRequest, _ := http.NewRequest(http.MethodPost, eventUrl, bytes.NewReader(bodyBytes))
+		pollRequest, _ := http.NewRequestWithContext(heartbeatCtx, http.MethodPost, eventUrl, bytes.NewReader(bodyBytes))
 		pollRequest.Header.Set("Authorization", authorization)
-		pollRequest.WithContext(heartbeatCtx)
 
-		serverLog.Info("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
+		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
 		resp, err := client.Do(pollRequest)
 		if err != nil || (resp != nil && resp.StatusCode > 400) {
 			if isConnectionError(err) {
@@ -624,7 +623,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		acks = []string{}
 
 		setCnt := len(pollResponse.Sets)
-		serverLog.Info("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", pollResponse.MoreAvailable)
+		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", pollResponse.MoreAvailable)
 
 		for jti, setString := range pollResponse.Sets {
 			serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti))
@@ -686,6 +685,17 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			ps.stream.ErrorMsg = ""
 			ps.mu.Unlock()
 		}
+
+		// If the last poll returned no events, add a small delay to avoid tight loops.
+		// This provides a safety valve while maintaining high performance for actual event delivery.
+		if len(pollResponse.Sets) == 0 && !pollResponse.MoreAvailable {
+			sleepTime := 100 * time.Millisecond
+			select {
+			case <-time.After(sleepTime):
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
 	}
 	if !ps.active {
 		serverLog.Warn("POLL-RCV: Polling marked inactive", "sid", ps.stream.StreamConfiguration.Id)
@@ -700,7 +710,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
 	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
-		processPushError(w, "authentication_failed", "The authorization was not successfully validated")
+		if status == http.StatusForbidden {
+			processPushError(w, "access_denied", "The authorization did not contain the required stream identifier or scope")
+		} else {
+			processPushError(w, "authentication_failed", "The authorization was not successfully validated")
+		}
 		return
 	}
 
@@ -798,8 +812,8 @@ func processPushError(w http.ResponseWriter, errorCode string, msg string) {
 		Description: msg,
 	}
 	responseBytes, _ := json.MarshalIndent(respBody, "", "  ")
-	w.WriteHeader(http.StatusBadRequest)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
 	_, err := w.Write(responseBytes)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg))
