@@ -263,16 +263,17 @@ func (s *MongoProviderSuite) generateEvent() {
 	}
 	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payloadClaims)
 
-	s.provider.AddEvent(&test1, "", "")
+	_, _ = s.provider.AddEvent(&test1, "", "")
 
 	state, _ := s.provider.GetStreamState(s.stream.Id)
 
-	s.provider.AddEventToStream(test1.ID, state.Id)
+	_ = s.provider.AddEventToStream(test1.ID, state.Id)
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	issuer := "i2test.example.org"
-	key := s.provider.CreateIssuerJwkKeyPair(issuer, "")
+	key, err := s.provider.CreateIssuerJwkKeyPair(issuer, "")
+	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
 	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)

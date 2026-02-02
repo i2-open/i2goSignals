@@ -26,7 +26,7 @@ type DbProviderInterface interface {
 	GetAuthValidatorPubKey() *keyfunc.JWKS
 	GetAuthIssuer() *authUtil.AuthIssuer
 	GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS
-	CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey
+	CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error)
 	RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error)
 	GetIssuerKeyNames() []string
 	GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error)
@@ -48,9 +48,9 @@ type DbProviderInterface interface {
 	GetEvent(jti string) *goSet.SecurityEventToken
 	GetEvents(jtis []string) []*goSet.SecurityEventToken
 	GetEventRecord(jti string) *model.EventRecord
-	AckEvent(jtiString string, streamId string, fencingToken int64)
-	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord)
-	AddEventToStream(jti string, streamId bson.ObjectID)
+	AckEvent(jtiString string, streamId string, fencingToken int64) error
+	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord, err error)
+	AddEventToStream(jti string, streamId bson.ObjectID) error
 	WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 

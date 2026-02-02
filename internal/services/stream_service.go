@@ -81,7 +81,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 
 	case model.DeliveryPoll, "DEFAULT":
-		authToken, _ := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		if err != nil {
+			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
+		}
 		delivery := &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
 				Method:              model.DeliveryPoll,
@@ -101,7 +104,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			config.RouteMode = model.RouteModeImport
 		}
 		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
-		authToken, _ := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		if err != nil {
+			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
+		}
 		method.AuthorizationHeader = "Bearer " + authToken
 
 	case model.ReceivePoll:
@@ -137,7 +143,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 				},
 			}
 			ssLog.Debug("Submitting POLL stream registration request to transmitter...")
-			reqBody, _ := json.Marshal(transmitStreamReq)
+			reqBody, err := json.Marshal(transmitStreamReq)
+			if err != nil {
+				return model.StreamConfiguration{}, fmt.Errorf("failed to marshal registration request: %v", err)
+			}
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, txConfig.ConfigurationEndpoint, bytes.NewReader(reqBody))
 			if err != nil {
 				return model.StreamConfiguration{}, err
@@ -248,22 +257,30 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		// Retrieve the transmitter configuration from the WellKnownUrl
 		resp, err := http.Get(*request.TxWellKnownUrl)
 		if err != nil {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("transmitter configuration returned status %d", resp.StatusCode)
 		}
 		var txConfig model.TransmitterConfiguration
 		if err := json.NewDecoder(resp.Body).Decode(&txConfig); err != nil {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter configuration: %v", err)
 		}
 
 		if txConfig.ConfigurationEndpoint == "" {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, errors.New("transmitter configuration missing configuration_endpoint")
 		}
 
@@ -291,10 +308,18 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		ssLog.Debug("Submitting PUSH stream registration request to transmitter...")
 
 		// Submit the creation request to the transmitter's ConfigurationEndpoint.
-		reqBody, _ := json.Marshal(transmitStreamReq)
+		reqBody, err := json.Marshal(transmitStreamReq)
+		if err != nil {
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
+			return model.StreamConfiguration{}, fmt.Errorf("failed to marshal registration request: %v", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, txConfig.ConfigurationEndpoint, bytes.NewReader(reqBody))
 		if err != nil {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, err
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -308,7 +333,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		resp, err = http.DefaultClient.Do(req)
 		if err != nil {
 			ssLog.Error("failed to submit registration request to transmitter", "error", err)
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to submit registration request to transmitter: %v", err)
 		}
 		defer resp.Body.Close()
@@ -316,13 +343,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		// parse the response and handle any errors. If they occur return a detailed error
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 			ssLog.Warn("transmitter registration failed", "host", txConfig.ConfigurationEndpoint, "status", resp.StatusCode)
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("transmitter registration failed with status %d", resp.StatusCode)
 		}
 
 		var txStreamResp model.StreamConfiguration
 		if err := json.NewDecoder(resp.Body).Decode(&txStreamResp); err != nil {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter registration response: %v", err)
 		}
 
@@ -335,7 +366,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		streamRec.StreamConfiguration = config
 		err = s.streamDAO.Update(ctx, streamRec)
 		if err != nil {
-			_ = s.DeleteStream(ctx, config.Id)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to update stream after registration: %v", err)
 		}
 
@@ -566,7 +599,10 @@ func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *mo
 				streamState.Status = model.StreamStateDisable
 				streamState.ErrorMsg = msg
 				// Update the stream in the database
-				_ = s.streamDAO.Update(ctx, streamState)
+				err = s.streamDAO.Update(ctx, streamState)
+				if err != nil {
+					ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
+				}
 			} else {
 				// Temporary error - log but don't change stream state
 				// Let the polling client handle retries with backoff

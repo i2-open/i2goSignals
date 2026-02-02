@@ -3,10 +3,16 @@ package interfaces
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/model"
 	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+var (
+	ErrNotFound    = errors.New("not found")
+	ErrKeyNotFound = errors.New("key not found")
 )
 
 // StreamDAO handles stream configuration data access

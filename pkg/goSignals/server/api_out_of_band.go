@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -43,7 +45,12 @@ func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Reques
 		})
 	}
 
-	pkcs8bytes, _ := x509.MarshalPKCS8PrivateKey(issuerKey)
+	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error marshaling private key for issuer %s: %v", issuer, err))
+		http.Error(w, "Error marshaling private key", http.StatusInternalServerError)
+		return
+	}
 	keyPemBytes := pem.EncodeToMemory(
 		&pem.Block{
 			Type:  "PRIVATE KEY",
@@ -55,7 +62,10 @@ func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(keyPemBytes)
+	_, err = w.Write(keyPemBytes)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error writing response for issuer %s: %v", issuer, err))
+	}
 }
 
 // CreateJwksIssuer handles the creation of a JWK key pair for the specified issuer and authorizes access permissions.
@@ -73,7 +83,12 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	// Check if issuer key already exists
-	existingKey, _ := sa.Provider.GetIssuerPrivateKey(issuer)
+	existingKey, err := sa.Provider.GetIssuerPrivateKey(issuer)
+	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+		serverLog.Error(fmt.Sprintf("Error checking existing issuer key for %s: %v", issuer, err))
+		http.Error(w, "Error checking existing key", http.StatusInternalServerError)
+		return
+	}
 	if existingKey != nil {
 		// Do they want to rotate?
 		queryParams := r.URL.Query()
@@ -86,9 +101,19 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	issuerKey := sa.Provider.CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
+	issuerKey, err := sa.Provider.CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", issuer, err))
+		http.Error(w, "Error generating private key", http.StatusInternalServerError)
+		return
+	}
 
-	pkcs8bytes, _ := x509.MarshalPKCS8PrivateKey(issuerKey)
+	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error marshaling private key for issuer %s: %v", issuer, err))
+		http.Error(w, "Error marshaling private key", http.StatusInternalServerError)
+		return
+	}
 	keyPemBytes := pem.EncodeToMemory(
 		&pem.Block{
 			Type:  "PRIVATE KEY",
@@ -96,9 +121,11 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 		})
 
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(keyPemBytes)
+	_, err = w.Write(keyPemBytes)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error writing response for issuer %s: %v", issuer, err))
+	}
 	return
-	// http.Error(w, "Unknown error generating private key", http.StatusInternalServerError)
 }
 
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
@@ -206,7 +233,7 @@ func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http
 	err := sa.Provider.DeleteIssuer(issuer)
 	if err != nil {
 		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
-		if err.Error() == "issuer not found" {
+		if errors.Is(err, interfaces.ErrKeyNotFound) {
 			http.Error(w, "Issuer not found", http.StatusNotFound)
 			return
 		}

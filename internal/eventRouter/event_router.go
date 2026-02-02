@@ -381,7 +381,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return err
 	}
 
-	event := r.provider.AddEvent(eventToken, sid, rawEvent)
+	event, err := r.provider.AddEvent(eventToken, sid, rawEvent)
+	if err != nil {
+		return err
+	}
 	r.IncrementCounter(streamState, eventToken, true)
 
 	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
@@ -399,7 +402,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			r.provider.AddEventToStream(event.Jti, stream.Id)
+			err = r.provider.AddEventToStream(event.Jti, stream.Id)
+			if err != nil {
+				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
+			}
 			// This will cause the PollStreamHandler assigned to deliver the event
 			r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
@@ -413,7 +419,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			r.provider.AddEventToStream(event.Jti, pollStream.Id)
+			err = r.provider.AddEventToStream(event.Jti, pollStream.Id)
+			if err != nil {
+				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
+			}
 			// This causes the event to be available on the next poll
 			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
@@ -613,7 +622,10 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 
 		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey, kid)
 		if delivered {
-			r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
+			err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
+			if err != nil {
+				eventLogger.Error("PUSH-SRV: Error acking event", "sid", config.StreamConfiguration.Id, "jti", jti, "error", err)
+			}
 			r.IncrementCounter(config, &eventRecord.Event, false)
 		}
 	}

@@ -54,8 +54,14 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 
 	serverLog.Debug("GetStatus result", "sid", sid, "status", streamStatus.Status, "reason", streamStatus.Reason)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	resp, err := json.Marshal(*streamStatus)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	resp, _ := json.Marshal(*streamStatus)
 	_, _ = w.Write(resp)
 }
 
@@ -102,6 +108,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
+		return
 	}
 	// sa.EventRouter.RemoveStream(authContext)
 	w.WriteHeader(http.StatusOK)
@@ -168,9 +175,14 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 
 	serverLog.Debug(fmt.Sprintf("Stream Config Get Request %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
 
-	resp, _ := json.Marshal(sa.adjustBaseUrl(*config))
+	resp, err := json.Marshal(sa.adjustBaseUrl(*config))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }
 
@@ -197,20 +209,29 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
 	// Update the event router
-	state, _ := sa.Provider.GetStreamState(configResp.Id)
+	state, err := sa.Provider.GetStreamState(configResp.Id)
+	if err != nil {
+		serverLog.Error("Error getting stream state after creation", "id", configResp.Id, "error", err)
+	}
 	sa.EventRouter.UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
 	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	respBytes, _ := json.MarshalIndent(sa.adjustBaseUrl(configResp), "", "  ")
+	respBytes, err := json.MarshalIndent(sa.adjustBaseUrl(configResp), "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
 
 }
@@ -225,6 +246,10 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 
 	var jsonRequest model.StreamConfiguration
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
 	if !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin}) {
@@ -247,11 +272,15 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "No stream found", http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
 	}
 
 	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	if err != nil {
+		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
+	}
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
 		err := sa.Provider.ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
@@ -269,7 +298,10 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Update the event router
-	state, _ := sa.Provider.GetStreamState(authCtx.StreamId)
+	state, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	if err != nil {
+		serverLog.Error("Error getting stream state for event router update", "id", authCtx.StreamId, "error", err)
+	}
 	if resetDate != nil || resetJti != "" {
 		sa.EventRouter.RemoveStream(authCtx.StreamId)
 	}
@@ -279,9 +311,14 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", authCtx.StreamId))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	respBytes, _ := json.MarshalIndent(sa.adjustBaseUrl(*configResp), "", "  ")
+	respBytes, err := json.MarshalIndent(sa.adjustBaseUrl(*configResp), "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
-	// w.WriteHeader(http.StatusOK)
 }
 
 func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
@@ -340,12 +377,23 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 		sa.HandleReceiver(streamState)
 	}
 
-	statusResp, _ := sa.Provider.GetStatus(authCtx.StreamId)
+	statusResp, err := sa.Provider.GetStatus(authCtx.StreamId)
+	if err != nil {
+		serverLog.Error("Error getting status after update", "id", authCtx.StreamId, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	respBytes, _ := json.MarshalIndent(statusResp, "", "  ")
+	respBytes, err := json.MarshalIndent(statusResp, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
-
 }
 
 func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfiguration {

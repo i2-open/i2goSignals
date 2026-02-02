@@ -44,29 +44,35 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	}
 
 	// Create new key
-	s.tokenKey = s.CreateIssuerJwkKeyPair(ctx, s.tokenIssuer, "")
+	s.tokenKey, err = s.CreateIssuerJwkKeyPair(ctx, s.tokenIssuer, "")
+	if err != nil {
+		return fmt.Errorf("failed to create token key: %v", err)
+	}
 	if defaultIssuer != s.tokenIssuer {
 		// Also create default issuer key if different
-		_ = s.CreateIssuerJwkKeyPair(ctx, defaultIssuer, "")
+		_, err = s.CreateIssuerJwkKeyPair(ctx, defaultIssuer, "")
+		if err != nil {
+			ksLog.Error("Error creating default issuer key", "error", err)
+		}
 	}
 	s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, s.tokenIssuer)
 	return nil
 }
 
-func (s *KeyService) CreateIssuerJwkKeyPair(ctx context.Context, issuer string, projectId string) *rsa.PrivateKey {
+func (s *KeyService) CreateIssuerJwkKeyPair(ctx context.Context, issuer string, projectId string) (*rsa.PrivateKey, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		ksLog.Error("Error generating key pair", "error", err)
-		panic(err)
+		return nil, err
 	}
 
 	err = s.storeJwkKeyPair(ctx, issuer, issuer, privateKey, projectId)
 	if err != nil {
 		ksLog.Error("Error storing key pair", "error", err)
-		return nil
+		return nil, err
 	}
 
-	return privateKey
+	return privateKey, nil
 }
 
 func (s *KeyService) RotateIssuerKey(ctx context.Context, issuer string, projectId string) (*rsa.PrivateKey, string, error) {

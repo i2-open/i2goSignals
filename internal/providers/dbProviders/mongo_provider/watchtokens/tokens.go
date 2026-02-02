@@ -22,13 +22,21 @@ func (tok *TokenData) Store() {
 		log.Default().Println("Mongo resume token file creation failed", err)
 		return
 	}
-	jsonOut, _ := json.Marshal(tok)
+	jsonOut, err := json.Marshal(tok)
+	if err != nil {
+		log.Default().Println("Failed to marshal Mongo resume token data", err)
+		return
+	}
 	_, err = tf.Write(jsonOut)
 	if err != nil {
 		log.Default().Println("Failed to save Mongo resume token data", err)
+		_ = tf.Close()
 		return
 	}
-	_ = tf.Close()
+	err = tf.Close()
+	if err != nil {
+		log.Default().Println("Failed to close Mongo resume token file", err)
+	}
 }
 
 // Reset is called after re-initialization of the Mongo database to remove prior watchlist tokens
@@ -69,7 +77,11 @@ func Load() *TokenData {
 }
 
 func storeFilename() string {
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Default().Println("Error getting current directory for watch token: " + err.Error())
+		cwd = "."
+	}
 	watchFile := os.Getenv("MONGO_WATCH_FILE")
 	if watchFile == "" {
 		resDir := filepath.Join(cwd, "resources")

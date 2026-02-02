@@ -668,7 +668,12 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			}
 			// sa.Provider.AddEvent(token, true)
 			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
-			_ = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
+			err = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
+			if err != nil {
+				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err)
+				// We don't acknowledge if we couldn't handle it
+				continue
+			}
 
 			acks = append(acks, jti)
 		}
@@ -811,12 +816,17 @@ func processPushError(w http.ResponseWriter, errorCode string, msg string) {
 		ErrCode:     errorCode,
 		Description: msg,
 	}
-	responseBytes, _ := json.MarshalIndent(respBody, "", "  ")
+	responseBytes, err := json.MarshalIndent(respBody, "", "  ")
+	if err != nil {
+		serverLog.Error("Error marshaling push error response", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-	_, err := w.Write(responseBytes)
+	_, err = w.Write(responseBytes)
 	if err != nil {
-		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg))
+		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg), "error", err)
 		return
 	}
 }

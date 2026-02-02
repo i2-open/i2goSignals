@@ -191,7 +191,7 @@ func (m *MockMongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 	return m.streamService.GetIssuerJwksForReceiver(context.Background(), sid)
 }
 
-func (m *MockMongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
+func (m *MockMongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error) {
 	return m.keyService.CreateIssuerJwkKeyPair(context.Background(), issuer, projectId)
 }
 
@@ -268,16 +268,16 @@ func (m *MockMongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	return m.eventService.GetEventRecord(context.Background(), jti)
 }
 
-func (m *MockMongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) {
-	m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
+func (m *MockMongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
+	return m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
 }
 
-func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord) {
+func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
 	return m.eventService.AddEvent(context.Background(), event, sid, raw)
 }
 
-func (m *MockMongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) {
-	m.eventService.AddEventToStream(context.Background(), jti, streamId)
+func (m *MockMongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
+	return m.eventService.AddEventToStream(context.Background(), jti, streamId)
 }
 
 func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {

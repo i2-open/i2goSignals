@@ -56,14 +56,14 @@ func (d *KeyDAOMongo) FindLatestByIssuer(ctx context.Context, issuer string) (*i
 	err := res.Decode(&rec)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, errors.New("no key found for: " + issuer)
+			return nil, interfaces.ErrKeyNotFound
 		}
 		kLog.Error("Error parsing JwkKeyRec for issuer", "issuer", issuer, "error", err)
 		return nil, err
 	}
 
 	if len(rec.KeyBytes) == 0 {
-		return nil, errors.New("no key found for: " + issuer)
+		return nil, interfaces.ErrKeyNotFound
 	}
 
 	return &rec, nil
@@ -75,7 +75,7 @@ func (d *KeyDAOMongo) DeleteByIssuer(ctx context.Context, issuer string) error {
 	if res.Err() != nil {
 		err := res.Err()
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return errors.New("issuer not found")
+			return interfaces.ErrKeyNotFound
 		}
 		return err
 	}
@@ -87,7 +87,7 @@ func (d *KeyDAOMongo) DeleteByIssuer(ctx context.Context, issuer string) error {
 	}
 
 	if delResult.DeletedCount == 0 {
-		return errors.New("issuer not found")
+		return interfaces.ErrKeyNotFound
 	}
 
 	kLog.Info("Deleted issuer keys for issuer", "issuer", issuer)

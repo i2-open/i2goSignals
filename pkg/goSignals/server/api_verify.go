@@ -58,7 +58,12 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	event := events.CreateVerifyEvent(payload.StreamId, payload.State, stream.Iss, stream.Aud)
 
 	// Add the event to the system
-	eventRec := sa.Provider.AddEvent(event, payload.StreamId, "")
+	eventRec, err := sa.Provider.AddEvent(event, payload.StreamId, "")
+	if err != nil {
+		verifyLog.Error("Error adding verify event", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	// Trigger the event on the stream
 	streamObjId, err := bson.ObjectIDFromHex(payload.StreamId)
@@ -66,7 +71,12 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	sa.Provider.AddEventToStream(eventRec.Jti, streamObjId)
+	err = sa.Provider.AddEventToStream(eventRec.Jti, streamObjId)
+	if err != nil {
+		verifyLog.Error("Error adding verify event to stream", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	// Return 204 No Content on success
 	w.WriteHeader(http.StatusNoContent)

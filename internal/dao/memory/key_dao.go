@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 
@@ -57,13 +56,13 @@ func (d *KeyDAOMemory) FindLatestByIssuer(ctx context.Context, issuer string) (*
 
 	recs, ok := d.keys[issuer]
 	if !ok || len(recs) == 0 {
-		return nil, errors.New("no key found for: " + issuer)
+		return nil, interfaces.ErrKeyNotFound
 	}
 
 	// Newest key is the last one in the slice
 	rec := recs[len(recs)-1]
 	if len(rec.KeyBytes) == 0 {
-		return nil, errors.New("no key found for: " + issuer)
+		return nil, interfaces.ErrKeyNotFound
 	}
 
 	copy := *rec
@@ -75,7 +74,7 @@ func (d *KeyDAOMemory) DeleteByIssuer(ctx context.Context, issuer string) error 
 	defer d.mu.Unlock()
 
 	if _, ok := d.keys[issuer]; !ok {
-		return errors.New("issuer not found")
+		return interfaces.ErrKeyNotFound
 	}
 
 	delete(d.keys, issuer)

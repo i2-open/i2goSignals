@@ -18,7 +18,12 @@ func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	keyBytes, _ := jsonKey.MarshalJSON()
+	keyBytes, err := jsonKey.MarshalJSON()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(keyBytes)
 }
 
@@ -42,7 +47,11 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 	issuerResponse := IssuerResponse{
 		Issuers: names,
 	}
-	jsonIssuers, _ := json.Marshal(issuerResponse)
+	jsonIssuers, err := json.Marshal(issuerResponse)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(jsonIssuers)
 }
@@ -81,13 +90,16 @@ func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Requ
 	// This is the normal JWKS response
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	keyBytes, _ := jsonKey.MarshalJSON()
+	keyBytes, err := jsonKey.MarshalJSON()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(keyBytes)
 	return
-
 }
 
 // PollEvents implements the server side of RFC8936 Poll-based delivery of SET Tokens
@@ -126,7 +138,10 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
-		sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
+		err = sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
+		if err != nil {
+			serverLog.Error("Error acking event in poll", "sid", authCtx.StreamId, "jti", jti, "error", err)
+		}
 		event := sa.Provider.GetEvent(jti)
 		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
 		sa.EventRouter.IncrementCounter(streamState, event, false)

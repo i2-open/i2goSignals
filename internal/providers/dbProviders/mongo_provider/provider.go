@@ -123,7 +123,10 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 
 	// Create indexes
 	if !dbExists {
-		m.createIndexes(ctx)
+		err = m.createIndexes(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Initialize DAOs
@@ -147,12 +150,14 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.dbInit = true
 
 	// Load receiver streams
-	_ = m.streamService.LoadReceiverStreams(ctx)
+	if m.streamService.LoadReceiverStreams(ctx) == nil {
+		pLog.Warn("No receiver streams loaded during initialization")
+	}
 
 	return nil
 }
 
-func (m *MongoProvider) createIndexes(ctx context.Context) {
+func (m *MongoProvider) createIndexes(ctx context.Context) error {
 	indexSid := mongo.IndexModel{
 		Keys: bson.M{"sid": 1},
 	}
@@ -160,10 +165,12 @@ func (m *MongoProvider) createIndexes(ctx context.Context) {
 	_, err := m.pendingCol.Indexes().CreateOne(ctx, indexSid)
 	if err != nil {
 		pLog.Error("Error creating index for pendingCol", "error", err)
+		return err
 	}
 	_, err = m.deliveredCol.Indexes().CreateOne(ctx, indexSid)
 	if err != nil {
 		pLog.Error("Error creating index for deliveredCol", "error", err)
+		return err
 	}
 
 	indexIss := mongo.IndexModel{
@@ -172,7 +179,9 @@ func (m *MongoProvider) createIndexes(ctx context.Context) {
 	_, err = m.keyCol.Indexes().CreateOne(ctx, indexIss)
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (m *MongoProvider) Check() error {
@@ -194,7 +203,10 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	m.dbInit = false
 
 	if initialize {
-		_ = m.ssefDb.Drop(context.TODO())
+		err = m.ssefDb.Drop(context.TODO())
+		if err != nil {
+			pLog.Error("Error dropping database during re-initialization", "error", err)
+		}
 		m.pendingCol = nil
 		m.ssefDb = nil
 		m.eventCol = nil
@@ -202,7 +214,10 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 		m.keyCol = nil
 		m.deliveredCol = nil
 		m.resumeTokens.Reset()
-		_ = m.initialize(m.DbName, context.TODO())
+		err = m.initialize(m.DbName, context.TODO())
+		if err != nil {
+			pLog.Error("Error re-initializing database", "error", err)
+		}
 	}
 
 	return err
@@ -370,7 +385,7 @@ func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 	return m.streamService.GetIssuerJwksForReceiver(context.Background(), sid)
 }
 
-func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) *rsa.PrivateKey {
+func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error) {
 	return m.keyService.CreateIssuerJwkKeyPair(context.Background(), issuer, projectId)
 }
 
@@ -447,16 +462,16 @@ func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
 	return m.eventService.GetEventRecord(context.Background(), jti)
 }
 
-func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) {
-	m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
+func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
+	return m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
 }
 
-func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord) {
+func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
 	return m.eventService.AddEvent(context.Background(), event, sid, raw)
 }
 
-func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) {
-	m.eventService.AddEventToStream(context.Background(), jti, streamId)
+func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
+	return m.eventService.AddEventToStream(context.Background(), jti, streamId)
 }
 
 func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
