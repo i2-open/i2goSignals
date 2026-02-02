@@ -8,12 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type TokenData struct {
-	StreamTokens map[primitive.ObjectID]bson.Raw
+	StreamTokens map[bson.ObjectID]bson.Raw
 	EventsToken  bson.Raw
 }
 
@@ -34,7 +33,7 @@ func (tok *TokenData) Store() {
 
 // Reset is called after re-initialization of the Mongo database to remove prior watchlist tokens
 func (tok *TokenData) Reset() {
-	tok.StreamTokens = map[primitive.ObjectID]bson.Raw{}
+	tok.StreamTokens = map[bson.ObjectID]bson.Raw{}
 	tok.EventsToken = nil
 	tok.Store()
 }
@@ -62,7 +61,7 @@ func Load() *TokenData {
 	err = json.Unmarshal(dataBytes, tokenData)
 	if err != nil {
 		log.Println("Error parsing token data file, returning empty state:", err)
-		return &TokenData{StreamTokens: make(map[primitive.ObjectID]bson.Raw)}
+		return &TokenData{StreamTokens: make(map[bson.ObjectID]bson.Raw)}
 	}
 
 	return tokenData

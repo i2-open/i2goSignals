@@ -7,9 +7,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 var sLog = logger.Sub("STREAM_DAO")
@@ -31,7 +30,7 @@ func (d *StreamDAOMongo) Create(ctx context.Context, state *model.StreamStateRec
 }
 
 func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
-	docId, err := primitive.ObjectIDFromHex(id)
+	docId, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +65,7 @@ func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRec
 }
 
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
-	docId, err := primitive.ObjectIDFromHex(id)
+	docId, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return err
 	}
@@ -132,7 +131,7 @@ func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.Strea
 }
 
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
-	docId, err := primitive.ObjectIDFromHex(id)
+	docId, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return err
 	}

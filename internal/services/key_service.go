@@ -14,7 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var ksLog = logger.Sub("KEY_SERVICE")
@@ -75,7 +75,7 @@ func (s *KeyService) RotateIssuerKey(ctx context.Context, issuer string, project
 		return nil, "", err
 	}
 
-	kid := fmt.Sprintf("%s-%s", issuer, primitive.NewObjectID().Hex())
+	kid := fmt.Sprintf("%s-%s", issuer, bson.NewObjectID().Hex())
 	err = s.storeJwkKeyPair(ctx, issuer, kid, privateKey, projectId)
 	if err != nil {
 		return nil, "", err
@@ -90,7 +90,7 @@ func (s *KeyService) storeJwkKeyPair(ctx context.Context, issuer string, kid str
 	pubKeyBytes := x509.MarshalPKCS1PublicKey(&publicKey)
 
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:          primitive.NewObjectID(),
+		Id:          bson.NewObjectID(),
 		Iss:         issuer,
 		Kid:         kid,
 		ProjectId:   projectId,
@@ -120,7 +120,7 @@ func (s *KeyService) AddIssuerKey(ctx context.Context, issuer string, kid string
 	}
 
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:          primitive.NewObjectID(),
+		Id:          bson.NewObjectID(),
 		Iss:         issuer,
 		Kid:         kid,
 		ProjectId:   projectId,

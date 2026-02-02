@@ -19,11 +19,11 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
 
 const CDbName = "ssef"
@@ -219,7 +219,7 @@ func (m *MongoProvider) connect() error {
 	opts.WriteConcern = &writeconcern.WriteConcern{
 		W: "majority",
 	}
-	client, err := mongo.Connect(ctx, opts)
+	client, err := mongo.Connect(opts)
 	if err != nil {
 		return err
 	}
@@ -455,11 +455,11 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, ra
 	return m.eventService.AddEvent(context.Background(), event, sid, raw)
 }
 
-func (m *MongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID) {
+func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) {
 	m.eventService.AddEventToStream(context.Background(), jti, streamId)
 }
 
-func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
+func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
 	m.eventService.WatchPending(ctx, callback)
 }
 
@@ -555,7 +555,7 @@ func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
 		},
 	}
 
-	opts := options.Update().SetUpsert(true)
+	opts := options.UpdateOne().SetUpsert(true)
 	_, err := m.nodeCol.UpdateOne(ctx, filter, update, opts)
 	return err
 }

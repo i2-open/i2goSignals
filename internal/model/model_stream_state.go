@@ -4,13 +4,13 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // StreamStateRecord is stored in MongoProvider.streamCol
 type StreamStateRecord struct {
-	Id        primitive.ObjectID `bson:"_id"`
-	ProjectId string             `json:"project_id" bson:"project_id"` // ProjectId links SsfClient entities to streams.
+	Id        bson.ObjectID `bson:"_id"`
+	ProjectId string        `json:"project_id" bson:"project_id"` // ProjectId links SsfClient entities to streams.
 	StreamConfiguration
 	StartDate  time.Time `json:"start_date" bson:"start_date"`
 	CreatedAt  time.Time `json:"created_at" bson:"created_at"`

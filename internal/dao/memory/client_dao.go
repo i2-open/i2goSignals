@@ -7,7 +7,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ClientDAOMemory struct {
@@ -21,30 +21,30 @@ func NewClientDAO() interfaces.ClientDAO {
 	}
 }
 
-func (d *ClientDAOMemory) Insert(ctx context.Context, client *model.SsfClient) error {
+func (d *ClientDAOMemory) Insert(_ context.Context, client *model.SsfClient) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if client.Id.IsZero() {
-		client.Id = primitive.NewObjectID()
+		client.Id = bson.NewObjectID()
 	}
 	clientId := client.Id.Hex()
 	d.clients[clientId] = client
 	return nil
 }
 
-func (d *ClientDAOMemory) FindByID(ctx context.Context, id string) (*model.SsfClient, error) {
+func (d *ClientDAOMemory) FindByID(_ context.Context, id string) (*model.SsfClient, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	if client, ok := d.clients[id]; ok {
-		copy := *client
-		return &copy, nil
+		copyClient := *client
+		return &copyClient, nil
 	}
 	return nil, errors.New("client not found")
 }
 
-func (d *ClientDAOMemory) FindByProjectID(ctx context.Context, projectID string) ([]*model.SsfClient, error) {
+func (d *ClientDAOMemory) FindByProjectID(_ context.Context, projectID string) ([]*model.SsfClient, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -53,8 +53,8 @@ func (d *ClientDAOMemory) FindByProjectID(ctx context.Context, projectID string)
 		// Check if projectID is in the client's ProjectIds list
 		for _, pid := range client.ProjectIds {
 			if pid == projectID {
-				copy := *client
-				clients = append(clients, &copy)
+				copyClient := *client
+				clients = append(clients, &copyClient)
 				break
 			}
 		}
@@ -62,7 +62,7 @@ func (d *ClientDAOMemory) FindByProjectID(ctx context.Context, projectID string)
 	return clients, nil
 }
 
-func (d *ClientDAOMemory) Delete(ctx context.Context, id string) error {
+func (d *ClientDAOMemory) Delete(_ context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 

@@ -21,7 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type testTokensSet struct {
@@ -65,7 +65,7 @@ func newTestTokens() testTokensSet {
 		os.Exit(-1)
 	}
 	client, err := auth.IssueStreamClientToken(model.SsfClient{
-		Id:            primitive.NewObjectID(),
+		Id:            bson.NewObjectID(),
 		ProjectIds:    []string{"abc", "def"},
 		AllowedScopes: []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery},
 		Email:         "test@example.com",

@@ -8,7 +8,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestEventDAOMemory_Insert(t *testing.T) {
@@ -91,7 +91,7 @@ func TestEventDAOMemory_AddPending(t *testing.T) {
 	_ = dao.Insert(ctx, record)
 
 	// Add to pending
-	streamID := primitive.NewObjectID()
+	streamID := bson.NewObjectID()
 	err := dao.AddPending(ctx, "test-jti", streamID)
 	if err != nil {
 		t.Fatalf("AddPending failed: %v", err)
@@ -131,7 +131,7 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	}
 	_ = dao.Insert(ctx, record)
 
-	streamID := primitive.NewObjectID()
+	streamID := bson.NewObjectID()
 	_ = dao.AddPending(ctx, "test-jti", streamID)
 
 	// Remove from pending
@@ -159,7 +159,7 @@ func TestEventDAOMemory_MarkDelivered(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	streamID := primitive.NewObjectID()
+	streamID := bson.NewObjectID()
 	deliverable := &interfaces.DeliverableEvent{
 		Jti:      "test-jti",
 		StreamId: streamID,
@@ -179,10 +179,10 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup: Add multiple pending events
-	streamID := primitive.NewObjectID()
+	streamID := bson.NewObjectID()
 	for i := 1; i <= 3; i++ {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
-		jti := primitive.NewObjectID().Hex()
+		jti := bson.NewObjectID().Hex()
 		event.ID = jti
 
 		record := &model.EventRecord{
@@ -267,12 +267,12 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	streamID := primitive.NewObjectID()
+	streamID := bson.NewObjectID()
 
 	// Add 5 pending events
 	for i := 1; i <= 5; i++ {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
-		jti := primitive.NewObjectID().Hex()
+		jti := bson.NewObjectID().Hex()
 		event.ID = jti
 
 		record := &model.EventRecord{

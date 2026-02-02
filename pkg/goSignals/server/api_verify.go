@@ -7,7 +7,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var verifyLog = logger.Sub("VERIFY")
@@ -61,7 +61,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	eventRec := sa.Provider.AddEvent(event, payload.StreamId, "")
 
 	// Trigger the event on the stream
-	streamObjId, err := primitive.ObjectIDFromHex(payload.StreamId)
+	streamObjId, err := bson.ObjectIDFromHex(payload.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return

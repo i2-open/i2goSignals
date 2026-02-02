@@ -12,13 +12,13 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"testing"
 )
 
 var testStream model2.StreamConfiguration = model2.StreamConfiguration{
-	Id:              primitive.NewObjectID().Hex(),
+	Id:              bson.NewObjectID().Hex(),
 	Iss:             "TestIssuer",
 	Aud:             []string{"TestAudience"},
 	EventsSupported: model2.GetSupportedEvents(),

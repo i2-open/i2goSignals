@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type KeyDAOMemory struct {
@@ -26,7 +26,7 @@ func (d *KeyDAOMemory) Insert(ctx context.Context, keyRec *interfaces.JwkKeyRec)
 	defer d.mu.Unlock()
 
 	if keyRec.Id.IsZero() {
-		keyRec.Id = primitive.NewObjectID()
+		keyRec.Id = bson.NewObjectID()
 	}
 
 	d.keys[keyRec.Iss] = append(d.keys[keyRec.Iss], keyRec)
@@ -101,7 +101,7 @@ func (d *KeyDAOMemory) InsertReceiverKey(ctx context.Context, streamID string, a
 	defer d.mu.Unlock()
 
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:              primitive.NewObjectID(),
+		Id:              bson.NewObjectID(),
 		Aud:             audience,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,

@@ -10,7 +10,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestCreateEventPushBuffer(t *testing.T) {
@@ -18,7 +18,7 @@ func TestCreateEventPushBuffer(t *testing.T) {
 	testVals := make([]string, testSize)
 	receiveVals := make([]string, testSize)
 	for i := 0; i < testSize; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	buffer := CreateEventPushBuffer(testVals[:2])
 
@@ -61,7 +61,7 @@ func TestCreateEventPollBuffer(t *testing.T) {
 
 	testVals := make([]string, 100)
 	for i := 0; i < 100; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, 100)
 	wg.Add(1)
@@ -104,7 +104,7 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 
 	testVals := make([]string, testSize)
 	for i := 0; i < 100; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, testSize)
 	noVals := false
@@ -181,7 +181,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 
 	testVals := make([]string, testSize)
 	for i := 0; i < testSize; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 
 	initialJtis := testVals[0:4]
@@ -249,7 +249,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 
 	testVals := make([]string, testSize)
 	for i := 0; i < testSize; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, testSize)
 	// noVals := false

@@ -2,15 +2,15 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var eLog = logger.Sub("EVENT_DAO")
@@ -43,7 +43,7 @@ func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.Event
 	cursor := d.eventCol.FindOne(ctx, filter)
 	err := cursor.Decode(&res)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		eLog.Error("Error decoding event record", "error", err)
@@ -112,7 +112,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 	return filtered, nil
 }
 
-func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID primitive.ObjectID) error {
+func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error {
 	deliverable := interfaces.DeliverableEvent{
 		Jti:      jti,
 		StreamId: streamID,
@@ -122,7 +122,7 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID pri
 }
 
 func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
-	sid, err := primitive.ObjectIDFromHex(streamID)
+	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,7 +166,7 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 }
 
 func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
-	sid, err := primitive.ObjectIDFromHex(streamID)
+	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 
 	res := d.pendingCol.FindOne(ctx, filter)
 	if res.Err() != nil {
-		if res.Err() == mongo.ErrNoDocuments {
+		if errors.Is(res.Err(), mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, res.Err()
@@ -201,7 +201,7 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 }
 
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
-	sid, err := primitive.ObjectIDFromHex(streamID)
+	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return 0, err
 	}
@@ -224,7 +224,7 @@ func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.Del
 	return err
 }
 
-func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) error {
+func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) error {
 	matchInserts := bson.D{
 		bson.E{
 			Key: "$match", Value: bson.D{
@@ -238,7 +238,12 @@ func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti stri
 		eLog.Error("Unable to initialize background event stream", "error", err)
 		return err
 	}
-	defer eventStream.Close(ctx)
+	defer func(eventStream *mongo.ChangeStream, ctx context.Context) {
+		err := eventStream.Close(ctx)
+		if err != nil {
+			eLog.Error("Error closing background event stream", "error", err)
+		}
+	}(eventStream, ctx)
 
 	eLog.Info("Background pending event watcher started")
 
@@ -255,7 +260,7 @@ func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti stri
 		}
 
 		jti, _ := fullDoc["jti"].(string)
-		sid, _ := fullDoc["sid"].(primitive.ObjectID)
+		sid, _ := fullDoc["sid"].(bson.ObjectID)
 
 		if jti != "" && !sid.IsZero() {
 			callback(jti, sid)

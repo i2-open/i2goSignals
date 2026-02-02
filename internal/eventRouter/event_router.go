@@ -14,7 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"strings"
 	"time"
@@ -102,7 +102,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	router.enabled = true
 
 	// Start the background watcher
-	go router.provider.WatchPending(ctx, func(jti string, streamId primitive.ObjectID) {
+	go router.provider.WatchPending(ctx, func(jti string, streamId bson.ObjectID) {
 		sid := streamId.Hex()
 		router.mu.RLock()
 		pollBuf, pollOk := router.pollBuffers[sid]

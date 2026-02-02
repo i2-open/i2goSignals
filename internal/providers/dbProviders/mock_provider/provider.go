@@ -18,7 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 const CDbName = "ssef"
@@ -276,11 +276,11 @@ func (m *MockMongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string
 	return m.eventService.AddEvent(context.Background(), event, sid, raw)
 }
 
-func (m *MockMongoProvider) AddEventToStream(jti string, streamId primitive.ObjectID) {
+func (m *MockMongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) {
 	m.eventService.AddEventToStream(context.Background(), jti, streamId)
 }
 
-func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID)) {
+func (m *MockMongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
 	m.eventService.WatchPending(ctx, callback)
 }
 

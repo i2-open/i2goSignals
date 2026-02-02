@@ -8,7 +8,7 @@ import (
 
 // EventRecord is stored in MongoProvider.eventCol
 type EventRecord struct {
-	// Id        primitive.ObjectID       `json:"id" bson:"_id"`
+	// Id        bson.ObjectID       `json:"id" bson:"_id"`
 	Jti string `json:"jti" bson:"jti"`
 
 	// A parsed Security Event Auth

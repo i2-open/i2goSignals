@@ -6,10 +6,9 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var kLog = logger.Sub("KEY_DAO")
@@ -23,7 +22,7 @@ func NewKeyDAO(collection *mongo.Collection) interfaces.KeyDAO {
 }
 
 func (d *KeyDAOMongo) Insert(ctx context.Context, keyRec *interfaces.JwkKeyRec) error {
-	_, err := d.collection.InsertOne(ctx, keyRec, &options.InsertOneOptions{})
+	_, err := d.collection.InsertOne(ctx, keyRec)
 	if err != nil {
 		kLog.Error("Error inserting key", "error", err)
 	}
@@ -56,7 +55,7 @@ func (d *KeyDAOMongo) FindLatestByIssuer(ctx context.Context, issuer string) (*i
 	var rec interfaces.JwkKeyRec
 	err := res.Decode(&rec)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, errors.New("no key found for: " + issuer)
 		}
 		kLog.Error("Error parsing JwkKeyRec for issuer", "issuer", issuer, "error", err)
@@ -121,7 +120,7 @@ func (d *KeyDAOMongo) ListIssuers(ctx context.Context) ([]string, error) {
 
 func (d *KeyDAOMongo) InsertReceiverKey(ctx context.Context, streamID string, audience string, jwksUri string) error {
 	keyPairRec := interfaces.JwkKeyRec{
-		Id:              primitive.NewObjectID(),
+		Id:              bson.NewObjectID(),
 		Aud:             audience,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,
@@ -138,7 +137,7 @@ func (d *KeyDAOMongo) FindReceiverKeyByStreamID(ctx context.Context, streamID st
 	var rec interfaces.JwkKeyRec
 	err := res.Decode(&rec)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		kLog.Error("Error locating receiver key", "streamId", streamID, "error", err)

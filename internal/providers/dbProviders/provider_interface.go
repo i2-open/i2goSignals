@@ -10,9 +10,9 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/MicahParks/keyfunc"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type DbProviderInterface interface {
@@ -50,8 +50,8 @@ type DbProviderInterface interface {
 	GetEventRecord(jti string) *model.EventRecord
 	AckEvent(jtiString string, streamId string, fencingToken int64)
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord)
-	AddEventToStream(jti string, streamId primitive.ObjectID)
-	WatchPending(ctx context.Context, callback func(jti string, streamId primitive.ObjectID))
+	AddEventToStream(jti string, streamId bson.ObjectID)
+	WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 
 	ResetDb(initialize bool) error

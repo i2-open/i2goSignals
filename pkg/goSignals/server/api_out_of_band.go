@@ -16,7 +16,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
@@ -336,7 +336,7 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 		Email:         jsonRequest.Email,
 		Description:   jsonRequest.Description,
 		AllowedScopes: scopes,
-		Id:            primitive.NewObjectID(),
+		Id:            bson.NewObjectID(),
 	}
 
 	response := sa.Provider.RegisterClient(client, authCtx.ProjectId)

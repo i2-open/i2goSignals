@@ -7,9 +7,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 var cLog = logger.Sub("CLIENT_DAO")
@@ -31,7 +30,7 @@ func (d *ClientDAOMongo) Insert(ctx context.Context, client *model.SsfClient) er
 }
 
 func (d *ClientDAOMongo) FindByID(ctx context.Context, id string) (*model.SsfClient, error) {
-	docId, err := primitive.ObjectIDFromHex(id)
+	docId, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +39,7 @@ func (d *ClientDAOMongo) FindByID(ctx context.Context, id string) (*model.SsfCli
 	var client model.SsfClient
 	err = d.collection.FindOne(ctx, filter).Decode(&client)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, errors.New("client not found")
 		}
 		cLog.Error("Error finding client", "id", id, "error", err)
@@ -67,7 +66,7 @@ func (d *ClientDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
 }
 
 func (d *ClientDAOMongo) Delete(ctx context.Context, id string) error {
-	docId, err := primitive.ObjectIDFromHex(id)
+	docId, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return err
 	}

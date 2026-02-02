@@ -9,7 +9,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var esLog = logger.Sub("EVENT_SERVICE")
@@ -59,7 +59,7 @@ func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventT
 	return rec
 }
 
-func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID primitive.ObjectID) {
+func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID bson.ObjectID) {
 	_ = s.eventDAO.AddPending(ctx, jti, streamID)
 }
 
@@ -122,7 +122,7 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 	}
 }
 
-func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) {
+func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
@@ -161,7 +161,7 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	}
 
 	// Re-add events to pending
-	streamObjId, err := primitive.ObjectIDFromHex(streamID)
+	streamObjId, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
 	"net/http"
@@ -28,8 +29,6 @@ import (
 
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v4"
-
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type AddServerCmd struct {
@@ -1676,7 +1675,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		SubjectIdentifier: *subjectIdentifier,
 	}, issuer, audience)
 
-	event.TransactionId = primitive.NewObjectID().Hex()
+	event.TransactionId = bson.NewObjectID().Hex()
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)

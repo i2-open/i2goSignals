@@ -8,7 +8,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type EventDAOMemory struct {
@@ -90,7 +90,7 @@ func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to
 	return sortedEvents, nil
 }
 
-func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID primitive.ObjectID) error {
+func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -174,7 +174,7 @@ func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.De
 	return nil
 }
 
-func (d *EventDAOMemory) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) error {
+func (d *EventDAOMemory) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) error {
 	// Mock implementation: for now, we don't need to do anything here
 	// since HandleEvent already updates local buffers in the router.
 	// In a real mock test, we might want to simulate external events.

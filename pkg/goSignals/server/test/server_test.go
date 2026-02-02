@@ -23,7 +23,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
@@ -144,7 +144,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 
 	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
-		Id:            primitive.ObjectID{},
+		Id:            bson.ObjectID{},
 		ProjectIds:    []string{eat.ProjectId},
 		AllowedScopes: []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
 		Email:         "test@test.com",

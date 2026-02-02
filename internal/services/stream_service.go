@@ -17,7 +17,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var ssLog = logger.Sub("STREAM_SERVICE")
@@ -47,7 +47,7 @@ func (s *StreamService) SetBaseUrl(u *url.URL) {
 }
 
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string) (model.StreamConfiguration, error) {
-	mid := primitive.NewObjectID()
+	mid := bson.NewObjectID()
 
 	var config model.StreamConfiguration
 
