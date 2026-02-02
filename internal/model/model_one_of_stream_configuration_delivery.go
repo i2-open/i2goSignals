@@ -103,35 +103,35 @@ func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
 			}
 			d.PollReceiveMethod = &poll
 			return nil
-		} else {
-			var poll PollTransmitMethod
-			err := json.Unmarshal(data, &poll)
+		}
+		var poll PollTransmitMethod
+		err := json.Unmarshal(data, &poll)
+		if err != nil {
+			return err
+		}
+		d.PollTransmitMethod = &poll
+		return nil
+
+	}
+	if strings.Contains(lowString, DeliveryPush) {
+		if strings.Contains(lowString, ReceivePush) {
+			var push PushReceiveMethod
+			err := json.Unmarshal(data, &push)
 			if err != nil {
 				return err
 			}
-			d.PollTransmitMethod = &poll
+			d.PushReceiveMethod = &push
 			return nil
 		}
-	} else {
-		if strings.Contains(lowString, DeliveryPush) {
-			if strings.Contains(lowString, ReceivePush) {
-				var push PushReceiveMethod
-				err := json.Unmarshal(data, &push)
-				if err != nil {
-					return err
-				}
-				d.PushReceiveMethod = &push
-				return nil
-			} else {
-				var push PushTransmitMethod
-				err := json.Unmarshal(data, &push)
-				if err != nil {
-					return err
-				}
-				d.PushTransmitMethod = &push
-				return nil
-			}
+		var push PushTransmitMethod
+		err := json.Unmarshal(data, &push)
+		if err != nil {
+			return err
 		}
+		d.PushTransmitMethod = &push
+		return nil
+
 	}
+
 	return errors.New("Unknown Stream delivery_method value.")
 }

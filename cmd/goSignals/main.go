@@ -251,7 +251,7 @@ func main() {
 	}
 	_ = td.cli.Data.Load(&td.cli.Globals)
 
-	for true {
+	for {
 		var args []string
 		if oneCommand {
 			args = initialArgs

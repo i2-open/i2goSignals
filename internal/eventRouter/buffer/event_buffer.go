@@ -169,14 +169,14 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 	eventsAvailable := len(b.events)
 	if eventsAvailable == 0 {
 		return nil, false
-	} else {
-		if params.MaxEvents > 0 && eventsAvailable > int(params.MaxEvents) {
-			more = true
-			eventsAvailable = int(params.MaxEvents)
-		}
-		values = make([]string, eventsAvailable)
-		copy(values, b.events[:eventsAvailable])
 	}
+
+	if params.MaxEvents > 0 && eventsAvailable > int(params.MaxEvents) {
+		more = true
+		eventsAvailable = int(params.MaxEvents)
+	}
+	values = make([]string, eventsAvailable)
+	copy(values, b.events[:eventsAvailable])
 
 	return &values, more
 }
