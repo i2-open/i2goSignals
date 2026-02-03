@@ -445,7 +445,18 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		pollBuffer.AckEvents(params.Acks)
 	}
 
+	if len(params.SetErrs) > 0 {
+		jtis := make([]string, 0, len(params.SetErrs))
+		for jti := range params.SetErrs {
+			jtis = append(jtis, jti)
+		}
+		pollBuffer.AckEvents(jtis)
+	}
+
 	if state.Status != model.StreamStateEnabled {
+		if (state.Status == model.StreamStatePause || state.Status == model.StreamStateDisable) && (len(params.Acks) > 0 || len(params.SetErrs) > 0) {
+			return map[string]string{}, false, http.StatusOK
+		}
 		stateString, _ := json.MarshalIndent(&state, "", "  ")
 		eventLogger.Debug("Stream State", "state", string(stateString))
 		eventLogger.Error("POLL-SRV: Error Poll request but stream is not active", "sid", sid)

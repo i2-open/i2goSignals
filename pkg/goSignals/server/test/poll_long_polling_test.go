@@ -385,7 +385,7 @@ func (suite *LongPollSuite) TestSetErrsReporting() {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Server should log the error (can't easily verify in test, but should not crash)
-	// The event should still be in the queue (not acknowledged)
+	// The event should be removed from the buffer (processed) per RFC8936
 	pollParams3 := model.PollParameters{
 		ReturnImmediately: true,
 		MaxEvents:         10,
@@ -404,9 +404,9 @@ func (suite *LongPollSuite) TestSetErrsReporting() {
 	body, _ = io.ReadAll(resp.Body)
 	_ = json.Unmarshal(body, &pollResp3)
 
-	// Event should still be available (errors don't acknowledge)
+	// Event should NO LONGER be available (errors cause removal from buffer)
 	_, exists := pollResp3.Sets[jti]
-	assert.True(t, exists, "Event with error should still be available until acknowledged")
+	assert.False(t, exists, "Event with error should be removed from buffer")
 }
 
 // TestPollAuthorizationFailure tests authorization failures per RFC8936

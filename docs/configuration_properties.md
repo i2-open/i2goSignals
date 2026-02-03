@@ -28,6 +28,7 @@ Currently i2goSignals has minimal configuration properties. The current values a
 | `POLL_RETRY_MAX_DELAY`       | The maximum delay in seconds for exponential backoff during polling retries.                                                                 | 300.0                                                 |
 | `POLL_RETRY_BACKOFF_FACTOR`  | The factor by which the delay increases during exponential backoff.                                                                          | 2.0                                                   |
 | `POLL_RETRY_LIMIT`           | The maximum time in seconds to continue retrying before disabling the stream.                                                                 | 21600 (6 hours)                                       |
+| `POLL_SRV_BEHAVIOR`         | Polling behavior based on status. `MODE` (default) follows stream status (403/503). `ALWAYSON` ignores disabled/paused status for polling.   | `MODE`                                                |
 | <BR>**TLS Config**           | <BR>To be implemented!                                                                                                                       |                                                       |
 
 

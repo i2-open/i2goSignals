@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
@@ -121,12 +123,47 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	behavior := os.Getenv("POLL_SRV_BEHAVIOR")
+	if behavior == "" {
+		behavior = "MODE"
+	}
+
 	// set default to return immediately
 	request := model.PollParameters{ReturnImmediately: false}
 
 	err = json.NewDecoder(r.Body).Decode(&request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Determine effective status based on behavior
+	effectiveStatus := streamState.Status
+	if behavior == "ALWAYSON" && effectiveStatus == model.StreamStateDisable {
+		effectiveStatus = model.StreamStatePause
+	}
+
+	if behavior == "MODE" || behavior == "ALWAYSON" {
+		hasAcksOrErrs := len(request.Acks) > 0 || len(request.SetErrs) > 0
+
+		if effectiveStatus == model.StreamStateDisable {
+			if !hasAcksOrErrs {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		} else if effectiveStatus == model.StreamStatePause {
+			if !hasAcksOrErrs {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
+
+		if effectiveStatus != model.StreamStateEnabled {
+			request.ReturnImmediately = true
+			// backoff rate limiter to prevent repeated requests
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
 	wait := ""

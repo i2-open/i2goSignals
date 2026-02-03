@@ -223,7 +223,7 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
-			defer resp.Body.Close()
+			defer handleRespClose(resp)
 			if resp.StatusCode == http.StatusOK {
 				var txConfig model.TransmitterConfiguration
 				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
@@ -292,6 +292,12 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	return ""
 }
 
+func handleRespClose(resp *http.Response) {
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+}
+
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
 	statusUrl := ps.getStatusEndpoint()
 	if statusUrl == "" {
@@ -316,7 +322,7 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer handleRespClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status check failed with status %d", resp.StatusCode)
@@ -529,12 +535,31 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
 		resp, err := client.Do(pollRequest)
-		if err != nil || (resp != nil && resp.StatusCode > 400) {
-			if isConnectionError(err) {
+		if err != nil || (resp != nil && resp.StatusCode >= 400) {
+			if resp != nil && resp.StatusCode == http.StatusForbidden {
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %s", sid, resp.Status)
+				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+				_ = resp.Body.Close()
+				ps.mu.Lock()
+				ps.active = false
+				ps.mu.Unlock()
+				return
+			}
+
+			if isConnectionError(err) || (resp != nil && resp.StatusCode == http.StatusServiceUnavailable) {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
 				if firstErrorTime.IsZero() {
 					firstErrorTime = time.Now()
 				}
-				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err.Error())
+				errStr := "none"
+				if err != nil {
+					errStr = err.Error()
+				} else if resp != nil {
+					errStr = resp.Status
+				}
+				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", errStr)
 				if time.Since(firstErrorTime) > retryLimit {
 					errMsg := "connection error"
 					if err != nil {
@@ -583,6 +608,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
 				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
 				ps.stream.ErrorMsg = errMsg
+				_ = resp.Body.Close()
 				continue
 			}
 			if err == nil {
@@ -590,6 +616,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
 				serverLog.Error("POLL-RCV: HTTP Error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
 				ps.stream.ErrorMsg = errMsg
+				_ = resp.Body.Close()
 				continue
 			}
 
