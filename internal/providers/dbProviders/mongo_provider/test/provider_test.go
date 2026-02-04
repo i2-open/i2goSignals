@@ -28,10 +28,15 @@ type MongoProviderSuite struct {
 
 func (s *MongoProviderSuite) SetupSuite() {
 	s.T().Helper()
-	var err error
 	provider, err := mongo_provider.Open(TestDbUrl, "")
 	if err != nil {
-		s.FailNow("Mongo client error: " + err.Error())
+		s.T().Skip("Mongo client error: " + err.Error())
+		return
+	}
+
+	if err := provider.Check(); err != nil {
+		s.T().Skip("Mongo Server not available: " + err.Error())
+		return
 	}
 
 	if provider != nil {

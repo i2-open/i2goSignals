@@ -19,8 +19,8 @@ type SsfServerTestSuite struct {
 }
 
 func (suite *SsfServerTestSuite) SetupSuite() {
-	// Use a mock database
-	dbUrl := "mockdb:"
+	// Use a memory database
+	dbUrl := "memorydb:"
 	provider, err := dbProviders.OpenProvider(dbUrl, "ssf_test")
 	suite.Require().NoError(err)
 	suite.provider = provider

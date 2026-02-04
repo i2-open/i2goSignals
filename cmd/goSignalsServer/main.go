@@ -14,7 +14,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 )
@@ -39,10 +38,7 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 		name = found
 	}
 
-	var provider dbProviders.DbProviderInterface
-	mongo, err := mongo_provider.Open(dbUrl, name)
-	provider = mongo
-	return provider, err
+	return dbProviders.OpenProvider(dbUrl, name)
 }
 
 func main() {
@@ -56,10 +52,12 @@ func main() {
 
 	mLog.Info("Listening on port", "port", port)
 
-	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
+	dbUrl := ""
 	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
 		mLog.Info("Connecting to MONGO_URL service", "url", dbUrl)
+	} else {
+		mLog.Info("MONGO_URL not set, using memory provider")
 	}
 
 	provider, err := StartProvider(dbUrl)

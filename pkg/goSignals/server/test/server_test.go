@@ -62,7 +62,7 @@ func TestServer(t *testing.T) {
 	serverSuite := ServerSuite{}
 
 	testLog.Println("Tests must be completed in order. Tests may not be run individually as each test builds on previous state.")
-	testLog.Println("By default, tests are run against a mock provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
+	testLog.Println("By default, tests are run against a memory provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
 
 	testLog.Println("NOTE: This test will generate a series of Prometheus duplicate collector registration errors. This is due to the test environment only.")
 	instances := make([]*ssfInstance, 2)
@@ -105,7 +105,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	var err error
 	var instance ssfInstance
 
-	dbUrl := "mockdb:"
+	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
 		dbUrl = TestDbUrl
 	}

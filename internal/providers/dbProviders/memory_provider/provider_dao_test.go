@@ -1,4 +1,4 @@
-package mock_provider
+package memory_provider
 
 import (
 	"testing"
@@ -7,12 +7,12 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
-func TestMockProviderDAOOpen(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db_v2")
+func TestMemoryProviderDAOOpen(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db_v2")
 	if err != nil {
-		t.Fatalf("Failed to open mock provider V2: %v", err)
+		t.Fatalf("Failed to open memory provider V2: %v", err)
 	}
-	defer func(provider *MockMongoProvider) {
+	defer func(provider *MemoryProvider) {
 		_ = provider.Close()
 	}(provider)
 
@@ -26,12 +26,12 @@ func TestMockProviderDAOOpen(t *testing.T) {
 	}
 }
 
-func TestMockProviderDAOStreamOperations(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db_v2_stream")
+func TestMemoryProviderDAOStreamOperations(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db_v2_stream")
 	if err != nil {
-		t.Fatalf("Failed to open mock provider V2: %v", err)
+		t.Fatalf("Failed to open memory provider V2: %v", err)
 	}
-	defer func(provider *MockMongoProvider) {
+	defer func(provider *MemoryProvider) {
 		_ = provider.Close()
 	}(provider)
 
@@ -83,12 +83,12 @@ func TestMockProviderDAOStreamOperations(t *testing.T) {
 	}
 }
 
-func TestMockProviderDAOEventOperations(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db_v2_events")
+func TestMemoryProviderDAOEventOperations(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db_v2_events")
 	if err != nil {
-		t.Fatalf("Failed to open mock provider V2: %v", err)
+		t.Fatalf("Failed to open memory provider V2: %v", err)
 	}
-	defer func(provider *MockMongoProvider) {
+	defer func(provider *MemoryProvider) {
 		_ = provider.Close()
 	}(provider)
 
@@ -113,12 +113,12 @@ func TestMockProviderDAOEventOperations(t *testing.T) {
 	}
 }
 
-func TestMockProviderDAOKeyOperations(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db_v2_keys")
+func TestMemoryProviderDAOKeyOperations(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db_v2_keys")
 	if err != nil {
-		t.Fatalf("Failed to open mock provider V2: %v", err)
+		t.Fatalf("Failed to open memory provider V2: %v", err)
 	}
-	defer func(provider *MockMongoProvider) {
+	defer func(provider *MemoryProvider) {
 		_ = provider.Close()
 	}(provider)
 

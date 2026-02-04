@@ -108,12 +108,12 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 	var err error
 	var instance ssfInstance
 
-	dbUrl := "mockdb:"
+	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
 		t.Log("Tests running against Mongo cluster.")
 		dbUrl = TestDbUrl
 	} else {
-		t.Log("Tests running against Mock provider.")
+		t.Log("Tests running against Memory provider.")
 	}
 
 	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)

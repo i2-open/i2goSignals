@@ -1,8 +1,8 @@
-# Mock MongoDB Provider
+# Memory Database Provider
 
 ## Overview
 
-The `mock_mongo_provider` is an in-memory implementation of the `DbProviderInterface` that simulates MongoDB behavior without requiring an actual MongoDB instance. This is useful for testing and development scenarios where you want to avoid external dependencies.
+The `memory_provider` is an in-memory implementation of the `DbProviderInterface` that simulates MongoDB behavior without requiring an actual MongoDB instance. This is useful for testing and development scenarios where you want to avoid external dependencies.
 
 ## Features
 
@@ -14,17 +14,17 @@ The `mock_mongo_provider` is an in-memory implementation of the `DbProviderInter
 
 ## Usage
 
-### Triggering the Mock Provider
+### Triggering the Memory Provider
 
-The mock provider is automatically triggered when the database URL starts with `mockdb:`. You can use it in two ways:
+The memory provider is automatically triggered when the database URL is empty or starts with `memorydb:`. You can use it in two ways:
 
 #### 1. Using the Factory Function (Recommended)
 
 ```go
 import "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 
-// This will automatically detect and use the mock provider
-provider, err := dbProviders.OpenProvider("mockdb://localhost:27017/", "test_db")
+// This will automatically detect and use the memory provider
+provider, err := dbProviders.OpenProvider("memorydb://localhost", "test_db")
 if err != nil {
     log.Fatal(err)
 }
@@ -34,21 +34,21 @@ defer provider.Close()
 #### 2. Direct Usage
 
 ```go
-import "github.com/i2-open/i2goSignals/internal/providers/dbProviders/mock_mongo_provider"
+import "github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 
-mockProvider, err := mock_mongo_provider.Open("mockdb://localhost:27017/", "test_db")
+memoryProvider, err := memory_provider.Open("memorydb:", "test_db")
 if err != nil {
     log.Fatal(err)
 }
-defer mockProvider.Close()
+defer memoryProvider.Close()
 ```
 
 ### Testing Example
 
 ```go
-func TestWithMockProvider(t *testing.T) {
-    // Use mock provider for testing
-    provider, err := dbProviders.OpenProvider("mockdb:", "test_db")
+func TestWithMemoryProvider(t *testing.T) {
+    // Use memory provider for testing
+    provider, err := dbProviders.OpenProvider("memorydb:", "test_db")
     if err != nil {
         t.Fatal(err)
     }
@@ -67,7 +67,7 @@ func TestWithMockProvider(t *testing.T) {
 
 ### Data Storage
 
-The mock provider stores all data in memory using the following structure:
+The memory provider stores all data in memory using the following structure:
 
 - `streams`: `map[string]*model.StreamStateRecord` - Stream configurations and states
 - `keys`: `map[string]*JwkKeyRec` - Cryptographic keys for authentication
@@ -82,6 +82,7 @@ The mock provider stores all data in memory using the following structure:
 2. **No Change Streams**: MongoDB change stream features are not available
 3. **Simplified Queries**: All lookups are direct map operations
 4. **No Indexes**: All data access is O(1) or O(n) without optimization
+5. **Single Node**: The memory provider runs as a single node only. Clustering features are simulated.
 
 ### Thread Safety
 
@@ -91,11 +92,15 @@ All public methods use read/write locks to ensure thread-safe access:
 
 ## Configuration
 
-The mock provider respects the same environment variables as the MongoDB provider:
+The memory provider respects the same environment variables as the MongoDB provider:
 
 - `I2SIG_ISSUER`: Default issuer name (default: "DEFAULT")
 - `I2SIG_DBNAME`: Database name (default: "ssef")
 - `I2SIG_TOKEN_ISSUER`: Token issuer name (default: "DEFAULT")
+
+In addition, the `OpenProvider` factory function respects:
+- `MONGO_URL`: If not set, memory provider is automatically selected.
+- `MONGO_FAILTOMEM`: If set to `FALSE`, the server will exit on connection failure instead of falling back to memory provider.
 
 ## Limitations
 
@@ -107,7 +112,7 @@ The mock provider respects the same environment variables as the MongoDB provide
 
 ## When to Use
 
-**Use the mock provider when:**
+**Use the memory provider when:**
 - Writing unit tests
 - Running integration tests without external dependencies
 - Developing features without a MongoDB instance
@@ -118,3 +123,4 @@ The mock provider respects the same environment variables as the MongoDB provide
 - Need data persistence
 - Using MongoDB-specific features
 - Performance testing with realistic data sizes
+- Multi-node clustering is required

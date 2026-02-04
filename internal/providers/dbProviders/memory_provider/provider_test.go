@@ -1,4 +1,4 @@
-package mock_provider
+package memory_provider
 
 import (
 	"testing"
@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMockProviderOpen(t *testing.T) {
-	provider, err := Open("mockdb://localhost:27017/", "test_db")
+func TestMemoryProviderOpen(t *testing.T) {
+	provider, err := Open("memorydb://localhost", "test_db")
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
 	assert.Equal(t, "test_db", provider.Name())
@@ -16,8 +16,8 @@ func TestMockProviderOpen(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMockProviderViaFactory(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db")
+func TestMemoryProviderViaFactory(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
 	assert.Equal(t, "test_db", provider.Name())
@@ -26,14 +26,14 @@ func TestMockProviderViaFactory(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMockProviderRejectNonMockURL(t *testing.T) {
+func TestMemoryProviderRejectNonMemoryURL(t *testing.T) {
 	_, err := Open("mongodb://localhost:27017/", "test_db")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "mock provider only supports 'mockdb:' URL prefix")
+	assert.Contains(t, err.Error(), "memory provider only supports 'memorydb:' URL prefix")
 }
 
-func TestMockProviderBasicOperations(t *testing.T) {
-	provider, err := Open("mockdb:", "test_db")
+func TestMemoryProviderBasicOperations(t *testing.T) {
+	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
 	defer provider.Close()
 

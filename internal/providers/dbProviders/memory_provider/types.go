@@ -1,4 +1,4 @@
-package mock_provider
+package memory_provider
 
 import (
 	"time"
@@ -21,13 +21,13 @@ type JwkKeyRec struct {
 	ReceiverJwksUrl string        `json:"receiverJwksUrl" bson:"receiver_jwks_url"`
 }
 
-// DeliveredEvent is stored in MockMongoProvider.deliveredEvents
+// DeliveredEvent is stored in MemoryProvider.deliveredEvents
 type DeliveredEvent struct {
 	DeliverableEvent
 	AckDate time.Time `json:"ackDate"`
 }
 
-// DeliverableEvent is stored in MockMongoProvider.pendingEvents
+// DeliverableEvent is stored in MemoryProvider.pendingEvents
 type DeliverableEvent struct {
 	Jti      string        `json:"jti" bson:"jti"`
 	StreamId bson.ObjectID `json:"sid" bson:"sid"`

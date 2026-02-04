@@ -18,7 +18,11 @@ func (s *LeaseTestSuite) SetupSuite() {
 	dbName := "ssef_test_lease"
 	p, err := mongo_provider.Open(dbUrl, dbName)
 	if err != nil {
-		s.T().Skip("MongoDB not available for testing")
+		s.T().Skip("MongoDB client error: " + err.Error())
+		return
+	}
+	if err := p.Check(); err != nil {
+		s.T().Skip("MongoDB Server not available: " + err.Error())
 		return
 	}
 	s.provider = p
