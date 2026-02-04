@@ -12,10 +12,14 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 )
 
-func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
+	JwksJsonHandler(sa, w, r)
+}
+
+func JwksJsonHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	jsonKey := sa.Provider.GetPublicTransmitterJWKS(sa.DefIssuer)
+	jsonKey := sa.GetProvider().GetPublicTransmitterJWKS(sa.GetDefIssuer())
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -34,7 +38,11 @@ type IssuerResponse struct {
 }
 
 func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
+	JwksIssuersHandler(sa, w, r)
+}
+
+func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
 	if stat != http.StatusOK || authCtx == nil {
 		if stat != http.StatusUnauthorized {
 			w.WriteHeader(stat)
@@ -45,7 +53,7 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	names := sa.Provider.GetIssuerKeyNames()
+	names := sa.GetProvider().GetIssuerKeyNames()
 	issuerResponse := IssuerResponse{
 		Issuers: names,
 	}
@@ -59,9 +67,13 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 }
 
 func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
+	JwksJsonIssuerHandler(sa, w, r)
+}
+
+func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
-	jsonKey := sa.Provider.GetPublicTransmitterJWKS(issuer)
+	jsonKey := sa.GetProvider().GetPublicTransmitterJWKS(issuer)
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -106,7 +118,11 @@ func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Requ
 
 // PollEvents implements the server side of RFC8936 Poll-based delivery of SET Tokens
 func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	PollEventsHandler(sa, w, r)
+}
+
+func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -118,7 +134,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -170,18 +186,18 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 	if !request.ReturnImmediately {
 		wait = "Long "
 	}
-	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...\n", authCtx.StreamId, wait))
+	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...", authCtx.StreamId, wait))
 
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
-		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]\n", authCtx.StreamId, jti))
-		err = sa.Provider.AckEvent(jti, authCtx.StreamId, 0)
+		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
+		err = sa.GetProvider().AckEvent(jti, authCtx.StreamId, 0)
 		if err != nil {
 			serverLog.Error("Error acking event in poll", "sid", authCtx.StreamId, "jti", jti, "error", err)
 		}
-		event := sa.Provider.GetEvent(jti)
+		event := sa.GetProvider().GetEvent(jti)
 		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
-		sa.EventRouter.IncrementCounter(streamState, event, false)
+		sa.GetEventRouter().IncrementCounter(streamState, event, false)
 	}
 
 	// Second, log any errors received
@@ -191,7 +207,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 		// TODO Nothing to do except log it?
 	}
 
-	sets, more, status := sa.EventRouter.PollStreamHandler(authCtx.StreamId, request)
+	sets, more, status := sa.GetEventRouter().PollStreamHandler(authCtx.StreamId, request)
 
 	resp := model.PollResponse{
 		Sets:          sets,

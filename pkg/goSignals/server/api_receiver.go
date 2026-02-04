@@ -315,7 +315,7 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
-	serverLog.Debug("Checking transmitter status", "url", statusUrl, "auth", maskAuthorization(authHeader))
+	serverLog.Debug("POLL-RCV: Checking transmitter status", "sid", ps.stream.StreamConfiguration.Id, "url", statusUrl, "auth", maskAuthorization(authHeader))
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -369,6 +369,14 @@ func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusC
 				status, err = ps.checkTransmitterStatus(ctx)
 				if err != nil {
 					serverLog.Debug("POLL-RCV: Transmitter status check failed during pause, attempting poll as fallback", "sid", sid, "error", err)
+					return true, nil
+				}
+				if status.Status == model.StreamStateEnabled {
+					serverLog.Info("POLL-RCV: Transmitter stream is now re-enabled after pause", "sid", sid)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateEnabled, "")
+					ps.mu.Lock()
+					ps.active = true
+					ps.mu.Unlock()
 					return true, nil
 				}
 				continue
@@ -740,7 +748,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 // ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	ReceivePushEventHandler(sa, w, r)
+}
+
+func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authContext, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
 		if status == http.StatusForbidden {
 			processPushError(w, "access_denied", "The authorization did not contain the required stream identifier or scope")
@@ -756,7 +768,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		processPushError(w, "access_denied", "The authorization did not contain a stream identifier")
 		return
 	}
-	config, err := sa.Provider.GetStream(sid)
+	config, err := sa.GetProvider().GetStream(sid)
 	if config == nil || err != nil {
 
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
@@ -777,7 +789,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		jwksKey := sa.Provider.GetIssuerJwksForReceiver(sid)
+		jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
 		tokenString := string(bodyBytes)
 
 		token, err := goSet.Parse(tokenString, jwksKey)
@@ -812,7 +824,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 		}
 
 		// Now we have a valid token, store it in the database and acknowledge it
-		err = sa.EventRouter.HandleEvent(token, tokenString, sid)
+		err = sa.GetEventRouter().HandleEvent(token, tokenString, sid)
 		// TODO: Handle different types of errors
 		if err != nil {
 			processPushError(w, "invalid_request", "Unexpected error: "+err.Error())

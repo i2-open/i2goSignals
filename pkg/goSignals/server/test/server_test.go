@@ -21,6 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -204,7 +205,9 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
 	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
-	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Selected issuer matched")
+
+	suite.Equal(constants.GoSignalsVersion, config.GoSignalsVersion, "Go Signals Version should have correct version")
+	suite.Equal(4, len(config.DeliveryMethodsSupported), "GoSignals has 4 methods")
 }
 
 // Test3_StreamConfig Tests the following sequence

@@ -24,12 +24,16 @@ import (
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
 // remain available when JwksJsonIssuer is requested.
 func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+	RotateIssuerHandler(sa, w, r, authCtx)
+}
+
+func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
 	// This function is called by CreateJwksIssuer so authentication has already been checked.
 
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
 
-	issuerKey, kid, err := sa.Provider.RotateIssuerKey(issuer, authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetProvider().RotateIssuerKey(issuer, authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -37,8 +41,8 @@ func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Update the router with the new key/kid
-	if sa.EventRouter != nil {
-		sa.EventRouter.UpdateStreamState(&model.StreamStateRecord{
+	if sa.GetEventRouter() != nil {
+		sa.GetEventRouter().UpdateStreamState(&model.StreamStateRecord{
 			StreamConfiguration: model.StreamConfiguration{
 				Iss: issuer,
 			},
@@ -72,7 +76,11 @@ func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Reques
 // Generates a PEM-encoded private key and writes it to the HTTP response with Content-Type as application/json.
 // Responds with HTTP status Forbidden if permissions are invalid or Internal Server Error for unknown issues.
 func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	CreateJwksIssuerHandler(sa, w, r)
+}
+
+func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
@@ -83,7 +91,7 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 	// Check if issuer key already exists
-	existingKey, err := sa.Provider.GetIssuerPrivateKey(issuer)
+	existingKey, err := sa.GetProvider().GetIssuerPrivateKey(issuer)
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		serverLog.Error(fmt.Sprintf("Error checking existing issuer key for %s: %v", issuer, err))
 		http.Error(w, "Error checking existing key", http.StatusInternalServerError)
@@ -94,14 +102,14 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 		queryParams := r.URL.Query()
 		_, rotate := queryParams["rotate"]
 		if rotate {
-			sa.rotateIssuer(w, r, authCtx)
+			RotateIssuerHandler(sa, w, r, authCtx)
 			return
 		}
 		http.Error(w, "Already exists, specify rotate=true to rotate issuer", http.StatusForbidden)
 		return
 	}
 
-	issuerKey, err := sa.Provider.CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
+	issuerKey, err := sa.GetProvider().CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", issuer, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
@@ -129,7 +137,11 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 }
 
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorizationAny(request, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	LoadKeyHandler(sa, writer, request)
+}
+
+func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(request, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(writer, "Invalid permission", http.StatusForbidden)
 		return
@@ -213,7 +225,7 @@ func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.
 		return
 	}
 
-	err = sa.Provider.AddIssuerKey(issuer, "", priv, pub, authCtx.ProjectId)
+	err = sa.GetProvider().AddIssuerKey(issuer, "", priv, pub, authCtx.ProjectId)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
@@ -223,14 +235,18 @@ func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.
 }
 
 func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	DeleteJwksIssuerKeyHandler(sa, w, r)
+}
+
+func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
 	}
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
-	err := sa.Provider.DeleteIssuer(issuer)
+	err := sa.GetProvider().DeleteIssuer(issuer)
 	if err != nil {
 		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
 		if errors.Is(err, interfaces.ErrKeyNotFound) {
@@ -316,8 +332,12 @@ func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
 // allows the creation of "fresh" IATs which can be used to register new clients in the same project (e.g.
 // because the current IAT is expired, or because separate IATs are desired.
 func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Request) {
-	authCtx, _ := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin})
-	projectIat, err := sa.Auth.IssueProjectIat(authCtx)
+	IssuerProjectIatHandler(sa, w, r)
+}
+
+func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, _ := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin})
+	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
 		serverLog.Error("Error generating IAT", "error", err.Error())
 		http.Error(w, "Error generating project IAT", http.StatusInternalServerError)
@@ -332,7 +352,11 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 // Using RegisterClient allows a goSignals command line client or admin server to register with an IAT.
 // When successful, the client is is issued an administrative token which can be used to register new streams.
 func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeRegister})
+	RegisterClientHandler(sa, w, r)
+}
+
+func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeRegister})
 	if stat != http.StatusOK {
 		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
 		http.Error(w, "Failed to register client. Invalid registration token", stat)
@@ -366,7 +390,7 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 		Id:            bson.NewObjectID(),
 	}
 
-	response := sa.Provider.RegisterClient(client, authCtx.ProjectId)
+	response := sa.GetProvider().RegisterClient(client, authCtx.ProjectId)
 	if response == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -377,13 +401,21 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
+	TriggerEventHandler(sa, w, r)
+}
+
+func TriggerEventHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 // ProtectedResourceMetadata returns the RFC9728 based data describing OAuth access
-func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	ProtectedResourceMetadataHandler(sa, w, r)
+}
+
+func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	serverLog.Debug("GET ProtectedResourceMetadata")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
@@ -395,7 +427,7 @@ func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _
 	name := "GoSignals"
 	prMeta := model.ProtectedResourceMetadata{
 		Resource:               &baseURl,
-		AuthorizationServers:   sa.Auth.GetOAuthServers(),
+		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
 		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery, authUtil.ScopeRegister},
 		BearerMethodsSupported: []string{"header"},
 		ResourceName:           &name,
@@ -409,17 +441,21 @@ func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, _
 // ListStreamStates allows the ability to list all stream states associated with the current server project. Requires "admin" or "root" scope.
 // If the authentication credential includes a project id, the result set is limited to the project.
 func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	ListStreamStatesHandler(sa, w, r)
+}
+
+func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
 	}
 	projectId := authCtx.ProjectId
-	mapStreams := sa.Provider.GetStateMap()
+	mapStreams := sa.GetProvider().GetStateMap()
 	result := make([]model.StreamStateRecord, 0)
 	for _, stream := range mapStreams {
 		if projectId == "" || stream.ProjectId == projectId {
-			result = append(result, sa.adjustStateBaseUrl(stream))
+			result = append(result, adjustStateBaseUrl(sa, stream))
 		}
 	}
 
@@ -439,7 +475,11 @@ func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Re
 // GetStreamState allows the ability to retrieve a specific stream state associated with the current server project. Requires "admin" or "root" scope.
 // If the authentication credential includes a project id, the result set is limited to the project.
 func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	GetStreamStateHandler(sa, w, r)
+}
+
+func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -451,7 +491,7 @@ func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	config, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	config, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

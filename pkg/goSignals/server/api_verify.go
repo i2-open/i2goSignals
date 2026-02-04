@@ -19,8 +19,12 @@ type VerificationRequestPayload struct {
 
 // VerificationRequest implements the SSF Stream Verification Event process as described in section 8.1.4.2.
 func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
+	VerificationRequestHandler(sa, w, r)
+}
+
+func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	verifyLog.Debug("POST VerificationRequest")
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt})
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -46,7 +50,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	}
 
 	// Check if the stream exists
-	stream, err := sa.Provider.GetStream(payload.StreamId)
+	stream, err := sa.GetProvider().GetStream(payload.StreamId)
 	if err != nil || stream == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -58,7 +62,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	event := events.CreateVerifyEvent(payload.StreamId, payload.State, stream.Iss, stream.Aud)
 
 	// Add the event to the system
-	eventRec, err := sa.Provider.AddEvent(event, payload.StreamId, "")
+	eventRec, err := sa.GetProvider().AddEvent(event, payload.StreamId, "")
 	if err != nil {
 		verifyLog.Error("Error adding verify event", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -71,7 +75,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	err = sa.Provider.AddEventToStream(eventRec.Jti, streamObjId)
+	err = sa.GetProvider().AddEventToStream(eventRec.Jti, streamObjId)
 	if err != nil {
 		verifyLog.Error("Error adding verify event to stream", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)

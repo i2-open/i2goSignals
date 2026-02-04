@@ -24,13 +24,21 @@ import (
 	"github.com/gorilla/mux"
 )
 
-func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
+	AddSubjectHandler(sa, w, r)
+}
+
+func AddSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	GetStatusHandler(sa, w, r)
+}
+
+func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
 		serverLog.Debug("GetStatus request received: error", "authCtx", "invalid", "status", status)
 		w.WriteHeader(status)
@@ -45,7 +53,7 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	streamStatus, err := sa.Provider.GetStatus(sid)
+	streamStatus, err := sa.GetProvider().GetStatus(sid)
 	if err != nil {
 		serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
 		w.WriteHeader(http.StatusNotFound)
@@ -65,13 +73,21 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 	_, _ = w.Write(resp)
 }
 
-func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
+	RemoveSubjectHandler(sa, w, r)
+}
+
+func RemoveSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	StreamDeleteHandler(sa, w, r)
+}
+
+func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authContext, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -85,21 +101,21 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 	}
 	serverLog.Warn(fmt.Sprintf("Stream %s DELETE requested.", authContext.StreamId))
 
-	state, err := sa.Provider.GetStreamState(authContext.StreamId)
+	state, err := sa.GetProvider().GetStreamState(authContext.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	state.Status = model.StreamStateDisable
-	sa.EventRouter.UpdateStreamState(state)
+	sa.GetEventRouter().UpdateStreamState(state)
 
 	// Stop all the inbound traffic if Polling
 	sa.CloseReceiver(authContext.StreamId)
 
 	// Stop any outbound activity
-	sa.EventRouter.RemoveStream(authContext.StreamId)
+	sa.GetEventRouter().RemoveStream(authContext.StreamId)
 
-	err = sa.Provider.DeleteStream(authContext.StreamId)
+	err = sa.GetProvider().DeleteStream(authContext.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -133,12 +149,20 @@ func replaceBase(original string, baseUrl *url.URL) string {
 }
 
 func (sa *SignalsApplication) adjustStateBaseUrl(config model.StreamStateRecord) model.StreamStateRecord {
+	return adjustStateBaseUrl(sa, config)
+}
+
+func adjustStateBaseUrl(sa SsfApplicationInterface, config model.StreamStateRecord) model.StreamStateRecord {
 	streamConfig := config.StreamConfiguration
-	config.StreamConfiguration = sa.adjustBaseUrl(streamConfig)
+	config.StreamConfiguration = adjustBaseUrl(sa, streamConfig)
 	return config
 }
 
 func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) model.StreamConfiguration {
+	return adjustBaseUrl(sa, config)
+}
+
+func adjustBaseUrl(sa SsfApplicationInterface, config model.StreamConfiguration) model.StreamConfiguration {
 	res := config
 	baseUrl := sa.GetBaseUrl()
 	switch config.Delivery.GetMethod() {
@@ -155,7 +179,11 @@ func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) mo
 }
 
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	StreamGetHandler(sa, w, r)
+}
+
+func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -167,7 +195,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	config, err := sa.Provider.GetStream(authCtx.StreamId)
+	config, err := sa.GetProvider().GetStream(authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -176,7 +204,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 	serverLog.Debug(fmt.Sprintf("Stream Config Get Request %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	resp, err := json.Marshal(sa.adjustBaseUrl(*config))
+	resp, err := json.Marshal(adjustBaseUrl(sa, *config))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -187,7 +215,11 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	StreamCreateHandler(sa, w, r)
+}
+
+func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -202,7 +234,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.Provider.CreateStream(jsonRequest, authCtx.ProjectId)
+	configResp, err := sa.GetProvider().CreateStream(jsonRequest, authCtx.ProjectId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -215,17 +247,17 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Update the event router
-	state, err := sa.Provider.GetStreamState(configResp.Id)
+	state, err := sa.GetProvider().GetStreamState(configResp.Id)
 	if err != nil {
 		serverLog.Error("Error getting stream state after creation", "id", configResp.Id, "error", err)
 	}
-	sa.EventRouter.UpdateStreamState(state)
+	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
 	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	respBytes, err := json.MarshalIndent(sa.adjustBaseUrl(configResp), "", "  ")
+	respBytes, err := json.MarshalIndent(adjustBaseUrl(sa, configResp), "", "  ")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -237,7 +269,11 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 }
 
 func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	StreamUpdateHandler(sa, w, r)
+}
+
+func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -262,7 +298,7 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.Provider.UpdateStream(authCtx.StreamId, authCtx.ProjectId, jsonRequest)
+	configResp, err := sa.GetProvider().UpdateStream(authCtx.StreamId, authCtx.ProjectId, jsonRequest)
 	if err != nil || configResp == nil {
 		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
@@ -277,13 +313,13 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
-		err := sa.Provider.ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
+		err := sa.GetProvider().ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
 			// Because reset goes through all events, this function confirms the stream should get the event
 			return eventRouter.StreamEventMatch(streamState, eventRecord)
 		})
@@ -298,20 +334,20 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Update the event router
-	state, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	state, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state for event router update", "id", authCtx.StreamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
-		sa.EventRouter.RemoveStream(authCtx.StreamId)
+		sa.GetEventRouter().RemoveStream(authCtx.StreamId)
 	}
-	sa.EventRouter.UpdateStreamState(state)
+	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", authCtx.StreamId))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	respBytes, err := json.MarshalIndent(sa.adjustBaseUrl(*configResp), "", "  ")
+	respBytes, err := json.MarshalIndent(adjustBaseUrl(sa, *configResp), "", "  ")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -322,7 +358,11 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	UpdateStatusHandler(sa, w, r)
+}
+
+func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -341,29 +381,29 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	modified := false
-	streamState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		log.Printf("Error getting streamState: %s\n", err.Error())
+		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if streamState == nil {
 		// should not happen!
-		log.Printf("Error stream %s returned nil", authCtx.StreamId)
+		serverLog.Error("Error: Get Stream state returned nil after update", "id", authCtx.StreamId)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if jsonRequest.Status != "" {
 		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
-				sa.Provider.UpdateStreamStatus(authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
+				sa.GetProvider().UpdateStreamStatus(authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
 				// Refresh streamState after update
-				updatedState, err := sa.Provider.GetStreamState(authCtx.StreamId)
+				updatedState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
 				if err == nil && updatedState != nil {
 					streamState = updatedState
 				}
@@ -373,11 +413,11 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	if modified {
-		sa.EventRouter.UpdateStreamState(streamState)
+		sa.GetEventRouter().UpdateStreamState(streamState)
 		sa.HandleReceiver(streamState)
 	}
 
-	statusResp, err := sa.Provider.GetStatus(authCtx.StreamId)
+	statusResp, err := sa.GetProvider().GetStatus(authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting status after update", "id", authCtx.StreamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -397,6 +437,10 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfiguration {
+	return getTransmitterConfig(sa)
+}
+
+func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfiguration {
 	baseUrl := sa.GetBaseUrl()
 	jwksUri, _ := baseUrl.Parse("/jwks.json")
 	configUri, _ := baseUrl.Parse("/stream")
@@ -406,15 +450,29 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 	verifyUri, _ := baseUrl.Parse("/verify")
 	regUri, _ := baseUrl.Parse("/register")
 
-	return &model.TransmitterConfiguration{
-		Issuer:  sa.DefIssuer,
-		JwksUri: jwksUri.String(),
-		DeliveryMethodsSupported: []string{
+	var methods []string
+	var goVersion string
+	switch sa.(type) {
+	case *SignalsApplication:
+		goVersion = constants.GoSignalsVersion
+		methods = []string{
 			model.DeliveryPoll,
 			model.DeliveryPush,
 			model.ReceivePoll,
 			model.ReceivePush,
-		},
+		}
+	default:
+		goVersion = "" // Simulate an SSF server
+		methods = []string{
+			model.DeliveryPoll,
+			model.DeliveryPush,
+		}
+	}
+
+	return &model.TransmitterConfiguration{
+		Issuer:                     sa.GetDefIssuer(),
+		JwksUri:                    jwksUri.String(),
+		DeliveryMethodsSupported:   methods,
 		ConfigurationEndpoint:      configUri.String(),
 		StatusEndpoint:             statusUri.String(),
 		AddSubjectEndpoint:         addSubUri.String(),
@@ -436,26 +494,34 @@ func (sa *SignalsApplication) getTransmitterConfig() *model.TransmitterConfigura
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
 		},
-		AuthorizationServers:   sa.Auth.GetOAuthServers(),
+		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
 		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt, authUtil.ScopeRegister},
 		BearerMethodsSupported: []string{"header"},
 
-		GoSignalsVersion: constants.GoSignalsVersion,
+		GoSignalsVersion: goVersion,
 		SpecVersion:      constants.SSF_VERSION,
 	}
 }
 
-func (sa *SignalsApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter, _ *http.Request) {
+func (sa *SignalsApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter, r *http.Request) {
+	WellKnownSsfConfigurationGetHandler(sa, w, r)
+}
+
+func WellKnownSsfConfigurationGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	serverLog.Debug("GET WellKnownSsfConfiguration")
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	resp, _ := json.Marshal(sa.getTransmitterConfig())
+	resp, _ := json.Marshal(getTransmitterConfig(sa))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 
 }
 
 func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
+	WellKnownSsfConfigurationIssuerGetHandler(sa, w, r)
+}
+
+func WellKnownSsfConfigurationIssuerGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	issuer := vars["issuer"]
 	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuer))
@@ -466,7 +532,7 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.Response
 
 	baseUrl := sa.GetBaseUrl()
 	jwksUri, _ := baseUrl.Parse("/jwks/" + issuer)
-	config := sa.getTransmitterConfig()
+	config := getTransmitterConfig(sa)
 	config.JwksUri = jwksUri.String()
 	config.Issuer = issuer
 

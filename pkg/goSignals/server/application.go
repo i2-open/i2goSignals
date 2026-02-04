@@ -20,6 +20,17 @@ import (
 
 var serverLog = logger.Sub("SERVER")
 
+type SsfApplicationInterface interface {
+	GetProvider() dbProviders.DbProviderInterface
+	GetEventRouter() eventRouter.EventRouter
+	GetAuth() *authUtil.AuthIssuer
+	GetBaseUrl() *url.URL
+	GetDefIssuer() string
+	Name() string
+	CloseReceiver(sid string)
+	HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream
+}
+
 type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
 	Server        *http.Server
@@ -43,6 +54,22 @@ func (sa *SignalsApplication) Name() string {
 		return sa.Provider.Name()
 	}
 	return "goSignals"
+}
+
+func (sa *SignalsApplication) GetProvider() dbProviders.DbProviderInterface {
+	return sa.Provider
+}
+
+func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
+	return sa.EventRouter
+}
+
+func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
+	return sa.Auth
+}
+
+func (sa *SignalsApplication) GetDefIssuer() string {
+	return sa.DefIssuer
 }
 
 func (sa *SignalsApplication) GetBaseUrl() *url.URL {
