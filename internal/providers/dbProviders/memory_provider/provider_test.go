@@ -1,12 +1,17 @@
 package memory_provider
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMemoryProviderOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb://localhost", "test_db")
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
@@ -17,6 +22,10 @@ func TestMemoryProviderOpen(t *testing.T) {
 }
 
 func TestMemoryProviderViaFactory(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
@@ -33,6 +42,10 @@ func TestMemoryProviderRejectNonMemoryURL(t *testing.T) {
 }
 
 func TestMemoryProviderBasicOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
 	defer provider.Close()

@@ -6,7 +6,9 @@ The `memory_provider` is an in-memory implementation of the `DbProviderInterface
 
 ## Features
 
-- **In-Memory Storage**: All data (streams, events, keys, clients) is stored in memory using Go maps
+- **In-Memory Storage**: Data (streams, events, keys, clients) is primarily stored in memory using Go maps
+- **Persistence Support**: Periodically saves state to disk and reloads on startup
+- **Memory Protection**: Offloads large event data to disk to minimize memory footprint
 - **Thread-Safe**: Uses `sync.RWMutex` to ensure concurrent access safety
 - **Full Interface Implementation**: Implements all methods from `DbProviderInterface`
 - **No External Dependencies**: No MongoDB server required
@@ -78,7 +80,7 @@ The memory provider stores all data in memory using the following structure:
 
 ### Differences from MongoDB Provider
 
-1. **No Persistence**: Data is lost when the provider is closed or the process ends
+1. **Local Persistence**: Data is persisted to local files instead of a MongoDB cluster
 2. **No Change Streams**: MongoDB change stream features are not available
 3. **Simplified Queries**: All lookups are direct map operations
 4. **No Indexes**: All data access is O(1) or O(n) without optimization
@@ -95,8 +97,13 @@ All public methods use read/write locks to ensure thread-safe access:
 The memory provider respects the same environment variables as the MongoDB provider:
 
 - `I2SIG_ISSUER`: Default issuer name (default: "DEFAULT")
-- `I2SIG_DBNAME`: Database name (default: "ssef")
+- `I2SIG_DBNAME`: Database name (default: "goSignalsMem")
 - `I2SIG_TOKEN_ISSUER`: Token issuer name (default: "DEFAULT")
+
+### Memory Provider Specific Variables
+
+- `MEM_DIRECTORY`: Directory to store persistent state (default: `config/{dbName}`)
+- `MEM_SAVE_RATE`: The interval in seconds between periodic saves. A setting of 0 means every change. (default: 30)
 
 In addition, the `OpenProvider` factory function respects:
 - `MONGO_URL`: If not set, memory provider is automatically selected.
@@ -104,11 +111,17 @@ In addition, the `OpenProvider` factory function respects:
 
 ## Limitations
 
-- No persistent storage across restarts
 - No MongoDB-specific features (aggregation, change streams, etc.)
 - Events are stored with the full SecurityEventToken object, not as raw JSON
 - No transaction support
 - No query optimization or indexing
+
+## Persistence and Memory Protection
+
+The memory provider can be configured to periodically save its state to disk. When enabled:
+- All state (streams, keys, clients, pending/delivered events) is saved to JSON files in the configured `MEM_DIRECTORY`.
+- Individual Security Event Tokens (SETs) are saved as `{jti}.set` files in an `events` sub-directory.
+- To protect memory usage, the raw SET data is offloaded to disk after being saved, keeping only the necessary metadata in memory for filtering and routing. The full SET is reloaded from disk only when requested.
 
 ## When to Use
 

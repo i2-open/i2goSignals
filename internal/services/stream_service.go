@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc"
@@ -31,6 +32,7 @@ type StreamService struct {
 	defaultIssuer   string
 	receiverStreams map[string]*model.StreamStateRecord
 	BaseUrl         *url.URL
+	mu              sync.RWMutex
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
@@ -245,7 +247,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	// If this is a receiver stream, load its JWKS
 	if streamRec.IsReceiver() {
+		s.mu.Lock()
 		s.receiverStreams[config.Id] = streamRec
+		s.mu.Unlock()
 		s.loadJwksForReceiver(ctx, streamRec)
 		ssLog.Debug("Receiver started", "id", streamRec.Id)
 	}
@@ -439,7 +443,9 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 
 func (s *StreamService) DeleteStream(ctx context.Context, streamID string) error {
 	// Remove from receiver streams cache if present
+	s.mu.Lock()
 	delete(s.receiverStreams, streamID)
+	s.mu.Unlock()
 	return s.streamDAO.Delete(ctx, streamID)
 }
 
@@ -477,7 +483,10 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 	}
 
 	// Update cache if receiver stream
-	if state, ok := s.receiverStreams[streamID]; ok {
+	s.mu.RLock()
+	state, ok := s.receiverStreams[streamID]
+	s.mu.RUnlock()
+	if ok {
 		state.Status = status
 		state.ErrorMsg = errorMsg
 	}
@@ -527,7 +536,9 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 			s.loadJwksForReceiver(ctx, &state)
 		}
 	}
+	s.mu.Lock()
 	s.receiverStreams = res
+	s.mu.Unlock()
 	return res
 }
 
@@ -616,7 +627,10 @@ func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *mo
 
 func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string) *keyfunc.JWKS {
 	// Check cache first
-	if streamState, ok := s.receiverStreams[sid]; ok {
+	s.mu.RLock()
+	streamState, ok := s.receiverStreams[sid]
+	s.mu.RUnlock()
+	if ok {
 		return streamState.ValidateJwks
 	}
 

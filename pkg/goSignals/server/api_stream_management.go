@@ -163,15 +163,22 @@ func (sa *SignalsApplication) adjustBaseUrl(config model.StreamConfiguration) mo
 }
 
 func adjustBaseUrl(sa SsfApplicationInterface, config model.StreamConfiguration) model.StreamConfiguration {
-	res := config
+	res := config.DeepCopy()
 	baseUrl := sa.GetBaseUrl()
-	switch config.Delivery.GetMethod() {
+	if res.Delivery == nil {
+		return res
+	}
+	switch res.Delivery.GetMethod() {
 	case model.DeliveryPoll:
-		endpoint := res.Delivery.PollTransmitMethod.EndpointUrl
-		res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
+		if res.Delivery.PollTransmitMethod != nil {
+			endpoint := res.Delivery.PollTransmitMethod.EndpointUrl
+			res.Delivery.PollTransmitMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
+		}
 	case model.ReceivePush:
-		endpoint := res.Delivery.PushReceiveMethod.EndpointUrl
-		res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
+		if res.Delivery.PushReceiveMethod != nil {
+			endpoint := res.Delivery.PushReceiveMethod.EndpointUrl
+			res.Delivery.PushReceiveMethod.EndpointUrl = replaceBase(endpoint, baseUrl)
+		}
 	default:
 		// do nothing
 	}

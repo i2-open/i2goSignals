@@ -121,3 +121,25 @@ func (d *KeyDAOMemory) FindReceiverKeyByStreamID(_ context.Context, streamID str
 	}
 	return nil, nil
 }
+
+func (d *KeyDAOMemory) GetState() map[string][]*interfaces.JwkKeyRec {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	res := make(map[string][]*interfaces.JwkKeyRec)
+	for k, v := range d.keys {
+		recs := make([]*interfaces.JwkKeyRec, len(v))
+		for i, r := range v {
+			copyRec := *r
+			recs[i] = &copyRec
+		}
+		res[k] = recs
+	}
+	return res
+}
+
+func (d *KeyDAOMemory) SetState(state map[string][]*interfaces.JwkKeyRec) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.keys = state
+}

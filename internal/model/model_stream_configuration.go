@@ -50,3 +50,42 @@ type StreamConfiguration struct {
 	// TxToken holds the token used for automatic SSF stream creation with the transmitter and may be updated upon success to allow access to status & verify endpoints
 	TxToken *string `json:"tx_token,omitempty"`
 }
+
+func (sc *StreamConfiguration) DeepCopy() StreamConfiguration {
+	if sc == nil {
+		return StreamConfiguration{}
+	}
+	res := *sc
+	if sc.Aud != nil {
+		res.Aud = make([]string, len(sc.Aud))
+		copy(res.Aud, sc.Aud)
+	}
+	if sc.EventsSupported != nil {
+		res.EventsSupported = make([]string, len(sc.EventsSupported))
+		copy(res.EventsSupported, sc.EventsSupported)
+	}
+	if sc.EventsRequested != nil {
+		res.EventsRequested = make([]string, len(sc.EventsRequested))
+		copy(res.EventsRequested, sc.EventsRequested)
+	}
+	if sc.EventsDelivered != nil {
+		res.EventsDelivered = make([]string, len(sc.EventsDelivered))
+		copy(res.EventsDelivered, sc.EventsDelivered)
+	}
+	if sc.Delivery != nil {
+		res.Delivery = sc.Delivery.DeepCopy()
+	}
+	if sc.ResetDate != nil {
+		copyDate := *sc.ResetDate
+		res.ResetDate = &copyDate
+	}
+	if sc.TxWellKnownUrl != nil {
+		copyUrl := *sc.TxWellKnownUrl
+		res.TxWellKnownUrl = &copyUrl
+	}
+	if sc.TxToken != nil {
+		copyToken := *sc.TxToken
+		res.TxToken = &copyToken
+	}
+	return res
+}

@@ -1,6 +1,7 @@
 package memory_provider
 
 import (
+	"os"
 	"testing"
 
 	"github.com/i2-open/i2goSignals/internal/model"
@@ -8,6 +9,10 @@ import (
 )
 
 func TestMemoryProviderDAOOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db_v2")
 	if err != nil {
 		t.Fatalf("Failed to open memory provider V2: %v", err)
@@ -27,6 +32,10 @@ func TestMemoryProviderDAOOpen(t *testing.T) {
 }
 
 func TestMemoryProviderDAOStreamOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db_v2_stream")
 	if err != nil {
 		t.Fatalf("Failed to open memory provider V2: %v", err)
@@ -84,6 +93,10 @@ func TestMemoryProviderDAOStreamOperations(t *testing.T) {
 }
 
 func TestMemoryProviderDAOEventOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db_v2_events")
 	if err != nil {
 		t.Fatalf("Failed to open memory provider V2: %v", err)
@@ -114,6 +127,10 @@ func TestMemoryProviderDAOEventOperations(t *testing.T) {
 }
 
 func TestMemoryProviderDAOKeyOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv(CEnvMemDir, tmpDir)
+	defer os.Unsetenv(CEnvMemDir)
+
 	provider, err := Open("memorydb:", "test_db_v2_keys")
 	if err != nil {
 		t.Fatalf("Failed to open memory provider V2: %v", err)

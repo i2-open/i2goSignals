@@ -24,8 +24,7 @@ func (d *StreamDAOMemory) Create(ctx context.Context, state *model.StreamStateRe
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	newState := *state
-	d.streams[state.StreamConfiguration.Id] = &newState
+	d.streams[state.StreamConfiguration.Id] = state.DeepCopy()
 	return nil
 }
 
@@ -34,11 +33,7 @@ func (d *StreamDAOMemory) FindByID(ctx context.Context, id string) (*model.Strea
 	defer d.mu.RUnlock()
 
 	if state, ok := d.streams[id]; ok {
-		// Deep copy the struct to avoid data races
-		copyState := *state
-		// If there are pointers inside StreamConfiguration, they might still race if not deep-copied.
-		// For now, copying the top-level struct should resolve the direct race on Status/ErrorMsg.
-		return &copyState, nil
+		return state.DeepCopy(), nil
 	}
 	return nil, errors.New("stream not found")
 }
@@ -50,9 +45,7 @@ func (d *StreamDAOMemory) Update(ctx context.Context, state *model.StreamStateRe
 	if _, exists := d.streams[state.StreamConfiguration.Id]; !exists {
 		return errors.New("not found")
 	}
-	// Copy the provided state into a new object to avoid sharing pointers
-	newState := *state
-	d.streams[state.StreamConfiguration.Id] = &newState
+	d.streams[state.StreamConfiguration.Id] = state.DeepCopy()
 	return nil
 }
 
@@ -73,7 +66,7 @@ func (d *StreamDAOMemory) List(ctx context.Context) ([]model.StreamStateRecord, 
 
 	var recs []model.StreamStateRecord
 	for _, state := range d.streams {
-		recs = append(recs, *state)
+		recs = append(recs, *state.DeepCopy())
 	}
 	return recs, nil
 }
@@ -85,7 +78,7 @@ func (d *StreamDAOMemory) FindByProjectID(ctx context.Context, projectID string)
 	var recs []model.StreamStateRecord
 	for _, state := range d.streams {
 		if state.ProjectId == projectID {
-			recs = append(recs, *state)
+			recs = append(recs, *state.DeepCopy())
 		}
 	}
 	return recs, nil
@@ -98,7 +91,7 @@ func (d *StreamDAOMemory) FindReceiverStreams(ctx context.Context) ([]model.Stre
 	var recs []model.StreamStateRecord
 	for _, state := range d.streams {
 		if state.IsReceiver() {
-			recs = append(recs, *state)
+			recs = append(recs, *state.DeepCopy())
 		}
 	}
 	return recs, nil
@@ -114,4 +107,21 @@ func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status st
 		return nil
 	}
 	return errors.New("not found")
+}
+
+func (d *StreamDAOMemory) GetState() map[string]*model.StreamStateRecord {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	res := make(map[string]*model.StreamStateRecord)
+	for k, v := range d.streams {
+		res[k] = v.DeepCopy()
+	}
+	return res
+}
+
+func (d *StreamDAOMemory) SetState(state map[string]*model.StreamStateRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.streams = state
 }

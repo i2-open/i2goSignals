@@ -3,10 +3,11 @@ package dbProviders
 import (
 	"strings"
 
+	"os"
+
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"os"
 )
 
 var factoryLog = logger.Sub("dbProviders")
@@ -28,7 +29,7 @@ func OpenProvider(mongoUrl string, dbName string) (DbProviderInterface, error) {
 	if err != nil {
 		failToMem := strings.ToUpper(os.Getenv("MONGO_FAILTOMEM"))
 		if failToMem == "FALSE" {
-			factoryLog.Error("Mongo Server connection failed and MONGO_FAILTOMEM is FALSE. Exiting.", "error", err)
+			factoryLog.Error("Mongo Server connection failed. Exiting.", "error", err)
 			return nil, err
 		}
 

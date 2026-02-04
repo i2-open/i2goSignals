@@ -26,6 +26,15 @@ type StreamStateRecord struct {
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty"`
 }
 
+func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
+	if ss == nil {
+		return nil
+	}
+	res := *ss
+	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
+	return &res
+}
+
 func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	// This is being done to preserve the handle on the PushStreams.
 	ss.Status = mod.Status

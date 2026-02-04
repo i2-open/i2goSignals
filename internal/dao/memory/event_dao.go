@@ -2,6 +2,9 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -16,9 +19,13 @@ type EventDAOMemory struct {
 	events          map[string]*model.EventRecord
 	pendingEvents   map[string][]interfaces.DeliverableEvent // streamId -> events
 	deliveredEvents map[string][]interfaces.DeliveredEvent   // streamId -> events
+
+	// Persistence
+	persistDir string
+	useDisk    bool
 }
 
-func NewEventDAO() interfaces.EventDAO {
+func NewEventDAO() *EventDAOMemory {
 	return &EventDAOMemory{
 		events:          make(map[string]*model.EventRecord),
 		pendingEvents:   make(map[string][]interfaces.DeliverableEvent),
@@ -26,9 +33,31 @@ func NewEventDAO() interfaces.EventDAO {
 	}
 }
 
+func (d *EventDAOMemory) SetPersistDir(dir string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.persistDir = dir
+	if dir != "" {
+		d.useDisk = true
+		// Ensure events directory exists
+		_ = os.MkdirAll(filepath.Join(dir, "events"), 0755)
+	} else {
+		d.useDisk = false
+	}
+}
+
 func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if d.useDisk {
+		err := d.saveEventToDiskLocked(record)
+		if err == nil {
+			// Memory optimization: clear large fields if on disk
+			// We keep Event for filtering/matching as it's often used
+			record.Original = ""
+		}
+	}
 
 	d.events[record.Jti] = record
 	return nil
@@ -36,9 +65,17 @@ func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) er
 
 func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventRecord, error) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
+	eventRec, ok := d.events[jti]
+	d.mu.RUnlock()
 
-	if eventRec, ok := d.events[jti]; ok {
+	if ok {
+		// If Original is empty but we are using disk, try to reload it
+		if eventRec.Original == "" && d.useDisk {
+			loaded, err := d.loadEventFromDisk(jti)
+			if err == nil {
+				return loaded, nil
+			}
+		}
 		copyRec := *eventRec
 		return &copyRec, nil
 	}
@@ -180,4 +217,76 @@ func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, st
 	// In a real mock test, we might want to simulate external events.
 	<-ctx.Done()
 	return nil
+}
+
+// Persistence helpers
+
+func (d *EventDAOMemory) saveEventToDiskLocked(record *model.EventRecord) error {
+	if d.persistDir == "" {
+		return nil
+	}
+	path := filepath.Join(d.persistDir, "events", record.Jti+".set")
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, error) {
+	if d.persistDir == "" {
+		return nil, os.ErrNotExist
+	}
+	path := filepath.Join(d.persistDir, "events", jti+".set")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var record model.EventRecord
+	err = json.Unmarshal(data, &record)
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	events = make(map[string]*model.EventRecord)
+	for k, v := range d.events {
+		copyRec := *v
+		events[k] = &copyRec
+	}
+
+	pending = make(map[string][]interfaces.DeliverableEvent)
+	for k, v := range d.pendingEvents {
+		copySlice := make([]interfaces.DeliverableEvent, len(v))
+		copy(copySlice, v)
+		pending[k] = copySlice
+	}
+
+	delivered = make(map[string][]interfaces.DeliveredEvent)
+	for k, v := range d.deliveredEvents {
+		copySlice := make([]interfaces.DeliveredEvent, len(v))
+		copy(copySlice, v)
+		delivered[k] = copySlice
+	}
+
+	return events, pending, delivered
+}
+
+func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if events != nil {
+		d.events = events
+	}
+	if pending != nil {
+		d.pendingEvents = pending
+	}
+	if delivered != nil {
+		d.deliveredEvents = delivered
+	}
 }

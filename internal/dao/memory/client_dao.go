@@ -72,3 +72,21 @@ func (d *ClientDAOMemory) Delete(_ context.Context, id string) error {
 	delete(d.clients, id)
 	return nil
 }
+
+func (d *ClientDAOMemory) GetState() map[string]*model.SsfClient {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	res := make(map[string]*model.SsfClient)
+	for k, v := range d.clients {
+		copyClient := *v
+		res[k] = &copyClient
+	}
+	return res
+}
+
+func (d *ClientDAOMemory) SetState(state map[string]*model.SsfClient) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.clients = state
+}

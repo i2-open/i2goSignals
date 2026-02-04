@@ -38,6 +38,30 @@ func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
 	return []byte("{}"), nil
 }
 
+func (d *OneOfStreamConfigurationDelivery) DeepCopy() *OneOfStreamConfigurationDelivery {
+	if d == nil {
+		return nil
+	}
+	res := &OneOfStreamConfigurationDelivery{}
+	if d.PushTransmitMethod != nil {
+		copy := *d.PushTransmitMethod
+		res.PushTransmitMethod = &copy
+	}
+	if d.PushReceiveMethod != nil {
+		copy := *d.PushReceiveMethod
+		res.PushReceiveMethod = &copy
+	}
+	if d.PollTransmitMethod != nil {
+		copy := *d.PollTransmitMethod
+		res.PollTransmitMethod = &copy
+	}
+	if d.PollReceiveMethod != nil {
+		copy := *d.PollReceiveMethod
+		res.PollReceiveMethod = &copy
+	}
+	return res
+}
+
 func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
 	if d == nil {
 		return "DEFAULT"

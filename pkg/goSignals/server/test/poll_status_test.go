@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,12 +27,16 @@ func TestPollTransmitterStatus(t *testing.T) {
 		Status: model.StreamStatePause,
 		Reason: "testing pause",
 	}
+	var mu sync.Mutex
 
 	// Mock transmitter
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/status" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(statusResponse)
+			mu.Lock()
+			resp := statusResponse
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if r.URL.Path == "/jwks" {
@@ -88,8 +93,10 @@ func TestPollTransmitterStatus(t *testing.T) {
 	assert.Contains(t, updatedState.ErrorMsg, "Transmitter stream is paused: testing pause")
 
 	// Now change status to enabled
+	mu.Lock()
 	statusResponse.Status = model.StreamStateEnabled
 	statusResponse.Reason = ""
+	mu.Unlock()
 
 	// Wait for next check (interval is 0.2s)
 	time.Sleep(400 * time.Millisecond)

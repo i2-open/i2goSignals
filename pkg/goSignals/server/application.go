@@ -47,6 +47,7 @@ type SignalsApplication struct {
 	Stats         *PrometheusHandler
 	NodeID        string
 	StartedAt     time.Time
+	stopSync      chan struct{}
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -119,6 +120,7 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		pushReceivers: map[string]model.StreamStateRecord{},
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
+		stopSync:      make(chan struct{}),
 	}
 
 	serverLog.Info("Starting goSignalsApplication", "nodeID", nodeID)
@@ -186,6 +188,8 @@ func (sa *SignalsApplication) backgroundSync() {
 					sa.EventRouter.UpdateStreamState(&state)
 				}
 			}
+		case <-sa.stopSync:
+			return
 		}
 	}
 }
@@ -242,6 +246,10 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 func (sa *SignalsApplication) Shutdown() {
 	name := sa.Provider.Name()
 	serverLog.Info("Shutdown initiated", "db", name)
+
+	if sa.stopSync != nil {
+		close(sa.stopSync)
+	}
 
 	// Turn off Polling Clients
 	sa.shutdownReceivers()
