@@ -15,6 +15,7 @@ type EventBuf interface {
 	IsClosed() bool
 	Close()
 	Cnt() int
+	Wakeup()
 }
 
 type EventPollBuffer struct {
@@ -122,6 +123,17 @@ func (b *EventPollBuffer) Close() {
 	b.closed = true
 	close(b.in)
 	close(b.notifier)
+}
+
+// Wakeup sends a notification to the buffer to wake up Poller to end the current long poll session (e.g., because of stream state change)
+func (b *EventPollBuffer) Wakeup() {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	if b.closed {
+		return
+	}
+	close(b.notifier)
+	b.notifier = make(chan struct{})
 }
 
 func (b *EventPollBuffer) AckEvents(jtis []string) {
@@ -288,4 +300,8 @@ func (b *EventPushBuffer) Close() {
 	}
 	close(b.in)
 	b.in = nil
+}
+
+func (b *EventPushBuffer) Wakeup() {
+	// Not used for push buffer
 }

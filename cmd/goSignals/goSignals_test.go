@@ -114,6 +114,7 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 		dbUrl = TestDbUrl
 	} else {
 		t.Log("Tests running against Memory provider.")
+		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
 
 	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)

@@ -108,6 +108,10 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
 		dbUrl = TestDbUrl
+	} else {
+		// When using memory provider, use a temporary directory for persistence
+		// to avoid leaving files in the source tree.
+		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
 	// mongo, err := mongo_provider.Open(TestDbUrl, dbName)
 	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)

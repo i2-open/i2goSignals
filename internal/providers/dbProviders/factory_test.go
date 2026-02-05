@@ -9,6 +9,7 @@ import (
 )
 
 func TestOpenProvider_Fallback(t *testing.T) {
+	t.Setenv("MEM_DIRECTORY", t.TempDir())
 	// Use a wrong Mongo URL that will fail to connect
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=1000"
 
@@ -23,6 +24,7 @@ func TestOpenProvider_Fallback(t *testing.T) {
 }
 
 func TestOpenProvider_Memory(t *testing.T) {
+	t.Setenv("MEM_DIRECTORY", t.TempDir())
 	p, err := OpenProvider("memorydb:", "test_mem")
 	assert.NoError(t, err)
 
@@ -33,6 +35,7 @@ func TestOpenProvider_Memory(t *testing.T) {
 }
 
 func TestOpenProvider_EmptyUrl(t *testing.T) {
+	t.Setenv("MEM_DIRECTORY", t.TempDir())
 	p, err := OpenProvider("", "test_empty")
 	assert.NoError(t, err)
 

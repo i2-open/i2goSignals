@@ -20,6 +20,7 @@ type SsfServerTestSuite struct {
 
 func (suite *SsfServerTestSuite) SetupSuite() {
 	// Use a memory database
+	suite.T().Setenv("MEM_DIRECTORY", suite.T().TempDir())
 	dbUrl := "memorydb:"
 	provider, err := dbProviders.OpenProvider(dbUrl, "ssf_test")
 	suite.Require().NoError(err)

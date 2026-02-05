@@ -67,17 +67,33 @@ func TestCreateEventPollBuffer(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		i := 0
-		for !buffer.IsClosed() {
-			// Introduce random time element in to allow for multi-events
-			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+		for i < 100 {
 			jtis, _ := buffer.GetEvents(model.PollParameters{ReturnImmediately: true})
-			for _, v := range *jtis {
-				lastVal = v
-				receiveVals[i] = v
-				fmt.Println(fmt.Sprintf("Received multi-event %d jti: %s", i, lastVal))
-				i++
+			if jtis != nil {
+				buffer.AckEvents(*jtis)
+				for _, v := range *jtis {
+					if i < 100 {
+						lastVal = v
+						receiveVals[i] = v
+						fmt.Println(fmt.Sprintf("Received multi-event %d jti: %s", i, lastVal))
+						i++
+					}
+				}
 			}
-
+			if i >= 100 {
+				break
+			}
+			if buffer.IsClosed() {
+				// If closed, wait a bit to ensure all events are moved from 'in' channel to 'events'
+				time.Sleep(10 * time.Millisecond)
+				// Check one last time
+				jtis, _ = buffer.GetEvents(model.PollParameters{ReturnImmediately: true})
+				if jtis == nil {
+					break
+				}
+			} else {
+				time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			}
 		}
 		wg.Done()
 		fmt.Println("Finished reading")
@@ -88,9 +104,9 @@ func TestCreateEventPollBuffer(t *testing.T) {
 		buffer.in <- testVals[i]
 	}
 	buffer.Close()
-	assert.True(t, buffer.IsClosed(), "Buffer should be closed")
 	fmt.Println("Finished writing")
 	wg.Wait()
+	assert.True(t, buffer.IsClosed(), "Buffer should be closed")
 	if testVals[99] != receiveVals[99] {
 		t.Errorf("Didn't get all values. Last received was %s", lastVal)
 	}
@@ -324,4 +340,27 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 		}
 	}
 
+}
+
+func TestEventPollBuffer_Wakeup(t *testing.T) {
+	buffer := CreateEventPollBuffer([]string{})
+
+	start := time.Now()
+
+	// Start a goroutine that will wake up the buffer after 500ms
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		buffer.Wakeup()
+	}()
+
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       5, // 5 seconds timeout
+	})
+
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis)
+	assert.False(t, more)
+	assert.True(t, elapsed < 1*time.Second, "GetEvents should have returned early, took %v", elapsed)
 }

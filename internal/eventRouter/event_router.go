@@ -314,8 +314,14 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 		if ok {
 			eventLogger.Debug("Syncing stream state", "sid", currentState.StreamConfiguration.Id)
+			oldStatus := currentState.Status
 			currentState.Update(stream)
 			r.pollStreams[stream.StreamConfiguration.Id] = currentState
+			if (currentState.Status == model.StreamStatePause || currentState.Status == model.StreamStateDisable) && oldStatus == model.StreamStateEnabled {
+				if pb, ok := r.pollBuffers[stream.StreamConfiguration.Id]; ok {
+					pb.Wakeup() // This will cause current long poll sessions to end
+				}
+			}
 		} else {
 			eventLogger.Info("Adding stream to Pollers", "sid", stream.StreamConfiguration.Id)
 			r.pollStreams[stream.StreamConfiguration.Id] = *stream
@@ -797,6 +803,9 @@ func (r *router) RemoveStream(sid string) {
 			delete(r.pollStreams, sid)
 		}
 
+		if pb, ok := r.pollBuffers[sid]; ok {
+			pb.Close()
+		}
 		delete(r.pollBuffers, sid)
 	}
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
