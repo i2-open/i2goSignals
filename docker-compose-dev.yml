@@ -130,9 +130,31 @@ services:
     volumes:
       - ./:/app
       - go_mod_cache:/go/pkg/mod
-      - go_build_cache:/root/.cache/go-bui
+      - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals2.env
+
+  goSsfServer:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: gossfserver
+    hostname: goSsfServer
+    ports:
+      - "8890:8890"
+      - "2347:2345"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+    env_file:
+      - ./config/goSsf1.env
+    command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
+
   scimSsfSetup:
     image: i2gosignals:v0.8
    # command: sh /scim/register.sh

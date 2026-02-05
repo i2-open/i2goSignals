@@ -45,7 +45,7 @@ dev-up:
 
 # Rebuild the dev image and restart goSignals1
 dev-rebuild: dev-build-image
-	 docker compose -f docker-compose-dev.yml up -d --no-deps --build goSignals1 goSignals2
+	 docker compose -f docker-compose-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
 
 # Stop and remove the dev stack containers
 dev-down:
