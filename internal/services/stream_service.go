@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,22 +27,46 @@ var ssLog = logger.Sub("STREAM_SERVICE")
 
 const CSubjectFmt = "opaque"
 const ErrorInvalidProject = "invalid project_id - invalid token"
+const ErrorInvalidDeliveryMethod = "cannot change delivery method"
 
 type StreamService struct {
-	streamDAO       interfaces.StreamDAO
-	keyService      *KeyService
-	defaultIssuer   string
-	receiverStreams map[string]*model.StreamStateRecord
-	BaseUrl         *url.URL
-	mu              sync.RWMutex
+	streamDAO               interfaces.StreamDAO
+	keyService              *KeyService
+	defaultIssuer           string
+	receiverStreams         map[string]*model.StreamStateRecord
+	BaseUrl                 *url.URL
+	mu                      sync.RWMutex
+	minVerificationInterval int
+	maxInactivityTimeout    int
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
+	minVerificationInterval := 300
+	maxInactivityTimeout := 3600
+	var err error
+	minVer, exist := os.LookupEnv("MIN_VERIFICATION_INTERVAL")
+	if exist {
+		minVerificationInterval, err = strconv.Atoi(minVer)
+		if err != nil {
+			minVerificationInterval = 300
+			ssLog.Error("Invalid MIN_VERIFICATION_INTERVAL value", "error", err.Error())
+		}
+	}
+	maxInactivityStr, exist := os.LookupEnv("MAX_INACTIVITY_TIMEOUT")
+	if exist {
+		maxInactivityTimeout, err = strconv.Atoi(maxInactivityStr)
+		if err != nil {
+			maxInactivityTimeout = 3600
+			ssLog.Error("Invalid MAX_INACTIVITY_TIMEOUT value", "error", err.Error())
+		}
+	}
 	return &StreamService{
-		streamDAO:       streamDAO,
-		keyService:      keyService,
-		defaultIssuer:   defaultIssuer,
-		receiverStreams: make(map[string]*model.StreamStateRecord),
+		streamDAO:               streamDAO,
+		keyService:              keyService,
+		defaultIssuer:           defaultIssuer,
+		receiverStreams:         make(map[string]*model.StreamStateRecord),
+		minVerificationInterval: minVerificationInterval,
+		maxInactivityTimeout:    maxInactivityTimeout,
 	}
 }
 
@@ -218,7 +244,20 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 	}
 
-	config.MinVerificationInterval = 15
+	// Set the default values based on environment values
+	config.InactivityTimeout = int32(s.maxInactivityTimeout)
+	config.MinVerificationInterval = int32(s.minVerificationInterval)
+
+	// It is not SSF compliant, but goSignals will accept these settings on stream creation
+	if request.InactivityTimeout > 0 {
+		config.InactivityTimeout = request.InactivityTimeout
+	}
+	if request.MinVerificationInterval > 0 {
+		config.MinVerificationInterval = request.MinVerificationInterval
+	}
+
+	config.Description = request.Description
+
 	config.Format = CSubjectFmt
 
 	if request.IssuerJWKSUrl != "" {
@@ -428,6 +467,47 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 
 	if configReq.Format != "" {
 		config.Format = configReq.Format
+	}
+
+	if configReq.Delivery != nil && configReq.Delivery.GetMethod() != config.Delivery.GetMethod() {
+		return nil, errors.New(ErrorInvalidDeliveryMethod)
+	}
+
+	if configReq.Description != "" {
+		config.Description = configReq.Description
+	}
+
+	switch config.Delivery.GetMethod() {
+	case model.DeliveryPoll:
+		if configReq.Delivery != nil {
+			config.Delivery.PollTransmitMethod = configReq.Delivery.PollTransmitMethod
+		} // otherwise ignore it
+		// MinVerificationInterval and InactivityTimeout are transmitter asserted and cannot be changed
+	case model.DeliveryPush:
+		if configReq.Delivery != nil {
+			config.Delivery.PushTransmitMethod = configReq.Delivery.PushTransmitMethod
+		}
+		// MinVerificationInterval and InactivityTimeout are transmitter asserted and cannot be changed
+	case model.ReceivePoll:
+		if configReq.Delivery != nil {
+			config.Delivery.PollReceiveMethod = configReq.Delivery.PollReceiveMethod
+		}
+		if configReq.MinVerificationInterval != 0 {
+			config.MinVerificationInterval = configReq.MinVerificationInterval
+		}
+		if configReq.InactivityTimeout > 0 {
+			config.InactivityTimeout = configReq.InactivityTimeout
+		}
+	case model.ReceivePush:
+		if configReq.Delivery != nil {
+			config.Delivery.PushReceiveMethod = configReq.Delivery.PushReceiveMethod
+		}
+		if configReq.MinVerificationInterval != 0 {
+			config.MinVerificationInterval = configReq.MinVerificationInterval
+		}
+		if configReq.InactivityTimeout > 0 {
+			config.InactivityTimeout = configReq.InactivityTimeout
+		}
 	}
 
 	streamRec.StreamConfiguration = *config

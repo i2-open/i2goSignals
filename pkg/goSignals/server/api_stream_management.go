@@ -190,7 +190,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -226,7 +226,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -280,7 +280,7 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -295,7 +295,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
-	if !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin}) {
+	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin}) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
@@ -369,7 +369,7 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)

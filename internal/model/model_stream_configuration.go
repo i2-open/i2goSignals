@@ -15,6 +15,9 @@ type StreamConfiguration struct {
 	// Read-Only. An array of URIs identifying the set of events supported by the Transmitter for this Receiver. If omitted, Event Transmitters SHOULD make this set available to the Event Receiver via some other means (e.g. publishing it in online documentation).
 	EventsSupported []string `json:"events_supported,omitempty"`
 
+	// Read-Write. A string that describes the properties of the stream. This is useful in multi-stream systems to identify the stream for human actors. The transmitter MAY truncate the string beyond an allowed max length.
+	Description string `json:"description,omitempty"`
+
 	// Read-Write. An array of URIs identifying the set of events that the Receiver requested. A Receiver SHOULD request only the events that it understands and it can act on. This is configurable by the Receiver.
 	EventsRequested []string `json:"events_requested"`
 
@@ -26,6 +29,9 @@ type StreamConfiguration struct {
 
 	// Read-Only. An integer indicating the minimum amount of time in seconds that must pass in between verification requests. If an Event Receiver submits verification requests more frequently than this, the Event Transmitter MAY respond with a 429 status code. An Event Transmitter SHOULD NOT respond with a 429 status code if an Event Receiver is not exceeding this frequency.
 	MinVerificationInterval int32 `json:"min_verification_interval,omitempty"`
+
+	// Read-Only. The refreshable inactivity timeout of the stream in seconds. After the timeout duration passes with no eligible activity from the Receiver, as defined below, the Transmitter MAY either pause, disable, or delete the stream
+	InactivityTimeout int32 `json:"inactivity_timeout,omitempty"`
 
 	// Read-Write. The Subject Identifier Format that the Receiver wants for the events. If not set then the Transmitter might decide to use a type that discloses more information than necessary.
 	Format string `json:"format,omitempty"`

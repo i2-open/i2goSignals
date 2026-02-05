@@ -418,6 +418,9 @@ type EventAuthToken struct {
 
 // IsScopeMatch checks both Event token scopes array and oauth style space delimited scope claim
 func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
+	if t == nil {
+		return false
+	}
 	oauthScope := t.OAuthScope
 	oauthScopes := strings.Split(oauthScope, " ")
 	for _, acceptedScope := range scopesAccepted {
@@ -445,6 +448,9 @@ func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
 }
 
 func (t *EventAuthToken) IsAuthorized(streamId string, scopesAccepted []string) bool {
+	if t == nil {
+		return false
+	}
 
 	scopeMatch := t.IsScopeMatch(scopesAccepted)
 	if streamId == "" {
