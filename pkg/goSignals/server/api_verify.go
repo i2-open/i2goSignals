@@ -24,7 +24,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 
 func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	verifyLog.Debug("POST VerificationRequest")
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)

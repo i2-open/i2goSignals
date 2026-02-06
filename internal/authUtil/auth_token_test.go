@@ -319,7 +319,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
 	testRequest.Header.Set("Authorization", "Bearer "+clientToken)
 
-	authCtx, stat := auth.ValidateAuthorization(testRequest, []string{ScopeStreamAdmin})
+	authCtx, stat := auth.ValidateAuthorizationAny(testRequest, []string{ScopeStreamAdmin})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 
 	projId2 := authCtx.ProjectId
@@ -333,7 +333,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest2, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
 	testRequest2.Header.Set("Authorization", "Bearer "+newIat)
 
-	authCtx2, stat := auth.ValidateAuthorization(testRequest2, []string{ScopeRegister})
+	authCtx2, stat := auth.ValidateAuthorizationAny(testRequest2, []string{ScopeRegister})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 
 	fmt.Println("ProjectID3:\t" + authCtx2.ProjectId)
@@ -350,7 +350,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest3, err := http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
 	testRequest3.Header.Set("Authorization", "Bearer "+newIat)
 
-	authCtx3, stat := auth.ValidateAuthorization(testRequest3, []string{ScopeRegister})
+	authCtx3, stat := auth.ValidateAuthorizationAny(testRequest3, []string{ScopeRegister})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 	assert.NotNil(t1, authCtx3, "Should be authenticated")
 
@@ -488,11 +488,7 @@ func TestValidateAuthorization(t *testing.T) {
 				r:      reqWithVars,
 				scopes: []string{ScopeStreamMgmt},
 			},
-			want: &AuthContext{
-				StreamId:  "1",
-				ProjectId: "abc",
-				Eat:       streamEat,
-			},
+			want:  nil,
 			want1: http.StatusForbidden,
 		},
 		{
@@ -543,7 +539,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1 := auth.ValidateAuthorization(tt.args.r, tt.args.scopes)
+			got, got1 := auth.ValidateAuthorizationAny(tt.args.r, tt.args.scopes)
 			if got1 != tt.want1 {
 				t.Errorf("ValidateAuthorization() got1 = %v, want %v", got1, tt.want1)
 			}
@@ -673,7 +669,7 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorization(req, []string{ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorization via OAuth fallback, got %d", code)
 	}
@@ -717,7 +713,7 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeStreamMgmt})
-	if code != http.StatusUnauthorized || got != nil {
+	if code != http.StatusForbidden || got != nil {
 		t.Fatalf("expected Unauthorized with nil context, got code=%d ctx=%+v", code, got)
 	}
 }

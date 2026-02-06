@@ -336,7 +336,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 }
 
 func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, _ := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamAdmin})
+	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
 	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
 		serverLog.Error("Error generating IAT", "error", err.Error())
@@ -356,7 +356,7 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 }
 
 func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeRegister})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister})
 	if stat != http.StatusOK {
 		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
 		http.Error(w, "Failed to register client. Invalid registration token", stat)

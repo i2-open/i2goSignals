@@ -191,76 +191,6 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 	return token.SignedString(a.PrivateKey)
 }
 
-// ValidateAuthorization evaluates the authorization header and checks to see if the correct scope is asserted.
-// Returns streamId (if available) and http status.  200 OK means authorized
-func (a *AuthIssuer) ValidateAuthorization(r *http.Request, scopes []string) (*AuthContext, int) {
-	authorization := r.Header.Get("Authorization")
-
-	// first look for stream id as a query
-	queries := r.URL.Query()
-
-	id := queries["stream_id"]
-
-	streamRequested := ""
-
-	if id != nil && len(id) > 0 {
-		streamRequested = id[0]
-	} else {
-		// check for stream id in the path or captured by mux
-		params := mux.Vars(r)
-		val, exist := params["id"]
-		if exist {
-			streamRequested = val
-		} else {
-			val, exist = params["stream_id"]
-			if exist {
-				streamRequested = val
-			}
-		}
-	}
-
-	// otherwise fallback to the token
-	if authorization == "" {
-		// return streamRequested, http.StatusUnauthorized
-
-		return nil, http.StatusUnauthorized
-	}
-
-	parts := strings.Split(authorization, " ")
-	if len(parts) < 2 {
-		return nil, http.StatusUnauthorized
-	}
-	if parts[0] == "Bearer" {
-
-		tkn, err := a.ParseAuthTokenVerbose(parts[1], false)
-		if err == nil {
-			if tkn.IsAuthorized(streamRequested, scopes) {
-				return &AuthContext{
-					StreamId:  streamRequested,
-					ProjectId: tkn.ProjectId,
-					Eat:       tkn,
-				}, http.StatusOK
-			}
-			return &AuthContext{
-				StreamId:  streamRequested,
-				ProjectId: tkn.ProjectId,
-				Eat:       tkn,
-			}, http.StatusForbidden
-		}
-		// Try validating against configured OAuth servers as a fallback
-		if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
-			return authCtx, http.StatusOK
-		}
-		if err != nil {
-			authLog.Error("Authorization invalid", "error", err)
-		}
-		return nil, http.StatusUnauthorized
-	}
-	authLog.Error("Received invalid authorization", "authHeader", parts[0])
-	return nil, http.StatusUnauthorized
-
-}
-
 // ValidateAuthorizationAny validates the Authorization header against either a locally issued token
 // or any configured OAuth/OIDC servers defined in OAUTH_SERVERS. It returns 200 OK when authorized.
 func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) (*AuthContext, int) {
@@ -295,24 +225,25 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 	}
 
 	// Try local token first
-	if tkn, err := a.ParseAuthTokenVerbose(parts[1], false); err == nil && tkn.IsAuthorized(streamRequested, scopes) {
-		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn}, http.StatusOK
+	if tkn, err := a.ParseAuthTokenVerbose(parts[1], false); err == nil {
+		if tkn.IsAuthorized(streamRequested, scopes) {
+			return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn}, http.StatusOK
+		}
+		return nil, http.StatusForbidden
 	}
 
 	// Try OAuth servers
-	if authCtx, ok := a.validateOAuthToken(parts[1], streamRequested, scopes); ok {
-		return authCtx, http.StatusOK
-	}
-	return nil, http.StatusUnauthorized
+	return a.validateOAuthToken(parts[1], streamRequested, scopes)
 }
 
 // validateOAuthToken attempts to validate the token using configured OAuth/OIDC servers.
 // Returns an AuthContext when token roles match accepted scopes.
-func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested string, scopesAccepted []string) (*AuthContext, bool) {
+func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested string, scopesAccepted []string) (*AuthContext, int) {
 	if err := a.loadOAuthJWKS(); err != nil {
-		return nil, false
+		return nil, http.StatusUnauthorized
 	}
 	tokenString = strings.TrimSpace(tokenString)
+	isAuthorized := false
 	for _, jwks := range a.OAuthPubKeys {
 		token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc)
 		if err != nil {
@@ -320,6 +251,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 			continue
 		}
 		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
+			isAuthorized = true
 			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
 			var hasScopes []string
 			if claims.RealmAccess.Roles != nil {
@@ -334,11 +266,14 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 					StreamId:  streamRequested,
 					ProjectId: "",
 					Eat:       nil,
-				}, true
+				}, http.StatusOK
 			}
 		}
 	}
-	return nil, false
+	if isAuthorized {
+		return nil, http.StatusForbidden
+	}
+	return nil, http.StatusUnauthorized
 }
 
 func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {

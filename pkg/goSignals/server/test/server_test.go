@@ -296,13 +296,13 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", configResponse.Delivery.PollTransmitMethod.AuthorizationHeader)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Should be no error despite authorization fail")
-	assert.Equal(suite.T(), resp.StatusCode, http.StatusForbidden, "Should be forbidden due to insufficient scope")
+	assert.Equal(suite.T(), http.StatusForbidden, resp.StatusCode, "Should be forbidden due to insufficient scope")
 
 	// Now re-run it with stream mgmt token
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
-	assert.Equal(suite.T(), resp.StatusCode, http.StatusOK, "Should be OK status")
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Should be OK status")
 
 	// Step 4.
 

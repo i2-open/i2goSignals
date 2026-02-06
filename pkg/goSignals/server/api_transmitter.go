@@ -122,7 +122,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 }
 
 func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)

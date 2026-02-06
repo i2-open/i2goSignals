@@ -38,7 +38,7 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 }
 
 func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
 	if status != http.StatusOK {
 		serverLog.Debug("GetStatus request received: error", "authCtx", "invalid", "status", status)
 		w.WriteHeader(status)
@@ -87,7 +87,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)

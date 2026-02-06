@@ -1158,7 +1158,7 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 }
 
 func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.GetAuth().ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
 		if status == http.StatusForbidden {
 			processPushError(w, "access_denied", "The authorization did not contain the required stream identifier or scope")
