@@ -236,6 +236,14 @@ func (rps *ReceiverPushStream) handleVerificationEvent(state string) {
 		rps.verifying = false
 		rps.verifyState = ""
 		rps.lastEventAt = time.Now()
+
+		// Mark as enabled and clear error upon successful verification
+		if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
+			rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+			rps.stream.Status = model.StreamStateEnabled
+			rps.stream.ErrorMsg = ""
+		}
+
 		select {
 		case rps.eventChan <- struct{}{}:
 		default:
@@ -279,6 +287,14 @@ func (rps *ReceiverPushStream) monitorPushStream() {
 		case <-rps.eventChan:
 			rps.mu.Lock()
 			rps.lastEventAt = time.Now()
+
+			// If we receive an event, the stream is active - ensure it's marked as enabled
+			if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
+				rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+				rps.stream.Status = model.StreamStateEnabled
+				rps.stream.ErrorMsg = ""
+			}
+
 			rps.mu.Unlock()
 			ticker.Reset(tickerInterval)
 			warnLogged = false
@@ -519,9 +535,18 @@ func (rps *ReceiverPushStream) fallbackToStatusCheck() {
 		return
 	}
 
-	if status.Status != model.StreamStateEnabled {
-		serverLog.Warn("PUSH-RCV: Stream is no longer enabled", "sid", rps.stream.StreamConfiguration.Id, "status", status.Status)
-		rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, status.Status, "Transmitter reported status: "+status.Status)
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+
+	if status.Status != rps.stream.Status || rps.stream.ErrorMsg != "" {
+		reason := ""
+		if status.Status != model.StreamStateEnabled {
+			reason = "Transmitter reported status: " + status.Status
+		}
+		serverLog.Info("PUSH-RCV: Syncing stream status from transmitter", "sid", rps.stream.StreamConfiguration.Id, "status", status.Status, "reason", reason)
+		rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, status.Status, reason)
+		rps.stream.Status = status.Status
+		rps.stream.ErrorMsg = reason
 	}
 }
 
@@ -757,6 +782,8 @@ func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusC
 					ps.sa.updateStreamAfterError(sid, model.StreamStateEnabled, "")
 					ps.mu.Lock()
 					ps.active = true
+					ps.stream.Status = model.StreamStateEnabled
+					ps.stream.ErrorMsg = ""
 					ps.mu.Unlock()
 					return true, nil
 				}
@@ -983,8 +1010,6 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					if updatedStream != nil {
 						ps.mu.Lock()
 						ps.stream = updatedStream
-						ps.stream.Status = model.StreamStateEnabled // temporarily treat as enabled to continue loop
-						ps.stream.ErrorMsg = ""                     // reset error message
 						ps.mu.Unlock()
 					}
 					continue
@@ -1097,7 +1122,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		// Successful poll - reset retry count and ensure status is enabled
 		retryCount = 0
 		ps.mu.RLock()
-		needsUpdate := ps.stream.Status != model.StreamStateEnabled
+		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""
 		ps.mu.RUnlock()
 		if needsUpdate {
 			ps.sa.Provider.UpdateStreamStatus(sid, model.StreamStateEnabled, "")

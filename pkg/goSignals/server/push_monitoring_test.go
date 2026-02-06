@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -79,8 +80,9 @@ func TestClientPushStream_Verification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	provider, _ := dbProviders.OpenProvider("", "test_verification")
 	pcs := &ReceiverPushStream{
-		sa:          &SignalsApplication{},
+		sa:          &SignalsApplication{Provider: provider},
 		stream:      streamState,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -153,8 +155,9 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 	// Manually set statusUrl to avoid discovery
 	statusUrl := mockTx.URL + "/status"
 
+	provider, _ := dbProviders.OpenProvider("", "test_fallback")
 	pcs := &ReceiverPushStream{
-		sa:        &SignalsApplication{},
+		sa:        &SignalsApplication{Provider: provider},
 		stream:    &model.StreamStateRecord{StreamConfiguration: streamConfig},
 		statusUrl: statusUrl,
 		active:    true,
@@ -166,4 +169,77 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 	mu.Lock()
 	assert.Equal(t, 1, statusCount)
 	mu.Unlock()
+}
+
+func TestReceiverPushStream_Recovery(t *testing.T) {
+	provider, _ := dbProviders.OpenProvider("", "test_recovery")
+	sid := "recovery-stream"
+
+	streamConfig := model.StreamConfiguration{
+		Id: sid,
+	}
+
+	// Create the stream in provider so UpdateStreamStatus doesn't fail
+	created, _ := provider.CreateStream(streamConfig, "test-project")
+	sid = created.Id
+
+	streamState := &model.StreamStateRecord{
+		StreamConfiguration: created,
+		Status:              model.StreamStatePause,
+		ErrorMsg:            "Initial error",
+	}
+
+	provider.UpdateStreamStatus(sid, model.StreamStatePause, "Initial error")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rps := &ReceiverPushStream{
+		sa:          &SignalsApplication{Provider: provider},
+		stream:      streamState,
+		ctx:         ctx,
+		cancel:      cancel,
+		active:      true,
+		eventChan:   make(chan struct{}, 1),
+		lastEventAt: time.Now(),
+	}
+
+	// 1. Test recovery via verification
+	rps.mu.Lock()
+	rps.verifying = true
+	rps.verifyState = "test-state"
+	rps.mu.Unlock()
+
+	rps.handleVerificationEvent("test-state")
+
+	assert.Equal(t, model.StreamStateEnabled, rps.stream.Status)
+	assert.Empty(t, rps.stream.ErrorMsg)
+
+	// Check provider
+	st, _ := provider.GetStreamState(sid)
+	assert.Equal(t, model.StreamStateEnabled, st.Status)
+	assert.Empty(t, st.ErrorMsg)
+
+	// 2. Test recovery via event
+	provider.UpdateStreamStatus(sid, model.StreamStatePause, "Another error")
+	rps.mu.Lock()
+	rps.stream.Status = model.StreamStatePause
+	rps.stream.ErrorMsg = "Another error"
+	rps.mu.Unlock()
+
+	rps.notifyEvent()
+
+	// We need to run monitorPushStream to process eventChan
+	go rps.monitorPushStream()
+
+	assert.Eventually(t, func() bool {
+		rps.mu.RLock()
+		defer rps.mu.RUnlock()
+		return rps.stream.Status == model.StreamStateEnabled && rps.stream.ErrorMsg == ""
+	}, 2*time.Second, 100*time.Millisecond)
+
+	// Check provider
+	st, _ = provider.GetStreamState(sid)
+	assert.Equal(t, model.StreamStateEnabled, st.Status)
+	assert.Empty(t, st.ErrorMsg)
 }
