@@ -403,7 +403,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
 		config.EventsDelivered = txStreamResp.EventsDelivered
 		config.TxWellKnownUrl = request.TxWellKnownUrl
-		config.TxToken = request.TxToken
+		config.TxToken = &txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader
 
 		// Update the persisted record
 		streamRec.StreamConfiguration = config

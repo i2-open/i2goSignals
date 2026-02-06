@@ -42,6 +42,7 @@ type SignalsApplication struct {
 	AdminRole     string
 	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
+	pushClients   map[string]*ReceiverPushStream
 	pushReceivers map[string]model.StreamStateRecord
 	mu            sync.RWMutex
 	Stats         *PrometheusHandler
@@ -117,6 +118,7 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		AdminRole:     role,
 		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
+		pushClients:   map[string]*ReceiverPushStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
