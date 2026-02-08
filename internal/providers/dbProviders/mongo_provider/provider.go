@@ -2,23 +2,18 @@ package mongo_provider
 
 import (
 	"context"
-	"crypto/rsa"
-	"encoding/json"
 	"errors"
-	"net/url"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -47,6 +42,8 @@ const ErrorInvalidProject = "invalid project_id - invalid token"
 var pLog = logger.Sub("MONGO")
 
 type MongoProvider struct {
+	*common.BaseProvider
+
 	mu          sync.RWMutex
 	DbUrl       string
 	DbName      string
@@ -65,18 +62,6 @@ type MongoProvider struct {
 	clientCol    *mongo.Collection
 	leaseCol     *mongo.Collection
 	nodeCol      *mongo.Collection
-
-	// DAOs
-	streamDAO interfaces.StreamDAO
-	eventDAO  interfaces.EventDAO
-	keyDAO    interfaces.KeyDAO
-	clientDAO interfaces.ClientDAO
-
-	// Services
-	keyService    *services.KeyService
-	streamService *services.StreamService
-	eventService  *services.EventService
-	clientService *services.ClientService
 
 	DefaultIssuer string
 	TokenIssuer   string
@@ -130,19 +115,25 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	}
 
 	// Initialize DAOs
-	m.streamDAO = mongodao.NewStreamDAO(m.streamCol)
-	m.eventDAO = mongodao.NewEventDAO(m.eventCol, m.pendingCol, m.deliveredCol)
-	m.keyDAO = mongodao.NewKeyDAO(m.keyCol)
-	m.clientDAO = mongodao.NewClientDAO(m.clientCol)
+	streamDAO := mongodao.NewStreamDAO(m.streamCol)
+	eventDAO := mongodao.NewEventDAO(m.eventCol, m.pendingCol, m.deliveredCol)
+	keyDAO := mongodao.NewKeyDAO(m.keyCol)
+	clientDAO := mongodao.NewClientDAO(m.clientCol)
 
 	// Initialize Services
-	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer)
-	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
-	m.eventService = services.NewEventService(m.eventDAO)
-	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
+	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
+	eventService := services.NewEventService(eventDAO)
+	clientService := services.NewClientService(clientDAO, keyService)
+
+	// Initialize BaseProvider with services
+	m.BaseProvider = common.NewBaseProvider(
+		streamDAO, eventDAO, keyDAO, clientDAO,
+		keyService, streamService, eventService, clientService,
+	)
 
 	// Initialize token keys
-	err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
+	err = keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
 	if err != nil {
 		return err
 	}
@@ -150,7 +141,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.dbInit = true
 
 	// Load receiver streams
-	if m.streamService.LoadReceiverStreams(ctx) == nil {
+	if streamService.LoadReceiverStreams(ctx) == nil {
 		pLog.Warn("No receiver streams loaded during initialization")
 	}
 
@@ -359,137 +350,16 @@ func (m *MongoProvider) Close() error {
 	return nil
 }
 
-// Provider Interface Implementation - delegating to services
-
-func (m *MongoProvider) DeleteIssuer(issuer string) error {
-	return m.keyService.DeleteIssuer(context.Background(), issuer)
-}
-
-func (m *MongoProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
-	return m.keyService.GetPublicTransmitterJWKS(context.Background(), issuer)
-}
-
-func (m *MongoProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error) {
-	return m.keyService.GetIssuerPrivateKey(context.Background(), issuer)
-}
-
-func (m *MongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
-	return m.keyService.GetAuthValidatorPubKey()
-}
-
-func (m *MongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
-	return m.keyService.GetAuthIssuer()
-}
-
-func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
-	return m.streamService.GetIssuerJwksForReceiver(context.Background(), sid)
-}
-
-func (m *MongoProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error) {
-	return m.keyService.CreateIssuerJwkKeyPair(context.Background(), issuer, projectId)
-}
-
-func (m *MongoProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
-	return m.keyService.RotateIssuerKey(context.Background(), issuer, projectId)
-}
-
-func (m *MongoProvider) GetIssuerKeyNames() []string {
-	names, _ := m.keyService.GetIssuerKeyNames(context.Background())
-	return names
-}
-
-func (m *MongoProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
-	return m.keyService.GetIssuerPrivateKeyWithKid(context.Background(), issuer)
-}
-
-func (m *MongoProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
-	return m.keyService.AddIssuerKey(context.Background(), issuer, kid, privateKey, publicKey, projectId)
-}
-
-func (m *MongoProvider) RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse {
-	return m.clientService.RegisterClient(context.Background(), request, projectId)
-}
-
-func (m *MongoProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
-	return m.streamService.CreateStream(context.Background(), request, projectId)
-}
-
-func (m *MongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
-	return m.streamService.UpdateStream(context.Background(), streamId, projectId, configReq)
-}
-
-func (m *MongoProvider) DeleteStream(streamId string) error {
-	return m.streamService.DeleteStream(context.Background(), streamId)
-}
-
-func (m *MongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
-	return m.streamService.GetStream(context.Background(), id)
-}
-
-func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
-	return m.streamService.GetStreamState(context.Background(), id)
-}
-
-func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
-	m.streamService.UpdateStreamStatus(context.Background(), streamId, status, errorMsg)
-}
-
-func (m *MongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
-	return m.streamService.GetStatus(context.Background(), streamId)
-}
-
-func (m *MongoProvider) ListStreams() []model.StreamConfiguration {
-	return m.streamService.ListStreams(context.Background())
-}
-
-func (m *MongoProvider) GetStateMap() map[string]model.StreamStateRecord {
-	return m.streamService.GetStateMap(context.Background())
-}
-
-func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	return m.eventService.GetEventIds(context.Background(), streamId, params)
-}
-
-func (m *MongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
-	return m.eventService.GetEvent(context.Background(), jti)
-}
-
-func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
-	return m.eventService.GetEvents(context.Background(), jtis)
-}
-
-func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
-	return m.eventService.GetEventRecord(context.Background(), jti)
-}
-
-func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
-	return m.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
-}
-
-func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
-	return m.eventService.AddEvent(context.Background(), event, sid, raw)
-}
-
-func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
-	return m.eventService.AddEventToStream(context.Background(), jti, streamId)
-}
-
-func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
-	m.eventService.WatchPending(ctx, callback)
-}
-
-func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
-	return m.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
-}
-
 // Helper methods for receiver key management (used by tests)
+// These extend BaseProvider functionality with mongo-specific test helpers
 func (m *MongoProvider) StoreReceiverKey(streamID string, audience string, jwksUri string) error {
-	return m.keyService.StoreReceiverKey(context.Background(), streamID, audience, jwksUri)
+	// Access the keyService through a helper method on BaseProvider
+	// For now, we need to provide access via an accessor
+	return m.BaseProvider.StoreReceiverKey(streamID, audience, jwksUri)
 }
 
 func (m *MongoProvider) GetReceiverKey(streamID string) *interfaces.JwkKeyRec {
-	rec, _ := m.keyService.GetReceiverKey(context.Background(), streamID)
-	return rec
+	return m.BaseProvider.GetReceiverKey(streamID)
 }
 
 // TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.
@@ -588,6 +458,4 @@ func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
 	return m.nodeCol.CountDocuments(ctx, filter)
 }
 
-func (m *MongoProvider) SetBaseUrl(u *url.URL) {
-	m.streamService.SetBaseUrl(u)
-}
+// SetBaseUrl is delegated to BaseProvider which handles it
