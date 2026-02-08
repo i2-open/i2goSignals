@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 )
 
 func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +146,28 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		behavior = "MODE"
 	}
 
-	// set default to return immediately
-	request := model.PollParameters{ReturnImmediately: false}
-
-	err = json.NewDecoder(r.Body).Decode(&request)
+	// Parse the RFC8936 poll request
+	pollReq, err := goSetPoll.ParsePollRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Convert to internal model type for application-layer processing
+	request := model.PollParameters{
+		MaxEvents:         pollReq.MaxEvents,
+		ReturnImmediately: pollReq.ReturnImmediately,
+		Acks:              pollReq.Acks,
+		TimeoutSecs:       pollReq.TimeoutSecs,
+	}
+	if len(pollReq.SetErrs) > 0 {
+		request.SetErrs = make(map[string]model.SetErrorType, len(pollReq.SetErrs))
+		for jti, setErr := range pollReq.SetErrs {
+			request.SetErrs[jti] = model.SetErrorType{
+				Error:       setErr.Error,
+				Description: setErr.Description,
+			}
+		}
 	}
 
 	// Determine effective status based on behavior
@@ -204,15 +220,9 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	for jti, setError := range request.SetErrs {
 		errMsg := fmt.Sprintf("POLL-SRV[%s] ErrReceived: Jti[%s] Type: %s, Desc: %s\n", authCtx.StreamId, jti, setError.Error, setError.Description)
 		serverLog.Warn(errMsg)
-		// TODO Nothing to do except log it?
 	}
 
 	sets, more, status := sa.GetEventRouter().PollStreamHandler(authCtx.StreamId, request)
-
-	resp := model.PollResponse{
-		Sets:          sets,
-		MoreAvailable: more,
-	}
 
 	if status != http.StatusOK {
 		http.Error(w, "Stream not found or not ready", status)
@@ -227,17 +237,11 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	}
 	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s], Returning %d SETs. %s", authCtx.StreamId, len(sets), isMore))
 
-	respBytes, err := json.MarshalIndent(resp, "", "  ")
-	if err != nil {
-		serverLog.Warn("POLL-SRV Error serializing response", "sid", authCtx.StreamId, "error", err.Error())
-		http.Error(w, "Error serializing response", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(respBytes)
-	return
-
+	// Use goSetPoll to write the RFC8936 response
+	goSetPoll.WritePollResponse(w, goSetPoll.PollResponse{
+		Sets:          sets,
+		MoreAvailable: more,
+	})
 }
 
 // PushEvents has been moved to the event router (to avoid an import cycle)

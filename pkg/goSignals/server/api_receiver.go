@@ -19,8 +19,9 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
+	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
+	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/segmentio/ksuid"
 )
 
@@ -856,8 +857,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		defer ps.sa.Stats.DecLeasesHeld()
 	}
 	var acks []string
-	var setErrs map[string]model.SetErrorType
-	client := http.Client{}
+	var setErrs map[string]goSetPoll.SetErrType
 
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
 	authorization := receiveMethod.AuthorizationHeader
@@ -937,51 +937,42 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		default:
 		}
 
-		var pollBody model.PollParameters
-		if receiveMethod.PollConfig != nil {
-			pollBody = *receiveMethod.PollConfig
+		pollReq := goSetPoll.PollRequest{
+			Acks:    acks,
+			SetErrs: setErrs,
 		}
-		pollBody.Acks = acks
-		pollBody.SetErrs = setErrs
-
-		bodyBytes, _ := json.MarshalIndent(pollBody, "", "  ")
-
-		pollRequest, _ := http.NewRequestWithContext(heartbeatCtx, http.MethodPost, eventUrl, bytes.NewReader(bodyBytes))
-		pollRequest.Header.Set("Authorization", authorization)
+		if receiveMethod.PollConfig != nil {
+			pollReq.MaxEvents = receiveMethod.PollConfig.MaxEvents
+			pollReq.ReturnImmediately = receiveMethod.PollConfig.ReturnImmediately
+			pollReq.TimeoutSecs = receiveMethod.PollConfig.TimeoutSecs
+		}
 
 		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
-		resp, err := client.Do(pollRequest)
-		if err != nil || (resp != nil && resp.StatusCode >= 400) {
-			if resp != nil && (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized) {
-				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %s", sid, resp.Status)
+		parsed, httpStatus, err := goSetPoll.Poll(heartbeatCtx, pollReq, goSetPoll.ReceiverConfig{
+			EndpointURL:       eventUrl,
+			Authorization:     authorization,
+			JWKS:              jwks,
+			ExpectedIssuer:    ps.stream.Iss,
+			ExpectedAudiences: ps.stream.Aud,
+		})
+
+		if err != nil {
+			if httpStatus == http.StatusForbidden || httpStatus == http.StatusUnauthorized {
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %d %s", sid, httpStatus, http.StatusText(httpStatus))
 				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
-				_ = resp.Body.Close()
 				ps.mu.Lock()
 				ps.active = false
 				ps.mu.Unlock()
 				return
 			}
 
-			if isConnectionError(err) || (resp != nil && resp.StatusCode == http.StatusServiceUnavailable) {
-				if resp != nil {
-					_ = resp.Body.Close()
-				}
+			if isConnectionError(err) || httpStatus == http.StatusServiceUnavailable {
 				if firstErrorTime.IsZero() {
 					firstErrorTime = time.Now()
 				}
-				errStr := "none"
-				if err != nil {
-					errStr = err.Error()
-				} else if resp != nil {
-					errStr = resp.Status
-				}
-				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", errStr)
+				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
 				if time.Since(firstErrorTime) > retryLimit {
-					errMsg := "connection error"
-					if err != nil {
-						errMsg = fmt.Sprintf("connection error: %s", err.Error())
-					}
-					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, errMsg)
+					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
 					ps.mu.Lock()
 					ps.active = false
 					ps.mu.Unlock()
@@ -1017,110 +1008,46 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					return
 				}
 			}
-			if resp != nil && resp.StatusCode == http.StatusNotFound {
-				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
+			if httpStatus == http.StatusNotFound {
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
-				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
-				ps.stream.ErrorMsg = errMsg
-				_ = resp.Body.Close()
-				continue
-			}
-			if err == nil {
-				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-				serverLog.Error("POLL-RCV: HTTP Error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
-				ps.stream.ErrorMsg = errMsg
-				_ = resp.Body.Close()
+				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", httpStatus)
 				continue
 			}
 
-			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s]\nError: %s", ps.stream.Id.Hex(), eventUrl, err.Error())
+			// General error (other HTTP errors or request failures)
+			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
 			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
 			serverLog.Error("POLL-RCV: Request error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "error", err.Error())
-			ps.stream.ErrorMsg = errMsg
 			continue
 		}
 
-		var pollResponse model.PollResponse
-		if resp != nil {
-			bodyBytes, err = io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if err != nil {
-				ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
-				serverLog.Warn("POLL_RCV: Error reading response body, will retry", "sid", ps.stream.StreamConfiguration.Id, "error", err.Error())
-				continue
-			}
-			err = json.Unmarshal(bodyBytes, &pollResponse)
-			if err != nil {
-				errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
-				serverLog.Error("POLL_RCV: Error parsing poll response", "sid", ps.stream.StreamConfiguration.Id, "error", err.Error())
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-				continue
-			}
-		}
-
-		// reset the error list
-		setErrs = map[string]model.SetErrorType{}
+		// Reset the error list for next poll
+		setErrs = make(map[string]goSetPoll.SetErrType)
 		acks = []string{}
 
-		setCnt := len(pollResponse.Sets)
-		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", pollResponse.MoreAvailable)
+		setCnt := len(parsed.Sets)
+		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
 
-		for jti, setString := range pollResponse.Sets {
-			serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti))
-
-			token, err := goSet.Parse(setString, jwks)
-			// Auth validation and diagnostics
-
-			// TODO: Need to detect invalid_key errors (signing and/or decryption error)
-
-			if err != nil {
-				serverLog.Warn("POLL-RCV: SET parsing error", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err.Error())
-				// fmt.Println(setString)
-				setErrs[jti] = model.SetErrorType{
-					Error:       "invalid_request",
-					Description: "The SET could not be parsed: " + err.Error(),
-				}
-				continue
-			}
-			if !token.VerifyIssuer(ps.stream.Iss, true) {
-				serverLog.Warn("POLL-RCV: Invalid issuer", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "expected-iss", ps.stream.Iss, "tokenIss", token.Issuer)
-				setErrs[jti] = model.SetErrorType{
-					Error:       "invalid_issuer",
-					Description: "The SET Issuer is invalid for the SET Recipient.",
-				}
-				continue
-			}
-			audMatch := false
-			if len(ps.stream.Aud) > 0 {
-				for _, value := range ps.stream.Aud {
-					if token.VerifyAudience(value, false) {
-						audMatch = true
-					}
-				}
-				if !audMatch {
-					serverLog.Warn("POLL-RCV: Audience not matched", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "tokenAud", token.RegisteredClaims.Audience)
-					setErrs[jti] = model.SetErrorType{
-						Error:       "invalid_audience",
-						Description: "The SET Audience does not correspond to the SET Recipient",
-					}
-					continue
-				}
-			}
-			// sa.Provider.AddEvent(token, true)
+		// Process successfully parsed and validated SETs
+		for jti, token := range parsed.ParsedSETs {
 			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
-			err = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
+			err = ps.sa.EventRouter.HandleEvent(token, parsed.Sets[jti], ps.stream.StreamConfiguration.Id)
 			if err != nil {
 				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err)
 				// We don't acknowledge if we couldn't handle it
 				continue
 			}
-
 			acks = append(acks, jti)
 		}
 
-		// Successful poll - reset retry count and ensure status is enabled
+		// Carry over validation errors to report in next poll
+		if len(parsed.Errors) > 0 {
+			setErrs = parsed.Errors
+		}
+
+		// Successful poll - reset retry count and error tracking
 		retryCount = 0
+		firstErrorTime = time.Time{}
 		ps.mu.RLock()
 		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""
 		ps.mu.RUnlock()
@@ -1134,7 +1061,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 		// If the last poll returned no events, add a small delay to avoid tight loops.
 		// This provides a safety valve while maintaining high performance for actual event delivery.
-		if len(pollResponse.Sets) == 0 && !pollResponse.MoreAvailable {
+		if setCnt == 0 && !parsed.MoreAvailable {
 			sleepTime := 100 * time.Millisecond
 			select {
 			case <-time.After(sleepTime):
@@ -1161,116 +1088,72 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
 		if status == http.StatusForbidden {
-			processPushError(w, "access_denied", "The authorization did not contain the required stream identifier or scope")
+
+			goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain the required stream identifier or scope")
 		} else {
-			processPushError(w, "authentication_failed", "The authorization was not successfully validated")
+			goSetPush.WriteDeliveryError(w, goSetPush.ErrAuthenticationFailed, "The authorization was not successfully validated")
 		}
 		return
 	}
 
 	sid := authContext.StreamId
 	if authContext.StreamId == "" {
-		// The authorization token had no stream identifier in it
-		processPushError(w, "access_denied", "The authorization did not contain a stream identifier")
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain a stream identifier")
 		return
 	}
 	config, err := sa.GetProvider().GetStream(sid)
 	if config == nil || err != nil {
-
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
-		processPushError(w, "not_found", "Stream "+authContext.StreamId+" could not be located or was deleted")
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
 	}
-	// serverLog.Debug("Config issuer", "iss", config.Iss)
 
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" || strings.EqualFold("application/secevent+jwt", contentType) {
+	// Use goSetPush to handle RFC8935 protocol parsing and validation
+	jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
+	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
+		JWKS:              jwksKey,
+		ExpectedIssuer:    config.Iss,
+		ExpectedAudiences: config.Aud,
+	})
+	if deliveryErr != nil {
+		goSetPush.WriteDeliveryError(w, deliveryErr.ErrCode, deliveryErr.Description)
+		return
+	}
 
-		// TODO: check that the stream matched is inbound?
+	// Application-layer: push monitoring and verification event handling
+	if app, ok := sa.(*SignalsApplication); ok {
+		app.mu.RLock()
+		pcs, ok := app.pushClients[sid]
+		app.mu.RUnlock()
+		if ok {
+			pcs.notifyEvent()
 
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			serverLog.Warn("PUSH-RCV: Unable to read HTTP Request body", "sid", sid)
-			processPushError(w, "invalid_request", "Expecting body with Content-Type application/secevent+jwt")
-			return
-		}
-
-		jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
-		tokenString := string(bodyBytes)
-
-		token, err := goSet.Parse(tokenString, jwksKey)
-
-		// Auth validation and diagnostics
-		if err != nil {
-			serverLog.Warn("PUSH-RCV: Error validating SET token", "sid", sid, "error", err.Error())
-			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
-			return
-		}
-
-		if !token.VerifyIssuer(config.Iss, true) {
-			serverLog.Warn("PUSH-RCV: invalid issuer", "sid", sid, "expectedIss", config.Iss, "setIssuer", token.Issuer)
-			processPushError(w, "invalid_issuer", "The SET Issuer is invalid for the SET Recipient.")
-			return
-		}
-
-		if app, ok := sa.(*SignalsApplication); ok {
-			app.mu.RLock()
-			pcs, ok := app.pushClients[sid]
-			app.mu.RUnlock()
-			if ok {
-				pcs.notifyEvent()
-
-				// Check for verification event
-				if payload, ok := token.Events[events.VerificationEventUri]; ok {
-					state := ""
-					if pMap, ok := payload.(map[string]interface{}); ok {
-						if s, ok := pMap["state"].(string); ok {
-							state = s
-						}
-					} else if pStruct, ok := payload.(events.VerifyPayload); ok {
-						state = pStruct.State
+			// Check for verification event
+			if payload, ok := received.Token.Events[events.VerificationEventUri]; ok {
+				state := ""
+				if pMap, ok := payload.(map[string]interface{}); ok {
+					if s, ok := pMap["state"].(string); ok {
+						state = s
 					}
+				} else if pStruct, ok := payload.(events.VerifyPayload); ok {
+					state = pStruct.State
+				}
 
-					if state != "" {
-						pcs.handleVerificationEvent(state)
-					}
+				if state != "" {
+					pcs.handleVerificationEvent(state)
 				}
 			}
 		}
+	}
 
-		audMatch := false
-		if len(config.Aud) > 0 {
-			serverLog.Debug("Auth audience values", "audience", token.Audience)
-			for _, value := range config.Aud {
-				serverLog.Debug("Checking audience match", "target", value)
-				if token.VerifyAudience(value, false) {
-					audMatch = true
-					break
-				}
-			}
-			if !audMatch {
-				serverLog.Warn("PUSH-RCV: Audience match error", "sid", sid, "expectedAud", config.Aud, "setAud", token.Audience)
-				processPushError(w, "invalid_audience", "The SET Audience does not correspond to the SET Recipient")
-				return
-			}
-		}
-
-		// Now we have a valid token, store it in the database and acknowledge it
-		err = sa.GetEventRouter().HandleEvent(token, tokenString, sid)
-		// TODO: Handle different types of errors
-		if err != nil {
-			processPushError(w, "invalid_request", "Unexpected error: "+err.Error())
-			return
-		}
-
-		// sa.Provider.AddEvent(token, true)
-		// TODO Event router needs to be notified to handle the event
-		w.WriteHeader(http.StatusAccepted)
+	// Application-layer: route the event
+	err = sa.GetEventRouter().HandleEvent(received.Token, received.TokenString, sid)
+	if err != nil {
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrInvalidRequest, "Unexpected error: "+err.Error())
 		return
 	}
-	serverLog.Warn(fmt.Sprintf("PUSH-RCV[%s] Received invalid format received: %s", sid, contentType))
-	processPushError(w, "invalid_request", "Expecting Content-Type application/secevent+jwt")
-	return
+
+	goSetPush.WriteAccepted(w)
 }
 
 func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode string, reason string) {
@@ -1280,24 +1163,4 @@ func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode strin
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
 	sa.Provider.UpdateStreamStatus(streamId, model.StreamStatePause, errMsg)
 	// TODO:  Update event router with stream state change??
-}
-
-func processPushError(w http.ResponseWriter, errorCode string, msg string) {
-	respBody := model.SetDeliveryErr{
-		ErrCode:     errorCode,
-		Description: msg,
-	}
-	responseBytes, err := json.MarshalIndent(respBody, "", "  ")
-	if err != nil {
-		serverLog.Error("Error marshaling push error response", "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_, err = w.Write(responseBytes)
-	if err != nil {
-		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg), "error", err)
-		return
-	}
 }

@@ -5,22 +5,21 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/v2/bson"
-
-	"strings"
-	"time"
-
-	"github.com/golang-jwt/jwt/v4"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 )
 
 var eventLogger = logger.Sub("ROUTER")
@@ -653,11 +652,8 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
-	client := http.Client{Timeout: 60 * time.Second}
-
+	// Prepare the token string (application-layer: signing or forwarding)
 	var tokenString string
-	url := pushConfig.EndpointUrl
-
 	if configuration.RouteMode == model.RouteModeForward {
 		tokenString = event.Original // In forward mode, we just pass on the raw event
 	} else {
@@ -673,54 +669,27 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		}
 	}
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(tokenString))
+	// Use goSetPush for the RFC8935 wire protocol
+	result := goSetPush.PushSET(context.Background(), tokenString, goSetPush.TransmitterConfig{
+		EndpointURL:   pushConfig.EndpointUrl,
+		Authorization: pushConfig.AuthorizationHeader,
+	})
 
-	if pushConfig.AuthorizationHeader != "" {
-		authorization := pushConfig.AuthorizationHeader
-		if strings.ToLower(authorization[0:4]) != "bear" {
-			authorization = "Bearer " + authorization
+	if !result.Accepted {
+		if result.Err != nil {
+			if deliveryErr, ok := result.Err.(*goSetPush.DeliveryErr); ok {
+				errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", deliveryErr.ErrCode, deliveryErr.Description)
+				eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", deliveryErr.ErrCode, "desc", deliveryErr.Description)
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
+			} else if result.StatusCode > 400 {
+				errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %d, POSTING to %s", configuration.Id, result.StatusCode, pushConfig.EndpointUrl)
+				eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", result.StatusCode, "url", pushConfig.EndpointUrl)
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
+			} else {
+				eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", result.Err)
+			}
 		}
-		req.Header.Set("Authorization", authorization)
-	}
-	req.Header.Set("Content-Type", "application/secevent+jwt")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", err)
 		return false
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			eventLogger.Error("PUSH-SRV: Error closing response body", "sid", configuration.Id, "error", err)
-		}
-	}(resp.Body)
-	if resp.StatusCode != http.StatusAccepted {
-		if resp.StatusCode == http.StatusBadRequest {
-			var errorMsg model.SetDeliveryErr
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
-				eventLogger.Error("PUSH-SRV: Error reading response", "sid", configuration.Id, "error", err)
-				return false
-			}
-			err = json.Unmarshal(body, &errorMsg)
-			if err != nil {
-				eventLogger.Error("PUSH-SRV: Error parsing error response", "sid", configuration.Id, "error", err)
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
-				return false
-			}
-			errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", errorMsg.ErrCode, errorMsg.Description)
-			eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", errorMsg.ErrCode, "desc", errorMsg.Description)
-			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			return false
-		}
-		if resp.StatusCode > 400 {
-			errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %s, POSTING to %s", configuration.Id, resp.Status, url)
-			eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", resp.Status, "url", url)
-			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-		}
 	}
 
 	eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
