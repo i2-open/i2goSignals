@@ -11,7 +11,7 @@ SCIM_CONFIG=$(CONFIG_DIR)/scim
 BIN_DIR=bin
 SERVER_BIN=$(BIN_DIR)/goSignalsServer
 
-.PHONY: all console-build server-build build clean \
+.PHONY: all console-build server-build build clean generate-certs \
     dev-build-image dev-up dev-down dev-logs dev-rebuild dev-clean
 
 all: build
@@ -28,6 +28,10 @@ server-build:
 
 # Build everything
 build: console-build server-build
+
+# Generate TLS certificates
+generate-certs:
+	$(GO) run ./cmd/genTlsKeys
 
 # Remove build artifacts
 clean: dev-clean

@@ -24,6 +24,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/MicahParks/keyfunc"
@@ -135,6 +136,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	baseUrl, _ := url.Parse(ts.URL + "/")
 	app.SetBaseUrl(baseUrl)
 	instance.client = ts.Client()
+	tlsSupport.CheckCaInstalled(instance.client)
 	instance.provider = mongo
 	nowTime := time.Now()
 	instance.startTime = &nowTime

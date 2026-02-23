@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // PollRaw sends an RFC8936 poll request to the configured endpoint and returns
@@ -21,6 +22,7 @@ func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
 	}
 
 	bodyBytes, err := json.MarshalIndent(request, "", "  ")

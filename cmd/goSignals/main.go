@@ -13,6 +13,7 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/google/shlex"
 	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 type ParserData struct {
@@ -181,6 +182,7 @@ func breakIntoArgs(command string) []string {
 
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
+	tlsSupport.CheckCaInstalled(nil)
 
 	// Check for script file in environment variable
 	scriptFile := stripQuotes(os.Getenv("GOSIGNALS_SCRIPT"))

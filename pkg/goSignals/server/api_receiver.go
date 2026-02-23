@@ -22,6 +22,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/segmentio/ksuid"
 )
 
@@ -363,6 +364,7 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		serverLog.Warn("PUSH-RCV: Verification request failed", "error", err)
@@ -418,6 +420,7 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := &http.Client{Timeout: 10 * time.Second}
+		tlsSupport.CheckCaInstalled(client)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer handleRespClose(resp)
@@ -463,6 +466,7 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := &http.Client{Timeout: 10 * time.Second}
+		tlsSupport.CheckCaInstalled(client)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer handleRespClose(resp)
@@ -511,6 +515,7 @@ func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*mod
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -725,6 +730,7 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	serverLog.Debug("POLL-RCV: Checking transmitter status", "sid", ps.stream.StreamConfiguration.Id, "url", statusUrl, "auth", maskAuthorization(authHeader))
 
 	client := &http.Client{}
+	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

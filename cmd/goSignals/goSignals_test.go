@@ -24,6 +24,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/model"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
@@ -131,6 +132,7 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 	instance.app = *signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
+	tlsSupport.CheckCaInstalled(instance.client)
 	instance.provider = mongo
 	nowTime := time.Now()
 	instance.startTime = &nowTime

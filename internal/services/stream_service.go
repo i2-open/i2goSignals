@@ -20,6 +20,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -78,6 +80,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 	mid := bson.NewObjectID()
 
 	var config model.StreamConfiguration
+	var pushAutoReg bool
 
 	if request.Iss == "" {
 		config.Iss = s.defaultIssuer
@@ -126,11 +129,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		config.Delivery = delivery
 
 	case model.ReceivePush:
+		// If a TxWellKnownUrl and TxToken are provided, create the receiver endpoints and then register with the SSF Transmitter.
 		config.Delivery = request.Delivery
-		method := config.Delivery.PushReceiveMethod
 		if request.RouteMode == "" {
 			config.RouteMode = model.RouteModeImport
 		}
+		method := config.Delivery.PushReceiveMethod
 		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
 		authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
 		if err != nil {
@@ -138,7 +142,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 		method.AuthorizationHeader = "Bearer " + authToken
 
+		if request.TxWellKnownUrl != nil && *request.TxWellKnownUrl != "" && request.TxToken != nil && *request.TxToken != "" {
+			pushAutoReg = true
+		}
+
 	case model.ReceivePoll:
+		// If a TxWellKnownUrl and TxToken are provided, attempt to do an SSF registration to create the Polling Transmit Stream and then create the local receiver stream
 		config.Delivery = request.Delivery
 		if request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "" {
 			// Attempt to do an SSF registration to create the Polling Transmit Stream
@@ -148,7 +157,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
 			}
-			defer resp.Body.Close()
+			defer handleRespClose(resp)
 			if resp.StatusCode != http.StatusOK {
 				return model.StreamConfiguration{}, fmt.Errorf("transmitter configuration returned status %d", resp.StatusCode)
 			}
@@ -162,8 +171,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 
 			transmitStreamReq := model.StreamConfiguration{
-				Iss: request.Iss,
-				Aud: request.Aud,
+				Iss:             request.Iss,
+				Aud:             request.Aud,
+				EventsRequested: request.EventsRequested,
+				Description:     request.Description,
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollTransmitMethod: &model.PollTransmitMethod{
 						Method: model.DeliveryPoll,
@@ -187,12 +198,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 				req.Header.Set("Authorization", *request.TxToken)
 			}
 
-			resp, err = http.DefaultClient.Do(req)
+			client := &http.Client{}
+			tlsSupport.CheckCaInstalled(client)
+			resp, err = client.Do(req)
 			if err != nil {
 				ssLog.Error("failed to submit registration request to transmitter", "error", err)
 				return model.StreamConfiguration{}, fmt.Errorf("failed to submit registration request to transmitter: %v", err)
 			}
-			defer resp.Body.Close()
+			defer handleRespClose(resp)
 
 			// parse the response and handle any errors. If they occur return a detailed error
 			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -208,9 +221,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
 			config.EventsDelivered = txStreamResp.EventsDelivered
 			config.TxWellKnownUrl = request.TxWellKnownUrl
+			txId := ""
+			if txStreamResp.TxStreamId != nil {
+				txId = *txStreamResp.TxStreamId
+			}
+			config.TxStreamId = &txId
 
 			if txStreamResp.Delivery != nil && txStreamResp.Delivery.PollTransmitMethod != nil {
 
+				// Copy the authorization header for use at the Status and management endpoints
 				config.TxToken = &txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader // Use for status and verification endpoints
 				config.Delivery.PollReceiveMethod.AuthorizationHeader = txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
 				config.Delivery.PollReceiveMethod.EndpointUrl = txStreamResp.Delivery.PollTransmitMethod.EndpointUrl
@@ -295,7 +314,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	// If automatic transmitter registration is requested for ReceivePush, do it now.
 	// The stream is now active and in the DB.
-	if request.Delivery.GetMethod() == model.ReceivePush && request.TxWellKnownUrl != nil && request.TxToken != nil {
+	if pushAutoReg {
 		ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 		// Retrieve the transmitter configuration from the WellKnownUrl
 		resp, err := http.Get(*request.TxWellKnownUrl)
@@ -305,7 +324,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
 		}
-		defer resp.Body.Close()
+		defer handleRespClose(resp)
 		if resp.StatusCode != http.StatusOK {
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
 				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
@@ -339,6 +358,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			Iss:             request.Iss,
 			Aud:             request.Aud,
 			EventsRequested: request.EventsRequested,
+			Description:     request.Description,
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PushTransmitMethod: &model.PushTransmitMethod{
 					Method:              model.DeliveryPush,
@@ -373,7 +393,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			req.Header.Set("Authorization", *request.TxToken)
 		}
 
-		resp, err = http.DefaultClient.Do(req)
+		client := &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
+
+		resp, err = client.Do(req)
 		if err != nil {
 			ssLog.Error("failed to submit registration request to transmitter", "error", err)
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
@@ -381,7 +404,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to submit registration request to transmitter: %v", err)
 		}
-		defer resp.Body.Close()
+		defer handleRespClose(resp)
 
 		// parse the response and handle any errors. If they occur return a detailed error
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -400,10 +423,27 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter registration response: %v", err)
 		}
 
-		// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
+		// from the response, update config with the transmitters response values
 		config.EventsDelivered = txStreamResp.EventsDelivered
+		config.EventsRequested = request.EventsRequested
+		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
-		config.TxToken = &txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader
+		config.TxStreamId = &txStreamResp.Id
+
+		if txStreamResp.Delivery != nil && txStreamResp.Delivery.PushTransmitMethod != nil {
+			// If no authorization_header value is returned, keep using the request token
+			config.TxToken = request.TxToken
+			if txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader != "" {
+				config.TxToken = &txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader
+			}
+
+		} else {
+			ssLog.Warn("transmitter configuration delivery is missing PushTransmitMethod information, registration aborted", "stream_id", config.Id, "transmitter_url", request.TxWellKnownUrl)
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
+			return model.StreamConfiguration{}, errors.New("unexpected response did not include delivery information")
+		}
 
 		// Update the persisted record
 		streamRec.StreamConfiguration = config
@@ -728,4 +768,10 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	}
 
 	return nil
+}
+
+func handleRespClose(resp *http.Response) {
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 }

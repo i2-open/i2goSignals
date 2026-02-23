@@ -25,10 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v4"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 type AddServerCmd struct {

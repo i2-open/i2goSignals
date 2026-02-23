@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // PushSET sends a SET token string to the receiver endpoint per RFC8935.
@@ -19,6 +21,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
+		tlsSupport.CheckCaInstalled(client)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.EndpointURL, strings.NewReader(tokenString))

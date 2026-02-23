@@ -16,6 +16,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var mLog = logger.Sub("MAIN")
@@ -43,6 +44,7 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
+	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)
 	port := "8888"
@@ -79,7 +81,19 @@ func main() {
 	mLog.Info("Base URL", "url", baseUrl)
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
-	err = signalsApplication.Server.ListenAndServe()
+
+	tlsMode, err := tlsSupport.InitTransportLayerSecurity(signalsApplication.Server)
+	if err != nil {
+		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
+		panic(err)
+	}
+	if tlsMode {
+		err = signalsApplication.Server.ListenAndServeTLS("", "")
+	} else {
+		mLog.Warn("TLS not enabled, using HTTP")
+		err = signalsApplication.Server.ListenAndServe()
+	}
+
 	if err != nil {
 		mLog.Error("Server error", "error", err)
 		os.Exit(-1)
