@@ -3,6 +3,7 @@ package goSsfServer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -313,8 +314,9 @@ func (sa *SsfApplication) registerNode() {
 func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
 	sa := NewApplication(provider, baseUrlString)
 	server := http.Server{
-		Addr:    addr,
-		Handler: sa.Handler,
+		Addr:     addr,
+		Handler:  sa.Handler,
+		ErrorLog: slog.NewLogLogger(serverLog.Handler(), slog.LevelError),
 	}
 	sa.mu.Lock()
 	sa.Server = &server

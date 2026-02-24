@@ -12,7 +12,7 @@ BIN_DIR=bin
 SERVER_BIN=$(BIN_DIR)/goSignalsServer
 
 .PHONY: all console-build server-build build clean generate-certs \
-    dev-build-image dev-up dev-down dev-logs dev-rebuild dev-clean
+    dev-build-image dev-up dev-down dev-logs dev-rebuild dev-clean dbclean check-certs
 
 all: build
 
@@ -27,7 +27,11 @@ server-build:
 	$(GO) build -o $(SERVER_BIN) ./$(SERVER_DIR)
 
 # Build everything
-build: console-build server-build
+build: check-certs console-build server-build
+
+# Check if certificates exist
+check-certs:
+	@if [ ! -f config/certs/ca-cert.pem ]; then $(MAKE) generate-certs; fi
 
 # Generate TLS certificates
 generate-certs:
@@ -44,7 +48,7 @@ dev-build-image:
 	 docker build -f Dockerfile-dev -t i2gosignals-dev:latest .
 
 # Bring up the minimal dev stack with the debug-enabled goSignals1
-dev-up:
+dev-up: check-certs
 	 docker compose -f docker-compose-dev.yml up -d mongo1 mongo2 mongo3 mongoSetup prometheus grafana goSignals1
 
 # Rebuild the dev image and restart goSignals1
@@ -55,6 +59,10 @@ dev-rebuild: dev-build-image
 dev-down:
 	 docker compose -f docker-compose-dev.yml down
 
+# Reset the mongo cluster database
+dbclean:
+	 rm -rf .mongo/mongo1 .mongo/mongo2 .mongo/mongo3
+
 # Tail logs from goSignals1
 dev-logs:
 	 docker compose -f docker-compose-dev.yml logs -f goSignals1
@@ -62,4 +70,5 @@ dev-logs:
 # Remove dev containers and caches (module/build caches)
 dev-clean:
 	 docker compose -f docker-compose-dev.yml down -v
+	 $(MAKE) dbclean
 	 find $(SCIM_CONFIG) -maxdepth 1 -type f -delete

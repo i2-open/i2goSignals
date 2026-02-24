@@ -23,17 +23,18 @@ import (
 )
 
 const (
-	EnvCertOrg       string = "CERT_ORG"
-	EnvCertCountry   string = "CERT_COUNTRY"
-	EnvCertProv      string = "CERT_PROV"
-	EnvCertLocality  string = "CERT_LOCALITY"
-	EnvCertCaPrivKey string = "CA_KEYFILE" // The location of a private key used to generate server keys
-	EnvCertCaPubKey  string = "CA_CERT"
-	EnvCertDirectory string = "CERT_DIRECTORY" // The location where keys are stored.
-	EnvServerCert    string = "SERVER_CERT"
-	EnvServerKey     string = "SERVER_KEY_PATH"
-	EnvServerDNS     string = "SERVER_DNS_NAME"
-	EnvAutoCreate    string = "AUTO_SELFSIGN"
+	EnvCertOrg         string = "CERT_ORG"
+	EnvCertCountry     string = "CERT_COUNTRY"
+	EnvCertProv        string = "CERT_PROV"
+	EnvCertLocality    string = "CERT_LOCALITY"
+	EnvCertCaPrivKey   string = "CA_KEYFILE" // The location of a private key used to generate server keys
+	EnvCertCaPubKey    string = "CA_CERT"
+	EnvCertCaPubKeyAlt string = "CERT_CA_PUB_KEY"
+	EnvCertDirectory   string = "CERT_DIRECTORY" // The location where keys are stored.
+	EnvServerCert      string = "SERVER_CERT_PATH"
+	EnvServerKey       string = "SERVER_KEY_PATH"
+	EnvServerDNS       string = "SERVER_DNS_NAME"
+	EnvAutoCreate      string = "AUTO_SELFSIGN"
 )
 
 type KeyConfig struct {
@@ -91,6 +92,9 @@ func GetKeyConfig() KeyConfig {
 	}
 
 	caCert := os.Getenv(EnvCertCaPubKey)
+	if caCert == "" {
+		caCert = os.Getenv(EnvCertCaPubKeyAlt)
+	}
 	if caCert == "" {
 		caCert = filepath.Join(certDir, "ca-cert.pem")
 	}
@@ -235,6 +239,23 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 			}
 		}
 
+		// Also load the CA certificate if it exists
+		if _, err := os.Stat(config.CaCertFile); err == nil {
+			log.Info(fmt.Sprintf("Loading existing CA Certificate from %s ...", config.CaCertFile))
+			certBytes, err := os.ReadFile(config.CaCertFile)
+			if err != nil {
+				return err
+			}
+			block, _ := pem.Decode(certBytes)
+			if block != nil {
+				caCert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return err
+				}
+				config.CaConfig = caCert
+			}
+		}
+
 	} else if auto {
 		err = config.InitializeCa()
 		if err != nil {
@@ -319,9 +340,15 @@ func (config *KeyConfig) generateCert(
 	// generate a random serial number (a real cert authority would have some logic behind this)
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+
+	subject := config.PkixName
+	if len(dnsNames) > 0 {
+		subject.CommonName = dnsNames[0]
+	}
+
 	cert := &x509.Certificate{
 		SerialNumber: serialNumber,
-		Subject:      config.PkixName,
+		Subject:      subject,
 		DNSNames:     dnsNames,
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		NotBefore:    time.Now(),
@@ -359,6 +386,12 @@ func (config *KeyConfig) generateCert(
 func CheckCaInstalled(client *http.Client) {
 	// Note; this is not tested because we don't want to install temporary test certs.
 	caCertPath := os.Getenv(EnvCertCaPubKey)
+	if caCertPath == "" {
+		caCertPath = os.Getenv(EnvCertCaPubKeyAlt)
+	}
+	if caCertPath == "" {
+		caCertPath = "config/certs/ca-cert.pem"
+	}
 
 	if caCertPath != "" {
 		caCertPem, err := os.ReadFile(caCertPath)

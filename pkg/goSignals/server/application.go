@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -228,8 +229,9 @@ func (sa *SignalsApplication) registerNode() {
 func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
 	sa := NewApplication(provider, baseUrlString)
 	server := http.Server{
-		Addr:    addr,
-		Handler: sa.Handler,
+		Addr:     addr,
+		Handler:  sa.Handler,
+		ErrorLog: slog.NewLogLogger(serverLog.Handler(), slog.LevelError),
 	}
 	sa.mu.Lock()
 	sa.Server = &server

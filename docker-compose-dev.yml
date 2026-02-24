@@ -63,7 +63,7 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     volumes:
-      - ".monitor/prometheus:/etc/prometheus"
+      - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -81,7 +81,7 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
     volumes:
-      - ".monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
 
   goSignals1:
     build:

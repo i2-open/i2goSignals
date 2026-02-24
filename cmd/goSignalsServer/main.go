@@ -52,8 +52,6 @@ func main() {
 		port = found
 	}
 
-	mLog.Info("Listening on port", "port", port)
-
 	dbUrl := ""
 	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
@@ -87,6 +85,7 @@ func main() {
 		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
 		panic(err)
 	}
+	mLog.Info("HTTP Listening", "tls", tlsMode, "port", port)
 	if tlsMode {
 		err = signalsApplication.Server.ListenAndServeTLS("", "")
 	} else {

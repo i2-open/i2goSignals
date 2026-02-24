@@ -60,7 +60,7 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     volumes:
-      - ".monitor/prometheus:/etc/prometheus"
+      - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -78,7 +78,7 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
     volumes:
-      - ".monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
 
   goSignals1:
     image: i2gosignals:v0.8
@@ -96,6 +96,7 @@ services:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1
+      - BASE_URL=https://goSignals1:8888/
 
   goSignals1b:
     image: i2gosignals:v0.8
@@ -113,7 +114,7 @@ services:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1b
-      - BASE_URL=http://goSignals1b:8888/
+      - BASE_URL=https://goSignals1:8888/
 
   goSignals2:
     image: i2gosignals:v0.8
@@ -131,6 +132,7 @@ services:
       - ./config/goSignals2.env
     environment:
       - NODE_ID=goSignals2
+      - BASE_URL=https://goSignals2:8888/
 
   scimSsfSetup:
     image: i2gosignals:v0.8
@@ -149,7 +151,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.7.0
+    image: independentid/i2scim-universal:0.8.0
     container_name: scim_cluster1
     ports:
       - "9000:8080"
@@ -163,7 +165,7 @@ services:
     env_file:
       - ./config/scim/scim_cluster.env
   scim_cluster2:
-    image: independentid/i2scim-universal:0.7.0
+    image: independentid/i2scim-universal:0.8.0
     container_name: scim_cluster2
     ports:
       - "9001:8080"

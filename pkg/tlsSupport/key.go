@@ -3,11 +3,10 @@ package tlsSupport
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
-
-	log "golang.org/x/exp/slog"
 )
 
 func InitTransportLayerSecurity(app *http.Server) (bool, error) {
@@ -27,6 +26,10 @@ func InitTransportLayerSecurity(app *http.Server) (bool, error) {
 		}
 		app.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{pair},
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				slog.Debug("TLS handshake started", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
+				return nil, nil
+			},
 		}
 		return true, nil
 	}
@@ -78,20 +81,20 @@ func CheckCaInstalled(client *http.Client) {
 		caCertPem, err := os.ReadFile(caCertPath)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				log.Warn("Error reading CA certificate: " + err.Error())
+				slog.Warn("Error reading CA certificate: " + err.Error())
 			}
 			return
 		}
 		var caPool *x509.CertPool
 		if client != nil {
-			log.Debug("Installing CA certificate into HTTP client", "file", caCertPath)
+			slog.Debug("Installing CA certificate into HTTP client", "file", caCertPath)
 			caPool = x509.NewCertPool()
 			t := &http.Transport{
 				TLSClientConfig: &tls.Config{RootCAs: caPool},
 			}
 			client.Transport = t
 		} else {
-			log.Debug("Installing CA certificate into default transport", "file", caCertPath)
+			slog.Debug("Installing CA certificate into default transport", "file", caCertPath)
 			caPool, _ = x509.SystemCertPool()
 			if caPool == nil {
 				caPool = x509.NewCertPool()
@@ -105,7 +108,7 @@ func CheckCaInstalled(client *http.Client) {
 		}
 		ok := caPool.AppendCertsFromPEM(caCertPem)
 		if !ok {
-			log.Error("Error loading CA PEM")
+			slog.Error("Error loading CA PEM")
 		}
 
 	}

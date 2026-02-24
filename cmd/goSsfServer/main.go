@@ -50,8 +50,6 @@ func main() {
 		port = found
 	}
 
-	mLog.Info("Listening on port", "port", port)
-
 	dbUrl := ""
 	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
@@ -84,13 +82,14 @@ func main() {
 		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
 		panic(err)
 	}
+	mLog.Info("HTTP Listening", "tls", tlsMode, "port", port)
 	if tlsMode {
 		err = ssfApplication.Server.ListenAndServeTLS("", "")
 	} else {
 		mLog.Warn("TLS not enabled, using HTTP")
 		err = ssfApplication.Server.ListenAndServe()
 	}
-	err = ssfApplication.Server.ListenAndServe()
+
 	if err != nil {
 		mLog.Error("Server error", "error", err)
 		os.Exit(-1)

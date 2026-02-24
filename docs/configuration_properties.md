@@ -35,7 +35,12 @@ Currently i2goSignals has minimal configuration properties. The current values a
 | `POLL_RETRY_BACKOFF_FACTOR`  | The factor by which the delay increases during exponential backoff.                                                                        | 2.0                                                    |
 | `POLL_RETRY_LIMIT`           | The maximum time in seconds to continue retrying before disabling the stream.                                                              | 21600 (6 hours)                                        |
 | `POLL_SRV_BEHAVIOR`         | Polling behavior based on status. `MODE` (default) follows stream status (403/503). `ALWAYSON` ignores disabled/paused status for polling. | `MODE`                                                 |
-| <BR>**TLS Config**           | <BR>To be implemented!                                                                                                                     |                                                        |
+| <BR>**TLS Config**           |                                                                                                                                            |                                                        |
+| `TLS_ENABLED`                | Set to `true` to enable HTTPS.                                                                                                             | `false`                                                |
+| `SERVER_CERT_PATH`           | Path to the PEM-encoded server certificate.                                                                                                | `config/certs/server-cert.pem`                         |
+| `SERVER_KEY_PATH`            | Path to the PEM-encoded server private key.                                                                                                | `config/certs/server-key.pem`                          |
+| `CA_CERT`                    | Path to the CA certificate PEM file. Used to trust the server in clients and sign certificates if using `genTlsKeys`.                      | `config/certs/ca-cert.pem`                             |
+| `CERT_CA_PUB_KEY`             | Alias for `CA_CERT`.                                                                                                                       | `_same as CA_CERT_`                                    |
 
 
 
@@ -46,4 +51,20 @@ For the goSignals tool the following properties are defined:
 | `GOSIGNALS_HOME`    | File path to store local administration configuration data                                 | ~/.goSignals/config.json |
 | `GOSIGNALS_SCRIPT`  | Path to a script file containing goSignals commands to be executed on startup.             | _none_                   |
 | `LOG_LEVEL`         | The logging level for the tool.                                                            | `info`                   |
+
+
+### TLS Certificate Generation (genTlsKeys)
+
+The `genTlsKeys` tool generates self-signed certificates for development. It can be run using `make generate-certs`.
+
+| Area / Parameter    | Description                                                                                | Default                  |
+|---------------------|--------------------------------------------------------------------------------------------|--------------------------|
+| `CERT_DIRECTORY`    | Directory where certificates will be generated and stored.                                 | `config/certs`           |
+| `AUTO_SELFSIGN`     | If `true`, certificates are automatically generated if they do not exist.                  | `true`                   |
+| `SERVER_DNS_NAME`   | Comma-separated list of DNS names for the server certificate.                              | _internal defaults_      |
+| `CA_KEYFILE`        | Path where the CA private key will be saved/loaded.                                        | `config/certs/ca-key.pem`|
+| `CERT_ORG`          | Organization name for generated certificates.                                              | `goSignals Organization` |
+| `CERT_COUNTRY`      | Country code (e.g., `CA`).                                                                 | `CA`                     |
+| `CERT_PROV`         | Province/State (e.g., `BC`).                                                               | `BC`                     |
+| `CERT_LOCALITY`     | Locality/City (e.g., `Vancouver`).                                                         | `Vancouver`              |
 
