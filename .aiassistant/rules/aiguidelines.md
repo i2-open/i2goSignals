@@ -1,17 +1,21 @@
+---
+apply: always
+---
+
 ### i2goSignals AI Development Guidelines
 
 #### General Principles
 - **Clean State**: When requested, a clean development environment. Do not rely on artifacts or state from previous sessions unless explicitly instructed.
 - **Minimalism**: Make the smallest change necessary to achieve the goal.
 - **Related Standards**: The following compliance standards documents apply to this project. The project may extend beyond these standards but should remain compatible with the following:
-  - **RFC8417 Security Event Token or SET** : [RFC8417: Guidelines for Writing RFCs and Related Documents](https://tools.ietf.org/html/rfc8417)
-  - **RFC8935 Push Delivery of SETs using HTTP**: [RFC8935](https://www.rfc-editor.org/rfc/rfc8935.txt)
-  - **RFC8936 Poll Delivery of SETs using HTTP**: [RFC8936](https://www.rfc-editor.org/rfc/rfc8936.txt)
-  - **SSF**: [Shared Signals Framework Specification](https://openid.net/specs/openid-sharedsignals-framework-1_0-final.txt)
-  - SET Token Event Types
-    - **SCIM**: [SCIM Profile for Security Event Tokens](https://www.ietf.org/archive/id/draft-ietf-scim-events-16.txt)
-    - **RISC**: [OpenID RISC Profile Specification](https://openid.net/specs/openid-risc-1_0-final.txt)
-    - **CAEP**: [OpenID Continuous Access Evaluation Profile 1.0](https://openid.net/specs/openid-caep-1_0-final.txt)
+    - **RFC8417 Security Event Token or SET** : [RFC8417: Guidelines for Writing RFCs and Related Documents](https://tools.ietf.org/html/rfc8417)
+    - **RFC8935 Push Delivery of SETs using HTTP**: [RFC8935](https://www.rfc-editor.org/rfc/rfc8935.txt)
+    - **RFC8936 Poll Delivery of SETs using HTTP**: [RFC8936](https://www.rfc-editor.org/rfc/rfc8936.txt)
+    - **SSF**: [Shared Signals Framework Specification](https://openid.net/specs/openid-sharedsignals-framework-1_0-final.txt)
+    - SET Token Event Types
+        - **SCIM**: [SCIM Profile for Security Event Tokens](https://www.ietf.org/archive/id/draft-ietf-scim-events-16.txt)
+        - **RISC**: [OpenID RISC Profile Specification](https://openid.net/specs/openid-risc-1_0-final.txt)
+        - **CAEP**: [OpenID Continuous Access Evaluation Profile 1.0](https://openid.net/specs/openid-caep-1_0-final.txt)
 
 #### Planning and Communication
 - **Mandatory Planning**: Before making any changes, you MUST create a detailed plan that includes the scope of work.
