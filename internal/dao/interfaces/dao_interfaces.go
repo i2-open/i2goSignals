@@ -75,6 +75,16 @@ type ClientDAO interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// ServerDAO handles server configuration data access
+type ServerDAO interface {
+	Create(ctx context.Context, server *model.Server) error
+	FindByID(ctx context.Context, id string) (*model.Server, error)
+	FindByAlias(ctx context.Context, alias string) (*model.Server, error)
+	Update(ctx context.Context, server *model.Server) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context) ([]model.Server, error)
+}
+
 // JwkKeyRec represents a cryptographic key record
 type JwkKeyRec struct {
 	Id              bson.ObjectID `json:"id" bson:"_id"`

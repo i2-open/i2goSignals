@@ -185,6 +185,42 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"ServerCreate",
+			http.MethodPost,
+			"/server",
+			h.sa.ServerCreate,
+			false,
+		},
+		Route{
+			"ServerList",
+			http.MethodGet,
+			"/server",
+			h.sa.ServerList,
+			false,
+		},
+		Route{
+			"ServerGet",
+			http.MethodGet,
+			"/server/{alias}",
+			h.sa.ServerGet,
+			false,
+		},
+		Route{
+			"ServerUpdate",
+			http.MethodPut,
+			"/server/{alias}",
+			h.sa.ServerUpdate,
+			false,
+		},
+		Route{
+			"ServerDelete",
+			http.MethodDelete,
+			"/server/{alias}",
+			h.sa.ServerDelete,
+			false,
+		},
+
+		Route{
 			"StreamReplace",
 			http.MethodPut,
 			"/stream",

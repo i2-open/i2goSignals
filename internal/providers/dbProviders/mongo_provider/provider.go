@@ -30,6 +30,7 @@ const CDbDelivered = "deliveredEvents"
 const CDbClients = "clients"
 const CDbLeases = "cluster_leases"
 const CDbNodes = "cluster_nodes"
+const CDbServers = "servers"
 
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
@@ -62,6 +63,7 @@ type MongoProvider struct {
 	clientCol    *mongo.Collection
 	leaseCol     *mongo.Collection
 	nodeCol      *mongo.Collection
+	serverCol    *mongo.Collection
 
 	DefaultIssuer string
 	TokenIssuer   string
@@ -103,6 +105,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.pendingCol = m.ssefDb.Collection(CDbPending)
 	m.eventCol = m.ssefDb.Collection(CDbEvents)
 	m.clientCol = m.ssefDb.Collection(CDbClients)
+	m.serverCol = m.ssefDb.Collection(CDbServers)
 	m.leaseCol = m.ssefDb.Collection(CDbLeases)
 	m.nodeCol = m.ssefDb.Collection(CDbNodes)
 
@@ -119,17 +122,19 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	eventDAO := mongodao.NewEventDAO(m.eventCol, m.pendingCol, m.deliveredCol)
 	keyDAO := mongodao.NewKeyDAO(m.keyCol)
 	clientDAO := mongodao.NewClientDAO(m.clientCol)
+	serverDAO := mongodao.NewServerDAO(m.serverCol)
 
 	// Initialize Services
 	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 	eventService := services.NewEventService(eventDAO)
 	clientService := services.NewClientService(clientDAO, keyService)
+	serverService := services.NewServerService(serverDAO)
 
 	// Initialize BaseProvider with services
 	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO,
-		keyService, streamService, eventService, clientService,
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
+		keyService, streamService, eventService, clientService, serverService,
 	)
 
 	// Initialize token keys
@@ -202,6 +207,7 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 		m.ssefDb = nil
 		m.eventCol = nil
 		m.streamCol = nil
+		m.serverCol = nil
 		m.keyCol = nil
 		m.deliveredCol = nil
 		m.resumeTokens.Reset()

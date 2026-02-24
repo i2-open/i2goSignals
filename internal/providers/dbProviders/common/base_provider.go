@@ -27,12 +27,14 @@ type BaseProvider struct {
 	eventDAO  interfaces.EventDAO
 	keyDAO    interfaces.KeyDAO
 	clientDAO interfaces.ClientDAO
+	serverDAO interfaces.ServerDAO
 
 	// Services - business logic layer
 	keyService    *services.KeyService
 	streamService *services.StreamService
 	eventService  *services.EventService
 	clientService *services.ClientService
+	serverService *services.ServerService
 
 	// Optional hook for write operations (used by memory provider for dirty tracking)
 	afterWrite WriteHook
@@ -44,20 +46,24 @@ func NewBaseProvider(
 	eventDAO interfaces.EventDAO,
 	keyDAO interfaces.KeyDAO,
 	clientDAO interfaces.ClientDAO,
+	serverDAO interfaces.ServerDAO,
 	keyService *services.KeyService,
 	streamService *services.StreamService,
 	eventService *services.EventService,
 	clientService *services.ClientService,
+	serverService *services.ServerService,
 ) *BaseProvider {
 	return &BaseProvider{
 		streamDAO:     streamDAO,
 		eventDAO:      eventDAO,
 		keyDAO:        keyDAO,
 		clientDAO:     clientDAO,
+		serverDAO:     serverDAO,
 		keyService:    keyService,
 		streamService: streamService,
 		eventService:  eventService,
 		clientService: clientService,
+		serverService: serverService,
 	}
 }
 
@@ -89,6 +95,10 @@ func (b *BaseProvider) GetKeyDAO() interfaces.KeyDAO {
 
 func (b *BaseProvider) GetClientDAO() interfaces.ClientDAO {
 	return b.clientDAO
+}
+
+func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
+	return b.serverDAO
 }
 
 // Service accessor methods for test helpers
@@ -282,4 +292,42 @@ func (b *BaseProvider) ResetEventStream(streamId string, jti string, resetDate *
 		b.notifyWrite()
 	}
 	return err
+}
+
+// Server Management Methods
+
+func (b *BaseProvider) CreateServer(ctx context.Context, server *model.Server) error {
+	err := b.serverService.CreateServer(ctx, server)
+	if err == nil {
+		b.notifyWrite()
+	}
+	return err
+}
+
+func (b *BaseProvider) GetServer(ctx context.Context, id string) (*model.Server, error) {
+	return b.serverService.GetServer(ctx, id)
+}
+
+func (b *BaseProvider) GetServerByAlias(ctx context.Context, alias string) (*model.Server, error) {
+	return b.serverService.GetServerByAlias(ctx, alias)
+}
+
+func (b *BaseProvider) UpdateServer(ctx context.Context, server *model.Server) error {
+	err := b.serverService.UpdateServer(ctx, server)
+	if err == nil {
+		b.notifyWrite()
+	}
+	return err
+}
+
+func (b *BaseProvider) DeleteServer(ctx context.Context, id string) error {
+	err := b.serverService.DeleteServer(ctx, id)
+	if err == nil {
+		b.notifyWrite()
+	}
+	return err
+}
+
+func (b *BaseProvider) ListServers(ctx context.Context) ([]model.Server, error) {
+	return b.serverService.ListServers(ctx)
 }

@@ -70,4 +70,11 @@ type DbProviderInterface interface {
 	// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 	GetActiveNodeCount() (int64, error)
 	SetBaseUrl(u *url.URL)
+
+	CreateServer(ctx context.Context, server *model.Server) error
+	GetServer(ctx context.Context, id string) (*model.Server, error)
+	GetServerByAlias(ctx context.Context, alias string) (*model.Server, error)
+	UpdateServer(ctx context.Context, server *model.Server) error
+	DeleteServer(ctx context.Context, id string) error
+	ListServers(ctx context.Context) ([]model.Server, error)
 }

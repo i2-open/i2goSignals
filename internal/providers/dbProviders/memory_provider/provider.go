@@ -57,17 +57,19 @@ func (m *MemoryProvider) initialize() {
 	eventDAO := memory.NewEventDAO()
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
+	serverDAO := memory.NewServerDAO()
 
 	// Initialize Services
 	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 	eventService := services.NewEventService(eventDAO)
 	clientService := services.NewClientService(clientDAO, keyService)
+	serverService := services.NewServerService(serverDAO)
 
 	// Initialize BaseProvider with services
 	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO,
-		keyService, streamService, eventService, clientService,
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
+		keyService, streamService, eventService, clientService, serverService,
 	)
 
 	// Initialize token keys
@@ -91,6 +93,7 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 	eventDAO := memory.NewEventDAO()
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
+	serverDAO := memory.NewServerDAO()
 
 	if initialize {
 		// Re-initialize services with new DAOs
@@ -98,11 +101,12 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 		streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 		eventService := services.NewEventService(eventDAO)
 		clientService := services.NewClientService(clientDAO, keyService)
+		serverService := services.NewServerService(serverDAO)
 
 		// Reinitialize BaseProvider
 		m.BaseProvider = common.NewBaseProvider(
-			streamDAO, eventDAO, keyDAO, clientDAO,
-			keyService, streamService, eventService, clientService,
+			streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
+			keyService, streamService, eventService, clientService, serverService,
 		)
 
 		ctx := context.Background()

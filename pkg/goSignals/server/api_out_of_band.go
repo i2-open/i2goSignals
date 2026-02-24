@@ -18,6 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -530,4 +531,200 @@ func maskAuthorization(authHeader string) string {
 		token[len(token)-4:])
 
 	return masked
+}
+
+func (sa *SignalsApplication) ServerCreate(w http.ResponseWriter, r *http.Request) {
+	ServerCreateHandler(sa, w, r)
+}
+
+func ServerCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	var server model.Server
+	err := json.NewDecoder(r.Body).Decode(&server)
+	if err != nil {
+		http.Error(w, "Error decoding request body", http.StatusBadRequest)
+		return
+	}
+
+	server.ProjectId = authCtx.ProjectId
+
+	err = sa.GetProvider().CreateServer(r.Context(), &server)
+	if err != nil {
+		if errors.Is(err, services.ErrServerAlreadyExists) {
+			http.Error(w, "Server alias already exists", http.StatusConflict)
+			return
+		}
+		serverLog.Error("Error creating server", "error", err)
+		http.Error(w, "Error creating server: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(server)
+}
+
+func (sa *SignalsApplication) ServerGet(w http.ResponseWriter, r *http.Request) {
+	GetServerHandler(sa, w, r)
+}
+
+func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	vars := mux.Vars(r)
+	alias := vars["alias"]
+
+	server, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if authCtx.ProjectId != "" && server.ProjectId != authCtx.ProjectId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(server)
+}
+
+func (sa *SignalsApplication) ServerUpdate(w http.ResponseWriter, r *http.Request) {
+	UpdateServerHandler(sa, w, r)
+}
+
+func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	vars := mux.Vars(r)
+	alias := vars["alias"]
+
+	// Find the existing server
+	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if authCtx.ProjectId != "" && existing.ProjectId != authCtx.ProjectId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	var server model.Server
+	err = json.NewDecoder(r.Body).Decode(&server)
+	if err != nil {
+		http.Error(w, "Error decoding request body", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure we are updating the right one
+	server.Id = existing.Id
+	server.ProjectId = existing.ProjectId // Don't allow changing project id via update
+
+	err = sa.GetProvider().UpdateServer(r.Context(), &server)
+	if err != nil {
+		if errors.Is(err, services.ErrServerAlreadyExists) {
+			http.Error(w, "Server alias already exists", http.StatusConflict)
+			return
+		}
+		serverLog.Error("Error updating server", "error", err)
+		http.Error(w, "Error updating server: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(server)
+}
+
+func (sa *SignalsApplication) ServerDelete(w http.ResponseWriter, r *http.Request) {
+	DeleteServerHandler(sa, w, r)
+}
+
+func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	vars := mux.Vars(r)
+	alias := vars["alias"]
+
+	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if authCtx.ProjectId != "" && existing.ProjectId != authCtx.ProjectId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	err = sa.GetProvider().DeleteServer(r.Context(), existing.Id.Hex())
+	if err != nil {
+		serverLog.Error("Error deleting server", "error", err)
+		http.Error(w, "Error deleting server: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (sa *SignalsApplication) ServerList(w http.ResponseWriter, r *http.Request) {
+	ListServerHandler(sa, w, r)
+}
+
+func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	servers, err := sa.GetProvider().ListServers(r.Context())
+	if err != nil {
+		serverLog.Error("Error listing servers", "error", err)
+		http.Error(w, "Error listing servers: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]model.Server, 0)
+	for _, s := range servers {
+		if authCtx.ProjectId == "" || s.ProjectId == authCtx.ProjectId {
+			result = append(result, s)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
 }

@@ -59,3 +59,43 @@ type TransmitterConfiguration struct {
 	SpecVersion      string `json:"spec_version,omitempty"`
 	GoSignalsVersion string `json:"gosignals_version,omitempty"`
 }
+
+func (tc *TransmitterConfiguration) DeepCopy() *TransmitterConfiguration {
+	if tc == nil {
+		return nil
+	}
+	res := *tc
+	if tc.DeliveryMethodsSupported != nil {
+		res.DeliveryMethodsSupported = make([]string, len(tc.DeliveryMethodsSupported))
+		copy(res.DeliveryMethodsSupported, tc.DeliveryMethodsSupported)
+	}
+	if tc.CriticalSubjectMembers != nil {
+		res.CriticalSubjectMembers = make([]string, len(tc.CriticalSubjectMembers))
+		copy(res.CriticalSubjectMembers, tc.CriticalSubjectMembers)
+	}
+	if tc.SupportedScopes != nil {
+		res.SupportedScopes = make(map[string][]string)
+		for k, v := range tc.SupportedScopes {
+			vCopy := make([]string, len(v))
+			copy(vCopy, v)
+			res.SupportedScopes[k] = vCopy
+		}
+	}
+	if tc.AuthorizationSchemes != nil {
+		res.AuthorizationSchemes = make([]AuthScheme, len(tc.AuthorizationSchemes))
+		copy(res.AuthorizationSchemes, tc.AuthorizationSchemes)
+	}
+	if tc.AuthorizationServers != nil {
+		res.AuthorizationServers = make([]string, len(tc.AuthorizationServers))
+		copy(res.AuthorizationServers, tc.AuthorizationServers)
+	}
+	if tc.ScopesSupported != nil {
+		res.ScopesSupported = make([]string, len(tc.ScopesSupported))
+		copy(res.ScopesSupported, tc.ScopesSupported)
+	}
+	if tc.BearerMethodsSupported != nil {
+		res.BearerMethodsSupported = make([]string, len(tc.BearerMethodsSupported))
+		copy(res.BearerMethodsSupported, tc.BearerMethodsSupported)
+	}
+	return &res
+}

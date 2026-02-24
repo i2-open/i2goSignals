@@ -133,6 +133,12 @@ func (pm *PersistenceManager) SaveState() {
 		pm.saveFile("clients.json", state)
 	}
 
+	// Save ServerDAO state
+	if sd, ok := pm.baseProvider.GetServerDAO().(*memory.ServerDAOMemory); ok {
+		state := sd.GetState()
+		pm.saveFile("servers.json", state)
+	}
+
 	// Save EventDAO state (pending and delivered)
 	if ed, ok := pm.baseProvider.GetEventDAO().(*memory.EventDAOMemory); ok {
 		_, pending, delivered := ed.GetState()
@@ -183,6 +189,14 @@ func (pm *PersistenceManager) LoadState() {
 	if pm.loadFile("clients.json", &clients) {
 		if cd, ok := pm.baseProvider.GetClientDAO().(*memory.ClientDAOMemory); ok {
 			cd.SetState(clients)
+		}
+	}
+
+	// Load ServerDAO state
+	var servers map[string]*model.Server
+	if pm.loadFile("servers.json", &servers) {
+		if sd, ok := pm.baseProvider.GetServerDAO().(*memory.ServerDAOMemory); ok {
+			sd.SetState(servers)
 		}
 	}
 

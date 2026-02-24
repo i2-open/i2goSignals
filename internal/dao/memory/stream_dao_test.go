@@ -230,7 +230,7 @@ func TestStreamDAOMemory_FindReceiverStreams(t *testing.T) {
 	}
 	_ = dao.Create(ctx, receiverStream)
 
-	// Create transmitter stream (RouteMode = publish)
+	// Create a transmitter stream (RouteMode = publish)
 	transmitterStream := &model.StreamStateRecord{
 		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
