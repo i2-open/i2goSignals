@@ -30,7 +30,7 @@ func (d *StreamDAOMongo) Create(ctx context.Context, state *model.StreamStateRec
 }
 
 func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -38,8 +38,8 @@ func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.Stream
 	filter := bson.M{"_id": docId}
 	res := d.collection.FindOne(ctx, filter)
 
-	if errors.Is(res.Err(), mongo.ErrNoDocuments) {
-		return nil, errors.New("not found")
+	if err := HandleFindError(res.Err(), errors.New("not found")); err != nil {
+		return nil, err
 	}
 
 	var rec model.StreamStateRecord
@@ -58,25 +58,22 @@ func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRec
 		return errors.New("stream update error: " + err.Error())
 	}
 
-	if res.ModifiedCount == 0 && res.MatchedCount == 0 {
-		return errors.New("not found")
-	}
-	return nil
+	return HandleUpdateResult(res, errors.New("not found"))
 }
 
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err
 	}
 
 	filter := bson.M{"_id": docId}
 	resp, err := d.collection.DeleteOne(ctx, filter)
-
-	if resp != nil && resp.DeletedCount == 0 {
-		return errors.New("not found")
+	if err != nil {
+		return err
 	}
-	return err
+
+	return HandleDeleteResult(resp, errors.New("not found"))
 }
 
 func (d *StreamDAOMongo) List(ctx context.Context) ([]model.StreamStateRecord, error) {
@@ -131,7 +128,7 @@ func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.Strea
 }
 
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err
 	}
@@ -150,8 +147,5 @@ func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status str
 		return err
 	}
 
-	if res.MatchedCount == 0 {
-		return errors.New("not found")
-	}
-	return nil
+	return HandleUpdateResult(res, errors.New("not found"))
 }

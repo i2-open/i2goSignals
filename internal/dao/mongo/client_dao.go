@@ -30,7 +30,7 @@ func (d *ClientDAOMongo) Insert(ctx context.Context, client *model.SsfClient) er
 }
 
 func (d *ClientDAOMongo) FindByID(ctx context.Context, id string) (*model.SsfClient, error) {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -39,10 +39,10 @@ func (d *ClientDAOMongo) FindByID(ctx context.Context, id string) (*model.SsfCli
 	var client model.SsfClient
 	err = d.collection.FindOne(ctx, filter).Decode(&client)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, errors.New("client not found")
+		err = HandleFindError(err, errors.New("client not found"))
+		if err.Error() != "client not found" {
+			cLog.Error("Error finding client", "id", id, "error", err)
 		}
-		cLog.Error("Error finding client", "id", id, "error", err)
 		return nil, err
 	}
 	return &client, nil
@@ -66,7 +66,7 @@ func (d *ClientDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
 }
 
 func (d *ClientDAOMongo) Delete(ctx context.Context, id string) error {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err
 	}
@@ -78,8 +78,5 @@ func (d *ClientDAOMongo) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	if res.DeletedCount == 0 {
-		return errors.New("client not found")
-	}
-	return nil
+	return HandleDeleteResult(res, errors.New("client not found"))
 }

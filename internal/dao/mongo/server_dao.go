@@ -2,7 +2,6 @@ package mongo
 
 import (
 	"context"
-	"errors"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
@@ -30,7 +29,7 @@ func (d *ServerDAOMongo) Create(ctx context.Context, server *model.Server) error
 }
 
 func (d *ServerDAOMongo) FindByID(ctx context.Context, id string) (*model.Server, error) {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -39,10 +38,10 @@ func (d *ServerDAOMongo) FindByID(ctx context.Context, id string) (*model.Server
 	var server model.Server
 	err = d.collection.FindOne(ctx, filter).Decode(&server)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, interfaces.ErrNotFound
+		err = HandleFindError(err, interfaces.ErrNotFound)
+		if err != interfaces.ErrNotFound {
+			svLog.Error("Error finding server", "id", id, "error", err)
 		}
-		svLog.Error("Error finding server", "id", id, "error", err)
 		return nil, err
 	}
 	return &server, nil
@@ -53,10 +52,10 @@ func (d *ServerDAOMongo) FindByAlias(ctx context.Context, alias string) (*model.
 	var server model.Server
 	err := d.collection.FindOne(ctx, filter).Decode(&server)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, interfaces.ErrNotFound
+		err = HandleFindError(err, interfaces.ErrNotFound)
+		if err != interfaces.ErrNotFound {
+			svLog.Error("Error finding server by alias", "alias", alias, "error", err)
 		}
-		svLog.Error("Error finding server by alias", "alias", alias, "error", err)
 		return nil, err
 	}
 	return &server, nil
@@ -70,14 +69,11 @@ func (d *ServerDAOMongo) Update(ctx context.Context, server *model.Server) error
 		return err
 	}
 
-	if res.MatchedCount == 0 {
-		return interfaces.ErrNotFound
-	}
-	return nil
+	return HandleUpdateResult(res, interfaces.ErrNotFound)
 }
 
 func (d *ServerDAOMongo) Delete(ctx context.Context, id string) error {
-	docId, err := bson.ObjectIDFromHex(id)
+	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err
 	}
@@ -89,10 +85,7 @@ func (d *ServerDAOMongo) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	if res.DeletedCount == 0 {
-		return interfaces.ErrNotFound
-	}
-	return nil
+	return HandleDeleteResult(res, interfaces.ErrNotFound)
 }
 
 func (d *ServerDAOMongo) List(ctx context.Context) ([]model.Server, error) {

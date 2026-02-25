@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/model"
@@ -11,82 +10,58 @@ import (
 )
 
 type ClientDAOMemory struct {
-	mu      sync.RWMutex
-	clients map[string]*model.SsfClient
+	store *StateManager[string, model.SsfClient]
 }
 
 func NewClientDAO() interfaces.ClientDAO {
 	return &ClientDAOMemory{
-		clients: make(map[string]*model.SsfClient),
+		store: NewStateManager[string, model.SsfClient](func(c *model.SsfClient) *model.SsfClient {
+			copyClient := *c
+			return &copyClient
+		}),
 	}
 }
 
 func (d *ClientDAOMemory) Insert(_ context.Context, client *model.SsfClient) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if client.Id.IsZero() {
 		client.Id = bson.NewObjectID()
 	}
 	clientId := client.Id.Hex()
-	d.clients[clientId] = client
+	d.store.Set(clientId, client)
 	return nil
 }
 
 func (d *ClientDAOMemory) FindByID(_ context.Context, id string) (*model.SsfClient, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if client, ok := d.clients[id]; ok {
-		copyClient := *client
-		return &copyClient, nil
+	if client, ok := d.store.Get(id); ok {
+		return client, nil
 	}
 	return nil, errors.New("client not found")
 }
 
 func (d *ClientDAOMemory) FindByProjectID(_ context.Context, projectID string) ([]*model.SsfClient, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	var clients []*model.SsfClient
-	for _, client := range d.clients {
+	clients := d.store.FindAll(func(client *model.SsfClient) bool {
 		// Check if projectID is in the client's ProjectIds list
 		for _, pid := range client.ProjectIds {
 			if pid == projectID {
-				copyClient := *client
-				clients = append(clients, &copyClient)
-				break
+				return true
 			}
 		}
-	}
+		return false
+	})
 	return clients, nil
 }
 
 func (d *ClientDAOMemory) Delete(_ context.Context, id string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, exists := d.clients[id]; !exists {
+	if !d.store.Delete(id) {
 		return errors.New("client not found")
 	}
-	delete(d.clients, id)
 	return nil
 }
 
 func (d *ClientDAOMemory) GetState() map[string]*model.SsfClient {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	res := make(map[string]*model.SsfClient)
-	for k, v := range d.clients {
-		copyClient := *v
-		res[k] = &copyClient
-	}
-	return res
+	return d.store.GetAll()
 }
 
 func (d *ClientDAOMemory) SetState(state map[string]*model.SsfClient) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.clients = state
+	d.store.SetAll(state)
 }

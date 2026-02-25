@@ -9,6 +9,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// KeyDAOMemory uses a simpler mutex-based approach because it stores
+// slices of keys per issuer, which doesn't fit well with StateManager
 type KeyDAOMemory struct {
 	mu   sync.RWMutex
 	keys map[string][]*interfaces.JwkKeyRec // iss -> list of keys
