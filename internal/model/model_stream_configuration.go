@@ -54,7 +54,6 @@ type StreamConfiguration struct {
 	TxWellKnownUrl *string `json:"tx_well_known_url,omitempty"`
 
 	// TxToken holds the token used for automatic SSF stream creation with the transmitter and may be updated upon success to allow access to status & verify endpoints
-	// Deprecated: Use TxAlias to look up the model.Server object and retrieve the token
 	TxToken *string `json:"tx_token,omitempty"`
 
 	// TxAlias is the alias of a model.Server which holds a security credential enabling remote management via SSF

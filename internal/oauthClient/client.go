@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/logger"
-
 	"golang.org/x/oauth2"
 )
 
@@ -31,6 +31,8 @@ type Config struct {
 	Audience string
 	// Resource is an optional default protected resource identifier. Can be overridden per call.
 	Resource string
+	// Scopes required for the client credentials flow
+	Scopes []string
 }
 
 // Manager caches HTTP clients per (subjectToken, scopes) tuple and reuses auto-refreshing TokenSources.
@@ -67,6 +69,9 @@ func DefaultManager() *Manager {
 			ClientSecret: strings.TrimSpace(os.Getenv("STS_CLIENT_SECRET")),
 			Audience:     strings.TrimSpace(os.Getenv("STS_AUDIENCE")),
 			Resource:     strings.TrimSpace(os.Getenv("STS_RESOURCE")),
+		}
+		if scopes := os.Getenv("STS_SCOPES"); scopes != "" {
+			cfg.Scopes = strings.Split(scopes, " ")
 		}
 		defaultMgr = NewManager(cfg, nil)
 	})
@@ -277,6 +282,272 @@ func cacheKey(subjectToken string, scopes []string, resource string) string {
 	r := strings.TrimSpace(resource)
 	h := sha256.Sum256([]byte(subjectToken + "|" + strings.Join(scopes, " ") + "|" + r))
 	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// GetClientCredentialsHTTPClient returns an http.Client that uses an oauth2.Transport with a TokenSource that
+// performs an OAuth Client Credentials flow for the provided scopes, and automatically refreshes when expired.
+// resource allows per-call selection of the protected resource identifier. If empty, the Manager's default (from Config.Resource) is used.
+func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []string, resource string) (*http.Client, error) {
+	if m.cfg.TokenURL == "" || m.cfg.ClientID == "" || m.cfg.ClientSecret == "" {
+		return nil, errors.New("oauthclient: client credentials configuration missing")
+	}
+	// Use provided resource or fallback to default configured resource
+	if strings.TrimSpace(resource) == "" {
+		resource = m.cfg.Resource
+	}
+
+	// Use provided scopes or fallback to default configured scopes
+	if len(scopes) == 0 {
+		scopes = m.cfg.Scopes
+	}
+
+	// For client credentials flow, we use an empty subjectToken in the cacheKey
+	key := cacheKey("client_credentials", scopes, resource)
+	m.mu.Lock()
+	if c, ok := m.cache[key]; ok {
+		m.mu.Unlock()
+		return c, nil
+	}
+	m.mu.Unlock()
+
+	base := &clientCredentialsSource{
+		ctx:          context.WithoutCancel(ctx),
+		hc:           m.hc,
+		tokenURL:     m.cfg.TokenURL,
+		clientID:     m.cfg.ClientID,
+		clientSecret: m.cfg.ClientSecret,
+		scopes:       normalizeScopes(scopes),
+		audience:     m.cfg.Audience,
+		resource:     resource,
+	}
+
+	// Wrap with ReuseTokenSource to cache the token in memory across requests.
+	ts := oauth2.ReuseTokenSource(nil, base)
+	oauthClient := &http.Client{
+		Transport:     &oauth2.Transport{Source: ts, Base: m.hc.Transport},
+		Timeout:       m.hc.Timeout,
+		CheckRedirect: m.hc.CheckRedirect,
+		Jar:           m.hc.Jar,
+	}
+
+	m.mu.Lock()
+	m.cache[key] = oauthClient
+	m.mu.Unlock()
+	return oauthClient, nil
+}
+
+// clientCredentialsSource is an oauth2.TokenSource that executes client credentials flow.
+type clientCredentialsSource struct {
+	ctx          context.Context
+	hc           *http.Client
+	tokenURL     string
+	clientID     string
+	clientSecret string
+	scopes       []string
+	audience     string
+	resource     string
+
+	// last token
+	last *oauth2.Token
+}
+
+func (s *clientCredentialsSource) Token() (*oauth2.Token, error) {
+	// If we have a token and it's still valid, return it.
+	if s.last != nil && s.last.Valid() {
+		clientLog.Debug("Using cached client credentials token")
+		return s.last, nil
+	}
+
+	// Perform client credentials flow
+	clientLog.Debug("Fetching client credentials token")
+	t, err := s.fetch()
+	if err != nil {
+		return nil, err
+	}
+	s.last = t
+	return t, nil
+}
+
+func (s *clientCredentialsSource) fetch() (*oauth2.Token, error) {
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	if len(s.scopes) > 0 {
+		form.Set("scope", strings.Join(s.scopes, " "))
+	}
+	if s.audience != "" {
+		form.Set("audience", s.audience)
+	}
+	if s.resource != "" {
+		form.Set("resource", s.resource)
+	}
+
+	req, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(s.clientID), url.QueryEscape(s.clientSecret))
+
+	resp, err := s.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, errors.New("client credentials flow failed: " + resp.Status + ": " + string(b))
+	}
+	var tr tokenResp
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return nil, err
+	}
+	return tr.toOAuth2Token(), nil
+}
+
+// ValidateClientCredentials checks if a token can be obtained using the provided client credentials configuration.
+func ValidateClientCredentials(ctx context.Context, cfg Config) error {
+	if cfg.TokenURL == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
+		return errors.New("oauthclient: configuration missing")
+	}
+	m := NewManager(cfg, nil)
+	client, err := m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource)
+	if err != nil {
+		return err
+	}
+	_, err = client.Transport.(*oauth2.Transport).Source.Token()
+	return err
+}
+
+var (
+	managersMu sync.Mutex
+	managers   = make(map[string]*Manager)
+)
+
+// GetClientCredentialsClient returns a cached or new http.Client for the provided client credentials configuration.
+func GetClientCredentialsClient(ctx context.Context, cfg Config) (*http.Client, error) {
+	managersMu.Lock()
+	key := cfg.key()
+	m, ok := managers[key]
+	if !ok {
+		m = NewManager(cfg, nil)
+		managers[key] = m
+	}
+	managersMu.Unlock()
+
+	return m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource)
+}
+
+func (c Config) key() string {
+	s := c.TokenURL + "|" + c.ClientID + "|" + c.ClientSecret + "|" + c.Audience + "|" + c.Resource + "|" + strings.Join(normalizeScopes(c.Scopes), " ")
+	h := sha256.Sum256([]byte(s))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// DiscoverTokenURL uses the Server Host value to query the Protected Resource Metadata endpoint (RFC9728)
+// to obtain authorization server information and the TokenURL value (RFC8414).
+func DiscoverTokenURL(ctx context.Context, host string) (string, error) {
+	if host == "" {
+		return "", errors.New("host is empty")
+	}
+
+	// Ensure host has a scheme
+	hostURL := host
+	if !strings.HasPrefix(hostURL, "http://") && !strings.HasPrefix(hostURL, "https://") {
+		hostURL = "https://" + hostURL
+	}
+
+	u, err := url.Parse(hostURL)
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/.well-known/oauth-protected-resource"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("protected resource metadata request failed with status %d", resp.StatusCode)
+	}
+
+	var metadata struct {
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return "", err
+	}
+
+	if len(metadata.AuthorizationServers) == 0 {
+		return "", errors.New("no authorization servers found in protected resource metadata")
+	}
+
+	// Try to find token_endpoint for each authorization server
+	for _, as := range metadata.AuthorizationServers {
+		tokenURL, err := discoverTokenEndpoint(ctx, as)
+		if err == nil {
+			return tokenURL, nil
+		}
+	}
+
+	return "", errors.New("could not discover token endpoint from any authorization server")
+}
+
+func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
+	// RFC8414: /.well-known/oauth-authorization-server
+	// OIDC: /.well-known/openid-configuration
+
+	asURL, err := url.Parse(as)
+	if err != nil {
+		return "", err
+	}
+
+	paths := []string{
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/openid-configuration",
+	}
+
+	// RFC8414 says if the AS URI contains a path, the .well-known should be inserted.
+	// But it also says many implementations just append it.
+	// "If the issuer identifier contains no path component, the metadata is at ..."
+	// "If the issuer identifier contains a path component, the metadata is at ..."
+
+	originalPath := asURL.Path
+	for _, p := range paths {
+		if originalPath == "" || originalPath == "/" {
+			asURL.Path = p
+		} else {
+			asURL.Path = strings.TrimSuffix(originalPath, "/") + p
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, asURL.String(), nil)
+		if err != nil {
+			continue
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var metadata struct {
+				TokenEndpoint string `json:"token_endpoint"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&metadata); err == nil && metadata.TokenEndpoint != "" {
+				return metadata.TokenEndpoint, nil
+			}
+		}
+	}
+
+	return "", errors.New("token endpoint not found")
 }
 
 func normalizeScopes(scopes []string) []string {

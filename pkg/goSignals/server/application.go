@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // var sa *SignalsApplication
@@ -100,6 +101,9 @@ func (sa *SignalsApplication) HealthCheck() bool {
 }
 
 func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
+	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
+	tlsSupport.CheckCaInstalled(http.DefaultClient)
+
 	role := os.Getenv("SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"

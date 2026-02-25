@@ -35,6 +35,10 @@ func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*
 		return nil, 0, fmt.Errorf("RFC8936: error creating poll request: %w", err)
 	}
 
+	// Set proper JSON headers per RFC8936 poll request conventions
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
 	if config.Authorization != "" {
 		req.Header.Set("Authorization", config.Authorization)
 	}
@@ -48,7 +52,12 @@ func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*
 	}()
 
 	if resp.StatusCode >= 400 {
-		log.Debug("RFC8936: Poll returned error status", "status", resp.StatusCode)
+		// Read a small portion of the body for diagnostics without overwhelming logs
+		b, _ := io.ReadAll(resp.Body)
+		if len(b) > 512 {
+			b = b[:512]
+		}
+		log.Debug("RFC8936: Poll returned error status", "status", resp.StatusCode, "body", string(b))
 		return nil, resp.StatusCode, fmt.Errorf("RFC8936: HTTP %s", resp.Status)
 	}
 

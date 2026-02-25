@@ -533,11 +533,11 @@ func maskAuthorization(authHeader string) string {
 	return masked
 }
 
-func (sa *SignalsApplication) ServerCreate(w http.ResponseWriter, r *http.Request) {
-	ServerCreateHandler(sa, w, r)
+func (sa *SignalsApplication) CreateServer(w http.ResponseWriter, r *http.Request) {
+	CreateServerHandler(sa, w, r)
 }
 
-func ServerCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -560,7 +560,7 @@ func ServerCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 			return
 		}
 		serverLog.Error("Error creating server", "error", err)
-		http.Error(w, "Error creating server: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error creating server: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 

@@ -410,3 +410,19 @@ func TestPoll_HTTPError(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.Error(t, err)
 }
+
+func TestPollRaw_SetsJSONHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		assert.Contains(t, r.Header.Get("Accept"), "application/json")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{}})
+	}))
+	defer server.Close()
+
+	_, _, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		EndpointURL: server.URL,
+	})
+	assert.NoError(t, err)
+}

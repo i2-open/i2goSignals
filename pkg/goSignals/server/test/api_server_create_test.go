@@ -36,10 +36,12 @@ func (s *ApiServerTestSuite) TestServerCreate() {
 	iat, err := s.sa.Auth.IssueProjectIat(nil)
 	s.NoError(err)
 
+	token := "valid-token"
 	server := model.Server{
-		Alias: "test-server",
-		Type:  model.ServerTypeGosignals,
-		Host:  "https://test.example.com",
+		Alias:       "test-server",
+		Type:        model.ServerTypeGosignals,
+		Host:        "https://test.example.com",
+		ClientToken: &token,
 	}
 	body, _ := json.Marshal(server)
 

@@ -38,10 +38,12 @@ func (s *ApiServerCrudTestSuite) TearDownSuite() {
 
 func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	// 1. Create a server
+	token := "valid-token"
 	server := model.Server{
-		Alias: "crud-server",
-		Type:  model.ServerTypeGosignals,
-		Host:  "https://crud.example.com",
+		Alias:       "crud-server",
+		Type:        model.ServerTypeGosignals,
+		Host:        "https://crud.example.com",
+		ClientToken: &token,
 	}
 	body, _ := json.Marshal(server)
 	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/server", bytes.NewBuffer(body))
@@ -79,10 +81,12 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 
 	// 4. Update alias (and check conflict)
 	// Create another server first
+	token2 := "valid-token-2"
 	server2 := model.Server{
-		Alias: "other-server",
-		Type:  model.ServerTypeGosignals,
-		Host:  "https://other.example.com",
+		Alias:       "other-server",
+		Type:        model.ServerTypeGosignals,
+		Host:        "https://other.example.com",
+		ClientToken: &token2,
 	}
 	body2, _ := json.Marshal(server2)
 	req, _ = http.NewRequest(http.MethodPost, s.ts.URL+"/server", bytes.NewBuffer(body2))

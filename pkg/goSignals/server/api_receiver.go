@@ -19,6 +19,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -142,6 +143,67 @@ func (sa *SignalsApplication) CloseReceiver(sid string) {
 		delete(sa.pushReceivers, sid)
 	}
 
+}
+
+func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
+	conf := stream.StreamConfiguration
+	// 1. Try TxAlias (New preferred method)
+	if conf.TxAlias != nil && *conf.TxAlias != "" {
+		server, err := sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+		if err == nil && server != nil {
+			if server.OAuthClientConfig != nil {
+				cfg := oauthclient.Config{
+					TokenURL:     server.OAuthClientConfig.TokenURL,
+					ClientID:     server.OAuthClientConfig.ClientID,
+					ClientSecret: server.OAuthClientConfig.ClientSecret,
+					Audience:     server.OAuthClientConfig.Audience,
+					Resource:     server.OAuthClientConfig.Resource,
+					Scopes:       server.OAuthClientConfig.Scopes,
+				}
+
+				// Use GetClientCredentialsClient which handles caching of managers and tokens
+				client, err := oauthclient.GetClientCredentialsClient(ctx, cfg)
+				if err == nil {
+					return client, "", nil
+				}
+				serverLog.Error("RCV: Failed to get OAuth client credentials client", "alias", *conf.TxAlias, "error", err)
+			}
+
+			// Fallback to static token from server
+			if server.ClientToken != nil && *server.ClientToken != "" {
+				client := &http.Client{}
+				tlsSupport.CheckCaInstalled(client)
+				token := *server.ClientToken
+				if !strings.Contains(token, " ") {
+					return client, "Bearer " + token, nil
+				}
+				return client, token, nil
+			}
+		}
+	}
+
+	// 2. Backward compatibility: TxToken
+	if conf.TxToken != nil && *conf.TxToken != "" {
+		client := &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
+		token := *conf.TxToken
+		if !strings.Contains(token, " ") {
+			return client, "Bearer " + token, nil
+		}
+		return client, token, nil
+	}
+
+	// 3. Fallback for Polling Receiver (legacy delivery method auth)
+	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
+		client := &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
+		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, nil
+	}
+
+	// Default client without extra authorization
+	client := &http.Client{}
+	tlsSupport.CheckCaInstalled(client)
+	return client, "", nil
 }
 
 /*
@@ -346,6 +408,13 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	}
 	body, _ := json.Marshal(params)
 
+	client, auth, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
+	if err != nil {
+		serverLog.Error("PUSH-RCV: Failed to get authenticated client", "error", err)
+		rps.fallbackToStatusCheck()
+		return
+	}
+
 	req, err := http.NewRequestWithContext(rps.ctx, http.MethodPost, verifyUrl, bytes.NewReader(body))
 	if err != nil {
 		serverLog.Error("PUSH-RCV: Failed to create verification request", "error", err)
@@ -354,17 +423,10 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if rps.stream.StreamConfiguration.TxToken != nil {
-		token := *rps.stream.StreamConfiguration.TxToken
-		if !strings.Contains(token, " ") {
-			req.Header.Set("Authorization", "Bearer "+token)
-		} else {
-			req.Header.Set("Authorization", token)
-		}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		serverLog.Warn("PUSH-RCV: Verification request failed", "error", err)
@@ -500,22 +562,20 @@ func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*mod
 		return nil, errors.New("could not determine status endpoint")
 	}
 
+	client, auth, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	if rps.stream.StreamConfiguration.TxToken != nil {
-		token := *rps.stream.StreamConfiguration.TxToken
-		if !strings.Contains(token, " ") {
-			req.Header.Set("Authorization", "Bearer "+token)
-		} else {
-			req.Header.Set("Authorization", token)
-		}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -716,21 +776,21 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 		return nil, errors.New("could not determine status endpoint")
 	}
 
+	client, auth, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	ps.mu.RLock()
-	authHeader := ps.stream.Delivery.PollReceiveMethod.AuthorizationHeader
-	ps.mu.RUnlock()
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
 	}
-	serverLog.Debug("POLL-RCV: Checking transmitter status", "sid", ps.stream.StreamConfiguration.Id, "url", statusUrl, "auth", maskAuthorization(authHeader))
+	serverLog.Debug("POLL-RCV: Checking transmitter status", "sid", ps.stream.StreamConfiguration.Id, "url", statusUrl, "auth", maskAuthorization(auth))
 
-	client := &http.Client{}
-	tlsSupport.CheckCaInstalled(client)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -865,8 +925,12 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	var acks []string
 	var setErrs map[string]goSetPoll.SetErrType
 
+	client, auth, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	if err != nil {
+		serverLog.Error("POLL-RCV: Failed to get authenticated client", "sid", sid, "error", err)
+	}
+
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
-	authorization := receiveMethod.AuthorizationHeader
 	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
 
@@ -956,7 +1020,8 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
 		parsed, httpStatus, err := goSetPoll.Poll(heartbeatCtx, pollReq, goSetPoll.ReceiverConfig{
 			EndpointURL:       eventUrl,
-			Authorization:     authorization,
+			Authorization:     auth,
+			HTTPClient:        client,
 			JWKS:              jwks,
 			ExpectedIssuer:    ps.stream.Iss,
 			ExpectedAudiences: ps.stream.Aud,

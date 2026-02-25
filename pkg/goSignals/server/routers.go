@@ -185,10 +185,10 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"ServerCreate",
+			"CreateServer",
 			http.MethodPost,
 			"/server",
-			h.sa.ServerCreate,
+			h.sa.CreateServer,
 			false,
 		},
 		Route{
