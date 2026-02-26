@@ -145,44 +145,74 @@ func (sa *SignalsApplication) CloseReceiver(sid string) {
 
 }
 
-func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
+// getHTTPClientForWellKnownEndpoint returns an HTTP client for fetching well-known configuration endpoints
+// It applies the server's TLS configuration if a TxAlias is configured
+func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Context, stream *model.StreamStateRecord) *http.Client {
 	conf := stream.StreamConfiguration
-	// 1. Try TxAlias (New preferred method)
+
+	// Try to get server configuration for TLS settings
 	if conf.TxAlias != nil && *conf.TxAlias != "" {
 		server, err := sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
 		if err == nil && server != nil {
-			if server.OAuthClientConfig != nil {
-				cfg := oauthclient.Config{
-					TokenURL:     server.OAuthClientConfig.TokenURL,
-					ClientID:     server.OAuthClientConfig.ClientID,
-					ClientSecret: server.OAuthClientConfig.ClientSecret,
-					Audience:     server.OAuthClientConfig.Audience,
-					Resource:     server.OAuthClientConfig.Resource,
-					Scopes:       server.OAuthClientConfig.Scopes,
-				}
-
-				// Use GetClientCredentialsClient which handles caching of managers and tokens
-				client, err := oauthclient.GetClientCredentialsClient(ctx, cfg)
-				if err == nil {
-					return client, "", nil
-				}
-				serverLog.Error("RCV: Failed to get OAuth client credentials client", "alias", *conf.TxAlias, "error", err)
-			}
-
-			// Fallback to static token from server
-			if server.ClientToken != nil && *server.ClientToken != "" {
-				client := &http.Client{}
-				tlsSupport.CheckCaInstalled(client)
-				token := *server.ClientToken
-				if !strings.Contains(token, " ") {
-					return client, "Bearer " + token, nil
-				}
-				return client, token, nil
-			}
+			client := oauthClient.GetBaseHTTPClientForServer(server)
+			client.Timeout = 10 * time.Second
+			return client
 		}
 	}
 
-	// 2. Backward compatibility: TxToken
+	// Fallback to default client with CA check
+	client := &http.Client{Timeout: 10 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	return client
+}
+
+func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
+	conf := stream.StreamConfiguration
+	var server *model.Server
+	var err error
+
+	// 1. Try TxAlias (New preferred method) - get server configuration first
+	if conf.TxAlias != nil && *conf.TxAlias != "" {
+		server, err = sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+		if err != nil || server == nil {
+			serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
+			server = nil // ensure nil if lookup failed
+		}
+	}
+
+	// If we have a server, use it for OAuth or static token with proper TLS
+	if server != nil {
+		// Try OAuth client credentials first
+		if server.OAuthClientConfig != nil {
+			cfg := oauthClient.Config{
+				TokenURL:     server.OAuthClientConfig.TokenURL,
+				ClientID:     server.OAuthClientConfig.ClientID,
+				ClientSecret: server.OAuthClientConfig.ClientSecret,
+				Audience:     server.OAuthClientConfig.Audience,
+				Resource:     server.OAuthClientConfig.Resource,
+				Scopes:       server.OAuthClientConfig.Scopes,
+			}
+
+			// Use GetClientCredentialsClient which handles caching and applies server TLS settings
+			client, err := oauthClient.GetClientCredentialsClient(ctx, cfg, server)
+			if err == nil {
+				return client, "", nil
+			}
+			serverLog.Error("RCV: Failed to get OAuth client credentials client", "alias", *conf.TxAlias, "error", err)
+		}
+
+		// Fallback to static token from server with proper TLS
+		if server.ClientToken != nil && *server.ClientToken != "" {
+			client := oauthClient.GetBaseHTTPClientForServer(server)
+			token := *server.ClientToken
+			if !strings.Contains(token, " ") {
+				return client, "Bearer " + token, nil
+			}
+			return client, token, nil
+		}
+	}
+
+	// 2. Backward compatibility: TxToken (no server object, use default TLS)
 	if conf.TxToken != nil && *conf.TxToken != "" {
 		client := &http.Client{}
 		tlsSupport.CheckCaInstalled(client)
@@ -195,14 +225,26 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 
 	// 3. Fallback for Polling Receiver (legacy delivery method auth)
 	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
-		client := &http.Client{}
-		tlsSupport.CheckCaInstalled(client)
+		// If we have a server, use its TLS settings; otherwise use default
+		var client *http.Client
+		if server != nil {
+			client = oauthClient.GetBaseHTTPClientForServer(server)
+		} else {
+			client = &http.Client{}
+			tlsSupport.CheckCaInstalled(client)
+		}
 		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, nil
 	}
 
 	// Default client without extra authorization
-	client := &http.Client{}
-	tlsSupport.CheckCaInstalled(client)
+	// Use server TLS settings if available
+	var client *http.Client
+	if server != nil {
+		client = oauthClient.GetBaseHTTPClientForServer(server)
+	} else {
+		client = &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
+	}
 	return client, "", nil
 }
 
@@ -481,8 +523,7 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 	}
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
-		client := &http.Client{Timeout: 10 * time.Second}
-		tlsSupport.CheckCaInstalled(client)
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer handleRespClose(resp)
@@ -527,8 +568,7 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 	}
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
-		client := &http.Client{Timeout: 10 * time.Second}
-		tlsSupport.CheckCaInstalled(client)
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer handleRespClose(resp)
@@ -692,7 +732,7 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 
 	// Step a: Use TxWellKnownUrl if defined.
 	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
-		client := &http.Client{Timeout: 10 * time.Second}
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
 		resp, err := client.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
 			defer handleRespClose(resp)

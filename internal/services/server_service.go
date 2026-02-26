@@ -8,7 +8,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
-	oauthclient "github.com/i2-open/i2goSignals/internal/oauthClient"
+	"github.com/i2-open/i2goSignals/internal/oauthClient"
 )
 
 var srvLog = logger.Sub("SERVICE")
@@ -31,14 +31,19 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 		return ErrServerAlreadyExists
 	}
 
-	if server.OAuthClientConfig != nil {
+	switch server.GetAuthMode() {
+	case model.AuthModeClient:
 		if err := s.validateOAuthClientConfig(ctx, server); err != nil {
 			srvLog.Warn("Failed to validate OAuth client config", "alias", server.Alias, "err", err)
 			return err
 		}
-	} else if (server.ClientToken == nil || *server.ClientToken == "") && (server.IatToken == nil || *server.IatToken == "") {
+	case model.AuthModeSts:
+		srvLog.Warn("Authentication mode (e.g. STS) not supported for SSF servers", "alias", server.Alias, "err", err)
 		return errors.New("either OAuthClientConfig, ClientToken, or IatToken must be provided")
+	default:
 	}
+
+	// We are assuming the server was previously validated by the client. We may still need to deal with connectivity issues where the admin server can reach the SSF server but this server cannot.
 
 	return s.serverDAO.Create(ctx, server)
 }
@@ -85,16 +90,7 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 	if server.OAuthClientConfig == nil {
 		return nil
 	}
-
-	if server.OAuthClientConfig.TokenURL == "" {
-		tokenURL, err := oauthclient.DiscoverTokenURL(ctx, server.Host)
-		if err != nil {
-			return err
-		}
-		server.OAuthClientConfig.TokenURL = tokenURL
-	}
-
-	cfg := oauthclient.Config{
+	cfg := oauthClient.Config{
 		TokenURL:     server.OAuthClientConfig.TokenURL,
 		ClientID:     server.OAuthClientConfig.ClientID,
 		ClientSecret: server.OAuthClientConfig.ClientSecret,
@@ -102,8 +98,16 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 		Resource:     server.OAuthClientConfig.Resource,
 		Scopes:       server.OAuthClientConfig.Scopes,
 	}
+	if server.OAuthClientConfig.TokenURL == "" {
+		tokenURL, err := oauthClient.DiscoverTokenURL(ctx, server.Host, nil)
+		if err != nil {
+			return err
+		}
+		server.OAuthClientConfig.TokenURL = tokenURL
+		cfg.TokenURL = tokenURL
+	}
 
-	return oauthclient.ValidateClientCredentials(ctx, cfg)
+	return oauthClient.ValidateClientCredentials(ctx, cfg, nil)
 }
 
 func (s *ServerService) DeleteServer(ctx context.Context, id string) error {

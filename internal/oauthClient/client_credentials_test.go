@@ -1,4 +1,4 @@
-package oauthclient
+package oauthClient
 
 import (
 	"encoding/json"
@@ -39,7 +39,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 		Scopes:       []string{"read", "write"},
 	}
 
-	err := ValidateClientCredentials(t.Context(), cfg)
+	err := ValidateClientCredentials(t.Context(), cfg, nil)
 	assert.NoError(t, err)
 }
 
@@ -68,7 +68,7 @@ func TestDiscoverTokenURL(t *testing.T) {
 	}))
 	defer resServer.Close()
 
-	tokenURL, err := DiscoverTokenURL(t.Context(), resServer.URL)
+	tokenURL, err := DiscoverTokenURL(t.Context(), resServer.URL, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, "http://as.example.com/token", tokenURL)
 }
@@ -93,14 +93,14 @@ func TestGetClientCredentialsClient_Caching(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	client1, err := GetClientCredentialsClient(ctx, cfg)
+	client1, err := GetClientCredentialsClient(ctx, cfg, nil)
 	assert.NoError(t, err)
 
 	_, err = client1.Get("http://example.com")
 	assert.NoError(t, err)
 	assert.Equal(t, 1, callCount)
 
-	client2, err := GetClientCredentialsClient(ctx, cfg)
+	client2, err := GetClientCredentialsClient(ctx, cfg, nil)
 	assert.NoError(t, err)
 	assert.Same(t, client1, client2)
 

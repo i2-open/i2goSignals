@@ -1,4 +1,4 @@
-package oauthclient
+package oauthClient
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/internal/model"
 	"golang.org/x/oauth2"
 )
 
@@ -287,7 +288,7 @@ func cacheKey(subjectToken string, scopes []string, resource string) string {
 // GetClientCredentialsHTTPClient returns an http.Client that uses an oauth2.Transport with a TokenSource that
 // performs an OAuth Client Credentials flow for the provided scopes, and automatically refreshes when expired.
 // resource allows per-call selection of the protected resource identifier. If empty, the Manager's default (from Config.Resource) is used.
-func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []string, resource string) (*http.Client, error) {
+func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []string, resource string, server *model.Server) (*http.Client, error) {
 	if m.cfg.TokenURL == "" || m.cfg.ClientID == "" || m.cfg.ClientSecret == "" {
 		return nil, errors.New("oauthclient: client credentials configuration missing")
 	}
@@ -310,9 +311,21 @@ func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []s
 	}
 	m.mu.Unlock()
 
+	// Create TLS configuration for both token endpoint and resource requests
+	tlsConfig := GetTlsConfigForServer(server)
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	// Create HTTP client with TLS config for token endpoint requests
+	tokenHTTPClient := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
 	base := &clientCredentialsSource{
 		ctx:          context.WithoutCancel(ctx),
-		hc:           m.hc,
+		hc:           tokenHTTPClient, // Use client with proper TLS config
 		tokenURL:     m.cfg.TokenURL,
 		clientID:     m.cfg.ClientID,
 		clientSecret: m.cfg.ClientSecret,
@@ -324,8 +337,8 @@ func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []s
 	// Wrap with ReuseTokenSource to cache the token in memory across requests.
 	ts := oauth2.ReuseTokenSource(nil, base)
 	oauthClient := &http.Client{
-		Transport:     &oauth2.Transport{Source: ts, Base: m.hc.Transport},
-		Timeout:       m.hc.Timeout,
+		Transport:     &oauth2.Transport{Source: ts, Base: transport},
+		Timeout:       30 * time.Second,
 		CheckRedirect: m.hc.CheckRedirect,
 		Jar:           m.hc.Jar,
 	}
@@ -405,12 +418,12 @@ func (s *clientCredentialsSource) fetch() (*oauth2.Token, error) {
 }
 
 // ValidateClientCredentials checks if a token can be obtained using the provided client credentials configuration.
-func ValidateClientCredentials(ctx context.Context, cfg Config) error {
+func ValidateClientCredentials(ctx context.Context, cfg Config, server *model.Server) error {
 	if cfg.TokenURL == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return errors.New("oauthclient: configuration missing")
 	}
 	m := NewManager(cfg, nil)
-	client, err := m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource)
+	client, err := m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource, server)
 	if err != nil {
 		return err
 	}
@@ -424,7 +437,7 @@ var (
 )
 
 // GetClientCredentialsClient returns a cached or new http.Client for the provided client credentials configuration.
-func GetClientCredentialsClient(ctx context.Context, cfg Config) (*http.Client, error) {
+func GetClientCredentialsClient(ctx context.Context, cfg Config, server *model.Server) (*http.Client, error) {
 	managersMu.Lock()
 	key := cfg.key()
 	m, ok := managers[key]
@@ -434,7 +447,7 @@ func GetClientCredentialsClient(ctx context.Context, cfg Config) (*http.Client, 
 	}
 	managersMu.Unlock()
 
-	return m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource)
+	return m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource, server)
 }
 
 func (c Config) key() string {
@@ -445,7 +458,7 @@ func (c Config) key() string {
 
 // DiscoverTokenURL uses the Server Host value to query the Protected Resource Metadata endpoint (RFC9728)
 // to obtain authorization server information and the TokenURL value (RFC8414).
-func DiscoverTokenURL(ctx context.Context, host string) (string, error) {
+func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (string, error) {
 	if host == "" {
 		return "", errors.New("host is empty")
 	}
@@ -467,7 +480,10 @@ func DiscoverTokenURL(ctx context.Context, host string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	if client == nil {
+		client = &http.Client{}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

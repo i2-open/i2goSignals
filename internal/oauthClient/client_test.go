@@ -1,4 +1,4 @@
-package oauthclient
+package oauthClient
 
 import (
 	"context"
