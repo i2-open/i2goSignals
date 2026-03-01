@@ -44,20 +44,20 @@ func (d *OneOfStreamConfigurationDelivery) DeepCopy() *OneOfStreamConfigurationD
 	}
 	res := &OneOfStreamConfigurationDelivery{}
 	if d.PushTransmitMethod != nil {
-		copy := *d.PushTransmitMethod
-		res.PushTransmitMethod = &copy
+		copyMethod := *d.PushTransmitMethod
+		res.PushTransmitMethod = &copyMethod
 	}
 	if d.PushReceiveMethod != nil {
-		copy := *d.PushReceiveMethod
-		res.PushReceiveMethod = &copy
+		copyMethod := *d.PushReceiveMethod
+		res.PushReceiveMethod = &copyMethod
 	}
 	if d.PollTransmitMethod != nil {
-		copy := *d.PollTransmitMethod
-		res.PollTransmitMethod = &copy
+		copyMethod := *d.PollTransmitMethod
+		res.PollTransmitMethod = &copyMethod
 	}
 	if d.PollReceiveMethod != nil {
-		copy := *d.PollReceiveMethod
-		res.PollReceiveMethod = &copy
+		copyMethod := *d.PollReceiveMethod
+		res.PollReceiveMethod = &copyMethod
 	}
 	return res
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/segmentio/ksuid"
 )
@@ -475,7 +476,7 @@ func (rps *ReceiverPushStream) initiateVerification() {
 		rps.fallbackToStatusCheck()
 		return
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		serverLog.Warn("PUSH-RCV: Verification request unauthorized", "sid", rps.stream.StreamConfiguration.Id)
@@ -526,7 +527,7 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 			if resp.StatusCode == http.StatusOK {
 				var txConfig model.TransmitterConfiguration
 				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
@@ -571,7 +572,7 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 			if resp.StatusCode == http.StatusOK {
 				var txConfig model.TransmitterConfiguration
 				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
@@ -620,7 +621,7 @@ func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*mod
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status endpoint returned %d", resp.StatusCode)
@@ -735,7 +736,7 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
 		resp, err := client.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil {
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 			if resp.StatusCode == http.StatusOK {
 				var txConfig model.TransmitterConfiguration
 				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
@@ -804,12 +805,6 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	return ""
 }
 
-func handleRespClose(resp *http.Response) {
-	if resp != nil {
-		_ = resp.Body.Close()
-	}
-}
-
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
 	statusUrl := ps.getStatusEndpoint()
 	if statusUrl == "" {
@@ -835,7 +830,7 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	if err != nil {
 		return nil, err
 	}
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status check failed with status %d", resp.StatusCode)

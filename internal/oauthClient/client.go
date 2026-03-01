@@ -18,6 +18,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"golang.org/x/oauth2"
 )
 
@@ -205,7 +206,7 @@ func (s *tokenExchangeSource) exchange() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, errors.New("token exchange failed: " + resp.Status + ": " + string(b))
@@ -235,7 +236,7 @@ func (s *tokenExchangeSource) refreshWithRefreshToken(refreshToken string) (*oau
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, errors.New("token refresh failed: " + resp.Status + ": " + string(b))
@@ -405,7 +406,7 @@ func (s *clientCredentialsSource) fetch() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, errors.New("client credentials flow failed: " + resp.Status + ": " + string(b))
@@ -489,7 +490,7 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("protected resource metadata request failed with status %d", resp.StatusCode)
@@ -556,7 +557,7 @@ func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
+		defer httpSupport.HandleRespClose(resp)
 
 		if resp.StatusCode == http.StatusOK {
 			var metadata struct {

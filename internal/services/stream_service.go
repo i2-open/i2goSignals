@@ -20,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -157,7 +158,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
 			}
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 			if resp.StatusCode != http.StatusOK {
 				return model.StreamConfiguration{}, fmt.Errorf("transmitter configuration returned status %d", resp.StatusCode)
 			}
@@ -205,7 +206,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 				ssLog.Error("failed to submit registration request to transmitter", "error", err)
 				return model.StreamConfiguration{}, fmt.Errorf("failed to submit registration request to transmitter: %v", err)
 			}
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 
 			// parse the response and handle any errors. If they occur return a detailed error
 			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -324,7 +325,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
 		}
-		defer handleRespClose(resp)
+		defer httpSupport.HandleRespClose(resp)
 		if resp.StatusCode != http.StatusOK {
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
 				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
@@ -404,7 +405,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 			return model.StreamConfiguration{}, fmt.Errorf("failed to submit registration request to transmitter: %v", err)
 		}
-		defer handleRespClose(resp)
+		defer httpSupport.HandleRespClose(resp)
 
 		// parse the response and handle any errors. If they occur return a detailed error
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -768,10 +769,4 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	}
 
 	return nil
-}
-
-func handleRespClose(resp *http.Response) {
-	if resp != nil {
-		_ = resp.Body.Close()
-	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
@@ -68,14 +69,14 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	resp, err = http.Get(tryUrl.String())
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		if strings.Contains(err.Error(), "gave HTTP response") {
 			tryUrl.Scheme = "http"
 			serverUrl.Scheme = "http"
 			fmt.Println("Warning: HTTPS not supported trying HTTP at: " + tryUrl.String())
 			resp, err = http.Get(tryUrl.String())
-			defer handleRespClose(resp)
+			defer httpSupport.HandleRespClose(resp)
 			if err != nil {
 				return err
 			}
@@ -100,7 +101,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		iatUrl, _ := serverUrl.Parse("/iat")
 		fmt.Println("Obtaining authorization...")
 		resp, err = http.Get(iatUrl.String())
-		defer handleRespClose(resp)
+		defer httpSupport.HandleRespClose(resp)
 		if resp.StatusCode != http.StatusOK {
 			fmt.Println("Error: unable to obtain registration IAT token")
 			return err
@@ -129,7 +130,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		req.Header.Set("Authorization", "Bearer "+server.IatToken)
 		client := http.Client{}
 		resp, err = client.Do(req)
-		defer handleRespClose(resp)
+		defer httpSupport.HandleRespClose(resp)
 		if err != nil {
 			return err
 		}
@@ -727,7 +728,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 
 	client := http.Client{}
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -825,7 +826,7 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -875,7 +876,7 @@ func (g *CreateIatCmd) Run(c *CLI) error {
 	client := http.Client{}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1086,7 +1087,7 @@ func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	client := http.Client{}
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1233,7 +1234,7 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1325,7 +1326,7 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 		client := http.Client{}
 		resp, err := client.Do(req)
-		defer handleRespClose(resp)
+		defer httpSupport.HandleRespClose(resp)
 		if err != nil {
 			return err
 		}
@@ -1397,7 +1398,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 
 	client := http.Client{}
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1732,7 +1733,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	req.Header.Set("Content-Type", "application/secevent+jwt")
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		return err
 	}
@@ -1781,10 +1782,4 @@ func parseMode(param string) string {
 		mode = model.RouteModePublish
 	}
 	return mode
-}
-
-func handleRespClose(resp *http.Response) {
-	if resp != nil {
-		_ = resp.Body.Close()
-	}
 }

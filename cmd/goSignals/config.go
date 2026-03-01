@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 )
 
 var ConfigFile = "config.json"
@@ -166,7 +167,7 @@ func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*mo
 		handleRespClose(resp)
 		return nil, errors.New(fmt.Sprintf("Error retrieving configuration for %s: %s", stream.Alias, resp.Status))
 	}
-	defer handleRespClose(resp)
+	defer httpSupport.HandleRespClose(resp)
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	var config model.StreamConfiguration
