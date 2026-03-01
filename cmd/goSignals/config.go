@@ -164,7 +164,7 @@ func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*mo
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		handleRespClose(resp)
+		httpSupport.HandleRespClose(resp)
 		return nil, errors.New(fmt.Sprintf("Error retrieving configuration for %s: %s", stream.Alias, resp.Status))
 	}
 	defer httpSupport.HandleRespClose(resp)
