@@ -48,6 +48,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.ModifiedAt = mod.ModifiedAt
 }
 
+// GetType returns the delivery method for the stream state record. Returns one of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll.
 func (ss *StreamStateRecord) GetType() string {
 	return ss.Delivery.GetMethod()
 }
@@ -61,15 +62,33 @@ func (ss *StreamStateRecord) IsReceiver() bool {
 	}
 }
 
+func (ss *StreamStateRecord) HasTxServer() bool {
+	if ss.TxAlias != nil && *ss.TxAlias != "" {
+		return true
+	}
+	if ss.TxWellKnownUrl != nil && *ss.TxWellKnownUrl != "" {
+		return true
+	}
+	return false
+}
+
 func (ss *StreamStateRecord) GetRouteMode() string {
 	return ss.StreamConfiguration.RouteMode
 }
 
 const (
-	DeliveryPoll        = "urn:ietf:rfc:8936"
-	DeliveryPush        = "urn:ietf:rfc:8935"
-	ReceivePoll         = "urn:ietf:rfc:8936:receive"
-	ReceivePush         = "urn:ietf:rfc:8935:receive"
+	// DeliveryPoll indicates that a stream delivers events using HTTP Set Delivery via Polling using HTTP GET by the receiver. It defines an SSF transmitter.
+	DeliveryPoll = "urn:ietf:rfc:8936"
+
+	// DeliveryPush indicates that a stream delivers events using HTTP Set Delivery via Pushing using HTTP POST by the transmitter. It defines an SSF transmitter.
+	DeliveryPush = "urn:ietf:rfc:8935"
+
+	// ReceivePoll indicates that a stream receives events using HTTP Set Delivery via Polling using HTTP GET by the receiver. It defines an SSF receiver. This is used by goSignals to define the receiver half of a transmitter/receiver pair.
+	ReceivePoll = "urn:ietf:rfc:8936:receive"
+
+	// ReceivePush indicates that a stream receives events using HTTP Set Delivery via PUSH using HTTP POST by the transmitter. It defines an SSF receiver. This is used by goSignals to define the receiver half of a transmitter/receiver pair.
+	ReceivePush = "urn:ietf:rfc:8935:receive"
+
 	StreamStateEnabled  = "enabled"
 	StreamStatePause    = "paused"
 	StreamStateDisable  = "disabled"

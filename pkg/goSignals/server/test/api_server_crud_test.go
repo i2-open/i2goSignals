@@ -15,9 +15,10 @@ import (
 
 type ApiServerCrudTestSuite struct {
 	suite.Suite
-	sa  *ssef.SignalsApplication
-	ts  *httptest.Server
-	iat string
+	sa        *ssef.SignalsApplication
+	ts        *httptest.Server
+	ssfServer *httptest.Server
+	iat       string
 }
 
 func (s *ApiServerCrudTestSuite) SetupSuite() {
@@ -25,6 +26,13 @@ func (s *ApiServerCrudTestSuite) SetupSuite() {
 	s.NoError(err)
 	s.sa = ssef.NewApplication(provider, "")
 	s.ts = httptest.NewServer(s.sa.Handler)
+	s.ssfServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/ssf-configuration" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 
 	iat, err := s.sa.Auth.IssueProjectIat(nil)
 	s.NoError(err)
@@ -33,6 +41,7 @@ func (s *ApiServerCrudTestSuite) SetupSuite() {
 
 func (s *ApiServerCrudTestSuite) TearDownSuite() {
 	s.ts.Close()
+	s.ssfServer.Close()
 	s.sa.Shutdown()
 }
 
@@ -42,7 +51,7 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	server := model.Server{
 		Alias:       "crud-server",
 		Type:        model.ServerTypeGosignals,
-		Host:        "https://crud.example.com",
+		Host:        s.ssfServer.URL,
 		ClientToken: &token,
 	}
 	body, _ := json.Marshal(server)
@@ -66,7 +75,7 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	s.Equal(server.Host, retrieved.Host)
 
 	// 3. Update server
-	retrieved.Host = "https://updated.example.com"
+	retrieved.Host = s.ssfServer.URL
 	updateBody, _ := json.Marshal(retrieved)
 	req, _ = http.NewRequest(http.MethodPut, s.ts.URL+"/server/crud-server", bytes.NewBuffer(updateBody))
 	req.Header.Set("Authorization", "Bearer "+s.iat)
@@ -77,7 +86,7 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	var updated model.Server
 	err = json.NewDecoder(resp.Body).Decode(&updated)
 	s.NoError(err)
-	s.Equal("https://updated.example.com", updated.Host)
+	s.Equal(s.ssfServer.URL, updated.Host)
 
 	// 4. Update alias (and check conflict)
 	// Create another server first
@@ -85,7 +94,7 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	server2 := model.Server{
 		Alias:       "other-server",
 		Type:        model.ServerTypeGosignals,
-		Host:        "https://other.example.com",
+		Host:        s.ssfServer.URL,
 		ClientToken: &token2,
 	}
 	body2, _ := json.Marshal(server2)

@@ -78,7 +78,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 
 		// Stream is a Polling receiver
 		if stream.GetType() == model.ReceivePoll {
-			sa.handleClientPollReceiverLocked(&stream)
+			sa.handleClientPollReceiver(&stream)
 			currentPollClients[stream.StreamConfiguration.Id] = true
 		}
 	}
@@ -262,10 +262,10 @@ func (sa *SignalsApplication) HandleReceiver(streamState *model.StreamStateRecor
 		}
 		return nil // nothing to do
 	}
-	return sa.handleClientPollReceiverLocked(streamState)
+	return sa.handleClientPollReceiver(streamState)
 }
 
-func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.StreamStateRecord) *ClientPollStream {
+func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
 	ps, ok := sa.pollClients[streamState.StreamConfiguration.Id]
 	if !ok {
 		ctx, cancel := context.WithCancel(context.Background())

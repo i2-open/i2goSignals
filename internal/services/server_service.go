@@ -3,7 +3,14 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"reflect"
+
+	"strings"
+
+	"slices"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
@@ -38,12 +45,19 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 			return err
 		}
 	case model.AuthModeSts:
-		srvLog.Warn("Authentication mode (e.g. STS) not supported for SSF servers", "alias", server.Alias, "err", err)
+		srvLog.Warn("Authentication mode (e.g. STS) not supported for SSF streams", "alias", server.Alias, "err", err)
 		return errors.New("either OAuthClientConfig, ClientToken, or IatToken must be provided")
-	default:
+	case model.AuthModeToken:
+		if err := s.validateTokenConfig(ctx, server); err != nil {
+			srvLog.Warn("Failed to validate client token config", "alias", server.Alias, "err", err)
+			return err
+		}
+	case model.AuthModeIaT:
+		srvLog.Info("Authentication using an IAT for a Server cannot be validated in advance.", "alias", server.Alias)
+		// TODO: Validate IAT token based config? Issue is that validation of an IAT may cause IAT to expire
 	}
 
-	// We are assuming the server was previously validated by the client. We may still need to deal with connectivity issues where the admin server can reach the SSF server but this server cannot.
+	// We are assuming the client previously validated the server. We may still need to deal with connectivity issues where the admin server can reach the SSF server but this server cannot.
 
 	return s.serverDAO.Create(ctx, server)
 }
@@ -107,7 +121,18 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 		cfg.TokenURL = tokenURL
 	}
 
-	return oauthClient.ValidateClientCredentials(ctx, cfg, nil)
+	client, err := oauthClient.GetClientCredentialsClient(ctx, cfg, server)
+	if err != nil {
+		srvLog.Warn("Failed to obtain client credentials", "alias", server.Alias, "server", server.Host, "err", err)
+		return err
+	}
+	srvLog.Debug("Obtained client token transmitter", "alias", server.Alias, "server", server.Host, "tokenUrl", cfg.TokenURL)
+
+	err = CheckTransmitterWellknown(ctx, client, "", server)
+	if err != nil {
+		srvLog.Warn("Failed to validate transmitter server configuration", "alias", server.Alias, "err", err)
+	}
+	return err
 }
 
 func (s *ServerService) DeleteServer(ctx context.Context, id string) error {
@@ -116,4 +141,71 @@ func (s *ServerService) DeleteServer(ctx context.Context, id string) error {
 
 func (s *ServerService) ListServers(ctx context.Context) ([]model.Server, error) {
 	return s.serverDAO.List(ctx)
+}
+
+func (s *ServerService) validateTokenConfig(ctx context.Context, server *model.Server) error {
+	client := oauthClient.GetBaseHTTPClientForServer(server)
+	token := *server.ClientToken
+	if !strings.Contains(token, " ") {
+		token = "Bearer " + token
+	}
+
+	return CheckTransmitterWellknown(ctx, client, token, server)
+}
+
+// CheckTransmitterWellknown checks that we are able to communicate with the transmitter host by querying its well-known OpenID configuration endpoint
+func CheckTransmitterWellknown(ctx context.Context, client *http.Client, auth string, server *model.Server) error {
+	serverURL, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	if serverURL.Scheme != "https" && serverURL.Scheme != "http" {
+		serverURL.Scheme = "https"
+	}
+	var candidates []string
+	basePath := serverURL.Path
+	if idx := strings.Index(serverURL.Path, "/.well-known"); idx != -1 {
+		candidates = append(candidates, serverURL.Path)
+		basePath = serverURL.Path[:idx]
+	}
+	basePath = strings.TrimSuffix(basePath, "/")
+	calculatedPath := basePath + "/.well-known/ssf-configuration"
+	if !slices.Contains(candidates, calculatedPath) {
+		candidates = append(candidates, calculatedPath)
+	}
+
+	success := false
+	var resp *http.Response
+	var req *http.Request
+	for _, path := range candidates {
+		serverURL.Path = path
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, serverURL.String(), nil)
+		if err != nil {
+			return err
+		}
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		srvLog.Debug("Checking transmitter", "alias", server.Alias, "url", serverURL.String())
+		resp, err = client.Do(req)
+
+		if err != nil {
+			srvLog.Warn("Failed to connect to transmitter", "alias", server.Alias, "url", serverURL.String(), "err", err)
+			continue // this didn't work
+		}
+		_ = resp.Body.Close() // only interested in connectivity
+		if resp.StatusCode == 200 {
+			success = true
+			break
+		}
+	}
+	if !success {
+		errMsg := fmt.Sprintf("transmitter not reachable at %s", serverURL.String())
+		if err != nil {
+			errMsg = errMsg + fmt.Sprintf(" error: %s", err.Error())
+		}
+		return errors.New(errMsg)
+	}
+	srvLog.Debug("Transmitter well-known endpoint reachable", "alias", server.Alias, "url", serverURL.String())
+	return nil
 }

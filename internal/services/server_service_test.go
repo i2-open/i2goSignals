@@ -13,12 +13,24 @@ import (
 
 type ServerServiceTestSuite struct {
 	suite.Suite
-	service *ServerService
+	service   *ServerService
+	ssfServer *httptest.Server
 }
 
 func (s *ServerServiceTestSuite) SetupTest() {
 	dao := memory.NewServerDAO()
 	s.service = NewServerService(dao)
+	s.ssfServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/ssf-configuration" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+func (s *ServerServiceTestSuite) TearDownTest() {
+	s.ssfServer.Close()
 }
 
 func (s *ServerServiceTestSuite) TestCreateServer() {
@@ -26,6 +38,7 @@ func (s *ServerServiceTestSuite) TestCreateServer() {
 	server := &model.Server{
 		Alias:       "test-server",
 		Type:        model.ServerTypeGosignals,
+		Host:        s.ssfServer.URL,
 		ClientToken: &token,
 	}
 
@@ -36,6 +49,7 @@ func (s *ServerServiceTestSuite) TestCreateServer() {
 	server2 := &model.Server{
 		Alias:       "test-server",
 		Type:        model.ServerTypeSsf,
+		Host:        s.ssfServer.URL,
 		ClientToken: &token,
 	}
 	err = s.service.CreateServer(s.T().Context(), server2)
@@ -58,6 +72,7 @@ func (s *ServerServiceTestSuite) TestCRUD() {
 	server := &model.Server{
 		Alias:       "test-server",
 		Type:        model.ServerTypeGosignals,
+		Host:        s.ssfServer.URL,
 		ClientToken: &token,
 	}
 
@@ -105,6 +120,7 @@ func (s *ServerServiceTestSuite) TestCreateServer_OAuthValidation() {
 	server := &model.Server{
 		Alias: "oauth-server",
 		Type:  model.ServerTypeSsf,
+		Host:  s.ssfServer.URL,
 		OAuthClientConfig: &model.OAuthClientConfig{
 			TokenURL:     asServer.URL,
 			ClientID:     "client",
@@ -135,6 +151,8 @@ func (s *ServerServiceTestSuite) TestCreateServer_OAuthDiscovery() {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"authorization_servers": []string{asServer.URL},
 			})
+		} else if r.URL.Path == "/.well-known/ssf-configuration" {
+			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusNotFound)
 		}

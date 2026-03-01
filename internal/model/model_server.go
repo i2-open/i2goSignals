@@ -47,6 +47,7 @@ type OAuthClientConfig struct {
 	Scopes   []string // Scopes required to post events and manage streams for SSF capability
 }
 
+// GetAuthMode returns the type of authentication mode used to access the server. Returns one of AuthModeSts, AuthModeToken, AuthModeIaT, AuthModeClient.
 func (s *Server) GetAuthMode() string {
 	if s.OAuthClientConfig != nil {
 		return AuthModeClient
@@ -58,6 +59,16 @@ func (s *Server) GetAuthMode() string {
 		return AuthModeToken
 	}
 	return AuthModeSts
+}
+
+// HasAdminCredential checks if the server definition uses Admin credentials to generate access via STS. If true,
+// it means that the server can only be administered via goSignalsAdminServer. To allow goSignals to access and manage
+// an SSF stream, it must have a token credential or use the OAuth2 Client Credential flow.
+func (s *Server) HasAdminCredential() bool {
+	if s.GetAuthMode() == AuthModeSts {
+		return true
+	}
+	return false
 }
 
 func (s *Server) DeepCopy() *Server {

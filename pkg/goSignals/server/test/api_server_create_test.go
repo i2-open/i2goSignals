@@ -15,8 +15,9 @@ import (
 
 type ApiServerTestSuite struct {
 	suite.Suite
-	sa *ssef.SignalsApplication
-	ts *httptest.Server
+	sa        *ssef.SignalsApplication
+	ts        *httptest.Server
+	ssfServer *httptest.Server
 }
 
 func (s *ApiServerTestSuite) SetupSuite() {
@@ -24,10 +25,18 @@ func (s *ApiServerTestSuite) SetupSuite() {
 	s.NoError(err)
 	s.sa = ssef.NewApplication(provider, "")
 	s.ts = httptest.NewServer(s.sa.Handler)
+	s.ssfServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/ssf-configuration" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 }
 
 func (s *ApiServerTestSuite) TearDownSuite() {
 	s.ts.Close()
+	s.ssfServer.Close()
 	s.sa.Shutdown()
 }
 
@@ -40,7 +49,7 @@ func (s *ApiServerTestSuite) TestServerCreate() {
 	server := model.Server{
 		Alias:       "test-server",
 		Type:        model.ServerTypeGosignals,
-		Host:        "https://test.example.com",
+		Host:        s.ssfServer.URL,
 		ClientToken: &token,
 	}
 	body, _ := json.Marshal(server)

@@ -481,7 +481,9 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 	}
 
 	if client == nil {
-		client = &http.Client{}
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -547,7 +549,10 @@ func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
 			continue
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			continue
 		}
@@ -562,7 +567,6 @@ func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
 			}
 		}
 	}
-
 	return "", errors.New("token endpoint not found")
 }
 

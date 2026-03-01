@@ -62,6 +62,7 @@ func (d *OneOfStreamConfigurationDelivery) DeepCopy() *OneOfStreamConfigurationD
 	return res
 }
 
+// GetMethod returns the delivery method for the stream configuration. Returns one of DeliveryPush, DeliveryPoll, ReceivePush, ReceivePoll.
 func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
 	if d == nil {
 		return "DEFAULT"
