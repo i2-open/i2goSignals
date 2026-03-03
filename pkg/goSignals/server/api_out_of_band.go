@@ -17,8 +17,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -81,7 +82,7 @@ func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Re
 }
 
 func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
@@ -142,7 +143,7 @@ func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.
 }
 
 func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(request, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(request, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(writer, "Invalid permission", http.StatusForbidden)
 		return
@@ -240,7 +241,7 @@ func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http
 }
 
 func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
@@ -329,7 +330,7 @@ func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
 // IssuerProjectIat generates an Initial Access Auth (IAT) which can be used at the registration endpoint. The
 // token generated will have a unique projectId and scope of `register` that will allow individual clients
 // to register and access the stream management functions of the server for a particular project. If an existing
-// authorization is provided with scope authUtil.ScopeStreamAdmin, then the existing ProjectId is used. This
+// authorization is provided with scope authSupport.ScopeStreamAdmin, then the existing ProjectId is used. This
 // allows the creation of "fresh" IATs which can be used to register new clients in the same project (e.g.
 // because the current IAT is expired, or because separate IATs are desired.
 func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Request) {
@@ -337,7 +338,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 }
 
 func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
+	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
 		serverLog.Error("Error generating IAT", "error", err.Error())
@@ -357,7 +358,7 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 }
 
 func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister})
 	if stat != http.StatusOK {
 		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
 		http.Error(w, "Failed to register client. Invalid registration token", stat)
@@ -372,11 +373,11 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
-		scopes = append(scopes, authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery)
+		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
 	} else {
 		for _, v := range jsonRequest.Scopes {
 			switch v {
-			case authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery:
+			case authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery:
 				scopes = append(scopes, v)
 			default:
 			}
@@ -429,7 +430,7 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	prMeta := model.ProtectedResourceMetadata{
 		Resource:               &baseURl,
 		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin, authUtil.ScopeEventDelivery, authUtil.ScopeRegister},
+		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery, authSupport.ScopeRegister},
 		BearerMethodsSupported: []string{"header"},
 		ResourceName:           &name,
 	}
@@ -446,7 +447,7 @@ func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Re
 }
 
 func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -480,7 +481,7 @@ func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Requ
 }
 
 func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -538,7 +539,7 @@ func (sa *SignalsApplication) CreateServer(w http.ResponseWriter, r *http.Reques
 }
 
 func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -574,7 +575,7 @@ func (sa *SignalsApplication) ServerGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -608,7 +609,7 @@ func (sa *SignalsApplication) ServerUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -665,7 +666,7 @@ func (sa *SignalsApplication) ServerDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -704,7 +705,7 @@ func (sa *SignalsApplication) ServerList(w http.ResponseWriter, r *http.Request)
 }
 
 func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return

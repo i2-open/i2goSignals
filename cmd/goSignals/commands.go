@@ -12,10 +12,10 @@ import (
 	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v4"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -124,7 +124,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		as.Desc = cleanQuotes(as.Desc)
 		regUrl, _ := serverUrl.Parse("/register")
 		clientReg := model.RegisterParameters{
-			Scopes:      []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+			Scopes:      []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 			Email:       as.Email,
 			Description: as.Desc,
 		}

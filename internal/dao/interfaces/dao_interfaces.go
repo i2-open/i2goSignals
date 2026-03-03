@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 

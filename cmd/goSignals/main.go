@@ -12,7 +12,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/chzyer/readline"
 	"github.com/google/shlex"
-	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 

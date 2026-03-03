@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 // CertificateInfo holds displayable information about a TLS certificate

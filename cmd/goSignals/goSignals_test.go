@@ -15,15 +15,15 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
-	"github.com/i2-open/i2goSignals/internal/model"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -240,7 +240,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
 			Id:            bson.NewObjectID(),
 			ProjectIds:    []string{eat.ProjectId},
-			AllowedScopes: []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+			AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 			Email:         "test@test.com",
 			Description:   "server test",
 		}, eat.ProjectId, true)
@@ -254,7 +254,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		if cat == nil {
 			suite.T().Fatal("Error client token was nil.")
 		}
-		assert.True(suite.T(), cat.IsAuthorized("", []string{authUtil.ScopeStreamAdmin}), "Check is authorized for mgmt")
+		assert.True(suite.T(), cat.IsAuthorized("", []string{authSupport.ScopeStreamAdmin}), "Check is authorized for mgmt")
 		assert.Equal(suite.T(), project, cat.ProjectId, "Check project ids match")
 		instance.projectId = eat.ProjectId
 	}

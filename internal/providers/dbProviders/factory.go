@@ -5,9 +5,9 @@ import (
 
 	"os"
 
-	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 )
 
 var factoryLog = logger.Sub("dbProviders")

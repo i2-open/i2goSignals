@@ -13,8 +13,8 @@ import (
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -38,8 +38,8 @@ func TestStreamUpdate_ExternalToken(t *testing.T) {
 	instance.app.Auth.OAuthPubKeys = []*keyfunc.JWKS{jwks}
 
 	// Create OIDC Claims that match our scopes
-	claims := &authUtil.OidcClaims{
-		Scope: authUtil.ScopeStreamMgmt,
+	claims := &authSupport.OidcClaims{
+		Scope: authSupport.ScopeStreamMgmt,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "external-issuer",
 			Subject:   "test-user",

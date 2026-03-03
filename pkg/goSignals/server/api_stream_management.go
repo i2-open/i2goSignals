@@ -15,11 +15,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 
 	"github.com/gorilla/mux"
 )
@@ -38,7 +38,7 @@ func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) 
 }
 
 func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery, authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if status != http.StatusOK {
 		serverLog.Debug("GetStatus request received: error", "authCtx", "invalid", "status", status)
 		w.WriteHeader(status)
@@ -87,7 +87,7 @@ func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -190,7 +190,7 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -226,7 +226,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeRegister, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -280,7 +280,7 @@ func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -295,7 +295,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
-	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin}) {
+	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
@@ -369,7 +369,7 @@ func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamMgmt, authUtil.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -488,21 +488,21 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 		CriticalSubjectMembers:     nil,
 		ClientRegistrationEndpoint: regUri.String(),
 		SupportedScopes: map[string][]string{
-			"configuration_endpoint":       {authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
-			"status_endpoint":              {authUtil.ScopeStreamMgmt},
-			"add_subject_endpoint":         {authUtil.ScopeStreamMgmt},
-			"remove_subject_endpoint":      {authUtil.ScopeStreamMgmt},
-			"events":                       {authUtil.ScopeEventDelivery},
-			"verification_endpoint":        {authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt},
-			"poll":                         {authUtil.ScopeEventDelivery},
-			"client_registration_endpoint": {authUtil.ScopeRegister},
+			"configuration_endpoint":       {authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
+			"status_endpoint":              {authSupport.ScopeStreamMgmt},
+			"add_subject_endpoint":         {authSupport.ScopeStreamMgmt},
+			"remove_subject_endpoint":      {authSupport.ScopeStreamMgmt},
+			"events":                       {authSupport.ScopeEventDelivery},
+			"verification_endpoint":        {authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+			"poll":                         {authSupport.ScopeEventDelivery},
+			"client_registration_endpoint": {authSupport.ScopeRegister},
 		},
 		AuthorizationSchemes: []model.AuthScheme{
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
 		},
 		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt, authUtil.ScopeRegister},
+		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeRegister},
 		BearerMethodsSupported: []string{"header"},
 
 		GoSignalsVersion: goVersion,

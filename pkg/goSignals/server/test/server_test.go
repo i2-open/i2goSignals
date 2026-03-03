@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -153,7 +153,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
 		Id:            bson.ObjectID{},
 		ProjectIds:    []string{eat.ProjectId},
-		AllowedScopes: []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",
 		Description:   "server test",
 	}, eat.ProjectId, true)

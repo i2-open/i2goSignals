@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,7 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 }
 
 func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeStreamAdmin})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if stat != http.StatusOK || authCtx == nil {
 		if stat != http.StatusUnauthorized {
 			w.WriteHeader(stat)
@@ -123,7 +123,7 @@ func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request)
 }
 
 func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authUtil.ScopeEventDelivery})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 const (

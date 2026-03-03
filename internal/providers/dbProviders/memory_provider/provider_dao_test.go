@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 func TestMemoryProviderDAOOpen(t *testing.T) {

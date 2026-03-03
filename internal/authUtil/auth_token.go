@@ -14,9 +14,10 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
@@ -26,7 +27,7 @@ var authLog = logger.Sub("AUTH")
 type AuthContext struct {
 	StreamId  string
 	ProjectId string
-	Eat       *EventAuthToken
+	Eat       *authSupport.EventAuthToken
 }
 
 type AuthIssuer struct {
@@ -106,9 +107,9 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	if authCtx != nil {
 		projectId = authCtx.ProjectId
 	}
-	eat := EventAuthToken{
+	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    []string{ScopeRegister},
+		Scopes:    []string{authSupport.ScopeRegister},
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -127,11 +128,11 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
-	scopes := []string{ScopeStreamMgmt}
+	scopes := []string{authSupport.ScopeStreamMgmt}
 	if admin { // 'admin' allows creation and deletion instead of just update
-		scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt}
+		scopes = []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt}
 	}
-	eat := EventAuthToken{
+	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
 		Scopes:    scopes,
 		ClientId:  client.Id.Hex(),
@@ -153,7 +154,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
-	eat := EventAuthToken{
+	eat := authSupport.EventAuthToken{
 		StreamIds: []string{streamId},
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -166,7 +167,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 	if projectId != "" {
 		eat.ProjectId = projectId
 	}
-	eat.Scopes = []string{ScopeEventDelivery}
+	eat.Scopes = []string{authSupport.ScopeEventDelivery}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
@@ -228,12 +229,12 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 	tokenString = strings.TrimSpace(tokenString)
 	isAuthorized := false
 	for _, jwks := range a.OAuthPubKeys {
-		token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc)
+		token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc)
 		if err != nil {
 			authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
 			continue
 		}
-		if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
+		if claims, ok := token.Claims.(*authSupport.OidcClaims); ok && token.Valid {
 			isAuthorized = true
 			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
 			var hasScopes []string
@@ -262,7 +263,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 	for _, accepted := range scopesAccepted {
 		for _, role := range roles {
-			if strings.EqualFold(role, ScopeRoot) {
+			if strings.EqualFold(role, authSupport.ScopeRoot) {
 				return true
 			}
 			if strings.EqualFold(role, accepted) {
@@ -273,14 +274,14 @@ func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 	return false
 }
 
-// ParseAuthToken parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
-func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error) {
+// ParseAuthToken parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
+func (a *AuthIssuer) ParseAuthToken(tokenString string) (*authSupport.EventAuthToken, error) {
 	return a.ParseAuthTokenVerbose(tokenString, true)
 }
 
-// ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
+// ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
 // When verbose is false, it does not log "Error validating token"
-func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*EventAuthToken, error) {
+func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*authSupport.EventAuthToken, error) {
 	if a.PublicKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
 	}
@@ -289,7 +290,7 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*E
 	tokenString = strings.TrimSpace(tokenString)
 
 	valid := true
-	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, a.PublicKey.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, a.PublicKey.Keyfunc)
 	if err != nil {
 		if verbose {
 			authLog.Error("Error validating token", "error", err)
@@ -307,87 +308,12 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*E
 	// claimString := string(jsonByte)
 	// authLog.Println(claimString)
 	if token != nil {
-		if claims, ok := token.Claims.(*EventAuthToken); ok && valid {
+		if claims, ok := token.Claims.(*authSupport.EventAuthToken); ok && valid {
 			return claims, nil
 		}
 	}
 
 	return nil, err
-}
-
-const (
-	ScopeStreamMgmt    = "stream"
-	ScopeEventDelivery = "event"
-	ScopeStreamAdmin   = "admin"
-	ScopeRegister      = "reg"
-	ScopeRoot          = "root"
-	StreamAny          = "any"
-)
-
-// EventAuthToken is an internally issued token used for stream management by SSF clients.
-type EventAuthToken struct {
-	StreamIds []string `json:"streams,omitempty"`
-	ProjectId string   `json:"project_id"`
-	Scopes    []string `json:"roles,omitempty"`
-	ClientId  string   `json:"client_id,omitempty"`
-	jwt.RegisteredClaims
-	OAuthScope string `json:"scope,omitempty"`
-}
-
-// IsScopeMatch checks both Event token scopes array and oauth style space delimited scope claim
-func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
-	if t == nil {
-		return false
-	}
-	oauthScope := t.OAuthScope
-	oauthScopes := strings.Split(oauthScope, " ")
-	for _, acceptedScope := range scopesAccepted {
-		for _, scope := range t.Scopes {
-			if strings.EqualFold(scope, ScopeRoot) {
-				return true
-			}
-			if strings.EqualFold(scope, acceptedScope) {
-				return true
-			}
-
-		}
-		for _, scope := range oauthScopes {
-			if strings.
-				EqualFold(scope, ScopeRoot) {
-				return true
-			}
-			if strings.EqualFold(scope, acceptedScope) {
-				return true
-			}
-		}
-
-	}
-	return false
-}
-
-func (t *EventAuthToken) IsAuthorized(streamId string, scopesAccepted []string) bool {
-	if t == nil {
-		return false
-	}
-
-	scopeMatch := t.IsScopeMatch(scopesAccepted)
-	if streamId == "" {
-		// Cases where streamId is not needed
-		return scopeMatch
-	}
-	// if no value for streamId is in the token, assume any stream is ok
-	if len(t.StreamIds) == 0 {
-		return scopeMatch
-	}
-
-	// Auth restricts stream Id.  Check for a match
-	for _, v := range t.StreamIds {
-		if strings.EqualFold(v, streamId) || strings.EqualFold(v, StreamAny) {
-			return scopeMatch
-		}
-	}
-
-	return false
 }
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -418,70 +344,15 @@ func generateAlias(n int) string {
 	return sb.String()
 }
 
-// OidcClaims represents the claims from an OIDC token (from Keycloak)
-type OidcClaims struct {
-	Email             string `json:"email"`
-	PreferredUsername string `json:"preferred_username"`
-	Name              string `json:"name"`
-	GivenName         string `json:"given_name"`
-	FamilyName        string `json:"family_name"`
-	Scope             string `json:"scope"`
-	RealmAccess       struct {
-		Roles []string `json:"roles"`
-	} `json:"realm_access"`
-	jwt.RegisteredClaims
-}
-
 // ValidateOidcToken validates an OIDC token from Keycloak and returns the claims
 // This is used by the adminUI to authenticate users
-func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*OidcClaims, error) {
-	if a.PublicKey == nil {
-		return nil, errors.New("ERROR: No public key provided to validate OIDC token.")
-	}
-
-	// In case of cut/paste error, trim extra spaces
-	tokenString = strings.TrimSpace(tokenString)
-
-	valid := true
-	token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, a.PublicKey.Keyfunc)
-	if err != nil {
-		authLog.Error("Error validating OIDC token", "error", err)
-		valid = false
-	}
-
-	if claims, ok := token.Claims.(*OidcClaims); ok && valid {
-		return claims, nil
-	}
-
-	return nil, err
+func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*authSupport.OidcClaims, error) {
+	validator := authSupport.NewTokenValidator(a.PublicKey)
+	return validator.ValidateOidcToken(tokenString)
 }
 
 // ValidateOidcAuthorizationMiddleware is middleware to validate OIDC tokens from adminUI
 func (a *AuthIssuer) ValidateOidcAuthorizationMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorization := r.Header.Get("Authorization")
-
-		if authorization == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		parts := strings.Split(authorization, " ")
-		if len(parts) < 2 || parts[0] != "Bearer" {
-			http.Error(w, "Invalid authorization header", http.StatusUnauthorized)
-			return
-		}
-
-		claims, err := a.ValidateOidcToken(parts[1])
-		if err != nil {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		// Add user info to request context for downstream handlers
-		r.Header.Set("X-User-Email", claims.Email)
-		r.Header.Set("X-User-Name", claims.PreferredUsername)
-
-		next.ServeHTTP(w, r)
-	})
+	validator := authSupport.NewTokenValidator(a.PublicKey)
+	return validator.ValidateOidcAuthorizationMiddleware(next)
 }

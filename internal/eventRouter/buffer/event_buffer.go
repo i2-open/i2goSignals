@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var bLog = logger.Sub("BUFFER")

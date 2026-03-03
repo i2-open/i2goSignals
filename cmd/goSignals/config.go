@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var ConfigFile = "config.json"

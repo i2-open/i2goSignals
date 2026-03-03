@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 type StreamDAOMemory struct {

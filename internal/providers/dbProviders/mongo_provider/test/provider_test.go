@@ -9,9 +9,10 @@ import (
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -105,7 +106,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 		ProjectIds:    []string{s.project},
 		Email:         "admin@example.com",
 		Description:   "this is a test",
-		AllowedScopes: []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery},
+		AllowedScopes: []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
 	}
 
 	resp := s.provider.RegisterClient(client, s.project)
