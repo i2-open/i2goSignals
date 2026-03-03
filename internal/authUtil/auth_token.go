@@ -1,11 +1,10 @@
 package authUtil
 
 import (
+	"context"
 	"crypto/rsa"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	mathRand "math/rand"
 	"net/http"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
 var authLog = logger.Sub("AUTH")
@@ -55,12 +55,6 @@ func (a *AuthIssuer) GetOAuthServers() []string {
 	return a.OAuthServer
 }
 
-// oidcDiscovery represents a minimal subset of the OpenID Provider Configuration
-// as defined in https://openid.net/specs/openid-connect-discovery-1_0.html
-type oidcDiscovery struct {
-	JWKSURI string `json:"jwks_uri"`
-}
-
 // loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
 // and caches them in AuthIssuer.OAuthPubKeys for later validation.
 func (a *AuthIssuer) loadOAuthJWKS() error {
@@ -77,28 +71,12 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 	tlsSupport.CheckCaInstalled(client)
 	for _, srv := range servers {
 		// Expect srv to be the discovery URL (e.g., .../.well-known/openid-configuration)
-		// Fetch discovery doc
-		var resp *http.Response
-		resp, err = client.Get(srv)
+		disc, err := wellKnownSupport.Fetch[wellKnownSupport.OIDCConfiguration](context.Background(), client, srv)
 		if err != nil {
 			authLog.Error("Failed to fetch OIDC discovery", "srv", srv, "error", err)
 			continue
 		}
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			authLog.Error("Failed to read OIDC discovery", "srv", srv, "error", err)
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			authLog.Error("OIDC discovery error", "status", resp.StatusCode, "srv", srv, "body", string(body))
-			continue
-		}
-		var disc oidcDiscovery
-		if err := json.Unmarshal(body, &disc); err != nil {
-			authLog.Error("Failed to parse OIDC discovery", "srv", srv, "error", err)
-			continue
-		}
+
 		if disc.JWKSURI == "" {
 			authLog.Error("OIDC discovery missing jwks_uri", "srv", srv)
 			continue

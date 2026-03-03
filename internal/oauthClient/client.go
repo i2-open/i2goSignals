@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,6 +19,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 	"golang.org/x/oauth2"
 )
 
@@ -534,43 +534,15 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 		return "", errors.New("host is empty")
 	}
 
-	// Ensure host has a scheme
-	hostURL := host
-	if !strings.HasPrefix(hostURL, "http://") && !strings.HasPrefix(hostURL, "https://") {
-		hostURL = "https://" + hostURL
-	}
-
-	u, err := url.Parse(hostURL)
-	if err != nil {
-		return "", err
-	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + "/.well-known/oauth-protected-resource"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
-	}
-
 	if client == nil {
 		client = &http.Client{
 			Timeout: 30 * time.Second,
 		}
 		tlsSupport.CheckCaInstalled(client)
 	}
-	resp, err := client.Do(req)
+
+	metadata, err := wellKnownSupport.FetchProtectedResourceMetadata(ctx, client, host)
 	if err != nil {
-		return "", err
-	}
-	defer httpSupport.HandleRespClose(resp)
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("protected resource metadata request failed with status %d", resp.StatusCode)
-	}
-
-	var metadata struct {
-		AuthorizationServers []string `json:"authorization_servers"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		return "", err
 	}
 
@@ -590,56 +562,26 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 }
 
 func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
-	// RFC8414: /.well-known/oauth-authorization-server
-	// OIDC: /.well-known/openid-configuration
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	tlsSupport.CheckCaInstalled(client)
 
-	asURL, err := url.Parse(as)
-	if err != nil {
-		return "", err
+	// Try OAuth 2.0 Authorization Server Metadata (RFC 8414)
+	metadata, err := wellKnownSupport.FetchWellKnown[struct {
+		TokenEndpoint string `json:"token_endpoint"`
+	}](ctx, client, as, wellKnownSupport.OAuthAuthorizationServerPath)
+
+	if err == nil && metadata.TokenEndpoint != "" {
+		return metadata.TokenEndpoint, nil
 	}
 
-	paths := []string{
-		"/.well-known/oauth-authorization-server",
-		"/.well-known/openid-configuration",
+	// Try OpenID Provider Configuration (OIDC)
+	oidcMetadata, err := wellKnownSupport.FetchOpenIDConfiguration(ctx, client, as)
+	if err == nil && oidcMetadata.TokenEndpoint != "" {
+		return oidcMetadata.TokenEndpoint, nil
 	}
 
-	// RFC8414 says if the AS URI contains a path, the .well-known should be inserted.
-	// But it also says many implementations just append it.
-	// "If the issuer identifier contains no path component, the metadata is at ..."
-	// "If the issuer identifier contains a path component, the metadata is at ..."
-
-	originalPath := asURL.Path
-	for _, p := range paths {
-		if originalPath == "" || originalPath == "/" {
-			asURL.Path = p
-		} else {
-			asURL.Path = strings.TrimSuffix(originalPath, "/") + p
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, asURL.String(), nil)
-		if err != nil {
-			continue
-		}
-
-		client := &http.Client{
-			Timeout: 30 * time.Second,
-		}
-		tlsSupport.CheckCaInstalled(client)
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer httpSupport.HandleRespClose(resp)
-
-		if resp.StatusCode == http.StatusOK {
-			var metadata struct {
-				TokenEndpoint string `json:"token_endpoint"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&metadata); err == nil && metadata.TokenEndpoint != "" {
-				return metadata.TokenEndpoint, nil
-			}
-		}
-	}
 	return "", errors.New("token endpoint not found")
 }
 

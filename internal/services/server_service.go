@@ -5,17 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"reflect"
 
 	"strings"
-
-	"slices"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/oauthClient"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
 var srvLog = logger.Sub("SERVICE")
@@ -153,59 +151,46 @@ func (s *ServerService) validateTokenConfig(ctx context.Context, server *model.S
 	return CheckTransmitterWellknown(ctx, client, token, server)
 }
 
-// CheckTransmitterWellknown checks that we are able to communicate with the transmitter host by querying its well-known OpenID configuration endpoint
+// CheckTransmitterWellknown checks that we are able to communicate with the transmitter host by querying its well-known SSF configuration endpoint
 func CheckTransmitterWellknown(ctx context.Context, client *http.Client, auth string, server *model.Server) error {
-	serverURL, err := url.Parse(server.Host)
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if auth != "" {
+		// Create a new client with the auth header if necessary, or wrap the existing one.
+		// However, the existing client might already have a RoundTripper that handles auth.
+		// If we are passed an 'auth' string here, it's usually a Bearer token.
+		// We can use a custom RoundTripper to add the header.
+		originalTransport := client.Transport
+		if originalTransport == nil {
+			originalTransport = http.DefaultTransport
+		}
+		client = &http.Client{
+			Transport: &authRoundTripper{
+				next:  originalTransport,
+				token: auth,
+			},
+			Timeout: client.Timeout,
+		}
+	}
+
+	srvLog.Debug("Checking transmitter", "alias", server.Alias, "url", server.Host)
+	err := wellKnownSupport.CheckSSFConfiguration(ctx, client, server.Host)
 	if err != nil {
-		return err
-	}
-	if serverURL.Scheme != "https" && serverURL.Scheme != "http" {
-		serverURL.Scheme = "https"
-	}
-	var candidates []string
-	basePath := serverURL.Path
-	if idx := strings.Index(serverURL.Path, "/.well-known"); idx != -1 {
-		candidates = append(candidates, serverURL.Path)
-		basePath = serverURL.Path[:idx]
-	}
-	basePath = strings.TrimSuffix(basePath, "/")
-	calculatedPath := basePath + "/.well-known/ssf-configuration"
-	if !slices.Contains(candidates, calculatedPath) {
-		candidates = append(candidates, calculatedPath)
+		srvLog.Warn("Failed to connect to transmitter", "alias", server.Alias, "url", server.Host, "err", err)
+		return fmt.Errorf("transmitter not reachable at %s error: %w", server.Host, err)
 	}
 
-	success := false
-	var resp *http.Response
-	var req *http.Request
-	for _, path := range candidates {
-		serverURL.Path = path
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, serverURL.String(), nil)
-		if err != nil {
-			return err
-		}
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
-		srvLog.Debug("Checking transmitter", "alias", server.Alias, "url", serverURL.String())
-		resp, err = client.Do(req)
-
-		if err != nil {
-			srvLog.Warn("Failed to connect to transmitter", "alias", server.Alias, "url", serverURL.String(), "err", err)
-			continue // this didn't work
-		}
-		_ = resp.Body.Close() // only interested in connectivity
-		if resp.StatusCode == 200 {
-			success = true
-			break
-		}
-	}
-	if !success {
-		errMsg := fmt.Sprintf("transmitter not reachable at %s", serverURL.String())
-		if err != nil {
-			errMsg = errMsg + fmt.Sprintf(" error: %s", err.Error())
-		}
-		return errors.New(errMsg)
-	}
-	srvLog.Debug("Transmitter well-known endpoint reachable", "alias", server.Alias, "url", serverURL.String())
+	srvLog.Debug("Transmitter well-known endpoint reachable", "alias", server.Alias, "url", server.Host)
 	return nil
+}
+
+type authRoundTripper struct {
+	next  http.RoundTripper
+	token string
+}
+
+func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", a.token)
+	return a.next.RoundTrip(req)
 }
