@@ -100,7 +100,7 @@ func TestCreateStream_TxTokenResilience(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			_, err = svc.CreateStream(ctx, request, "test-project")
+			_, err = svc.CreateStream(ctx, request, "test-project", nil)
 
 			// 4. Verify Results
 			assert.NoError(t, err)

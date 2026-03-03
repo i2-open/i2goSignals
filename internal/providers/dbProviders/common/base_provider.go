@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"time"
 
@@ -188,7 +189,16 @@ func (b *BaseProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 }
 
 func (b *BaseProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
-	res, err := b.streamService.CreateStream(context.Background(), request, projectId)
+	var txServer *model.Server
+
+	if request.TxAlias != nil && *request.TxAlias != "" {
+		var err error
+		txServer, err = b.serverService.GetServerByAlias(context.Background(), *request.TxAlias)
+		if err != nil {
+			return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
+		}
+	}
+	res, err := b.streamService.CreateStream(context.Background(), request, projectId, txServer)
 	if err == nil {
 		b.notifyWrite()
 	}

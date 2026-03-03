@@ -128,6 +128,44 @@ func (m *Manager) GetHTTPClient(ctx context.Context, subjectAccessToken string, 
 	return oauthClient, nil
 }
 
+func GetStaticTokenClient(ctx context.Context, server *model.Server) (*http.Client, error) {
+	if server == nil {
+		return nil, errors.New("server cannot be nil")
+	}
+	if server.ClientToken == nil {
+		return nil, errors.New("client token cannot be nil")
+	}
+	token := *server.ClientToken
+	if !strings.Contains(token, " ") {
+		token = "Bearer " + token
+	}
+
+	tlsConfig := GetTlsConfigForServer(server)
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		Proxy:           http.ProxyFromEnvironment,
+	}
+
+	return &http.Client{
+		Transport: &staticTokenRoundTripper{
+			token:   token,
+			wrapped: transport,
+		},
+		Timeout: 30 * time.Second,
+	}, nil
+}
+
+// staticTokenRoundTripper is an http.RoundTripper that adds a static Authorization header.
+type staticTokenRoundTripper struct {
+	token   string
+	wrapped http.RoundTripper
+}
+
+func (s *staticTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", s.token)
+	return s.wrapped.RoundTrip(req)
+}
+
 // GetClient is a convenience wrapper around DefaultManager().GetHTTPClient.
 // resource overrides the default resource set in environment (STS_RESOURCE). Pass "" to use default.
 func GetClient(ctx context.Context, subjectAccessToken string, scopes []string, resource string) (*http.Client, error) {
@@ -449,6 +487,37 @@ func GetClientCredentialsClient(ctx context.Context, cfg Config, server *model.S
 	managersMu.Unlock()
 
 	return m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource, server)
+}
+
+// GetClientForServer returns an http.Client configured for the given server based on its auth mode.
+// It prioritizes OAuth2 Client Credentials flow, then static token, then fallback to base client with TLS.
+// The returned client automatically handles the Authorization header for both OAuth2 and Static Token modes.
+func GetClientForServer(ctx context.Context, server *model.Server) (*http.Client, error) {
+	if server == nil {
+		return nil, errors.New("server is nil")
+	}
+
+	// Try OAuth client credentials first
+	if server.OAuthClientConfig != nil {
+		cfg := Config{
+			TokenURL:     server.OAuthClientConfig.TokenURL,
+			ClientID:     server.OAuthClientConfig.ClientID,
+			ClientSecret: server.OAuthClientConfig.ClientSecret,
+			Audience:     server.OAuthClientConfig.Audience,
+			Resource:     server.OAuthClientConfig.Resource,
+			Scopes:       server.OAuthClientConfig.Scopes,
+		}
+
+		return GetClientCredentialsClient(ctx, cfg, server)
+	}
+
+	// Fallback to static token from server with proper TLS
+	if server.ClientToken != nil && *server.ClientToken != "" {
+		return GetStaticTokenClient(ctx, server)
+	}
+
+	// Default client with server TLS settings
+	return GetBaseHTTPClientForServer(server), nil
 }
 
 func (c Config) key() string {
