@@ -14,7 +14,7 @@ func TestGetHTTPClient_CachingAndContext(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		exchangeCount++
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"access_token":"foo","token_type":"Bearer","expires_in":3600}`))
+		_, _ = w.Write([]byte(`{"access_token":"foo","token_type":"Bearer","expires_in":3600}`))
 	}))
 	defer ts.Close()
 
@@ -72,7 +72,7 @@ func TestGetHTTPClient_StaleContextOnInitialFailure(t *testing.T) {
 	// Setup a mock STS server
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"access_token":"foo","token_type":"Bearer","expires_in":3600}`))
+		_, _ = w.Write([]byte(`{"access_token":"foo","token_type":"Bearer","expires_in":3600}`))
 	}))
 	defer ts.Close()
 

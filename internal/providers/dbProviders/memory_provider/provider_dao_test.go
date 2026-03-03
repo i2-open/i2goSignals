@@ -1,7 +1,6 @@
 package memory_provider
 
 import (
-	"os"
 	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -10,8 +9,7 @@ import (
 
 func TestMemoryProviderDAOOpen(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db_v2")
 	if err != nil {
@@ -33,8 +31,7 @@ func TestMemoryProviderDAOOpen(t *testing.T) {
 
 func TestMemoryProviderDAOStreamOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db_v2_stream")
 	if err != nil {
@@ -94,8 +91,7 @@ func TestMemoryProviderDAOStreamOperations(t *testing.T) {
 
 func TestMemoryProviderDAOEventOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db_v2_events")
 	if err != nil {
@@ -128,8 +124,7 @@ func TestMemoryProviderDAOEventOperations(t *testing.T) {
 
 func TestMemoryProviderDAOKeyOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db_v2_keys")
 	if err != nil {

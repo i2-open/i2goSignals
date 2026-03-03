@@ -37,8 +37,10 @@ func (suite *PollStateChangeSuite) SetupSuite() {
 		},
 	}
 
-	stream, _ := instance.provider.CreateStream(streamConfig, instance.projectId)
-	state, _ := instance.provider.GetStreamState(stream.Id)
+	stream, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	assert.NoError(suite.T(), err)
+	state, err := instance.provider.GetStreamState(stream.Id)
+	assert.NoError(suite.T(), err)
 	instance.app.EventRouter.UpdateStreamState(state)
 
 	suite.stream = stream
@@ -59,7 +61,8 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 	t := suite.T()
 
 	// Ensure stream is enabled
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(t, err)
 	state.Status = model.StreamStateEnabled
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -96,7 +99,8 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 	time.Sleep(1 * time.Second)
 
 	// Now update the stream status to paused
-	state, _ = suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err = suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(t, err)
 	state.Status = model.StreamStatePause
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -107,7 +111,8 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 		var pollResp model.PollResponse
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
 		_ = json.Unmarshal(body, &pollResp)
 
 		assert.Empty(t, pollResp.Sets)
@@ -123,7 +128,8 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnDisable() {
 	t := suite.T()
 
 	// Re-enable the stream first
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(t, err)
 	state.Status = model.StreamStateEnabled
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -156,7 +162,8 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnDisable() {
 	time.Sleep(1 * time.Second)
 
 	// Now update the stream status to disabled
-	state, _ = suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err = suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(t, err)
 	state.Status = model.StreamStateDisable
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 

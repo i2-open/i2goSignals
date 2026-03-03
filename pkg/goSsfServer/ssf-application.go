@@ -51,11 +51,11 @@ func (sa *SsfApplication) GetDefIssuer() string {
 	return sa.DefIssuer
 }
 
-func (sa *SsfApplication) CloseReceiver(sid string) {
+func (sa *SsfApplication) CloseReceiver(_ string) {
 	// SSF-only server does not implement receivers
 }
 
-func (sa *SsfApplication) HandleReceiver(streamState *model.StreamStateRecord) *server.ClientPollStream {
+func (sa *SsfApplication) HandleReceiver(_ *model.StreamStateRecord) *server.ClientPollStream {
 	// SSF-only server does not implement receivers
 	return nil
 }
@@ -285,13 +285,13 @@ func (sa *SsfApplication) backgroundSync() {
 // registerNode registers the current node in the cluster with its ID, address, version, and timestamps.
 func (sa *SsfApplication) registerNode() {
 	sa.mu.RLock()
-	server := sa.Server
+	httpServer := sa.Server
 	baseUrl := sa.BaseUrl
 	sa.mu.RUnlock()
 
 	addr := ""
-	if server != nil {
-		addr = server.Addr
+	if httpServer != nil {
+		addr = httpServer.Addr
 	} else if baseUrl != nil {
 		addr = baseUrl.Host
 	}
@@ -313,15 +313,15 @@ func (sa *SsfApplication) registerNode() {
 // This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
 func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
 	sa := NewApplication(provider, baseUrlString)
-	server := http.Server{
+	httpServer := http.Server{
 		Addr:     addr,
 		Handler:  sa.Handler,
 		ErrorLog: slog.NewLogLogger(serverLog.Handler(), slog.LevelError),
 	}
 	sa.mu.Lock()
-	sa.Server = &server
+	sa.Server = &httpServer
 	if sa.BaseUrl == nil {
-		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
+		baseUrl, _ := url.Parse("http://" + httpServer.Addr + "/")
 		sa.BaseUrl = baseUrl
 		if sa.Provider != nil {
 			sa.Provider.SetBaseUrl(baseUrl)

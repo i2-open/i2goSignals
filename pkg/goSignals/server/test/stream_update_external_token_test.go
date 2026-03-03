@@ -14,6 +14,7 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -73,7 +74,7 @@ func TestStreamUpdate_ExternalToken(t *testing.T) {
 	// This should NOT panic and should return 200 OK
 	resp, err := instance.client.Do(req)
 	assert.NoError(t, err)
-	defer resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -39,8 +38,10 @@ func (suite *PollBehaviorSuite) SetupSuite() {
 		},
 	}
 
-	stream, _ := instance.provider.CreateStream(streamConfig, instance.projectId)
-	state, _ := instance.provider.GetStreamState(stream.Id)
+	stream, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	assert.NoError(suite.T(), err)
+	state, err := instance.provider.GetStreamState(stream.Id)
+	assert.NoError(suite.T(), err)
 	instance.app.EventRouter.UpdateStreamState(state)
 
 	suite.stream = stream
@@ -51,7 +52,6 @@ func (suite *PollBehaviorSuite) TearDownSuite() {
 		suite.instance.app.Shutdown()
 		suite.instance.ts.Close()
 	}
-	os.Unsetenv("POLL_SRV_BEHAVIOR")
 }
 
 func TestPollBehaviorSuite(t *testing.T) {
@@ -60,13 +60,13 @@ func TestPollBehaviorSuite(t *testing.T) {
 
 func (suite *PollBehaviorSuite) TestPollDisabledMode() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	pollParams := model.PollParameters{ReturnImmediately: true}
@@ -83,13 +83,13 @@ func (suite *PollBehaviorSuite) TestPollDisabledMode() {
 
 func (suite *PollBehaviorSuite) TestPollPausedModeNoAcks() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
 	// Update router's view of the stream
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	pollParams := model.PollParameters{ReturnImmediately: true}
@@ -106,13 +106,13 @@ func (suite *PollBehaviorSuite) TestPollPausedModeNoAcks() {
 
 func (suite *PollBehaviorSuite) TestPollPausedModeWithAcks() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
 	// Update router's view of the stream
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	// Poll with an ACK (even if JTI is fake, it should trigger the 200 response instead of 503)
@@ -137,13 +137,13 @@ func (suite *PollBehaviorSuite) TestPollPausedModeWithAcks() {
 
 func (suite *PollBehaviorSuite) TestPollDisabledModeWithAcks() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	// Poll with an ACK (should trigger 200 instead of 403)
@@ -164,12 +164,12 @@ func (suite *PollBehaviorSuite) TestPollDisabledModeWithAcks() {
 
 func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Ensure stream is enabled
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateEnabled, "")
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	// 1. Add an event
@@ -181,7 +181,7 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 		"reason": "test error",
 	})
 	jti := set.ID
-	err := suite.instance.app.EventRouter.HandleEvent(&set, "", suite.stream.Id)
+	err = suite.instance.app.EventRouter.HandleEvent(&set, "", suite.stream.Id)
 	assert.NoError(t, err)
 
 	// 2. Poll it
@@ -234,12 +234,12 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 
 func (suite *PollBehaviorSuite) TestPollPausedWithSetErrs() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	// Poll with a SetErr
@@ -262,12 +262,12 @@ func (suite *PollBehaviorSuite) TestPollPausedWithSetErrs() {
 
 func (suite *PollBehaviorSuite) TestPollDisabledWithSetErrs() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "MODE")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	// Poll with a SetErr
@@ -290,13 +290,13 @@ func (suite *PollBehaviorSuite) TestPollDisabledWithSetErrs() {
 
 func (suite *PollBehaviorSuite) TestPollAlwaysOnDisabled() {
 	t := suite.T()
-	_ = os.Setenv("POLL_SRV_BEHAVIOR", "ALWAYSON")
-	defer os.Unsetenv("POLL_SRV_BEHAVIOR")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "ALWAYSON")
 
 	// Set stream to disabled
 	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, _ := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
 	pollParams := model.PollParameters{ReturnImmediately: true}

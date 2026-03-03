@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,7 +57,7 @@ func TestGetClientCredentialsHTTPClient_WithTLSConfig(t *testing.T) {
 	resp, err := client.Get(server.URL + "/test")
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 }
 
 func TestGetClientCredentialsHTTPClient_WithTLSSkipVerify(t *testing.T) {
@@ -103,7 +104,7 @@ func TestGetClientCredentialsHTTPClient_WithTLSSkipVerify(t *testing.T) {
 	resp, err := client.Get(server.URL + "/test")
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	resp.Body.Close()
+	defer httpSupport.HandleRespClose(resp)
 }
 
 func TestGetClientCredentialsHTTPClient_CachingWithDifferentTLS(t *testing.T) {
@@ -314,7 +315,7 @@ func TestClientCredentialsSource_UsesTLSClient(t *testing.T) {
 	resp, err := client.Get("http://example.com")
 	assert.NoError(t, err)
 	if resp != nil {
-		resp.Body.Close()
+		defer httpSupport.HandleRespClose(resp)
 	}
 }
 

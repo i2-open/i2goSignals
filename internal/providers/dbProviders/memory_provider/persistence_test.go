@@ -1,7 +1,6 @@
 package memory_provider
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,14 +12,10 @@ import (
 
 func TestPersistence(t *testing.T) {
 	// Setup temporary directory
-	tmpDir, err := os.MkdirTemp("", "goSignalsMemTest")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
-	os.Setenv(CEnvMemDir, tmpDir)
-	os.Setenv(CEnvMemSaveRate, "0") // Save every change
-	defer os.Unsetenv(CEnvMemDir)
-	defer os.Unsetenv(CEnvMemSaveRate)
+	t.Setenv(CEnvMemDir, tmpDir)
+	t.Setenv(CEnvMemSaveRate, "0") // Save every change
 
 	dbName := "testPersistence"
 	provider, err := Open("memorydb:", dbName)
@@ -51,7 +46,9 @@ func TestPersistence(t *testing.T) {
 
 	provider2, err := Open("memorydb:", dbName)
 	require.NoError(t, err)
-	defer provider2.Close()
+	defer func(provider2 *MemoryProvider) {
+		_ = provider2.Close()
+	}(provider2)
 
 	// Verify state reloaded
 	streams := provider2.ListStreams()
@@ -71,18 +68,16 @@ func TestPersistence(t *testing.T) {
 }
 
 func TestMemoryProtection(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "goSignalsMemProtTest")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
-	os.Setenv(CEnvMemDir, tmpDir)
-	os.Setenv(CEnvMemSaveRate, "0")
-	defer os.Unsetenv(CEnvMemDir)
-	defer os.Unsetenv(CEnvMemSaveRate)
+	t.Setenv(CEnvMemDir, tmpDir)
+	t.Setenv(CEnvMemSaveRate, "0")
 
 	provider, err := Open("memorydb:", "testMemProt")
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func(provider *MemoryProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	// Add an event with large raw content
 	largeRaw := "raw-token-" + string(make([]byte, 10000))

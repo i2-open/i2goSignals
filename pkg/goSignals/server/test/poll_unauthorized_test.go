@@ -55,7 +55,8 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, _ := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 
 	// Start receiver
 	ps := instance.app.HandleReceiver(streamState)
@@ -68,7 +69,8 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	t.Logf("Poll count after 500ms: %d", finalCount)
 
 	// Check that it's in Disable state
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "Unauthorized")
 

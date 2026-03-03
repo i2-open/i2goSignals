@@ -24,7 +24,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"sets": {}}`)
+		_, _ = fmt.Fprint(w, `{"sets": {}}`)
 	}))
 	defer ts.Close()
 

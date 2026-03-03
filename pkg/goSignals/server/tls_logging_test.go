@@ -39,7 +39,9 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func(ln net.Listener) {
+		_ = ln.Close()
+	}(ln)
 
 	server := &http.Server{
 		Addr:     ln.Addr().String(),
@@ -50,7 +52,9 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 		// Using relative paths to the certs from pkg/goSignals/server
 		_ = server.ServeTLS(ln, "../../../config/certs/server-cert.pem", "../../../config/certs/server-key.pem")
 	}()
-	defer server.Close()
+	defer func(server *http.Server) {
+		_ = server.Close()
+	}(server)
 
 	// Wait for server to start
 	time.Sleep(100 * time.Millisecond)
@@ -63,7 +67,7 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 
 	conn, err := tls.Dial("tcp", ln.Addr().String(), conf)
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Log("Expected TLS handshake error, but it succeeded")
 	}
 
@@ -75,8 +79,8 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 		// If nothing logged yet, try sending junk
 		rawConn, _ := net.Dial("tcp", ln.Addr().String())
 		if rawConn != nil {
-			rawConn.Write([]byte("NOT A TLS HANDSHAKE"))
-			rawConn.Close()
+			_, _ = rawConn.Write([]byte("NOT A TLS HANDSHAKE"))
+			_ = rawConn.Close()
 		}
 		time.Sleep(200 * time.Millisecond)
 		output = buf.String()

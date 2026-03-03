@@ -1,7 +1,6 @@
 package test
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -11,14 +10,10 @@ import (
 
 func TestPollBackoffRetry(t *testing.T) {
 	// Set short backoff for testing
-	os.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
-	os.Setenv("POLL_RETRY_MAX_DELAY", "0.3")
-	os.Setenv("POLL_RETRY_BACKOFF_FACTOR", "2.0")
-	os.Setenv("POLL_RETRY_LIMIT", "1.0") // 1 second retry limit
-	defer os.Unsetenv("POLL_RETRY_BASE_DELAY")
-	defer os.Unsetenv("POLL_RETRY_MAX_DELAY")
-	defer os.Unsetenv("POLL_RETRY_BACKOFF_FACTOR")
-	defer os.Unsetenv("POLL_RETRY_LIMIT")
+	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
+	t.Setenv("POLL_RETRY_MAX_DELAY", "0.3")
+	t.Setenv("POLL_RETRY_BACKOFF_FACTOR", "2.0")
+	t.Setenv("POLL_RETRY_LIMIT", "1.0") // 1 second retry limit
 
 	// Create server with mock provider
 	instance, err := createServer(t, "test_backoff", true)
@@ -61,7 +56,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check provider status - it should be "paused" with "retry being attempted"
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
 
@@ -70,7 +66,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(2000 * time.Millisecond)
 
 	// Now it should be disabled
-	finalState, _ := instance.provider.GetStreamState(streamID)
+	finalState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
 }

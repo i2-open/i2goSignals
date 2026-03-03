@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"context"
+	"errors"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -39,7 +40,7 @@ func (d *ServerDAOMongo) FindByID(ctx context.Context, id string) (*model.Server
 	err = d.collection.FindOne(ctx, filter).Decode(&server)
 	if err != nil {
 		err = HandleFindError(err, interfaces.ErrNotFound)
-		if err != interfaces.ErrNotFound {
+		if !errors.Is(err, interfaces.ErrNotFound) {
 			svLog.Error("Error finding server", "id", id, "error", err)
 		}
 		return nil, err
@@ -53,7 +54,7 @@ func (d *ServerDAOMongo) FindByAlias(ctx context.Context, alias string) (*model.
 	err := d.collection.FindOne(ctx, filter).Decode(&server)
 	if err != nil {
 		err = HandleFindError(err, interfaces.ErrNotFound)
-		if err != interfaces.ErrNotFound {
+		if !errors.Is(err, interfaces.ErrNotFound) {
 			svLog.Error("Error finding server by alias", "alias", alias, "error", err)
 		}
 		return nil, err

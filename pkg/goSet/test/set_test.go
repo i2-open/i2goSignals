@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-var testStream model2.StreamConfiguration = model2.StreamConfiguration{
+var testStream = model2.StreamConfiguration{
 	Id:              bson.NewObjectID().Hex(),
 	Iss:             "TestIssuer",
 	Aud:             []string{"TestAudience"},

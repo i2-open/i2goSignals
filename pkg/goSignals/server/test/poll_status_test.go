@@ -78,7 +78,8 @@ func TestPollTransmitterStatus(t *testing.T) {
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, _ := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 
 	// Start receiver
 	ps := instance.app.HandleReceiver(streamState)
@@ -88,7 +89,8 @@ func TestPollTransmitterStatus(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Check status - should be paused in provider
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "Transmitter stream is paused: testing pause")
 
@@ -151,7 +153,8 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, _ := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 
 	// Start receiver
 	ps := instance.app.HandleReceiver(streamState)
@@ -161,7 +164,8 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Check status - should be disabled
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "Transmitter stream is disabled: testing disable")
 }

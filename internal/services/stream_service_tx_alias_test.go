@@ -65,7 +65,7 @@ func TestCreateStream_OAuthClientCredentialRegistration(t *testing.T) {
 		assert.Equal(t, "test-client-secret", pass)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "oauth-access-token",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -86,7 +86,7 @@ func TestCreateStream_OAuthClientCredentialRegistration(t *testing.T) {
 		// Verify OAuth token was used
 		assert.Equal(t, "Bearer oauth-access-token", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	txMux.HandleFunc("/streams", func(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +98,7 @@ func TestCreateStream_OAuthClientCredentialRegistration(t *testing.T) {
 
 		req.EventsDelivered = eventsDelivered
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	txServerMock := httptest.NewServer(txMux)
@@ -151,7 +151,7 @@ func TestCreateStream_OAuthClientCredentialPushRegistration(t *testing.T) {
 	tokenMux := http.NewServeMux()
 	tokenMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "oauth-push-token",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -171,7 +171,7 @@ func TestCreateStream_OAuthClientCredentialPushRegistration(t *testing.T) {
 	txMux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer oauth-push-token", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	txMux.HandleFunc("/streams", func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func TestCreateStream_OAuthClientCredentialPushRegistration(t *testing.T) {
 
 		req.EventsDelivered = eventsDelivered
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	txServerMock := httptest.NewServer(txMux)

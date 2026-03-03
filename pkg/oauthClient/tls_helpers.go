@@ -46,7 +46,9 @@ func ExtractServerCertificate(hostURL string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
-	defer conn.Close()
+	defer func(conn *tls.Conn) {
+		_ = conn.Close()
+	}(conn)
 
 	// Get the peer certificates
 	certs := conn.ConnectionState().PeerCertificates

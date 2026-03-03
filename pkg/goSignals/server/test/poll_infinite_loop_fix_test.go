@@ -1,7 +1,6 @@
 package test
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -15,10 +14,8 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	logger.Init("debug")
 
 	// Set short backoff for testing to speed up failure/retry cycle
-	os.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
-	os.Setenv("POLL_RETRY_MAX_DELAY", "0.5")
-	defer os.Unsetenv("POLL_RETRY_BASE_DELAY")
-	defer os.Unsetenv("POLL_RETRY_MAX_DELAY")
+	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
+	t.Setenv("POLL_RETRY_MAX_DELAY", "0.5")
 
 	instance, err := createServer(t, "test_infinite_loop_fix", true)
 	assert.NoError(t, err)
@@ -44,7 +41,8 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
-	streamState, _ := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 
 	// Start the receiver
 	ps := instance.app.HandleReceiver(streamState)
@@ -55,7 +53,8 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Check that it's in Pause state
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 
 	// If the infinite loop were present, we would see thousands of "Node lease acquired" messages in the log.

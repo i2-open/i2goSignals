@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +18,9 @@ func TestSNILogging(t *testing.T) {
 	slog.SetDefault(slog.New(handler))
 
 	// Mock environment variables for TLS
-	os.Setenv("TLS_ENABLED", "true")
-	os.Setenv("SERVER_CERT_PATH", "../../config/certs/server-cert.pem")
-	os.Setenv("SERVER_KEY_PATH", "../../config/certs/server-key.pem")
+	t.Setenv("TLS_ENABLED", "true")
+	t.Setenv("SERVER_CERT_PATH", "../../config/certs/server-cert.pem")
+	t.Setenv("SERVER_KEY_PATH", "../../config/certs/server-key.pem")
 
 	server := &http.Server{
 		Addr: "127.0.0.1:0",
@@ -40,13 +39,17 @@ func TestSNILogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func(ln net.Listener) {
+		_ = ln.Close()
+	}(ln)
 	server.Addr = ln.Addr().String()
 
 	go func() {
 		_ = server.ServeTLS(ln, "", "")
 	}()
-	defer server.Close()
+	defer func(server *http.Server) {
+		_ = server.Close()
+	}(server)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -61,7 +64,7 @@ func TestSNILogging(t *testing.T) {
 		// Handshake might fail due to cert issues, but we want to see if it started and logged SNI
 		t.Logf("Dial failed as expected or not: %v", err)
 	} else {
-		conn.Close()
+		_ = conn.Close()
 	}
 
 	time.Sleep(100 * time.Millisecond)

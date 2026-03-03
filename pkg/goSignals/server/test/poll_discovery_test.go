@@ -27,7 +27,7 @@ func TestPollStatusDiscovery(t *testing.T) {
 			mu.Lock()
 			endpoint := statusEndpoint
 			mu.Unlock()
-			json.NewEncoder(w).Encode(model.TransmitterConfiguration{
+			_ = json.NewEncoder(w).Encode(model.TransmitterConfiguration{
 				StatusEndpoint: endpoint,
 			})
 			return
@@ -37,17 +37,17 @@ func TestPollStatusDiscovery(t *testing.T) {
 			requestedUrl = r.URL.String()
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(model.StreamStatus{Status: model.StreamStateEnabled})
+			_ = json.NewEncoder(w).Encode(model.StreamStatus{Status: model.StreamStateEnabled})
 			return
 		}
 		if path == "/jwks" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"keys":[]}`))
+			_, _ = w.Write([]byte(`{"keys":[]}`))
 			return
 		}
 		if path == "/poll" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
+			_ = json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
 			return
 		}
 	}))
@@ -101,7 +101,8 @@ func TestPollStatusDiscovery(t *testing.T) {
 			createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
 			assert.NoError(t, err)
 
-			streamState, _ := instance.provider.GetStreamState(createdConfig.Id)
+			streamState, err := instance.provider.GetStreamState(createdConfig.Id)
+			assert.NoError(t, err)
 			ps := instance.app.HandleReceiver(streamState)
 			assert.NotNil(t, ps)
 

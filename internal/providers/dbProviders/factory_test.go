@@ -5,7 +5,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/stretchr/testify/assert"
-	"os"
 )
 
 func TestOpenProvider_Fallback(t *testing.T) {
@@ -46,8 +45,7 @@ func TestOpenProvider_EmptyUrl(t *testing.T) {
 }
 
 func TestOpenProvider_FailToMemFalse(t *testing.T) {
-	os.Setenv("MONGO_FAILTOMEM", "FALSE")
-	defer os.Unsetenv("MONGO_FAILTOMEM")
+	t.Setenv("MONGO_FAILTOMEM", "FALSE")
 
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=100"
 	p, err := OpenProvider(wrongUrl, "test_fail")

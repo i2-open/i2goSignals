@@ -26,7 +26,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	// Well-known endpoint
 	mux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	// Stream configuration endpoint
@@ -43,7 +43,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 		// Return updated configuration
 		req.EventsDelivered = eventsDelivered
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	ts := httptest.NewServer(mux)
@@ -100,7 +100,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	// Well-known endpoint
 	mux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	// Stream configuration endpoint
@@ -125,7 +125,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	ts := httptest.NewServer(mux)

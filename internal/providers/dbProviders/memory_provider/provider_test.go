@@ -1,7 +1,6 @@
 package memory_provider
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,8 +8,7 @@ import (
 
 func TestMemoryProviderOpen(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb://localhost", "test_db")
 	assert.NoError(t, err)
@@ -23,8 +21,7 @@ func TestMemoryProviderOpen(t *testing.T) {
 
 func TestMemoryProviderViaFactory(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
@@ -43,12 +40,13 @@ func TestMemoryProviderRejectNonMemoryURL(t *testing.T) {
 
 func TestMemoryProviderBasicOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.Setenv(CEnvMemDir, tmpDir)
-	defer os.Unsetenv(CEnvMemDir)
+	t.Setenv(CEnvMemDir, tmpDir)
 
 	provider, err := Open("memorydb:", "test_db")
 	assert.NoError(t, err)
-	defer provider.Close()
+	defer func(provider *MemoryProvider) {
+		_ = provider.Close()
+	}(provider)
 
 	// Test ResetDb
 	err = provider.ResetDb(true)
