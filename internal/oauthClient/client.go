@@ -19,6 +19,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"golang.org/x/oauth2"
 )
 
@@ -554,6 +555,7 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 		client = &http.Client{
 			Timeout: 30 * time.Second,
 		}
+		tlsSupport.CheckCaInstalled(client)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -622,6 +624,7 @@ func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
 		client := &http.Client{
 			Timeout: 30 * time.Second,
 		}
+		tlsSupport.CheckCaInstalled(client)
 		resp, err := client.Do(req)
 		if err != nil {
 			continue

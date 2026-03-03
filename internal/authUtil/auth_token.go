@@ -18,6 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var authLog = logger.Sub("AUTH")
@@ -72,11 +73,13 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 		return errors.New("no OAUTH_SERVERS configured")
 	}
 	jwksList := make([]*keyfunc.JWKS, 0, len(servers))
+	client := &http.Client{Timeout: 10 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
 	for _, srv := range servers {
 		// Expect srv to be the discovery URL (e.g., .../.well-known/openid-configuration)
 		// Fetch discovery doc
 		var resp *http.Response
-		resp, err = http.Get(srv)
+		resp, err = client.Get(srv)
 		if err != nil {
 			authLog.Error("Failed to fetch OIDC discovery", "srv", srv, "error", err)
 			continue
@@ -100,7 +103,9 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 			authLog.Error("OIDC discovery missing jwks_uri", "srv", srv)
 			continue
 		}
-		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{})
+		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{
+			Client: client,
+		})
 		if err != nil {
 			authLog.Error("Failed to load JWKS", "jwks_uri", disc.JWKSURI, "error", err)
 			continue

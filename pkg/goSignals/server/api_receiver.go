@@ -181,36 +181,13 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 		}
 	}
 
-	// If we have a server, use it for OAuth or static token with proper TLS
+	// Use unified client acquisition if server is available
 	if server != nil {
-		// Try OAuth client credentials first
-		if server.OAuthClientConfig != nil {
-			cfg := oauthClient.Config{
-				TokenURL:     server.OAuthClientConfig.TokenURL,
-				ClientID:     server.OAuthClientConfig.ClientID,
-				ClientSecret: server.OAuthClientConfig.ClientSecret,
-				Audience:     server.OAuthClientConfig.Audience,
-				Resource:     server.OAuthClientConfig.Resource,
-				Scopes:       server.OAuthClientConfig.Scopes,
-			}
-
-			// Use GetClientCredentialsClient which handles caching and applies server TLS settings
-			client, err := oauthClient.GetClientCredentialsClient(ctx, cfg, server)
-			if err == nil {
-				return client, "", nil
-			}
-			serverLog.Error("RCV: Failed to get OAuth client credentials client", "alias", *conf.TxAlias, "error", err)
+		client, err := oauthClient.GetClientForServer(ctx, server)
+		if err == nil {
+			return client, "", nil // Client handles Authorization header
 		}
-
-		// Fallback to static token from server with proper TLS
-		if server.ClientToken != nil && *server.ClientToken != "" {
-			client := oauthClient.GetBaseHTTPClientForServer(server)
-			token := *server.ClientToken
-			if !strings.Contains(token, " ") {
-				return client, "Bearer " + token, nil
-			}
-			return client, token, nil
-		}
+		serverLog.Error("RCV: Failed to get client for server", "alias", *conf.TxAlias, "error", err)
 	}
 
 	// 2. Backward compatibility: TxToken (no server object, use default TLS)

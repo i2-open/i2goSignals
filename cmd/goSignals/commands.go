@@ -16,6 +16,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
@@ -68,14 +69,16 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
-	resp, err = http.Get(tryUrl.String())
+	client := &http.Client{Timeout: 30 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	resp, err = client.Get(tryUrl.String())
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
 		if strings.Contains(err.Error(), "gave HTTP response") {
 			tryUrl.Scheme = "http"
 			serverUrl.Scheme = "http"
 			fmt.Println("Warning: HTTPS not supported trying HTTP at: " + tryUrl.String())
-			resp, err = http.Get(tryUrl.String())
+			resp, err = client.Get(tryUrl.String())
 			defer httpSupport.HandleRespClose(resp)
 			if err != nil {
 				return err
@@ -100,7 +103,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		// Load tokens and register client
 		iatUrl, _ := serverUrl.Parse("/iat")
 		fmt.Println("Obtaining authorization...")
-		resp, err = http.Get(iatUrl.String())
+		resp, err = client.Get(iatUrl.String())
 		defer httpSupport.HandleRespClose(resp)
 		if resp.StatusCode != http.StatusOK {
 			fmt.Println("Error: unable to obtain registration IAT token")
@@ -128,7 +131,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		regBytes, _ := json.Marshal(&clientReg)
 		req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(regBytes))
 		req.Header.Set("Authorization", "Bearer "+server.IatToken)
-		client := http.Client{}
+		tlsSupport.CheckCaInstalled(client)
 		resp, err = client.Do(req)
 		defer httpSupport.HandleRespClose(resp)
 		if err != nil {
