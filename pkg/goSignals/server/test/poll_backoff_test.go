@@ -81,8 +81,9 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	// Create a polling receiver stream with an invalid JWKS URL (permanent error)
 	streamID := "test-jwks-permanent-error"
 	streamConfig := model.StreamConfiguration{
-		Id:  streamID,
-		Iss: "http://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		Id:            streamID,
+		Iss:           "invalid-protocol-in-issuer",
+		IssuerJWKSUrl: "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

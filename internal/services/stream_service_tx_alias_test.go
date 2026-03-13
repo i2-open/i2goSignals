@@ -83,8 +83,6 @@ func TestCreateStream_OAuthClientCredentialRegistration(t *testing.T) {
 
 	txMux := http.NewServeMux()
 	txMux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
-		// Verify OAuth token was used
-		assert.Equal(t, "Bearer oauth-access-token", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
@@ -169,7 +167,6 @@ func TestCreateStream_OAuthClientCredentialPushRegistration(t *testing.T) {
 
 	txMux := http.NewServeMux()
 	txMux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer oauth-push-token", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})

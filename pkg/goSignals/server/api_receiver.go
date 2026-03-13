@@ -942,6 +942,10 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		serverLog.Error("POLL-RCV: Failed to get authenticated client", "sid", sid, "error", err)
 	}
 
+	if ps.stream.Delivery == nil || ps.stream.Delivery.PollReceiveMethod == nil {
+		serverLog.Error("POLL-RCV: Missing delivery configuration", "sid", sid)
+		return
+	}
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
 	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)

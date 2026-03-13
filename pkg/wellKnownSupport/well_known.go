@@ -21,6 +21,48 @@ const (
 	OAuthProtectedResourcePath   = "/.well-known/oauth-protected-resource"
 )
 
+// IsWellKnownPath returns true if the given path is a standard well-known discovery path.
+func IsWellKnownPath(path string) bool {
+	p := "/" + strings.TrimPrefix(path, "/")
+	return p == SSFConfigurationPath ||
+		p == SSEConfigurationPath ||
+		p == OpenIDConfigurationPath ||
+		p == OAuthAuthorizationServerPath ||
+		p == OAuthProtectedResourcePath ||
+		strings.HasPrefix(p, "/.well-known/")
+}
+
+// allWellKnownPaths is the list of well-known paths supported by this package.
+var allWellKnownPaths = []string{
+	SSFConfigurationPath,
+	SSEConfigurationPath,
+	OpenIDConfigurationPath,
+	OAuthAuthorizationServerPath,
+	OAuthProtectedResourcePath,
+}
+
+func stripWellKnown(path string) string {
+	if idx := strings.Index(path, "/.well-known/"); idx != -1 {
+		pathAfter := path[idx:]
+		for _, known := range allWellKnownPaths {
+			if strings.HasPrefix(pathAfter, known) {
+				// Recover original path by stripping the well-known part.
+				// For appended URLs: /issuer/.well-known/type -> /issuer
+				// For RFC 8414 URLs: /.well-known/type/issuer -> /issuer
+				rest := strings.TrimPrefix(pathAfter, known)
+				if rest == "" || rest == "/" {
+					return path[:idx]
+				} else if strings.HasPrefix(rest, "/") {
+					return path[:idx] + rest
+				}
+			}
+		}
+		// If it's an unknown well-known path, just strip it for safety.
+		return path[:idx]
+	}
+	return path
+}
+
 // OIDCConfiguration represents common fields from the OpenID Provider Configuration
 type OIDCConfiguration struct {
 	Issuer                 string   `json:"issuer"`
@@ -55,6 +97,18 @@ func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) 
 
 	wellKnownPath = "/" + strings.TrimPrefix(wellKnownPath, "/")
 
+	// If baseURL already contains the target wellKnownPath, it might be exactly the endpoint we need.
+	if idx := strings.Index(u.Path, wellKnownPath); idx != -1 {
+		// Check if it's exactly the endpoint or inserted pattern (RFC 8414)
+		pathAfter := u.Path[idx:]
+		if pathAfter == wellKnownPath || pathAfter == wellKnownPath+"/" || strings.HasPrefix(pathAfter, wellKnownPath+"/") {
+			u.Path = strings.TrimSuffix(u.Path, "/")
+			return []string{u.String()}, nil
+		}
+	}
+
+	// Otherwise, strip any existing well-known component to find the base/issuer URL.
+	u.Path = stripWellKnown(u.Path)
 	var candidates []string
 
 	// 1. RFC 8414 insertion strategy (for issuers with paths)
@@ -154,12 +208,14 @@ func CheckWellKnown(ctx context.Context, client *http.Client, baseURL string, we
 			lastErr = err
 			continue
 		}
-		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("request to %s failed with status %d", targetURL, resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("request to %s failed with status %d: %s", targetURL, resp.StatusCode, string(body))
 			continue
 		}
+		_ = resp.Body.Close()
 
 		return nil
 	}

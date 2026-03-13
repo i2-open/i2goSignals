@@ -23,6 +23,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -82,7 +83,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	var config model.StreamConfiguration
 	var pushAutoReg bool
-
+	var defaultTxJwksUrl string
+	var txConfig *model.TransmitterConfiguration
+	var err error
 	if request.Iss == "" {
 		config.Iss = s.defaultIssuer
 	} else {
@@ -105,6 +108,28 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 	config.TxAlias = request.TxAlias
 
 	authIssuer := s.keyService.GetAuthIssuer()
+	selectedTxServerParam := false
+	if txServer != nil || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
+		selectedTxServerParam = true
+		if txServer == nil {
+			selectedTxServerParam = false
+			// In static token mode, we don't necessarily have a pre-defined server. Create one so we can use the new http client / credential handler
+			txServer = &model.Server{
+				Host:        *request.TxWellKnownUrl,
+				ClientToken: request.TxToken,
+			}
+		}
+		client := oauthClient.GetBaseHTTPClientForServer(txServer)
+		// Retrieve the transmitter configuration from the WellKnownUrl
+		txConfig, err = wellKnownSupport.FetchSSFConfiguration(ctx, client, txServer.Host)
+		if err != nil {
+			return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
+		}
+		if txConfig.ConfigurationEndpoint == "" {
+			return model.StreamConfiguration{}, errors.New("transmitter configuration missing configuration_endpoint")
+		}
+		defaultTxJwksUrl = txConfig.JwksUri
+	}
 
 	switch delivery.GetMethod() {
 	case model.DeliveryPush:
@@ -147,7 +172,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 		// If a transmitter server (txServer) or well-known URL and token are provided, enable automatic registration.
 		// TxAlias is used to link the created stream to a defined Transmitter Server for later credential recovery.
-		if txServer != nil || (request.TxWellKnownUrl != nil && *request.TxWellKnownUrl != "" && request.TxToken != nil && *request.TxToken != "") {
+		if selectedTxServerParam || (request.TxWellKnownUrl != nil && *request.TxWellKnownUrl != "" && request.TxToken != nil && *request.TxToken != "") {
 			pushAutoReg = true
 		}
 
@@ -156,46 +181,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		// If a TxWellKnownUrl and TxToken are provided, attempt to do an SSF registration to create the Polling Transmit Stream and then create the local receiver stream
 		config.Delivery = request.Delivery
 
-		if txServer != nil || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
+		if selectedTxServerParam || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
 			// Attempt to do an SSF registration to create the Polling Transmit Stream
 			ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
 			var client *http.Client
 			var err error
-			if txServer == nil {
-				// In static token mode, we don't necessarily have a pre-defined server. Create one so we can use the new http client / credential handler
-				txServer = &model.Server{
-					Host:        *request.TxWellKnownUrl,
-					ClientToken: request.TxToken,
-				}
-			}
-			// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
-			client, err = oauthClient.GetClientForServer(ctx, txServer)
-			if err != nil {
-				return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
-			}
-
-			// Retrieve the transmitter configuration from the WellKnownUrl
-			req, err := http.NewRequestWithContext(ctx, "GET", calcWellknown(txServer), nil)
-			if err != nil {
-				return model.StreamConfiguration{}, fmt.Errorf("failed to retrieve transmitter configuration: %v", err)
-			}
-			resp, err := client.Do(req)
-			if err != nil {
-				return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
-			}
-			defer httpSupport.HandleRespClose(resp)
-			if resp.StatusCode != http.StatusOK {
-				return model.StreamConfiguration{}, fmt.Errorf("transmitter configuration returned status %d", resp.StatusCode)
-			}
-			var txConfig model.TransmitterConfiguration
-			if err := json.NewDecoder(resp.Body).Decode(&txConfig); err != nil {
-				return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter configuration: %v", err)
-			}
-
-			if txConfig.ConfigurationEndpoint == "" {
-				return model.StreamConfiguration{}, errors.New("transmitter configuration missing configuration_endpoint")
-			}
+			var req *http.Request
+			var resp *http.Response
 
 			transmitStreamReq := model.StreamConfiguration{
 				Iss:             request.Iss,
@@ -208,10 +201,21 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 					},
 				},
 			}
+
+			// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
+			client, err = oauthClient.GetClientForServer(ctx, txServer)
+			if err != nil {
+				return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
+			}
+
 			ssLog.Debug("Submitting POLL stream registration request to transmitter...")
 			reqBody, err := json.Marshal(transmitStreamReq)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to marshal registration request: %v", err)
+			}
+			if txConfig == nil {
+				ssLog.Warn("unexpected nil for transmitter configuration")
+				return model.StreamConfiguration{}, errors.New("unexpected nil for transmitter configuration")
 			}
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, txConfig.ConfigurationEndpoint, bytes.NewReader(reqBody))
 			if err != nil {
@@ -250,12 +254,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			if txStreamResp.TxStreamId != nil {
 				txId = *txStreamResp.TxStreamId
 			}
-			config.TxStreamId = &txId
+			txIdPtr := txId
+			config.TxStreamId = &txIdPtr
 
 			if txStreamResp.Delivery != nil && txStreamResp.Delivery.PollTransmitMethod != nil {
 
 				// Copy the authorization header for use at the Status and management endpoints
-				config.TxToken = &txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader // Use for status and verification endpoints
+				txToken := txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
+				config.TxToken = &txToken // Use for status and verification endpoints
 				config.Delivery.PollReceiveMethod.AuthorizationHeader = txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
 				config.Delivery.PollReceiveMethod.EndpointUrl = txStreamResp.Delivery.PollTransmitMethod.EndpointUrl
 				config.Delivery.PollReceiveMethod.PollConfig = txStreamResp.Delivery.PollTransmitMethod.PollConfig // follow the Transmitters poll config if asserted
@@ -306,8 +312,21 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	if request.IssuerJWKSUrl != "" {
 		config.IssuerJWKSUrl = request.IssuerJWKSUrl
+	} else if defaultTxJwksUrl != "" {
+		ssLog.Debug("Configuring for JWKS Url based on transmitter discovery", "url", defaultTxJwksUrl)
+		config.IssuerJWKSUrl = defaultTxJwksUrl
 	} else {
-		config.IssuerJWKSUrl = "/jwks/" + config.Iss
+		method := config.Delivery.GetMethod()
+		if (method == model.ReceivePoll || method == model.ReceivePush) && config.Iss != "" {
+			config.IssuerJWKSUrl = ""
+			host := "unknown"
+			if txServer != nil {
+				host = txServer.Host
+			} else if txConfig != nil {
+				host = txConfig.JwksUri
+			}
+			ssLog.Warn("No issuer jwks_url value defined. SETs cannot be validated", "iss", config.Iss, "tx-host", host)
+		}
 	}
 
 	now := time.Now()
@@ -322,7 +341,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		ModifiedAt:          now,
 	}
 
-	err := s.streamDAO.Create(ctx, streamRec)
+	err = s.streamDAO.Create(ctx, streamRec)
 	if err != nil {
 		return model.StreamConfiguration{}, err
 	}
@@ -346,42 +365,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		var err error
 		var req *http.Request
 		var resp *http.Response
-		if txServer == nil {
-			// In static token mode, we don't necessarily have a pre-defined server. Create one so we can use the new http client / credential handler
-			txServer = &model.Server{
-				Host:        *request.TxWellKnownUrl,
-				ClientToken: request.TxToken,
-			}
-		}
+
 		// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
 		client, err = oauthClient.GetClientForServer(ctx, txServer)
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
-		}
-
-		// Retrieve the transmitter configuration from the WellKnownUrl
-		req, err = http.NewRequestWithContext(ctx, "GET", calcWellknown(txServer), nil)
-		if err != nil {
-			return model.StreamConfiguration{}, fmt.Errorf("failed to retrieve transmitter configuration: %v", err)
-		}
-		resp, err = client.Do(req)
-		if err != nil {
-			return model.StreamConfiguration{}, fmt.Errorf("failed to fetch transmitter configuration: %v", err)
-		}
-		defer httpSupport.HandleRespClose(resp)
-		if resp.StatusCode != http.StatusOK {
-			return model.StreamConfiguration{}, fmt.Errorf("transmitter configuration returned status %d", resp.StatusCode)
-		}
-		var txConfig model.TransmitterConfiguration
-		if err = json.NewDecoder(resp.Body).Decode(&txConfig); err != nil {
-			return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter configuration: %v", err)
-		}
-
-		if txConfig.ConfigurationEndpoint == "" {
-			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
-				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
-			}
-			return model.StreamConfiguration{}, errors.New("transmitter configuration missing configuration_endpoint")
 		}
 
 		method := streamRec.StreamConfiguration.Delivery.PushReceiveMethod
@@ -459,13 +447,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		config.EventsRequested = request.EventsRequested
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
-		config.TxStreamId = &txStreamResp.Id
+		txIdStr := txStreamResp.Id
+		config.TxStreamId = &txIdStr
 
 		if txStreamResp.Delivery != nil && txStreamResp.Delivery.PushTransmitMethod != nil {
 			// If no authorization_header value is returned, keep using the request token
 			config.TxToken = request.TxToken
 			if txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader != "" {
-				config.TxToken = &txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader
+				txTokStr := txStreamResp.Delivery.PushTransmitMethod.AuthorizationHeader
+				config.TxToken = &txTokStr
 			}
 
 		} else {
@@ -799,12 +789,4 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	}
 
 	return nil
-}
-
-func calcWellknown(server *model.Server) string {
-	if strings.Index(server.Host, "/.well-known/ssf-configuration") > -1 {
-		return server.Host
-	}
-	newUrl := strings.TrimSuffix(server.Host, "/")
-	return newUrl + "/.well-known/ssf-configuration"
 }
