@@ -998,12 +998,22 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		statusCheckInterval = time.Duration(v * float64(time.Second))
 	}
 
+	unauthorizedRetryDelay := 15 * time.Second
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_UNAUTHORIZED_RETRY_DELAY"), 64); err == nil {
+		unauthorizedRetryDelay = time.Duration(v * float64(time.Second))
+	}
+	unauthorizedRetryLimit := 10
+	if v, err := strconv.Atoi(os.Getenv("POLL_UNAUTHORIZED_RETRY_LIMIT")); err == nil {
+		unauthorizedRetryLimit = v
+	}
+
 	// Initial status check upon lease acquisition - verify that the transmitter is active
 	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
 		return
 	}
 
 	retryCount := 0
+	unauthorizedCount := 0
 	var firstErrorTime time.Time
 
 	for {
@@ -1044,7 +1054,51 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		})
 
 		if err != nil {
-			if httpStatus == http.StatusForbidden || httpStatus == http.StatusUnauthorized {
+			if httpStatus == http.StatusUnauthorized {
+				unauthorizedCount++
+				if unauthorizedCount >= unauthorizedRetryLimit {
+					errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled after %d unauthorized attempts", sid, unauthorizedCount)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+					ps.mu.Lock()
+					ps.active = false
+					ps.mu.Unlock()
+					return
+				}
+
+				delaySeconds := float64(unauthorizedRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(unauthorizedCount-1))
+				if delaySeconds > maxDelay {
+					delaySeconds = maxDelay
+				}
+				delay := time.Duration(delaySeconds * float64(time.Second))
+
+				serverLog.Warn("POLL-RCV: Unauthorized response, retrying after delay", "sid", sid, "delay", delay, "attempt", unauthorizedCount)
+				authMethod := "by client credential"
+				if auth != "" {
+					authMethod = "static token: " + maskAuthorization(auth)
+				}
+				serverLog.Debug("POLL-RCV: Authentication method", "sid", sid, "method", authMethod)
+				ps.sa.pauseStreamOnError(sid, fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
+				select {
+				case <-time.After(delay):
+					// Refresh the stream state to check if it's still enabled/active
+					updatedStream, _ := ps.sa.Provider.GetStreamState(sid)
+					if updatedStream != nil {
+						ps.mu.Lock()
+						ps.stream = updatedStream
+						ps.mu.Unlock()
+					}
+					// Refresh the client and auth header before retrying
+					client, auth, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+					if err != nil {
+						serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", err)
+					}
+					continue
+				case <-heartbeatCtx.Done():
+					return
+				}
+			}
+
+			if httpStatus == http.StatusForbidden {
 				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %d %s", sid, httpStatus, http.StatusText(httpStatus))
 				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
 				ps.mu.Lock()
@@ -1134,6 +1188,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 		// Successful poll - reset retry count and error tracking
 		retryCount = 0
+		unauthorizedCount = 0
 		firstErrorTime = time.Time{}
 		ps.mu.RLock()
 		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""

@@ -22,24 +22,31 @@ var ksLog = logger.Sub("KEY_SERVICE")
 type KeyService struct {
 	keyDAO      interfaces.KeyDAO
 	tokenIssuer string
+	tokenKid    string
 	tokenKey    *rsa.PrivateKey
 	tokenPubKey *keyfunc.JWKS
+	authIssuer  *authUtil.AuthIssuer
 }
 
 func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string) *KeyService {
 	return &KeyService{
 		keyDAO:      keyDAO,
 		tokenIssuer: tokenIssuer,
+		authIssuer: &authUtil.AuthIssuer{
+			TokenIssuer: tokenIssuer,
+		},
 	}
 }
 
 // InitializeTokenKey loads or creates the token key for authentication
 func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer string) error {
 	// Try to load existing key
-	key, err := s.GetIssuerPrivateKey(ctx, s.tokenIssuer)
+	key, kid, err := s.GetIssuerPrivateKeyWithKid(ctx, s.tokenIssuer)
 	if err == nil && key != nil {
 		s.tokenKey = key
+		s.tokenKid = kid
 		s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, s.tokenIssuer)
+		s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
 		return nil
 	}
 
@@ -48,6 +55,10 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	if err != nil {
 		return fmt.Errorf("failed to create token key: %v", err)
 	}
+	s.tokenKid = s.tokenIssuer
+	s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, s.tokenIssuer)
+	s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
+
 	if defaultIssuer != s.tokenIssuer {
 		// Also create default issuer key if different
 		_, err = s.CreateIssuerJwkKeyPair(ctx, defaultIssuer, "")
@@ -72,6 +83,13 @@ func (s *KeyService) CreateIssuerJwkKeyPair(ctx context.Context, issuer string, 
 		return nil, err
 	}
 
+	if issuer == s.tokenIssuer {
+		s.tokenKey = privateKey
+		s.tokenKid = issuer
+		s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, issuer)
+		s.authIssuer.UpdateTokenKey(issuer, issuer, privateKey, s.tokenPubKey)
+	}
+
 	return privateKey, nil
 }
 
@@ -85,6 +103,13 @@ func (s *KeyService) RotateIssuerKey(ctx context.Context, issuer string, project
 	err = s.storeJwkKeyPair(ctx, issuer, kid, privateKey, projectId)
 	if err != nil {
 		return nil, "", err
+	}
+
+	if issuer == s.tokenIssuer {
+		s.tokenKey = privateKey
+		s.tokenKid = kid
+		s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, issuer)
+		s.authIssuer.UpdateTokenKey(issuer, kid, privateKey, s.tokenPubKey)
 	}
 
 	return privateKey, kid, nil
@@ -104,7 +129,14 @@ func (s *KeyService) storeJwkKeyPair(ctx context.Context, issuer string, kid str
 		PubKeyBytes: pubKeyBytes,
 	}
 
-	return s.keyDAO.Insert(ctx, keyPairRec)
+	err := s.keyDAO.Insert(ctx, keyPairRec)
+	if err == nil && issuer == s.tokenIssuer {
+		s.tokenKey = privateKey
+		s.tokenKid = kid
+		s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, issuer)
+		s.authIssuer.UpdateTokenKey(issuer, kid, privateKey, s.tokenPubKey)
+	}
+	return err
 }
 
 func (s *KeyService) AddIssuerKey(ctx context.Context, issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
@@ -134,7 +166,14 @@ func (s *KeyService) AddIssuerKey(ctx context.Context, issuer string, kid string
 		PubKeyBytes: pubKeyBytes,
 	}
 
-	return s.keyDAO.Insert(ctx, keyPairRec)
+	err := s.keyDAO.Insert(ctx, keyPairRec)
+	if err == nil && issuer == s.tokenIssuer && privateKey != nil {
+		s.tokenKey = privateKey
+		s.tokenKid = kid
+		s.tokenPubKey = s.getInternalPublicTransmitterJWKS(ctx, issuer)
+		s.authIssuer.UpdateTokenKey(issuer, kid, privateKey, s.tokenPubKey)
+	}
+	return err
 }
 
 func (s *KeyService) DeleteIssuer(ctx context.Context, issuer string) error {
@@ -260,11 +299,7 @@ func (s *KeyService) GetAuthValidatorPubKey() *keyfunc.JWKS {
 }
 
 func (s *KeyService) GetAuthIssuer() *authUtil.AuthIssuer {
-	return &authUtil.AuthIssuer{
-		TokenIssuer: s.tokenIssuer,
-		PrivateKey:  s.tokenKey,
-		PublicKey:   s.tokenPubKey,
-	}
+	return s.authIssuer
 }
 
 func (s *KeyService) StoreReceiverKey(ctx context.Context, streamID string, audience string, jwksUri string) error {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -544,6 +545,9 @@ func TestValidateAuthorization(t *testing.T) {
 			if got1 != tt.want1 {
 				t.Errorf("ValidateAuthorization() got1 = %v, want %v", got1, tt.want1)
 			}
+			if got != nil && got.IsOAuthClient == true {
+				t.Errorf("ValidateAuthorization() IsOAuth got = %v, want %v", true, false)
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ValidateAuthorization() got = %v, want %v", got, tt.want)
 			}
@@ -650,6 +654,10 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	if got == nil || got.StreamId != "1" {
 		t.Fatalf("expected non-nil AuthContext with StreamId=1, got %+v", got)
 	}
+	if got.IsOAuthClient != true {
+		t.Fatalf("expected AuthContext with isOAuthClient=true, got %+v", got)
+	}
+
 }
 
 func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
@@ -676,6 +684,9 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	}
 	if got == nil || got.StreamId != "1" {
 		t.Fatalf("expected non-nil AuthContext with StreamId=1, got %+v", got)
+	}
+	if got.IsOAuthClient != true {
+		t.Fatalf("expected AuthContext with isOAuthClient=true, got %+v", got)
 	}
 }
 
@@ -706,7 +717,9 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	defer os.Setenv("OAUTH_SERVERS", prev)
 
 	auth.OAuthServer = nil
+	auth.mu.Lock()
 	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
 
 	tok := mintOAuthToken(t, priv, kid, []string{"viewer"})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
@@ -719,7 +732,144 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	}
 }
 
+func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
+	// Generate a new key and token
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed generating rsa key: %v", err)
+	}
+	pub := &priv.PublicKey
+	n := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+	eBytes := []byte{0x01, 0x00, 0x01}
+	e := base64.RawURLEncoding.EncodeToString(eBytes)
+	kid := "dynamic-kid"
+
+	var mu sync.Mutex
+	hasKey := false
+	var jwksURL string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			disc := map[string]string{"jwks_uri": jwksURL}
+			_ = json.NewEncoder(w).Encode(disc)
+		case "/jwks":
+			w.Header().Set("Content-Type", "application/json")
+			mu.Lock()
+			currentHasKey := hasKey
+			mu.Unlock()
+			jwks := map[string]any{
+				"keys": []map[string]string{},
+			}
+			if currentHasKey {
+				jwks["keys"] = []map[string]string{
+					{
+						"kty": "RSA",
+						"kid": kid,
+						"use": "sig",
+						"alg": "RS256",
+						"n":   n,
+						"e":   e,
+					},
+				}
+			}
+			_ = json.NewEncoder(w).Encode(jwks)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	jwksURL = srv.URL + "/jwks"
+
+	prev := os.Getenv("OAUTH_SERVERS")
+	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	// Reset caches on issuer
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeEventDelivery})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	// 1. Initial attempt - key is missing in JWKS
+	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (Service Unavailable) from ValidateAuthorizationAny when key is missing (refresh in progress), got %d", code)
+	}
+
+	// 2. Enable key in OIDC server
+	mu.Lock()
+	hasKey = true
+	mu.Unlock()
+
+	// 3. Second attempt - key should be picked up via RefreshUnknownKID
+	// Need to wait for RefreshRateLimit (which I set to 1s in the code for testing? No, I should use a smaller value in the test if possible, or just wait)
+	time.Sleep(1200 * time.Millisecond)
+	_, code = auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from ValidateAuthorizationAny after key is enabled, got %d", code)
+	}
+}
+
+func TestAuthIssuer_TokenKid(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+
+	issuer := "test-issuer"
+	kid := "test-kid"
+
+	a := &AuthIssuer{
+		TokenIssuer: issuer,
+		TokenKid:    kid,
+		PrivateKey:  privateKey,
+	}
+
+	tokenString, err := a.IssueStreamToken("stream1", "proj1")
+	assert.NoError(t, err)
+
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	assert.NoError(t, err)
+
+	assert.Equal(t, kid, token.Header["kid"])
+	assert.Equal(t, issuer, token.Claims.(jwt.MapClaims)["iss"])
+}
+
+func TestAuthIssuer_TokenKidFallback(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+
+	issuer := "test-issuer"
+
+	a := &AuthIssuer{
+		TokenIssuer: issuer,
+		PrivateKey:  privateKey,
+	}
+
+	tokenString, err := a.IssueStreamToken("stream1", "proj1")
+	assert.NoError(t, err)
+
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	assert.NoError(t, err)
+
+	assert.Equal(t, issuer, token.Header["kid"])
+	assert.Equal(t, issuer, token.Claims.(jwt.MapClaims)["iss"])
+}
 func (a *AuthIssuer) generateTestToken(exp time.Time, scopes []string, projectId string, clientId string) (string, error) {
+	a.mu.RLock()
+	issuer := a.TokenIssuer
+	kid := a.TokenKid
+	if kid == "" {
+		kid = issuer
+	}
+	privateKey := a.PrivateKey
+	a.mu.RUnlock()
+
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
 		Scopes:    scopes,
@@ -727,14 +877,62 @@ func (a *AuthIssuer) generateTestToken(exp time.Time, scopes []string, projectId
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
-			Audience:  []string{a.TokenIssuer},
-			Issuer:    a.TokenIssuer,
+			Audience:  []string{issuer},
+			Issuer:    issuer,
 			ID:        goSet.GenerateJti(),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
-	token.Header["kid"] = a.TokenIssuer
-	return token.SignedString(a.PrivateKey)
+	token.Header["kid"] = kid
+
+	return token.SignedString(privateKey)
+}
+
+func TestValidateAuthorizationAny_PartialOAuthFailure(t *testing.T) {
+	// 1. Setup a working OIDC server
+	srv1, kid1, priv1 := startOIDCTestServer(t)
+	defer srv1.Close()
+
+	// 2. Setup a failing OIDC server (returns 500)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv2.Close()
+
+	prev := os.Getenv("OAUTH_SERVERS")
+	// Configure both servers
+	_ = os.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
+	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	// Reset caches on issuer
+	auth.mu.Lock()
+	auth.OAuthServer = nil
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	// Create a token from a THIRD (not configured) source to ensure it fails validation
+	priv3, _ := rsa.GenerateKey(rand.Reader, 2048)
+	tok3 := mintOAuthToken(t, priv3, "kid3", []string{authSupport.ScopeEventDelivery})
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req.Header.Set("Authorization", "Bearer "+tok3)
+
+	// Should return 503 because one server failed to load
+	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 from ValidateAuthorizationAny when partial load fails, got %d", code)
+	}
+
+	// Now try a token from the WORKING server (srv1)
+	tok1 := mintOAuthToken(t, priv1, kid1, []string{authSupport.ScopeEventDelivery})
+	req1, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req1.Header.Set("Authorization", "Bearer "+tok1)
+
+	// Should return 200 because it validated successfully even if other server failed to load
+	_, code = auth.ValidateAuthorizationAny(req1, []string{authSupport.ScopeEventDelivery})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from ValidateAuthorizationAny for valid token even with partial load failure, got %d", code)
+	}
 }

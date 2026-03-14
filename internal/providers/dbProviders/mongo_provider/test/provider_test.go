@@ -89,7 +89,7 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	if len(events) > 0 {
 		req.EventsRequested = events
 	}
-	s.stream, _ = s.provider.CreateStream(req, s.project)
+	s.stream, _ = s.provider.CreateStream(req, authUtil.ConvertProject(s.project))
 }
 
 func TestMongoProvider(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -59,7 +60,7 @@ func TestStreamUpdate_ExternalToken(t *testing.T) {
 		Aud: []string{"test.example.com"},
 		Iss: "DEFAULT",
 	}
-	config, err := instance.provider.CreateStream(transConfig, "")
+	config, err := instance.provider.CreateStream(transConfig, authUtil.ConvertProject(""))
 	assert.NoError(t, err)
 
 	// 4. Prepare update request

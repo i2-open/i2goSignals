@@ -241,7 +241,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetProvider().CreateStream(jsonRequest, authCtx.ProjectId)
+	configResp, err := sa.GetProvider().CreateStream(jsonRequest, authCtx)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -37,7 +38,7 @@ func (suite *PollStateChangeSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	stream, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
 	state, err := instance.provider.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)

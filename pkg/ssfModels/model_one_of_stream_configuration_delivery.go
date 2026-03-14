@@ -135,6 +135,13 @@ func (d *OneOfStreamConfigurationDelivery) GetAuthorizationHeader() string {
 	return "" // won't happen unless a new method defined
 }
 
+func (d *OneOfStreamConfigurationDelivery) GetAuthorizationType() string {
+	if d.GetAuthorizationHeader() != "" {
+		return AuthModeToken
+	}
+	return AuthModeClient
+}
+
 func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
 	dataString := string(data)
 	if dataString == "null" || dataString == `""` {

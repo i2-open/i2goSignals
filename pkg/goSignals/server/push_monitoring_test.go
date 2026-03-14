@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -180,7 +181,7 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 	}
 
 	// Create the stream in provider so UpdateStreamStatus doesn't fail
-	created, _ := provider.CreateStream(streamConfig, "test-project")
+	created, _ := provider.CreateStream(streamConfig, authUtil.ConvertProject("test-project"))
 	sid = created.Id
 
 	streamState := &model.StreamStateRecord{

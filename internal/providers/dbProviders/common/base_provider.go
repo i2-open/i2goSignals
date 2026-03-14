@@ -188,7 +188,7 @@ func (b *BaseProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 	return b.streamService.GetIssuerJwksForReceiver(context.Background(), sid)
 }
 
-func (b *BaseProvider) CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
+func (b *BaseProvider) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
 	var txServer *model.Server
 
 	if request.TxAlias != nil && *request.TxAlias != "" {
@@ -198,7 +198,9 @@ func (b *BaseProvider) CreateStream(request model.StreamConfiguration, projectId
 			return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
 		}
 	}
-	res, err := b.streamService.CreateStream(context.Background(), request, projectId, txServer)
+
+	ctx := context.WithValue(context.Background(), "authCtx", authCtx)
+	res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, txServer)
 	if err == nil {
 		b.notifyWrite()
 	}

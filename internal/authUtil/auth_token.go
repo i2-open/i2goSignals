@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc"
@@ -25,49 +26,87 @@ import (
 var authLog = logger.Sub("AUTH")
 
 type AuthContext struct {
-	StreamId  string
-	ProjectId string
-	Eat       *authSupport.EventAuthToken
+	StreamId      string
+	ProjectId     string
+	Eat           *authSupport.EventAuthToken
+	IsOAuthClient bool
 }
 
 type AuthIssuer struct {
+	mu           sync.RWMutex
 	TokenIssuer  string
+	TokenKid     string
 	PrivateKey   *rsa.PrivateKey
 	PublicKey    *keyfunc.JWKS
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
 	OAuthServer []string // OAuth Authorization Server identifiers
+}
 
+func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *keyfunc.JWKS) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TokenIssuer = issuer
+	a.TokenKid = kid
+	a.PrivateKey = privateKey
+	a.PublicKey = publicKey
 }
 
 // GetOAuthServers checks the environment variable OAUTH_SERVERS for OAuth Authorization server discovery endpoints
 func (a *AuthIssuer) GetOAuthServers() []string {
-	if a.OAuthServer == nil {
-		as_env := os.Getenv("OAUTH_SERVERS")
-		if as_env == "" {
-			return nil
-		}
-		urls := strings.Split(as_env, ",")
-		for i := range urls {
-			urls[i] = strings.TrimSpace(strings.Trim(urls[i], "\"'"))
-		}
-		a.OAuthServer = urls
+	a.mu.RLock()
+	if a.OAuthServer != nil {
+		defer a.mu.RUnlock()
+		return a.OAuthServer
 	}
+	a.mu.RUnlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.OAuthServer != nil {
+		return a.OAuthServer
+	}
+
+	as_env := os.Getenv("OAUTH_SERVERS")
+	if as_env == "" {
+		return nil
+	}
+	urls := strings.Split(as_env, ",")
+	for i := range urls {
+		urls[i] = strings.TrimSpace(strings.Trim(urls[i], "\"'"))
+	}
+	a.OAuthServer = urls
 	return a.OAuthServer
 }
 
 // loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
 // and caches them in AuthIssuer.OAuthPubKeys for later validation.
 func (a *AuthIssuer) loadOAuthJWKS() error {
-	var err error
-	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) > 0 {
-		return nil
-	}
 	servers := a.GetOAuthServers()
 	if len(servers) == 0 {
-		return errors.New("no OAUTH_SERVERS configured")
+		return nil
 	}
+
+	a.mu.RLock()
+	// If all servers are already loaded, return early
+	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) == len(servers) {
+		a.mu.RUnlock()
+		return nil
+	}
+	a.mu.RUnlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Check again under write lock
+	if a.OAuthPubKeys != nil && len(a.OAuthPubKeys) == len(servers) {
+		return nil
+	}
+
 	jwksList := make([]*keyfunc.JWKS, 0, len(servers))
+	var lastErr error
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	tlsSupport.CheckCaInstalled(client)
 	for _, srv := range servers {
@@ -75,27 +114,44 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 		disc, err := wellKnownSupport.Fetch[wellKnownSupport.OIDCConfiguration](context.Background(), client, srv)
 		if err != nil {
 			authLog.Error("Failed to fetch OIDC discovery", "srv", srv, "error", err)
+			lastErr = err
 			continue
 		}
 
 		if disc.JWKSURI == "" {
 			authLog.Error("OIDC discovery missing jwks_uri", "srv", srv)
+			lastErr = fmt.Errorf("OIDC discovery missing jwks_uri for %s", srv)
 			continue
 		}
+
+		// Use background refresh and refresh on unknown KID to handle transient startup issues and key rotation
 		jwks, err := keyfunc.Get(disc.JWKSURI, keyfunc.Options{
 			Client: client,
+			RefreshErrorHandler: func(err error) {
+				authLog.Error("JWKS background refresh failed", "jwks_uri", disc.JWKSURI, "error", err)
+			},
+			RefreshInterval:   time.Hour,
+			RefreshRateLimit:  time.Second,
+			RefreshTimeout:    time.Second * 30,
+			RefreshUnknownKID: true,
 		})
 		if err != nil {
 			authLog.Error("Failed to load JWKS", "jwks_uri", disc.JWKSURI, "error", err)
+			lastErr = err
 			continue
 		}
 		jwksList = append(jwksList, jwks)
 	}
-	if len(jwksList) == 0 && err == nil {
+
+	if len(jwksList) == 0 {
+		if lastErr != nil {
+			return lastErr
+		}
 		return fmt.Errorf("failed to load JWKS from any configured OAUTH_SERVERS")
 	}
+
 	a.OAuthPubKeys = jwksList
-	return err
+	return lastErr
 }
 
 // IssueProjectIat issues a new registration token. If authCtx is nil, a new project is generated. If an authCtx is asserted,
@@ -107,22 +163,33 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	if authCtx != nil {
 		projectId = authCtx.ProjectId
 	}
+
+	a.mu.RLock()
+	issuer := a.TokenIssuer
+	kid := a.TokenKid
+	if kid == "" {
+		kid = issuer
+	}
+	privateKey := a.PrivateKey
+	a.mu.RUnlock()
+
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
 		Scopes:    []string{authSupport.ScopeRegister},
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
-			Audience:  []string{a.TokenIssuer},
-			Issuer:    a.TokenIssuer,
+			Audience:  []string{issuer},
+			Issuer:    issuer,
 			ID:        goSet.GenerateJti(),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
-	token.Header["kid"] = a.TokenIssuer
-	return token.SignedString(a.PrivateKey)
+	token.Header["kid"] = kid
+
+	return token.SignedString(privateKey)
 }
 
 func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
@@ -132,6 +199,16 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	if admin { // 'admin' allows creation and deletion instead of just update
 		scopes = []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt}
 	}
+
+	a.mu.RLock()
+	issuer := a.TokenIssuer
+	kid := a.TokenKid
+	if kid == "" {
+		kid = issuer
+	}
+	privateKey := a.PrivateKey
+	a.mu.RUnlock()
+
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
 		Scopes:    scopes,
@@ -139,28 +216,38 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
-			Audience:  []string{a.TokenIssuer},
-			Issuer:    a.TokenIssuer,
+			Audience:  []string{issuer},
+			Issuer:    issuer,
 			ID:        goSet.GenerateJti(),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
-	token.Header["kid"] = a.TokenIssuer
-	return token.SignedString(a.PrivateKey)
+	token.Header["kid"] = kid
+
+	return token.SignedString(privateKey)
 }
 
 func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
+
+	a.mu.RLock()
+	issuer := a.TokenIssuer
+	kid := a.TokenKid
+	if kid == "" {
+		kid = issuer
+	}
+	privateKey := a.PrivateKey
+	a.mu.RUnlock()
 
 	eat := authSupport.EventAuthToken{
 		StreamIds: []string{streamId},
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
-			Audience:  []string{a.TokenIssuer},
-			Issuer:    a.TokenIssuer,
+			Audience:  []string{issuer},
+			Issuer:    issuer,
 			ID:        goSet.GenerateJti(),
 		},
 	}
@@ -171,8 +258,9 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
-	token.Header["kid"] = a.TokenIssuer
-	return token.SignedString(a.PrivateKey)
+	token.Header["kid"] = kid
+
+	return token.SignedString(privateKey)
 }
 
 // ValidateAuthorizationAny validates the Authorization header against either a locally issued token
@@ -211,7 +299,7 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 	// Try local token first
 	if tkn, err := a.ParseAuthTokenVerbose(parts[1], false); err == nil {
 		if tkn.IsAuthorized(streamRequested, scopes) {
-			return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn}, http.StatusOK
+			return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
 		}
 		return nil, http.StatusForbidden
 	}
@@ -223,14 +311,33 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 // validateOAuthToken attempts to validate the token using configured OAuth/OIDC servers.
 // Returns an AuthContext when token roles match accepted scopes.
 func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested string, scopesAccepted []string) (*AuthContext, int) {
-	if err := a.loadOAuthJWKS(); err != nil {
+	loadErr := a.loadOAuthJWKS()
+
+	a.mu.RLock()
+	pubKeys := a.OAuthPubKeys
+	a.mu.RUnlock()
+
+	if len(pubKeys) == 0 {
+		if loadErr != nil && len(a.GetOAuthServers()) > 0 {
+			return nil, http.StatusServiceUnavailable
+		}
 		return nil, http.StatusUnauthorized
 	}
+
 	tokenString = strings.TrimSpace(tokenString)
 	isAuthorized := false
-	for _, jwks := range a.OAuthPubKeys {
+
+	a.mu.RLock()
+	pubKeys = a.OAuthPubKeys
+	a.mu.RUnlock()
+
+	isMissingKID := false
+	for _, jwks := range pubKeys {
 		token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc)
 		if err != nil {
+			if strings.Contains(err.Error(), "key ID was not found") {
+				isMissingKID = true
+			}
 			authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
 			continue
 		}
@@ -247,15 +354,26 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 			if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
 				// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
 				return &AuthContext{
-					StreamId:  streamRequested,
-					ProjectId: "",
-					Eat:       nil,
+					StreamId:      streamRequested,
+					ProjectId:     "",
+					Eat:           nil,
+					IsOAuthClient: true,
 				}, http.StatusOK
 			}
 		}
 	}
 	if isAuthorized {
 		return nil, http.StatusForbidden
+	}
+	if loadErr != nil || isMissingKID {
+		reason := "OAuth token validation failed"
+		if loadErr != nil {
+			reason += " while some JWKS failed to load"
+		} else if isMissingKID {
+			reason += " because Key ID was not found in JWKS (refresh may be in progress)"
+		}
+		authLog.Warn(reason, "error", loadErr)
+		return nil, http.StatusServiceUnavailable
 	}
 	return nil, http.StatusUnauthorized
 }
@@ -355,4 +473,10 @@ func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*authSupport.OidcCla
 func (a *AuthIssuer) ValidateOidcAuthorizationMiddleware(next http.Handler) http.Handler {
 	validator := authSupport.NewTokenValidator(a.PublicKey)
 	return validator.ValidateOidcAuthorizationMiddleware(next)
+}
+
+func ConvertProject(projectId string) *AuthContext {
+	return &AuthContext{
+		ProjectId: projectId,
+	}
 }

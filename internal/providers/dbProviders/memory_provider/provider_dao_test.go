@@ -3,6 +3,7 @@ package memory_provider
 import (
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -51,7 +52,7 @@ func TestMemoryProviderDAOStreamOperations(t *testing.T) {
 		},
 	}
 
-	createdStream, err := provider.CreateStream(streamConfig, "test_project")
+	createdStream, err := provider.CreateStream(streamConfig, authUtil.ConvertProject("test_project"))
 	if err != nil {
 		t.Fatalf("Failed to create stream: %v", err)
 	}

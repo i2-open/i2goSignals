@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
@@ -92,6 +93,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		config.Iss = request.Iss
 	}
 
+	isOAuth := false
+	if ctx.Value("authCtx") != nil {
+		authCtx := ctx.Value("authCtx").(*authUtil.AuthContext)
+		isOAuth = authCtx.IsOAuthClient
+	}
+
 	config.Id = mid.Hex()
 	config.Aud = request.Aud
 
@@ -139,7 +146,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 
 	case model.DeliveryPoll, "DEFAULT":
-		authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		authToken := ""
+		if !isOAuth {
+			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID)
+		}
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
 		}
@@ -164,11 +174,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 		method := config.Delivery.PushReceiveMethod
 		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
-		authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
-		if err != nil {
-			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
+		if !isOAuth {
+			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+			if err != nil {
+				return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
+			}
+			method.AuthorizationHeader = "Bearer " + authToken
+
 		}
-		method.AuthorizationHeader = "Bearer " + authToken
 
 		// If a transmitter server (txServer) or well-known URL and token are provided, enable automatic registration.
 		// TxAlias is used to link the created stream to a defined Transmitter Server for later credential recovery.

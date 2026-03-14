@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +39,7 @@ func (suite *PollBehaviorSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	stream, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
 	state, err := instance.provider.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)
@@ -340,7 +341,7 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 		},
 	}
 
-	createdConfig, err := suite.instance.provider.CreateStream(streamConfig, suite.instance.projectId)
+	createdConfig, err := suite.instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
 	state, _ := suite.instance.provider.GetStreamState(createdConfig.Id)
 

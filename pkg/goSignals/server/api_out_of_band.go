@@ -42,6 +42,11 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
+	// If the rotated issuer is the token issuer, update the application's AuthIssuer
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
+		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
+	}
+
 	// Update the router with the new key/kid
 	if sa.GetEventRouter() != nil {
 		sa.GetEventRouter().UpdateStreamState(&model.StreamStateRecord{
@@ -116,6 +121,11 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", issuer, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
 		return
+	}
+
+	// If the created issuer is the token issuer, update the application's AuthIssuer
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
+		sa.GetAuth().UpdateTokenKey(issuer, issuer, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
 	}
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
@@ -231,6 +241,13 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
+	}
+
+	// If the loaded issuer is the token issuer, update the application's AuthIssuer
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer && priv != nil {
+		// We don't have the kid here, it will default to issuer in UpdateTokenKey fallback or we can load it
+		// But AddIssuerKey with empty kid uses issuer as kid.
+		sa.GetAuth().UpdateTokenKey(issuer, issuer, priv, sa.GetProvider().GetAuthValidatorPubKey())
 	}
 
 	writer.WriteHeader(http.StatusOK)

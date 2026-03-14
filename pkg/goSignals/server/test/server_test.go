@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
@@ -367,7 +368,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	config, _ := suite.servers[0].provider.CreateStream(transConfig, suite.servers[0].projectId)
+	config, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
 	streamToken := config.Delivery.PollTransmitMethod.AuthorizationHeader
 
 	suite.servers[0].streamToken = streamToken
@@ -543,7 +544,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		IssuerJWKSUrl:   jwksIssuer.String(),
 		RouteMode:       model.RouteModeImport,
 	}
-	stream, err := suite.servers[1].provider.CreateStream(reg, "DEFAULT")
+	stream, err := suite.servers[1].provider.CreateStream(reg, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ := suite.servers[1].provider.GetStreamState(stream.Id)
 	suite.servers[1].app.EventRouter.UpdateStreamState(state)
@@ -569,7 +570,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		EventsRequested: stream.EventsDelivered,
 	}
 
-	stream, err = suite.servers[0].provider.CreateStream(regPush, "DEFAULT")
+	stream, err = suite.servers[0].provider.CreateStream(regPush, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ = suite.servers[0].provider.GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
@@ -909,7 +910,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	stream, _ := suite.servers[0].provider.CreateStream(transConfig, suite.servers[0].projectId)
+	stream, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
 	state, _ := suite.servers[0].provider.GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
 	streamToken := stream.Delivery.PollTransmitMethod.AuthorizationHeader
@@ -1036,7 +1037,7 @@ func (suite *ServerSuite) TestE_StatusUpdateReflection() {
 	}
 	method := &model.PollTransmitMethod{Method: model.DeliveryPoll}
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
-	config, err := server.provider.CreateStream(transConfig, server.projectId)
+	config, err := server.provider.CreateStream(transConfig, authUtil.ConvertProject(server.projectId))
 	assert.NoError(suite.T(), err)
 	streamId := config.Id
 

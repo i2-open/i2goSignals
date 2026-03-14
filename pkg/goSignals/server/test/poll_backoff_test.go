@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -37,8 +38,11 @@ func TestPollBackoffRetry(t *testing.T) {
 		},
 	}
 
+	atx := authUtil.AuthContext{
+		ProjectId: instance.projectId,
+	}
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -87,16 +91,19 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
-				EndpointUrl: "http://localhost:8080/poll",
+				EndpointUrl: "http://localhost:9080/poll",
 				PollConfig: &model.PollParameters{
 					ReturnImmediately: true,
 				},
 			},
 		},
 	}
+	atx := authUtil.AuthContext{
+		ProjectId: instance.projectId,
+	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 

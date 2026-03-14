@@ -33,7 +33,7 @@ type DbProviderInterface interface {
 	AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error
 
 	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
-	CreateStream(request model.StreamConfiguration, projectId string) (model.StreamConfiguration, error)
+	CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error)
 	UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error)
 	DeleteStream(streamId string) error
 	GetStream(id string) (*model.StreamConfiguration, error)

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -26,7 +27,7 @@ func TestPersistence(t *testing.T) {
 	streamReq := model.StreamConfiguration{
 		Aud: []string{"test-aud"},
 	}
-	createdStream, err := provider.CreateStream(streamReq, "test-project")
+	createdStream, err := provider.CreateStream(streamReq, authUtil.ConvertProject("test-project"))
 	assert.NoError(t, err)
 	streamID := createdStream.Id
 
