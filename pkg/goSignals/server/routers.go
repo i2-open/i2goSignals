@@ -35,7 +35,7 @@ type Routes []Route
 
 func NewRouter(application *SignalsApplication) *HttpRouter {
 	httpRouter := HttpRouter{
-		router: mux.NewRouter().StrictSlash(true),
+		router: mux.NewRouter().StrictSlash(true).UseEncodedPath(),
 		sa:     application,
 	}
 

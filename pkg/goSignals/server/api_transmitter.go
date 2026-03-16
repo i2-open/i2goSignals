@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -73,7 +74,8 @@ func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Requ
 
 func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
+	issuer, _ := url.QueryUnescape(rawIssuer)
 	jsonKey := sa.GetProvider().GetPublicTransmitterJWKS(issuer)
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)

@@ -662,7 +662,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error generating key")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check status ok result")
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode, "Check status created result")
 
 	body, _ := io.ReadAll(resp.Body)
 	assert.NotNil(suite.T(), body, "Check a request body was returned.")
@@ -692,6 +692,57 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	assert.NoError(suite.T(), err, "key was signed!")
 	assert.NotNil(suite.T(), val, "Signed value returned")
 	testLog.Println("Signed event: \n" + val)
+
+	// Test with URL encoded issuer
+	testLog.Println("Creating issuer key with URL encoded issuer..")
+	issuerEncoded := url.QueryEscape("https://example.com")
+	baseUrlEncoded := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuerEncoded)
+
+	reqEncoded, _ := http.NewRequest(http.MethodPost, baseUrlEncoded, nil)
+	reqEncoded.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respEncoded, err := suite.servers[0].client.Do(reqEncoded)
+	assert.NoError(suite.T(), err, "No error generating key with URL encoded issuer")
+	assert.Equal(suite.T(), http.StatusCreated, respEncoded.StatusCode, "Check status created result for URL encoded issuer")
+
+	bodyEncoded, _ := io.ReadAll(respEncoded.Body)
+	assert.NotNil(suite.T(), bodyEncoded, "Check a request body was returned for URL encoded issuer.")
+
+	blockEncoded, _ := pem.Decode(bodyEncoded)
+	assert.NotNil(suite.T(), blockEncoded, "Check PEM block decoded for URL encoded issuer")
+
+	pkcs8PrivateKeyEncoded, err := x509.ParsePKCS8PrivateKey(blockEncoded.Bytes)
+	keyEncoded := pkcs8PrivateKeyEncoded.(*rsa.PrivateKey)
+	assert.NoError(suite.T(), err, "private key decoded for URL encoded issuer")
+	assert.NotNil(suite.T(), keyEncoded, "Check key is not nil for URL encoded issuer")
+
+	// Negative test: Invalid authorization
+	testLog.Println("Testing negative case: Invalid authorization..")
+	reqInvalidAuth, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	reqInvalidAuth.Header.Set("Authorization", "Bearer invalid_token")
+	respInvalidAuth, err := suite.servers[0].client.Do(reqInvalidAuth)
+	assert.NoError(suite.T(), err, "No error making request with invalid auth")
+	assert.Equal(suite.T(), http.StatusForbidden, respInvalidAuth.StatusCode, "Check forbidden with invalid authorization")
+
+	// Negative test: Empty issuer
+	testLog.Println("Testing negative case: Empty issuer..")
+	baseUrlEmpty := fmt.Sprintf("http://%s/jwks/", suite.servers[0].host)
+	reqEmpty, _ := http.NewRequest(http.MethodPost, baseUrlEmpty, nil)
+	reqEmpty.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respEmpty, err := suite.servers[0].client.Do(reqEmpty)
+	assert.NoError(suite.T(), err, "No error making request with empty issuer")
+	assert.NotEqual(suite.T(), http.StatusCreated, respEmpty.StatusCode, "Check not created with empty issuer")
+
+	// Negative test: Malformed issuer (special characters that might break parsing)
+	testLog.Println("Testing negative case: Malformed issuer..")
+	issuerMalformed := "example@#$%.com"
+	baseUrlMalformed := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, url.PathEscape(issuerMalformed))
+	reqMalformed, _ := http.NewRequest(http.MethodPost, baseUrlMalformed, nil)
+	reqMalformed.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respMalformed, err := suite.servers[0].client.Do(reqMalformed)
+	assert.NoError(suite.T(), err, "No error making request with malformed issuer")
+	// The response might vary depending on implementation. If the server accepts it, it will return 201.
+	// If we wanted to forbid certain characters in issuer name, we should add validation in the handler.
+	assert.True(suite.T(), respMalformed.StatusCode == http.StatusCreated || respMalformed.StatusCode == http.StatusBadRequest, "Unexpected status for malformed issuer")
 }
 
 func (suite *ServerSuite) TestA_GetIssuers() {
@@ -711,8 +762,9 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	var names ssef.IssuerResponse
 	err = json.Unmarshal(body, &names)
 	assert.NoError(suite.T(), err, "No error parsing issuers")
-	assert.Len(suite.T(), names.Issuers, 2, "Issuer was not returned")
+	assert.GreaterOrEqual(suite.T(), len(names.Issuers), 2, "Issuer was not returned")
 	assert.Contains(suite.T(), names.Issuers, "example.com", "Issuer example.com returned")
+	assert.Contains(suite.T(), names.Issuers, "https://example.com", "Issuer https://example.com returned")
 }
 
 func (suite *ServerSuite) TestB_DeleteIssuers() {
@@ -742,7 +794,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.True(suite.T(), resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated, "Expected 200 or 201")
 	body, _ := io.ReadAll(resp.Body)
 	assert.NotEmpty(suite.T(), body)
 

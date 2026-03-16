@@ -156,7 +156,7 @@ func (suite *SSFConformanceSuite) TestMultipleIssuerPaths() {
 
 	resp, err := suite.instance.client.Do(req)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	// Test well-known endpoint with issuer path
 	resp, err = http.Get(suite.instance.ts.URL + "/.well-known/ssf-configuration/" + issuerName)

@@ -57,7 +57,7 @@ func (suite *VerifySuite) TestTriggerVerification() {
 
 	resp, err := instance.client.Do(req)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	var createdStream model.StreamConfiguration
 	_ = json.NewDecoder(resp.Body).Decode(&createdStream)

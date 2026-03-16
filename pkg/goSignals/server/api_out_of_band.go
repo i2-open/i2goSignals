@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/MicahParks/keyfunc"
@@ -33,7 +34,8 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// This function is called by CreateJwksIssuer so authentication has already been checked.
 
 	vars := mux.Vars(r)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
+	issuer, _ := url.QueryUnescape(rawIssuer)
 
 	issuerKey, kid, err := sa.GetProvider().RotateIssuerKey(issuer, authCtx.ProjectId)
 	if err != nil {
@@ -94,8 +96,15 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	}
 
 	vars := mux.Vars(r)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	issuer, err := url.QueryUnescape(rawIssuer)
+	if err != nil {
+		serverLog.Warn(fmt.Sprintf("Error unescaping issuer %s: %v", rawIssuer, err))
+		http.Error(w, "Error malformed issuer encoding", http.StatusBadRequest)
+		return
+	}
 
 	// Check if issuer key already exists
 	existingKey, err := sa.GetProvider().GetIssuerPrivateKey(issuer)
@@ -140,7 +149,7 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 			Bytes: pkcs8bytes,
 		})
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusCreated)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error writing response for issuer %s: %v", issuer, err))
@@ -159,7 +168,8 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 	vars := mux.Vars(request)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
+	issuer, _ := url.QueryUnescape(rawIssuer)
 
 	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
 	contentType = strings.TrimSpace(contentType)
@@ -264,7 +274,8 @@ func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		return
 	}
 	vars := mux.Vars(r)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
+	issuer, _ := url.QueryUnescape(rawIssuer)
 	err := sa.GetProvider().DeleteIssuer(issuer)
 	if err != nil {
 		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
@@ -599,7 +610,8 @@ func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	}
 
 	vars := mux.Vars(r)
-	alias := vars["alias"]
+	rawAlias := vars["alias"]
+	alias, _ := url.QueryUnescape(rawAlias)
 
 	server, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
 	if err != nil {
@@ -633,7 +645,8 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	vars := mux.Vars(r)
-	alias := vars["alias"]
+	rawAlias := vars["alias"]
+	alias, _ := url.QueryUnescape(rawAlias)
 
 	// Find the existing server
 	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
@@ -690,7 +703,8 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	vars := mux.Vars(r)
-	alias := vars["alias"]
+	rawAlias := vars["alias"]
+	alias, _ := url.QueryUnescape(rawAlias)
 
 	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
 	if err != nil {

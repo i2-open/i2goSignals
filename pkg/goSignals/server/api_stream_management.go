@@ -530,7 +530,8 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.Response
 
 func WellKnownSsfConfigurationIssuerGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	issuer := vars["issuer"]
+	rawIssuer := vars["issuer"]
+	issuer, _ := url.QueryUnescape(rawIssuer)
 	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuer))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
