@@ -268,7 +268,7 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 	var dnsNames []string
 	domainName := os.Getenv(EnvServerDNS)
 	if domainName == "" {
-		dnsNames = []string{"goSignals1", "goSignals2", "goSsfServer", "scim_cluster1", "scim_cluster2", "localhost"}
+		dnsNames = []string{"goSignals1", "goSignals2", "goSsfServer", "scim_cluster1", "scim_cluster2", "keycloak", "localhost"}
 	} else {
 		dnsNames = strings.Split(domainName, ",")
 	}

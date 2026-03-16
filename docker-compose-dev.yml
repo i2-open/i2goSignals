@@ -90,6 +90,8 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    depends_on:
+      - prometheus
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
@@ -205,11 +207,11 @@ services:
       - frontend
     ports:
       - "9000:8080"
-    #depends_on:
-    #  goSignals1:
-    #    condition: service_started
-    #  scimSsfSetup:
-    #    condition: service_completed_successfully
+    depends_on:
+      goSignals1:
+        condition: service_started
+      scimSsfSetup:
+        condition: service_completed_successfully
     volumes:
       - ./config/scim/data1:/scim
     env_file:
@@ -250,8 +252,10 @@ services:
     environment:
       KC_HEALTH_ENABLED: true
       KC_HOSTNAME_STRICT: false
-      KC_HOSTNAME_URL: http://keycloak
-      KC_HTTP_ENABLED: true
+      KC_HOSTNAME_URL: https://keycloak:9080
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/server-cert.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/server-key.pem
+      KC_HTTPS_PORT: 9080
       KC_FEATURES: scripts
       KC_SCRIPT_UPLOAD_ENABLED: "true"
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
@@ -260,7 +264,6 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      KC_HTTP_PORT: 9080
       QUARKUS_HTTP_HOST: 0.0.0.0
     ports:
       - 9080:9080
@@ -269,11 +272,12 @@ services:
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
       - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
+      - "./config/certs:/opt/keycloak/certs"
 
 networks:
   frontend:
     driver: bridge
     driver_opts:
-      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
   backend:
     driver: bridge

@@ -91,7 +91,7 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
-				EndpointUrl: "http://localhost:9080/poll",
+				EndpointUrl: "http://localhost:8888/poll",
 				PollConfig: &model.PollParameters{
 					ReturnImmediately: true,
 				},

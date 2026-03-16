@@ -60,7 +60,7 @@ func (suite *ServerDAOMongoSuite) TestCreateAndFind() {
 	server := &model.Server{
 		Id:    id,
 		Alias: "test-server",
-		Host:  "http://localhost:9080",
+		Host:  "http://localhost:8888",
 	}
 
 	err := suite.dao.Create(ctx, server)
@@ -84,7 +84,7 @@ func (suite *ServerDAOMongoSuite) TestUpdate() {
 	server := &model.Server{
 		Id:    id,
 		Alias: "test-server",
-		Host:  "http://localhost:9080",
+		Host:  "http://localhost:8888",
 	}
 
 	err := suite.dao.Create(ctx, server)
