@@ -260,7 +260,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Registration error")
-	assert.Equal(suite.T(), 200, resp.StatusCode, "Reg response status 200 returned check")
+	assert.Equal(suite.T(), 201, resp.StatusCode, "Reg response status 201 returned check")
 	body, _ = io.ReadAll(resp.Body)
 	var configResponse model.StreamConfiguration
 	err = json.Unmarshal(body, &configResponse)
@@ -959,7 +959,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	resp, err := suite.servers[1].client.Do(reqCreate)
 	assert.NoError(suite.T(), err, "Check no http error on polling stream create")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check status accepted")
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode, "Check status created")
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	var pstream model.StreamConfiguration

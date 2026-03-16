@@ -48,7 +48,7 @@ func (suite *PushErrorSuite) SetupSuite() {
 
 	resp, err := instance.client.Do(req)
 	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode)
 
 	var createdStream model.StreamConfiguration
 	_ = json.NewDecoder(resp.Body).Decode(&createdStream)
