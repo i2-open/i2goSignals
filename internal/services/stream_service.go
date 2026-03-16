@@ -752,7 +752,7 @@ func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *mo
 		if streamState.IssuerJWKSUrl == "" {
 			return
 		}
-		ssLog.Info("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
+		ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
 		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
 		if err != nil {
 			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())

@@ -227,9 +227,10 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HTTP_PORT: 9080
       QUARKUS_HTTP_HOST: 0.0.0.0
     ports:
-      - 8080:8080
+      - 9080:9080
     depends_on:
       - postgres
     volumes:

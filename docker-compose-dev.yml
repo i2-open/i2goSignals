@@ -16,6 +16,8 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
       - MONGO_REPLICA_SET_NAME=dbrs
+    networks:
+      - backend
     ports:
       - "30001:30001"
     command: ["--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30001"]
@@ -29,6 +31,8 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
       - MONGO_REPLICA_SET_NAME=dbrs
+    networks:
+      - backend
     ports:
       - "30002:30002"
     command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30002" ]
@@ -44,6 +48,8 @@ services:
       - MONGO_REPLICA_SET_NAME=dbrs
     ports:
       - "30003:30003"
+    networks:
+      - backend
     command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30003" ]
     volumes:
       - ".mongo/replica.key:/data/replica.key"
@@ -57,11 +63,15 @@ services:
     volumes:
       - ".mongo/:/scripts"
     restart: "no"
+    networks:
+      - backend
     entrypoint: [ "bash", "/scripts/mongo_init.sh"]
 
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    networks:
+      - backend
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
@@ -74,6 +84,9 @@ services:
   grafana:
     image: grafana/grafana
     container_name: grafana
+    networks:
+      - frontend
+      - backend
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -90,6 +103,9 @@ services:
     image: i2gosignals-dev:latest
     container_name: gosignals1
     hostname: goSignals1
+    networks:
+      - frontend
+      - backend
     depends_on:
       mongo1:
         condition: service_started
@@ -116,6 +132,9 @@ services:
     image: i2gosignals-dev:latest
     container_name: gosignals2
     hostname: goSignals2
+    networks:
+      - frontend
+      - backend
     depends_on:
       mongo1:
         condition: service_started
@@ -141,6 +160,9 @@ services:
     image: i2gosignals-dev:latest
     container_name: gossfserver
     hostname: goSsfServer
+    networks:
+      - frontend
+      - backend
     ports:
       - "8890:8890"
       - "2347:2345"
@@ -167,6 +189,9 @@ services:
     volumes:
       - "./config/scim:/scim"
     restart: "no"
+    networks:
+      - backend
+      - frontend
     environment:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
@@ -176,6 +201,8 @@ services:
   scim_cluster1:
     image: independentid/i2scim-universal:0.8.0
     container_name: scim_cluster1
+    networks:
+      - frontend
     ports:
       - "9000:8080"
     #depends_on:
@@ -205,6 +232,8 @@ services:
     image: postgres:alpine
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -213,6 +242,9 @@ services:
     image: quay.io/keycloak/keycloak:26.4.7
     container_name: keycloak-signals
     hostname: keycloak
+    networks:
+      - frontend
+      - backend
     command: start-dev --import-realm
     # --spi-theme-static-max-age=-1 --spi-theme-cache-themes=false --spi-theme-cache-templates=false --log-level=org.keycloak.theme:DEBUG
     environment:
@@ -228,13 +260,20 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HTTP_PORT: 9080
       QUARKUS_HTTP_HOST: 0.0.0.0
     ports:
-      - 8080:8080
+      - 9080:9080
     depends_on:
       - postgres
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
       - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
 
-
+networks:
+  frontend:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
+  backend:
+    driver: bridge
