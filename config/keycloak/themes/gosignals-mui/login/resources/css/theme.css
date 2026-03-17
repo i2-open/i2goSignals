@@ -5,24 +5,70 @@
 */
 
 :root {
-  /* Primary (dark) */
-  --mui-bg: #141b2d;           /* tokens.primary.500 */
-  --mui-bg-alt: #1F2A40;       /* tokens.primary.400 (dark mode primary surface) */
-  --mui-text: #dbf5ee;         /* tokens.greenAccent.900 (light green) */
-  --mui-text-muted: #c3c6fd;   /* tokens.blueAccent.200 */
+  /* Light Mode Tokens (Default) */
+  --mui-bg: #f9fafb;             /* Neutral background */
+  --mui-bg-alt: #ffffff;         /* Card surface */
+  --mui-text: #111827;           /* High-contrast dark text */
+  --mui-text-muted: #4b5563;     /* Muted grey text */
 
   /* Accents */
-  --mui-primary: #4cceac;      /* tokens.greenAccent.500 */
-  --mui-primary-600: #3da58a;  /* tokens.greenAccent.600 */
-  --mui-primary-700: #2e7c67;  /* tokens.greenAccent.700 */
-  --mui-danger: #db4f4a;       /* tokens.redAccent.500 */
+  --mui-primary: #059669;        /* Darker green for light mode contrast */
+  --mui-primary-600: #047857;
+  --mui-primary-700: #065f46;
+  --mui-danger: #dc2626;         /* Standard danger red */
 
   /* Borders & inputs */
-  --mui-border: #2a2d64;       /* tokens.blueAccent.800 */
-  --mui-input-bg: #101624;     /* tokens.primary.600 */
-  --mui-input-text: #e0e0e0;   /* tokens.grey.100 */
-  --mui-focus: #6870fa;        /* tokens.blueAccent.500 */
-  --mui-shadow: rgba(0,0,0,0.6);
+  --mui-border: #d1d5db;
+  --mui-input-bg: #ffffff;
+  --mui-input-text: #111827;
+  --mui-focus: #2563eb;          /* MUI blue for focus states */
+  --mui-shadow: rgba(0, 0, 0, 0.05);
+  --mui-btn-text: #ffffff;       /* Text on primary buttons */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Dark Mode Tokens (MUI-inspired) */
+    --mui-bg: #141b2d;
+    --mui-bg-alt: #1F2A40;
+    --mui-text: #dbf5ee;
+    --mui-text-muted: #c3c6fd;
+    --mui-primary: #4cceac;
+    --mui-primary-600: #3da58a;
+    --mui-primary-700: #2e7c67;
+    --mui-danger: #db4f4a;
+    --mui-border: #2a2d64;
+    --mui-input-bg: #101624;
+    --mui-input-text: #e0e0e0;
+    --mui-focus: #6870fa;
+    --mui-shadow: rgba(0, 0, 0, 0.4);
+    --mui-btn-text: #04130e;     /* Dark text for contrast on bright green */
+  }
+}
+
+/* Also support explicit theme class if provided by Keycloak */
+.pf-v5-theme-dark, .pf-theme-dark {
+  --mui-bg: #141b2d;
+  --mui-bg-alt: #1F2A40;
+  --mui-text: #dbf5ee;
+  --mui-text-muted: #c3c6fd;
+  --mui-primary: #4cceac;
+  --mui-primary-600: #3da58a;
+  --mui-primary-700: #2e7c67;
+  --mui-danger: #db4f4a;
+  --mui-border: #2a2d64;
+  --mui-input-bg: #101624;
+  --mui-input-text: #e0e0e0;
+  --mui-focus: #6870fa;
+  --mui-shadow: rgba(0, 0, 0, 0.4);
+  --mui-btn-text: #04130e;
+}
+
+/* Leverage PatternFly Theme Variables */
+.pf-v5-c-login, .login-pf-page {
+  --pf-v5-global--BackgroundColor--100: var(--mui-bg);
+  --pf-v5-c-login__main--BackgroundColor: var(--mui-bg-alt);
+  --pf-v5-c-login__main--Color: var(--mui-text);
 }
 
 /* Page background */
@@ -109,7 +155,7 @@ input:focus, textarea:focus, select:focus, .pf-c-form-control:focus {
 input[type="submit"], button[type="submit"],
 .btn, .pf-c-button {
   background-color: var(--mui-primary) !important;
-  color: #04130e !important; /* good contrast on green */
+  color: var(--mui-btn-text) !important;
   border: 0 !important;
   border-radius: 6px !important;
   text-transform: none !important;
@@ -134,6 +180,23 @@ a, .kc-feedback-text a, .pf-c-button.pf-m-link {
 }
 
 a:hover { opacity: 0.9; }
+
+/* Social Providers Icons */
+#kc-social-providers svg:not(.google) {
+  filter: invert(47%) sepia(88%) saturate(7486%) hue-rotate(199deg) brightness(91%) contrast(101%);
+  height: var(--pf-v5-global--FontSize--xl);
+}
+
+@media (prefers-color-scheme: dark) {
+  #kc-social-providers svg:not(.google) {
+    filter: invert(54%) sepia(96%) saturate(2028%) hue-rotate(174deg) brightness(99%) contrast(97%);
+  }
+}
+
+.pf-v5-theme-dark #kc-social-providers svg:not(.google),
+.pf-theme-dark #kc-social-providers svg:not(.google) {
+  filter: invert(54%) sepia(96%) saturate(2028%) hue-rotate(174deg) brightness(99%) contrast(97%);
+}
 
 /* Error messages */
 .alert-error, .pf-c-alert.pf-m-danger, .kc-feedback-text-error {
