@@ -111,7 +111,7 @@ func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
 
 func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
 	// Receiver streams have RouteMode = "import"
-	filter := bson.M{"config.route_mode": model.RouteModeImport}
+	filter := bson.M{"route_mode": model.RouteModeImport}
 	cursor, err := d.collection.Find(ctx, filter)
 	if err != nil {
 		sLog.Error("Error finding receiver streams", "error", err)

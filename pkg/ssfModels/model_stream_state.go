@@ -9,12 +9,12 @@ import (
 
 // StreamStateRecord is stored in MongoProvider.streamCol
 type StreamStateRecord struct {
-	Id        bson.ObjectID `bson:"_id"`
-	ProjectId string        `json:"project_id" bson:"project_id"` // ProjectId links SsfClient entities to streams.
-	StreamConfiguration
-	StartDate  time.Time `json:"start_date" bson:"start_date"`
-	CreatedAt  time.Time `json:"created_at" bson:"created_at"`
-	ModifiedAt time.Time `json:"modified_at" bson:"modified_at"`
+	Id                  bson.ObjectID `bson:"_id"`
+	ProjectId           string        `json:"project_id" bson:"project_id"` // ProjectId links SsfClient entities to streams.
+	StreamConfiguration `bson:",inline"`
+	StartDate           time.Time `json:"start_date" bson:"start_date"`
+	CreatedAt           time.Time `json:"created_at" bson:"created_at"`
+	ModifiedAt          time.Time `json:"modified_at" bson:"modified_at"`
 
 	// Status indicates the current operational status and is one of StreamStateEnabled, StreamStatePause, StreamStateDisable
 	Status string `json:"status" bson:"status"`

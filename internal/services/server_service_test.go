@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -196,6 +197,53 @@ func (s *ServerServiceTestSuite) TestCreateServer_OAuthDiscovery() {
 	err := s.service.CreateServer(s.T().Context(), server)
 	s.NoError(err)
 	s.Equal(tokenServer.URL, server.OAuthClientConfig.TokenURL)
+}
+
+func (s *ServerServiceTestSuite) TestCreateServer_SelfSignedCertDiscovery() {
+	// Mock Server (both AS and Resource)
+	mockServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"authorization_servers": []string{"https://" + r.Host},
+			})
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token_endpoint": "https://" + r.Host + "/token",
+			})
+		case "/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "test-token",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			})
+		case "/.well-known/ssf-configuration":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	// Get the certificate from mockServer
+	certBytes := mockServer.Certificate().Raw
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+
+	server := &model.Server{
+		Alias: "discovery-server",
+		Type:  model.ServerTypeSsf,
+		Host:  mockServer.URL,
+		OAuthClientConfig: &model.OAuthClientConfig{
+			ClientID:     "client",
+			ClientSecret: "secret",
+		},
+		TLSCertificate: string(certPEM),
+	}
+
+	err := s.service.CreateServer(s.T().Context(), server)
+	s.NoError(err)
+	s.Equal("https://"+mockServer.Listener.Addr().String()+"/token", server.OAuthClientConfig.TokenURL)
 }
 
 func TestServerServiceSuite(t *testing.T) {

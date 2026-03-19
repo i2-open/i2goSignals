@@ -49,6 +49,14 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 	minVerificationInterval := 300
 	maxInactivityTimeout := 3600
 	var err error
+	var baseUrl *url.URL
+	base, exist := os.LookupEnv("BASE_URL")
+	if exist {
+		baseUrl, err = url.Parse(base)
+		if err != nil {
+			ssLog.Error("Invalid BASE_URL value", "error", err.Error())
+		}
+	}
 	minVer, exist := os.LookupEnv("MIN_VERIFICATION_INTERVAL")
 	if exist {
 		minVerificationInterval, err = strconv.Atoi(minVer)
@@ -70,6 +78,7 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 		keyService:              keyService,
 		defaultIssuer:           defaultIssuer,
 		receiverStreams:         make(map[string]*model.StreamStateRecord),
+		BaseUrl:                 baseUrl,
 		minVerificationInterval: minVerificationInterval,
 		maxInactivityTimeout:    maxInactivityTimeout,
 	}
@@ -79,9 +88,49 @@ func (s *StreamService) SetBaseUrl(u *url.URL) {
 	s.BaseUrl = u
 }
 
+func (s *StreamService) getFullUrl(relativePath string) string {
+	if s.BaseUrl == nil {
+		return relativePath
+	}
+	u, err := s.BaseUrl.Parse(relativePath)
+	if err != nil {
+		ssLog.Error("failed to parse relative URL", "error", err, "relative", relativePath)
+		return relativePath
+	}
+	return u.String()
+}
+
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
 	mid := bson.NewObjectID()
 
+	if logger.IsDebugEnabled() {
+		ssLog.Debug("CreateStream dump:")
+		fmt.Println("CreateStream", mid, "projectID", projectID)
+		rbytes, err := json.MarshalIndent(request, "", "  ")
+		if rbytes != nil {
+			fmt.Println(string(rbytes))
+		} else {
+			fmt.Println("error", err)
+		}
+		if txServer != nil {
+			fmt.Println("Tx Server:", txServer.Alias)
+			rbytes, err = json.MarshalIndent(txServer, "", "  ")
+			if rbytes != nil {
+				fmt.Println(string(rbytes))
+			} else {
+				fmt.Println("error", err)
+			}
+		}
+	}
+
+	transmitAlias := ""
+	if request.TxAlias != nil {
+		transmitAlias = *request.TxAlias // take a copy so it is preserved.
+	}
+	transmitToken := ""
+	if request.TxToken != nil {
+		transmitToken = *request.TxToken
+	}
 	var config model.StreamConfiguration
 	var pushAutoReg bool
 	var defaultTxJwksUrl string
@@ -112,7 +161,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
 	config.TxWellKnownUrl = request.TxWellKnownUrl
-	config.TxAlias = request.TxAlias
+	if transmitAlias != "" {
+		config.TxAlias = &transmitAlias
+	}
+
+	if transmitToken != "" {
+		config.TxToken = &transmitToken
+	}
 
 	authIssuer := s.keyService.GetAuthIssuer()
 	selectedTxServerParam := false
@@ -153,10 +208,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
 		}
+
 		delivery := &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
 				Method:              model.DeliveryPoll,
-				EndpointUrl:         fmt.Sprintf("/poll/%s", mid.Hex()),
+				EndpointUrl:         s.getFullUrl(fmt.Sprintf("/poll/%s", mid.Hex())),
 				AuthorizationHeader: "Bearer " + authToken,
 			},
 		}
@@ -173,7 +229,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			config.RouteMode = model.RouteModeImport
 		}
 		method := config.Delivery.PushReceiveMethod
-		method.EndpointUrl = fmt.Sprintf("/events/%s", mid.Hex())
+		method.EndpointUrl = s.getFullUrl(fmt.Sprintf("/events/%s", mid.Hex()))
 		if !isOAuth {
 			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
 			if err != nil {
@@ -181,6 +237,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 			method.AuthorizationHeader = "Bearer " + authToken
 
+		}
+		if transmitAlias != "" {
+			config.TxAlias = &transmitAlias // save TxAlias to support client credential flows
+		}
+		config.TxWellKnownUrl = request.TxWellKnownUrl
+		if transmitToken != "" {
+			config.TxToken = &transmitToken
 		}
 
 		// If a transmitter server (txServer) or well-known URL and token are provided, enable automatic registration.
@@ -193,6 +256,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		// ReceivePoll indicates this goSignals instance will poll an external SSF Transmitter for events.
 		// If a TxWellKnownUrl and TxToken are provided, attempt to do an SSF registration to create the Polling Transmit Stream and then create the local receiver stream
 		config.Delivery = request.Delivery
+		if transmitAlias != "" {
+			config.TxAlias = &transmitAlias // save TxAlias to support client credential flows
+		}
+		config.TxWellKnownUrl = request.TxWellKnownUrl
+		if transmitToken != "" {
+			config.TxToken = &transmitToken
+		}
+
+		config.TxWellKnownUrl = request.TxWellKnownUrl
 
 		if selectedTxServerParam || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
 			// Attempt to do an SSF registration to create the Polling Transmit Stream
@@ -263,12 +335,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
 			config.EventsDelivered = txStreamResp.EventsDelivered
 			config.TxWellKnownUrl = request.TxWellKnownUrl
-			txId := ""
-			if txStreamResp.TxStreamId != nil {
-				txId = *txStreamResp.TxStreamId
-			}
+			txId := txStreamResp.Id
+
 			txIdPtr := txId
-			config.TxStreamId = &txIdPtr
+			config.RemoteStreamId = &txIdPtr
 
 			if txStreamResp.Delivery != nil && txStreamResp.Delivery.PollTransmitMethod != nil {
 
@@ -278,6 +348,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 				config.Delivery.PollReceiveMethod.AuthorizationHeader = txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
 				config.Delivery.PollReceiveMethod.EndpointUrl = txStreamResp.Delivery.PollTransmitMethod.EndpointUrl
 				config.Delivery.PollReceiveMethod.PollConfig = txStreamResp.Delivery.PollTransmitMethod.PollConfig // follow the Transmitters poll config if asserted
+				if transmitAlias != "" {
+					config.TxAlias = &transmitAlias // This is needed for client crecdential flow
+				}
+				config.RemoteStreamId = &txId
 
 			} else {
 				ssLog.Warn("transmitter configuration delivery is missing PollTransmitMethod information, receive creation aborted", "stream_id", config.Id, "transmitter_url", request.TxWellKnownUrl)
@@ -386,12 +460,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		}
 
 		method := streamRec.StreamConfiguration.Delivery.PushReceiveMethod
-		endpoint := method.EndpointUrl
-		if s.BaseUrl != nil {
-			u, _ := s.BaseUrl.Parse(endpoint)
-			endpoint = u.String()
-		}
+		endpoint := s.getFullUrl(method.EndpointUrl)
 
+		remoteId := mid.Hex()
 		// Using the returned configuration endpoint, form a stream create-request with model.DeliveryPush.
 		transmitStreamReq := model.StreamConfiguration{
 			Iss:             request.Iss,
@@ -405,6 +476,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 					AuthorizationHeader: method.AuthorizationHeader,
 				},
 			},
+			RemoteStreamId: &remoteId, // note: ssf servers will ignore
 		}
 
 		ssLog.Debug("Submitting PUSH stream registration request to transmitter...")
@@ -460,8 +532,8 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		config.EventsRequested = request.EventsRequested
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
-		txIdStr := txStreamResp.Id
-		config.TxStreamId = &txIdStr
+
+		config.RemoteStreamId = &txStreamResp.Id
 
 		if txStreamResp.Delivery != nil && txStreamResp.Delivery.PushTransmitMethod != nil {
 			// If no authorization_header value is returned, keep using the request token
@@ -566,6 +638,18 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		if configReq.Delivery != nil {
 			config.Delivery.PollReceiveMethod = configReq.Delivery.PollReceiveMethod
 		}
+		if configReq.TxWellKnownUrl != nil {
+			config.TxWellKnownUrl = configReq.TxWellKnownUrl
+		}
+		if configReq.TxToken != nil {
+			config.TxToken = configReq.TxToken
+		}
+		if configReq.TxAlias != nil {
+			config.TxAlias = configReq.TxAlias
+		}
+		if configReq.RemoteStreamId != nil {
+			config.RemoteStreamId = configReq.RemoteStreamId
+		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval
 		}
@@ -575,6 +659,18 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	case model.ReceivePush:
 		if configReq.Delivery != nil {
 			config.Delivery.PushReceiveMethod = configReq.Delivery.PushReceiveMethod
+		}
+		if configReq.TxWellKnownUrl != nil {
+			config.TxWellKnownUrl = configReq.TxWellKnownUrl
+		}
+		if configReq.TxToken != nil {
+			config.TxToken = configReq.TxToken
+		}
+		if configReq.TxAlias != nil {
+			config.TxAlias = configReq.TxAlias
+		}
+		if configReq.RemoteStreamId != nil {
+			config.RemoteStreamId = configReq.RemoteStreamId
 		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval

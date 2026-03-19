@@ -133,18 +133,27 @@ func TestGetClientCredentialsHTTPClient_CachingWithDifferentTLS(t *testing.T) {
 	client1, err := mgr.GetClientCredentialsHTTPClient(context.Background(), []string{"read"}, "", nil)
 	assert.NoError(t, err)
 
-	// Trigger token fetch
-	_, _ = client1.Get("http://example.com")
-	assert.Equal(t, 1, callCount)
-
 	// Second call with same params should return cached client
 	client2, err := mgr.GetClientCredentialsHTTPClient(context.Background(), []string{"read"}, "", nil)
 	assert.NoError(t, err)
 	assert.Same(t, client1, client2)
 
-	// Token should be cached, no new call
-	_, _ = client2.Get("http://example.com")
-	assert.Equal(t, 1, callCount)
+	// Third call with different server (alias) should return DIFFERENT client
+	server1 := &model.Server{Alias: "server1"}
+	client3, err := mgr.GetClientCredentialsHTTPClient(context.Background(), []string{"read"}, "", server1)
+	assert.NoError(t, err)
+	assert.NotSame(t, client1, client3)
+
+	// Fourth call with same server should return cached client for THAT server
+	client4, err := mgr.GetClientCredentialsHTTPClient(context.Background(), []string{"read"}, "", server1)
+	assert.NoError(t, err)
+	assert.Same(t, client3, client4)
+
+	// Fifth call with another server with DIFFERENT TLS cert should return ANOTHER client
+	server2 := &model.Server{Alias: "server2", TLSCertificate: "cert2"}
+	client5, err := mgr.GetClientCredentialsHTTPClient(context.Background(), []string{"read"}, "", server2)
+	assert.NoError(t, err)
+	assert.NotSame(t, client3, client5)
 }
 
 func TestGetClientCredentialsClient_GlobalCaching(t *testing.T) {

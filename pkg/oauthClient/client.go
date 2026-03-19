@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -94,7 +95,7 @@ func (m *Manager) GetHTTPClient(ctx context.Context, subjectAccessToken string, 
 	if strings.TrimSpace(resource) == "" {
 		resource = m.cfg.Resource
 	}
-	key := cacheKey(subjectAccessToken, scopes, resource)
+	key := cacheKey(subjectAccessToken, scopes, resource, nil)
 	m.mu.Lock()
 	if c, ok := m.cache[key]; ok {
 		m.mu.Unlock()
@@ -318,10 +319,14 @@ func (tr tokenResp) toOAuth2Token() *oauth2.Token {
 	return t
 }
 
-func cacheKey(subjectToken string, scopes []string, resource string) string {
+func cacheKey(subjectToken string, scopes []string, resource string, server *model.Server) string {
 	scopes = normalizeScopes(scopes)
 	r := strings.TrimSpace(resource)
-	h := sha256.Sum256([]byte(subjectToken + "|" + strings.Join(scopes, " ") + "|" + r))
+	tlsInfo := ""
+	if server != nil {
+		tlsInfo = server.Alias + "|" + server.TLSCertificate + "|" + fmt.Sprintf("%v", server.TLSSkipVerify)
+	}
+	h := sha256.Sum256([]byte(subjectToken + "|" + strings.Join(scopes, " ") + "|" + r + "|" + tlsInfo))
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
@@ -343,7 +348,7 @@ func (m *Manager) GetClientCredentialsHTTPClient(ctx context.Context, scopes []s
 	}
 
 	// For client credentials flow, we use an empty subjectToken in the cacheKey
-	key := cacheKey("client_credentials", scopes, resource)
+	key := cacheKey("client_credentials", scopes, resource, server)
 	m.mu.Lock()
 	if c, ok := m.cache[key]; ok {
 		m.mu.Unlock()
@@ -552,7 +557,7 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 
 	// Try to find token_endpoint for each authorization server
 	for _, as := range metadata.AuthorizationServers {
-		tokenURL, err := discoverTokenEndpoint(ctx, as)
+		tokenURL, err := discoverTokenEndpoint(ctx, client, as)
 		if err == nil {
 			return tokenURL, nil
 		}
@@ -561,11 +566,13 @@ func DiscoverTokenURL(ctx context.Context, host string, client *http.Client) (st
 	return "", errors.New("could not discover token endpoint from any authorization server")
 }
 
-func discoverTokenEndpoint(ctx context.Context, as string) (string, error) {
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+func discoverTokenEndpoint(ctx context.Context, client *http.Client, as string) (string, error) {
+	if client == nil {
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+		}
+		tlsSupport.CheckCaInstalled(client)
 	}
-	tlsSupport.CheckCaInstalled(client)
 
 	// Try OAuth 2.0 Authorization Server Metadata (RFC 8414)
 	metadata, err := wellKnownSupport.FetchWellKnown[struct {

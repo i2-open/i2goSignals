@@ -41,6 +41,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 		assert.Contains(t, req.Delivery.PushTransmitMethod.EndpointUrl, "http://receiver.com/events/")
 
 		// Return updated configuration
+		req.Id = "remote-stream-abc"
 		req.EventsDelivered = eventsDelivered
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(req)
@@ -85,6 +86,8 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	// 4. Verify Results
 	assert.NoError(t, err)
 	assert.Equal(t, eventsDelivered, config.EventsDelivered)
+	assert.NotNil(t, config.RemoteStreamId)
+	assert.Equal(t, "remote-stream-abc", *config.RemoteStreamId)
 }
 
 func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
@@ -115,6 +118,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 		assert.Equal(t, model.DeliveryPoll, req.Delivery.GetMethod())
 
 		// Return updated configuration with Poll details
+		req.Id = "remote-stream-123"
 		req.EventsDelivered = eventsDelivered
 		req.Delivery = &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
@@ -171,4 +175,6 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	assert.Equal(t, "Bearer status-token", config.Delivery.PollReceiveMethod.AuthorizationHeader)
 	assert.NotNil(t, config.TxToken)
 	assert.Equal(t, "Bearer status-token", *config.TxToken)
+	assert.NotNil(t, config.RemoteStreamId)
+	assert.Equal(t, "remote-stream-123", *config.RemoteStreamId)
 }

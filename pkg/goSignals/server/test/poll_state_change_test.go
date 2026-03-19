@@ -75,7 +75,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -142,7 +142,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnDisable() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")

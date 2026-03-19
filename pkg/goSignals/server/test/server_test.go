@@ -55,6 +55,28 @@ type ssfInstance struct {
 	startTime       *time.Time
 }
 
+func (instance *ssfInstance) GetPollUrl(stream model.StreamConfiguration) string {
+	if stream.Delivery == nil || stream.Delivery.PollTransmitMethod == nil {
+		return ""
+	}
+	endpoint := stream.Delivery.PollTransmitMethod.EndpointUrl
+	if strings.HasPrefix(endpoint, "http") {
+		return endpoint
+	}
+	return instance.ts.URL + endpoint
+}
+
+func (instance *ssfInstance) GetPushUrl(stream model.StreamConfiguration) string {
+	if stream.Delivery == nil || stream.Delivery.PushReceiveMethod == nil {
+		return ""
+	}
+	endpoint := stream.Delivery.PushReceiveMethod.EndpointUrl
+	if strings.HasPrefix(endpoint, "http") {
+		return endpoint
+	}
+	return instance.ts.URL + endpoint
+}
+
 type ServerSuite struct {
 	suite.Suite
 	servers []*ssfInstance

@@ -242,7 +242,11 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	// Set defaults
 	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
 	if !issDefined {
-		defaultIssuer = "DEFAULT"
+		if sa.BaseUrl != nil {
+			defaultIssuer = sa.BaseUrl.String()
+		} else {
+			defaultIssuer = "DEFAULT"
+		}
 	}
 	sa.DefIssuer = defaultIssuer
 	serverLog.Info("Selected issuer id", "issuer", sa.DefIssuer)

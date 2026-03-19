@@ -111,7 +111,7 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 		Scopes:       server.OAuthClientConfig.Scopes,
 	}
 	if server.OAuthClientConfig.TokenURL == "" {
-		tokenURL, err := oauthClient.DiscoverTokenURL(ctx, server.Host, nil)
+		tokenURL, err := oauthClient.DiscoverTokenURL(ctx, server.Host, oauthClient.GetBaseHTTPClientForServer(server))
 		if err != nil {
 			return err
 		}

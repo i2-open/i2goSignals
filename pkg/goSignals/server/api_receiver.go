@@ -203,6 +203,7 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 
 	// 3. Fallback for Polling Receiver (legacy delivery method auth)
 	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
+		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
 		// If we have a server, use its TLS settings; otherwise use default
 		var client *http.Client
 		if server != nil {

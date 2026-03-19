@@ -37,6 +37,7 @@ const CDefIssuer = "DEFAULT"
 const CEnvIssuer = "I2SIG_ISSUER"
 const CEnvDbName = "I2SIG_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
+const CEnvBaseURL = "BASE_URL"
 const CDefTokenIssuer = "DEFAULT"
 const ErrorInvalidProject = "invalid project_id - invalid token"
 
@@ -286,7 +287,10 @@ func (m *MongoProvider) monitor() {
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 	defaultIssuer, issDefined := os.LookupEnv(CEnvIssuer)
 	if !issDefined {
-		defaultIssuer = CDefIssuer
+		defaultIssuer, issDefined = os.LookupEnv(CEnvBaseURL)
+		if !issDefined {
+			defaultIssuer = CDefIssuer
+		}
 	}
 
 	if dbName == "" {

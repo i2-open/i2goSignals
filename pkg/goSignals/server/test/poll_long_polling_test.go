@@ -77,7 +77,7 @@ func (suite *LongPollSuite) TestLongPollingWithTimeout() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -132,7 +132,7 @@ func (suite *LongPollSuite) TestMaxEventsLimit() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -173,7 +173,7 @@ func (suite *LongPollSuite) TestCombinedAckAndPoll() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -212,7 +212,7 @@ func (suite *LongPollSuite) TestCombinedAckAndPoll() {
 	}
 
 	bodyBytes, _ = json.Marshal(pollParams2)
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -254,7 +254,7 @@ func (suite *LongPollSuite) TestAcknowledgeOnly() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -281,7 +281,7 @@ func (suite *LongPollSuite) TestAcknowledgeOnly() {
 	}
 
 	bodyBytes, _ = json.Marshal(pollParams2)
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -304,7 +304,7 @@ func (suite *LongPollSuite) TestAcknowledgeOnly() {
 	}
 
 	bodyBytes, _ = json.Marshal(pollParams3)
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -343,7 +343,7 @@ func (suite *LongPollSuite) TestSetErrsReporting() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -376,7 +376,7 @@ func (suite *LongPollSuite) TestSetErrsReporting() {
 	}
 
 	bodyBytes, _ = json.Marshal(pollParams2)
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -393,7 +393,7 @@ func (suite *LongPollSuite) TestSetErrsReporting() {
 	}
 
 	bodyBytes, _ = json.Marshal(pollParams3)
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 	req.Header.Set("Content-Type", "application/json")
@@ -420,7 +420,7 @@ func (suite *LongPollSuite) TestPollAuthorizationFailure() {
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
-	pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl := suite.instance.GetPollUrl(suite.stream)
 	req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -429,7 +429,7 @@ func (suite *LongPollSuite) TestPollAuthorizationFailure() {
 	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "Should fail without authorization")
 
 	// Test 2: Invalid authorization token
-	pollUrl = suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+	pollUrl = suite.instance.GetPollUrl(suite.stream)
 	req, _ = http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	req.Header.Set("Content-Type", "application/json")
@@ -457,7 +457,7 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 			}
 
 			bodyBytes, _ := json.Marshal(pollParams)
-			pollUrl := suite.instance.ts.URL + suite.stream.Delivery.PollTransmitMethod.EndpointUrl
+			pollUrl := suite.instance.GetPollUrl(suite.stream)
 			req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
 			req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
 			req.Header.Set("Content-Type", "application/json")
