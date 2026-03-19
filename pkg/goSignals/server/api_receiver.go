@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,10 +19,11 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
-	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSsfUtils"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
-	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 	"github.com/segmentio/ksuid"
 )
 
@@ -167,17 +166,29 @@ func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Cont
 	return client
 }
 
+func (sa *SignalsApplication) getServerForStream(ctx context.Context, stream *model.StreamStateRecord) (*model.Server, error) {
+	conf := stream.StreamConfiguration
+	if conf.TxAlias != nil && *conf.TxAlias != "" {
+		return sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+	}
+	return nil, nil
+}
+
 func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
 	conf := stream.StreamConfiguration
 	var server *model.Server
 	var err error
 
 	// 1. Try TxAlias (New preferred method) - get server configuration first
-	if conf.TxAlias != nil && *conf.TxAlias != "" {
-		server, err = sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
-		if err != nil || server == nil {
-			serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
-			server = nil // ensure nil if lookup failed
+	server, err = sa.getServerForStream(ctx, stream)
+	if err != nil {
+		serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
+	}
+
+	// 2. Backward compatibility: TxToken (no server object)
+	if server == nil && conf.TxToken != nil && *conf.TxToken != "" {
+		server = &model.Server{
+			ClientToken: conf.TxToken,
 		}
 	}
 
@@ -187,43 +198,24 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 		if err == nil {
 			return client, "", nil // Client handles Authorization header
 		}
-		serverLog.Error("RCV: Failed to get client for server", "alias", *conf.TxAlias, "error", err)
-	}
-
-	// 2. Backward compatibility: TxToken (no server object, use default TLS)
-	if conf.TxToken != nil && *conf.TxToken != "" {
-		client := &http.Client{}
-		tlsSupport.CheckCaInstalled(client)
-		token := *conf.TxToken
-		if !strings.Contains(token, " ") {
-			return client, "Bearer " + token, nil
+		alias := ""
+		if conf.TxAlias != nil {
+			alias = *conf.TxAlias
 		}
-		return client, token, nil
+		serverLog.Error("RCV: Failed to get client for server", "alias", alias, "error", err)
 	}
 
 	// 3. Fallback for Polling Receiver (legacy delivery method auth)
 	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
 		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
-		// If we have a server, use its TLS settings; otherwise use default
-		var client *http.Client
-		if server != nil {
-			client = oauthClient.GetBaseHTTPClientForServer(server)
-		} else {
-			client = &http.Client{}
-			tlsSupport.CheckCaInstalled(client)
-		}
+		client := &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
 		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, nil
 	}
 
 	// Default client without extra authorization
-	// Use server TLS settings if available
-	var client *http.Client
-	if server != nil {
-		client = oauthClient.GetBaseHTTPClientForServer(server)
-	} else {
-		client = &http.Client{}
-		tlsSupport.CheckCaInstalled(client)
-	}
+	client := &http.Client{}
+	tlsSupport.CheckCaInstalled(client)
 	return client, "", nil
 }
 
@@ -427,42 +419,21 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	params := model.VerificationParameters{
 		State: state,
 	}
-	body, _ := json.Marshal(params)
 
-	client, auth, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
+	client, _, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
 	if err != nil {
 		serverLog.Error("PUSH-RCV: Failed to get authenticated client", "error", err)
 		rps.fallbackToStatusCheck()
 		return
 	}
 
-	req, err := http.NewRequestWithContext(rps.ctx, http.MethodPost, verifyUrl, bytes.NewReader(body))
+	err = goSsfUtils.PostVerification(rps.ctx, client, verifyUrl, params)
 	if err != nil {
-		serverLog.Error("PUSH-RCV: Failed to create verification request", "error", err)
-		rps.fallbackToStatusCheck()
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
+		if err.Error() == "unauthorized" {
+			serverLog.Warn("PUSH-RCV: Verification request unauthorized", "sid", rps.stream.StreamConfiguration.Id)
+			return
+		}
 		serverLog.Warn("PUSH-RCV: Verification request failed", "error", err)
-		rps.fallbackToStatusCheck()
-		return
-	}
-	defer httpSupport.HandleRespClose(resp)
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		serverLog.Warn("PUSH-RCV: Verification request unauthorized", "sid", rps.stream.StreamConfiguration.Id)
-		return
-	}
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		serverLog.Warn("PUSH-RCV: Verification endpoint returned error", "status", resp.StatusCode)
 		rps.fallbackToStatusCheck()
 		return
 	}
@@ -501,20 +472,23 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 		return rps.verifyUrl
 	}
 
+	// Using goSsfUtils if server is available
+	server, _ := rps.sa.getServerForStream(rps.ctx, rps.stream)
+	if server != nil {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		endpoint, err := goSsfUtils.GetVerificationEndpoint(rps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			rps.verifyUrl = endpoint
+			return rps.verifyUrl
+		}
+	}
+
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
-		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
-		if err == nil {
-			defer httpSupport.HandleRespClose(resp)
-			if resp.StatusCode == http.StatusOK {
-				var txConfig model.TransmitterConfiguration
-				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
-					if txConfig.VerificationEndpoint != "" {
-						rps.verifyUrl = txConfig.VerificationEndpoint
-						return rps.verifyUrl
-					}
-				}
-			}
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.VerificationEndpoint != "" {
+			rps.verifyUrl = txConfig.VerificationEndpoint
+			return rps.verifyUrl
 		}
 	}
 
@@ -546,71 +520,45 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 		return rps.statusUrl
 	}
 
+	// Using goSsfUtils if server is available
+	server, _ := rps.sa.getServerForStream(rps.ctx, rps.stream)
+	if server != nil {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		endpoint, err := goSsfUtils.GetStatusEndpoint(rps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, rps.stream.StreamConfiguration.Id)
+			return rps.statusUrl
+		}
+	}
+
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
-		resp, err := client.Get(*rps.stream.StreamConfiguration.TxWellKnownUrl)
-		if err == nil {
-			defer httpSupport.HandleRespClose(resp)
-			if resp.StatusCode == http.StatusOK {
-				var txConfig model.TransmitterConfiguration
-				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
-					if txConfig.StatusEndpoint != "" {
-						statusUrl := txConfig.StatusEndpoint
-						u, err := url.Parse(statusUrl)
-						if err == nil {
-							q := u.Query()
-							if q.Get("stream_id") == "" {
-								q.Set("stream_id", rps.stream.StreamConfiguration.Id)
-								u.RawQuery = q.Encode()
-								statusUrl = u.String()
-							}
-						}
-						rps.statusUrl = statusUrl
-						return rps.statusUrl
-					}
-				}
-			}
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.StatusEndpoint != "" {
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, rps.stream.StreamConfiguration.Id)
+			return rps.statusUrl
 		}
 	}
 	return ""
 }
 
 func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
+	server, _ := rps.sa.getServerForStream(ctx, rps.stream)
+	client, _, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if server != nil {
+		return goSsfUtils.GetStreamStatus(ctx, client, server, rps.stream.StreamConfiguration.Id)
+	}
+
 	statusUrl := rps.getStatusEndpoint()
 	if statusUrl == "" {
 		return nil, errors.New("could not determine status endpoint")
 	}
 
-	client, auth, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer httpSupport.HandleRespClose(resp)
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status endpoint returned %d", resp.StatusCode)
-	}
-
-	var status model.StreamStatus
-	err = json.NewDecoder(resp.Body).Decode(&status)
-	if err != nil {
-		return nil, err
-	}
-	return &status, nil
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, rps.stream.StreamConfiguration.Id, "status check")
 }
 
 func (rps *ReceiverPushStream) fallbackToStatusCheck() {
@@ -704,6 +652,17 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 		return ps.statusUrl
 	}
 
+	// Using goSsfUtils if server is available
+	server, _ := ps.sa.getServerForStream(ps.ctx, ps.stream)
+	if server != nil {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+		endpoint, err := goSsfUtils.GetStatusEndpoint(ps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, ps.stream.StreamConfiguration.Id)
+			return ps.statusUrl
+		}
+	}
+
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
 	if receiveMethod == nil {
 		return ""
@@ -712,28 +671,10 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	// Step a: Use TxWellKnownUrl if defined.
 	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
-		resp, err := client.Get(*ps.stream.StreamConfiguration.TxWellKnownUrl)
-		if err == nil {
-			defer httpSupport.HandleRespClose(resp)
-			if resp.StatusCode == http.StatusOK {
-				var txConfig model.TransmitterConfiguration
-				if err := json.NewDecoder(resp.Body).Decode(&txConfig); err == nil {
-					if txConfig.StatusEndpoint != "" {
-						statusUrl := txConfig.StatusEndpoint
-						u, err := url.Parse(statusUrl)
-						if err == nil {
-							q := u.Query()
-							if q.Get("stream_id") == "" {
-								q.Set("stream_id", ps.stream.StreamConfiguration.Id)
-								u.RawQuery = q.Encode()
-								statusUrl = u.String()
-							}
-						}
-						ps.statusUrl = statusUrl
-						return ps.statusUrl
-					}
-				}
-			}
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.StatusEndpoint != "" {
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, ps.stream.StreamConfiguration.Id)
+			return ps.statusUrl
 		}
 	}
 
@@ -784,42 +725,22 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 }
 
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
+	server, _ := ps.sa.getServerForStream(ctx, ps.stream)
+	client, _, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if server != nil {
+		return goSsfUtils.GetStreamStatus(ctx, client, server, ps.stream.StreamConfiguration.Id)
+	}
+
 	statusUrl := ps.getStatusEndpoint()
 	if statusUrl == "" {
 		return nil, errors.New("could not determine status endpoint")
 	}
 
-	client, auth, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	serverLog.Debug("POLL-RCV: Checking transmitter status", "sid", ps.stream.StreamConfiguration.Id, "url", statusUrl, "auth", maskAuthorization(auth))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer httpSupport.HandleRespClose(resp)
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status check failed with status %d", resp.StatusCode)
-	}
-
-	var streamStatus model.StreamStatus
-	if err := json.NewDecoder(resp.Body).Decode(&streamStatus); err != nil {
-		return nil, err
-	}
-
-	return &streamStatus, nil
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, ps.stream.StreamConfiguration.Id, "status check")
 }
 
 func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusCheckInterval time.Duration) (bool, error) {
