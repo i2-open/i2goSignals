@@ -43,8 +43,10 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 			return err
 		}
 	case model.AuthModeSts:
-		srvLog.Warn("Authentication mode (e.g. STS) not supported for SSF streams", "alias", server.Alias, "err", err)
+
+		srvLog.Warn("STS admin credential exchange mode not supported for server-to-server communications", "alias", server.Alias, "err", err)
 		return errors.New("either OAuthClientConfig, ClientToken, or IatToken must be provided")
+
 	case model.AuthModeToken:
 		if err := s.validateTokenConfig(ctx, server); err != nil {
 			srvLog.Warn("Failed to validate client token config", "alias", server.Alias, "err", err)
