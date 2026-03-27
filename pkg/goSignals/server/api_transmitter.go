@@ -14,6 +14,14 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
+// JwksJson returns the JSON Web Key Set (JWKS) for the default issuer.
+//
+// Return values:
+//   - 200 OK: JWKS as a JSON object.
+//
+// Errors:
+//   - 404 Not Found: Default issuer keys not found.
+//   - 500 Internal Server Error: Database or serialization error.
 func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
 	JwksJsonHandler(sa, w, r)
 }
@@ -39,6 +47,13 @@ type IssuerResponse struct {
 	Issuers []string `json:"issuers"`
 }
 
+// JwksIssuers lists all issuers that have JWKS available.
+//
+// Return values:
+//   - 200 OK: JSON array of issuer names.
+//
+// Errors:
+//   - 500 Internal Server Error: Database error.
 func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request) {
 	JwksIssuersHandler(sa, w, r)
 }
@@ -68,6 +83,19 @@ func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *ht
 	_, _ = w.Write(jsonIssuers)
 }
 
+// JwksJsonIssuer returns the JSON Web Key Set (JWKS) for a specific issuer.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer.
+//   - format (query): Optional. If set to "pem", "x509", or "pkcs", returns the keys in that format instead of JWKS.
+//
+// Return values:
+//   - 200 OK: JWKS as a JSON object, or keys in requested format.
+//
+// Errors:
+//   - 400 Bad Request: Unsupported format requested.
+//   - 404 Not Found: Issuer keys not found.
+//   - 500 Internal Server Error: Database or conversion error.
 func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
 	JwksJsonIssuerHandler(sa, w, r)
 }
@@ -120,6 +148,21 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 }
 
 // PollEvents implements the server side of RFC8936 Poll-based delivery of SET Tokens
+// PollEvents handles requests for SETs via HTTP Poll (RFC8936).
+//
+// Inputs:
+//   - id (path): The stream ID.
+//   - Authorization (header): Token with 'event_delivery' scope.
+//   - Request body (JSON): Poll parameters (maxEvents, returnImmediately, etc.).
+//
+// Return values:
+//   - 200 OK: JSON object containing sets (SETs) and moreAvailable flag.
+//
+// Errors:
+//   - 400 Bad Request: Invalid request parameters or missing stream ID.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Error during polling or database access.
 func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
 	PollEventsHandler(sa, w, r)
 }

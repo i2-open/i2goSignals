@@ -24,6 +24,10 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// AddSubject adds a subject to a stream. (Currently not implemented)
+//
+// Return values:
+//   - 501 Not Implemented
 func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
 	AddSubjectHandler(sa, w, r)
 }
@@ -33,6 +37,20 @@ func AddSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GetStatus retrieves the status of a stream.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - stream_id (query): The unique identifier of the stream.
+//
+// Return values:
+//   - 200 OK: JSON object with the stream status.
+//
+// Errors:
+//   - 400 Bad Request: Missing or invalid stream ID.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Database or serialization error.
 func (sa *SignalsApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
 	GetStatusHandler(sa, w, r)
 }
@@ -73,6 +91,10 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	_, _ = w.Write(resp)
 }
 
+// RemoveSubject removes a subject from a stream. (Currently not implemented)
+//
+// Return values:
+//   - 501 Not Implemented
 func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
 	RemoveSubjectHandler(sa, w, r)
 }
@@ -82,6 +104,20 @@ func RemoveSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *h
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// StreamDelete deletes an existing event stream.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - stream_id (query): The unique identifier of the stream to be deleted.
+//
+// Return values:
+//   - 204 No Content: Stream successfully deleted.
+//
+// Errors:
+//   - 400 Bad Request: Missing or invalid stream ID.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Error during deletion or database access.
 func (sa *SignalsApplication) StreamDelete(w http.ResponseWriter, r *http.Request) {
 	StreamDeleteHandler(sa, w, r)
 }
@@ -185,6 +221,20 @@ func adjustBaseUrl(sa SsfApplicationInterface, config model.StreamConfiguration)
 	return res
 }
 
+// StreamGet retrieves the configuration of a stream.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - stream_id (query): The unique identifier of the stream.
+//
+// Return values:
+//   - 200 OK: JSON object of the StreamConfiguration.
+//
+// Errors:
+//   - 400 Bad Request: Missing or invalid stream ID.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Serialization error.
 func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
 	StreamGetHandler(sa, w, r)
 }
@@ -221,6 +271,19 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	_, _ = w.Write(resp)
 }
 
+// StreamCreate creates a new event stream configuration.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - Request body (JSON): StreamConfiguration details.
+//
+// Return values:
+//   - 201 Created: JSON object of the created StreamConfiguration.
+//
+// Errors:
+//   - 400 Bad Request: Error decoding request body or invalid configuration.
+//   - 401/403: Unauthorized access.
+//   - 500 Internal Server Error: Error creating stream.
 func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Request) {
 	StreamCreateHandler(sa, w, r)
 }
@@ -275,6 +338,21 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 }
 
+// StreamUpdate updates (replaces or patches) an existing stream configuration.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - stream_id (query): The unique identifier of the stream.
+//   - Request body (JSON): Updated StreamConfiguration details.
+//
+// Return values:
+//   - 200 OK: JSON object of the updated StreamConfiguration.
+//
+// Errors:
+//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Database update failure.
 func (sa *SignalsApplication) StreamUpdate(w http.ResponseWriter, r *http.Request) {
 	StreamUpdateHandler(sa, w, r)
 }
@@ -364,6 +442,21 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	_, _ = w.Write(respBytes)
 }
 
+// UpdateStatus updates the status (e.g., enabled, disabled, paused) of a stream.
+//
+// Inputs:
+//   - Authorization (header): Token with 'stream_mgmt' or 'stream_admin' scope.
+//   - stream_id (query): The unique identifier of the stream.
+//   - Request body (JSON): Object with the new status and optional reason.
+//
+// Return values:
+//   - 200 OK: JSON object containing the updated status.
+//
+// Errors:
+//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Database or internal update failure.
 func (sa *SignalsApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	UpdateStatusHandler(sa, w, r)
 }
@@ -510,6 +603,10 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 	}
 }
 
+// WellKnownSsfConfigurationGet returns the default SSF transmitter configuration.
+//
+// Return values:
+//   - 200 OK: JSON object of the TransmitterConfiguration.
 func (sa *SignalsApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter, r *http.Request) {
 	WellKnownSsfConfigurationGetHandler(sa, w, r)
 }
@@ -524,6 +621,16 @@ func WellKnownSsfConfigurationGetHandler(sa SsfApplicationInterface, w http.Resp
 
 }
 
+// WellKnownSsfConfigurationIssuerGet returns the SSF configuration for a specific issuer.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer.
+//
+// Return values:
+//   - 200 OK: JSON object of the TransmitterConfiguration for the issuer.
+//
+// Errors:
+//   - 404 Not Found: Configuration not found for the specified issuer.
 func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
 	WellKnownSsfConfigurationIssuerGetHandler(sa, w, r)
 }

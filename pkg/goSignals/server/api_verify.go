@@ -17,7 +17,20 @@ type VerificationRequestPayload struct {
 	State    string `json:"state,omitempty"`
 }
 
-// VerificationRequest implements the SSF Stream Verification Event process as described in section 8.1.4.2.
+// VerificationRequest handles requests to trigger a stream verification event (SSF 8.1.4.2).
+//
+// Inputs:
+//   - Authorization (header): Token with 'event_delivery' or 'stream_mgmt' scope.
+//   - Request body (JSON): VerificationRequestPayload containing stream_id and optional state.
+//
+// Return values:
+//   - 204 No Content: Verification event successfully created and added to the stream.
+//
+// Errors:
+//   - 400 Bad Request: Missing stream ID or malformed request body.
+//   - 401/403: Unauthorized access or stream ID mismatch.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Database error during event creation or assignment.
 func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
 	VerificationRequestHandler(sa, w, r)
 }

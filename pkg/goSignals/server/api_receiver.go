@@ -1143,7 +1143,21 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	return
 }
 
-// ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
+// ReceivePushEvent handles incoming Security Event Tokens (SETs) via HTTP Push (RFC8935).
+//
+// Inputs:
+//   - id (path): The stream ID (captured by gorilla/mux, but auth context is used for validation).
+//   - Authorization (header): Token with 'event_delivery' scope.
+//   - Request body: Signed SET (JWT).
+//
+// Return values:
+//   - 202 Accepted: SET successfully received and accepted.
+//
+// Errors:
+//   - 401 Unauthorized: Authentication failed.
+//   - 403 Forbidden: Access denied or missing stream ID.
+//   - 404 Not Found: Stream not found.
+//   - 400 Bad Request: Invalid request or SET parsing error.
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
 	ReceivePushEventHandler(sa, w, r)
 }

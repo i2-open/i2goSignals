@@ -82,8 +82,19 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 }
 
 // CreateJwksIssuer handles the creation of a JWK key pair for the specified issuer and authorizes access permissions.
-// Generates a PEM-encoded private key and writes it to the HTTP response with Content-Type as application/json.
-// Responds with HTTP status Forbidden if permissions are invalid or Internal Server Error for unknown issues.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer for which to create the key pair.
+//   - rotate (query): Optional. If set to "true", rotates existing keys if they already exist.
+//
+// Return values:
+//   - 201 Created: PEM-encoded private key.
+//   - 200 OK: (If rotating) PEM-encoded private key.
+//
+// Errors:
+//   - 400 Bad Request: Malformed issuer encoding.
+//   - 403 Forbidden: Invalid permissions or issuer already exists without rotate=true.
+//   - 500 Internal Server Error: Error checking existing keys, generating, marshaling, or writing the private key.
 func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
 	CreateJwksIssuerHandler(sa, w, r)
 }
@@ -157,6 +168,20 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	return
 }
 
+// LoadKey handles the uploading of a public or private key for a specified issuer.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer for which to load the key. This will become the kid in the certificates and matches certificate 'iss' values.
+//   - Content-Type (header): Must be one of 'application/x-pem-file', 'application/pkix-cert', or 'application/pkcs7-mime'.
+//   - Request body: The key data in PEM or DER format.
+//
+// Return values:
+//   - 200 OK: Key successfully loaded and saved.
+//
+// Errors:
+//   - 400 Bad Request: Error reading body, invalid PEM data, invalid certificate, or unsupported key type.
+//   - 403 Forbidden: Invalid permissions.
+//   - 500 Internal Server Error: Error saving the key.
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
 	LoadKeyHandler(sa, writer, request)
 }
@@ -263,6 +288,18 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	writer.WriteHeader(http.StatusOK)
 }
 
+// DeleteJwksIssuerKey deletes the keys associated with a specified issuer.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer whose keys are to be deleted.
+//
+// Return values:
+//   - 200 OK: Issuer keys successfully deleted.
+//
+// Errors:
+//   - 403 Forbidden: Invalid permissions.
+//   - 404 Not Found: Issuer keys not found.
+//   - 500 Internal Server Error: Error during deletion process.
 func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
 	DeleteJwksIssuerKeyHandler(sa, w, r)
 }
@@ -355,12 +392,17 @@ func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
 	}
 }
 
-// IssuerProjectIat generates an Initial Access Auth (IAT) which can be used at the registration endpoint. The
-// token generated will have a unique projectId and scope of `register` that will allow individual clients
-// to register and access the stream management functions of the server for a particular project. If an existing
-// authorization is provided with scope authSupport.ScopeStreamAdmin, then the existing ProjectId is used. This
-// allows the creation of "fresh" IATs which can be used to register new clients in the same project (e.g.
-// because the current IAT is expired, or because separate IATs are desired.
+// IssuerProjectIat generates an Initial Access Token (IAT) for a project.
+// The token has a unique projectId and 'register' scope, allowing clients to register and manage streams.
+//
+// Inputs:
+//   - Authorization (header): Existing administrative token (optional, but if provided, its ProjectId is reused).
+//
+// Return values:
+//   - 200 OK: JSON object containing the generated IAT.
+//
+// Errors:
+//   - 500 Internal Server Error: Error generating the Iat.
 func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Request) {
 	IssuerProjectIatHandler(sa, w, r)
 }
@@ -378,9 +420,19 @@ func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-// RegisterClient is used in scenarios where there is no external OAuth infrastructure to manage access.
-// Using RegisterClient allows a goSignals command line client or admin server to register with an IAT.
-// When successful, the client is is issued an administrative token which can be used to register new streams.
+// RegisterClient registers a new client using an IAT.
+//
+// Inputs:
+//   - Authorization (header): IAT with 'register' scope.
+//   - Request body (JSON): RegisterParameters containing Email, Description, and Scopes.
+//
+// Return values:
+//   - 200 OK: JSON object containing client registration details (ClientId, ClientSecret, etc.).
+//
+// Errors:
+//   - 400 Bad Request: Error decoding request body.
+//   - 401/403: Invalid or missing registration token.
+//   - 500 Internal Server Error: Error during client registration.
 func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Request) {
 	RegisterClientHandler(sa, w, r)
 }
@@ -431,6 +483,10 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
+// TriggerEvent is a placeholder handler for triggering events manually. (Not currently implemented)
+//
+// Return values:
+//   - 501 Not Implemented
 func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	TriggerEventHandler(sa, w, r)
 }
@@ -440,7 +496,10 @@ func TriggerEventHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *ht
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ProtectedResourceMetadata returns the RFC9728 based data describing OAuth access
+// ProtectedResourceMetadata returns RFC9728 metadata describing OAuth access to the server.
+//
+// Return values:
+//   - 200 OK: JSON object with resource name, auth servers, and supported scopes/methods.
 func (sa *SignalsApplication) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	ProtectedResourceMetadataHandler(sa, w, r)
 }
@@ -468,8 +527,17 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	_, _ = w.Write(resp)
 }
 
-// ListStreamStates allows the ability to list all stream states associated with the current server project. Requires "admin" or "root" scope.
-// If the authentication credential includes a project id, the result set is limited to the project.
+// ListStreamStates lists all stream states associated with the current project.
+//
+// Inputs:
+//   - Authorization (header): Token with 'admin' or 'root' scope.
+//
+// Return values:
+//   - 200 OK: JSON array of StreamStateRecord objects.
+//
+// Errors:
+//   - 401/403: Unauthorized access.
+//   - 500 Internal Server Error: Error marshaling response.
 func (sa *SignalsApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
 	ListStreamStatesHandler(sa, w, r)
 }
@@ -502,8 +570,19 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	_, _ = w.Write(resp)
 }
 
-// GetStreamState allows the ability to retrieve a specific stream state associated with the current server project. Requires "admin" or "root" scope.
-// If the authentication credential includes a project id, the result set is limited to the project.
+// GetStreamState retrieves a specific stream state by stream ID.
+//
+// Inputs:
+//   - Authorization (header): Token with 'admin' or 'root' scope, must contain the stream ID.
+//
+// Return values:
+//   - 200 OK: JSON object of the StreamStateRecord.
+//
+// Errors:
+//   - 400 Bad Request: Missing stream ID in authorization.
+//   - 401/403: Unauthorized access.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Error marshaling response.
 func (sa *SignalsApplication) GetStreamState(w http.ResponseWriter, r *http.Request) {
 	GetStreamStateHandler(sa, w, r)
 }
@@ -562,6 +641,19 @@ func maskAuthorization(authHeader string) string {
 	return masked
 }
 
+// CreateServer creates a new server configuration for the current project.
+//
+// Inputs:
+//   - Authorization (header): Token with 'register' or 'admin' scope.
+//   - Request body (JSON): Server object details.
+//
+// Return values:
+//   - 201 Created: JSON object of the created Server.
+//
+// Errors:
+//   - 400 Bad Request: Error decoding request body or creating server.
+//   - 401/403: Unauthorized access.
+//   - 409 Conflict: Server alias already exists.
 func (sa *SignalsApplication) CreateServer(w http.ResponseWriter, r *http.Request) {
 	CreateServerHandler(sa, w, r)
 }
@@ -598,6 +690,19 @@ func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	_ = json.NewEncoder(w).Encode(server)
 }
 
+// ServerGet retrieves server configuration by its alias.
+//
+// Inputs:
+//   - alias (path): The unique alias for the server.
+//   - Authorization (header): Token with 'register' or 'admin' scope.
+//
+// Return values:
+//   - 200 OK: JSON object of the Server configuration.
+//
+// Errors:
+//   - 401/403: Unauthorized access or project mismatch.
+//   - 404 Not Found: Server not found.
+//   - 500 Internal Server Error: Database error.
 func (sa *SignalsApplication) ServerGet(w http.ResponseWriter, r *http.Request) {
 	GetServerHandler(sa, w, r)
 }
@@ -633,6 +738,22 @@ func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(server)
 }
 
+// ServerUpdate updates an existing server configuration by its alias.
+//
+// Inputs:
+//   - alias (path): The unique alias for the server.
+//   - Authorization (header): Token with 'register' or 'admin' scope.
+//   - Request body (JSON): Updated Server object details.
+//
+// Return values:
+//   - 200 OK: JSON object of the updated Server configuration.
+//
+// Errors:
+//   - 400 Bad Request: Error decoding request body.
+//   - 401/403: Unauthorized access or project mismatch.
+//   - 404 Not Found: Server not found.
+//   - 409 Conflict: New server alias already exists.
+//   - 500 Internal Server Error: Database error or update failure.
 func (sa *SignalsApplication) ServerUpdate(w http.ResponseWriter, r *http.Request) {
 	UpdateServerHandler(sa, w, r)
 }
@@ -691,6 +812,19 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	_ = json.NewEncoder(w).Encode(server)
 }
 
+// ServerDelete deletes a server configuration by its alias.
+//
+// Inputs:
+//   - alias (path): The unique alias for the server.
+//   - Authorization (header): Token with 'register' or 'admin' scope.
+//
+// Return values:
+//   - 204 No Content: Server successfully deleted.
+//
+// Errors:
+//   - 401/403: Unauthorized access or project mismatch.
+//   - 404 Not Found: Server not found.
+//   - 500 Internal Server Error: Database error or deletion failure.
 func (sa *SignalsApplication) ServerDelete(w http.ResponseWriter, r *http.Request) {
 	DeleteServerHandler(sa, w, r)
 }
@@ -731,6 +865,17 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ServerList lists all server configurations associated with the current project.
+//
+// Inputs:
+//   - Authorization (header): Token with 'register' or 'admin' scope.
+//
+// Return values:
+//   - 200 OK: JSON array of Server objects.
+//
+// Errors:
+//   - 401/403: Unauthorized access.
+//   - 500 Internal Server Error: Database error.
 func (sa *SignalsApplication) ServerList(w http.ResponseWriter, r *http.Request) {
 	ListServerHandler(sa, w, r)
 }

@@ -77,6 +77,13 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 	return &httpRouter
 }
 
+// Index is a simple health check or welcome endpoint.
+//
+// Inputs:
+//   - User-Agent (header): The user agent string of the requester.
+//
+// Return values:
+//   - 200 OK: A greeting string including the user agent.
 func (sa *SignalsApplication) Index(w http.ResponseWriter, r *http.Request) {
 	test := r.UserAgent()
 	_, _ = fmt.Fprintf(w, "Hello %s", test)
