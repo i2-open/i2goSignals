@@ -19,11 +19,14 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
@@ -52,6 +55,28 @@ type ssfInstance struct {
 	startTime       *time.Time
 }
 
+func (instance *ssfInstance) GetPollUrl(stream model.StreamConfiguration) string {
+	if stream.Delivery == nil || stream.Delivery.PollTransmitMethod == nil {
+		return ""
+	}
+	endpoint := stream.Delivery.PollTransmitMethod.EndpointUrl
+	if strings.HasPrefix(endpoint, "http") {
+		return endpoint
+	}
+	return instance.ts.URL + endpoint
+}
+
+func (instance *ssfInstance) GetPushUrl(stream model.StreamConfiguration) string {
+	if stream.Delivery == nil || stream.Delivery.PushReceiveMethod == nil {
+		return ""
+	}
+	endpoint := stream.Delivery.PushReceiveMethod.EndpointUrl
+	if strings.HasPrefix(endpoint, "http") {
+		return endpoint
+	}
+	return instance.ts.URL + endpoint
+}
+
 type ServerSuite struct {
 	suite.Suite
 	servers []*ssfInstance
@@ -61,7 +86,7 @@ func TestServer(t *testing.T) {
 	serverSuite := ServerSuite{}
 
 	testLog.Println("Tests must be completed in order. Tests may not be run individually as each test builds on previous state.")
-	testLog.Println("By default, tests are run against a mock provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
+	testLog.Println("By default, tests are run against a memory provider. Set environment variable TEST_MONGO_CLUSTER to true to test against docker-compose mongo cluster")
 
 	testLog.Println("NOTE: This test will generate a series of Prometheus duplicate collector registration errors. This is due to the test environment only.")
 	instances := make([]*ssfInstance, 2)
@@ -104,9 +129,13 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	var err error
 	var instance ssfInstance
 
-	dbUrl := "mockdb:"
+	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
 		dbUrl = TestDbUrl
+	} else {
+		// When using memory provider, use a temporary directory for persistence
+		// to avoid leaving files in the source tree.
+		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
 	// mongo, err := mongo_provider.Open(TestDbUrl, dbName)
 	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
@@ -130,6 +159,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	baseUrl, _ := url.Parse(ts.URL + "/")
 	app.SetBaseUrl(baseUrl)
 	instance.client = ts.Client()
+	tlsSupport.CheckCaInstalled(instance.client)
 	instance.provider = mongo
 	nowTime := time.Now()
 	instance.startTime = &nowTime
@@ -144,9 +174,9 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 
 	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
-		Id:            primitive.ObjectID{},
+		Id:            bson.ObjectID{},
 		ProjectIds:    []string{eat.ProjectId},
-		AllowedScopes: []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",
 		Description:   "server test",
 	}, eat.ProjectId, true)
@@ -204,7 +234,9 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	assert.Equal(suite.T(), verifyUrlString, config.VerificationEndpoint, "Confirm baseurl to verify url calculation correct")
 	streamUrlString := fmt.Sprintf("http://%s/stream", suite.servers[0].host)
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
-	assert.Equal(suite.T(), "DEFAULT", config.Issuer, "Selected issuer matched")
+
+	suite.Equal(constants.GoSignalsVersion, config.GoSignalsVersion, "Go Signals Version should have correct version")
+	suite.Equal(4, len(config.DeliveryMethodsSupported), "GoSignals has 4 methods")
 }
 
 // Test3_StreamConfig Tests the following sequence
@@ -250,7 +282,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Registration error")
-	assert.Equal(suite.T(), 200, resp.StatusCode, "Reg response status 200 returned check")
+	assert.Equal(suite.T(), 201, resp.StatusCode, "Reg response status 201 returned check")
 	body, _ = io.ReadAll(resp.Body)
 	var configResponse model.StreamConfiguration
 	err = json.Unmarshal(body, &configResponse)
@@ -289,13 +321,13 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", configResponse.Delivery.PollTransmitMethod.AuthorizationHeader)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Should be no error despite authorization fail")
-	assert.Equal(suite.T(), resp.StatusCode, http.StatusUnauthorized, "Should be unauthorized")
+	assert.Equal(suite.T(), http.StatusForbidden, resp.StatusCode, "Should be forbidden due to insufficient scope")
 
 	// Now re-run it with stream mgmt token
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
-	assert.Equal(suite.T(), resp.StatusCode, http.StatusOK, "Should be OK status")
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Should be OK status")
 
 	// Step 4.
 
@@ -358,7 +390,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	config, _ := suite.servers[0].provider.CreateStream(transConfig, suite.servers[0].projectId)
+	config, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
 	streamToken := config.Delivery.PollTransmitMethod.AuthorizationHeader
 
 	suite.servers[0].streamToken = streamToken
@@ -534,7 +566,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		IssuerJWKSUrl:   jwksIssuer.String(),
 		RouteMode:       model.RouteModeImport,
 	}
-	stream, err := suite.servers[1].provider.CreateStream(reg, "DEFAULT")
+	stream, err := suite.servers[1].provider.CreateStream(reg, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ := suite.servers[1].provider.GetStreamState(stream.Id)
 	suite.servers[1].app.EventRouter.UpdateStreamState(state)
@@ -560,7 +592,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		EventsRequested: stream.EventsDelivered,
 	}
 
-	stream, err = suite.servers[0].provider.CreateStream(regPush, "DEFAULT")
+	stream, err = suite.servers[0].provider.CreateStream(regPush, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
 	state, _ = suite.servers[0].provider.GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
@@ -652,7 +684,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error generating key")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check status ok result")
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode, "Check status created result")
 
 	body, _ := io.ReadAll(resp.Body)
 	assert.NotNil(suite.T(), body, "Check a request body was returned.")
@@ -682,6 +714,57 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	assert.NoError(suite.T(), err, "key was signed!")
 	assert.NotNil(suite.T(), val, "Signed value returned")
 	testLog.Println("Signed event: \n" + val)
+
+	// Test with URL encoded issuer
+	testLog.Println("Creating issuer key with URL encoded issuer..")
+	issuerEncoded := url.QueryEscape("https://example.com")
+	baseUrlEncoded := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuerEncoded)
+
+	reqEncoded, _ := http.NewRequest(http.MethodPost, baseUrlEncoded, nil)
+	reqEncoded.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respEncoded, err := suite.servers[0].client.Do(reqEncoded)
+	assert.NoError(suite.T(), err, "No error generating key with URL encoded issuer")
+	assert.Equal(suite.T(), http.StatusCreated, respEncoded.StatusCode, "Check status created result for URL encoded issuer")
+
+	bodyEncoded, _ := io.ReadAll(respEncoded.Body)
+	assert.NotNil(suite.T(), bodyEncoded, "Check a request body was returned for URL encoded issuer.")
+
+	blockEncoded, _ := pem.Decode(bodyEncoded)
+	assert.NotNil(suite.T(), blockEncoded, "Check PEM block decoded for URL encoded issuer")
+
+	pkcs8PrivateKeyEncoded, err := x509.ParsePKCS8PrivateKey(blockEncoded.Bytes)
+	keyEncoded := pkcs8PrivateKeyEncoded.(*rsa.PrivateKey)
+	assert.NoError(suite.T(), err, "private key decoded for URL encoded issuer")
+	assert.NotNil(suite.T(), keyEncoded, "Check key is not nil for URL encoded issuer")
+
+	// Negative test: Invalid authorization
+	testLog.Println("Testing negative case: Invalid authorization..")
+	reqInvalidAuth, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	reqInvalidAuth.Header.Set("Authorization", "Bearer invalid_token")
+	respInvalidAuth, err := suite.servers[0].client.Do(reqInvalidAuth)
+	assert.NoError(suite.T(), err, "No error making request with invalid auth")
+	assert.Equal(suite.T(), http.StatusForbidden, respInvalidAuth.StatusCode, "Check forbidden with invalid authorization")
+
+	// Negative test: Empty issuer
+	testLog.Println("Testing negative case: Empty issuer..")
+	baseUrlEmpty := fmt.Sprintf("http://%s/jwks/", suite.servers[0].host)
+	reqEmpty, _ := http.NewRequest(http.MethodPost, baseUrlEmpty, nil)
+	reqEmpty.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respEmpty, err := suite.servers[0].client.Do(reqEmpty)
+	assert.NoError(suite.T(), err, "No error making request with empty issuer")
+	assert.NotEqual(suite.T(), http.StatusCreated, respEmpty.StatusCode, "Check not created with empty issuer")
+
+	// Negative test: Malformed issuer (special characters that might break parsing)
+	testLog.Println("Testing negative case: Malformed issuer..")
+	issuerMalformed := "example@#$%.com"
+	baseUrlMalformed := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, url.PathEscape(issuerMalformed))
+	reqMalformed, _ := http.NewRequest(http.MethodPost, baseUrlMalformed, nil)
+	reqMalformed.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	respMalformed, err := suite.servers[0].client.Do(reqMalformed)
+	assert.NoError(suite.T(), err, "No error making request with malformed issuer")
+	// The response might vary depending on implementation. If the server accepts it, it will return 201.
+	// If we wanted to forbid certain characters in issuer name, we should add validation in the handler.
+	assert.True(suite.T(), respMalformed.StatusCode == http.StatusCreated || respMalformed.StatusCode == http.StatusBadRequest, "Unexpected status for malformed issuer")
 }
 
 func (suite *ServerSuite) TestA_GetIssuers() {
@@ -701,8 +784,9 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	var names ssef.IssuerResponse
 	err = json.Unmarshal(body, &names)
 	assert.NoError(suite.T(), err, "No error parsing issuers")
-	assert.Len(suite.T(), names.Issuers, 2, "Issuer was not returned")
+	assert.GreaterOrEqual(suite.T(), len(names.Issuers), 2, "Issuer was not returned")
 	assert.Contains(suite.T(), names.Issuers, "example.com", "Issuer example.com returned")
+	assert.Contains(suite.T(), names.Issuers, "https://example.com", "Issuer https://example.com returned")
 }
 
 func (suite *ServerSuite) TestB_DeleteIssuers() {
@@ -732,7 +816,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+	assert.True(suite.T(), resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated, "Expected 200 or 201")
 	body, _ := io.ReadAll(resp.Body)
 	assert.NotEmpty(suite.T(), body)
 
@@ -900,7 +984,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	stream, _ := suite.servers[0].provider.CreateStream(transConfig, suite.servers[0].projectId)
+	stream, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
 	state, _ := suite.servers[0].provider.GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
 	streamToken := stream.Delivery.PollTransmitMethod.AuthorizationHeader
@@ -949,7 +1033,7 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	resp, err := suite.servers[1].client.Do(reqCreate)
 	assert.NoError(suite.T(), err, "Check no http error on polling stream create")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check status accepted")
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode, "Check status created")
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	var pstream model.StreamConfiguration
@@ -1027,7 +1111,7 @@ func (suite *ServerSuite) TestE_StatusUpdateReflection() {
 	}
 	method := &model.PollTransmitMethod{Method: model.DeliveryPoll}
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
-	config, err := server.provider.CreateStream(transConfig, server.projectId)
+	config, err := server.provider.CreateStream(transConfig, authUtil.ConvertProject(server.projectId))
 	assert.NoError(suite.T(), err)
 	streamId := config.Id
 

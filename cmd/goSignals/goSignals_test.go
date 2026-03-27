@@ -15,14 +15,16 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
@@ -107,12 +109,13 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 	var err error
 	var instance ssfInstance
 
-	dbUrl := "mockdb:"
+	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
 		t.Log("Tests running against Mongo cluster.")
 		dbUrl = TestDbUrl
 	} else {
-		t.Log("Tests running against Mock provider.")
+		t.Log("Tests running against Memory provider.")
+		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
 
 	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
@@ -129,6 +132,7 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 	instance.app = *signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
+	tlsSupport.CheckCaInstalled(instance.client)
 	instance.provider = mongo
 	nowTime := time.Now()
 	instance.startTime = &nowTime
@@ -234,9 +238,9 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		testLog.Printf("  Getting Client admin token for %s...", instance.provider.Name())
 
 		clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
-			Id:            primitive.NewObjectID(),
+			Id:            bson.NewObjectID(),
 			ProjectIds:    []string{eat.ProjectId},
-			AllowedScopes: []string{authUtil.ScopeStreamAdmin, authUtil.ScopeStreamMgmt},
+			AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 			Email:         "test@test.com",
 			Description:   "server test",
 		}, eat.ProjectId, true)
@@ -250,7 +254,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		if cat == nil {
 			suite.T().Fatal("Error client token was nil.")
 		}
-		assert.True(suite.T(), cat.IsAuthorized("", []string{authUtil.ScopeStreamAdmin}), "Check is authorized for mgmt")
+		assert.True(suite.T(), cat.IsAuthorized("", []string{authSupport.ScopeStreamAdmin}), "Check is authorized for mgmt")
 		assert.Equal(suite.T(), project, cat.ProjectId, "Check project ids match")
 		instance.projectId = eat.ProjectId
 	}

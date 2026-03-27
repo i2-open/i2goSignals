@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-
 	"github.com/MicahParks/keyfunc"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -28,21 +28,30 @@ type MongoProviderSuite struct {
 }
 
 func (s *MongoProviderSuite) SetupSuite() {
-	var err error
+	s.T().Helper()
 	provider, err := mongo_provider.Open(TestDbUrl, "")
 	if err != nil {
-		s.FailNow("Mongo client error: " + err.Error())
+		s.T().Skip("Mongo client error: " + err.Error())
+		return
 	}
 
-	err = provider.ResetDb(true)
-	if err != nil {
-		s.FailNow("Received error generating test token: " + err.Error())
+	if err := provider.Check(); err != nil {
+		s.T().Skip("Mongo Server not available: " + err.Error())
+		return
 	}
 
-	s.provider = *provider
-	s.auth = provider.GetAuthIssuer()
+	if provider != nil {
+		err = provider.ResetDb(true)
+		if err != nil {
+			s.FailNow("Received error generating test token: " + err.Error())
+		}
 
-	s.InitStream([]string{"*"})
+		s.provider = *provider
+		s.auth = provider.GetAuthIssuer()
+
+		s.InitStream([]string{"*"})
+	}
+
 }
 
 func (s *MongoProviderSuite) TearDownSuite() {
@@ -80,7 +89,7 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	if len(events) > 0 {
 		req.EventsRequested = events
 	}
-	s.stream, _ = s.provider.CreateStream(req, s.project)
+	s.stream, _ = s.provider.CreateStream(req, authUtil.ConvertProject(s.project))
 }
 
 func TestMongoProvider(t *testing.T) {
@@ -97,7 +106,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 		ProjectIds:    []string{s.project},
 		Email:         "admin@example.com",
 		Description:   "this is a test",
-		AllowedScopes: []string{authUtil.ScopeStreamMgmt, authUtil.ScopeEventDelivery},
+		AllowedScopes: []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
 	}
 
 	resp := s.provider.RegisterClient(client, s.project)
@@ -152,7 +161,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	s.provider.AckEvent(eventIds[0], s.stream.Id, 0)
+	_ = s.provider.AckEvent(eventIds[0], s.stream.Id, 0)
 
 	nextIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(0, len(nextIds), "Should be no pending events")
@@ -170,7 +179,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 
 	finalIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(1, len(finalIds), "should be 1 event")
-	s.provider.AckEvent(finalIds[0], s.stream.Id, 0)
+	_ = s.provider.AckEvent(finalIds[0], s.stream.Id, 0)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -226,7 +235,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			s.provider.AckEvent(id, s.stream.Id, 0)
+			_ = s.provider.AckEvent(id, s.stream.Id, 0)
 		}
 	}
 }
@@ -263,21 +272,23 @@ func (s *MongoProviderSuite) generateEvent() {
 	}
 	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payloadClaims)
 
-	s.provider.AddEvent(&test1, "", "")
+	_, _ = s.provider.AddEvent(&test1, "", "")
 
 	state, _ := s.provider.GetStreamState(s.stream.Id)
 
-	s.provider.AddEventToStream(test1.ID, state.Id)
+	_ = s.provider.AddEventToStream(test1.ID, state.Id)
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	issuer := "i2test.example.org"
-	key := s.provider.CreateIssuerJwkKeyPair(issuer, "")
+	key, err := s.provider.CreateIssuerJwkKeyPair(issuer, "")
+	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
 	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
 	s.NoError(err, "Should be no error")
-	s.Equal(key, keyRetrieved, "Should be same key")
+	s.NotNil(keyRetrieved)
+	s.True(key.Equal(keyRetrieved), "Should be same key")
 
 	keyFail, err := s.provider.GetIssuerPrivateKey("should.fail")
 	s.Error(err, "No key found for: should.fail")
@@ -289,9 +300,12 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 
 	log.Printf("\nIusser JWKS JSON:\n%v\n", string(jwtBytes))
 
-	issPub, err := keyfunc.NewJSON(*issPubJson)
-	s.NoError(err, "No error parsing json into JWKS")
-	s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
+	s.NotNil(issPubJson, "Check public key returned")
+	if issPubJson != nil {
+		issPub, err := keyfunc.NewJSON(*issPubJson)
+		s.NoError(err, "No error parsing json into JWKS")
+		s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
+	}
 
 	keys := s.provider.GetIssuerKeyNames()
 	s.Len(keys, 2, "Should be 2 keys")
@@ -310,7 +324,8 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 
 	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
 	s.NoError(err)
-	s.Equal(privateKey, keyRetrieved)
+	s.NotNil(keyRetrieved)
+	s.True(privateKey.Equal(keyRetrieved))
 
 	// Test adding only public key
 	issuerPub := "addkey-pub.example.org"
@@ -319,9 +334,11 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 
 	issPubJson := s.provider.GetPublicTransmitterJWKS(issuerPub)
 	s.NotNil(issPubJson)
-	issPub, err := keyfunc.NewJSON(*issPubJson)
-	s.NoError(err)
-	s.Contains(issPub.KIDs(), "key-pub")
+	if issPubJson != nil {
+		issPub, err := keyfunc.NewJSON(*issPubJson)
+		s.NoError(err)
+		s.Contains(issPub.KIDs(), "key-pub")
+	}
 
 	// Verify private key is NOT there
 	keyFail, err := s.provider.GetIssuerPrivateKey(issuerPub)

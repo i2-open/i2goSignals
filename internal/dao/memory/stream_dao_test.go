@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestStreamDAOMemory_Create(t *testing.T) {
@@ -14,7 +14,7 @@ func TestStreamDAOMemory_Create(t *testing.T) {
 	ctx := context.Background()
 
 	streamState := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:  "stream-1",
@@ -56,7 +56,7 @@ func TestStreamDAOMemory_Update(t *testing.T) {
 	ctx := context.Background()
 
 	streamState := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:     "stream-1",
@@ -88,7 +88,7 @@ func TestStreamDAOMemory_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	streamState := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:  "stream-1",
@@ -120,10 +120,10 @@ func TestStreamDAOMemory_List(t *testing.T) {
 	// Create multiple streams
 	for i := 1; i <= 3; i++ {
 		streamState := &model.StreamStateRecord{
-			Id:        primitive.NewObjectID(),
+			Id:        bson.NewObjectID(),
 			ProjectId: "test-project",
 			StreamConfiguration: model.StreamConfiguration{
-				Id:  primitive.NewObjectID().Hex(),
+				Id:  bson.NewObjectID().Hex(),
 				Iss: "test-issuer",
 			},
 			Status:    model.StreamStateEnabled,
@@ -151,10 +151,10 @@ func TestStreamDAOMemory_FindByProjectID(t *testing.T) {
 	projects := []string{"project-1", "project-1", "project-2"}
 	for _, projectId := range projects {
 		streamState := &model.StreamStateRecord{
-			Id:        primitive.NewObjectID(),
+			Id:        bson.NewObjectID(),
 			ProjectId: projectId,
 			StreamConfiguration: model.StreamConfiguration{
-				Id:  primitive.NewObjectID().Hex(),
+				Id:  bson.NewObjectID().Hex(),
 				Iss: "test-issuer",
 			},
 			Status:    model.StreamStateEnabled,
@@ -179,7 +179,7 @@ func TestStreamDAOMemory_UpdateStatus(t *testing.T) {
 	ctx := context.Background()
 
 	streamState := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:  "stream-1",
@@ -213,7 +213,7 @@ func TestStreamDAOMemory_FindReceiverStreams(t *testing.T) {
 
 	// Create receiver stream (RouteMode = import)
 	receiverStream := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:        "receiver-stream",
@@ -230,9 +230,9 @@ func TestStreamDAOMemory_FindReceiverStreams(t *testing.T) {
 	}
 	_ = dao.Create(ctx, receiverStream)
 
-	// Create transmitter stream (RouteMode = publish)
+	// Create a transmitter stream (RouteMode = publish)
 	transmitterStream := &model.StreamStateRecord{
-		Id:        primitive.NewObjectID(),
+		Id:        bson.NewObjectID(),
 		ProjectId: "test-project",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:        "transmitter-stream",

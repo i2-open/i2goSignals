@@ -1,10 +1,11 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -244,7 +245,8 @@ func registerCollector(collector prometheus.Collector) {
 
 	err := prometheus.Register(collector)
 	if err != nil {
-		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+		var alreadyRegisteredError prometheus.AlreadyRegisteredError
+		if errors.As(err, &alreadyRegisteredError) {
 			// Already registered, this is fine (e.g. in tests)
 			return
 		}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,14 +12,26 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // var sa *SignalsApplication
 
 var serverLog = logger.Sub("SERVER")
+
+type SsfApplicationInterface interface {
+	GetProvider() dbProviders.DbProviderInterface
+	GetEventRouter() eventRouter.EventRouter
+	GetAuth() *authUtil.AuthIssuer
+	GetBaseUrl() *url.URL
+	GetDefIssuer() string
+	Name() string
+	CloseReceiver(sid string)
+	HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream
+}
 
 type SignalsApplication struct {
 	Provider      dbProviders.DbProviderInterface
@@ -31,11 +44,13 @@ type SignalsApplication struct {
 	AdminRole     string
 	Auth          *authUtil.AuthIssuer
 	pollClients   map[string]*ClientPollStream
+	pushClients   map[string]*ReceiverPushStream
 	pushReceivers map[string]model.StreamStateRecord
 	mu            sync.RWMutex
 	Stats         *PrometheusHandler
 	NodeID        string
 	StartedAt     time.Time
+	stopSync      chan struct{}
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -43,6 +58,22 @@ func (sa *SignalsApplication) Name() string {
 		return sa.Provider.Name()
 	}
 	return "goSignals"
+}
+
+func (sa *SignalsApplication) GetProvider() dbProviders.DbProviderInterface {
+	return sa.Provider
+}
+
+func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
+	return sa.EventRouter
+}
+
+func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
+	return sa.Auth
+}
+
+func (sa *SignalsApplication) GetDefIssuer() string {
+	return sa.DefIssuer
 }
 
 func (sa *SignalsApplication) GetBaseUrl() *url.URL {
@@ -70,6 +101,9 @@ func (sa *SignalsApplication) HealthCheck() bool {
 }
 
 func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
+	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
+	tlsSupport.CheckCaInstalled(http.DefaultClient)
+
 	role := os.Getenv("SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"
@@ -89,9 +123,11 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		AdminRole:     role,
 		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
+		pushClients:   map[string]*ReceiverPushStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
+		stopSync:      make(chan struct{}),
 	}
 
 	serverLog.Info("Starting goSignalsApplication", "nodeID", nodeID)
@@ -120,7 +156,11 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	// Set defaults
 	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
 	if !issDefined {
-		defaultIssuer = "DEFAULT"
+		if sa.BaseUrl != nil {
+			defaultIssuer = sa.BaseUrl.String()
+		} else {
+			defaultIssuer = "DEFAULT"
+		}
 	}
 	sa.DefIssuer = defaultIssuer
 	serverLog.Info("Selected issuer id", "issuer", sa.DefIssuer)
@@ -159,6 +199,8 @@ func (sa *SignalsApplication) backgroundSync() {
 					sa.EventRouter.UpdateStreamState(&state)
 				}
 			}
+		case <-sa.stopSync:
+			return
 		}
 	}
 }
@@ -195,8 +237,9 @@ func (sa *SignalsApplication) registerNode() {
 func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
 	sa := NewApplication(provider, baseUrlString)
 	server := http.Server{
-		Addr:    addr,
-		Handler: sa.Handler,
+		Addr:     addr,
+		Handler:  sa.Handler,
+		ErrorLog: slog.NewLogLogger(serverLog.Handler(), slog.LevelError),
 	}
 	sa.mu.Lock()
 	sa.Server = &server
@@ -215,6 +258,10 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 func (sa *SignalsApplication) Shutdown() {
 	name := sa.Provider.Name()
 	serverLog.Info("Shutdown initiated", "db", name)
+
+	if sa.stopSync != nil {
+		close(sa.stopSync)
+	}
 
 	// Turn off Polling Clients
 	sa.shutdownReceivers()

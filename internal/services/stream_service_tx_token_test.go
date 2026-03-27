@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -50,7 +50,7 @@ func TestCreateStream_TxTokenResilience(t *testing.T) {
 			// Well-known endpoint
 			mux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(transmitterConfig)
+				_ = json.NewEncoder(w).Encode(transmitterConfig)
 			})
 
 			// Stream configuration endpoint
@@ -64,7 +64,7 @@ func TestCreateStream_TxTokenResilience(t *testing.T) {
 				// Return updated configuration
 				req.EventsDelivered = eventsDelivered
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(req)
+				_ = json.NewEncoder(w).Encode(req)
 			})
 
 			ts := httptest.NewServer(mux)
@@ -100,7 +100,7 @@ func TestCreateStream_TxTokenResilience(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			_, err = svc.CreateStream(ctx, request, "test-project")
+			_, err = svc.CreateStream(ctx, request, "test-project", nil)
 
 			// 4. Verify Results
 			assert.NoError(t, err)

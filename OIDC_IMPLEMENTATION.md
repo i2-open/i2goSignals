@@ -133,7 +133,7 @@ This document summarizes the OIDC/OAuth authentication integration implemented f
 ```
 1. User accesses adminUI (http://localhost:8899)
 2. User clicks "Login" button
-3. adminUI redirects to Keycloak (http://localhost:8080/realms/gosignals)
+3. adminUI redirects to Keycloak (https://keycloak:9080/realms/gosignals)
 4. User enters credentials on Keycloak page
 5. Keycloak redirects back to adminUI with authorization code
 6. adminUI exchanges code for tokens (access_token, refresh_token, id_token)
@@ -148,10 +148,10 @@ This document summarizes the OIDC/OAuth authentication integration implemented f
 ## Environment Variables
 
 ### goSignalsServer
-- `KEYCLOAK_URL`: Keycloak realm URL (default: http://localhost:8080/realms/gosignals)
+- `KEYCLOAK_URL`: Keycloak realm URL (default: https://keycloak:9080/realms/gosignals)
 
 ### adminUI (Vite)
-- `VITE_KEYCLOAK_URL`: Keycloak realm URL (default: http://localhost:8080/realms/gosignals)
+- `VITE_KEYCLOAK_URL`: Keycloak realm URL (default: https://keycloak:9080/realms/gosignals)
 - `VITE_GOSIGNALS_SERVER_URL`: goSignalsServer URL (default: http://localhost:8888)
 
 ## Files Created/Modified

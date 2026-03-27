@@ -5,22 +5,21 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"sync"
-
-	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var eventLogger = logger.Sub("ROUTER")
@@ -38,6 +37,7 @@ type EventRouter interface {
 	GetPollStreamCnt() float64
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
 	SetStatsHandler(stats interface{})
+	ResetStream(sid string)
 }
 
 type router struct {
@@ -101,7 +101,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	router.enabled = true
 
 	// Start the background watcher
-	go router.provider.WatchPending(ctx, func(jti string, streamId primitive.ObjectID) {
+	go router.provider.WatchPending(ctx, func(jti string, streamId bson.ObjectID) {
 		sid := streamId.Hex()
 		router.mu.RLock()
 		pollBuf, pollOk := router.pollBuffers[sid]
@@ -119,6 +119,15 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	})
 
 	return router
+}
+
+func (r *router) ResetStream(sid string) {
+	r.mu.RLock()
+	buf, ok := r.pollBuffers[sid]
+	r.mu.RUnlock()
+	if ok {
+		buf.Clear()
+	}
 }
 
 func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool) {
@@ -166,10 +175,13 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	if dir == "In" {
 		eventLogger.Debug("Inbound token", "token", token.String())
 	}
-
+	tokenIssuer := ""
+	if token != nil {
+		tokenIssuer = token.Issuer
+	}
 	label := prometheus.Labels{
 		"type":      eventTypes,
-		"iss":       token.Issuer,
+		"iss":       tokenIssuer,
 		"tfr":       tfr,
 		"stream_id": stream.StreamConfiguration.Id,
 	}
@@ -301,8 +313,14 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 		if ok {
 			eventLogger.Debug("Syncing stream state", "sid", currentState.StreamConfiguration.Id)
+			oldStatus := currentState.Status
 			currentState.Update(stream)
 			r.pollStreams[stream.StreamConfiguration.Id] = currentState
+			if (currentState.Status == model.StreamStatePause || currentState.Status == model.StreamStateDisable) && oldStatus == model.StreamStateEnabled {
+				if pb, ok := r.pollBuffers[stream.StreamConfiguration.Id]; ok {
+					pb.Wakeup() // This will cause current long poll sessions to end
+				}
+			}
 		} else {
 			eventLogger.Info("Adding stream to Pollers", "sid", stream.StreamConfiguration.Id)
 			r.pollStreams[stream.StreamConfiguration.Id] = *stream
@@ -368,7 +386,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return err
 	}
 
-	event := r.provider.AddEvent(eventToken, sid, rawEvent)
+	event, err := r.provider.AddEvent(eventToken, sid, rawEvent)
+	if err != nil {
+		return err
+	}
 	r.IncrementCounter(streamState, eventToken, true)
 
 	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
@@ -386,7 +407,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			r.provider.AddEventToStream(event.Jti, stream.Id)
+			err = r.provider.AddEventToStream(event.Jti, stream.Id)
+			if err != nil {
+				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
+			}
 			// This will cause the PollStreamHandler assigned to deliver the event
 			r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
@@ -400,7 +424,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			r.provider.AddEventToStream(event.Jti, pollStream.Id)
+			err = r.provider.AddEventToStream(event.Jti, pollStream.Id)
+			if err != nil {
+				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
+			}
 			// This causes the event to be available on the next poll
 			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
@@ -419,7 +446,22 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		return nil, false, http.StatusNotFound
 	}
 
+	if len(params.Acks) > 0 {
+		pollBuffer.AckEvents(params.Acks)
+	}
+
+	if len(params.SetErrs) > 0 {
+		jtis := make([]string, 0, len(params.SetErrs))
+		for jti := range params.SetErrs {
+			jtis = append(jtis, jti)
+		}
+		pollBuffer.AckEvents(jtis)
+	}
+
 	if state.Status != model.StreamStateEnabled {
+		if (state.Status == model.StreamStatePause || state.Status == model.StreamStateDisable) && (len(params.Acks) > 0 || len(params.SetErrs) > 0) {
+			return map[string]string{}, false, http.StatusOK
+		}
 		stateString, _ := json.MarshalIndent(&state, "", "  ")
 		eventLogger.Debug("Stream State", "state", string(stateString))
 		eventLogger.Error("POLL-SRV: Error Poll request but stream is not active", "sid", sid)
@@ -596,7 +638,10 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 
 		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey, kid)
 		if delivered {
-			r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
+			err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
+			if err != nil {
+				eventLogger.Error("PUSH-SRV: Error acking event", "sid", config.StreamConfiguration.Id, "jti", jti, "error", err)
+			}
 			r.IncrementCounter(config, &eventRecord.Event, false)
 		}
 	}
@@ -607,11 +652,8 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
-	client := http.Client{Timeout: 60 * time.Second}
-
+	// Prepare the token string (application-layer: signing or forwarding)
 	var tokenString string
-	url := pushConfig.EndpointUrl
-
 	if configuration.RouteMode == model.RouteModeForward {
 		tokenString = event.Original // In forward mode, we just pass on the raw event
 	} else {
@@ -627,48 +669,27 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		}
 	}
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(tokenString))
+	// Use goSetPush for the RFC8935 wire protocol
+	result := goSetPush.PushSET(context.Background(), tokenString, goSetPush.TransmitterConfig{
+		EndpointURL:   pushConfig.EndpointUrl,
+		Authorization: pushConfig.AuthorizationHeader,
+	})
 
-	if pushConfig.AuthorizationHeader != "" {
-		authorization := pushConfig.AuthorizationHeader
-		if strings.ToLower(authorization[0:4]) != "bear" {
-			authorization = "Bearer " + authorization
+	if !result.Accepted {
+		if result.Err != nil {
+			if deliveryErr, ok := result.Err.(*goSetPush.DeliveryErr); ok {
+				errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", deliveryErr.ErrCode, deliveryErr.Description)
+				eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", deliveryErr.ErrCode, "desc", deliveryErr.Description)
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
+			} else if result.StatusCode > 400 {
+				errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %d, POSTING to %s", configuration.Id, result.StatusCode, pushConfig.EndpointUrl)
+				eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", result.StatusCode, "url", pushConfig.EndpointUrl)
+				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
+			} else {
+				eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", result.Err)
+			}
 		}
-		req.Header.Set("Authorization", authorization)
-	}
-	req.Header.Set("Content-Type", "application/secevent+jwt")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", err)
 		return false
-	}
-	if resp.StatusCode != http.StatusAccepted {
-		if resp.StatusCode == http.StatusBadRequest {
-			var errorMsg model.SetDeliveryErr
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to read response")
-				eventLogger.Error("PUSH-SRV: Error reading response", "sid", configuration.Id, "error", err)
-				return false
-			}
-			err = json.Unmarshal(body, &errorMsg)
-			if err != nil {
-				eventLogger.Error("PUSH-SRV: Error parsing error response", "sid", configuration.Id, "error", err)
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, "Unable to parse JSON response")
-				return false
-			}
-			errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", errorMsg.ErrCode, errorMsg.Description)
-			eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", errorMsg.ErrCode, "desc", errorMsg.Description)
-			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			return false
-		}
-		if resp.StatusCode > 400 {
-			errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %s, POSTING to %s", configuration.Id, resp.Status, url)
-			eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", resp.Status, "url", url)
-			r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-		}
 	}
 
 	eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
@@ -751,6 +772,9 @@ func (r *router) RemoveStream(sid string) {
 			delete(r.pollStreams, sid)
 		}
 
+		if pb, ok := r.pollBuffers[sid]; ok {
+			pb.Close()
+		}
 		delete(r.pollBuffers, sid)
 	}
 	eventLogger.Info("STREAM Removed from router", "sid", sid)

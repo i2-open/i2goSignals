@@ -35,7 +35,7 @@ type Routes []Route
 
 func NewRouter(application *SignalsApplication) *HttpRouter {
 	httpRouter := HttpRouter{
-		router: mux.NewRouter().StrictSlash(true),
+		router: mux.NewRouter().StrictSlash(true).UseEncodedPath(),
 		sa:     application,
 	}
 
@@ -60,7 +60,7 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 				Path(route.Pattern).
 				Name(route.Name).
 				Handler(handler).
-				Queries("stream_id", "{stream_id:[a-fA-F0-9]+}")
+				Queries("stream_id", "{id:[^/]+}")
 		} else {
 			httpRouter.router.
 				Methods(route.Method).
@@ -77,6 +77,13 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 	return &httpRouter
 }
 
+// Index is a simple health check or welcome endpoint.
+//
+// Inputs:
+//   - User-Agent (header): The user agent string of the requester.
+//
+// Return values:
+//   - 200 OK: A greeting string including the user agent.
 func (sa *SignalsApplication) Index(w http.ResponseWriter, r *http.Request) {
 	test := r.UserAgent()
 	_, _ = fmt.Fprintf(w, "Hello %s", test)
@@ -137,7 +144,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/status",
 			h.sa.GetStatus,
-			true,
+			false,
 		},
 
 		Route{
@@ -153,9 +160,8 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodDelete,
 			"/stream",
 			h.sa.StreamDelete,
-			true,
+			false,
 		},
-
 		Route{"ListStreamStates",
 			http.MethodGet,
 			"/states",
@@ -166,7 +172,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/state",
 			h.sa.GetStreamState,
-			true,
+			false,
 		},
 
 		Route{
@@ -174,7 +180,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodGet,
 			"/stream",
 			h.sa.StreamGet,
-			true,
+			false,
 		},
 
 		Route{
@@ -182,6 +188,42 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodPost,
 			"/stream",
 			h.sa.StreamCreate,
+			false,
+		},
+
+		Route{
+			"CreateServer",
+			http.MethodPost,
+			"/server",
+			h.sa.CreateServer,
+			false,
+		},
+		Route{
+			"ServerList",
+			http.MethodGet,
+			"/server",
+			h.sa.ServerList,
+			false,
+		},
+		Route{
+			"ServerGet",
+			http.MethodGet,
+			"/server/{alias}",
+			h.sa.ServerGet,
+			false,
+		},
+		Route{
+			"ServerUpdate",
+			http.MethodPut,
+			"/server/{alias}",
+			h.sa.ServerUpdate,
+			false,
+		},
+		Route{
+			"ServerDelete",
+			http.MethodDelete,
+			"/server/{alias}",
+			h.sa.ServerDelete,
 			false,
 		},
 
@@ -206,7 +248,7 @@ func (h *HttpRouter) getRoutes() Routes {
 			http.MethodPost,
 			"/status",
 			h.sa.UpdateStatus,
-			true,
+			false,
 		},
 
 		Route{
@@ -297,7 +339,7 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"ProtectedResourceMetadata",
 			http.MethodGet,
-			"/.well-known/oauth-provisioned-resource",
+			"/.well-known/oauth-protected-resource",
 			h.sa.ProtectedResourceMetadata,
 			false,
 		},

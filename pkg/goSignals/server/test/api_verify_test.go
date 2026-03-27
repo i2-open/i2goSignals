@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
@@ -57,7 +57,7 @@ func (suite *VerifySuite) TestTriggerVerification() {
 
 	resp, err := instance.client.Do(req)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	var createdStream model.StreamConfiguration
 	_ = json.NewDecoder(resp.Body).Decode(&createdStream)

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -26,7 +26,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	// Well-known endpoint
 	mux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	// Stream configuration endpoint
@@ -41,9 +41,10 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 		assert.Contains(t, req.Delivery.PushTransmitMethod.EndpointUrl, "http://receiver.com/events/")
 
 		// Return updated configuration
+		req.Id = "remote-stream-abc"
 		req.EventsDelivered = eventsDelivered
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	ts := httptest.NewServer(mux)
@@ -80,11 +81,13 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	config, err := svc.CreateStream(ctx, request, "test-project")
+	config, err := svc.CreateStream(ctx, request, "test-project", nil)
 
 	// 4. Verify Results
 	assert.NoError(t, err)
 	assert.Equal(t, eventsDelivered, config.EventsDelivered)
+	assert.NotNil(t, config.RemoteStreamId)
+	assert.Equal(t, "remote-stream-abc", *config.RemoteStreamId)
 }
 
 func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
@@ -100,7 +103,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	// Well-known endpoint
 	mux.HandleFunc("/.well-known/ssf-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transmitterConfig)
+		_ = json.NewEncoder(w).Encode(transmitterConfig)
 	})
 
 	// Stream configuration endpoint
@@ -115,6 +118,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 		assert.Equal(t, model.DeliveryPoll, req.Delivery.GetMethod())
 
 		// Return updated configuration with Poll details
+		req.Id = "remote-stream-123"
 		req.EventsDelivered = eventsDelivered
 		req.Delivery = &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
@@ -125,7 +129,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(req)
+		_ = json.NewEncoder(w).Encode(req)
 	})
 
 	ts := httptest.NewServer(mux)
@@ -161,7 +165,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	config, err := svc.CreateStream(ctx, request, "test-project")
+	config, err := svc.CreateStream(ctx, request, "test-project", nil)
 
 	// 4. Verify Results
 	assert.NoError(t, err)
@@ -171,4 +175,6 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	assert.Equal(t, "Bearer status-token", config.Delivery.PollReceiveMethod.AuthorizationHeader)
 	assert.NotNil(t, config.TxToken)
 	assert.Equal(t, "Bearer status-token", *config.TxToken)
+	assert.NotNil(t, config.RemoteStreamId)
+	assert.Equal(t, "remote-stream-123", *config.RemoteStreamId)
 }

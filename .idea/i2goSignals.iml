@@ -2,7 +2,12 @@
 <module type="WEB_MODULE" version="4">
   <component name="Go" enabled="true" />
   <component name="NewModuleRootManager">
-    <content url="file://$MODULE_DIR$" />
+    <content url="file://$MODULE_DIR$">
+      <excludeFolder url="file://$MODULE_DIR$/.idea/dataSources" />
+      <excludeFolder url="file://$MODULE_DIR$/.mongo/mongo1" />
+      <excludeFolder url="file://$MODULE_DIR$/.mongo/mongo2" />
+      <excludeFolder url="file://$MODULE_DIR$/.mongo/mongo3" />
+    </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

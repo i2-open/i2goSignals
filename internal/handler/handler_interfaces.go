@@ -3,7 +3,7 @@ package handler
 import (
 	"crypto/rsa"
 
-	model "github.com/i2-open/i2goSignals/internal/model"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 
 	"github.com/MicahParks/keyfunc"
 )

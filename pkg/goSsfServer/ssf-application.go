@@ -1,0 +1,360 @@
+package goSsfServer
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+)
+
+var serverLog = logger.Sub("SERVER")
+
+type SsfApplication struct {
+	Provider    dbProviders.DbProviderInterface
+	Server      *http.Server
+	Handler     http.Handler
+	EventRouter eventRouter.EventRouter
+	BaseUrl     *url.URL
+	HostName    string
+	DefIssuer   string
+	AdminRole   string
+	Auth        *authUtil.AuthIssuer
+	mu          sync.RWMutex
+	NodeID      string
+	StartedAt   time.Time
+}
+
+func (sa *SsfApplication) GetProvider() dbProviders.DbProviderInterface {
+	return sa.Provider
+}
+
+func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
+	return sa.EventRouter
+}
+
+func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
+	return sa.Auth
+}
+
+func (sa *SsfApplication) GetDefIssuer() string {
+	return sa.DefIssuer
+}
+
+func (sa *SsfApplication) CloseReceiver(_ string) {
+	// SSF-only server does not implement receivers
+}
+
+func (sa *SsfApplication) HandleReceiver(_ *model.StreamStateRecord) *server.ClientPollStream {
+	// SSF-only server does not implement receivers
+	return nil
+}
+
+func (sa *SsfApplication) Name() string {
+	if sa.Provider != nil {
+		return sa.Provider.Name()
+	}
+	return "goSSF"
+}
+
+func (sa *SsfApplication) Index(w http.ResponseWriter, r *http.Request) {
+	test := r.UserAgent()
+	_, _ = fmt.Fprintf(w, "Hello %s", test)
+}
+
+func (sa *SsfApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Request) {
+	server.IssuerProjectIatHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) RegisterClient(w http.ResponseWriter, r *http.Request) {
+	server.RegisterClientHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
+	server.TriggerEventHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
+	server.ReceivePushEventHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
+	server.AddSubjectHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) GetStatus(w http.ResponseWriter, r *http.Request) {
+	server.GetStatusHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
+	server.RemoveSubjectHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) StreamDelete(w http.ResponseWriter, r *http.Request) {
+	server.StreamDeleteHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) ListStreamStates(w http.ResponseWriter, r *http.Request) {
+	server.ListStreamStatesHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) GetStreamState(w http.ResponseWriter, r *http.Request) {
+	server.GetStreamStateHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) StreamGet(w http.ResponseWriter, r *http.Request) {
+	server.StreamGetHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) StreamCreate(w http.ResponseWriter, r *http.Request) {
+	server.StreamCreateHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) StreamUpdate(w http.ResponseWriter, r *http.Request) {
+	server.StreamUpdateHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	server.UpdateStatusHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
+	server.VerificationRequestHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) WellKnownSsfConfigurationGet(w http.ResponseWriter, r *http.Request) {
+	server.WellKnownSsfConfigurationGetHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) WellKnownSsfConfigurationIssuerGet(w http.ResponseWriter, r *http.Request) {
+	server.WellKnownSsfConfigurationIssuerGetHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) LoadKey(w http.ResponseWriter, r *http.Request) {
+	server.LoadKeyHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
+	server.CreateJwksIssuerHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
+	server.JwksJsonHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) JwksIssuers(w http.ResponseWriter, r *http.Request) {
+	server.JwksIssuersHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
+	server.JwksJsonIssuerHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
+	server.DeleteJwksIssuerKeyHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
+	server.PollEventsHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	server.ProtectedResourceMetadataHandler(sa, w, r)
+}
+
+func (sa *SsfApplication) GetBaseUrl() *url.URL {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+	return sa.BaseUrl
+}
+
+func (sa *SsfApplication) SetBaseUrl(u *url.URL) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	sa.BaseUrl = u
+	if sa.Provider != nil {
+		sa.Provider.SetBaseUrl(u)
+	}
+}
+
+func (sa *SsfApplication) HealthCheck() bool {
+	err := sa.Provider.Check()
+	if err != nil {
+		serverLog.Error("MongoProvider ping failed", "error", err)
+		return false
+	}
+	return true
+}
+func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
+	role := os.Getenv("SSEF_ADMIN_ROLE")
+	if role == "" {
+		role = "ADMIN"
+	}
+
+	nodeID := os.Getenv("NODE_ID")
+	if nodeID == "" {
+		nodeID = os.Getenv("POD_NAME")
+	}
+	if nodeID == "" {
+		hostname, _ := os.Hostname()
+		nodeID = fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
+	}
+
+	sa := &SsfApplication{
+		Provider:  provider,
+		AdminRole: role,
+		Auth:      provider.GetAuthIssuer(),
+		NodeID:    nodeID,
+		StartedAt: time.Now().UTC(),
+	}
+
+	serverLog.Info("Starting goSsfApplication", "nodeID", nodeID)
+
+	httpRouter := NewRouter(sa)
+	// expose the handler for external server usage (e.g., httptest.Server)
+	sa.Handler = httpRouter.router
+
+	sa.EventRouter = eventRouter.NewRouter(provider, nodeID)
+
+	var baseUrl *url.URL
+	var err error
+	if baseUrlString != "" {
+		baseUrl, err = url.Parse(baseUrlString)
+		if err != nil {
+			serverLog.Error("FATAL: Invalid BaseUrl", "url", baseUrlString, "error", err)
+		}
+	}
+	sa.BaseUrl = baseUrl
+	if sa.Provider != nil {
+		sa.Provider.SetBaseUrl(baseUrl)
+	}
+
+	// Set defaults
+	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
+	if !issDefined {
+		if sa.BaseUrl != nil {
+			defaultIssuer = sa.BaseUrl.String()
+		} else {
+			defaultIssuer = "DEFAULT"
+		}
+	}
+	sa.DefIssuer = defaultIssuer
+	serverLog.Info("Selected issuer id", "issuer", sa.DefIssuer)
+
+	// Start background sync for clustering
+	go sa.backgroundSync()
+
+	return sa
+}
+
+// backgroundSync handles periodic tasks such as cluster node registration and state synchronization for event streams.
+func (sa *SsfApplication) backgroundSync() {
+	ticker := time.NewTicker(10 * time.Second) // Heartbeat every 10s
+	defer ticker.Stop()
+
+	// Initial registration
+	sa.registerNode()
+
+	syncCounter := 0
+	for {
+		select {
+		case <-ticker.C:
+			sa.registerNode()
+
+			syncCounter++
+			if syncCounter >= 4 { // Every 40s
+				syncCounter = 0
+				serverLog.Debug("Periodic background sync starting")
+
+				// Sync router state
+				states := sa.Provider.GetStateMap()
+				for _, state := range states {
+					sa.EventRouter.UpdateStreamState(&state)
+				}
+			}
+		}
+	}
+}
+
+// registerNode registers the current node in the cluster with its ID, address, version, and timestamps.
+func (sa *SsfApplication) registerNode() {
+	sa.mu.RLock()
+	httpServer := sa.Server
+	baseUrl := sa.BaseUrl
+	sa.mu.RUnlock()
+
+	addr := ""
+	if httpServer != nil {
+		addr = httpServer.Addr
+	} else if baseUrl != nil {
+		addr = baseUrl.Host
+	}
+
+	node := model.ClusterNode{
+		Id:         sa.NodeID,
+		Address:    addr,
+		Version:    "1.0.0", // TODO: use actual version
+		StartedAt:  sa.StartedAt,
+		LastSeenAt: time.Now().UTC(),
+	}
+	err := sa.Provider.RegisterNode(node)
+	if err != nil {
+		serverLog.Error("Failed to register node", "error", err)
+	}
+}
+
+// StartServer creates a real net/http server wrapping the application handler.
+// This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
+func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
+	sa := NewApplication(provider, baseUrlString)
+	httpServer := http.Server{
+		Addr:     addr,
+		Handler:  sa.Handler,
+		ErrorLog: slog.NewLogLogger(serverLog.Handler(), slog.LevelError),
+	}
+	sa.mu.Lock()
+	sa.Server = &httpServer
+	if sa.BaseUrl == nil {
+		baseUrl, _ := url.Parse("http://" + httpServer.Addr + "/")
+		sa.BaseUrl = baseUrl
+		if sa.Provider != nil {
+			sa.Provider.SetBaseUrl(baseUrl)
+		}
+	}
+	sa.mu.Unlock()
+	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)
+	return sa
+}
+
+func (sa *SsfApplication) Shutdown() {
+	name := sa.Provider.Name()
+	serverLog.Info("Shutdown initiated", "db", name)
+
+	// Turn off the server (if present)
+	if sa.Server != nil {
+		_ = sa.Server.Shutdown(context.Background())
+	}
+
+	time.Sleep(time.Second)
+
+	// Stop processing new events
+	sa.EventRouter.Shutdown()
+
+	// Give some time to ensure all ops are finished.
+	time.Sleep(time.Second)
+
+	// Shutdown the provider
+	_ = sa.Provider.Close()
+
+	serverLog.Info("Shutdown Complete", "db", name)
+}

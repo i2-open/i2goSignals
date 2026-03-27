@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,18 +15,41 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/model"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
+	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
+	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/goSsfUtils"
+	"github.com/i2-open/i2goSignals/pkg/oauthClient"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
+	"github.com/segmentio/ksuid"
 )
 
 type ClientPollStream struct {
-	mu     sync.RWMutex
-	sa     *SignalsApplication
-	stream *model.StreamStateRecord
-	ctx    context.Context
-	cancel context.CancelFunc
-	active bool
+	mu        sync.RWMutex
+	sa        *SignalsApplication
+	stream    *model.StreamStateRecord
+	ctx       context.Context
+	cancel    context.CancelFunc
+	active    bool
+	statusUrl string
+}
+
+type ReceiverPushStream struct {
+	mu          sync.RWMutex
+	sa          *SignalsApplication
+	stream      *model.StreamStateRecord
+	ctx         context.Context
+	cancel      context.CancelFunc
+	active      bool
+	statusUrl   string
+	verifyUrl   string
+	eventChan   chan struct{}
+	lastEventAt time.Time
+	verifying   bool
+	verifyState string
 }
 
 /*
@@ -41,6 +62,7 @@ func (sa *SignalsApplication) InitializeReceivers() {
 
 	newPushReceivers := make(map[string]model.StreamStateRecord)
 	currentPollClients := make(map[string]bool)
+	currentPushClients := make(map[string]bool)
 
 	for _, stream := range states {
 		if !stream.IsReceiver() {
@@ -48,14 +70,15 @@ func (sa *SignalsApplication) InitializeReceivers() {
 		}
 
 		if stream.GetType() == model.ReceivePush {
-			serverLog.Info("PUSH-RCV: Stream Ready", "sid", stream.StreamConfiguration.Id)
+			sa.handleClientPushReceiver(&stream)
+			currentPushClients[stream.StreamConfiguration.Id] = true
 			newPushReceivers[stream.StreamConfiguration.Id] = stream
 			continue
 		}
 
 		// Stream is a Polling receiver
 		if stream.GetType() == model.ReceivePoll {
-			sa.handleClientPollReceiverLocked(&stream)
+			sa.handleClientPollReceiver(&stream)
 			currentPollClients[stream.StreamConfiguration.Id] = true
 		}
 	}
@@ -67,7 +90,17 @@ func (sa *SignalsApplication) InitializeReceivers() {
 	for sid := range sa.pollClients {
 		if !currentPollClients[sid] {
 			serverLog.Info("POLL-RCV: Closing Poll Receiver", "sid", sid)
+			sa.pollClients[sid].Close()
 			delete(sa.pollClients, sid)
+		}
+	}
+
+	// Clean up push clients that are no longer present or no longer receivers
+	for sid := range sa.pushClients {
+		if !currentPushClients[sid] {
+			serverLog.Info("PUSH-RCV: Closing Push Receiver", "sid", sid)
+			sa.pushClients[sid].Close()
+			delete(sa.pushClients, sid)
 		}
 	}
 }
@@ -84,6 +117,9 @@ func (sa *SignalsApplication) shutdownReceivers() {
 	for _, ps := range sa.pollClients {
 		ps.Close()
 	}
+	for _, ps := range sa.pushClients {
+		ps.Close()
+	}
 }
 
 func (sa *SignalsApplication) CloseReceiver(sid string) {
@@ -95,12 +131,92 @@ func (sa *SignalsApplication) CloseReceiver(sid string) {
 		delete(sa.pollClients, sid)
 	}
 
+	pcs, ok := sa.pushClients[sid]
+	if ok {
+		pcs.Close()
+		delete(sa.pushClients, sid)
+	}
+
 	// Remove so that the count is correct. The provider holds the true state
 	_, ok = sa.pushReceivers[sid]
 	if ok {
 		delete(sa.pushReceivers, sid)
 	}
 
+}
+
+// getHTTPClientForWellKnownEndpoint returns an HTTP client for fetching well-known configuration endpoints
+// It applies the server's TLS configuration if a TxAlias is configured
+func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Context, stream *model.StreamStateRecord) *http.Client {
+	conf := stream.StreamConfiguration
+
+	// Try to get server configuration for TLS settings
+	if conf.TxAlias != nil && *conf.TxAlias != "" {
+		server, err := sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+		if err == nil && server != nil {
+			client := oauthClient.GetBaseHTTPClientForServer(server)
+			client.Timeout = 10 * time.Second
+			return client
+		}
+	}
+
+	// Fallback to default client with CA check
+	client := &http.Client{Timeout: 10 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	return client
+}
+
+func (sa *SignalsApplication) getServerForStream(ctx context.Context, stream *model.StreamStateRecord) (*model.Server, error) {
+	conf := stream.StreamConfiguration
+	if conf.TxAlias != nil && *conf.TxAlias != "" {
+		return sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+	}
+	return nil, nil
+}
+
+func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
+	conf := stream.StreamConfiguration
+	var server *model.Server
+	var err error
+
+	// 1. Try TxAlias (New preferred method) - get server configuration first
+	server, err = sa.getServerForStream(ctx, stream)
+	if err != nil {
+		serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
+	}
+
+	// 2. Backward compatibility: TxToken (no server object)
+	if server == nil && conf.TxToken != nil && *conf.TxToken != "" {
+		server = &model.Server{
+			ClientToken: conf.TxToken,
+		}
+	}
+
+	// Use unified client acquisition if server is available
+	if server != nil {
+		client, err := oauthClient.GetClientForServer(ctx, server)
+		if err == nil {
+			return client, "", nil // Client handles Authorization header
+		}
+		alias := ""
+		if conf.TxAlias != nil {
+			alias = *conf.TxAlias
+		}
+		serverLog.Error("RCV: Failed to get client for server", "alias", alias, "error", err)
+	}
+
+	// 3. Fallback for Polling Receiver (legacy delivery method auth)
+	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
+		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
+		client := &http.Client{}
+		tlsSupport.CheckCaInstalled(client)
+		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, nil
+	}
+
+	// Default client without extra authorization
+	client := &http.Client{}
+	tlsSupport.CheckCaInstalled(client)
+	return client, "", nil
 }
 
 /*
@@ -112,19 +228,20 @@ func (sa *SignalsApplication) HandleReceiver(streamState *model.StreamStateRecor
 	defer sa.mu.Unlock()
 	if !(streamState.GetType() == model.ReceivePoll) {
 		if streamState.GetType() == model.ReceivePush {
+			sa.handleClientPushReceiver(streamState)
 			sa.pushReceivers[streamState.StreamConfiguration.Id] = *streamState
 		}
 		return nil // nothing to do
 	}
-	return sa.handleClientPollReceiverLocked(streamState)
+	return sa.handleClientPollReceiver(streamState)
 }
 
-func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.StreamStateRecord) *ClientPollStream {
+func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.StreamStateRecord) *ClientPollStream {
 	ps, ok := sa.pollClients[streamState.StreamConfiguration.Id]
 	if !ok {
 		ctx, cancel := context.WithCancel(context.Background())
 
-		ps := &ClientPollStream{
+		ps = &ClientPollStream{
 			sa:     sa,
 			stream: streamState,
 			active: true,
@@ -141,6 +258,329 @@ func (sa *SignalsApplication) handleClientPollReceiverLocked(streamState *model.
 	ps.stream = streamState
 	ps.mu.Unlock()
 	return ps
+}
+
+func (sa *SignalsApplication) handleClientPushReceiver(streamState *model.StreamStateRecord) *ReceiverPushStream {
+	ps, ok := sa.pushClients[streamState.StreamConfiguration.Id]
+	if !ok {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		ps = &ReceiverPushStream{
+			sa:          sa,
+			stream:      streamState,
+			active:      true,
+			ctx:         ctx,
+			cancel:      cancel,
+			eventChan:   make(chan struct{}, 1),
+			lastEventAt: time.Now(),
+		}
+		sa.pushClients[streamState.StreamConfiguration.Id] = ps
+		serverLog.Info("PUSH-RCV: Initialized push receiver monitoring", "sid", streamState.StreamConfiguration.Id)
+		if streamState.StreamConfiguration.TxWellKnownUrl == nil || *streamState.StreamConfiguration.TxWellKnownUrl == "" {
+			serverLog.Info("RFC8935 receiver mode only. SSF endpoint unavailable", "sid", streamState.StreamConfiguration.Id)
+		}
+		go ps.monitorPushStream()
+		return ps
+	}
+	ps.mu.Lock()
+	ps.stream = streamState
+	ps.mu.Unlock()
+	return ps
+}
+
+func (rps *ReceiverPushStream) Close() {
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+	serverLog.Info("PUSH-RCV: Push client monitoring shutdown", "sid", rps.stream.StreamConfiguration.Id)
+	if rps.active {
+		rps.active = false
+		rps.cancel()
+	}
+}
+
+func (rps *ReceiverPushStream) notifyEvent() {
+	select {
+	case rps.eventChan <- struct{}{}:
+	default:
+	}
+}
+
+func (rps *ReceiverPushStream) handleVerificationEvent(state string) {
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+	if rps.verifying && rps.verifyState == state {
+		serverLog.Info("PUSH-RCV: Verification received for the stream", "sid", rps.stream.StreamConfiguration.Id)
+		rps.verifying = false
+		rps.verifyState = ""
+		rps.lastEventAt = time.Now()
+
+		// Mark as enabled and clear error upon successful verification
+		if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
+			rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+			rps.stream.Status = model.StreamStateEnabled
+			rps.stream.ErrorMsg = ""
+		}
+
+		select {
+		case rps.eventChan <- struct{}{}:
+		default:
+		}
+	} else {
+		serverLog.Warn("PUSH-RCV: Verification state mismatch or verified", "sid", rps.stream.StreamConfiguration.Id, "expected", rps.verifyState, "received", state)
+
+		// TODO Should verify be tried again?  Or should stream be paused?
+	}
+}
+
+func (rps *ReceiverPushStream) monitorPushStream() {
+	rps.mu.RLock()
+	minInterval := rps.stream.StreamConfiguration.MinVerificationInterval
+	inactivityTimeout := rps.stream.StreamConfiguration.InactivityTimeout
+	txWellKnown := rps.stream.StreamConfiguration.TxWellKnownUrl
+	rps.mu.RUnlock()
+
+	if minInterval <= 0 {
+		minInterval = 300 // Default to 5 minutes
+	}
+
+	ssfEnabled := txWellKnown != nil && *txWellKnown != ""
+
+	// Use a smaller ticker if we need to check inactivityTimeout more frequently
+	tickerInterval := time.Duration(minInterval) * time.Second
+	if !ssfEnabled && inactivityTimeout > 0 && time.Duration(inactivityTimeout)*time.Second < tickerInterval {
+		tickerInterval = time.Duration(inactivityTimeout) * time.Second
+	}
+
+	ticker := time.NewTicker(tickerInterval)
+	defer ticker.Stop()
+
+	warnLogged := false
+	errorLogged := false
+
+	for {
+		select {
+		case <-rps.ctx.Done():
+			return
+		case <-rps.eventChan:
+			rps.mu.Lock()
+			rps.lastEventAt = time.Now()
+
+			// If we receive an event, the stream is active - ensure it's marked as enabled
+			if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
+				rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+				rps.stream.Status = model.StreamStateEnabled
+				rps.stream.ErrorMsg = ""
+			}
+
+			rps.mu.Unlock()
+			ticker.Reset(tickerInterval)
+			warnLogged = false
+			errorLogged = false
+		case <-ticker.C:
+			rps.mu.RLock()
+			lastEventAt := rps.lastEventAt
+			sid := rps.stream.StreamConfiguration.Id
+			rps.mu.RUnlock()
+
+			elapsed := time.Since(lastEventAt)
+			if ssfEnabled {
+				if elapsed >= time.Duration(minInterval)*time.Second {
+					rps.initiateVerification()
+				}
+			} else {
+				if elapsed >= time.Duration(minInterval)*time.Second && !warnLogged {
+					serverLog.Warn("PUSH-RCV: MinVerificationInterval exceeded", "sid", sid, "elapsed", elapsed)
+					warnLogged = true
+				}
+				if inactivityTimeout > 0 && elapsed >= time.Duration(inactivityTimeout)*time.Second && !errorLogged {
+					serverLog.Error("PUSH-RCV: InactivityTimeout exceeded", "sid", sid, "elapsed", elapsed)
+					errorLogged = true
+				}
+			}
+		}
+	}
+}
+
+func (rps *ReceiverPushStream) initiateVerification() {
+	serverLog.Debug("PUSH-RCV: Verification process is initiated", "sid", rps.stream.StreamConfiguration.Id)
+	verifyUrl := rps.getVerifyEndpoint()
+	if verifyUrl == "" {
+		serverLog.Warn("PUSH-RCV: Could not determine verification endpoint", "sid", rps.stream.StreamConfiguration.Id)
+		rps.fallbackToStatusCheck()
+		return
+	}
+
+	state := ksuid.New().String()
+	rps.mu.Lock()
+	rps.verifying = true
+	rps.verifyState = state
+	rps.mu.Unlock()
+
+	params := model.VerificationParameters{
+		State: state,
+	}
+
+	client, _, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
+	if err != nil {
+		serverLog.Error("PUSH-RCV: Failed to get authenticated client", "error", err)
+		rps.fallbackToStatusCheck()
+		return
+	}
+
+	err = goSsfUtils.PostVerification(rps.ctx, client, verifyUrl, params)
+	if err != nil {
+		if err.Error() == "unauthorized" {
+			serverLog.Warn("PUSH-RCV: Verification request unauthorized", "sid", rps.stream.StreamConfiguration.Id)
+			return
+		}
+		serverLog.Warn("PUSH-RCV: Verification request failed", "error", err)
+		rps.fallbackToStatusCheck()
+		return
+	}
+
+	// Wait 120s for verification event
+	go func(vState string) {
+		select {
+		case <-rps.ctx.Done():
+			return
+		case <-time.After(120 * time.Second):
+			rps.mu.Lock()
+			if rps.verifying && rps.verifyState == vState {
+				serverLog.Warn("PUSH-RCV: Verification event not received in 120s", "sid", rps.stream.StreamConfiguration.Id)
+				rps.verifying = false
+				rps.mu.Unlock()
+				rps.fallbackToStatusCheck()
+			} else {
+				rps.mu.Unlock()
+			}
+		}
+	}(state)
+}
+
+func (rps *ReceiverPushStream) getVerifyEndpoint() string {
+	rps.mu.RLock()
+	if rps.verifyUrl != "" {
+		rps.mu.RUnlock()
+		return rps.verifyUrl
+	}
+	rps.mu.RUnlock()
+
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+
+	if rps.verifyUrl != "" {
+		return rps.verifyUrl
+	}
+
+	// Using goSsfUtils if server is available
+	server, _ := rps.sa.getServerForStream(rps.ctx, rps.stream)
+	if server != nil {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		endpoint, err := goSsfUtils.GetVerificationEndpoint(rps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			rps.verifyUrl = endpoint
+			return rps.verifyUrl
+		}
+	}
+
+	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.VerificationEndpoint != "" {
+			rps.verifyUrl = txConfig.VerificationEndpoint
+			return rps.verifyUrl
+		}
+	}
+
+	// Fallback calculation
+	statusUrl := rps.getStatusEndpointLocked()
+	if statusUrl != "" {
+		u, err := url.Parse(statusUrl)
+		if err == nil {
+			path := u.Path
+			if strings.Contains(path, "/status") {
+				u.Path = strings.Replace(path, "/status", "/verify", 1)
+				rps.verifyUrl = u.String()
+				return rps.verifyUrl
+			}
+		}
+	}
+
+	return ""
+}
+
+func (rps *ReceiverPushStream) getStatusEndpoint() string {
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+	return rps.getStatusEndpointLocked()
+}
+
+func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
+	if rps.statusUrl != "" {
+		return rps.statusUrl
+	}
+
+	// Using goSsfUtils if server is available
+	server, _ := rps.sa.getServerForStream(rps.ctx, rps.stream)
+	if server != nil {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		endpoint, err := goSsfUtils.GetStatusEndpoint(rps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, rps.stream.StreamConfiguration.Id)
+			return rps.statusUrl
+		}
+	}
+
+	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
+		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.StatusEndpoint != "" {
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, rps.stream.StreamConfiguration.Id)
+			return rps.statusUrl
+		}
+	}
+	return ""
+}
+
+func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
+	server, _ := rps.sa.getServerForStream(ctx, rps.stream)
+	client, _, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if server != nil {
+		return goSsfUtils.GetStreamStatus(ctx, client, server, rps.stream.StreamConfiguration.Id)
+	}
+
+	statusUrl := rps.getStatusEndpoint()
+	if statusUrl == "" {
+		return nil, errors.New("could not determine status endpoint")
+	}
+
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, rps.stream.StreamConfiguration.Id, "status check")
+}
+
+func (rps *ReceiverPushStream) fallbackToStatusCheck() {
+	status, err := rps.checkTransmitterStatus(rps.ctx)
+	if err != nil {
+		serverLog.Error("PUSH-RCV: Status check failed", "sid", rps.stream.StreamConfiguration.Id, "error", err)
+		return
+	}
+
+	rps.mu.Lock()
+	defer rps.mu.Unlock()
+
+	if status.Status != rps.stream.Status || rps.stream.ErrorMsg != "" {
+		reason := ""
+		if status.Status != model.StreamStateEnabled {
+			reason = "Transmitter reported status: " + status.Status
+		}
+		serverLog.Info("PUSH-RCV: Syncing stream status from transmitter", "sid", rps.stream.StreamConfiguration.Id, "status", status.Status, "reason", reason)
+		rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, status.Status, reason)
+		rps.stream.Status = status.Status
+		rps.stream.ErrorMsg = reason
+	}
 }
 
 func (sa *SignalsApplication) GetPollReceiverCnt() float64 {
@@ -196,6 +636,169 @@ func isConnectionError(err error) bool {
 	return true
 }
 
+func (ps *ClientPollStream) getStatusEndpoint() string {
+	ps.mu.RLock()
+	if ps.statusUrl != "" {
+		ps.mu.RUnlock()
+		return ps.statusUrl
+	}
+	ps.mu.RUnlock()
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	// Double check
+	if ps.statusUrl != "" {
+		return ps.statusUrl
+	}
+
+	// Using goSsfUtils if server is available
+	server, _ := ps.sa.getServerForStream(ps.ctx, ps.stream)
+	if server != nil {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+		endpoint, err := goSsfUtils.GetStatusEndpoint(ps.ctx, client, server)
+		if err == nil && endpoint != "" {
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, ps.stream.StreamConfiguration.Id)
+			return ps.statusUrl
+		}
+	}
+
+	receiveMethod := ps.stream.Delivery.PollReceiveMethod
+	if receiveMethod == nil {
+		return ""
+	}
+
+	// Step a: Use TxWellKnownUrl if defined.
+	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.StatusEndpoint != "" {
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, ps.stream.StreamConfiguration.Id)
+			return ps.statusUrl
+		}
+	}
+
+	// Step b: Replace last path segment of EndpointUrl with /status
+	eventUrl := receiveMethod.EndpointUrl
+	if eventUrl != "" {
+		u, err := url.Parse(eventUrl)
+		if err == nil {
+			q := u.Query()
+			streamId := q.Get("stream_id")
+
+			path := strings.TrimSuffix(u.Path, "/")
+			segments := strings.Split(path, "/")
+
+			// Try to find "poll" in segments
+			pollIdx := -1
+			for i := len(segments) - 1; i >= 0; i-- {
+				if segments[i] == "poll" {
+					pollIdx = i
+					break
+				}
+			}
+
+			if pollIdx != -1 {
+				// If streamId was not in query, check if it's the segment after "poll"
+				if streamId == "" && pollIdx < len(segments)-1 {
+					streamId = segments[pollIdx+1]
+				}
+
+				// Replace "poll" with "status" and remove everything after it in the path
+				segments[pollIdx] = "status"
+				u.Path = strings.Join(segments[:pollIdx+1], "/")
+
+				// Ensure stream_id is in the query
+				if streamId == "" {
+					streamId = ps.stream.StreamConfiguration.Id
+				}
+				q.Set("stream_id", streamId)
+				u.RawQuery = q.Encode()
+
+				ps.statusUrl = u.String()
+				return ps.statusUrl
+			}
+		}
+	}
+
+	return ""
+}
+
+func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
+	server, _ := ps.sa.getServerForStream(ctx, ps.stream)
+	client, _, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if server != nil {
+		return goSsfUtils.GetStreamStatus(ctx, client, server, ps.stream.StreamConfiguration.Id)
+	}
+
+	statusUrl := ps.getStatusEndpoint()
+	if statusUrl == "" {
+		return nil, errors.New("could not determine status endpoint")
+	}
+
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, ps.stream.StreamConfiguration.Id, "status check")
+}
+
+func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusCheckInterval time.Duration) (bool, error) {
+	status, err := ps.checkTransmitterStatus(ctx)
+	if err != nil {
+		serverLog.Debug("POLL-RCV: Transmitter status check failed, proceeding with polling", "sid", ps.stream.StreamConfiguration.Id, "error", err)
+		return true, nil // continue
+	}
+
+	sid := ps.stream.StreamConfiguration.Id
+
+	for {
+		if status.Status == model.StreamStateEnabled {
+			return true, nil
+		}
+
+		if status.Status == model.StreamStateDisable {
+			serverLog.Info("POLL-RCV: Transmitter stream is disabled", "sid", sid, "reason", status.Reason)
+			ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, "Transmitter stream is disabled: "+status.Reason)
+			ps.mu.Lock()
+			ps.active = false
+			ps.mu.Unlock()
+			return false, nil // stop
+		}
+
+		// if the stream is paused, periodically check status until it is re-enabled.
+		if status.Status == model.StreamStatePause {
+			serverLog.Info("POLL-RCV: Transmitter stream is paused", "sid", sid, "reason", status.Reason)
+			ps.sa.pauseStreamOnError(sid, "Transmitter stream is paused: "+status.Reason)
+
+			select {
+			case <-time.After(statusCheckInterval):
+				status, err = ps.checkTransmitterStatus(ctx)
+				if err != nil {
+					serverLog.Debug("POLL-RCV: Transmitter status check failed during pause, attempting poll as fallback", "sid", sid, "error", err)
+					return true, nil
+				}
+				if status.Status == model.StreamStateEnabled {
+					serverLog.Info("POLL-RCV: Transmitter stream is now re-enabled after pause", "sid", sid)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateEnabled, "")
+					ps.mu.Lock()
+					ps.active = true
+					ps.stream.Status = model.StreamStateEnabled
+					ps.stream.ErrorMsg = ""
+					ps.mu.Unlock()
+					return true, nil
+				}
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+
+		// Unknown status, fallback to enabled
+		return true, nil
+	}
+}
+
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.stream.StreamConfiguration.Id
@@ -207,7 +810,8 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		if stream.Status != model.StreamStateEnabled || !active {
+		// do not start if disabled or marked inactive
+		if !active || stream.Status == model.StreamStateDisable {
 			serverLog.Debug("POLL-RCV: Stream not enabled. Will not start.", "sid", sid)
 			return
 		}
@@ -253,11 +857,18 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		defer ps.sa.Stats.DecLeasesHeld()
 	}
 	var acks []string
-	var setErrs map[string]model.SetErrorType
-	client := http.Client{}
+	var setErrs map[string]goSetPoll.SetErrType
 
+	client, auth, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	if err != nil {
+		serverLog.Error("POLL-RCV: Failed to get authenticated client", "sid", sid, "error", err)
+	}
+
+	if ps.stream.Delivery == nil || ps.stream.Delivery.PollReceiveMethod == nil {
+		serverLog.Error("POLL-RCV: Missing delivery configuration", "sid", sid)
+		return
+	}
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
-	authorization := receiveMethod.AuthorizationHeader
 	eventUrl := receiveMethod.EndpointUrl
 	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
 
@@ -304,7 +915,27 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		retryLimit = time.Duration(v) * time.Second
 	}
 
+	statusCheckInterval := 30 * time.Second
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_STATUS_CHECK_INTERVAL"), 64); err == nil {
+		statusCheckInterval = time.Duration(v * float64(time.Second))
+	}
+
+	unauthorizedRetryDelay := 15 * time.Second
+	if v, err := strconv.ParseFloat(os.Getenv("POLL_UNAUTHORIZED_RETRY_DELAY"), 64); err == nil {
+		unauthorizedRetryDelay = time.Duration(v * float64(time.Second))
+	}
+	unauthorizedRetryLimit := 10
+	if v, err := strconv.Atoi(os.Getenv("POLL_UNAUTHORIZED_RETRY_LIMIT")); err == nil {
+		unauthorizedRetryLimit = v
+	}
+
+	// Initial status check upon lease acquisition - verify that the transmitter is active
+	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+		return
+	}
+
 	retryCount := 0
+	unauthorizedCount := 0
 	var firstErrorTime time.Time
 
 	for {
@@ -313,7 +944,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		if stream.Status != model.StreamStateEnabled || !active {
+		if !active || stream.Status == model.StreamStateDisable {
 			break
 		}
 
@@ -324,33 +955,87 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		default:
 		}
 
-		var pollBody model.PollParameters
-		if receiveMethod.PollConfig != nil {
-			pollBody = *receiveMethod.PollConfig
+		pollReq := goSetPoll.PollRequest{
+			Acks:    acks,
+			SetErrs: setErrs,
 		}
-		pollBody.Acks = acks
-		pollBody.SetErrs = setErrs
+		if receiveMethod.PollConfig != nil {
+			pollReq.MaxEvents = receiveMethod.PollConfig.MaxEvents
+			pollReq.ReturnImmediately = receiveMethod.PollConfig.ReturnImmediately
+			pollReq.TimeoutSecs = receiveMethod.PollConfig.TimeoutSecs
+		}
 
-		bodyBytes, _ := json.MarshalIndent(pollBody, "", "  ")
+		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
+		parsed, httpStatus, err := goSetPoll.Poll(heartbeatCtx, pollReq, goSetPoll.ReceiverConfig{
+			EndpointURL:       eventUrl,
+			Authorization:     auth,
+			HTTPClient:        client,
+			JWKS:              jwks,
+			ExpectedIssuer:    ps.stream.Iss,
+			ExpectedAudiences: ps.stream.Aud,
+		})
 
-		pollRequest, _ := http.NewRequest(http.MethodPost, eventUrl, bytes.NewReader(bodyBytes))
-		pollRequest.Header.Set("Authorization", authorization)
-		pollRequest.WithContext(heartbeatCtx)
+		if err != nil {
+			if httpStatus == http.StatusUnauthorized {
+				unauthorizedCount++
+				if unauthorizedCount >= unauthorizedRetryLimit {
+					errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled after %d unauthorized attempts", sid, unauthorizedCount)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+					ps.mu.Lock()
+					ps.active = false
+					ps.mu.Unlock()
+					return
+				}
 
-		serverLog.Info("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
-		resp, err := client.Do(pollRequest)
-		if err != nil || (resp != nil && resp.StatusCode > 400) {
-			if isConnectionError(err) {
+				delaySeconds := float64(unauthorizedRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(unauthorizedCount-1))
+				if delaySeconds > maxDelay {
+					delaySeconds = maxDelay
+				}
+				delay := time.Duration(delaySeconds * float64(time.Second))
+
+				serverLog.Warn("POLL-RCV: Unauthorized response, retrying after delay", "sid", sid, "delay", delay, "attempt", unauthorizedCount)
+				authMethod := "by client credential"
+				if auth != "" {
+					authMethod = "static token: " + maskAuthorization(auth)
+				}
+				serverLog.Debug("POLL-RCV: Authentication method", "sid", sid, "method", authMethod)
+				ps.sa.pauseStreamOnError(sid, fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
+				select {
+				case <-time.After(delay):
+					// Refresh the stream state to check if it's still enabled/active
+					updatedStream, _ := ps.sa.Provider.GetStreamState(sid)
+					if updatedStream != nil {
+						ps.mu.Lock()
+						ps.stream = updatedStream
+						ps.mu.Unlock()
+					}
+					// Refresh the client and auth header before retrying
+					client, auth, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+					if err != nil {
+						serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", err)
+					}
+					continue
+				case <-heartbeatCtx.Done():
+					return
+				}
+			}
+
+			if httpStatus == http.StatusForbidden {
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %d %s", sid, httpStatus, http.StatusText(httpStatus))
+				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+				ps.mu.Lock()
+				ps.active = false
+				ps.mu.Unlock()
+				return
+			}
+
+			if isConnectionError(err) || httpStatus == http.StatusServiceUnavailable {
 				if firstErrorTime.IsZero() {
 					firstErrorTime = time.Now()
 				}
-				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err.Error())
+				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
 				if time.Since(firstErrorTime) > retryLimit {
-					errMsg := "connection error"
-					if err != nil {
-						errMsg = fmt.Sprintf("connection error: %s", err.Error())
-					}
-					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, errMsg)
+					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
 					ps.mu.Lock()
 					ps.active = false
 					ps.mu.Unlock()
@@ -368,13 +1053,17 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				select {
 				case <-time.After(delay):
 					retryCount++
-					// Refresh stream state to check if it's still enabled/active
+
+					// Complement retry with transmitter status check - if status is not active, abort retry
+					if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+						return
+					}
+
+					// Refresh the stream state to check if it's still enabled/active
 					updatedStream, _ := ps.sa.Provider.GetStreamState(stream.StreamConfiguration.Id)
 					if updatedStream != nil {
 						ps.mu.Lock()
 						ps.stream = updatedStream
-						ps.stream.Status = model.StreamStateEnabled // temporarily treat as enabled to continue loop
-						ps.stream.ErrorMsg = ""                     // reset error message
 						ps.mu.Unlock()
 					}
 					continue
@@ -382,101 +1071,68 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					return
 				}
 			}
-			if resp != nil && resp.StatusCode == http.StatusNotFound {
-				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
+			if httpStatus == http.StatusNotFound {
 				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
-				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
-				ps.stream.ErrorMsg = errMsg
-				continue
-			}
-			if err == nil {
-				errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Http error: %s", ps.stream.Id.Hex(), eventUrl, resp.Status)
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-				serverLog.Error("POLL-RCV: HTTP Error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", resp.Status)
-				ps.stream.ErrorMsg = errMsg
+				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", httpStatus)
 				continue
 			}
 
-			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s]\nError: %s", ps.stream.Id.Hex(), eventUrl, err.Error())
+			// General error (other HTTP errors or request failures)
+			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
 			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
 			serverLog.Error("POLL-RCV: Request error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "error", err.Error())
-			ps.stream.ErrorMsg = errMsg
 			continue
 		}
 
-		var pollResponse model.PollResponse
-		if resp != nil {
-			bodyBytes, err = io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if err != nil {
-				ps.sa.Provider.UpdateStreamStatus(ps.stream.StreamConfiguration.Id, model.StreamStatePause, err.Error())
-				serverLog.Warn("POLL_RCV: Error reading response body, will retry", "sid", ps.stream.StreamConfiguration.Id, "error", err.Error())
-				continue
-			}
-			err = json.Unmarshal(bodyBytes, &pollResponse)
-			if err != nil {
-				errMsg := fmt.Sprintf("POLL-RCV[%s] Error parsing response: %s", ps.stream.Id.Hex(), err.Error())
-				serverLog.Error("POLL_RCV: Error parsing poll response", "sid", ps.stream.StreamConfiguration.Id, "error", err.Error())
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-				continue
-			}
-		}
-
-		// reset the error list
-		setErrs = map[string]model.SetErrorType{}
+		// Reset the error list for next poll
+		setErrs = make(map[string]goSetPoll.SetErrType)
 		acks = []string{}
 
-		setCnt := len(pollResponse.Sets)
-		serverLog.Info("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", pollResponse.MoreAvailable)
+		setCnt := len(parsed.Sets)
+		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
 
-		for jti, setString := range pollResponse.Sets {
-			serverLog.Info(fmt.Sprintf("POLL-RCV[%s] Parsing Event: %s", ps.stream.Id.Hex(), jti))
-
-			token, err := goSet.Parse(setString, jwks)
-			// Auth validation and diagnostics
-
-			// TODO: Need to detect invalid_key errors (signing and/or decryption error)
-
-			if err != nil {
-				serverLog.Warn("POLL-RCV: SET parsing error", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err.Error())
-				// fmt.Println(setString)
-				setErrs[jti] = model.SetErrorType{
-					Error:       "invalid_request",
-					Description: "The SET could not be parsed: " + err.Error(),
-				}
-				continue
-			}
-			if !token.VerifyIssuer(ps.stream.Iss, true) {
-				serverLog.Warn("POLL-RCV: Invalid issuer", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "expected-iss", ps.stream.Iss, "tokenIss", token.Issuer)
-				setErrs[jti] = model.SetErrorType{
-					Error:       "invalid_issuer",
-					Description: "The SET Issuer is invalid for the SET Recipient.",
-				}
-				continue
-			}
-			audMatch := false
-			if len(ps.stream.Aud) > 0 {
-				for _, value := range ps.stream.Aud {
-					if token.VerifyAudience(value, false) {
-						audMatch = true
-					}
-				}
-				if !audMatch {
-					serverLog.Warn("POLL-RCV: Audience not matched", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "tokenAud", token.RegisteredClaims.Audience)
-					setErrs[jti] = model.SetErrorType{
-						Error:       "invalid_audience",
-						Description: "The SET Audience does not correspond to the SET Recipient",
-					}
-					continue
-				}
-			}
-			// sa.Provider.AddEvent(token, true)
+		// Process successfully parsed and validated SETs
+		for jti, token := range parsed.ParsedSETs {
 			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
-			_ = ps.sa.EventRouter.HandleEvent(token, setString, ps.stream.StreamConfiguration.Id)
-
+			err = ps.sa.EventRouter.HandleEvent(token, parsed.Sets[jti], ps.stream.StreamConfiguration.Id)
+			if err != nil {
+				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err)
+				// We don't acknowledge if we couldn't handle it
+				continue
+			}
 			acks = append(acks, jti)
 		}
 
+		// Carry over validation errors to report in next poll
+		if len(parsed.Errors) > 0 {
+			setErrs = parsed.Errors
+		}
+
+		// Successful poll - reset retry count and error tracking
+		retryCount = 0
+		unauthorizedCount = 0
+		firstErrorTime = time.Time{}
+		ps.mu.RLock()
+		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""
+		ps.mu.RUnlock()
+		if needsUpdate {
+			ps.sa.Provider.UpdateStreamStatus(sid, model.StreamStateEnabled, "")
+			ps.mu.Lock()
+			ps.stream.Status = model.StreamStateEnabled
+			ps.stream.ErrorMsg = ""
+			ps.mu.Unlock()
+		}
+
+		// If the last poll returned no events, add a small delay to avoid tight loops.
+		// This provides a safety valve while maintaining high performance for actual event delivery.
+		if setCnt == 0 && !parsed.MoreAvailable {
+			sleepTime := 100 * time.Millisecond
+			select {
+			case <-time.After(sleepTime):
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
 	}
 	if !ps.active {
 		serverLog.Warn("POLL-RCV: Polling marked inactive", "sid", ps.stream.StreamConfiguration.Id)
@@ -487,91 +1143,95 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	return
 }
 
-// ReceivePushEvent events enables an endpoint to receive events from the RFC8935 SET Push provider
+// ReceivePushEvent handles incoming Security Event Tokens (SETs) via HTTP Push (RFC8935).
+//
+// Inputs:
+//   - id (path): The stream ID (captured by gorilla/mux, but auth context is used for validation).
+//   - Authorization (header): Token with 'event_delivery' scope.
+//   - Request body: Signed SET (JWT).
+//
+// Return values:
+//   - 202 Accepted: SET successfully received and accepted.
+//
+// Errors:
+//   - 401 Unauthorized: Authentication failed.
+//   - 403 Forbidden: Access denied or missing stream ID.
+//   - 404 Not Found: Stream not found.
+//   - 400 Bad Request: Invalid request or SET parsing error.
 func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Request) {
-	authContext, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery})
+	ReceivePushEventHandler(sa, w, r)
+}
+
+func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
-		processPushError(w, "authentication_failed", "The authorization was not successfully validated")
+		if status == http.StatusForbidden {
+
+			goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain the required stream identifier or scope")
+		} else {
+			goSetPush.WriteDeliveryError(w, goSetPush.ErrAuthenticationFailed, "The authorization was not successfully validated")
+		}
 		return
 	}
 
 	sid := authContext.StreamId
 	if authContext.StreamId == "" {
-		// The authorization token had no stream identifier in it
-		processPushError(w, "access_denied", "The authorization did not contain a stream identifier")
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain a stream identifier")
 		return
 	}
-	config, err := sa.Provider.GetStream(sid)
+	config, err := sa.GetProvider().GetStream(sid)
 	if config == nil || err != nil {
-
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
-		processPushError(w, "not_found", "Stream "+authContext.StreamId+" could not be located or was deleted")
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
 	}
-	// serverLog.Debug("Config issuer", "iss", config.Iss)
 
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" || strings.EqualFold("application/secevent+jwt", contentType) {
+	// Use goSetPush to handle RFC8935 protocol parsing and validation
+	jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
+	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
+		JWKS:              jwksKey,
+		ExpectedIssuer:    config.Iss,
+		ExpectedAudiences: config.Aud,
+	})
+	if deliveryErr != nil {
+		goSetPush.WriteDeliveryError(w, deliveryErr.ErrCode, deliveryErr.Description)
+		return
+	}
 
-		// TODO: check that the stream matched is inbound?
+	// Application-layer: push monitoring and verification event handling
+	if app, ok := sa.(*SignalsApplication); ok {
+		app.mu.RLock()
+		pcs, ok := app.pushClients[sid]
+		app.mu.RUnlock()
+		if ok {
+			pcs.notifyEvent()
 
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			serverLog.Warn("PUSH-RCV: Unable to read HTTP Request body", "sid", sid)
-			processPushError(w, "invalid_request", "Expecting body with Content-Type application/secevent+jwt")
-			return
-		}
+			// Check for verification event
+			if payload, ok := received.Token.Events[events.VerificationEventUri]; ok {
+				state := ""
+				if pMap, ok := payload.(map[string]interface{}); ok {
+					if s, ok := pMap["state"].(string); ok {
+						state = s
+					}
+				} else if pStruct, ok := payload.(events.VerifyPayload); ok {
+					state = pStruct.State
+				}
 
-		jwksKey := sa.Provider.GetIssuerJwksForReceiver(sid)
-		tokenString := string(bodyBytes)
-
-		token, err := goSet.Parse(tokenString, jwksKey)
-
-		// Auth validation and diagnostics
-		if err != nil {
-			serverLog.Warn("PUSH-RCV: Error validating SET token", "sid", sid, "error", err.Error())
-			processPushError(w, "invalid_request", "The request could not be parsed as a SET.")
-			return
-		}
-
-		if !token.VerifyIssuer(config.Iss, true) {
-			serverLog.Warn("PUSH-RCV: invalid issuer", "sid", sid, "expectedIss", config.Iss, "setIssuer", token.Issuer)
-			processPushError(w, "invalid_issuer", "The SET Issuer is invalid for the SET Recipient.")
-			return
-		}
-		audMatch := false
-		if len(config.Aud) > 0 {
-			serverLog.Debug("Auth audience values", "audience", token.Audience)
-			for _, value := range config.Aud {
-				serverLog.Debug("Checking audience match", "target", value)
-				if token.VerifyAudience(value, false) {
-					audMatch = true
-					break
+				if state != "" {
+					pcs.handleVerificationEvent(state)
 				}
 			}
-			if !audMatch {
-				serverLog.Warn("PUSH-RCV: Audience match error", "sid", sid, "expectedAud", config.Aud, "setAud", token.Audience)
-				processPushError(w, "invalid_audience", "The SET Audience does not correspond to the SET Recipient")
-				return
-			}
 		}
+	}
 
-		// Now we have a valid token, store it in the database and acknowledge it
-		err = sa.EventRouter.HandleEvent(token, tokenString, sid)
-		// TODO: Handle different types of errors
-		if err != nil {
-			processPushError(w, "invalid_request", "Unexpected error: "+err.Error())
-			return
-		}
-
-		// sa.Provider.AddEvent(token, true)
-		// TODO Event router needs to be notified to handle the event
-		w.WriteHeader(http.StatusAccepted)
+	// Application-layer: route the event
+	err = sa.GetEventRouter().HandleEvent(received.Token, received.TokenString, sid)
+	if err != nil {
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrInvalidRequest, "Unexpected error: "+err.Error())
 		return
 	}
-	serverLog.Warn(fmt.Sprintf("PUSH-RCV[%s] Received invalid format received: %s", sid, contentType))
-	processPushError(w, "invalid_request", "Expecting Content-Type application/secevent+jwt")
-	return
+
+	goSetPush.WriteAccepted(w)
 }
 
 func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode string, reason string) {
@@ -581,19 +1241,4 @@ func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode strin
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
 	sa.Provider.UpdateStreamStatus(streamId, model.StreamStatePause, errMsg)
 	// TODO:  Update event router with stream state change??
-}
-
-func processPushError(w http.ResponseWriter, errorCode string, msg string) {
-	respBody := model.SetDeliveryErr{
-		ErrCode:     errorCode,
-		Description: msg,
-	}
-	responseBytes, _ := json.MarshalIndent(respBody, "", "  ")
-	w.WriteHeader(http.StatusBadRequest)
-	w.Header().Set("Content-Type", "application/json")
-	_, err := w.Write(responseBytes)
-	if err != nil {
-		serverLog.Error(fmt.Sprintf("Stream[] Error writing error response message: [%s]%s", errorCode, msg))
-		return
-	}
 }

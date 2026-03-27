@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var bLog = logger.Sub("BUFFER")
@@ -15,15 +15,16 @@ type EventBuf interface {
 	IsClosed() bool
 	Close()
 	Cnt() int
+	Wakeup()
 }
 
 type EventPollBuffer struct {
-	in               chan string
-	events           []string
-	mutex            sync.Mutex
-	closed           bool
-	triggerCondition *sync.Cond
-	pollReady        bool
+	in        chan string
+	events    []string
+	mutex     sync.Mutex
+	closed    bool
+	notifier  chan struct{}
+	pollReady bool
 }
 
 // CreateEventPollBuffer is intended to queue up events via an in channel. Events can be subsequently retrieved
@@ -35,8 +36,8 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 		events:    []string{},
 		pollReady: false,
 		closed:    false,
+		notifier:  make(chan struct{}),
 	}
-	buffer.triggerCondition = sync.NewCond(&buffer.mutex)
 
 	if len(initialJtis) > 0 {
 		buffer.addEvents(initialJtis)
@@ -59,7 +60,10 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 					inCh = nil
 				} else {
 					buffer.events = append(buffer.events, v)
-					buffer.triggerCondition.Broadcast()
+					if !buffer.closed {
+						close(buffer.notifier)
+						buffer.notifier = make(chan struct{})
+					}
 				}
 				buffer.mutex.Unlock()
 			}
@@ -118,64 +122,73 @@ func (b *EventPollBuffer) Close() {
 	}
 	b.closed = true
 	close(b.in)
-	b.triggerCondition.Broadcast()
+	close(b.notifier)
 }
 
-func (b *EventPollBuffer) waitForEventTrigger(result chan string) {
-	b.triggerCondition.L.Lock()
-	// log.Println("\t\t\tWaiting for trigger")
-	b.triggerCondition.Wait()
-	b.triggerCondition.L.Unlock()
-	// log.Println("\t\t\tReceived trigger!!")
-	result <- "done"
+// Wakeup sends a notification to the buffer to wake up Poller to end the current long poll session (e.g., because of stream state change)
+func (b *EventPollBuffer) Wakeup() {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	if b.closed {
+		return
+	}
+	close(b.notifier)
+	b.notifier = make(chan struct{})
 }
 
-func (b *EventPollBuffer) waitForEventWithTimeout(waitTime time.Duration) {
-	result := make(chan string, 1)
-	go b.waitForEventTrigger(result)
-	select {
-	case <-time.After(waitTime):
-		// log.Println("\t\t\tEvent wait timed out")
-	case <-result:
-		// log.Println("\t\t\tReceived event trigger: " + val)
+func (b *EventPollBuffer) AckEvents(jtis []string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	for _, jti := range jtis {
+		for i, e := range b.events {
+			if e == jti {
+				b.events = append(b.events[:i], b.events[i+1:]...)
+				break
+			}
+		}
 	}
 }
 
-// GetEvents returns all events in the buffer and resets the buffer to empty
+func (b *EventPollBuffer) Clear() {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.events = []string{}
+}
+
+// GetEvents returns all events in the buffer. Events remain in buffer until acknowledged.
 func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, bool) {
 	b.mutex.Lock()
 	if len(b.events) == 0 {
 		if params.ReturnImmediately == false {
-			timeout := time.Duration(params.TimeoutSecs) * time.Second
-			if timeout == 0 {
-				timeout = 900 * time.Second
+			timeoutSecs := params.TimeoutSecs
+			if timeoutSecs == 0 {
+				timeoutSecs = 30
 			}
+			timeout := time.Duration(timeoutSecs) * time.Second
+			notifier := b.notifier
 			b.mutex.Unlock()
-			b.waitForEventWithTimeout(timeout)
+			select {
+			case <-notifier:
+			case <-time.After(timeout):
+			}
 			b.mutex.Lock()
 		}
 	}
+
 	more := false
 	var values []string
 	defer b.mutex.Unlock()
 	eventsAvailable := len(b.events)
 	if eventsAvailable == 0 {
 		return nil, false
-	} else {
-		if params.MaxEvents > 0 {
-			if eventsAvailable <= int(params.MaxEvents) {
-				values = b.events
-				b.events = []string{}
-			} else {
-				more = true
-				values = b.events[:params.MaxEvents]
-				b.events = b.events[params.MaxEvents:]
-			}
-		} else {
-			values = b.events
-			b.events = []string{}
-		}
 	}
+
+	if params.MaxEvents > 0 && eventsAvailable > int(params.MaxEvents) {
+		more = true
+		eventsAvailable = int(params.MaxEvents)
+	}
+	values = make([]string, eventsAvailable)
+	copy(values, b.events[:eventsAvailable])
 
 	return &values, more
 }
@@ -287,4 +300,8 @@ func (b *EventPushBuffer) Close() {
 	}
 	close(b.in)
 	b.in = nil
+}
+
+func (b *EventPushBuffer) Wakeup() {
+	// Not used for push buffer
 }

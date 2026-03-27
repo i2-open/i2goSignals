@@ -15,7 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var ConfigFile = "config.json"
@@ -46,8 +47,8 @@ type ConfigData struct {
 	Selected      string
 	Servers       map[string]SsfServer
 	Pems          map[string][]byte
-	keys          map[string]*rsa.PrivateKey            `json:"-"` // parsed keys - don't persist
-	streamConfigs map[string]*model.StreamConfiguration `json:"-"` // don't store (cached)
+	keys          map[string]*rsa.PrivateKey            // parsed keys - don't persist
+	streamConfigs map[string]*model.StreamConfiguration // don't store (cached)
 }
 
 func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
@@ -163,8 +164,11 @@ func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*mo
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		httpSupport.HandleRespClose(resp)
 		return nil, errors.New(fmt.Sprintf("Error retrieving configuration for %s: %s", stream.Alias, resp.Status))
 	}
+	defer httpSupport.HandleRespClose(resp)
+
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	var config model.StreamConfiguration
 	_ = json.Unmarshal(bodyBytes, &config)

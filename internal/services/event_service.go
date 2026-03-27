@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/logger"
-	"github.com/i2-open/i2goSignals/internal/model"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var esLog = logger.Sub("EVENT_SERVICE")
@@ -24,7 +24,7 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 	}
 }
 
-func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) *model.EventRecord {
+func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
 	jti := event.ID
 	keys := make([]string, 0, len(event.Events))
 	for k := range event.Events {
@@ -53,14 +53,18 @@ func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventT
 	err := s.eventDAO.Insert(ctx, rec)
 	if err != nil {
 		esLog.Error("Error inserting event", "error", err)
-		return nil
+		return nil, err
 	}
 
-	return rec
+	return rec, nil
 }
 
-func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID primitive.ObjectID) {
-	_ = s.eventDAO.AddPending(ctx, jti, streamID)
+func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID bson.ObjectID) error {
+	err := s.eventDAO.AddPending(ctx, jti, streamID)
+	if err != nil {
+		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
+	}
+	return err
 }
 
 func (s *EventService) GetEvent(ctx context.Context, jti string) *goSet.SecurityEventToken {
@@ -109,20 +113,25 @@ func (s *EventService) GetEventIds(ctx context.Context, streamID string, params 
 	return jtis, more
 }
 
-func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) {
+func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
 	// TODO: Use fencingToken to verify lease ownership before marking delivered
 	event, err := s.eventDAO.RemovePending(ctx, jtiString, streamID)
 	if err != nil {
 		esLog.Error("Error removing pending event", "error", err)
-		return
+		return err
 	}
 
 	if event != nil {
-		_ = s.eventDAO.MarkDelivered(ctx, event, time.Now())
+		err = s.eventDAO.MarkDelivered(ctx, event, time.Now())
+		if err != nil {
+			esLog.Error("Error marking event as delivered", "jti", event.Jti, "error", err)
+			return err
+		}
 	}
+	return nil
 }
 
-func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) {
+func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
@@ -161,13 +170,16 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	}
 
 	// Re-add events to pending
-	streamObjId, err := primitive.ObjectIDFromHex(streamID)
+	streamObjId, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return err
 	}
 
 	for _, event := range events {
-		s.AddEventToStream(ctx, event.Jti, streamObjId)
+		err = s.AddEventToStream(ctx, event.Jti, streamObjId)
+		if err != nil {
+			esLog.Error("Error re-adding event to stream during reset", "jti", event.Jti, "streamID", streamID, "error", err)
+		}
 	}
 
 	return nil

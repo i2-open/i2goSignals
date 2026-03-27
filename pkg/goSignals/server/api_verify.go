@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var verifyLog = logger.Sub("VERIFY")
@@ -17,10 +17,27 @@ type VerificationRequestPayload struct {
 	State    string `json:"state,omitempty"`
 }
 
-// VerificationRequest implements the SSF Stream Verification Event process as described in section 8.1.4.2.
+// VerificationRequest handles requests to trigger a stream verification event (SSF 8.1.4.2).
+//
+// Inputs:
+//   - Authorization (header): Token with 'event_delivery' or 'stream_mgmt' scope.
+//   - Request body (JSON): VerificationRequestPayload containing stream_id and optional state.
+//
+// Return values:
+//   - 204 No Content: Verification event successfully created and added to the stream.
+//
+// Errors:
+//   - 400 Bad Request: Missing stream ID or malformed request body.
+//   - 401/403: Unauthorized access or stream ID mismatch.
+//   - 404 Not Found: Stream not found.
+//   - 500 Internal Server Error: Database error during event creation or assignment.
 func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http.Request) {
+	VerificationRequestHandler(sa, w, r)
+}
+
+func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	verifyLog.Debug("POST VerificationRequest")
-	authCtx, status := sa.Auth.ValidateAuthorization(r, []string{authUtil.ScopeEventDelivery, authUtil.ScopeStreamMgmt})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -46,7 +63,7 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	}
 
 	// Check if the stream exists
-	stream, err := sa.Provider.GetStream(payload.StreamId)
+	stream, err := sa.GetProvider().GetStream(payload.StreamId)
 	if err != nil || stream == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -58,15 +75,25 @@ func (sa *SignalsApplication) VerificationRequest(w http.ResponseWriter, r *http
 	event := events.CreateVerifyEvent(payload.StreamId, payload.State, stream.Iss, stream.Aud)
 
 	// Add the event to the system
-	eventRec := sa.Provider.AddEvent(event, payload.StreamId, "")
+	eventRec, err := sa.GetProvider().AddEvent(event, payload.StreamId, "")
+	if err != nil {
+		verifyLog.Error("Error adding verify event", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	// Trigger the event on the stream
-	streamObjId, err := primitive.ObjectIDFromHex(payload.StreamId)
+	streamObjId, err := bson.ObjectIDFromHex(payload.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	sa.Provider.AddEventToStream(eventRec.Jti, streamObjId)
+	err = sa.GetProvider().AddEventToStream(eventRec.Jti, streamObjId)
+	if err != nil {
+		verifyLog.Error("Error adding verify event to stream", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	// Return 204 No Content on success
 	w.WriteHeader(http.StatusNoContent)

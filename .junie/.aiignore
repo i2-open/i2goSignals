@@ -1,0 +1,5 @@
+.mongo/
+
+.mongo/mongo1/WiredTiger.turtle
+.mongo/mongo2/WiredTiger.turtle
+.mongo/mongo3/WiredTiger.turtle

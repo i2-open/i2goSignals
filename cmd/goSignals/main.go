@@ -12,7 +12,8 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/chzyer/readline"
 	"github.com/google/shlex"
-	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 type ParserData struct {
@@ -181,6 +182,7 @@ func breakIntoArgs(command string) []string {
 
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
+	tlsSupport.CheckCaInstalled(nil)
 
 	// Check for script file in environment variable
 	scriptFile := stripQuotes(os.Getenv("GOSIGNALS_SCRIPT"))
@@ -251,7 +253,7 @@ func main() {
 	}
 	_ = td.cli.Data.Load(&td.cli.Globals)
 
-	for true {
+	for {
 		var args []string
 		if oneCommand {
 			args = initialArgs
@@ -304,7 +306,7 @@ func main() {
 			td.parser.Errorf("%s", err.Error())
 			var kerr *kong.ParseError
 			if errors.As(err, &kerr) {
-				kerr = err.(*kong.ParseError)
+				errors.As(err, &kerr)
 				fmt.Println(kerr.Error())
 				_ = kerr.Context.PrintUsage(false)
 			}

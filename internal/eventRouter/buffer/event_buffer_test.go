@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestCreateEventPushBuffer(t *testing.T) {
@@ -18,7 +18,7 @@ func TestCreateEventPushBuffer(t *testing.T) {
 	testVals := make([]string, testSize)
 	receiveVals := make([]string, testSize)
 	for i := 0; i < testSize; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	buffer := CreateEventPushBuffer(testVals[:2])
 
@@ -61,23 +61,39 @@ func TestCreateEventPollBuffer(t *testing.T) {
 
 	testVals := make([]string, 100)
 	for i := 0; i < 100; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, 100)
 	wg.Add(1)
 	go func() {
 		i := 0
-		for !buffer.IsClosed() {
-			// Introduce random time element in to allow for multi-events
-			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+		for i < 100 {
 			jtis, _ := buffer.GetEvents(model.PollParameters{ReturnImmediately: true})
-			for _, v := range *jtis {
-				lastVal = v
-				receiveVals[i] = v
-				fmt.Println(fmt.Sprintf("Received multi-event %d jti: %s", i, lastVal))
-				i++
+			if jtis != nil {
+				buffer.AckEvents(*jtis)
+				for _, v := range *jtis {
+					if i < 100 {
+						lastVal = v
+						receiveVals[i] = v
+						fmt.Println(fmt.Sprintf("Received multi-event %d jti: %s", i, lastVal))
+						i++
+					}
+				}
 			}
-
+			if i >= 100 {
+				break
+			}
+			if buffer.IsClosed() {
+				// If closed, wait a bit to ensure all events are moved from 'in' channel to 'events'
+				time.Sleep(10 * time.Millisecond)
+				// Check one last time
+				jtis, _ = buffer.GetEvents(model.PollParameters{ReturnImmediately: true})
+				if jtis == nil {
+					break
+				}
+			} else {
+				time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			}
 		}
 		wg.Done()
 		fmt.Println("Finished reading")
@@ -88,9 +104,9 @@ func TestCreateEventPollBuffer(t *testing.T) {
 		buffer.in <- testVals[i]
 	}
 	buffer.Close()
-	assert.True(t, buffer.IsClosed(), "Buffer should be closed")
 	fmt.Println("Finished writing")
 	wg.Wait()
+	assert.True(t, buffer.IsClosed(), "Buffer should be closed")
 	if testVals[99] != receiveVals[99] {
 		t.Errorf("Didn't get all values. Last received was %s", lastVal)
 	}
@@ -104,7 +120,7 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 
 	testVals := make([]string, testSize)
 	for i := 0; i < 100; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, testSize)
 	noVals := false
@@ -122,6 +138,7 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 				noVals = true
 				continue
 			} else {
+				buffer.AckEvents(*jtis)
 				cnt := len(*jtis)
 				fmt.Printf("%d events returned\n", cnt)
 				if cnt == 1 {
@@ -131,10 +148,10 @@ func TestCreateEventPollBufferAdvanced(t *testing.T) {
 				}
 			}
 			for _, v := range *jtis {
-
-				receiveVals[i] = v
-				// fmt.Println(fmt.Sprintf("Received #%d: jti: %s", i, lastVal))
-				i++
+				if i < testSize {
+					receiveVals[i] = v
+					i++
+				}
 			}
 		}
 		assert.Equal(t, testSize, i, "Expected result size matches")
@@ -180,7 +197,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 
 	testVals := make([]string, testSize)
 	for i := 0; i < testSize; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 
 	initialJtis := testVals[0:4]
@@ -193,6 +210,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       0})
 	assert.Equal(t, 2, len(*jtis), "Should be 2 results")
 	assert.Equal(t, true, more, "should be more results")
+	buffer.AckEvents(*jtis)
 
 	jtis, more = buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: true,
@@ -200,6 +218,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       5})
 	assert.Equal(t, 2, len(*jtis), "Should be 2 results")
 	assert.Equal(t, false, more, "should be NO more results")
+	buffer.AckEvents(*jtis)
 
 	jtis, more = buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: true,
@@ -218,6 +237,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 		TimeoutSecs:       5})
 	assert.Greater(t, len(*jtis), 2, "Should be several results")
 	assert.Equal(t, false, more, "should be NO more results")
+	buffer.AckEvents(*jtis)
 
 	go func() {
 		time.Sleep(time.Second)
@@ -244,8 +264,8 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 	testSize := 1000
 
 	testVals := make([]string, testSize)
-	for i := 0; i < 100; i++ {
-		testVals[i] = primitive.NewObjectID().Hex()
+	for i := 0; i < testSize; i++ {
+		testVals[i] = bson.NewObjectID().Hex()
 	}
 	receiveVals := make([]string, testSize)
 	// noVals := false
@@ -266,6 +286,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 				// noVals = true
 				continue
 			} else {
+				buffer.AckEvents(*jtis)
 				cnt := len(*jtis)
 				fmt.Printf("Received %d events\n", cnt)
 				if cnt > 1 {
@@ -275,9 +296,10 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 				}
 			}
 			for _, v := range *jtis {
-				receiveVals[i] = v
-				// fmt.Println(fmt.Sprintf("Received #%d: jti: %s", i, lastVal))
-				i++
+				if i < testSize {
+					receiveVals[i] = v
+					i++
+				}
 			}
 
 		}
@@ -318,4 +340,27 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 		}
 	}
 
+}
+
+func TestEventPollBuffer_Wakeup(t *testing.T) {
+	buffer := CreateEventPollBuffer([]string{})
+
+	start := time.Now()
+
+	// Start a goroutine that will wake up the buffer after 500ms
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		buffer.Wakeup()
+	}()
+
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       5, // 5 seconds timeout
+	})
+
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis)
+	assert.False(t, more)
+	assert.True(t, elapsed < 1*time.Second, "GetEvents should have returned early, took %v", elapsed)
 }

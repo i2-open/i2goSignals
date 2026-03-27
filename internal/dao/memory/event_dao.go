@@ -2,13 +2,16 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type EventDAOMemory struct {
@@ -16,9 +19,13 @@ type EventDAOMemory struct {
 	events          map[string]*model.EventRecord
 	pendingEvents   map[string][]interfaces.DeliverableEvent // streamId -> events
 	deliveredEvents map[string][]interfaces.DeliveredEvent   // streamId -> events
+
+	// Persistence
+	persistDir string
+	useDisk    bool
 }
 
-func NewEventDAO() interfaces.EventDAO {
+func NewEventDAO() *EventDAOMemory {
 	return &EventDAOMemory{
 		events:          make(map[string]*model.EventRecord),
 		pendingEvents:   make(map[string][]interfaces.DeliverableEvent),
@@ -26,26 +33,56 @@ func NewEventDAO() interfaces.EventDAO {
 	}
 }
 
-func (d *EventDAOMemory) Insert(ctx context.Context, record *model.EventRecord) error {
+func (d *EventDAOMemory) SetPersistDir(dir string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.persistDir = dir
+	if dir != "" {
+		d.useDisk = true
+		// Ensure events directory exists
+		_ = os.MkdirAll(filepath.Join(dir, "events"), 0755)
+	} else {
+		d.useDisk = false
+	}
+}
+
+func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.useDisk {
+		err := d.saveEventToDiskLocked(record)
+		if err == nil {
+			// Memory optimization: clear large fields if on disk
+			// We keep Event for filtering/matching as it's often used
+			record.Original = ""
+		}
+	}
 
 	d.events[record.Jti] = record
 	return nil
 }
 
-func (d *EventDAOMemory) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventRecord, error) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
+	eventRec, ok := d.events[jti]
+	d.mu.RUnlock()
 
-	if eventRec, ok := d.events[jti]; ok {
+	if ok {
+		// If Original is empty but we are using disk, try to reload it
+		if eventRec.Original == "" && d.useDisk {
+			loaded, err := d.loadEventFromDisk(jti)
+			if err == nil {
+				return loaded, nil
+			}
+		}
 		copyRec := *eventRec
 		return &copyRec, nil
 	}
 	return nil, nil
 }
 
-func (d *EventDAOMemory) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.EventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -59,7 +96,7 @@ func (d *EventDAOMemory) FindByJTIs(ctx context.Context, jtis []string) ([]*mode
 	return records, nil
 }
 
-func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -90,7 +127,7 @@ func (d *EventDAOMemory) FindByTimeRange(ctx context.Context, from time.Time, to
 	return sortedEvents, nil
 }
 
-func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID primitive.ObjectID) error {
+func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID bson.ObjectID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -105,7 +142,7 @@ func (d *EventDAOMemory) AddPending(ctx context.Context, jti string, streamID pr
 	return nil
 }
 
-func (d *EventDAOMemory) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
+func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -130,7 +167,7 @@ func (d *EventDAOMemory) GetPendingForStream(ctx context.Context, streamID strin
 	return jtiList, int64(len(pending)), nil
 }
 
-func (d *EventDAOMemory) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
+func (d *EventDAOMemory) RemovePending(_ context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -152,7 +189,7 @@ func (d *EventDAOMemory) RemovePending(ctx context.Context, jti string, streamID
 	return nil, nil
 }
 
-func (d *EventDAOMemory) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -161,7 +198,7 @@ func (d *EventDAOMemory) ClearPendingForStream(ctx context.Context, streamID str
 	return count, nil
 }
 
-func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
+func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -174,10 +211,82 @@ func (d *EventDAOMemory) MarkDelivered(ctx context.Context, event *interfaces.De
 	return nil
 }
 
-func (d *EventDAOMemory) WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) error {
+func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID bson.ObjectID)) error {
 	// Mock implementation: for now, we don't need to do anything here
 	// since HandleEvent already updates local buffers in the router.
 	// In a real mock test, we might want to simulate external events.
 	<-ctx.Done()
 	return nil
+}
+
+// Persistence helpers
+
+func (d *EventDAOMemory) saveEventToDiskLocked(record *model.EventRecord) error {
+	if d.persistDir == "" {
+		return nil
+	}
+	path := filepath.Join(d.persistDir, "events", record.Jti+".set")
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, error) {
+	if d.persistDir == "" {
+		return nil, os.ErrNotExist
+	}
+	path := filepath.Join(d.persistDir, "events", jti+".set")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var record model.EventRecord
+	err = json.Unmarshal(data, &record)
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	events = make(map[string]*model.EventRecord)
+	for k, v := range d.events {
+		copyRec := *v
+		events[k] = &copyRec
+	}
+
+	pending = make(map[string][]interfaces.DeliverableEvent)
+	for k, v := range d.pendingEvents {
+		copySlice := make([]interfaces.DeliverableEvent, len(v))
+		copy(copySlice, v)
+		pending[k] = copySlice
+	}
+
+	delivered = make(map[string][]interfaces.DeliveredEvent)
+	for k, v := range d.deliveredEvents {
+		copySlice := make([]interfaces.DeliveredEvent, len(v))
+		copy(copySlice, v)
+		delivered[k] = copySlice
+	}
+
+	return events, pending, delivered
+}
+
+func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if events != nil {
+		d.events = events
+	}
+	if pending != nil {
+		d.pendingEvents = pending
+	}
+	if delivered != nil {
+		d.deliveredEvents = delivered
+	}
 }

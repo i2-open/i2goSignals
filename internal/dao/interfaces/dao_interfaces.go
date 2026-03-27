@@ -3,10 +3,16 @@ package interfaces
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+var (
+	ErrNotFound    = errors.New("not found")
+	ErrKeyNotFound = errors.New("key not found")
 )
 
 // StreamDAO handles stream configuration data access
@@ -35,7 +41,7 @@ type EventDAO interface {
 	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
 
 	// Pending events
-	AddPending(ctx context.Context, jti string, streamID primitive.ObjectID) error
+	AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
 	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)
@@ -44,7 +50,7 @@ type EventDAO interface {
 	MarkDelivered(ctx context.Context, event *DeliverableEvent, ackDate time.Time) error
 
 	// Change streams
-	WatchPending(ctx context.Context, callback func(jti string, streamID primitive.ObjectID)) error
+	WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) error
 }
 
 // KeyDAO handles cryptographic key data access
@@ -69,23 +75,33 @@ type ClientDAO interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// ServerDAO handles server configuration data access
+type ServerDAO interface {
+	Create(ctx context.Context, server *model.Server) error
+	FindByID(ctx context.Context, id string) (*model.Server, error)
+	FindByAlias(ctx context.Context, alias string) (*model.Server, error)
+	Update(ctx context.Context, server *model.Server) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context) ([]model.Server, error)
+}
+
 // JwkKeyRec represents a cryptographic key record
 type JwkKeyRec struct {
-	Id              primitive.ObjectID `json:"id" bson:"_id"`
-	Iss             string             `json:"iss,omitempty" bson:"iss"`
-	Kid             string             `json:"kid,omitempty" bson:"kid"`
-	Aud             string             `json:"aud,omitempty" bson:"aud"`
-	ProjectId       string             `bson:"project_id" json:"projectId,omitempty"`
-	StreamId        string             `json:"streamId" bson:"stream_id"`
-	KeyBytes        []byte             `json:"keyBytes" bson:"key_bytes"`
-	PubKeyBytes     []byte             `json:"pubJwks" bson:"pub_jwks"`
-	ReceiverJwksUrl string             `json:"receiverJwksUrl" bson:"receiver_jwks_url"`
+	Id              bson.ObjectID `json:"id" bson:"_id"`
+	Iss             string        `json:"iss,omitempty" bson:"iss"`
+	Kid             string        `json:"kid,omitempty" bson:"kid"`
+	Aud             string        `json:"aud,omitempty" bson:"aud"`
+	ProjectId       string        `bson:"project_id" json:"projectId,omitempty"`
+	StreamId        string        `json:"streamId" bson:"stream_id"`
+	KeyBytes        []byte        `json:"keyBytes" bson:"key_bytes"`
+	PubKeyBytes     []byte        `json:"pubJwks" bson:"pub_jwks"`
+	ReceiverJwksUrl string        `json:"receiverJwksUrl" bson:"receiver_jwks_url"`
 }
 
 // DeliverableEvent represents an event pending delivery
 type DeliverableEvent struct {
-	Jti      string             `json:"jti" bson:"jti"`
-	StreamId primitive.ObjectID `json:"sid" bson:"sid"`
+	Jti      string        `json:"jti" bson:"jti"`
+	StreamId bson.ObjectID `json:"sid" bson:"sid"`
 }
 
 // DeliveredEvent represents a delivered/acknowledged event

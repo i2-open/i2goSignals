@@ -36,3 +36,6 @@
 - **Cleanup**: Always clean up any debug binaries (`__debug_bin*`), temporary output files, or other artifacts created during the session.
 - **Sensitive Info**: Do not commit or log sensitive information (keys, tokens, etc.).
 
+### Restriction
+
+Do not look at or modify files specified in .aiignore

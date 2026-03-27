@@ -8,33 +8,43 @@ import (
 	"os"
 	"path/filepath"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type TokenData struct {
-	StreamTokens map[primitive.ObjectID]bson.Raw
+	StreamTokens map[bson.ObjectID]bson.Raw
 	EventsToken  bson.Raw
 }
 
 func (tok *TokenData) Store() {
 	tf, err := os.Create(storeFilename())
+	defer func(tf *os.File) {
+		_ = tf.Close()
+	}(tf)
 	if err != nil {
 		log.Default().Println("Mongo resume token file creation failed", err)
 		return
 	}
-	jsonOut, _ := json.Marshal(tok)
+	jsonOut, err := json.Marshal(tok)
+	if err != nil {
+		log.Default().Println("Failed to marshal Mongo resume token data", err)
+		return
+	}
 	_, err = tf.Write(jsonOut)
 	if err != nil {
 		log.Default().Println("Failed to save Mongo resume token data", err)
+		_ = tf.Close()
 		return
 	}
-	_ = tf.Close()
+	err = tf.Close()
+	if err != nil {
+		log.Default().Println("Failed to close Mongo resume token file", err)
+	}
 }
 
 // Reset is called after re-initialization of the Mongo database to remove prior watchlist tokens
 func (tok *TokenData) Reset() {
-	tok.StreamTokens = map[primitive.ObjectID]bson.Raw{}
+	tok.StreamTokens = map[bson.ObjectID]bson.Raw{}
 	tok.EventsToken = nil
 	tok.Store()
 }
@@ -62,7 +72,7 @@ func Load() *TokenData {
 	err = json.Unmarshal(dataBytes, tokenData)
 	if err != nil {
 		log.Println("Error parsing token data file, returning empty state:", err)
-		return &TokenData{StreamTokens: make(map[primitive.ObjectID]bson.Raw)}
+		return &TokenData{StreamTokens: make(map[bson.ObjectID]bson.Raw)}
 	}
 
 	return tokenData
@@ -70,7 +80,11 @@ func Load() *TokenData {
 }
 
 func storeFilename() string {
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Default().Println("Error getting current directory for watch token: " + err.Error())
+		cwd = "."
+	}
 	watchFile := os.Getenv("MONGO_WATCH_FILE")
 	if watchFile == "" {
 		resDir := filepath.Join(cwd, "resources")

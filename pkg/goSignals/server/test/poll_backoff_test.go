@@ -1,24 +1,20 @@
 package test
 
 import (
-	"os"
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/model"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPollBackoffRetry(t *testing.T) {
 	// Set short backoff for testing
-	os.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
-	os.Setenv("POLL_RETRY_MAX_DELAY", "0.3")
-	os.Setenv("POLL_RETRY_BACKOFF_FACTOR", "2.0")
-	os.Setenv("POLL_RETRY_LIMIT", "1.0") // 1 second retry limit
-	defer os.Unsetenv("POLL_RETRY_BASE_DELAY")
-	defer os.Unsetenv("POLL_RETRY_MAX_DELAY")
-	defer os.Unsetenv("POLL_RETRY_BACKOFF_FACTOR")
-	defer os.Unsetenv("POLL_RETRY_LIMIT")
+	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
+	t.Setenv("POLL_RETRY_MAX_DELAY", "0.3")
+	t.Setenv("POLL_RETRY_BACKOFF_FACTOR", "2.0")
+	t.Setenv("POLL_RETRY_LIMIT", "1.0") // 1 second retry limit
 
 	// Create server with mock provider
 	instance, err := createServer(t, "test_backoff", true)
@@ -42,8 +38,11 @@ func TestPollBackoffRetry(t *testing.T) {
 		},
 	}
 
+	atx := authUtil.AuthContext{
+		ProjectId: instance.projectId,
+	}
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -61,7 +60,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check provider status - it should be "paused" with "retry being attempted"
-	updatedState, _ := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
 
@@ -70,7 +70,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(2000 * time.Millisecond)
 
 	// Now it should be disabled
-	finalState, _ := instance.provider.GetStreamState(streamID)
+	finalState, err := instance.provider.GetStreamState(streamID)
+	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
 }
@@ -84,21 +85,25 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	// Create a polling receiver stream with an invalid JWKS URL (permanent error)
 	streamID := "test-jwks-permanent-error"
 	streamConfig := model.StreamConfiguration{
-		Id:  streamID,
-		Iss: "http://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		Id:            streamID,
+		Iss:           "invalid-protocol-in-issuer",
+		IssuerJWKSUrl: "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
-				EndpointUrl: "http://localhost:8080/poll",
+				EndpointUrl: "http://localhost:8888/poll",
 				PollConfig: &model.PollParameters{
 					ReturnImmediately: true,
 				},
 			},
 		},
 	}
+	atx := authUtil.AuthContext{
+		ProjectId: instance.projectId,
+	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, instance.projectId)
+	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 

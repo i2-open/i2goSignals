@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/i2-open/i2goSignals/internal/logger"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/kelseyhightower/envconfig"
 )
 

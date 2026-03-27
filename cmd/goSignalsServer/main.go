@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/i2-open/i2goSignals/internal/logger"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var mLog = logger.Sub("MAIN")
@@ -39,14 +39,12 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 		name = found
 	}
 
-	var provider dbProviders.DbProviderInterface
-	mongo, err := mongo_provider.Open(dbUrl, name)
-	provider = mongo
-	return provider, err
+	return dbProviders.OpenProvider(dbUrl, name)
 }
 
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
+	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)
 	port := "8888"
@@ -54,12 +52,12 @@ func main() {
 		port = found
 	}
 
-	mLog.Info("Listening on port", "port", port)
-
-	dbUrl := "mongodb://root:dockTest@0.0.0.0:8880"
+	dbUrl := ""
 	if found := stripQuotes(os.Getenv("MONGO_URL")); found != "" {
 		dbUrl = fmt.Sprintf("%v", found)
 		mLog.Info("Connecting to MONGO_URL service", "url", dbUrl)
+	} else {
+		mLog.Info("MONGO_URL not set, using memory provider")
 	}
 
 	provider, err := StartProvider(dbUrl)
@@ -67,6 +65,12 @@ func main() {
 		mLog.Error("Fatal: Unable to start database provider", "error", err)
 		os.Exit(-1)
 	}
+	defer func(provider dbProviders.DbProviderInterface) {
+		err := provider.Close()
+		if err != nil {
+			mLog.Error("Fatal: Unable to close database provider", "error", err)
+		}
+	}(provider)
 
 	baseUrl := "127.0.0.1:" + port + "/"
 	if found := stripQuotes(os.Getenv("BASE_URL")); found != "" {
@@ -75,7 +79,20 @@ func main() {
 	mLog.Info("Base URL", "url", baseUrl)
 
 	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
-	err = signalsApplication.Server.ListenAndServe()
+
+	tlsMode, err := tlsSupport.InitTransportLayerSecurity(signalsApplication.Server)
+	if err != nil {
+		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
+		panic(err)
+	}
+	mLog.Info("HTTP Listening", "tls", tlsMode, "port", port)
+	if tlsMode {
+		err = signalsApplication.Server.ListenAndServeTLS("", "")
+	} else {
+		mLog.Warn("TLS not enabled, using HTTP")
+		err = signalsApplication.Server.ListenAndServe()
+	}
+
 	if err != nil {
 		mLog.Error("Server error", "error", err)
 		os.Exit(-1)
