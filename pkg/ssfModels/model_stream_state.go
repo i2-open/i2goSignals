@@ -3,7 +3,7 @@ package model
 import (
 	"time"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 

@@ -1,0 +1,13 @@
+[ {
+  "schemas" : [ "SyncRec" ],
+  "id" : "bd9f37b5-c119-4f9e-bbd6-54a1f42b2e37",
+  "date" : "2025-12-15T21:54:10Z",
+  "source" : "defaultClient",
+  "opNum" : 1
+}, {
+  "schemas" : [ "ConfigState" ],
+  "id" : "ConfigState",
+  "rTypeCnt" : 5,
+  "schemaCnt" : 8,
+  "lastSyncDate" : "2025-12-15T21:54:10Z"
+} ]

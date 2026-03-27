@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ReactBuddyPluginProjectSettings">
+    <option name="devServerConfigs">
+      <DevServerState>
+        <option name="packageJsonPath" value="$PROJECT_DIR$/adminUi/package.json" />
+        <option name="scriptName" value="dev" />
+        <option name="url" value="http://localhost:3001" />
+      </DevServerState>
+      <DevServerState>
+        <option name="packageJsonPath" value="$PROJECT_DIR$/adminUI/package.json" />
+        <option name="scriptName" value="dev" />
+        <option name="url" value="http://localhost:3000" />
+      </DevServerState>
+    </option>
+  </component>
+</project>

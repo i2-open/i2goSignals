@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -68,7 +69,7 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 
 	// Validate issuer
 	if config.ExpectedIssuer != "" {
-		if !token.VerifyIssuer(config.ExpectedIssuer, true) {
+		if token.Issuer != config.ExpectedIssuer {
 			log.Warn("RFC8935: Invalid issuer", "expected", config.ExpectedIssuer, "actual", token.Issuer)
 			return nil, &DeliveryErr{
 				ErrCode:     ErrInvalidIssuer,
@@ -81,7 +82,7 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 	if len(config.ExpectedAudiences) > 0 {
 		audMatch := false
 		for _, aud := range config.ExpectedAudiences {
-			if token.VerifyAudience(aud, false) {
+			if slices.Contains([]string(token.Audience), aud) {
 				audMatch = true
 				break
 			}

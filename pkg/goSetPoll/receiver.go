@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -109,7 +110,7 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 
 		// Validate issuer
 		if config.ExpectedIssuer != "" {
-			if !token.VerifyIssuer(config.ExpectedIssuer, true) {
+			if token.Issuer != config.ExpectedIssuer {
 				log.Warn("RFC8936: Invalid issuer", "jti", jti, "expected", config.ExpectedIssuer, "actual", token.Issuer)
 				result.Errors[jti] = SetErrType{
 					Error:       "invalid_issuer",
@@ -123,7 +124,7 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 		if len(config.ExpectedAudiences) > 0 {
 			audMatch := false
 			for _, aud := range config.ExpectedAudiences {
-				if token.VerifyAudience(aud, false) {
+				if slices.Contains([]string(token.Audience), aud) {
 					audMatch = true
 					break
 				}

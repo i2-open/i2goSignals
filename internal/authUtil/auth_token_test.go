@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -45,7 +45,7 @@ func initMockIssuer() *AuthIssuer {
 	}
 
 	publicKey := privateKey.PublicKey
-	givenKey := keyfunc.NewGivenRSACustomWithOptions(&publicKey, keyfunc.GivenKeyOptions{
+	givenKey := keyfunc.NewGivenRSA(&publicKey, keyfunc.GivenKeyOptions{
 		Algorithm: "RS256",
 	})
 	givenKeys := make(map[string]keyfunc.GivenKey)

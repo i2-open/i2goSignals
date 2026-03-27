@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +37,7 @@ func generateTestKey(t *testing.T) *rsa.PrivateKey {
 
 func createTestJWKS(t *testing.T, key *rsa.PrivateKey) *keyfunc.JWKS {
 	t.Helper()
-	givenKey := keyfunc.NewGivenRSA(&key.PublicKey)
+	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
 	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{"test-kid": givenKey})
 	return jwks
 }

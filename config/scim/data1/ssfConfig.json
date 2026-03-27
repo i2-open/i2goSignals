@@ -1,0 +1,25 @@
+{
+  "serverUrl" : "http://goSignals1:8888",
+  "iat" : "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJwcm9qZWN0X2lkIjoiWVVibSIsInJvbGVzIjpbInJlZyJdLCJpc3MiOiJERUZBVUxUIiwiYXVkIjpbIkRFRkFVTFQiXSwiZXhwIjoxNzcyNzMwNTM3LCJpYXQiOjE3NjQ5NTQ1MzcsImp0aSI6IjM2UjFPU1FJMURQSXRSRmRMRWdZQlU5WVJHSSJ9.qlUImedW-zfiQYpQpNEG9Xg4OD9wY3-9OBAzZnYdundpim2FNB4jqpCpHifTOKQpUhYNY-tBxEriqHhyogcs5PBz1HPalrzvvctw3Rq7yGO158yxQMwpnmT-_dvAFiREJuLVTk_zGKNafjxlqdDn6osAAkx298CCESpVoZIG_FKPleZtGQjimCoEHTFCJOBMLltsSfCS-6FftVkalvzbxvw2uspdMxos4owD5xFHfsSJ_lPyS0dLFrxBN6fCfzWEIn_hMb8YYnc-XXRgFVEiSKbdupoeanI7HY54ih4MVtPgTDF6sKaOSKf81jn0gwsglIZWPyJWK9ezx6Fgpe9-Vg",
+  "clientToken" : "eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJwcm9qZWN0X2lkIjoiWVVibSIsInJvbGVzIjpbImFkbWluIiwic3RyZWFtIl0sImNsaWVudF9pZCI6IjY5MzVmZmEyZDgxOTE2ZjFlYzVmYjJlOCIsImlzcyI6IkRFRkFVTFQiLCJhdWQiOlsiREVGQVVMVCJdLCJleHAiOjE3NzI5MjI1MzYsImlhdCI6MTc2NTE0NjUzNiwianRpIjoiMzZYSVlVSEF4MEpCemdZY3ZnUnZHVVowaFZPIn0.hJRQc4lhaHDDj3ibyaG3ZZKo26iuUlI3S3IXM_RGzSo022azNeaxFTwtRH6GNVWswg7YiVPJnVBwwONMn4fBPEgyDZdy8F_V--_9iXNpdw8Wtz5m5xw_V6bFIxmnT5qI7oPwVx2qdu7ltRqdXE5Rwhj9FtrtlcQ2W3Pk3IS471N58jq846q_JCh6fX4W7oubE22K5cPLIc1tp-QsOMPpu7avgvqTGBxznfiUZJ7vMupmB91E_CGOeIgb3_1DvNTdsqp_Pylf_75YtnHnV5J6I9fSV7hIfVVY7UCy-lnWm2_4b7yItPVxvae93HtQBudfCZ3O83XjLf_dFIyxeOBOqg",
+  "pollStream" : {
+    "streamId" : "6935ffc0d81916f1ec5fb2ea",
+    "enabled" : true,
+    "endpointUrl" : "http://goSignals1:8888/poll/6935ffc0d81916f1ec5fb2ea",
+    "authorization" : "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkRFRkFVTFQiLCJ0eXAiOiJqd3QifQ.eyJzaWQiOlsiNjkzNWZmYzBkODE5MTZmMWVjNWZiMmVhIl0sInByb2plY3RfaWQiOiJZVWJtIiwicm9sZXMiOlsiZXZlbnQiXSwiaXNzIjoiREVGQVVMVCIsImF1ZCI6WyJERUZBVUxUIl0sImV4cCI6MTc3MjkyMjU2MCwiaWF0IjoxNzY1MTQ2NTYwLCJqdGkiOiIzNlhJYlV1bDBXYmJrOE94ckF4aEVUd2V0Y1AifQ.vZumNE1E7FJYl0GRjQJFJMwzHe6xsiZDMxaAUeeSE6r_EncMDeUGtD8gj_WlJbQkbEfvDj77Ue7OBda15aCvvavpzLYRJQoqY9IFEUoJVrp2fZK8-xxEAv32twDWYqQGhCeqkjP1H5UfsnYkfCYg-0fsImKDp7cU1l3fsWuzOGObTLMddPa-7R1SuJht2WSdATr32SKJ_ObnrNj0aYamwCCOztnnR5yrO55Zt87TYlioLReJ0dTZpU2RNNbsUGCZfsvEqQqTIuSPlZNIUwtnlg1EDpk16z3bodgrfwbIRsEeAceTRRvkIkSFrOANopj5EyiC7gYZ0vJx2tKyUnnONA"
+  },
+  "pushStream" : {
+    "streamId" : "6935ffacd81916f1ec5fb2e9",
+    "enabled" : true,
+    "endpointUrl" : "http://goSignals1:8888/events/6935ffacd81916f1ec5fb2e9",
+    "authorization" : "http://goSignals1:8888/events/6935ffacd81916f1ec5fb2e9"
+  },
+  "ssfConfig" : {
+    "issuer" : "DEFAULT",
+    "jwks_uri" : "http://goSignals1:8888/jwks.json",
+    "configuration_endpoint" : "http://goSignals1:8888/stream",
+    "status_endpoint" : "http://goSignals1:8888/status",
+    "client_registration_endpoint" : "http://goSignals1:8888/register"
+  },
+  "initialized" : true
+}

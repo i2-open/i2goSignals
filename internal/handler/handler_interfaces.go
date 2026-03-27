@@ -5,7 +5,7 @@ import (
 
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 )
 
 /*

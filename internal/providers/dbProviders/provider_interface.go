@@ -12,7 +12,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 )
 
 type DbProviderInterface interface {
