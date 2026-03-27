@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 )
 
 func GetJwks(jwksUrl string) (*keyfunc.JWKS, error) {

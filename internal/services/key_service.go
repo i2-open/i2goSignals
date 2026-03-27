@@ -10,7 +10,7 @@ import (
 	"fmt"
 
 	"github.com/MicahParks/jwkset"
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -282,7 +282,7 @@ func (s *KeyService) getInternalPublicTransmitterJWKS(ctx context.Context, issue
 			kid = rec.Iss
 		}
 
-		givenKey := keyfunc.NewGivenRSACustomWithOptions(pubKey, keyfunc.GivenKeyOptions{
+		givenKey := keyfunc.NewGivenRSA(pubKey, keyfunc.GivenKeyOptions{
 			Algorithm: "RS256",
 		})
 		givenKeys[kid] = givenKey

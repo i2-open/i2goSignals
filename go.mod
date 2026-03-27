@@ -8,13 +8,13 @@ toolchain go1.25.4
 
 require (
 	github.com/MicahParks/jwkset v0.11.0
-	github.com/MicahParks/keyfunc v1.9.0
+	github.com/MicahParks/keyfunc/v2 v2.1.0
 	github.com/alecthomas/kong v1.14.0
 	github.com/brianvoe/gofakeit/v6 v6.28.0
 	github.com/chzyer/readline v1.5.1
 	github.com/fatih/structs v1.1.0
 	github.com/gofrs/flock v0.13.0
-	github.com/golang-jwt/jwt/v4 v4.5.2
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/gorilla/mux v1.8.1
 	github.com/kelseyhightower/envconfig v1.4.0

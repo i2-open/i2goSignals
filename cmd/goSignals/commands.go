@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"regexp"
 
-	jwt "github.com/golang-jwt/jwt/v4"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	_ "github.com/golang-jwt/jwt/v4"
+	_ "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 

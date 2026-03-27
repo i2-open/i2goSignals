@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -114,8 +114,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 	s.mgmtToken = resp.Token
 	tkn, err := s.auth.ParseAuthToken(s.mgmtToken)
 	s.Nil(err, "taken parse check")
-	err = tkn.Valid()
-	s.Nil(err, "mgmt token is valid check")
+	s.NotNil(tkn, "mgmt token is valid check")
 
 	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project)
 	s.Nil(err, "issue stream token error check")
