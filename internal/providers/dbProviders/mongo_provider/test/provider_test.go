@@ -287,7 +287,8 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 
 	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
 	s.NoError(err, "Should be no error")
-	s.Equal(key, keyRetrieved, "Should be same key")
+	s.NotNil(keyRetrieved)
+	s.True(key.Equal(keyRetrieved), "Should be same key")
 
 	keyFail, err := s.provider.GetIssuerPrivateKey("should.fail")
 	s.Error(err, "No key found for: should.fail")
@@ -323,7 +324,8 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 
 	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
 	s.NoError(err)
-	s.Equal(privateKey, keyRetrieved)
+	s.NotNil(keyRetrieved)
+	s.True(privateKey.Equal(keyRetrieved))
 
 	// Test adding only public key
 	issuerPub := "addkey-pub.example.org"
