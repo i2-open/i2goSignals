@@ -66,6 +66,44 @@ func stripQuotes(s string) string {
 	return s
 }
 
+// GetGlobalCertPool returns a cert pool containing the CA certificate found via standard env vars
+// (CERT_CA_PUB_KEY, CA_CERT, then any extraEnvVars), falling back to "config/certs/ca-cert.pem".
+// Returns the system cert pool (augmented with the CA cert) if found.
+func GetGlobalCertPool(extraEnvVars ...string) *x509.CertPool {
+	envVars := []string{EnvCertCaPubKey, EnvCaCert}
+	envVars = append(envVars, extraEnvVars...)
+
+	caCertPath := ""
+	for _, env := range envVars {
+		if v := os.Getenv(env); v != "" {
+			caCertPath = v
+			break
+		}
+	}
+	if caCertPath == "" {
+		caCertPath = "config/certs/ca-cert.pem"
+	}
+
+	caPool, _ := x509.SystemCertPool()
+	if caPool == nil {
+		caPool = x509.NewCertPool()
+	}
+
+	caCertPem, err := os.ReadFile(caCertPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Error reading CA certificate: " + err.Error())
+		}
+		return caPool
+	}
+	if ok := caPool.AppendCertsFromPEM(caCertPem); !ok {
+		slog.Error("Error loading CA PEM from " + caCertPath)
+	} else {
+		slog.Debug("Loaded global CA certificate", "file", caCertPath)
+	}
+	return caPool
+}
+
 // CheckCaInstalled will check if a CA certificate has been installed in the http.Client or if nil, the system cert pool
 func CheckCaInstalled(client *http.Client) {
 	// Note; this is not tested because we don't want to install temporary test certs.

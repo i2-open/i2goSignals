@@ -61,6 +61,11 @@ type StreamConfiguration struct {
 
 	// RemoteStreamId holds the stream_id of the remote stream that this stream is connected to.
 	RemoteStreamId *string `json:"remote_stream_id,omitempty"`
+
+	// TxTLSCertificate is the PEM-encoded certificate for the transmitter
+	TxTLSCertificate string `json:"tx_tls_certificate,omitempty" bson:"tx_tls_certificate,omitempty"`
+	// TxTLSSkipVerify if true, skip certificate verification for the transmitter
+	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitempty" bson:"tx_tls_skip_verify,omitempty"`
 }
 
 func (sc *StreamConfiguration) DeepCopy() StreamConfiguration {
