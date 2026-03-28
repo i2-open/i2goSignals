@@ -136,13 +136,13 @@ func TestMemoryProviderDAOKeyOperations(t *testing.T) {
 	}(provider)
 
 	// Create a key pair
-	privateKey, err := provider.CreateIssuerJwkKeyPair("test-issuer", "test-project")
+	privateKey, err := provider.CreateKeyPair("test-issuer", "sig", "test-project")
 	if err != nil || privateKey == nil {
 		t.Fatal("Failed to create issuer key pair")
 	}
 
 	// Get the private key
-	retrievedKey, err := provider.GetIssuerPrivateKey("test-issuer")
+	retrievedKey, err := provider.GetPrivateKey("test-issuer")
 	if err != nil {
 		t.Fatalf("Failed to get issuer private key: %v", err)
 	}
@@ -152,20 +152,20 @@ func TestMemoryProviderDAOKeyOperations(t *testing.T) {
 	}
 
 	// Get public JWKS
-	jwks := provider.GetPublicTransmitterJWKS("test-issuer")
+	jwks := provider.GetPublicJWKS("test-issuer")
 	if jwks == nil {
 		t.Fatal("Failed to get public transmitter JWKS")
 	}
 
-	// Delete issuer
-	err = provider.DeleteIssuer("test-issuer")
+	// Delete key by name
+	err = provider.DeleteKeysByName("test-issuer")
 	if err != nil {
-		t.Fatalf("Failed to delete issuer: %v", err)
+		t.Fatalf("Failed to delete key: %v", err)
 	}
 
 	// Verify deletion
-	_, err = provider.GetIssuerPrivateKey("test-issuer")
+	_, err = provider.GetPrivateKey("test-issuer")
 	if err == nil {
-		t.Error("Expected error when getting deleted issuer key, got nil")
+		t.Error("Expected error when getting deleted key, got nil")
 	}
 }

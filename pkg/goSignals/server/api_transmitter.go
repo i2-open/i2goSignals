@@ -29,7 +29,7 @@ func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
 func JwksJsonHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	jsonKey := sa.GetProvider().GetPublicTransmitterJWKS(sa.GetDefIssuer())
+	jsonKey := sa.GetProvider().GetPublicJWKS(sa.GetDefIssuer())
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -47,6 +47,33 @@ type IssuerResponse struct {
 	Issuers []string `json:"issuers"`
 }
 
+func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		if stat != http.StatusUnauthorized {
+			w.WriteHeader(stat)
+			return
+		}
+		w.WriteHeader(stat)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	summaries, err := sa.GetProvider().ListSummaries()
+	if err != nil {
+		serverLog.Warn("Error listing summaries", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	resp, err := json.Marshal(summaries)
+	if err != nil {
+		serverLog.Warn("Error marshalling summaries", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
 // JwksIssuers lists all issuers that have JWKS available.
 //
 // Return values:
@@ -59,7 +86,7 @@ func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request
 }
 
 func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		if stat != http.StatusUnauthorized {
 			w.WriteHeader(stat)
@@ -70,7 +97,7 @@ func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *ht
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	names := sa.GetProvider().GetIssuerKeyNames()
+	names := sa.GetProvider().ListKeyNames()
 	issuerResponse := IssuerResponse{
 		Issuers: names,
 	}
@@ -104,7 +131,7 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	vars := mux.Vars(r)
 	rawIssuer := vars["issuer"]
 	issuer, _ := url.QueryUnescape(rawIssuer)
-	jsonKey := sa.GetProvider().GetPublicTransmitterJWKS(issuer)
+	jsonKey := sa.GetProvider().GetPublicJWKS(issuer)
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

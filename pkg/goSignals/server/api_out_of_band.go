@@ -37,7 +37,7 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	rawIssuer := vars["issuer"]
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
-	issuerKey, kid, err := sa.GetProvider().RotateIssuerKey(issuer, authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetProvider().RotateKey(issuer, authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -118,7 +118,7 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	}
 
 	// Check if issuer key already exists
-	existingKey, err := sa.GetProvider().GetIssuerPrivateKey(issuer)
+	existingKey, err := sa.GetProvider().GetPrivateKey(issuer)
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		serverLog.Error(fmt.Sprintf("Error checking existing issuer key for %s: %v", issuer, err))
 		http.Error(w, "Error checking existing key", http.StatusInternalServerError)
@@ -136,7 +136,7 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		return
 	}
 
-	issuerKey, err := sa.GetProvider().CreateIssuerJwkKeyPair(issuer, authCtx.ProjectId)
+	issuerKey, err := sa.GetProvider().CreateKeyPair(issuer, "sig", authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", issuer, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
@@ -272,7 +272,7 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	err = sa.GetProvider().AddIssuerKey(issuer, "", priv, pub, authCtx.ProjectId)
+	err = sa.GetProvider().AddKey(issuer, "sig", "", priv, pub, authCtx.ProjectId)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
@@ -313,7 +313,7 @@ func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWrite
 	vars := mux.Vars(r)
 	rawIssuer := vars["issuer"]
 	issuer, _ := url.QueryUnescape(rawIssuer)
-	err := sa.GetProvider().DeleteIssuer(issuer)
+	err := sa.GetProvider().DeleteKeysByName(issuer)
 	if err != nil {
 		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
 		if errors.Is(err, interfaces.ErrKeyNotFound) {

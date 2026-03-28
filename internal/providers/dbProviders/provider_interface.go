@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -20,17 +21,19 @@ type DbProviderInterface interface {
 	Check() error
 	Close() error
 
-	DeleteIssuer(issuer string) error
-	GetPublicTransmitterJWKS(issuer string) *json.RawMessage
-	GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error)
+	DeleteKeysByName(keyName string) error
+	GetPublicJWKS(keyName string) *json.RawMessage
+	GetPrivateKey(keyName string) (*rsa.PrivateKey, error)
 	GetAuthValidatorPubKey() *keyfunc.JWKS
 	GetAuthIssuer() *authUtil.AuthIssuer
 	GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS
-	CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error)
-	RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error)
-	GetIssuerKeyNames() []string
-	GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error)
-	AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error
+	CreateKeyPair(keyName string, use string, projectId string) (*rsa.PrivateKey, error)
+	RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error)
+	ListKeyNames() []string
+	ListSummaries() ([]interfaces.KeySummary, error)
+
+	GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error)
+	AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error
 
 	RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse
 	CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error)

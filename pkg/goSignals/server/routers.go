@@ -313,6 +313,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			Name:        "JwksSummaries",
+			Method:      http.MethodGet,
+			Pattern:     "/keys",
+			HandlerFunc: h.sa.GetSummaries,
+			IsIdQuery:   false,
+		},
+
+		Route{
 			"JwksJsonTenant",
 			http.MethodGet,
 			"/jwks/{issuer}",

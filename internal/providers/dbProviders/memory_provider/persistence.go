@@ -177,7 +177,7 @@ func (pm *PersistenceManager) LoadState() {
 	}
 
 	// Load KeyDAO state
-	var keys map[string][]*interfaces.JwkKeyRec
+	var keys map[string]*interfaces.JwkKeyRec
 	if pm.loadFile("keys.json", &keys) {
 		if kd, ok := pm.baseProvider.GetKeyDAO().(*memory.KeyDAOMemory); ok {
 			kd.SetState(keys)

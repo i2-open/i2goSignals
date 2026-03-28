@@ -929,7 +929,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
 
 	// Verify it was saved
-	savedKey, err := suite.servers[0].provider.GetIssuerPrivateKey(issuer)
+	savedKey, err := suite.servers[0].provider.GetPrivateKey(issuer)
 	assert.NoError(suite.T(), err)
 	assert.Equal(suite.T(), privateKey.N, savedKey.N)
 
@@ -946,7 +946,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, respPub.StatusCode)
 
 	// Verify it was saved as public key
-	issPubJson := suite.servers[0].provider.GetPublicTransmitterJWKS(issuerPub)
+	issPubJson := suite.servers[0].provider.GetPublicJWKS(issuerPub)
 	assert.NotNil(suite.T(), issPubJson)
 
 	// 3. Test loading PKCS#1 Public Key (DER)

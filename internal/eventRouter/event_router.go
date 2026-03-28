@@ -266,7 +266,7 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKe
 		key, ok = r.issuerKeys[issuer]
 		if !ok {
 			var err error
-			key, kid, err = r.provider.GetIssuerPrivateKeyWithKid(issuer)
+			key, kid, err = r.provider.GetPrivateKeyWithKid(issuer)
 			if err != nil {
 				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
 				r.mu.Unlock()

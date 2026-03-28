@@ -104,31 +104,31 @@ func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
 
 // Service accessor methods for test helpers
 
-func (b *BaseProvider) StoreReceiverKey(streamID string, audience string, jwksUri string) error {
-	return b.keyService.StoreReceiverKey(context.Background(), streamID, audience, jwksUri)
+func (b *BaseProvider) StoreExternalKey(keyName string, streamID string, use string, jwksUri string) error {
+	return b.keyService.StoreExternalKey(context.Background(), keyName, streamID, use, jwksUri)
 }
 
-func (b *BaseProvider) GetReceiverKey(streamID string) *interfaces.JwkKeyRec {
-	rec, _ := b.keyService.GetReceiverKey(context.Background(), streamID)
+func (b *BaseProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {
+	rec, _ := b.keyService.GetKeyByStreamID(context.Background(), streamID)
 	return rec
 }
 
 // Key Management Methods
 
-func (b *BaseProvider) DeleteIssuer(issuer string) error {
-	err := b.keyService.DeleteIssuer(context.Background(), issuer)
+func (b *BaseProvider) DeleteKeysByName(keyName string) error {
+	err := b.keyService.DeleteKeysByName(context.Background(), keyName)
 	if err == nil {
 		b.notifyWrite()
 	}
 	return err
 }
 
-func (b *BaseProvider) GetPublicTransmitterJWKS(issuer string) *json.RawMessage {
-	return b.keyService.GetPublicTransmitterJWKS(context.Background(), issuer)
+func (b *BaseProvider) GetPublicJWKS(keyName string) *json.RawMessage {
+	return b.keyService.GetPublicJWKS(context.Background(), keyName)
 }
 
-func (b *BaseProvider) GetIssuerPrivateKey(issuer string) (*rsa.PrivateKey, error) {
-	return b.keyService.GetIssuerPrivateKey(context.Background(), issuer)
+func (b *BaseProvider) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
+	return b.keyService.GetPrivateKey(context.Background(), keyName)
 }
 
 func (b *BaseProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
@@ -139,33 +139,37 @@ func (b *BaseProvider) GetAuthIssuer() *authUtil.AuthIssuer {
 	return b.keyService.GetAuthIssuer()
 }
 
-func (b *BaseProvider) CreateIssuerJwkKeyPair(issuer string, projectId string) (*rsa.PrivateKey, error) {
-	key, err := b.keyService.CreateIssuerJwkKeyPair(context.Background(), issuer, projectId)
+func (b *BaseProvider) CreateKeyPair(keyName string, use string, projectId string) (*rsa.PrivateKey, error) {
+	key, err := b.keyService.CreateKeyPair(context.Background(), keyName, use, projectId)
 	if err == nil {
 		b.notifyWrite()
 	}
 	return key, err
 }
 
-func (b *BaseProvider) RotateIssuerKey(issuer string, projectId string) (*rsa.PrivateKey, string, error) {
-	key, kid, err := b.keyService.RotateIssuerKey(context.Background(), issuer, projectId)
+func (b *BaseProvider) RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error) {
+	key, kid, err := b.keyService.RotateKey(context.Background(), keyName, projectId)
 	if err == nil {
 		b.notifyWrite()
 	}
 	return key, kid, err
 }
 
-func (b *BaseProvider) GetIssuerKeyNames() []string {
-	names, _ := b.keyService.GetIssuerKeyNames(context.Background())
+func (b *BaseProvider) ListKeyNames() []string {
+	names, _ := b.keyService.ListKeyNames(context.Background())
 	return names
 }
 
-func (b *BaseProvider) GetIssuerPrivateKeyWithKid(issuer string) (*rsa.PrivateKey, string, error) {
-	return b.keyService.GetIssuerPrivateKeyWithKid(context.Background(), issuer)
+func (b *BaseProvider) ListSummaries() ([]interfaces.KeySummary, error) {
+	return b.keyService.ListSummaries(context.Background())
 }
 
-func (b *BaseProvider) AddIssuerKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
-	err := b.keyService.AddIssuerKey(context.Background(), issuer, kid, privateKey, publicKey, projectId)
+func (b *BaseProvider) GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error) {
+	return b.keyService.GetPrivateKeyWithKid(context.Background(), keyName)
+}
+
+func (b *BaseProvider) AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+	err := b.keyService.AddKey(context.Background(), keyName, use, kid, privateKey, publicKey, projectId)
 	if err == nil {
 		b.notifyWrite()
 	}

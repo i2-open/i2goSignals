@@ -65,7 +65,7 @@ func TestMemoryProviderBasicOperations(t *testing.T) {
 	assert.NotNil(t, authIssuer)
 	assert.NotNil(t, authIssuer.PrivateKey)
 
-	// Test GetPublicTransmitterJWKS
-	jwks := provider.GetPublicTransmitterJWKS("DEFAULT")
+	// Test GetPublicJWKS
+	jwks := provider.GetPublicJWKS("DEFAULT")
 	assert.NotNil(t, jwks)
 }
