@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
+	"net/url"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -64,7 +65,7 @@ type KeyDAO interface {
 	DeleteByKeyName(ctx context.Context, keyName string) error
 	ListKids(ctx context.Context) ([]string, error)
 	ListKeyNames(ctx context.Context) ([]string, error)
-	KeySummary(ctx context.Context, kid string) (*KeySummary, error)
+	KeySummary(ctx context.Context, keyName string) (*KeySummary, error)
 	ListSummaries(ctx context.Context) ([]KeySummary, error)
 }
 
@@ -113,23 +114,41 @@ func (key *JwkKeyRec) ToSummary() KeySummary {
 	}
 
 	return KeySummary{
-		Kid:       key.Kid,
+		Kids:      []string{key.Kid},
 		KeyName:   key.KeyName,
 		Use:       key.Use,
 		ProjectId: key.ProjectId,
 		StreamIds: streamIds,
 		Type:      keyType,
+		JwksUrl:   key.ReceiverJwksUrl,
 	}
 }
 
 // KeySummary is used to report a key registry entry and its capabilities without exposing key material
 type KeySummary struct {
-	Kid       string   `json:"kid"`
+	Kids      []string `json:"kid"`
 	KeyName   string   `json:"keyName"`
 	Use       string   `json:"use,omitempty"` // "sig" | "enc"
 	ProjectId string   `json:"projectId,omitempty"`
 	StreamIds []string `json:"streamIds,omitempty"`
 	Type      string   `json:"type"` // "pair" | "public" | "external"
+	JwksUrl   string   `json:"jwksUrl,omitempty"`
+	Rotations int      `json:"rotations,omitempty"`
+}
+
+func (key KeySummary) AdjustBase(baseUrl *url.URL) KeySummary {
+	jwksUrl := key.JwksUrl
+	if jwksUrl == "" {
+		// "/jwks/{keyname}
+		if baseUrl != nil {
+			path := "/jwks/" + url.QueryEscape(key.KeyName)
+			jwksURL, _ := baseUrl.Parse(path)
+			if jwksURL != nil {
+				key.JwksUrl = jwksURL.String()
+			}
+		}
+	}
+	return key
 }
 
 // DeliverableEvent represents an event pending delivery

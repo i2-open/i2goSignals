@@ -736,6 +736,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		return nil, err
 	}
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
+	}
 
 	var config model.StreamConfiguration
 	err = json.Unmarshal(body, &config)
@@ -811,6 +814,7 @@ type CreateKeyCmd struct {
 	Alias    string `arg:"" required:"" help:"The alias of the server to issue the key (default is selected server)"`
 	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
 	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
+	Force    string `optional:"" help:"Force creation of the key even if it already exists (replace or rotate)."`
 }
 
 func (c *CreateKeyCmd) Run(g *Globals) error {
@@ -819,7 +823,12 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		return err
 	}
 	hostUrl, _ := url.Parse(server.Host)
-	certUrl := hostUrl.JoinPath("/jwks", c.IssuerId)
+	certUrl := hostUrl.JoinPath("/key", c.IssuerId)
+	if c.Force != "" {
+		q := certUrl.Query()
+		q.Set("force", c.Force)
+		certUrl.RawQuery = q.Encode()
+	}
 	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
 	if server.ClientToken != "" {
 		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
@@ -834,6 +843,9 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		return err
 	}
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
+	}
 
 	if g.Data.Pems == nil {
 		g.Data.Pems = map[string][]byte{}
@@ -1406,6 +1418,9 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 		return err
 	}
 	bodyBytes, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(bodyBytes))
+	}
 	var status model.StreamStatus
 	_ = json.Unmarshal(bodyBytes, &status)
 

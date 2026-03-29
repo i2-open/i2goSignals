@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -34,7 +35,10 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// This function is called by CreateJwksIssuer so authentication has already been checked.
 
 	vars := mux.Vars(r)
-	rawIssuer := vars["issuer"]
+	rawIssuer := vars["keyName"]
+	if rawIssuer == "" {
+		rawIssuer = vars["issuer"]
+	}
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
 	issuerKey, kid, err := sa.GetProvider().RotateKey(issuer, authCtx.ProjectId)
@@ -81,76 +85,97 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 }
 
-// CreateJwksIssuer handles the creation of a JWK key pair for the specified issuer and authorizes access permissions.
+// CreateKey handles the creation or uploading of a JWK key pair for the specified keyName.
+// If a payload is present in the request body, the key is loaded from the payload.
+// If no payload is present, a new key pair is generated for the specified keyName.
 //
 // Inputs:
-//   - issuer (path): The name of the issuer for which to create the key pair.
-//   - rotate (query): Optional. If set to "true", rotates existing keys if they already exist.
+//   - keyName (path): The name of the key to create or load.
 //
 // Return values:
-//   - 201 Created: PEM-encoded private key.
-//   - 200 OK: (If rotating) PEM-encoded private key.
-//
-// Errors:
-//   - 400 Bad Request: Malformed issuer encoding.
-//   - 403 Forbidden: Invalid permissions or issuer already exists without rotate=true.
-//   - 500 Internal Server Error: Error checking existing keys, generating, marshaling, or writing the private key.
-func (sa *SignalsApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
-	CreateJwksIssuerHandler(sa, w, r)
+//   - 201 Created: (If generating) PEM-encoded private key.
+//   - 200 OK: (If loading or rotating) PEM-encoded private key or success message.
+func (sa *SignalsApplication) CreateKey(w http.ResponseWriter, r *http.Request) {
+	CreateKeyHandler(sa, w, r)
 }
 
-func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
 	}
 
+	// Read body to check for payload
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(body) > 0 {
+		loadKeyHandler(sa, w, r, authCtx, body)
+	} else {
+		createKeyByNameHandler(sa, w, r, authCtx)
+	}
+}
+
+func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
 	vars := mux.Vars(r)
-	rawIssuer := vars["issuer"]
+	rawKeyName := vars["keyName"]
+	if rawKeyName == "" {
+		rawKeyName = vars["issuer"]
+	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	issuer, err := url.QueryUnescape(rawIssuer)
+	keyName, err := url.QueryUnescape(rawKeyName)
 	if err != nil {
-		serverLog.Warn(fmt.Sprintf("Error unescaping issuer %s: %v", rawIssuer, err))
-		http.Error(w, "Error malformed issuer encoding", http.StatusBadRequest)
+		serverLog.Warn(fmt.Sprintf("Error unescaping keyName %s: %v", rawKeyName, err))
+		http.Error(w, "Error malformed keyName encoding", http.StatusBadRequest)
 		return
 	}
 
-	// Check if issuer key already exists
-	existingKey, err := sa.GetProvider().GetPrivateKey(issuer)
-	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
-		serverLog.Error(fmt.Sprintf("Error checking existing issuer key for %s: %v", issuer, err))
-		http.Error(w, "Error checking existing key", http.StatusInternalServerError)
-		return
-	}
-	if existingKey != nil {
-		// Do they want to rotate?
-		queryParams := r.URL.Query()
-		_, rotate := queryParams["rotate"]
-		if rotate {
+	queryParams := r.URL.Query()
+	force := queryParams.Get("force")
+	_, rotate := queryParams["rotate"]
+
+	// Check if key already exists
+	if checkKeyNameExists(sa, keyName) {
+		if force == "" && !rotate {
+			http.Error(w, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
+			return
+		}
+
+		if force == "rotate" || rotate {
 			RotateIssuerHandler(sa, w, r, authCtx)
 			return
 		}
-		http.Error(w, "Already exists, specify rotate=true to rotate issuer", http.StatusForbidden)
-		return
+
+		if force == "replace" {
+			err := sa.GetProvider().DeleteKeysByName(keyName)
+			if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+				serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
+				http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
-	issuerKey, err := sa.GetProvider().CreateKeyPair(issuer, "sig", authCtx.ProjectId)
+	issuerKey, err := sa.GetProvider().CreateKeyPair(keyName, "sig", authCtx.ProjectId)
 	if err != nil {
-		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", issuer, err))
+		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
 		return
 	}
 
 	// If the created issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
-		sa.GetAuth().UpdateTokenKey(issuer, issuer, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName {
+		sa.GetAuth().UpdateTokenKey(keyName, keyName, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
 	}
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
 	if err != nil {
-		serverLog.Error(fmt.Sprintf("Error marshaling private key for issuer %s: %v", issuer, err))
+		serverLog.Error(fmt.Sprintf("Error marshaling private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error marshaling private key", http.StatusInternalServerError)
 		return
 	}
@@ -163,7 +188,7 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	w.WriteHeader(http.StatusCreated)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
-		serverLog.Error(fmt.Sprintf("Error writing response for issuer %s: %v", issuer, err))
+		serverLog.Error(fmt.Sprintf("Error writing response for issuer %s: %v", keyName, err))
 	}
 	return
 }
@@ -172,6 +197,9 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 //
 // Inputs:
 //   - issuer (path): The name of the issuer for which to load the key. This will become the kid in the certificates and matches certificate 'iss' values.
+//   - force (query): Optional. If 'replace', all existing keys for the issuer are deleted before adding the new key.
+//     If 'rotate', a new unique kid is generated and added to the set of keys for the issuer.
+//   - use (query): Optional. Specifies the intended use of the key. Acceptable values are 'sig' (signing) or 'enc' (encryption). Defaults to 'sig'.
 //   - Content-Type (header): Must be one of 'application/x-pem-file', 'application/pkix-cert', or 'application/pkcs7-mime'.
 //   - Request body: The key data in PEM or DER format.
 //
@@ -181,6 +209,7 @@ func CreateJwksIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 // Errors:
 //   - 400 Bad Request: Error reading body, invalid PEM data, invalid certificate, or unsupported key type.
 //   - 403 Forbidden: Invalid permissions.
+//   - 409 Conflict: Key already exists without force parameter.
 //   - 500 Internal Server Error: Error saving the key.
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
 	LoadKeyHandler(sa, writer, request)
@@ -192,18 +221,33 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		http.Error(writer, "Invalid permission", http.StatusForbidden)
 		return
 	}
-	vars := mux.Vars(request)
-	rawIssuer := vars["issuer"]
-	issuer, _ := url.QueryUnescape(rawIssuer)
-
-	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
-	contentType = strings.TrimSpace(contentType)
-
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		http.Error(writer, "Error reading request body", http.StatusBadRequest)
 		return
 	}
+	loadKeyHandler(sa, writer, request, authCtx, body)
+}
+
+func CreateKeyNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		http.Error(w, "Invalid permission", http.StatusForbidden)
+		return
+	}
+	createKeyByNameHandler(sa, w, r, authCtx)
+}
+
+func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+	vars := mux.Vars(request)
+	rawKeyName := vars["keyName"]
+	if rawKeyName == "" {
+		rawKeyName = vars["issuer"]
+	}
+	keyName, _ := url.QueryUnescape(rawKeyName)
+
+	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
+	contentType = strings.TrimSpace(contentType)
 
 	var priv *rsa.PrivateKey
 	var pub *rsa.PublicKey
@@ -272,23 +316,53 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	err = sa.GetProvider().AddKey(issuer, "sig", "", priv, pub, authCtx.ProjectId)
+	queryParams := request.URL.Query()
+	force := queryParams.Get("force")
+
+	if checkKeyNameExists(sa, keyName) && force == "" {
+		http.Error(writer, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
+		return
+	}
+
+	kid := ""
+	if force == "replace" {
+		err := sa.GetProvider().DeleteKeysByName(keyName)
+		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+			serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
+			http.Error(writer, "Error replacing existing keys", http.StatusInternalServerError)
+			return
+		}
+	} else if force == "rotate" {
+		kid = fmt.Sprintf("%s-%s", keyName, bson.NewObjectID().Hex())
+	}
+
+	use := queryParams.Get("use")
+	if use == "" {
+		use = "sig"
+	} else if use != "sig" && use != "enc" {
+		http.Error(writer, "Invalid use parameter", http.StatusBadRequest)
+		return
+	}
+
+	err := sa.GetProvider().AddKey(keyName, use, kid, priv, pub, authCtx.ProjectId)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
 	}
 
 	// If the loaded issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer && priv != nil {
-		// We don't have the kid here, it will default to issuer in UpdateTokenKey fallback or we can load it
-		// But AddIssuerKey with empty kid uses issuer as kid.
-		sa.GetAuth().UpdateTokenKey(issuer, issuer, priv, sa.GetProvider().GetAuthValidatorPubKey())
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && priv != nil {
+		// Update the kid for the token issuer if not set
+		if kid == "" {
+			kid = keyName
+		}
+		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetProvider().GetAuthValidatorPubKey())
 	}
 
 	writer.WriteHeader(http.StatusOK)
 }
 
-// DeleteJwksIssuerKey deletes the keys associated with a specified issuer.
+// DeleteKey deletes the keys associated with a specified issuer.
 //
 // Inputs:
 //   - issuer (path): The name of the issuer whose keys are to be deleted.
@@ -300,7 +374,7 @@ func LoadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 //   - 403 Forbidden: Invalid permissions.
 //   - 404 Not Found: Issuer keys not found.
 //   - 500 Internal Server Error: Error during deletion process.
-func (sa *SignalsApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
+func (sa *SignalsApplication) DeleteKey(w http.ResponseWriter, r *http.Request) {
 	DeleteJwksIssuerKeyHandler(sa, w, r)
 }
 
@@ -311,13 +385,16 @@ func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		return
 	}
 	vars := mux.Vars(r)
-	rawIssuer := vars["issuer"]
-	issuer, _ := url.QueryUnescape(rawIssuer)
-	err := sa.GetProvider().DeleteKeysByName(issuer)
+	rawKeyName := vars["keyName"]
+	if rawKeyName == "" {
+		rawKeyName = vars["issuer"]
+	}
+	keyName, _ := url.QueryUnescape(rawKeyName)
+	err := sa.GetProvider().DeleteKeysByName(keyName)
 	if err != nil {
-		serverLog.Error("Error deleting issuer keys for issuer", issuer, err.Error())
+		serverLog.Error("Error deleting keys for keyName", keyName, err.Error())
 		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			http.Error(w, "Issuer not found", http.StatusNotFound)
+			http.Error(w, "Key not found", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -904,4 +981,179 @@ func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// JwksJson returns the JSON Web Key Set (JWKS) for the default issuer.
+//
+// Return values:
+//   - 200 OK: JWKS as a JSON object.
+//
+// Errors:
+//   - 404 Not Found: Default issuer keys not found.
+//   - 500 Internal Server Error: Database or serialization error.
+func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
+	JwksJsonHandler(sa, w, r)
+}
+
+func JwksJsonHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	jsonKey := sa.GetProvider().GetPublicJWKS(sa.GetDefIssuer())
+	if jsonKey == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	keyBytes, err := jsonKey.MarshalJSON()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(keyBytes)
+}
+
+type IssuerResponse struct {
+	Issuers []string `json:"issuers"`
+}
+
+func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		if stat != http.StatusUnauthorized {
+			w.WriteHeader(stat)
+			return
+		}
+		w.WriteHeader(stat)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	summaries, err := sa.GetProvider().ListSummaries()
+	if err != nil {
+		serverLog.Warn("Error listing summaries", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	adjusted := make([]interfaces.KeySummary, len(summaries))
+	for i, s := range summaries {
+		adjusted[i] = s.AdjustBase(sa.BaseUrl)
+	}
+
+	resp, err := json.Marshal(adjusted)
+	if err != nil {
+		serverLog.Warn("Error marshalling summaries", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// JwksIssuers lists all issuers that have JWKS available.
+//
+// Return values:
+//   - 200 OK: JSON array of issuer names.
+//
+// Errors:
+//   - 500 Internal Server Error: Database error.
+func (sa *SignalsApplication) JwksIssuers(w http.ResponseWriter, r *http.Request) {
+	JwksIssuersHandler(sa, w, r)
+}
+
+func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		if stat != http.StatusUnauthorized {
+			w.WriteHeader(stat)
+			return
+		}
+		w.WriteHeader(stat)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	names := sa.GetProvider().ListKeyNames()
+	issuerResponse := IssuerResponse{
+		Issuers: names,
+	}
+	jsonIssuers, err := json.Marshal(issuerResponse)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(jsonIssuers)
+}
+
+// JwksJsonIssuer returns the JSON Web Key Set (JWKS) for a specific issuer.
+//
+// Inputs:
+//   - issuer (path): The name of the issuer.
+//   - format (query): Optional. If set to "pem", "x509", or "pkcs", returns the keys in that format instead of JWKS.
+//
+// Return values:
+//   - 200 OK: JWKS as a JSON object, or keys in requested format.
+//
+// Errors:
+//   - 400 Bad Request: Unsupported format requested.
+//   - 404 Not Found: Issuer keys not found.
+//   - 500 Internal Server Error: Database or conversion error.
+func (sa *SignalsApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request) {
+	JwksJsonIssuerHandler(sa, w, r)
+}
+
+func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	rawKeyName := vars["keyName"]
+	if rawKeyName == "" {
+		rawKeyName = vars["issuer"]
+	}
+	keyName, _ := url.QueryUnescape(rawKeyName)
+	jsonKey := sa.GetProvider().GetPublicJWKS(keyName)
+	if jsonKey == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	queryParams := r.URL.Query()
+	respType, isFormat := queryParams["format"]
+	if isFormat {
+		resp, err := convertKey(jsonKey, respType[0])
+		if err != nil {
+			serverLog.Warn("Error converting key", "error", err.Error())
+			http.Error(w, fmt.Sprintf("Error converting key: %v", err), http.StatusBadRequest)
+			return
+		}
+		switch respType[0] {
+		case "pem":
+			w.Header().Set("Content-Type", "application/x-pem-file")
+		case "x509":
+			w.Header().Set("Content-Type", "application/pkix-cert")
+		case "pkcs":
+			w.Header().Set("Content-Type", "application/pkcs7-mime")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(resp)
+		return
+	}
+
+	// This is the normal JWKS response
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	keyBytes, err := jsonKey.MarshalJSON()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(keyBytes)
+	return
+}
+
+func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {
+	// Check for existing key
+	keyNames := sa.GetProvider().ListKeyNames()
+	return slices.Contains(keyNames, keyName)
 }

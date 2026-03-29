@@ -151,7 +151,7 @@ func (suite *SSFConformanceSuite) TestMultipleIssuerPaths() {
 
 	// Create a new issuer
 	issuerName := "conformance.example.com"
-	req, _ := http.NewRequest(http.MethodPost, suite.instance.ts.URL+"/jwks/"+issuerName, nil)
+	req, _ := http.NewRequest(http.MethodPost, suite.instance.ts.URL+"/key/"+issuerName, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.instance.streamMgmtToken)
 
 	resp, err := suite.instance.client.Do(req)

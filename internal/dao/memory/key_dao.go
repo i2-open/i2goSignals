@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
@@ -148,38 +149,57 @@ func (d *KeyDAOMemory) ListKeyNames(_ context.Context) ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	namesMap := make(map[string]struct{})
-	for _, rec := range d.keys {
-		if rec.KeyName != "" {
-			namesMap[rec.KeyName] = struct{}{}
+	var names []string
+	for _, key := range d.keys {
+		keyName := key.KeyName
+		if !slices.Contains(names, keyName) {
+			names = append(names, keyName)
 		}
-	}
-
-	names := make([]string, 0, len(namesMap))
-	for name := range namesMap {
-		names = append(names, name)
 	}
 
 	return names, nil
 }
 
-func (d *KeyDAOMemory) KeySummary(ctx context.Context, kid string) (*interfaces.KeySummary, error) {
-	rec, err := d.FindByKid(ctx, kid)
+func (d *KeyDAOMemory) KeySummary(ctx context.Context, keyName string) (*interfaces.KeySummary, error) {
+	recs, err := d.FindByKeyName(ctx, keyName)
 	if err != nil {
 		return nil, err
 	}
-	summary := rec.ToSummary()
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
+	firstKey := recs[0]
+	var kids []string
+	for _, rec := range recs {
+		kids = append(kids, rec.Kid)
+	}
+	summary := firstKey.ToSummary()
+	summary.Kids = kids
+	summary.Rotations = len(recs) - 1
 	return &summary, nil
 }
 
-func (d *KeyDAOMemory) ListSummaries(_ context.Context) ([]interfaces.KeySummary, error) {
+func (d *KeyDAOMemory) ListSummaries(ctx context.Context) ([]interfaces.KeySummary, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	summaries := make([]interfaces.KeySummary, 0, len(d.keys))
-	for _, rec := range d.keys {
-		summaries = append(summaries, rec.ToSummary())
+	names, err := d.ListKeyNames(ctx)
+	if err != nil {
+		return nil, err
 	}
+	var summaries []interfaces.KeySummary
+	for _, name := range names {
+		summary, err := d.KeySummary(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if summary == nil {
+			continue
+		}
+		summaries = append(summaries, *summary)
+	}
+
 	return summaries, nil
 }
 

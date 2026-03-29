@@ -41,7 +41,7 @@ func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string) *KeyService {
 // InitializeTokenKey loads or creates the token signing key for authentication
 func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer string) error {
 	// Try to load existing key
-	key, kid, err := s.GetPrivateKeyWithKid(ctx, s.tokenIssuer)
+	key, kid, err := s.GetPrivateKeyWithKeyname(ctx, s.tokenIssuer)
 	if err == nil && key != nil {
 		s.tokenKey = key
 		s.tokenKid = kid
@@ -195,12 +195,12 @@ func (s *KeyService) DeleteKeysByName(ctx context.Context, keyName string) error
 
 // GetPrivateKey retrieves the latest private key for keyName.
 func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (*rsa.PrivateKey, error) {
-	key, _, err := s.GetPrivateKeyWithKid(ctx, keyName)
+	key, _, err := s.GetPrivateKeyWithKeyname(ctx, keyName)
 	return key, err
 }
 
-// GetPrivateKeyWithKid retrieves the latest private key and its kid for keyName.
-func (s *KeyService) GetPrivateKeyWithKid(ctx context.Context, keyName string) (*rsa.PrivateKey, string, error) {
+// GetPrivateKeyWithKeyname retrieves the latest private key and its kid for keyName.
+func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (*rsa.PrivateKey, string, error) {
 	rec, err := s.keyDAO.FindLatestByKeyName(ctx, keyName)
 	if err != nil {
 		return nil, "", err
@@ -248,7 +248,11 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 		metadata := jwkset.JWKMetadataOptions{
 			KID: kid,
 		}
-		metadata.USE = jwkset.UseSig
+		if rec.Use == "enc" {
+			metadata.USE = jwkset.UseEnc
+		} else {
+			metadata.USE = jwkset.UseSig
+		}
 		jwkOptions := jwkset.JWKOptions{
 			Metadata: metadata,
 		}

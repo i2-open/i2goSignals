@@ -165,7 +165,7 @@ func (b *BaseProvider) ListSummaries() ([]interfaces.KeySummary, error) {
 }
 
 func (b *BaseProvider) GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error) {
-	return b.keyService.GetPrivateKeyWithKid(context.Background(), keyName)
+	return b.keyService.GetPrivateKeyWithKeyname(context.Background(), keyName)
 }
 
 func (b *BaseProvider) AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {

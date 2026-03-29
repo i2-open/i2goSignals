@@ -3,6 +3,7 @@ package mongo
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -176,47 +177,57 @@ func (d *KeyDAOMongo) ListKeyNames(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	namesMap := make(map[string]struct{})
+	// There can be more than one key for a particular keyname
+	var names []string
 	for _, key := range keys {
-		if key.KeyName != "" {
-			namesMap[key.KeyName] = struct{}{}
+		keyName := key.KeyName
+		if !slices.Contains(names, keyName) {
+			names = append(names, keyName)
 		}
-	}
-
-	names := make([]string, 0, len(namesMap))
-	for name := range namesMap {
-		names = append(names, name)
 	}
 
 	return names, nil
 }
 
-func (d *KeyDAOMongo) KeySummary(ctx context.Context, kid string) (*interfaces.KeySummary, error) {
-	rec, err := d.FindByKid(ctx, kid)
+func (d *KeyDAOMongo) KeySummary(ctx context.Context, keyName string) (*interfaces.KeySummary, error) {
+	recs, err := d.FindByKeyName(ctx, keyName)
 	if err != nil {
 		return nil, err
 	}
-	summary := rec.ToSummary()
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
+	firstKey := recs[0]
+	var kids []string
+	for _, rec := range recs {
+		kids = append(kids, rec.Kid)
+	}
+	summary := firstKey.ToSummary()
+	summary.Kids = kids
+	summary.Rotations = len(recs) - 1
 	return &summary, nil
 }
 
 func (d *KeyDAOMongo) ListSummaries(ctx context.Context) ([]interfaces.KeySummary, error) {
-	cursor, err := d.collection.Find(ctx, bson.M{})
+
+	names, err := d.ListKeyNames(ctx)
 	if err != nil {
-		kLog.Error("Error listing summaries", "error", err)
 		return nil, err
 	}
 
-	var keys []*interfaces.JwkKeyRec
-	err = cursor.All(ctx, &keys)
-	if err != nil {
-		kLog.Error("Error parsing keys for summaries", "error", err)
-		return nil, err
+	var summaries []interfaces.KeySummary
+	for _, name := range names {
+		summary, err := d.KeySummary(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if summary == nil {
+			kLog.Error("Received unexpected nil summary", "keyName", name)
+			continue
+		}
+		summaries = append(summaries, *summary)
 	}
 
-	summaries := make([]interfaces.KeySummary, 0, len(keys))
-	for _, key := range keys {
-		summaries = append(summaries, key.ToSummary())
-	}
 	return summaries, nil
 }

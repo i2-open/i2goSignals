@@ -59,7 +59,7 @@ func (suite *ServerSuite) TestF_JwksSummaries() {
 	suite.GreaterOrEqual(len(summaries), 1, "Expected at least one key summary")
 
 	for _, summary := range summaries {
-		suite.NotEmpty(summary.Kid)
+		suite.NotEmpty(summary.Kids)
 		suite.NotEmpty(summary.KeyName)
 		suite.NotEmpty(summary.Type)
 	}

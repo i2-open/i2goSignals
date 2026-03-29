@@ -224,17 +224,10 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 		Route{
-			"LoadKey",
+			"CreateKey",
 			http.MethodPost,
-			"/key/{issuer}",
-			h.sa.LoadKey,
-			false,
-		},
-		Route{
-			"JwksJsonCreate",
-			http.MethodPost,
-			"/jwks/{issuer}",
-			h.sa.CreateJwksIssuer,
+			"/key/{keyName}",
+			h.sa.CreateKey,
 			false,
 		},
 		Route{
@@ -256,7 +249,7 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"JwksJsonTenant",
 			http.MethodGet,
-			"/jwks/{issuer}",
+			"/jwks/{keyName}",
 			h.sa.JwksJsonIssuer,
 			false,
 		},
@@ -264,7 +257,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		Route{
 			"JwksJsonIssuerDelete",
 			http.MethodDelete,
-			"/jwks/{issuer}",
+			"/jwks/{keyName}",
+			h.sa.DeleteJwksIssuerKey,
+			false,
+		},
+		Route{
+			"KeyDelete",
+			http.MethodDelete,
+			"/key/{keyName}",
 			h.sa.DeleteJwksIssuerKey,
 			false,
 		},
