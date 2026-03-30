@@ -20,6 +20,7 @@ USER ${USER}
 
 ADD --chmod=0755 ./goSignals ./goSignals
 ADD --chmod=0755 ./goSignalsServer ./goSignalsServer
+ADD --chmod=0755 ./goSsfServer ./goSsfServer
 ADD --chmod=0766 --chown=${USER} ./cmd/goSignals/resources ./resources
 
 # Optional:

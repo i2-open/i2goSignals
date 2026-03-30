@@ -6,8 +6,25 @@ volumes:
     driver: local
 
 services:
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/certs:/etc/nginx/certs:ro
+    ports:
+      - "8888:8888"
+      - "9000:9000"
+      - "9080:9080"
+    depends_on:
+      - goSignals1
+      - goSignals1b
+      - goSignals2
+      - goSsfServer
+      - keycloak
+      - scim_cluster1
+      - scim_cluster2
+
   mongo1:
-    container_name: mongo1
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -20,7 +37,6 @@ services:
       - ".mongo/replica.key:/data/replica.key"
       - ".mongo/mongo1:/data/db"
   mongo2:
-    container_name: mongo2
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -33,7 +49,6 @@ services:
       - ".mongo/replica.key:/data/replica.key"
       - ".mongo/mongo2:/data/db"
   mongo3:
-    container_name: mongo3
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -58,7 +73,6 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
@@ -70,7 +84,6 @@ services:
 
   grafana:
     image: grafana/grafana
-    container_name: grafana
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -83,56 +96,74 @@ services:
   goSignals1:
     image: i2gosignals:v0.8
     command: /app/goSignalsServer
-    container_name: gosignals1
     hostname: goSignals1
     depends_on:
       mongo1:
         condition: service_started
       mongoSetup:
         condition: service_completed_successfully
-    ports:
-      - "8888:8888"
     env_file:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1
-      - BASE_URL=https://goSignals1:8888/
+      - BASE_URL=https://gosignals1:8888/
+      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
 
   goSignals1b:
     image: i2gosignals:v0.8
     command: /app/goSignalsServer
-    container_name: gosignals1b
     hostname: goSignals1b
     depends_on:
       mongo1:
         condition: service_started
       mongoSetup:
         condition: service_completed_successfully
-    ports:
-      - "8890:8888"
     env_file:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1b
-      - BASE_URL=https://goSignals1:8888/
+      - BASE_URL=https://gosignals1:8888/
+      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
 
   goSignals2:
     image: i2gosignals:v0.8
     command: /app/goSignalsServer
-    container_name: gosignals2
     hostname: goSignals2
     depends_on:
       mongo1:
         condition: service_started
       mongoSetup:
         condition: service_completed_successfully
-    ports:
-      - "8889:8889"
     env_file:
       - ./config/goSignals2.env
     environment:
       - NODE_ID=goSignals2
-      - BASE_URL=https://goSignals2:8888/
+      - BASE_URL=https://gosignals2:8888/
+      - I2SIG_ISSUER=https://gosignals2:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
+
+  goSsfServer:
+    image: i2gosignals:v0.8
+    command: /app/goSsfServer
+    hostname: goSsfServer
+    depends_on:
+      mongo1:
+        condition: service_started
+      mongoSetup:
+        condition: service_completed_successfully
+    env_file:
+      - ./config/goSsf1.env
+    environment:
+      - NODE_ID=goSsfServer
+      - BASE_URL=https://gossfserver:8888/
+      - I2SIG_ISSUER=https://gossfserver:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
 
   scimSsfSetup:
     image: i2gosignals:v0.8
@@ -152,9 +183,6 @@ services:
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.8.0
-    container_name: scim_cluster1
-    ports:
-      - "9000:8080"
     depends_on:
       goSignals1:
         condition: service_started
@@ -166,9 +194,6 @@ services:
       - ./config/scim/scim_cluster.env
   scim_cluster2:
     image: independentid/i2scim-universal:0.8.0
-    container_name: scim_cluster2
-    ports:
-      - "9001:8080"
     depends_on:
       goSignals1:
         condition: service_started
@@ -188,7 +213,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
   keycloak:
     image: quay.io/keycloak/keycloak:26.4.7
-    container_name: keycloak-signals
     hostname: keycloak
     command: start --import-realm
     environment:
@@ -207,8 +231,6 @@ services:
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       QUARKUS_HTTP_HOST: 0.0.0.0
-    ports:
-      - 9080:9080
     depends_on:
       - postgres
     volumes:
