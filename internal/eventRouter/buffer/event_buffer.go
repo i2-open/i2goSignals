@@ -16,6 +16,7 @@ type EventBuf interface {
 	Close()
 	Cnt() int
 	Wakeup()
+	WakeupCh() <-chan struct{}
 }
 
 type EventPollBuffer struct {
@@ -94,6 +95,10 @@ func (b *EventPollBuffer) addEvents(jtis []string) {
 }
 
 func (b *EventPollBuffer) SubmitEvent(jti string) {
+	b.SubmitEvents([]string{jti})
+}
+
+func (b *EventPollBuffer) SubmitEvents(jtis []string) {
 	b.mutex.Lock()
 	if b.closed {
 		b.mutex.Unlock()
@@ -105,7 +110,9 @@ func (b *EventPollBuffer) SubmitEvent(jti string) {
 	defer func() {
 		recover()
 	}()
-	in <- jti
+	for _, jti := range jtis {
+		in <- jti
+	}
 }
 
 func (b *EventPollBuffer) IsClosed() bool {
@@ -134,6 +141,12 @@ func (b *EventPollBuffer) Wakeup() {
 	}
 	close(b.notifier)
 	b.notifier = make(chan struct{})
+}
+
+func (b *EventPollBuffer) WakeupCh() <-chan struct{} {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.notifier
 }
 
 func (b *EventPollBuffer) AckEvents(jtis []string) {
@@ -196,6 +209,7 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 type EventPushBuffer struct {
 	in          chan interface{}
 	Out         chan interface{}
+	wakeup      chan struct{}
 	events      []interface{}
 	eventsMutex sync.Mutex
 }
@@ -207,6 +221,7 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 	buffer := &EventPushBuffer{
 		in:          make(chan interface{}, 100),
 		Out:         make(chan interface{}),
+		wakeup:      make(chan struct{}, 1),
 		events:      []interface{}{},
 		eventsMutex: sync.Mutex{},
 	}
@@ -273,6 +288,10 @@ func (b *EventPushBuffer) addEvents(jtis []string) {
 }
 
 func (b *EventPushBuffer) SubmitEvent(jti string) {
+	b.SubmitEvents([]string{jti})
+}
+
+func (b *EventPushBuffer) SubmitEvents(jtis []string) {
 	b.eventsMutex.Lock()
 	in := b.in
 	b.eventsMutex.Unlock()
@@ -283,7 +302,9 @@ func (b *EventPushBuffer) SubmitEvent(jti string) {
 	defer func() {
 		recover()
 	}()
-	in <- jti
+	for _, jti := range jtis {
+		in <- jti
+	}
 }
 
 func (b *EventPushBuffer) IsClosed() bool {
@@ -303,5 +324,12 @@ func (b *EventPushBuffer) Close() {
 }
 
 func (b *EventPushBuffer) Wakeup() {
-	// Not used for push buffer
+	select {
+	case b.wakeup <- struct{}{}:
+	default:
+	}
+}
+
+func (b *EventPushBuffer) WakeupCh() <-chan struct{} {
+	return b.wakeup
 }

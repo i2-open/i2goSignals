@@ -339,6 +339,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"WakeTransmitter",
+			http.MethodPost,
+			"/_cluster/wake-transmitter",
+			h.sa.WakeTransmitter,
+			false,
+		},
+
+		Route{
 			"ProtectedResourceMetadata",
 			http.MethodGet,
 			"/.well-known/oauth-protected-resource",

@@ -55,6 +55,7 @@ type DbProviderInterface interface {
 	AckEvent(jtiString string, streamId string, fencingToken int64) error
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.EventRecord, err error)
 	AddEventToStream(jti string, streamId bson.ObjectID) error
+	ClearPending(streamId string) error
 	WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error
 
@@ -73,6 +74,13 @@ type DbProviderInterface interface {
 
 	// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 	GetActiveNodeCount() (int64, error)
+
+	// GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
+	GetLeaseOwner(resource string) (ownerNodeId string, leaseUntil time.Time, fencingToken int64, err error)
+
+	// GetNode returns a node by its ID.
+	GetNode(nodeId string) (*model.ClusterNode, error)
+
 	SetBaseUrl(u *url.URL)
 
 	CreateServer(ctx context.Context, server *model.Server) error

@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -34,23 +37,24 @@ type SsfApplicationInterface interface {
 }
 
 type SignalsApplication struct {
-	Provider      dbProviders.DbProviderInterface
-	Server        *http.Server
-	Handler       http.Handler
-	EventRouter   eventRouter.EventRouter
-	BaseUrl       *url.URL
-	HostName      string
-	DefIssuer     string
-	AdminRole     string
-	Auth          *authUtil.AuthIssuer
-	pollClients   map[string]*ClientPollStream
-	pushClients   map[string]*ReceiverPushStream
-	pushReceivers map[string]model.StreamStateRecord
-	mu            sync.RWMutex
-	Stats         *PrometheusHandler
-	NodeID        string
-	StartedAt     time.Time
-	stopSync      chan struct{}
+	Provider       dbProviders.DbProviderInterface
+	Server         *http.Server
+	Handler        http.Handler
+	EventRouter    eventRouter.EventRouter
+	BaseUrl        *url.URL
+	HostName       string
+	DefIssuer      string
+	AdminRole      string
+	Auth           *authUtil.AuthIssuer
+	pollClients    map[string]*ClientPollStream
+	pushClients    map[string]*ReceiverPushStream
+	pushReceivers  map[string]model.StreamStateRecord
+	mu             sync.RWMutex
+	Stats          *PrometheusHandler
+	NodeID         string
+	StartedAt      time.Time
+	stopSync       chan struct{}
+	InternalServer *http.Server
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -170,6 +174,9 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	// Start background sync for clustering
 	go sa.backgroundSync()
 
+	// Start internal cluster server if requested on a different port
+	sa.startInternalServer()
+
 	return sa
 }
 
@@ -212,17 +219,39 @@ func (sa *SignalsApplication) registerNode() {
 	baseUrl := sa.BaseUrl
 	sa.mu.RUnlock()
 
-	addr := ""
-	if server != nil {
-		addr = server.Addr
-	} else if baseUrl != nil {
-		addr = baseUrl.Host
+	host := ""
+	port := ""
+
+	if baseUrl != nil {
+		host = baseUrl.Hostname()
+		port = baseUrl.Port()
+	}
+
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
+		host, _ = os.Hostname()
+	}
+
+	mainPort := port
+	if mainPort == "" && server != nil {
+		_, p, _ := net.SplitHostPort(server.Addr)
+		mainPort = p
+	}
+
+	internalPort := os.Getenv("I2SIG_CLUSTER_INTERNAL_PORT")
+	effectivePort := internalPort
+	if effectivePort == "" {
+		effectivePort = mainPort
+	}
+
+	addr := net.JoinHostPort(host, effectivePort)
+	if !strings.HasPrefix(addr, "http") {
+		addr = "http://" + addr
 	}
 
 	node := model.ClusterNode{
 		Id:         sa.NodeID,
 		Address:    addr,
-		Version:    "1.0.0", // TODO: use actual version
+		Version:    constants.GoSignalsVersion,
 		StartedAt:  sa.StartedAt,
 		LastSeenAt: time.Now().UTC(),
 	}
@@ -269,6 +298,10 @@ func (sa *SignalsApplication) Shutdown() {
 	// Turn off the server (if present)
 	if sa.Server != nil {
 		_ = sa.Server.Shutdown(context.Background())
+	}
+
+	if sa.InternalServer != nil {
+		_ = sa.InternalServer.Shutdown(context.Background())
 	}
 
 	// Turn off client connections

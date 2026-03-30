@@ -241,3 +241,11 @@ func (m *MemoryProvider) RegisterNode(_ model.ClusterNode) error {
 func (m *MemoryProvider) GetActiveNodeCount() (int64, error) {
 	return 1, nil
 }
+
+func (m *MemoryProvider) GetLeaseOwner(_ string) (string, time.Time, int64, error) {
+	return "", time.Time{}, 0, nil
+}
+
+func (m *MemoryProvider) GetNode(_ string) (*model.ClusterNode, error) {
+	return nil, nil
+}

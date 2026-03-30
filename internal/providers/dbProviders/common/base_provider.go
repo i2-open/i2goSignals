@@ -298,6 +298,14 @@ func (b *BaseProvider) AddEventToStream(jti string, streamId bson.ObjectID) erro
 	return err
 }
 
+func (b *BaseProvider) ClearPending(streamId string) error {
+	_, err := b.eventService.ClearPendingForStream(context.Background(), streamId)
+	if err == nil {
+		b.notifyWrite()
+	}
+	return err
+}
+
 func (b *BaseProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
 	b.eventService.WatchPending(ctx, callback)
 }

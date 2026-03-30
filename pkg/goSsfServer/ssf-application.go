@@ -13,6 +13,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -307,7 +308,7 @@ func (sa *SsfApplication) registerNode() {
 	node := model.ClusterNode{
 		Id:         sa.NodeID,
 		Address:    addr,
-		Version:    "1.0.0", // TODO: use actual version
+		Version:    constants.GoSignalsVersion,
 		StartedAt:  sa.StartedAt,
 		LastSeenAt: time.Now().UTC(),
 	}

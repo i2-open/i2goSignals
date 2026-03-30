@@ -38,6 +38,11 @@ const CEnvIssuer = "I2SIG_ISSUER"
 const CEnvDbName = "I2SIG_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CEnvBaseURL = "BASE_URL"
+const CEnvClusterInternalToken = "I2SIG_CLUSTER_INTERNAL_TOKEN"
+const CEnvClusterInternalPort = "I2SIG_CLUSTER_INTERNAL_PORT"
+const CEnvTransmitterBackfillInterval = "I2SIG_TRANSMITTER_BACKFILL_INTERVAL"
+const CEnvTransmitterBackfillBatch = "I2SIG_TRANSMITTER_BACKFILL_BATCH"
+const CEnvMongoWatchEnabled = "I2SIG_MONGO_WATCH_ENABLED"
 const CDefTokenIssuer = "DEFAULT"
 const ErrorInvalidProject = "invalid project_id - invalid token"
 
@@ -463,6 +468,40 @@ func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
 	}
 
 	return m.nodeCol.CountDocuments(ctx, filter)
+}
+
+// GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
+func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var lease model.ClusterLease
+	err := m.leaseCol.FindOne(ctx, bson.M{"_id": resource}).Decode(&lease)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", time.Time{}, 0, nil
+		}
+		return "", time.Time{}, 0, err
+	}
+
+	return lease.OwnerNodeId, lease.LeaseUntil, lease.FencingToken, nil
+}
+
+// GetNode returns a node by its ID.
+func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var node model.ClusterNode
+	err := m.nodeCol.FindOne(ctx, bson.M{"_id": nodeId}).Decode(&node)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &node, nil
 }
 
 // SetBaseUrl is delegated to BaseProvider which handles it

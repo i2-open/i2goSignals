@@ -56,6 +56,22 @@ Similarly, for `PUSH` transmitters, the node attempts to acquire the lease `push
 *   Only the lease holder runs the `PushStreamHandler` loop for that stream.
 *   If the lease is lost, the loop stops.
 
+## Intra-Cluster Coordination (Wake-up Mechanism)
+
+To ensure low-latency event delivery without relying on MongoDB Change Streams (which can be resource-intensive and complex to manage), `goSignalsServer` uses a lease-aware wake-up mechanism.
+
+When a node receives or generates an event that needs to be routed to an outbound stream:
+1. It identifies the current lease owner for that stream (e.g., `push-transmitter:<streamId>`).
+2. If the current node is the owner, it enqueues the event locally for immediate transmission.
+3. If another node is the owner, it sends a lightweight `POST /_cluster/wake-transmitter` request to that node.
+4. The receiving node, upon validation of the request, triggers an immediate backfill from MongoDB to fetch and transmit any pending events.
+
+This mechanism is secured using a shared HMAC secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) and includes rate-limiting to prevent denial-of-service.
+
+## Periodic Backfill
+
+As a fallback and to ensure eventual consistency, transmitter loops periodically perform a "backfill" by polling MongoDB for any pending events that might have been missed by the wake-up mechanism (e.g., due to network transient issues). The backfill interval and batch size are configurable.
+
 ## Observability
 
 Nodes register themselves in the `cluster_nodes` collection with metadata:
