@@ -21,6 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -245,6 +246,13 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		rawKeyName = vars["issuer"]
 	}
 	keyName, _ := url.QueryUnescape(rawKeyName)
+	queryParams := request.URL.Query()
+	force := queryParams.Get("force")
+
+	if checkKeyNameExists(sa, keyName) && force == "" {
+		http.Error(writer, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
+		return
+	}
 
 	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
 	contentType = strings.TrimSpace(contentType)
@@ -253,6 +261,44 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	var pub *rsa.PublicKey
 
 	switch contentType {
+	case "application/json":
+		// in this case we are expecting a JSON struct with
+		type requestType struct {
+			JwksUri  string `json:"jwks_uri"`
+			Use      string `json:"use"`
+			StreamId string `json:"stream_id"`
+		}
+		var request requestType
+		err := json.Unmarshal(body, &request)
+		if err != nil {
+			http.Error(writer, "Error parsing JSON request body", http.StatusBadRequest)
+			return
+		}
+
+		if request.JwksUri == "" {
+			http.Error(writer, "Missing required parameter jwksUri", http.StatusBadRequest)
+			return
+		}
+		jwksExtern, err := goSet.GetJwks(request.JwksUri)
+		if err != nil {
+			msg := fmt.Sprintf("Error getting jwks for keyName %s: %v", keyName, err)
+			http.Error(writer, msg, http.StatusBadRequest)
+		}
+
+		use := "sig"
+		if request.Use != "" {
+			use = request.Use
+		}
+
+		err = sa.GetProvider().StoreExternalKey(keyName, jwksExtern.KIDs(), request.StreamId, use, request.JwksUri)
+		if err != nil {
+			msg := fmt.Sprintf("Error storing keyName %s: %v", keyName, err)
+			http.Error(writer, msg, http.StatusInternalServerError)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+		return
+
 	case "application/x-pem-file":
 		block, _ := pem.Decode(body)
 		if block == nil {
@@ -313,14 +359,6 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	if priv == nil && pub == nil {
 		http.Error(writer, "Could not parse key or unsupported key type", http.StatusBadRequest)
-		return
-	}
-
-	queryParams := request.URL.Query()
-	force := queryParams.Get("force")
-
-	if checkKeyNameExists(sa, keyName) && force == "" {
-		http.Error(writer, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
 		return
 	}
 
@@ -1085,7 +1123,7 @@ func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *ht
 	_, _ = w.Write(jsonIssuers)
 }
 
-// JwksJsonIssuer returns the JSON Web Key Set (JWKS) for a specific issuer.
+// JwksJsonIssuer returns the JSON Web Key Set (JWKS) for a specific keyName.
 //
 // Inputs:
 //   - issuer (path): The name of the issuer.

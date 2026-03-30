@@ -361,8 +361,8 @@ func (m *MongoProvider) Close() error {
 }
 
 // Helper methods for external key management (used by tests)
-func (m *MongoProvider) StoreExternalKey(keyName string, streamID string, use string, jwksUri string) error {
-	return m.BaseProvider.StoreExternalKey(keyName, streamID, use, jwksUri)
+func (m *MongoProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
+	return m.BaseProvider.StoreExternalKey(keyName, kids, streamID, use, jwksUri)
 }
 
 func (m *MongoProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {

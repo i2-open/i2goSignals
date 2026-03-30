@@ -13,6 +13,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -234,38 +235,77 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 	jwkstore := jwkset.NewMemoryStorage()
 
 	for _, rec := range keys {
-		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
-		if err != nil {
-			ksLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)
+		var jwkSet jwkset.JWK
+		var err error
+		if rec.ReceiverJwksUrl != "" {
+			// key is an external key fetch the jwks and convert so it can be added to jwkstore
+			srvLog.Debug("Fetching JWK from server", "url", rec.ReceiverJwksUrl)
+			var jwksExtern *keyfunc.JWKS
+			jwksExtern, err = goSet.GetJwks(rec.ReceiverJwksUrl)
+			if err != nil {
+				ksLog.Error("Error fetching JWKS from server", "url", rec.ReceiverJwksUrl, "error", err)
+				continue
+			}
+
+			// Convert keyfunc.JWKS to jwkset.JWK and add to jwkstore
+			rawJWKS := jwksExtern.RawJWKS()
+
+			var jwksData struct {
+				Keys []json.RawMessage `json:"keys"`
+			}
+			if err = json.Unmarshal(rawJWKS, &jwksData); err != nil {
+				ksLog.Error("Error unmarshaling JWKS", "error", err)
+				continue
+			}
+
+			for _, keyData := range jwksData.Keys {
+				jwkSet, err = jwkset.NewJWKFromRawJSON(keyData, jwkset.JWKMarshalOptions{}, jwkset.JWKValidateOptions{})
+				if err != nil {
+					ksLog.Error("Error creating JWK from raw JSON", "error", err)
+					continue
+				}
+				err = jwkstore.KeyWrite(context.Background(), jwkSet)
+				if err != nil {
+					ksLog.Error("Error adding external key to JWKS", "error", err)
+				}
+			}
 			continue
-		}
 
-		kid := rec.Kid
-		if kid == "" {
-			kid = rec.KeyName
-		}
-
-		metadata := jwkset.JWKMetadataOptions{
-			KID: kid,
-		}
-		if rec.Use == "enc" {
-			metadata.USE = jwkset.UseEnc
 		} else {
-			metadata.USE = jwkset.UseSig
-		}
-		jwkOptions := jwkset.JWKOptions{
-			Metadata: metadata,
+			pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
+			if err != nil {
+				ksLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)
+				continue
+			}
+
+			kid := rec.Kid
+			if kid == "" {
+				kid = rec.KeyName
+			}
+
+			metadata := jwkset.JWKMetadataOptions{
+				KID: kid,
+			}
+			if rec.Use == "enc" {
+				metadata.USE = jwkset.UseEnc
+			} else {
+				metadata.USE = jwkset.UseSig
+			}
+			jwkOptions := jwkset.JWKOptions{
+				Metadata: metadata,
+			}
+
+			jwkSet, err = jwkset.NewJWKFromKey(pubKey, jwkOptions)
+			if err != nil {
+				ksLog.Error("Error parsing rsa key into jwk", "error", err)
+				continue
+			}
+			err = jwkstore.KeyWrite(context.Background(), jwkSet)
+			if err != nil {
+				ksLog.Error("Error adding key to JWKS", "kid", kid, "error", err)
+			}
 		}
 
-		jwkSet, err := jwkset.NewJWKFromKey(pubKey, jwkOptions)
-		if err != nil {
-			ksLog.Error("Error parsing rsa key into jwk", "error", err)
-			continue
-		}
-		err = jwkstore.KeyWrite(context.Background(), jwkSet)
-		if err != nil {
-			ksLog.Error("Error adding key to JWKS", "kid", kid, "error", err)
-		}
 	}
 
 	response, err := jwkstore.JSONPublic(context.Background())
@@ -361,11 +401,15 @@ func (s *KeyService) GetAuthIssuer() *authUtil.AuthIssuer {
 
 // StoreExternalKey stores a reference to an external JWKS URL for a receiver or encryption target.
 // keyName identifies the entity (e.g. audience/receiver name), use is "sig" or "enc".
-func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, streamID string, use string, jwksUri string) error {
+func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, kids []string, streamID string, use string, jwksUri string) error {
+	kid := keyName
+	if kids != nil && len(kids) > 0 {
+		kid = kids[0]
+	}
 	keyPairRec := &interfaces.JwkKeyRec{
 		Id:              bson.NewObjectID(),
 		KeyName:         keyName,
-		Kid:             keyName,
+		Kid:             kid,
 		Use:             use,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,

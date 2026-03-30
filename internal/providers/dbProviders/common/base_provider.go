@@ -104,8 +104,8 @@ func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
 
 // Service accessor methods for test helpers
 
-func (b *BaseProvider) StoreExternalKey(keyName string, streamID string, use string, jwksUri string) error {
-	return b.keyService.StoreExternalKey(context.Background(), keyName, streamID, use, jwksUri)
+func (b *BaseProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
+	return b.keyService.StoreExternalKey(context.Background(), keyName, kids, streamID, use, jwksUri)
 }
 
 func (b *BaseProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {

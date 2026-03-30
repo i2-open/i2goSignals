@@ -346,7 +346,7 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 }
 
 func (s *MongoProviderSuite) TestG_ReceiverKeys() {
-	err := s.provider.StoreExternalKey("example.org", s.stream.Id, "sig", "https://example.org/jwksKey")
+	err := s.provider.StoreExternalKey("example.org", nil, s.stream.Id, "sig", "https://example.org/jwksKey")
 	s.NoError(err)
 
 	jwkRecord := s.provider.GetKeyByStreamID(s.stream.Id)

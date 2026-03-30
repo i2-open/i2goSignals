@@ -101,7 +101,7 @@ type JwkKeyRec struct {
 }
 
 func (key *JwkKeyRec) ToSummary() KeySummary {
-	keyType := "external"
+	keyType := "jwksurl"
 	if key.KeyBytes != nil {
 		keyType = "pair"
 	} else if key.PubKeyBytes != nil {

@@ -31,6 +31,7 @@ type DbProviderInterface interface {
 	RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error)
 	ListKeyNames() []string
 	ListSummaries() ([]interfaces.KeySummary, error)
+	StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error
 
 	GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error)
 	AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error
