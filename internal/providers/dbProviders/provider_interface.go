@@ -75,6 +75,9 @@ type DbProviderInterface interface {
 	// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 	GetActiveNodeCount() (int64, error)
 
+	// GetActiveNodes returns the nodes that have heartbeated within the last 60 seconds.
+	GetActiveNodes() ([]model.ClusterNode, error)
+
 	// GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
 	GetLeaseOwner(resource string) (ownerNodeId string, leaseUntil time.Time, fencingToken int64, err error)
 

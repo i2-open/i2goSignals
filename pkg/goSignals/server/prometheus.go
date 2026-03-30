@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -87,6 +88,58 @@ func (c *streamCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+type clusterCollector struct {
+	sa           *SignalsApplication
+	nodeInfoDesc *prometheus.Desc
+	uptimeDesc   *prometheus.Desc
+	lastSeenDesc *prometheus.Desc
+}
+
+func newClusterCollector(sa *SignalsApplication) *clusterCollector {
+	return &clusterCollector{
+		sa: sa,
+		nodeInfoDesc: prometheus.NewDesc(
+			"goSignals_cluster_node_info",
+			"Information about the cluster nodes.",
+			[]string{"node_id", "address", "version"},
+			nil,
+		),
+		uptimeDesc: prometheus.NewDesc(
+			"goSignals_cluster_node_uptime_seconds",
+			"Node uptime in seconds.",
+			[]string{"node_id"},
+			nil,
+		),
+		lastSeenDesc: prometheus.NewDesc(
+			"goSignals_cluster_node_last_seen_seconds",
+			"Node last seen in unix seconds.",
+			[]string{"node_id"},
+			nil,
+		),
+	}
+}
+
+func (c *clusterCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.nodeInfoDesc
+	ch <- c.uptimeDesc
+	ch <- c.lastSeenDesc
+}
+
+func (c *clusterCollector) Collect(ch chan<- prometheus.Metric) {
+	nodes, err := c.sa.Provider.GetActiveNodes()
+	if err != nil {
+		pLog.Error("Failed to get active nodes", "error", err)
+		return
+	}
+	now := time.Now().UTC()
+	for _, node := range nodes {
+		ch <- prometheus.MustNewConstMetric(c.nodeInfoDesc, prometheus.GaugeValue, 1, node.Id, node.Address, node.Version)
+		uptime := now.Sub(node.StartedAt).Seconds()
+		ch <- prometheus.MustNewConstMetric(c.uptimeDesc, prometheus.GaugeValue, uptime, node.Id)
+		ch <- prometheus.MustNewConstMetric(c.lastSeenDesc, prometheus.GaugeValue, float64(node.LastSeenAt.Unix()), node.Id)
+	}
+}
+
 var (
 	httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "goSignals_http_duration_seconds",
@@ -128,6 +181,10 @@ func (h *PrometheusHandler) DecLeasesHeld() {
 }
 
 func (sa *SignalsApplication) InitializePrometheus() {
+	sa.InitializePrometheusWithRegisterer(prometheus.DefaultRegisterer)
+}
+
+func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.Registerer) {
 	prometheusHandler := PrometheusHandler{
 		App: sa,
 		EventsIn: prometheus.NewCounterVec(
@@ -219,17 +276,18 @@ func (sa *SignalsApplication) InitializePrometheus() {
 
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
 
-	registerCollector(prometheusHandler.EventsIn)
-	registerCollector(prometheusHandler.EventsOut)
+	registerTo(reg, prometheusHandler.EventsIn)
+	registerTo(reg, prometheusHandler.EventsOut)
 
-	registerCollector(prometheusHandler.RcvPollCnt)
-	registerCollector(prometheusHandler.RcvPushCnt)
-	registerCollector(prometheusHandler.PubPollCnt)
-	registerCollector(prometheusHandler.PubPushCnt)
-	registerCollector(prometheusHandler.ClusterLeasesHeld)
-	registerCollector(prometheusHandler.ClusterLeaseAcq)
-	registerCollector(prometheusHandler.ClusterNodes)
-	registerCollector(newStreamCollector(sa))
+	registerTo(reg, prometheusHandler.RcvPollCnt)
+	registerTo(reg, prometheusHandler.RcvPushCnt)
+	registerTo(reg, prometheusHandler.PubPollCnt)
+	registerTo(reg, prometheusHandler.PubPushCnt)
+	registerTo(reg, prometheusHandler.ClusterLeasesHeld)
+	registerTo(reg, prometheusHandler.ClusterLeaseAcq)
+	registerTo(reg, prometheusHandler.ClusterNodes)
+	registerTo(reg, newStreamCollector(sa))
+	registerTo(reg, newClusterCollector(sa))
 
 	// Pre-initialize counters for existing streams
 	states := sa.Provider.GetStateMap()
@@ -241,9 +299,8 @@ func (sa *SignalsApplication) InitializePrometheus() {
 	sa.EventRouter.SetStatsHandler(sa.Stats)
 }
 
-func registerCollector(collector prometheus.Collector) {
-
-	err := prometheus.Register(collector)
+func registerTo(reg prometheus.Registerer, collector prometheus.Collector) {
+	err := reg.Register(collector)
 	if err != nil {
 		var alreadyRegisteredError prometheus.AlreadyRegisteredError
 		if errors.As(err, &alreadyRegisteredError) {
@@ -252,5 +309,8 @@ func registerCollector(collector prometheus.Collector) {
 		}
 		pLog.Error("instrumentation error", "error", err)
 	}
+}
 
+func registerCollector(collector prometheus.Collector) {
+	registerTo(prometheus.DefaultRegisterer, collector)
 }

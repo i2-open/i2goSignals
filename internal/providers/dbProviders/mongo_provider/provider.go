@@ -470,6 +470,30 @@ func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
 	return m.nodeCol.CountDocuments(ctx, filter)
 }
 
+// GetActiveNodes returns the nodes that have heartbeated within the last 60 seconds.
+func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	threshold := time.Now().UTC().Add(-60 * time.Second)
+	filter := bson.M{
+		"lastSeenAt": bson.M{"$gte": threshold},
+	}
+
+	cursor, err := m.nodeCol.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var nodes []model.ClusterNode
+	if err := cursor.All(ctx, &nodes); err != nil {
+		return nil, err
+	}
+
+	return nodes, nil
+}
+
 // GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
 func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
