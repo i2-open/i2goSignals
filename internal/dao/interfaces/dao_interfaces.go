@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
+	"net/url"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -55,16 +56,17 @@ type EventDAO interface {
 
 // KeyDAO handles cryptographic key data access
 type KeyDAO interface {
-	// Key pair operations
 	Insert(ctx context.Context, keyRec *JwkKeyRec) error
-	FindByIssuer(ctx context.Context, issuer string) ([]*JwkKeyRec, error)
-	FindLatestByIssuer(ctx context.Context, issuer string) (*JwkKeyRec, error)
-	DeleteByIssuer(ctx context.Context, issuer string) error
-	ListIssuers(ctx context.Context) ([]string, error)
-
-	// Receiver keys
-	InsertReceiverKey(ctx context.Context, streamID string, audience string, jwksUri string) error
-	FindReceiverKeyByStreamID(ctx context.Context, streamID string) (*JwkKeyRec, error)
+	FindByKid(ctx context.Context, kid string) (*JwkKeyRec, error)
+	FindByKeyName(ctx context.Context, keyName string) ([]*JwkKeyRec, error)
+	FindLatestByKeyName(ctx context.Context, keyName string) (*JwkKeyRec, error)
+	FindByStreamID(ctx context.Context, streamID string) (*JwkKeyRec, error)
+	DeleteByKid(ctx context.Context, kid string) error
+	DeleteByKeyName(ctx context.Context, keyName string) error
+	ListKids(ctx context.Context) ([]string, error)
+	ListKeyNames(ctx context.Context) ([]string, error)
+	KeySummary(ctx context.Context, keyName string) (*KeySummary, error)
+	ListSummaries(ctx context.Context) ([]KeySummary, error)
 }
 
 // ClientDAO handles client registration data access
@@ -88,14 +90,65 @@ type ServerDAO interface {
 // JwkKeyRec represents a cryptographic key record
 type JwkKeyRec struct {
 	Id              bson.ObjectID `json:"id" bson:"_id"`
-	Iss             string        `json:"iss,omitempty" bson:"iss"`
-	Kid             string        `json:"kid,omitempty" bson:"kid"`
-	Aud             string        `json:"aud,omitempty" bson:"aud"`
-	ProjectId       string        `bson:"project_id" json:"projectId,omitempty"`
-	StreamId        string        `json:"streamId" bson:"stream_id"`
-	KeyBytes        []byte        `json:"keyBytes" bson:"key_bytes"`
-	PubKeyBytes     []byte        `json:"pubJwks" bson:"pub_jwks"`
-	ReceiverJwksUrl string        `json:"receiverJwksUrl" bson:"receiver_jwks_url"`
+	KeyName         string        `json:"keyName" bson:"key_name"`  // primary identifier; replaces Iss/Aud
+	Kid             string        `json:"kid,omitempty" bson:"kid"` // = KeyName by default; after rotation: KeyName-{objectid}
+	Use             string        `json:"use,omitempty" bson:"use"` // "sig" | "enc"
+	ProjectId       string        `json:"projectId,omitempty" bson:"project_id"`
+	StreamId        string        `json:"streamId,omitempty" bson:"stream_id"`
+	KeyBytes        []byte        `json:"keyBytes,omitempty" bson:"key_bytes"`                // private key (PKCS1); nil for public-only or external
+	PubKeyBytes     []byte        `json:"pubKeyBytes,omitempty" bson:"pub_jwks"`              // public key (PKCS1); nil for external-only
+	ReceiverJwksUrl string        `json:"receiverJwksUrl,omitempty" bson:"receiver_jwks_url"` // external JWKS URL
+}
+
+func (key *JwkKeyRec) ToSummary() KeySummary {
+	keyType := "jwksurl"
+	if key.KeyBytes != nil {
+		keyType = "pair"
+	} else if key.PubKeyBytes != nil {
+		keyType = "public"
+	}
+
+	var streamIds []string
+	if key.StreamId != "" {
+		streamIds = []string{key.StreamId}
+	}
+
+	return KeySummary{
+		Kids:      []string{key.Kid},
+		KeyName:   key.KeyName,
+		Use:       key.Use,
+		ProjectId: key.ProjectId,
+		StreamIds: streamIds,
+		Type:      keyType,
+		JwksUrl:   key.ReceiverJwksUrl,
+	}
+}
+
+// KeySummary is used to report a key registry entry and its capabilities without exposing key material
+type KeySummary struct {
+	Kids      []string `json:"kid"`
+	KeyName   string   `json:"keyName"`
+	Use       string   `json:"use,omitempty"` // "sig" | "enc"
+	ProjectId string   `json:"projectId,omitempty"`
+	StreamIds []string `json:"streamIds,omitempty"`
+	Type      string   `json:"type"` // "pair" | "public" | "external"
+	JwksUrl   string   `json:"jwksUrl,omitempty"`
+	Rotations int      `json:"rotations,omitempty"`
+}
+
+func (key KeySummary) AdjustBase(baseUrl *url.URL) KeySummary {
+	jwksUrl := key.JwksUrl
+	if jwksUrl == "" {
+		// "/jwks/{keyname}
+		if baseUrl != nil {
+			path := "/jwks/" + url.QueryEscape(key.KeyName)
+			jwksURL, _ := baseUrl.Parse(path)
+			if jwksURL != nil {
+				key.JwksUrl = jwksURL.String()
+			}
+		}
+	}
+	return key
 }
 
 // DeliverableEvent represents an event pending delivery

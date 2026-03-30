@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc"
+	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -114,8 +114,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 	s.mgmtToken = resp.Token
 	tkn, err := s.auth.ParseAuthToken(s.mgmtToken)
 	s.Nil(err, "taken parse check")
-	err = tkn.Valid()
-	s.Nil(err, "mgmt token is valid check")
+	s.NotNil(tkn, "mgmt token is valid check")
 
 	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project)
 	s.Nil(err, "issue stream token error check")
@@ -281,20 +280,20 @@ func (s *MongoProviderSuite) generateEvent() {
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	issuer := "i2test.example.org"
-	key, err := s.provider.CreateIssuerJwkKeyPair(issuer, "")
+	key, err := s.provider.CreateKeyPair(issuer, "sig", "")
 	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
-	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
+	keyRetrieved, err := s.provider.GetPrivateKey(issuer)
 	s.NoError(err, "Should be no error")
 	s.NotNil(keyRetrieved)
 	s.True(key.Equal(keyRetrieved), "Should be same key")
 
-	keyFail, err := s.provider.GetIssuerPrivateKey("should.fail")
+	keyFail, err := s.provider.GetPrivateKey("should.fail")
 	s.Error(err, "No key found for: should.fail")
 	s.Nil(keyFail, "Should be no key returned")
 
-	issPubJson := s.provider.GetPublicTransmitterJWKS(issuer)
+	issPubJson := s.provider.GetPublicJWKS(issuer)
 	s.NotNil(issPubJson, "Check public key returned")
 	jwtBytes, err := issPubJson.MarshalJSON()
 
@@ -307,7 +306,7 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 		s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
 	}
 
-	keys := s.provider.GetIssuerKeyNames()
+	keys := s.provider.ListKeyNames()
 	s.Len(keys, 2, "Should be 2 keys")
 	s.Contains(keys, issuer, "Confirm issuer i2test.example.org present")
 	s.Contains(keys, "DEFAULT", "Confirm issuer DEFAULT present")
@@ -319,20 +318,20 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 
 	// Test adding private key
-	err := s.provider.AddIssuerKey(issuer, "key-1", privateKey, nil, "")
+	err := s.provider.AddKey(issuer, "sig", "key-1", privateKey, nil, "")
 	s.NoError(err)
 
-	keyRetrieved, err := s.provider.GetIssuerPrivateKey(issuer)
+	keyRetrieved, err := s.provider.GetPrivateKey(issuer)
 	s.NoError(err)
 	s.NotNil(keyRetrieved)
 	s.True(privateKey.Equal(keyRetrieved))
 
 	// Test adding only public key
 	issuerPub := "addkey-pub.example.org"
-	err = s.provider.AddIssuerKey(issuerPub, "key-pub", nil, &privateKey.PublicKey, "")
+	err = s.provider.AddKey(issuerPub, "sig", "key-pub", nil, &privateKey.PublicKey, "")
 	s.NoError(err)
 
-	issPubJson := s.provider.GetPublicTransmitterJWKS(issuerPub)
+	issPubJson := s.provider.GetPublicJWKS(issuerPub)
 	s.NotNil(issPubJson)
 	if issPubJson != nil {
 		issPub, err := keyfunc.NewJSON(*issPubJson)
@@ -341,22 +340,22 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	}
 
 	// Verify private key is NOT there
-	keyFail, err := s.provider.GetIssuerPrivateKey(issuerPub)
+	keyFail, err := s.provider.GetPrivateKey(issuerPub)
 	s.Error(err)
 	s.Nil(keyFail)
 }
 
 func (s *MongoProviderSuite) TestG_ReceiverKeys() {
-	err := s.provider.StoreReceiverKey(s.stream.Id, "example.org", "https://example.org/jwksKey")
+	err := s.provider.StoreExternalKey("example.org", nil, s.stream.Id, "sig", "https://example.org/jwksKey")
 	s.NoError(err)
 
-	jwkRecord := s.provider.GetReceiverKey(s.stream.Id)
+	jwkRecord := s.provider.GetKeyByStreamID(s.stream.Id)
 
 	s.NotNil(jwkRecord)
 
-	s.Equal("example.org", jwkRecord.Aud)
+	s.Equal("example.org", jwkRecord.KeyName)
 
-	res := s.provider.GetReceiverKey("dummy")
+	res := s.provider.GetKeyByStreamID("dummy")
 	s.Nil(res)
 }
 

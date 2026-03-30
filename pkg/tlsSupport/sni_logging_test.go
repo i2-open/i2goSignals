@@ -6,12 +6,28 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
+func ensureTestCertificates(t *testing.T) {
+	certPath := "../../config/certs/server-cert.pem"
+	if _, err := os.Stat(certPath); os.IsNotExist(err) {
+		t.Log("Certs missing. Running genTlsKeys...")
+		cmd := exec.Command("go", "run", "./cmd/genTlsKeys")
+		cmd.Dir = "../../"
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to generate certificates: %v\nOutput: %s", err, string(output))
+		}
+	}
+}
+
 func TestSNILogging(t *testing.T) {
+	ensureTestCertificates(t)
 	// Setup a buffer to capture logs
 	var buf bytes.Buffer
 	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
@@ -59,7 +75,8 @@ func TestSNILogging(t *testing.T) {
 		ServerName:         "test.example.com",
 	}
 
-	conn, err := tls.Dial("tcp", ln.Addr().String(), conf)
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", ln.Addr().String(), conf)
 	if err != nil {
 		// Handshake might fail due to cert issues, but we want to see if it started and logged SNI
 		t.Logf("Dial failed as expected or not: %v", err)

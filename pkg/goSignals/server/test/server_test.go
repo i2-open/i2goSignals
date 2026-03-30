@@ -28,8 +28,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
@@ -674,7 +674,7 @@ func (suite *ServerSuite) getMetricValue(app *ssef.SignalsApplication, vec *prom
 func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	testLog.Println("Creating new issuer key..")
 	issuer := "example.com"
-	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuer)
+	baseUrl := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
 
 	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
 	resp, err := suite.servers[0].client.Do(req)
@@ -718,7 +718,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	// Test with URL encoded issuer
 	testLog.Println("Creating issuer key with URL encoded issuer..")
 	issuerEncoded := url.QueryEscape("https://example.com")
-	baseUrlEncoded := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuerEncoded)
+	baseUrlEncoded := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuerEncoded)
 
 	reqEncoded, _ := http.NewRequest(http.MethodPost, baseUrlEncoded, nil)
 	reqEncoded.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
@@ -747,7 +747,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 
 	// Negative test: Empty issuer
 	testLog.Println("Testing negative case: Empty issuer..")
-	baseUrlEmpty := fmt.Sprintf("http://%s/jwks/", suite.servers[0].host)
+	baseUrlEmpty := fmt.Sprintf("http://%s/key/", suite.servers[0].host)
 	reqEmpty, _ := http.NewRequest(http.MethodPost, baseUrlEmpty, nil)
 	reqEmpty.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	respEmpty, err := suite.servers[0].client.Do(reqEmpty)
@@ -757,7 +757,7 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	// Negative test: Malformed issuer (special characters that might break parsing)
 	testLog.Println("Testing negative case: Malformed issuer..")
 	issuerMalformed := "example@#$%.com"
-	baseUrlMalformed := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, url.PathEscape(issuerMalformed))
+	baseUrlMalformed := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, url.PathEscape(issuerMalformed))
 	reqMalformed, _ := http.NewRequest(http.MethodPost, baseUrlMalformed, nil)
 	reqMalformed.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	respMalformed, err := suite.servers[0].client.Do(reqMalformed)
@@ -791,14 +791,14 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 
 func (suite *ServerSuite) TestB_DeleteIssuers() {
 
-	baseUrl := fmt.Sprintf("http://%s/jwks/notfound.com", suite.servers[0].host)
+	baseUrl := fmt.Sprintf("http://%s/key/notfound.com", suite.servers[0].host)
 	req, _ := http.NewRequest(http.MethodDelete, baseUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error making request")
 	assert.Equal(suite.T(), http.StatusNotFound, resp.StatusCode, "Issuer not found")
 
-	baseUrl = fmt.Sprintf("http://%s/jwks/example.com", suite.servers[0].host)
+	baseUrl = fmt.Sprintf("http://%s/key/example.com", suite.servers[0].host)
 	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
@@ -809,10 +809,11 @@ func (suite *ServerSuite) TestB_DeleteIssuers() {
 func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	testLog.Println("Testing issuer key rotation...")
 	issuer := "rotate-test.com"
-	baseUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuer)
+	keyUrl := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
+	jwksUrl := fmt.Sprintf("http://%s/jwks/%s", suite.servers[0].host, issuer)
 
 	// 1. Create initial key
-	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	req, _ := http.NewRequest(http.MethodPost, keyUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err)
@@ -821,7 +822,6 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	assert.NotEmpty(suite.T(), body)
 
 	// 2. Verify initial JWKS
-	jwksUrl := baseUrl
 	resp, err = http.Get(jwksUrl)
 	assert.NoError(suite.T(), err)
 	body, _ = io.ReadAll(resp.Body)
@@ -833,7 +833,7 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	assert.Equal(suite.T(), issuer, issPub.KIDs()[0], "Initial KID should be the issuer ID")
 
 	// 3. Rotate key
-	rotateUrl := baseUrl + "?rotate=true"
+	rotateUrl := keyUrl + "?rotate=true"
 	req, _ = http.NewRequest(http.MethodPost, rotateUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
@@ -901,7 +901,48 @@ func (suite *ServerSuite) TestC_RotateIssuerKey() {
 	assert.Equal(suite.T(), issuer, parsedSet.Issuer)
 
 	// 6. Cleanup
-	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
+	req, _ = http.NewRequest(http.MethodDelete, keyUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	_, _ = suite.servers[0].client.Do(req)
+}
+
+func (suite *ServerSuite) TestC2_CreateKeyForce() {
+	testLog.Println("Testing CreateKey with force parameter...")
+	issuer := "force-test.com"
+	keyUrl := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
+
+	// 1. Create initial key
+	req, _ := http.NewRequest(http.MethodPost, keyUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode)
+
+	// 2. Try creating again without force (should fail with 409 Conflict)
+	req, _ = http.NewRequest(http.MethodPost, keyUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusConflict, resp.StatusCode)
+
+	// 3. Create with force=replace (should succeed with 201 Created)
+	replaceUrl := keyUrl + "?force=replace"
+	req, _ = http.NewRequest(http.MethodPost, replaceUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode)
+
+	// 4. Create with force=rotate (should succeed with 200 OK)
+	rotateUrl := keyUrl + "?force=rotate"
+	req, _ = http.NewRequest(http.MethodPost, rotateUrl, nil)
+	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
+	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
+
+	// Cleanup
+	req, _ = http.NewRequest(http.MethodDelete, keyUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	_, _ = suite.servers[0].client.Do(req)
 }
@@ -929,7 +970,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
 
 	// Verify it was saved
-	savedKey, err := suite.servers[0].provider.GetIssuerPrivateKey(issuer)
+	savedKey, err := suite.servers[0].provider.GetPrivateKey(issuer)
 	assert.NoError(suite.T(), err)
 	assert.Equal(suite.T(), privateKey.N, savedKey.N)
 
@@ -946,7 +987,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, respPub.StatusCode)
 
 	// Verify it was saved as public key
-	issPubJson := suite.servers[0].provider.GetPublicTransmitterJWKS(issuerPub)
+	issPubJson := suite.servers[0].provider.GetPublicJWKS(issuerPub)
 	assert.NotNil(suite.T(), issPubJson)
 
 	// 3. Test loading PKCS#1 Public Key (DER)

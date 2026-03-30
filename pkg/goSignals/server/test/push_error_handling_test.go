@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -53,7 +53,7 @@ func (suite *PushErrorSuite) SetupSuite() {
 	var createdStream model.StreamConfiguration
 	_ = json.NewDecoder(resp.Body).Decode(&createdStream)
 	suite.stream = createdStream
-	suite.jwks = instance.provider.GetPublicTransmitterJWKS("DEFAULT")
+	suite.jwks = instance.provider.GetPublicJWKS("DEFAULT")
 }
 
 func (suite *PushErrorSuite) TearDownSuite() {
@@ -118,7 +118,7 @@ func (suite *PushErrorSuite) TestInvalidIssuer() {
 	})
 
 	// Get private key and sign
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -156,7 +156,7 @@ func (suite *PushErrorSuite) TestInvalidAudience() {
 	})
 
 	// Get private key and sign
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -192,7 +192,7 @@ func (suite *PushErrorSuite) TestAuthenticationFailed() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -239,7 +239,7 @@ func (suite *PushErrorSuite) TestAccessDenied() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -290,7 +290,7 @@ func (suite *PushErrorSuite) TestInvalidContentType() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -326,7 +326,7 @@ func (suite *PushErrorSuite) TestDuplicateSET() {
 		"reason": "duplicate test",
 	})
 
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -369,7 +369,7 @@ func (suite *PushErrorSuite) TestSuccessResponseFormat() {
 		"reason": "success test",
 	})
 
-	privKey, _ := suite.instance.provider.GetIssuerPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 

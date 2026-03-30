@@ -360,16 +360,13 @@ func (m *MongoProvider) Close() error {
 	return nil
 }
 
-// Helper methods for receiver key management (used by tests)
-// These extend BaseProvider functionality with mongo-specific test helpers
-func (m *MongoProvider) StoreReceiverKey(streamID string, audience string, jwksUri string) error {
-	// Access the keyService through a helper method on BaseProvider
-	// For now, we need to provide access via an accessor
-	return m.BaseProvider.StoreReceiverKey(streamID, audience, jwksUri)
+// Helper methods for external key management (used by tests)
+func (m *MongoProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
+	return m.BaseProvider.StoreExternalKey(keyName, kids, streamID, use, jwksUri)
 }
 
-func (m *MongoProvider) GetReceiverKey(streamID string) *interfaces.JwkKeyRec {
-	return m.BaseProvider.GetReceiverKey(streamID)
+func (m *MongoProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {
+	return m.BaseProvider.GetKeyByStreamID(streamID)
 }
 
 // TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.

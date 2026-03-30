@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +31,21 @@ func (s *safeBuffer) String() string {
 	return s.buf.String()
 }
 
+func ensureTestCertificates(t *testing.T) {
+	certPath := "../../../config/certs/server-cert.pem"
+	if _, err := os.Stat(certPath); os.IsNotExist(err) {
+		t.Log("Certs missing. Running genTlsKeys...")
+		cmd := exec.Command("go", "run", "./cmd/genTlsKeys")
+		cmd.Dir = "../../../"
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to generate certificates: %v\nOutput: %s", err, string(output))
+		}
+	}
+}
+
 func TestTLSHandshakeErrorLogging(t *testing.T) {
+	ensureTestCertificates(t)
 	var buf safeBuffer
 	// Create a handler that writes to our buffer
 	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})
@@ -48,16 +64,24 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 		ErrorLog: slog.NewLogLogger(handler, slog.LevelError),
 	}
 
+	errChan := make(chan error, 1)
 	go func() {
 		// Using relative paths to the certs from pkg/goSignals/server
-		_ = server.ServeTLS(ln, "../../../config/certs/server-cert.pem", "../../../config/certs/server-key.pem")
+		errChan <- server.ServeTLS(ln, "../../../config/certs/server-cert.pem", "../../../config/certs/server-key.pem")
 	}()
 	defer func(server *http.Server) {
 		_ = server.Close()
 	}(server)
 
-	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
+	// Wait for server to start or fail
+	select {
+	case err := <-errChan:
+		if err != nil && err != http.ErrServerClosed {
+			t.Fatalf("Server failed to start: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Server likely started
+	}
 
 	// Attempt a connection that will fail the TLS handshake
 	// For example, a client that doesn't trust the self-signed CA or just sends junk
@@ -65,7 +89,8 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 		InsecureSkipVerify: false, // This will fail because we don't provide the CA
 	}
 
-	conn, err := tls.Dial("tcp", ln.Addr().String(), conf)
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", ln.Addr().String(), conf)
 	if err == nil {
 		_ = conn.Close()
 		t.Log("Expected TLS handshake error, but it succeeded")

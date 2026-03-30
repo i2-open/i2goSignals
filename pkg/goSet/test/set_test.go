@@ -4,13 +4,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model2 "github.com/i2-open/i2goSignals/pkg/ssfModels"
 
-	"github.com/MicahParks/keyfunc"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -124,7 +126,7 @@ func TestCreateSet(t *testing.T) {
 
 	assert.Contains(t, claimString, "monitor.example.com", "Contains TestAudience")
 	assert.Equal(t, jwt.SigningMethodNone.Alg(), token.Header["alg"])
-	assert.Truef(t, set.VerifyAudience("cluster.example.com", false), "Contains audience")
+	assert.Truef(t, slices.Contains([]string(set.Audience), "cluster.example.com"), "Contains audience")
 	testSet = &set
 }
 
@@ -139,8 +141,7 @@ func TestSetJws(t *testing.T) {
 
 	publicKey := privateKey.PublicKey
 
-	// NewGivenRSACustomWithOptions(key *rsa.PublicKey, options GivenKeyOptions) (givenKey GivenKey
-	givenKey := keyfunc.NewGivenRSACustomWithOptions(&publicKey, keyfunc.GivenKeyOptions{
+	givenKey := keyfunc.NewGivenRSA(&publicKey, keyfunc.GivenKeyOptions{
 		Algorithm: "RS256",
 	})
 
@@ -160,7 +161,7 @@ func TestSetJws(t *testing.T) {
 		println(newSet.String())
 	}
 
-	assert.Truef(t, newSet.VerifyAudience("cluster.example.com", false), "Contains audience")
+	assert.Truef(t, slices.Contains([]string(newSet.Audience), "cluster.example.com"), "Contains audience")
 
 	unsignedString, err := testSet.JWS(jwt.SigningMethodNone, nil)
 	fmt.Println("Alg=None unsigned value")
@@ -180,7 +181,7 @@ func TestSetJws(t *testing.T) {
 
 	altPublicKey := altPrivateKey.PublicKey
 
-	altGivenKey := keyfunc.NewGivenRSACustomWithOptions(&altPublicKey, keyfunc.GivenKeyOptions{
+	altGivenKey := keyfunc.NewGivenRSA(&altPublicKey, keyfunc.GivenKeyOptions{
 		Algorithm: "RS256",
 	})
 
@@ -188,18 +189,17 @@ func TestSetJws(t *testing.T) {
 		"issuer": altGivenKey,
 	})
 
-	// Test with Wrong Public Key
+	// Test with Wrong Public Key (kid mismatch → ErrTokenUnverifiable)
 	badSet, err := goSet.Parse(signString, altJwks)
 	assert.NotNilf(t, err, "Check not valid")
-	assert.IsTypef(t, &jwt.ValidationError{}, err, "Should be a jwt.ValidationError")
-	assert.Error(t, err, "Error should be jwt.ValidationError", jwt.ValidationError{})
+	assert.True(t, errors.Is(err, jwt.ErrTokenUnverifiable) || errors.Is(err, jwt.ErrTokenSignatureInvalid), "Should be a token validation error")
 	assert.Nil(t, badSet, "No set should be returned - wrong key")
 
-	// Test with corrupt signed message
+	// Test with corrupt signed message (invalid signature → ErrTokenSignatureInvalid)
 	badSign := signString + "aaaa"
 	badSet, err = goSet.Parse(badSign, jwks)
 	assert.NotNilf(t, err, "Check not valid")
-	assert.IsTypef(t, &jwt.ValidationError{}, err, "Should be a jwt.ValidationError")
+	assert.True(t, errors.Is(err, jwt.ErrTokenSignatureInvalid), "Should be a signature invalid error")
 	assert.Nil(t, badSet, "No set should be returned - bad signature")
 
 	// Test for a bad token type

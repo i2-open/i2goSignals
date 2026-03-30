@@ -140,12 +140,16 @@ func (sa *SsfApplication) WellKnownSsfConfigurationIssuerGet(w http.ResponseWrit
 	server.WellKnownSsfConfigurationIssuerGetHandler(sa, w, r)
 }
 
+func (sa *SsfApplication) CreateKey(w http.ResponseWriter, r *http.Request) {
+	server.CreateKeyHandler(sa, w, r)
+}
+
 func (sa *SsfApplication) LoadKey(w http.ResponseWriter, r *http.Request) {
 	server.LoadKeyHandler(sa, w, r)
 }
 
 func (sa *SsfApplication) CreateJwksIssuer(w http.ResponseWriter, r *http.Request) {
-	server.CreateJwksIssuerHandler(sa, w, r)
+	server.CreateKeyNameHandler(sa, w, r)
 }
 
 func (sa *SsfApplication) JwksJson(w http.ResponseWriter, r *http.Request) {

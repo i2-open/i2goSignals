@@ -60,6 +60,10 @@ type TransmitterConfiguration struct {
 	GoSignalsVersion string `json:"gosignals_version,omitempty"`
 }
 
+func (tc TransmitterConfiguration) IsGoSignalsServer() bool {
+	return tc.GoSignalsVersion != ""
+}
+
 func (tc *TransmitterConfiguration) DeepCopy() *TransmitterConfiguration {
 	if tc == nil {
 		return nil

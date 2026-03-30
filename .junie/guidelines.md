@@ -39,3 +39,5 @@
 ### Restriction
 
 Do not look at or modify files specified in .aiignore
+
+Do not make any GIT commits.

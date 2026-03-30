@@ -45,6 +45,11 @@ type MemoryProvider struct {
 	persistence *PersistenceManager
 }
 
+func (m *MemoryProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
+	// TODO implement me
+	panic("implement me")
+}
+
 func (m *MemoryProvider) Name() string {
 	return m.DbName
 }

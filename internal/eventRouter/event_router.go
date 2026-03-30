@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -265,7 +266,7 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKe
 		key, ok = r.issuerKeys[issuer]
 		if !ok {
 			var err error
-			key, kid, err = r.provider.GetIssuerPrivateKeyWithKid(issuer)
+			key, kid, err = r.provider.GetPrivateKeyWithKid(issuer)
 			if err != nil {
 				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
 				r.mu.Unlock()
@@ -722,7 +723,7 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord)
 		for _, value := range stream.Aud {
 			// fmt.Println("Trying value: " + value)
 			// test below returns true if the event has no aud value
-			if event.Event.VerifyAudience(value, false) {
+			if len(event.Event.Audience) == 0 || slices.Contains([]string(event.Event.Audience), value) {
 				audMatch = true
 				// fmt.Println("Stream Aud Matched!")
 				break

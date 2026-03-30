@@ -80,7 +80,7 @@ func GetKeyConfig() KeyConfig {
 
 	// Create the directory if it does not exist
 	err := os.Mkdir(certDir, 0755)
-	if !os.IsExist(err) {
+	if err != nil && !os.IsExist(err) {
 		msg := fmt.Sprintf("Was unable to open or create certificate directory(%s):%s", certDir, err)
 		log.Error(msg)
 		panic(msg)
