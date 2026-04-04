@@ -14,7 +14,7 @@ func TestPollBackoffRetry(t *testing.T) {
 	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
 	t.Setenv("POLL_RETRY_MAX_DELAY", "0.3")
 	t.Setenv("POLL_RETRY_BACKOFF_FACTOR", "2.0")
-	t.Setenv("POLL_RETRY_LIMIT", "1.0") // 1 second retry limit
+	t.Setenv("POLL_RETRY_LIMIT", "1.0") // 1.0 second retry limit
 
 	// Create server with mock provider
 	instance, err := createServer(t, "test_backoff", true)
@@ -66,8 +66,8 @@ func TestPollBackoffRetry(t *testing.T) {
 	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
 
 	// Wait for more retries and eventually exceeding the limit
-	// retryLimit is 1s.
-	time.Sleep(2000 * time.Millisecond)
+	// retryLimit is 1.0s.
+	time.Sleep(1500 * time.Millisecond)
 
 	// Now it should be disabled
 	finalState, err := instance.provider.GetStreamState(streamID)

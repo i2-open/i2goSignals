@@ -68,10 +68,10 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	assert.NotNil(t, ps)
 
 	// Wait a bit to observe the loop
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
-	t.Logf("Poll count after 500ms: %d", finalCount)
+	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's in Pause state
 	updatedState, err := instance.provider.GetStreamState(streamID)
@@ -223,8 +223,8 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 
 	// Wait enough time for 2 attempts (initial + 1 retry)
 	// 0.01s delay * 1 retry = 0.01s + some processing time.
-	// 500ms should be plenty.
-	time.Sleep(500 * time.Millisecond)
+	// 100ms should be plenty.
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
 	t.Logf("Poll count: %d", finalCount)
@@ -298,10 +298,10 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	assert.NotNil(t, ps)
 
 	// Wait for at least 3 attempts to prove it didn't stop at 2
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
-	t.Logf("Poll count after 500ms: %d", finalCount)
+	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's NOT disabled yet
 	updatedState, err := instance.provider.GetStreamState(streamID)

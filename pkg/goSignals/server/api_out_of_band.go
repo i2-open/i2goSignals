@@ -606,9 +606,55 @@ func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Reques
 	TriggerEventHandler(sa, w, r)
 }
 
-func TriggerEventHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
+func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	var req struct {
+		StreamID  string         `json:"stream_id"`
+		EventType string         `json:"event_type"`
+		Subject   map[string]any `json:"subject"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	state, err := sa.GetProvider().GetStreamState(req.StreamID)
+	if err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
+	}
+
+	if authCtx.ProjectId != "" && state.ProjectId != authCtx.ProjectId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	subject := &goSet.EventSubject{}
+	if sub, ok := req.Subject["sub"].(string); ok {
+		subject.Sub = sub
+	} else {
+		// Try to marshal back to SubjectIdentifier
+		subBytes, _ := json.Marshal(req.Subject)
+		_ = json.Unmarshal(subBytes, &subject.SubjectIdentifier)
+	}
+
+	set := goSet.CreateSet(subject, state.Iss, state.Aud)
+	set.AddEventPayload(req.EventType, nil)
+
+	// HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	if err := sa.GetEventRouter().HandleEvent(&set, "", state.Id.Hex()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
+	w.WriteHeader(http.StatusOK)
 }
 
 // ProtectedResourceMetadata returns RFC9728 metadata describing OAuth access to the server.

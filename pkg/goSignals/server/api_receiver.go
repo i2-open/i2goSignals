@@ -629,11 +629,11 @@ func isConnectionError(err error) bool {
 	}
 
 	// EOF during read is often a connection reset or server crash
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return true
 	}
 
-	return true
+	return false
 }
 
 func (ps *ClientPollStream) getStatusEndpoint() string {
@@ -1035,6 +1035,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				}
 				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
 				if time.Since(firstErrorTime) > retryLimit {
+					serverLog.Error("POLL-RCV: Exceeded retry limit, disabling stream", "sid", ps.stream.StreamConfiguration.Id, "elapsed", time.Since(firstErrorTime), "limit", retryLimit)
 					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
 					ps.mu.Lock()
 					ps.active = false

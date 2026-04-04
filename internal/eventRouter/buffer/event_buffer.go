@@ -227,7 +227,9 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 	}
 
 	if len(initialJtis) > 0 {
-		buffer.addEvents(initialJtis)
+		for _, jti := range initialJtis {
+			buffer.events = append(buffer.events, jti)
+		}
 	}
 
 	go func() {
@@ -247,18 +249,29 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 			}
 			buffer.eventsMutex.Unlock()
 
-			select {
-			case v, ok := <-inCh:
+			if outCh != nil {
+				select {
+				case v, ok := <-inCh:
+					buffer.eventsMutex.Lock()
+					if !ok {
+						inCh = nil
+					} else {
+						buffer.events = append(buffer.events, v)
+					}
+					buffer.eventsMutex.Unlock()
+				case outCh <- next:
+					buffer.eventsMutex.Lock()
+					buffer.events = buffer.events[1:]
+					buffer.eventsMutex.Unlock()
+				}
+			} else {
+				v, ok := <-inCh
 				buffer.eventsMutex.Lock()
 				if !ok {
 					inCh = nil
 				} else {
 					buffer.events = append(buffer.events, v)
 				}
-				buffer.eventsMutex.Unlock()
-			case outCh <- next:
-				buffer.eventsMutex.Lock()
-				buffer.events = buffer.events[1:]
 				buffer.eventsMutex.Unlock()
 			}
 		}

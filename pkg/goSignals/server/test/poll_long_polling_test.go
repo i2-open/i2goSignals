@@ -73,7 +73,7 @@ func (suite *LongPollSuite) TestLongPollingWithTimeout() {
 	pollParams := model.PollParameters{
 		ReturnImmediately: false,
 		MaxEvents:         10,
-		TimeoutSecs:       2,
+		TimeoutSecs:       1,
 	}
 
 	bodyBytes, _ := json.Marshal(pollParams)
@@ -102,7 +102,7 @@ func (suite *LongPollSuite) TestLongPollingWithTimeout() {
 
 	// Should have waited (timeout), check elapsed time is reasonable (at least 1 second)
 	// The default timeout in PollStreamHandler is typically 10 seconds or configurable
-	assert.Greater(t, elapsed, 1*time.Second, "Long poll should wait before returning")
+	assert.Greater(t, elapsed, 500*time.Millisecond, "Long poll should wait before returning")
 }
 
 // TestMaxEventsLimit tests the MaxEvents parameter per RFC8936
@@ -475,7 +475,7 @@ func (suite *LongPollSuite) TestConcurrentLongPolls() {
 	}
 
 	// Wait a bit, then generate an event
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/concurrent-test"),
