@@ -70,17 +70,17 @@ func (s *TokenServiceTestSuite) TestTokenLifecycle() {
 func (s *TokenServiceTestSuite) TestListByProjectAndClient() {
 	ctx := context.Background()
 
-	s.service.TrackToken(ctx, &authSupport.EventAuthToken{
+	_ = s.service.TrackToken(ctx, &authSupport.EventAuthToken{
 		ProjectId:        "p1",
 		ClientId:         "c1",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j1"},
 	}, model.TokenTypeStream)
-	s.service.TrackToken(ctx, &authSupport.EventAuthToken{
+	_ = s.service.TrackToken(ctx, &authSupport.EventAuthToken{
 		ProjectId:        "p1",
 		ClientId:         "c2",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j2"},
 	}, model.TokenTypeStream)
-	s.service.TrackToken(ctx, &authSupport.EventAuthToken{
+	_ = s.service.TrackToken(ctx, &authSupport.EventAuthToken{
 		ProjectId:        "p2",
 		ClientId:         "c1",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j3"},

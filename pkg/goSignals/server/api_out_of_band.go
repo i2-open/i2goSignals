@@ -1151,7 +1151,7 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 
 	// 3. Extract JTI if it's a JWT, or use as is if it's an opaque JTI
 	jti := token
-	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil {
+	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
 	}
 

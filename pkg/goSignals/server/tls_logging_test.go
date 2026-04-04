@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -76,7 +77,7 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 	// Wait for server to start or fail
 	select {
 	case err := <-errChan:
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Fatalf("Server failed to start: %v", err)
 		}
 	case <-time.After(100 * time.Millisecond):

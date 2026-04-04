@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -105,7 +104,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 	eat, err := instance.provider.GetAuthIssuer().ParseAuthToken(instance.iatToken)
 	if err != nil {
-		t.Logf("Error parsing iat: %s\n", err.Error())
+		t.Fatalf("Error parsing iat: %s\n", err.Error())
 	}
 
 	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
@@ -120,44 +119,4 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	instance.projectId = eat.ProjectId
 
 	return &instance, nil
-}
-
-// TestSuiteCleanup provides a simple pattern for managing test cleanup operations
-type TestSuiteCleanup struct {
-	mu       sync.Mutex
-	cleanups []func()
-}
-
-// NewTestSuiteCleanup creates a new cleanup manager
-func NewTestSuiteCleanup() *TestSuiteCleanup {
-	return &TestSuiteCleanup{
-		cleanups: make([]func(), 0),
-	}
-}
-
-// AddCleanup registers a cleanup function to be called during teardown
-func (tc *TestSuiteCleanup) AddCleanup(fn func()) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	tc.cleanups = append(tc.cleanups, fn)
-}
-
-// RunCleanups executes all registered cleanup functions in reverse order (LIFO)
-func (tc *TestSuiteCleanup) RunCleanups() {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	// Execute in reverse order
-	for i := len(tc.cleanups) - 1; i >= 0; i-- {
-		tc.cleanups[i]()
-	}
-	tc.cleanups = nil
-}
-
-// AssertionHelper provides common assertion patterns for SSF tests
-type AssertionHelper struct{}
-
-// NewAssertionHelper creates a new assertion helper
-func NewAssertionHelper() *AssertionHelper {
-	return &AssertionHelper{}
 }

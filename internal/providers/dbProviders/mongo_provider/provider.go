@@ -526,7 +526,9 @@ func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer func(cursor *mongo.Cursor, ctx context.Context) {
+		_ = cursor.Close(ctx)
+	}(cursor, ctx)
 
 	var nodes []model.ClusterNode
 	if err := cursor.All(ctx, &nodes); err != nil {

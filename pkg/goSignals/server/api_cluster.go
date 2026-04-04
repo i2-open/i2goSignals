@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
@@ -161,7 +162,7 @@ func (sa *SignalsApplication) startInternalServer() {
 				go func() {
 					serverLog.Info("Internal cluster server listening with mTLS", "port", port)
 					// Empty cert/key: GetCertificate in TLSConfig provides the SVID.
-					if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 						serverLog.Error("Internal cluster server failed", "error", err)
 					}
 					_ = x509Source.Close()
@@ -175,7 +176,7 @@ func (sa *SignalsApplication) startInternalServer() {
 	sa.InternalServer = srv
 	go func() {
 		serverLog.Info("Internal cluster server listening (plain HTTP)", "port", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverLog.Error("Internal cluster server failed", "error", err)
 		}
 	}()

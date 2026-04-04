@@ -669,9 +669,8 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	defer srv.Close()
 
 	// Point OAUTH_SERVERS to the discovery endpoint
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -701,9 +700,7 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.OAuthPubKeys = nil
@@ -749,9 +746,7 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.mu.Lock()
@@ -819,9 +814,7 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	defer srv.Close()
 	jwksURL = srv.URL + "/jwks"
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -938,10 +931,8 @@ func TestValidateAuthorizationAny_PartialOAuthFailure(t *testing.T) {
 	}))
 	defer srv2.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
 	// Configure both servers
-	_ = os.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.mu.Lock()

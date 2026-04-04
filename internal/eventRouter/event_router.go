@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -577,7 +579,8 @@ func (r *router) callWakeupAPI(address, sid, mode string) {
 		eventLogger.Error("ROUTER: Wake-up call failed", "url", url, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+
+	defer httpSupport.HandleRespClose(resp)
 
 	if resp.StatusCode != http.StatusAccepted {
 		eventLogger.Warn("ROUTER: Wake-up call rejected", "url", url, "status", resp.Status)
@@ -873,16 +876,11 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 
 	if !result.Accepted {
 		if result.Err != nil {
-			if deliveryErr, ok := result.Err.(*goSetPush.DeliveryErr); ok {
+			var deliveryErr *goSetPush.DeliveryErr
+			if errors.As(result.Err, &deliveryErr) {
 				errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", deliveryErr.ErrCode, deliveryErr.Description)
 				eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", deliveryErr.ErrCode, "desc", deliveryErr.Description)
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			} else if result.StatusCode > 400 {
-				errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %d, POSTING to %s", configuration.Id, result.StatusCode, pushConfig.EndpointUrl)
-				eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", result.StatusCode, "url", pushConfig.EndpointUrl)
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			} else {
-				eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", result.Err)
 			}
 		}
 		return false

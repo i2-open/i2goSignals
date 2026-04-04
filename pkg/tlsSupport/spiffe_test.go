@@ -2,7 +2,6 @@ package tlsSupport
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +19,7 @@ func TestSpiffeEnabled_Set(t *testing.T) {
 }
 
 func TestClusterTrustDomain_Default(t *testing.T) {
-	os.Unsetenv(EnvSpiffeTrustDomain)
+	t.Setenv(EnvSpiffeTrustDomain, "")
 	td, err := ClusterTrustDomain()
 	require.NoError(t, err)
 	assert.Equal(t, DefaultTrustDomain, td.Name())

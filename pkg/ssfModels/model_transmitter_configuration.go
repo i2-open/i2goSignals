@@ -60,7 +60,7 @@ type TransmitterConfiguration struct {
 	GoSignalsVersion string `json:"gosignals_version,omitempty"`
 }
 
-func (tc TransmitterConfiguration) IsGoSignalsServer() bool {
+func (tc *TransmitterConfiguration) IsGoSignalsServer() bool {
 	return tc.GoSignalsVersion != ""
 }
 

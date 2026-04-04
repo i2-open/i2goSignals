@@ -403,7 +403,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		reason := "OAuth token validation failed"
 		if loadErr != nil {
 			reason += " while some JWKS failed to load"
-		} else if isMissingKID {
+		} else {
 			reason += " because Key ID was not found in JWKS (refresh may be in progress)"
 		}
 		authLog.Warn(reason, "error", loadErr)

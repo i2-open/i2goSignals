@@ -21,6 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -46,7 +47,7 @@ func TestServer(t *testing.T) {
 	testLog.Println("** Starting GoSignals (ssf1)...")
 	instance, err := createServer(t, "ssf1", true) // Reset DB for first instance
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", "ssf1", err.Error())
+		t.Fatalf("Error starting %s: %s", "ssf1", err.Error())
 	}
 	assert.NotEqualf(t, instance.projectId, "", "Check project id is not empty")
 
@@ -54,7 +55,7 @@ func TestServer(t *testing.T) {
 	testLog.Println("** Starting GoSignals (ssf2)...")
 	instance, err = createServer(t, "ssf2", false) // Don't reset DB for second instance (shared storage)
 	if err != nil {
-		testLog.Printf("Error starting %s: %s", "ssf2", err.Error())
+		t.Fatalf("Error starting %s: %s", "ssf2", err.Error())
 	}
 	instances[1] = instance
 
@@ -83,10 +84,13 @@ func (suite *ServerSuite) TearDownTest() {
 func (suite *ServerSuite) Test1_Certificate() {
 	serverUrl := fmt.Sprintf("http://%s/jwks.json", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
 	if err != nil {
-		testLog.Println(err.Error())
+		return
 	}
-	body, _ := io.ReadAll(resp.Body)
+	defer httpSupport.HandleRespClose(resp)
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(suite.T(), err)
 	assert.NotNil(suite.T(), body, "A certificate was returned.")
 
 	var rawJson json.RawMessage
@@ -109,10 +113,13 @@ func (suite *ServerSuite) Test1_Certificate() {
 func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
 	if err != nil {
-		testLog.Println(err.Error())
+		return
 	}
-	body, _ := io.ReadAll(resp.Body)
+	defer httpSupport.HandleRespClose(resp)
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(suite.T(), err)
 	var config model.TransmitterConfiguration
 	err = json.Unmarshal(body, &config)
 	assert.NoError(suite.T(), err, "Configuration parsed and returned")
@@ -140,10 +147,13 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	testLog.Println("0. Retrieving well-known configuration...")
 	serverUrl := fmt.Sprintf("http://%s/.well-known/ssf-configuration", suite.servers[0].host)
 	resp, err := http.Get(serverUrl)
+	assert.NoError(suite.T(), err)
 	if err != nil {
-		testLog.Println(err.Error())
+		return
 	}
-	body, _ := io.ReadAll(resp.Body)
+	defer httpSupport.HandleRespClose(resp)
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(suite.T(), err)
 	var config model.TransmitterConfiguration
 	err = json.Unmarshal(body, &config)
 
@@ -165,6 +175,10 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	regBytes, err := json.Marshal(regConfigRequest)
 
 	req, err := http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	req.Header.Add("Content-Type", "application/json;charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
@@ -188,6 +202,10 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	// Check that the same configuration is returned via GET to stream endpoint
 	streamUrl := fmt.Sprintf("%s?stream_id=%s", config.ConfigurationEndpoint, configResponse.Id)
 	getReq, err := http.NewRequest(http.MethodGet, streamUrl, nil)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	getReq.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(getReq)
 	assert.NoError(suite.T(), err, "Should be no error on GET")
@@ -203,6 +221,10 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	testLog.Println("3. Deleting stream from step 1...")
 
 	req, err = http.NewRequest(http.MethodDelete, streamUrl, nil)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 
 	// First try with the wrong authorization
 	req.Header.Set("Authorization", configResponse.Delivery.PollTransmitMethod.AuthorizationHeader)
@@ -232,8 +254,13 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 		RouteMode: model.RouteModeImport,
 	}
 
-	regBytes, _ = json.Marshal(reg2)
-	req, _ = http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
+	regBytes, err = json.Marshal(reg2)
+	assert.NoError(suite.T(), err)
+	req, err = http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 
 	resp, err = suite.servers[0].client.Do(req)
@@ -257,6 +284,10 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	testLog.Println("5. Delete incoming stream")
 	streamUrl = fmt.Sprintf("%s?stream_id=%s", config.ConfigurationEndpoint, registration2.Id)
 	req, err = http.NewRequest(http.MethodDelete, streamUrl, nil)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream delete request ok")
@@ -315,8 +346,16 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 
 	testLog.Println("Removing update test stream")
 	req, err = http.NewRequest(http.MethodDelete, streamUrl, nil)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check delete ok")
 }
 
@@ -389,10 +428,16 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	assert.NoError(suite.T(), err, "JSON Marshalling error")
 	req, err := http.NewRequest(http.MethodPut, streamUrl, bytes.NewReader(bodyBytes))
 	assert.NoError(suite.T(), err, "no request builder error")
+	if err != nil {
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check reset stream ok")
 	assert.NoError(suite.T(), err, "Update request successful")
+	if err != nil {
+		return
+	}
+	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check reset stream ok")
 	assert.NotNil(suite.T(), resp, "Response is not null")
 
 	var configResp model.StreamConfiguration
@@ -544,7 +589,7 @@ func (suite *ServerSuite) Test8_Prometheus() {
 	testLog.Println("Prometheus test complete.")
 }
 
-func (suite *ServerSuite) getMetricValue(app *ssef.SignalsApplication, vec *prometheus.CounterVec, tfr string, streamID string) int {
+func (suite *ServerSuite) getMetricValue(vec *prometheus.CounterVec, tfr string, streamID string) int {
 	label := prometheus.Labels{
 		"type":      model.EventScimCreateFull,
 		"iss":       "DEFAULT",
@@ -563,14 +608,25 @@ func (suite *ServerSuite) Test9_CreateIssuerKey() {
 	issuer := "example.com"
 	baseUrl := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
 
-	req, _ := http.NewRequest(http.MethodPost, baseUrl, nil)
+	req, err := http.NewRequest(http.MethodPost, baseUrl, nil)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 	resp, err := suite.servers[0].client.Do(req)
+	assert.NoError(suite.T(), err)
+	if err != nil {
+		return
+	}
 
 	assert.Equal(suite.T(), http.StatusForbidden, resp.StatusCode, "Check forbidden without authorization")
 
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error generating key")
+	if err != nil {
+		return
+	}
 	assert.Equal(suite.T(), http.StatusCreated, resp.StatusCode, "Check status created result")
 
 	body, _ := io.ReadAll(resp.Body)
@@ -847,8 +903,8 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	}
 	pemData := pem.EncodeToMemory(pemBlock)
 
-	url := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(pemData))
+	keyUrl := fmt.Sprintf("http://%s/key/%s", suite.servers[0].host, issuer)
+	req, _ := http.NewRequest(http.MethodPost, keyUrl, bytes.NewReader(pemData))
 	req.Header.Set("Content-Type", "application/x-pem-file")
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 

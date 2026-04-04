@@ -15,7 +15,7 @@ import (
 
 func TestPollUnauthorizedTightLoop(t *testing.T) {
 	// Ensure default delay is used or set it explicitly
-	os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
+	_ = os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
 
 	var pollCount int32
 
@@ -85,10 +85,8 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 
 func TestPollUnauthorizedRetry(t *testing.T) {
 	// Set a short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_LIMIT")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.2")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
 
 	var pollCount int32
 
@@ -166,10 +164,8 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 
 func TestPollUnauthorizedLimit(t *testing.T) {
 	// Set a very short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_LIMIT")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
 
 	var pollCount int32
 
@@ -243,8 +239,7 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 
 func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	// Set a very short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
 	// Use default limit (now 10)
 
 	var pollCount int32
