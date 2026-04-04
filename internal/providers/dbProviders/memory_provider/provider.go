@@ -70,9 +70,11 @@ func (m *MemoryProvider) initialize() {
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
 	serverDAO := memory.NewServerDAO()
+	tokenDAO := memory.NewTokenDAO()
 
 	// Initialize Services
-	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+	tokenService := services.NewTokenService(tokenDAO)
+	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 	eventService := services.NewEventService(eventDAO)
 	clientService := services.NewClientService(clientDAO, keyService)
@@ -80,8 +82,8 @@ func (m *MemoryProvider) initialize() {
 
 	// Initialize BaseProvider with services
 	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
-		keyService, streamService, eventService, clientService, serverService,
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+		keyService, streamService, eventService, clientService, serverService, tokenService,
 	)
 
 	// Initialize token keys
@@ -106,10 +108,12 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
 	serverDAO := memory.NewServerDAO()
+	tokenDAO := memory.NewTokenDAO()
 
 	if initialize {
 		// Re-initialize services with new DAOs
-		keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+		tokenService := services.NewTokenService(tokenDAO)
+		keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 		streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 		eventService := services.NewEventService(eventDAO)
 		clientService := services.NewClientService(clientDAO, keyService)
@@ -117,8 +121,8 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 
 		// Reinitialize BaseProvider
 		m.BaseProvider = common.NewBaseProvider(
-			streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
-			keyService, streamService, eventService, clientService, serverService,
+			streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+			keyService, streamService, eventService, clientService, serverService, tokenService,
 		)
 
 		ctx := context.Background()

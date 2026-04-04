@@ -116,7 +116,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 	s.Nil(err, "taken parse check")
 	s.NotNil(tkn, "mgmt token is valid check")
 
-	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project)
+	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project, nil)
 	s.Nil(err, "issue stream token error check")
 }
 

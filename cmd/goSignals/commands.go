@@ -1801,3 +1801,126 @@ func parseMode(param string) string {
 	}
 	return mode
 }
+
+type TokenListCmd struct {
+	Project string `help:"Filter by project ID"`
+	Client  string `help:"Filter by client ID"`
+}
+
+func (t *TokenListCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/token"
+	if t.Client != "" {
+		reqUrl += "?client_id=" + t.Client
+	} else if t.Project != "" {
+		reqUrl += "?project_id=" + t.Project
+	} else {
+		// Default to current project if available
+		if server.ProjectId != "" {
+			reqUrl += "?project_id=" + server.ProjectId
+		} else {
+			return errors.New("must specify --project or --client")
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error listing tokens: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Println(string(body))
+	return nil
+}
+
+type TokenRevokeCmd struct {
+	Jti string `arg:"" help:"The JTI of the token to revoke"`
+}
+
+func (t *TokenRevokeCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/token/" + t.Jti
+	req, err := http.NewRequest(http.MethodDelete, reqUrl, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("error revoking token: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Printf("Token %s revoked.\n", t.Jti)
+	return nil
+}
+
+type TokenIntrospectCmd struct {
+	Token string `arg:"" help:"The token string to introspect"`
+}
+
+func (t *TokenIntrospectCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/introspect"
+	data := url.Values{}
+	data.Set("token", t.Token)
+
+	req, err := http.NewRequest(http.MethodPost, reqUrl, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error introspecting token: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Println(string(body))
+	return nil
+}
+
+type TokenCmd struct {
+	List       TokenListCmd       `cmd:"" help:"List issued tokens"`
+	Revoke     TokenRevokeCmd     `cmd:"" help:"Revoke a token by JTI"`
+	Introspect TokenIntrospectCmd `cmd:"" help:"Introspect a token (RFC7662)"`
+}

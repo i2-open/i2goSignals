@@ -29,6 +29,7 @@ type BaseProvider struct {
 	keyDAO    interfaces.KeyDAO
 	clientDAO interfaces.ClientDAO
 	serverDAO interfaces.ServerDAO
+	tokenDAO  interfaces.TokenDAO
 
 	// Services - business logic layer
 	keyService    *services.KeyService
@@ -36,6 +37,7 @@ type BaseProvider struct {
 	eventService  *services.EventService
 	clientService *services.ClientService
 	serverService *services.ServerService
+	tokenService  *services.TokenService
 
 	// Optional hook for write operations (used by memory provider for dirty tracking)
 	afterWrite WriteHook
@@ -48,11 +50,13 @@ func NewBaseProvider(
 	keyDAO interfaces.KeyDAO,
 	clientDAO interfaces.ClientDAO,
 	serverDAO interfaces.ServerDAO,
+	tokenDAO interfaces.TokenDAO,
 	keyService *services.KeyService,
 	streamService *services.StreamService,
 	eventService *services.EventService,
 	clientService *services.ClientService,
 	serverService *services.ServerService,
+	tokenService *services.TokenService,
 ) *BaseProvider {
 	return &BaseProvider{
 		streamDAO:     streamDAO,
@@ -60,11 +64,13 @@ func NewBaseProvider(
 		keyDAO:        keyDAO,
 		clientDAO:     clientDAO,
 		serverDAO:     serverDAO,
+		tokenDAO:      tokenDAO,
 		keyService:    keyService,
 		streamService: streamService,
 		eventService:  eventService,
 		clientService: clientService,
 		serverService: serverService,
+		tokenService:  tokenService,
 	}
 }
 
@@ -203,7 +209,7 @@ func (b *BaseProvider) CreateStream(request model.StreamConfiguration, authCtx *
 		}
 	}
 
-	ctx := context.WithValue(context.Background(), "authCtx", authCtx)
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
 	res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, txServer)
 	if err == nil {
 		b.notifyWrite()
@@ -354,4 +360,8 @@ func (b *BaseProvider) DeleteServer(ctx context.Context, id string) error {
 
 func (b *BaseProvider) ListServers(ctx context.Context) ([]model.Server, error) {
 	return b.serverService.ListServers(ctx)
+}
+
+func (b *BaseProvider) GetTokenService() *services.TokenService {
+	return b.tokenService
 }

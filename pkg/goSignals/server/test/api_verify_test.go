@@ -69,7 +69,7 @@ func (suite *VerifySuite) TestTriggerVerification() {
 	// ValidateAuthorization for /verification usually expects stream_id in the token or as a query param.
 
 	// Create a token for this specific stream
-	streamToken, err := instance.provider.GetAuthIssuer().IssueStreamToken(streamId, instance.projectId)
+	streamToken, err := instance.provider.GetAuthIssuer().IssueStreamToken(streamId, instance.projectId, nil)
 	assert.NoError(t, err)
 
 	// 3. Trigger verification

@@ -223,7 +223,7 @@ func (suite *SSFConformanceSuite) TestSupportedScopes() {
 	_ = json.Unmarshal(body, &config)
 
 	if len(config.ScopesSupported) > 0 {
-		// Scopes should be non-empty strings
+		// Roles should be non-empty strings
 		for _, scope := range config.ScopesSupported {
 			assert.NotEmpty(t, scope, "Each scope should be a non-empty string")
 		}
@@ -233,7 +233,7 @@ func (suite *SSFConformanceSuite) TestSupportedScopes() {
 		// SupportedScopes maps endpoints to required scopes
 		for endpoint, scopes := range config.SupportedScopes {
 			assert.NotEmpty(t, endpoint, "Endpoint name should not be empty")
-			assert.NotEmpty(t, scopes, "Scopes array should not be empty for endpoint "+endpoint)
+			assert.NotEmpty(t, scopes, "Roles array should not be empty for endpoint "+endpoint)
 		}
 	}
 }

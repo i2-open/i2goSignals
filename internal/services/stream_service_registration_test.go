@@ -56,7 +56,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	// 2. Setup StreamService
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
-	keyService := NewKeyService(keyDAO, "http://receiver.com")
+	keyService := NewKeyService(keyDAO, "http://receiver.com", nil)
 
 	// We need to initialize token keys for the key service to have an auth issuer
 	err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
@@ -141,7 +141,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	// 2. Setup StreamService
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
-	keyService := NewKeyService(keyDAO, "http://receiver.com")
+	keyService := NewKeyService(keyDAO, "http://receiver.com", nil)
 
 	err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
 	assert.NoError(t, err)

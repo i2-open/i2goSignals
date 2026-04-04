@@ -353,6 +353,27 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.ProtectedResourceMetadata,
 			false,
 		},
+		Route{
+			"Introspect",
+			http.MethodPost,
+			"/introspect",
+			h.sa.IntrospectHandler,
+			false,
+		},
+		Route{
+			"TokenRevoke",
+			http.MethodDelete,
+			"/token/{jti}",
+			h.sa.TokenRevokeHandler,
+			false,
+		},
+		Route{
+			"TokenList",
+			http.MethodGet,
+			"/token",
+			h.sa.TokenListHandler,
+			false,
+		},
 	}
 	return routes
 }

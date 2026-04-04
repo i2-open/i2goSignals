@@ -42,6 +42,7 @@ type CLI struct {
 	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
 	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
 	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
+	Token    TokenCmd    `cmd:"" help:"Manage issued tokens"`
 	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
 	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
 }

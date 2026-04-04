@@ -539,7 +539,7 @@ func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 //
 // Inputs:
 //   - Authorization (header): IAT with 'register' scope.
-//   - Request body (JSON): RegisterParameters containing Email, Description, and Scopes.
+//   - Request body (JSON): RegisterParameters containing Email, Description, and Roles.
 //
 // Return values:
 //   - 200 OK: JSON object containing client registration details (ClientId, ClientSecret, etc.).
@@ -1085,6 +1085,101 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// IntrospectHandler implements RFC7662 token introspection.
+func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Validate authorization (Relatively open) - should this be anyone?
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	// 2. Parse token from form
+	token := r.FormValue("token")
+	if token == "" {
+		http.Error(w, "Missing token", http.StatusBadRequest)
+		return
+	}
+
+	// 3. Extract JTI if it's a JWT, or use as is if it's an opaque JTI
+	jti := token
+	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil {
+		jti = claims.ID
+	}
+
+	// 4. Introspect
+	resp, err := sa.GetProvider().GetTokenService().IntrospectToken(r.Context(), jti)
+	if err != nil {
+		serverLog.Error("Introspection error", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// TokenRevokeHandler revokes a token by its JTI.
+func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	vars := mux.Vars(r)
+	jti := vars["jti"]
+	if jti == "" {
+		http.Error(w, "Missing jti", http.StatusBadRequest)
+		return
+	}
+
+	err := sa.GetProvider().GetTokenService().RevokeToken(r.Context(), jti)
+	if err != nil {
+		serverLog.Error("Revocation error", "jti", jti, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// TokenListHandler lists tokens by project or client.
+func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	queryParams := r.URL.Query()
+	projectId := queryParams.Get("project_id")
+	clientId := queryParams.Get("client_id")
+
+	var tokens []*model.TokenRecord
+	var err error
+
+	if clientId != "" {
+		tokens, err = sa.GetProvider().GetTokenService().ListByClient(r.Context(), clientId)
+	} else if projectId != "" {
+		tokens, err = sa.GetProvider().GetTokenService().ListByProject(r.Context(), projectId)
+	} else {
+		// List all? DAO doesn't have list all yet. I'll use projectId if provided, else return error for now
+		// or I can add ListAll to DAO.
+		http.Error(w, "Missing project_id or client_id", http.StatusBadRequest)
+		return
+	}
+
+	if err != nil {
+		serverLog.Error("Token list error", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(tokens)
 }
 
 // JwksIssuers lists all issuers that have JWKS available.

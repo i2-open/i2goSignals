@@ -23,6 +23,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
+const AuthContextKey = "AuthContext"
+
 var authLog = logger.Sub("AUTH")
 
 type AuthContext struct {
@@ -40,7 +42,8 @@ type AuthIssuer struct {
 	PublicKey    *keyfunc.JWKS
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
-	OAuthServer []string // OAuth Authorization Server identifiers
+	OAuthServer  []string                 // OAuth Authorization Server identifiers
+	TokenTracker authSupport.TokenTracker // Tracker for revocation
 }
 
 func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *keyfunc.JWKS) {
@@ -173,10 +176,21 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	privateKey := a.PrivateKey
 	a.mu.RUnlock()
 
+	clientId := ""
+	if authCtx != nil && authCtx.Eat != nil {
+		clientId = authCtx.Eat.ClientId
+	}
+	subject := ""
+	if authCtx != nil && authCtx.Eat != nil {
+		subject = authCtx.Eat.Subject
+	}
+
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    []string{authSupport.ScopeRegister},
+		Roles:     []string{authSupport.ScopeRegister},
+		ClientId:  clientId,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   subject,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
 			Audience:  []string{issuer},
@@ -189,7 +203,11 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeIAT)
+	}
+	return signed, err
 }
 
 func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
@@ -211,7 +229,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    scopes,
+		Roles:     scopes,
 		ClientId:  client.Id.Hex(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -226,10 +244,14 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+	}
+	return signed, err
 }
 
-func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string, error) {
+func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session *AuthContext) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
 	a.mu.RLock()
@@ -243,6 +265,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 
 	eat := authSupport.EventAuthToken{
 		StreamIds: []string{streamId},
+		ProjectId: projectId,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -254,13 +277,24 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 	if projectId != "" {
 		eat.ProjectId = projectId
 	}
-	eat.Scopes = []string{authSupport.ScopeEventDelivery}
+	eat.Roles = []string{authSupport.ScopeEventDelivery}
+	if session != nil {
+		if session.Eat != nil {
+			eat.ClientId = session.Eat.ClientId
+			eat.Subject, _ = session.Eat.GetSubject()
+		}
+
+	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+	}
+	return signed, err
 }
 
 // ValidateAuthorizationAny validates the Authorization header against either a locally issued token
@@ -427,6 +461,12 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 	// authLog.Println(claimString)
 	if token != nil {
 		if claims, ok := token.Claims.(*authSupport.EventAuthToken); ok && valid {
+			if a.TokenTracker != nil {
+				revoked, _ := a.TokenTracker.IsRevoked(context.Background(), claims.ID)
+				if revoked {
+					return nil, errors.New("token has been revoked")
+				}
+			}
 			return claims, nil
 		}
 	}

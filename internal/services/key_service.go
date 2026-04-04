@@ -13,6 +13,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -29,12 +30,13 @@ type KeyService struct {
 	authIssuer  *authUtil.AuthIssuer
 }
 
-func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string) *KeyService {
+func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker) *KeyService {
 	return &KeyService{
 		keyDAO:      keyDAO,
 		tokenIssuer: tokenIssuer,
 		authIssuer: &authUtil.AuthIssuer{
-			TokenIssuer: tokenIssuer,
+			TokenIssuer:  tokenIssuer,
+			TokenTracker: tokenTracker,
 		},
 	}
 }

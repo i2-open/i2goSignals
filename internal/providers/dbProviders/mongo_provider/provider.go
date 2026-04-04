@@ -31,6 +31,7 @@ const CDbClients = "clients"
 const CDbLeases = "cluster_leases"
 const CDbNodes = "cluster_nodes"
 const CDbServers = "servers"
+const CDbTokens = "tokens"
 
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
@@ -70,6 +71,7 @@ type MongoProvider struct {
 	leaseCol     *mongo.Collection
 	nodeCol      *mongo.Collection
 	serverCol    *mongo.Collection
+	tokenCol     *mongo.Collection
 
 	DefaultIssuer string
 	TokenIssuer   string
@@ -114,6 +116,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.serverCol = m.ssefDb.Collection(CDbServers)
 	m.leaseCol = m.ssefDb.Collection(CDbLeases)
 	m.nodeCol = m.ssefDb.Collection(CDbNodes)
+	m.tokenCol = m.ssefDb.Collection(CDbTokens)
 
 	// Create indexes
 	if !dbExists {
@@ -129,9 +132,11 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	keyDAO := mongodao.NewKeyDAO(m.keyCol)
 	clientDAO := mongodao.NewClientDAO(m.clientCol)
 	serverDAO := mongodao.NewServerDAO(m.serverCol)
+	tokenDAO := mongodao.NewTokenDAO(m.tokenCol)
 
 	// Initialize Services
-	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+	tokenService := services.NewTokenService(tokenDAO)
+	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 	eventService := services.NewEventService(eventDAO)
 	clientService := services.NewClientService(clientDAO, keyService)
@@ -139,8 +144,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 
 	// Initialize BaseProvider with services
 	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
-		keyService, streamService, eventService, clientService, serverService,
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+		keyService, streamService, eventService, clientService, serverService, tokenService,
 	)
 
 	// Initialize token keys

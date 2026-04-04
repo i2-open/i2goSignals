@@ -103,6 +103,9 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
 	mid := bson.NewObjectID()
 
+	// var authCtx authUtil.AuthContext
+	// authCtx = ctx.Value(authUtil.AuthContextKey).(authUtil.AuthContext)
+
 	if logger.IsDebugEnabled() {
 		ssLog.Debug("CreateStream dump:")
 		fmt.Println("CreateStream", mid, "projectID", projectID)
@@ -203,7 +206,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 	case model.DeliveryPoll, "DEFAULT":
 		authToken := ""
 		if !isOAuth {
-			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID)
+			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
 		}
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
@@ -231,7 +234,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		method := config.Delivery.PushReceiveMethod
 		method.EndpointUrl = s.getFullUrl(fmt.Sprintf("/events/%s", mid.Hex()))
 		if !isOAuth {
-			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
 			}

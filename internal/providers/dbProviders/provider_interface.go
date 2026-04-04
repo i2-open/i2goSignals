@@ -9,6 +9,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -92,4 +93,6 @@ type DbProviderInterface interface {
 	UpdateServer(ctx context.Context, server *model.Server) error
 	DeleteServer(ctx context.Context, id string) error
 	ListServers(ctx context.Context) ([]model.Server, error)
+
+	GetTokenService() *services.TokenService
 }
