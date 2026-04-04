@@ -16,6 +16,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
@@ -25,6 +26,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var eventLogger = logger.Sub("ROUTER")
@@ -68,6 +70,9 @@ type router struct {
 	outboundWakesMu     sync.Mutex
 	backfillInterval    time.Duration
 	backfillBatch       int
+	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
+	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
+	x509Source *workloadapi.X509Source
 }
 
 type statsTracker interface {
@@ -106,6 +111,28 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 		httpClient:          &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
 		recentOutboundWakes: make(map[string]time.Time),
+	}
+
+	// When SPIFFE is configured, replace the plain HTTP client with one that
+	// uses mutual TLS backed by the workload's X509-SVID. This allows inter-cluster
+	// wake-up calls to authenticate via SPIFFE without the shared HMAC secret.
+	if tlsSupport.SpiffeEnabled() {
+		if x509Source, err := tlsSupport.NewX509Source(ctx); err == nil {
+			tlsCfg, cfgErr := tlsSupport.NewClusterMTLSClientConfig(x509Source)
+			if cfgErr == nil {
+				router.httpClient = &http.Client{
+					Timeout:   5 * time.Second,
+					Transport: &http.Transport{TLSClientConfig: tlsCfg},
+				}
+				router.x509Source = x509Source
+				eventLogger.Info("ROUTER: SPIFFE mTLS enabled for inter-cluster communication")
+			} else {
+				_ = x509Source.Close()
+				eventLogger.Warn("ROUTER: SPIFFE config invalid; using HMAC-only", "err", cfgErr)
+			}
+		} else {
+			eventLogger.Warn("ROUTER: SPIFFE configured but X509Source failed; using HMAC-only", "err", err)
+		}
 	}
 
 	backfillInterval := 1 * time.Second
@@ -970,6 +997,9 @@ func (r *router) Shutdown() {
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
 	}
-
-	// Nothing need to be done for polling because.
+	if r.x509Source != nil {
+		_ = r.x509Source.Close()
+		r.x509Source = nil
+	}
+	// Nothing need to be done for polling.
 }

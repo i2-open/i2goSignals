@@ -17,7 +17,32 @@ const (
 	AuthModeSts         = "sts"    // AuthModeSts is used when exchanging an administrative token for a new access token
 	AuthModeClient      = "client" // AuthModeClient is used to indicate the client credential is used to obtain an access token for the server
 	AuthModeIaT         = "iat"
+	AuthModeSpiffe      = "spiffe" // AuthModeSpiffe uses SPIFFE X.509-SVIDs for mutual TLS authentication
 )
+
+// SpiffeConfig holds the SPIFFE identity information needed to establish a
+// mutually authenticated TLS connection with a remote SSF or goSignals server.
+// Either SpiffeID or TrustDomain must be set; SpiffeID takes precedence when both are provided.
+type SpiffeConfig struct {
+	// TrustDomain of the remote server's SPIFFE trust domain.
+	// Authorizes any SVID that belongs to this trust domain.
+	// Example: "partner.example.com"
+	TrustDomain string `bson:"trustDomain,omitempty" json:"trustDomain,omitempty"`
+
+	// SpiffeID is the exact SPIFFE ID of the remote server to authorize.
+	// Takes precedence over TrustDomain when set.
+	// Example: "spiffe://partner.example.com/workload/ssf-server"
+	SpiffeID string `bson:"spiffeId,omitempty" json:"spiffeId,omitempty"`
+}
+
+// DeepCopy returns a deep copy of the SpiffeConfig.
+func (s *SpiffeConfig) DeepCopy() *SpiffeConfig {
+	if s == nil {
+		return nil
+	}
+	res := *s
+	return &res
+}
 
 type Server struct {
 	Id                  bson.ObjectID      `bson:"_id,omitempty" json:"id"`
@@ -29,6 +54,7 @@ type Server struct {
 	TokenExpires        *time.Time         // TimeExpires is the time the ClientToken expires
 	IatToken            *string            // IaT is used to register new client (Initial Access Token)
 	OAuthClientConfig   *OAuthClientConfig // Used for OAuth2 token exchange flows
+	SpiffeConfig        *SpiffeConfig      // Used for SPIFFE X.509-SVID mutual TLS authentication
 	ProjectId           string
 	ServerConfiguration *TransmitterConfiguration
 	OfflineMode         bool   `json:"OfflineMode"`              // OfflineMode indicates if the server is in offline or not accessible
@@ -47,8 +73,12 @@ type OAuthClientConfig struct {
 	Scopes   []string // Scopes required to post events and manage streams for SSF capability
 }
 
-// GetAuthMode returns the type of authentication mode used to access the server. Returns one of AuthModeSts, AuthModeToken, AuthModeIaT, AuthModeClient.
+// GetAuthMode returns the type of authentication mode used to access the server.
+// Priority order: SPIFFE > OAuth Client Credentials > Initial Access Token > Static Token > STS.
 func (s *Server) GetAuthMode() string {
+	if s.SpiffeConfig != nil {
+		return AuthModeSpiffe
+	}
 	if s.OAuthClientConfig != nil {
 		return AuthModeClient
 	}
@@ -94,6 +124,9 @@ func (s *Server) DeepCopy() *Server {
 	}
 	if s.OAuthClientConfig != nil {
 		res.OAuthClientConfig = s.OAuthClientConfig.DeepCopy()
+	}
+	if s.SpiffeConfig != nil {
+		res.SpiffeConfig = s.SpiffeConfig.DeepCopy()
 	}
 	if s.ServerConfiguration != nil {
 		res.ServerConfiguration = s.ServerConfiguration.DeepCopy()

@@ -14,6 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -77,6 +78,10 @@ type MongoProvider struct {
 	TokenIssuer   string
 	resumeTokens  *watchtokens.TokenData
 	stopMonitor   chan struct{}
+
+	// x509Source is non-nil when SPIFFE mTLS is enabled for MongoDB connections.
+	// It is closed in Close().
+	x509Source interface{ Close() error }
 }
 
 func (m *MongoProvider) Name() string {
@@ -231,6 +236,12 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	return err
 }
 
+const (
+	// CEnvSpiffeMongoEnabled controls whether SPIFFE mTLS is used for MongoDB
+	// connections. Requires SPIFFE_ENDPOINT_SOCKET to also be set.
+	CEnvSpiffeMongoEnabled = "SPIFFE_MONGO_ENABLED"
+)
+
 func (m *MongoProvider) connect() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -242,6 +253,28 @@ func (m *MongoProvider) connect() error {
 	opts.WriteConcern = &writeconcern.WriteConcern{
 		W: "majority",
 	}
+
+	// When SPIFFE mTLS is enabled for MongoDB, obtain the workload's X509-SVID
+	// and use it as the client certificate. This replaces username/password
+	// authentication with cryptographic workload identity, provided the MongoDB
+	// server is configured to accept mTLS with the SPIRE CA bundle.
+	if os.Getenv(CEnvSpiffeMongoEnabled) == "true" && tlsSupport.SpiffeEnabled() {
+		x509Source, err := tlsSupport.NewX509Source(context.Background())
+		if err == nil {
+			tlsCfg, cfgErr := tlsSupport.NewClusterMTLSClientConfig(x509Source)
+			if cfgErr == nil {
+				opts.SetTLSConfig(tlsCfg)
+				m.x509Source = x509Source
+				pLog.Info("MongoDB: SPIFFE mTLS enabled for database connection")
+			} else {
+				_ = x509Source.Close()
+				pLog.Warn("MongoDB: SPIFFE config error; using password auth", "err", cfgErr)
+			}
+		} else {
+			pLog.Warn("MongoDB: SPIFFE enabled but X509Source failed; using password auth", "err", err)
+		}
+	}
+
 	client, err := mongo.Connect(opts)
 	if err != nil {
 		return err
@@ -360,6 +393,10 @@ func (m *MongoProvider) Close() error {
 		default:
 			close(m.stopMonitor)
 		}
+	}
+	if m.x509Source != nil {
+		_ = m.x509Source.Close()
+		m.x509Source = nil
 	}
 	if m.mongoClient != nil {
 		err := m.mongoClient.Disconnect(context.Background())

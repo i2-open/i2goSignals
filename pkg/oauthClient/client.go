@@ -496,11 +496,22 @@ func GetClientCredentialsClient(ctx context.Context, cfg Config, server *model.S
 }
 
 // GetClientForServer returns an http.Client configured for the given server based on its auth mode.
-// It prioritizes OAuth2 Client Credentials flow, then static token, then fallback to base client with TLS.
-// The returned client automatically handles the Authorization header for both OAuth2 and Static Token modes.
+// Priority order: SPIFFE mTLS > OAuth2 Client Credentials > Static Token > Base TLS client.
+// The returned client automatically handles the Authorization header for OAuth2 and Static Token modes.
+// For SPIFFE mode, mutual TLS provides authentication at the transport layer.
 func GetClientForServer(ctx context.Context, server *model.Server) (*http.Client, error) {
 	if server == nil {
 		return nil, errors.New("server is nil")
+	}
+
+	// Try SPIFFE mTLS first — falls through to next mode if SPIRE is not configured.
+	if server.SpiffeConfig != nil {
+		client, err := GetSpiffeClient(ctx, server)
+		if err == nil {
+			return client, nil
+		}
+		clientLog.Warn("SPIFFE client unavailable, falling back to next auth mode",
+			"host", server.Host, "err", err)
 	}
 
 	// Try OAuth client credentials first

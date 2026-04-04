@@ -46,6 +46,10 @@ Currently i2goSignals has minimal configuration properties. The current values a
 | `SERVER_KEY_PATH`            | Path to the PEM-encoded server private key.                                                                                                | `config/certs/server-key.pem`                          |
 | `CA_CERT`                    | Path to the CA certificate PEM file. Used to trust the server in clients and sign certificates if using `genTlsKeys`.                      | `config/certs/ca-cert.pem`                             |
 | `CERT_CA_PUB_KEY`             | Alias for `CA_CERT`.                                                                                                                       | `_same as CA_CERT_`                                    |
+| <BR>**SPIFFE/SPIRE**         |                                                                                                                                            |                                                        |
+| `SPIFFE_ENDPOINT_SOCKET`     | Path to the SPIRE agent Unix socket. Setting this value enables all SPIFFE features. When unset, the server operates in HMAC/OAuth mode.  | _none_ (SPIFFE disabled)                               |
+| `SPIFFE_TRUST_DOMAIN`        | SPIFFE trust domain for this cluster. Used to authorize peer SVIDs in inter-cluster calls and inbound WakeTransmitter requests.            | `cluster.i2gosignals.internal`                         |
+| `SPIFFE_MONGO_ENABLED`       | If `true`, use SPIFFE X.509-SVID mutual TLS for MongoDB connections instead of username/password. Requires `SPIFFE_ENDPOINT_SOCKET`.       | `false`                                                |
 
 
 

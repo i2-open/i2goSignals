@@ -62,6 +62,30 @@ Run the i2goSignals server and Mongo database using docker-compose
 ## Documentation
 * [goSignals administration tool](docs/gosignals_tool.md)
 * [Supported environment properties](docs/configuration_properties.md)
+* [Security model](docs/security_model.md)
+* [SPIFFE/SPIRE integration plan](docs/spiffe_support_plan.md)
+
+## SPIFFE/SPIRE Support
+
+i2goSignals supports [SPIFFE](https://spiffe.io/) workload identity for mutual TLS, augmenting
+the existing HMAC and OAuth2 mechanisms without replacing them.
+
+**What it enables:**
+- Inter-cluster `WakeTransmitter` calls authenticated by X.509-SVID instead of a shared HMAC secret
+- SSF stream management to SPIFFE-aware servers via `SpiffeConfig` on server records
+- MongoDB connections secured with SVID client certificates (opt-in)
+- SPIRE Federation for cross-domain SSF deployments
+
+**Quick start (SPIFFE-enabled dev environment):**
+```bash
+docker-compose -f docker-compose-spiffe-dev.yml up -d
+
+# After SPIRE server and agent are healthy, register workloads:
+docker exec spire-server sh /etc/spire/registration/register.sh
+```
+
+Setting `SPIFFE_ENDPOINT_SOCKET` enables SPIFFE features; when unset the server operates
+identically to previous releases. See [`docs/security_model.md`](docs/security_model.md) for details.
 
 
 ## Demonstration Set Up
