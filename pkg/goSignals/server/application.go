@@ -73,7 +73,16 @@ func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
 }
 
 func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
-	return sa.Auth
+	if sa.Provider != nil {
+		auth := sa.Provider.GetAuthIssuer()
+		if auth != nil {
+			sa.mu.Lock()
+			sa.Auth = auth
+			sa.mu.Unlock()
+		}
+		return auth
+	}
+	return nil
 }
 
 func (sa *SignalsApplication) GetDefIssuer() string {
@@ -125,13 +134,17 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	sa := &SignalsApplication{
 		Provider:      provider,
 		AdminRole:     role,
-		Auth:          provider.GetAuthIssuer(),
 		pollClients:   map[string]*ClientPollStream{},
 		pushClients:   map[string]*ReceiverPushStream{},
 		pushReceivers: map[string]model.StreamStateRecord{},
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
 		stopSync:      make(chan struct{}),
+	}
+
+	// Initialize Auth if available
+	if sa.Provider != nil {
+		sa.Auth = sa.Provider.GetAuthIssuer()
 	}
 
 	serverLog.Info("Starting goSignalsApplication", "nodeID", nodeID)

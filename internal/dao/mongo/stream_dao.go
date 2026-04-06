@@ -22,6 +22,9 @@ func NewStreamDAO(collection *mongo.Collection) interfaces.StreamDAO {
 }
 
 func (d *StreamDAOMongo) Create(ctx context.Context, state *model.StreamStateRecord) error {
+	if d.collection == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	_, err := d.collection.InsertOne(ctx, state)
 	if err != nil {
 		sLog.Error("Error inserting stream", "error", err)
@@ -30,6 +33,9 @@ func (d *StreamDAOMongo) Create(ctx context.Context, state *model.StreamStateRec
 }
 
 func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
+	if d.collection == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	docId, err := ParseObjectID(id)
 	if err != nil {
 		return nil, err
@@ -52,6 +58,9 @@ func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.Stream
 }
 
 func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRecord) error {
+	if d.collection == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	filter := bson.M{"_id": state.Id}
 	res, err := d.collection.ReplaceOne(ctx, filter, state)
 	if err != nil {
@@ -62,6 +71,9 @@ func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRec
 }
 
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
+	if d.collection == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err
@@ -77,6 +89,9 @@ func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
 }
 
 func (d *StreamDAOMongo) List(ctx context.Context) ([]model.StreamStateRecord, error) {
+	if d.collection == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	cursor, err := d.collection.Find(ctx, bson.D{})
 	if err != nil {
 		sLog.Error("Error listing Stream Configs", "error", err)
@@ -93,6 +108,9 @@ func (d *StreamDAOMongo) List(ctx context.Context) ([]model.StreamStateRecord, e
 }
 
 func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) ([]model.StreamStateRecord, error) {
+	if d.collection == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	filter := bson.M{"project_id": projectID}
 	cursor, err := d.collection.Find(ctx, filter)
 	if err != nil {
@@ -110,6 +128,9 @@ func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
 }
 
 func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
+	if d.collection == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	// Receiver streams have RouteMode = "import"
 	filter := bson.M{"route_mode": model.RouteModeImport}
 	cursor, err := d.collection.Find(ctx, filter)
@@ -128,6 +149,9 @@ func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.Strea
 }
 
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	if d.collection == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	docId, err := ParseObjectID(id)
 	if err != nil {
 		return err

@@ -49,11 +49,15 @@ dev-build-image:
 
 # Bring up the minimal dev stack with the debug-enabled goSignals1
 dev-up: check-certs
-	 docker compose -f docker-compose-dev.yml up -d mongo1 mongo2 mongo3 mongoSetup prometheus grafana keycloak goSignals1 goSignals2 goSsfServer
+	 docker compose -f docker-compose-dev.yml up -d mongo1 mongo2 mongo3 mongo-init prometheus grafana keycloak goSignals1 goSignals2 goSsfServer
 
 # Rebuild the dev image and restart goSignals1
 dev-rebuild: dev-build-image
 	 docker compose -f docker-compose-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
+
+# Rebuild the dev image and restart for spiffe
+dev-rebuild-spiffe: dev-build-image
+	 docker compose -f docker-compose-spiffe-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
 
 # Stop and remove the dev stack containers
 dev-down:
@@ -61,7 +65,7 @@ dev-down:
 
 # Reset the mongo cluster database
 dbclean:
-	 rm -rf .mongo/mongo1 .mongo/mongo2 .mongo/mongo3
+	 # Database now in Docker volumes, use 'make dev-clean' instead
 
 # Tail logs from goSignals1
 dev-logs:

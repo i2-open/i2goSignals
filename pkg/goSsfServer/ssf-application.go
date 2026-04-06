@@ -45,6 +45,15 @@ func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 }
 
 func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
+	if sa.Provider != nil {
+		auth := sa.Provider.GetAuthIssuer()
+		if auth != nil {
+			sa.mu.Lock()
+			sa.Auth = auth
+			sa.mu.Unlock()
+		}
+		return auth
+	}
 	return sa.Auth
 }
 
@@ -218,9 +227,12 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	sa := &SsfApplication{
 		Provider:  provider,
 		AdminRole: role,
-		Auth:      provider.GetAuthIssuer(),
 		NodeID:    nodeID,
 		StartedAt: time.Now().UTC(),
+	}
+
+	if sa.Provider != nil {
+		sa.Auth = sa.Provider.GetAuthIssuer()
 	}
 
 	serverLog.Info("Starting goSsfApplication", "nodeID", nodeID)

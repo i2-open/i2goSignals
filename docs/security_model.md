@@ -90,7 +90,7 @@ SPIRE CA bundle as the trusted root. Falls back to password auth if SPIRE is una
 
 [SPIRE federation](https://spiffe.io/docs/latest/architecture/federation/readme/) extends the
 trust model across organizational boundaries, enabling SPIFFE mTLS for SSF streams that cross
-domain boundaries. See [`docs/spiffe_support_plan.md`](spiffe_support_plan.md) and
+domain boundaries. See [`docs/spiffe_support_plan.md`](spiffe_support.md) and
 [`config/spire/registration/register.sh`](../config/spire/registration/register.sh) for setup
 instructions.
 

@@ -2,16 +2,22 @@ package mongo_provider
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/MicahParks/keyfunc/v2"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -86,6 +92,36 @@ type MongoProvider struct {
 
 func (m *MongoProvider) Name() string {
 	return m.DbName
+}
+
+// initBaseProvider initializes the embedded BaseProvider with "disconnected" services
+// that use nil collections. This prevents nil pointer panics when the provider is
+// accessed before the initial MongoDB connection is established.
+func (m *MongoProvider) initBaseProvider() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Initialize DAOs with nil collections (mongodao.New... handles nil safely)
+	streamDAO := mongodao.NewStreamDAO(nil)
+	eventDAO := mongodao.NewEventDAO(nil, nil, nil)
+	keyDAO := mongodao.NewKeyDAO(nil)
+	clientDAO := mongodao.NewClientDAO(nil)
+	serverDAO := mongodao.NewServerDAO(nil)
+	tokenDAO := mongodao.NewTokenDAO(nil)
+
+	// Initialize Services (services.New... handles nil safely)
+	tokenService := services.NewTokenService(tokenDAO)
+	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
+	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
+	eventService := services.NewEventService(eventDAO)
+	clientService := services.NewClientService(clientDAO, keyService)
+	serverService := services.NewServerService(serverDAO)
+
+	// Initialize BaseProvider with services
+	m.BaseProvider = common.NewBaseProvider(
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+		keyService, streamService, eventService, clientService, serverService, tokenService,
+	)
 }
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
@@ -197,10 +233,16 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 }
 
 func (m *MongoProvider) Check() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return m.CheckWithContext(ctx)
+}
+
+func (m *MongoProvider) CheckWithContext(ctx context.Context) error {
 	if m.mongoClient == nil {
 		return errors.New("mongo client not initialized")
 	}
-	return m.mongoClient.Ping(context.Background(), nil)
+	return m.mongoClient.Ping(ctx, nil)
 }
 
 func (m *MongoProvider) ResetDb(initialize bool) error {
@@ -246,7 +288,8 @@ func (m *MongoProvider) connect() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Overall timeout for the connection attempt, including SPIFFE setup, MongoDB connection, ping, and initialization.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	opts := options.Client().ApplyURI(m.DbUrl)
@@ -259,7 +302,10 @@ func (m *MongoProvider) connect() error {
 	// authentication with cryptographic workload identity, provided the MongoDB
 	// server is configured to accept mTLS with the SPIRE CA bundle.
 	if os.Getenv(CEnvSpiffeMongoEnabled) == "true" && tlsSupport.SpiffeEnabled() {
-		x509Source, err := tlsSupport.NewX509Source(context.Background())
+		// Dedicate 30 seconds of the overall timeout to obtaining the X509Source.
+		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 30*time.Second)
+		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
+		spiffeCancel()
 		if err == nil {
 			tlsCfg, cfgErr := tlsSupport.NewClusterMTLSClientConfig(x509Source)
 			if cfgErr == nil {
@@ -281,7 +327,7 @@ func (m *MongoProvider) connect() error {
 	}
 	m.mongoClient = client
 
-	err = m.Check()
+	err = m.CheckWithContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -365,11 +411,22 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		stopMonitor:   make(chan struct{}),
 	}
 
-	if logger.IsDebugEnabled() {
+	// Initialize a minimal BaseProvider so that methods like GetAuthIssuer can be called
+	// safely even before the initial connection is established.
+	m.initBaseProvider()
+
+	if os.Getenv("PAUSE_FOR_DEBUG") == "TRUE" {
 		pLog.Info("Pausing to allow debug to load")
-		time.Sleep(10 * time.Second)
+		// Using a channel and select to allow for potentially shorter pauses or cancellations if needed,
+		// but keeping the 10s requirement for now.
+		timer := time.NewTimer(10 * time.Second)
+		select {
+		case <-timer.C:
+		}
 	}
 
+	// Use a longer timeout for the overall connect attempt to allow for network delays and SPIFFE overhead.
+	// But let m.connect handle its own internal contexts.
 	err := m.connect()
 	if err != nil {
 		pLog.Warn("initial Mongo connection failed. Retrying in background.", "error", err)
@@ -379,7 +436,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 
 	go m.monitor()
 
-	return m, nil
+	return m, err
 }
 
 func (m *MongoProvider) Close() error {
@@ -407,17 +464,193 @@ func (m *MongoProvider) Close() error {
 	return nil
 }
 
+// getBaseProvider returns the embedded BaseProvider with proper RLock protection
+func (m *MongoProvider) getBaseProvider() *common.BaseProvider {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.BaseProvider
+}
+
+// DbProviderInterface delegation with thread-safety
+
+func (m *MongoProvider) DeleteKeysByName(keyName string) error {
+	return m.getBaseProvider().DeleteKeysByName(keyName)
+}
+
+func (m *MongoProvider) GetPublicJWKS(keyName string) *json.RawMessage {
+	return m.getBaseProvider().GetPublicJWKS(keyName)
+}
+
+func (m *MongoProvider) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
+	return m.getBaseProvider().GetPrivateKey(keyName)
+}
+
+func (m *MongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
+	return m.getBaseProvider().GetAuthValidatorPubKey()
+}
+
+func (m *MongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
+	return m.getBaseProvider().GetAuthIssuer()
+}
+
+func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
+	return m.getBaseProvider().GetIssuerJwksForReceiver(sid)
+}
+
+func (m *MongoProvider) CreateKeyPair(keyName string, use string, projectId string) (*rsa.PrivateKey, error) {
+	return m.getBaseProvider().CreateKeyPair(keyName, use, projectId)
+}
+
+func (m *MongoProvider) RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error) {
+	return m.getBaseProvider().RotateKey(keyName, projectId)
+}
+
+func (m *MongoProvider) ListKeyNames() []string {
+	return m.getBaseProvider().ListKeyNames()
+}
+
+func (m *MongoProvider) ListSummaries() ([]interfaces.KeySummary, error) {
+	return m.getBaseProvider().ListSummaries()
+}
+
+func (m *MongoProvider) GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error) {
+	return m.getBaseProvider().GetPrivateKeyWithKid(keyName)
+}
+
+func (m *MongoProvider) AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+	return m.getBaseProvider().AddKey(keyName, use, kid, privateKey, publicKey, projectId)
+}
+
+func (m *MongoProvider) RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse {
+	return m.getBaseProvider().RegisterClient(request, projectId)
+}
+
+func (m *MongoProvider) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
+	return m.getBaseProvider().CreateStream(request, authCtx)
+}
+
+func (m *MongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+	return m.getBaseProvider().UpdateStream(streamId, projectId, configReq)
+}
+
+func (m *MongoProvider) DeleteStream(streamId string) error {
+	return m.getBaseProvider().DeleteStream(streamId)
+}
+
+func (m *MongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
+	return m.getBaseProvider().GetStream(id)
+}
+
+func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
+	return m.getBaseProvider().GetStreamState(id)
+}
+
+func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
+	m.getBaseProvider().UpdateStreamStatus(streamId, status, errorMsg)
+}
+
+func (m *MongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
+	return m.getBaseProvider().GetStatus(streamId)
+}
+
+func (m *MongoProvider) ListStreams() []model.StreamConfiguration {
+	return m.getBaseProvider().ListStreams()
+}
+
+func (m *MongoProvider) GetStateMap() map[string]model.StreamStateRecord {
+	return m.getBaseProvider().GetStateMap()
+}
+
+func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
+	return m.getBaseProvider().GetEventIds(streamId, params)
+}
+
+func (m *MongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
+	return m.getBaseProvider().GetEvent(jti)
+}
+
+func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
+	return m.getBaseProvider().GetEvents(jtis)
+}
+
+func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
+	return m.getBaseProvider().GetEventRecord(jti)
+}
+
+func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
+	return m.getBaseProvider().AckEvent(jtiString, streamId, fencingToken)
+}
+
+func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
+	return m.getBaseProvider().AddEvent(event, sid, raw)
+}
+
+func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
+	return m.getBaseProvider().AddEventToStream(jti, streamId)
+}
+
+func (m *MongoProvider) ClearPending(streamId string) error {
+	return m.getBaseProvider().ClearPending(streamId)
+}
+
+func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
+	m.getBaseProvider().WatchPending(ctx, callback)
+}
+
+func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+	return m.getBaseProvider().ResetEventStream(streamId, jti, resetDate, isStreamEvent)
+}
+
+func (m *MongoProvider) SetBaseUrl(u *url.URL) {
+	m.getBaseProvider().SetBaseUrl(u)
+}
+
+func (m *MongoProvider) CreateServer(ctx context.Context, server *model.Server) error {
+	return m.getBaseProvider().CreateServer(ctx, server)
+}
+
+func (m *MongoProvider) GetServer(ctx context.Context, id string) (*model.Server, error) {
+	return m.getBaseProvider().GetServer(ctx, id)
+}
+
+func (m *MongoProvider) GetServerByAlias(ctx context.Context, alias string) (*model.Server, error) {
+	return m.getBaseProvider().GetServerByAlias(ctx, alias)
+}
+
+func (m *MongoProvider) UpdateServer(ctx context.Context, server *model.Server) error {
+	return m.getBaseProvider().UpdateServer(ctx, server)
+}
+
+func (m *MongoProvider) DeleteServer(ctx context.Context, id string) error {
+	return m.getBaseProvider().DeleteServer(ctx, id)
+}
+
+func (m *MongoProvider) ListServers(ctx context.Context) ([]model.Server, error) {
+	return m.getBaseProvider().ListServers(ctx)
+}
+
+func (m *MongoProvider) GetTokenService() *services.TokenService {
+	return m.getBaseProvider().GetTokenService()
+}
+
 // Helper methods for external key management (used by tests)
 func (m *MongoProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
-	return m.BaseProvider.StoreExternalKey(keyName, kids, streamID, use, jwksUri)
+	return m.getBaseProvider().StoreExternalKey(keyName, kids, streamID, use, jwksUri)
 }
 
 func (m *MongoProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {
-	return m.BaseProvider.GetKeyByStreamID(streamID)
+	return m.getBaseProvider().GetKeyByStreamID(streamID)
 }
 
 // TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.
 func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+	m.mu.RLock()
+	col := m.leaseCol
+	m.mu.RUnlock()
+	if col == nil {
+		return false, 0, errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -445,7 +678,7 @@ func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, l
 	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
 
 	var lease model.ClusterLease
-	err := m.leaseCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
+	err := col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
 			return false, 0, nil
@@ -458,6 +691,13 @@ func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, l
 
 // ReleaseLeaseIfOwned clears/shortens the lease if (and only if) it's owned by nodeId.
 func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
+	m.mu.RLock()
+	col := m.leaseCol
+	m.mu.RUnlock()
+	if col == nil {
+		return errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -473,12 +713,19 @@ func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) erro
 		},
 	}
 
-	_, err := m.leaseCol.UpdateOne(ctx, filter, update)
+	_, err := col.UpdateOne(ctx, filter, update)
 	return err
 }
 
 // RegisterNode updates the node registry with heartbeats and metadata.
 func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
+	m.mu.RLock()
+	col := m.nodeCol
+	m.mu.RUnlock()
+	if col == nil {
+		return errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -495,12 +742,19 @@ func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
 	}
 
 	opts := options.UpdateOne().SetUpsert(true)
-	_, err := m.nodeCol.UpdateOne(ctx, filter, update, opts)
+	_, err := col.UpdateOne(ctx, filter, update, opts)
 	return err
 }
 
 // GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
+	m.mu.RLock()
+	col := m.nodeCol
+	m.mu.RUnlock()
+	if col == nil {
+		return 0, errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -509,11 +763,18 @@ func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
 		"lastSeenAt": bson.M{"$gte": threshold},
 	}
 
-	return m.nodeCol.CountDocuments(ctx, filter)
+	return col.CountDocuments(ctx, filter)
 }
 
 // GetActiveNodes returns the nodes that have heartbeated within the last 60 seconds.
 func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
+	m.mu.RLock()
+	col := m.nodeCol
+	m.mu.RUnlock()
+	if col == nil {
+		return nil, errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -522,7 +783,7 @@ func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
 		"lastSeenAt": bson.M{"$gte": threshold},
 	}
 
-	cursor, err := m.nodeCol.Find(ctx, filter)
+	cursor, err := col.Find(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -540,11 +801,18 @@ func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
 
 // GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
 func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
+	m.mu.RLock()
+	col := m.leaseCol
+	m.mu.RUnlock()
+	if col == nil {
+		return "", time.Time{}, 0, errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var lease model.ClusterLease
-	err := m.leaseCol.FindOne(ctx, bson.M{"_id": resource}).Decode(&lease)
+	err := col.FindOne(ctx, bson.M{"_id": resource}).Decode(&lease)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return "", time.Time{}, 0, nil
@@ -557,11 +825,18 @@ func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64
 
 // GetNode returns a node by its ID.
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
+	m.mu.RLock()
+	col := m.nodeCol
+	m.mu.RUnlock()
+	if col == nil {
+		return nil, errors.New("mongo provider not initialized")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var node model.ClusterNode
-	err := m.nodeCol.FindOne(ctx, bson.M{"_id": nodeId}).Decode(&node)
+	err := col.FindOne(ctx, bson.M{"_id": nodeId}).Decode(&node)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil

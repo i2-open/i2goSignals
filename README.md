@@ -63,7 +63,7 @@ Run the i2goSignals server and Mongo database using docker-compose
 * [goSignals administration tool](docs/gosignals_tool.md)
 * [Supported environment properties](docs/configuration_properties.md)
 * [Security model](docs/security_model.md)
-* [SPIFFE/SPIRE integration plan](docs/spiffe_support_plan.md)
+* [SPIFFE/SPIRE integration plan](docs/spiffe_support.md)
 
 ## SPIFFE/SPIRE Support
 
