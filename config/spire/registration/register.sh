@@ -65,8 +65,26 @@ register_workload() {
     done
 }
 
-# -ttl 3600 does not seem to be valid
-
+# Same as register_workload but sets a per-entry x509 SVID TTL.
+# Used for workloads (e.g. MongoDB) that cannot hot-reload their TLS cert.
+# The TTL should match ca_ttl in server.conf so the cert remains valid for
+# the full lifetime of the process without requiring a restart.
+register_workload_with_ttl() {
+    SPIFFE_PATH=$1
+    TTL=$2
+    shift 2
+    echo "Registering spiffe://${TRUST_DOMAIN}/$SPIFFE_PATH (x509SVIDTTL=${TTL})..."
+    for SELECTOR in "$@"; do
+        echo "  Adding selector: $SELECTOR"
+        $SPIRE_CLI entry create \
+            -socketPath "$SOCKET" \
+            -spiffeID "spiffe://${TRUST_DOMAIN}/$SPIFFE_PATH" \
+            -parentID "$AGENT_ID" \
+            -x509SVIDTTL "$TTL" \
+            -selector "$SELECTOR" >/dev/null \
+            || echo "  (Error creating entry for $SPIFFE_PATH with $SELECTOR)"
+    done
+}
 
 # ----------------------------------------------------------------------------
 # Core Services
@@ -86,7 +104,11 @@ register_workload "workload/gossf-node" \
     "docker:container_name:gossfserver" \
     "docker:container_name:goSsfServer"
 
-# MongoDB Replica Set & Initialization
+# MongoDB Replica Set & Initialization.
+# SVIDs use the server default TTL (1h). The mongo_spiffe_init.sh renewal loop
+# calls db.adminCommand({rotateCertificates:1}) on each node after writing
+# updated cert files, enabling hot reload of both the server cert and CA bundle
+# without restarting mongod. See docs/spiffe_support.md for details.
 register_workload "workload/mongodb" \
     "docker:label:com.i2gosignals.role:mongodb" \
     "docker:container_name:mongo-init" \

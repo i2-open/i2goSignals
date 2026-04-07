@@ -1,0 +1,314 @@
+#!/bin/bash
+set -e
+
+TRUST_DOMAIN="cluster.i2gosignals.internal"
+
+# ---------------------------------------------------------------------------
+# Cleanup — remove stale certs and init sentinel from any prior run so that
+# mongod's startup loop waits for fresh SVIDs and the healthcheck is reset.
+# ---------------------------------------------------------------------------
+echo "Cleaning up old certs and sentinel..."
+rm -f /certs/mongo.pem /certs/ca.pem /certs/*.pem /certs/*.key /certs/.init_complete
+
+# ---------------------------------------------------------------------------
+# Wait for SPIRE agent binary and socket
+# ---------------------------------------------------------------------------
+echo "Waiting for spire-agent binary..."
+until [ -f /usr/local/bin/spire-agent ]; do sleep 2; done
+
+echo "Waiting for spire-agent socket..."
+until [ -S /run/spire/sockets/agent.sock ]; do sleep 2; done
+
+# ---------------------------------------------------------------------------
+# MongoDB replica key (shared across replica set members for keyFile auth)
+# ---------------------------------------------------------------------------
+echo "Setting up replica.key..."
+if [ ! -f /data/config/replica.key ]; then
+    mkdir -p /data/config
+    openssl rand -base64 756 > /data/config/replica.key
+    chmod 400 /data/config/replica.key
+    chown 999:999 /data/config/replica.key
+    echo "replica.key created"
+fi
+
+# ---------------------------------------------------------------------------
+# Fetch initial SVID for the mongodb workload
+# ---------------------------------------------------------------------------
+echo "Fetching initial SPIFFE SVID for MongoDB workload..."
+until /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock; do
+    echo "Waiting for SVID registration to complete..."
+    sleep 5
+done
+
+# Prepare the combined PEM file mongod requires (cert + key)
+cp /certs/svid.0.pem /certs/mongo.pem
+cat /certs/svid.0.key >> /certs/mongo.pem
+cp /certs/bundle.0.pem /certs/ca.pem
+chmod 644 /certs/mongo.pem /certs/ca.pem
+chown 999:999 /certs/mongo.pem /certs/ca.pem
+echo "Initial certificates fetched and prepared"
+
+# ---------------------------------------------------------------------------
+# Determine MongoDB $external usernames from SVID Subjects.
+#
+# MongoDB X.509 auth looks up the TLS peer certificate's Subject DN (RFC2253
+# format) in the $external database.  Standard SPIFFE SVIDs have an empty
+# Subject — identity lives in the URI SAN.  The SPIRE "uniqueid"
+# CredentialComposer plugin adds OID 2.5.4.45 (x509UniqueIdentifier) to the
+# Subject, with value = SHA256(spiffe_id)[0:16] hex-encoded (32 chars).
+#
+# Because the hash is deterministic we can compute the expected Subject for
+# every known workload without needing to hold their actual certificates.
+# We verify the formula against our own cert first; if it doesn't match we
+# bail with a clear diagnostic so the operator knows what's wrong.
+# ---------------------------------------------------------------------------
+
+# Compute first 16 bytes (128 bits) of SHA256 of a SPIFFE ID URI as hex.
+# Uses only tools present in mongo:latest (openssl, awk, cut).
+spiffe_hash() {
+    printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-32
+}
+
+MONGODB_SPIFFE_ID="spiffe://${TRUST_DOMAIN}/workload/mongodb"
+ACTUAL_SUBJECT=$(openssl x509 -in /certs/svid.0.pem -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+echo "Actual SVID Subject (RFC2253): '${ACTUAL_SUBJECT}'"
+
+if [ -z "$ACTUAL_SUBJECT" ]; then
+    echo "ERROR: SVID Subject is empty."
+    echo "  Ensure the 'uniqueid' CredentialComposer plugin is enabled in"
+    echo "  config/spire/server/server.conf and the SPIRE server has been restarted."
+    exit 1
+fi
+
+MONGODB_HASH=$(spiffe_hash "$MONGODB_SPIFFE_ID")
+echo "Expected SHA256[0:16] of mongodb SPIFFE ID: '${MONGODB_HASH}'"
+
+if ! echo "$ACTUAL_SUBJECT" | grep -qF "$MONGODB_HASH"; then
+    echo "ERROR: Computed hash not found in Subject DN."
+    echo "  Computed hash:  ${MONGODB_HASH}"
+    echo "  Actual Subject: ${ACTUAL_SUBJECT}"
+    echo "  The 'uniqueid' plugin may not be active, or the hash algorithm"
+    echo "  assumption (SHA256, first 16 bytes, hex-encoded) is incorrect."
+    exit 1
+fi
+
+# Extract the format prefix/suffix so we can derive other workload Subjects
+# without holding their certificates.  Typically the Subject is simply
+# "2.5.4.45=<32-char-hex>" or "x509UniqueIdentifier=<32-char-hex>".
+SUBJ_PREFIX="${ACTUAL_SUBJECT%%${MONGODB_HASH}*}"
+SUBJ_SUFFIX="${ACTUAL_SUBJECT#*${MONGODB_HASH}}"
+echo "Subject format: prefix='${SUBJ_PREFIX}' suffix='${SUBJ_SUFFIX}'"
+
+make_mongo_user() {
+    local HASH
+    HASH=$(spiffe_hash "spiffe://${TRUST_DOMAIN}/$1")
+    echo "${SUBJ_PREFIX}${HASH}${SUBJ_SUFFIX}"
+}
+
+GOSIGNALS_USER=$(make_mongo_user "workload/gosignals-node")
+GOSSF_USER=$(make_mongo_user "workload/gossf-node")
+SCIM_USER=$(make_mongo_user "workload/scim")
+# NOTE: the mongodb workload Subject is NOT added as a $external user.
+# With clusterAuthMode sendKeyFile, replica nodes authenticate to each other
+# via the shared keyFile — not via $external x.509 lookup.  The mongodb cert
+# Subject matches the clusterAuthX509.attributes pattern, so MongoDB correctly
+# refuses to create a $external user with that subject anyway.
+
+echo "Computed MongoDB \$external users:"
+echo "  gosignals-node: ${GOSIGNALS_USER}"
+echo "  gossf-node:     ${GOSSF_USER}"
+echo "  scim:           ${SCIM_USER}"
+
+# ---------------------------------------------------------------------------
+# Background certificate renewal loop (every 5 minutes)
+#
+# SPIRE rotates SVIDs at ~50% of their TTL (default: 30 min into a 1h SVID).
+# Each iteration fetches the current SVID from the Workload API. When SPIRE
+# has issued a new SVID, the fetched cert will differ from the previous one.
+#
+# After writing new cert files we call db.adminCommand({rotateCertificates:1})
+# on each mongod node. That command re-reads net.tls.certificateKeyFile,
+# net.tls.CAFile, and net.tls.CRLFile from disk without restarting mongod.
+# New connections immediately use the new cert and CA bundle; existing
+# connections continue with the old material until they close naturally.
+# A failed rotateCertificates call (node unreachable, etc.) is non-fatal:
+# the call is retried on the next loop iteration 5 minutes later, and MongoDB
+# keeps the previous (still-valid) TLS configuration in the meantime.
+# ---------------------------------------------------------------------------
+echo "Starting certificate renewal loop in background..."
+(while true; do
+    sleep 300
+    if /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock 2>/dev/null; then
+        # Save the current cert/CA before overwriting.
+        # We must connect to mongod using the PREVIOUS cert (which mongod's
+        # in-memory CA bundle already trusts) to issue rotateCertificates.
+        # Using the newly-written cert would fail if the SPIRE CA has rotated:
+        # mongod's old CA bundle would reject a cert signed by the new CA.
+        # On the first renewal cycle .prev files do not exist; we fall back to
+        # the new cert (safe because the CA hasn't rotated yet).
+        cp /certs/mongo.pem /certs/mongo.pem.prev 2>/dev/null || true
+        cp /certs/ca.pem    /certs/ca.pem.prev    2>/dev/null || true
+
+        cp /certs/svid.0.pem /certs/mongo.pem
+        cat /certs/svid.0.key >> /certs/mongo.pem
+        cp /certs/bundle.0.pem /certs/ca.pem
+        chmod 644 /certs/mongo.pem /certs/ca.pem
+        chown 999:999 /certs/mongo.pem /certs/ca.pem
+        echo "Certificates updated: $(date)"
+
+        # Use previous cert/CA for the connection; fall back to new if no .prev.
+        CONN_CERT=/certs/mongo.pem.prev
+        CONN_CA=/certs/ca.pem.prev
+        [ -f "$CONN_CERT" ] || CONN_CERT=/certs/mongo.pem
+        [ -f "$CONN_CA"   ] || CONN_CA=/certs/ca.pem
+
+        # Hot-reload TLS material on each replica node.
+        # mongod requires a TLS client cert (it enforces mutual TLS when
+        # --tlsCAFile is configured), so CONN_CERT must be provided.
+        # rotateCertificates reloads net.tls.certificateKeyFile, net.tls.CAFile,
+        # and net.tls.CRLFile from disk; new connections immediately use the new
+        # material while existing connections drain with the old cert.
+        for HOST in mongo1 mongo2 mongo3; do
+            IDX=${HOST##mongo}   # strips "mongo" prefix → 1, 2, or 3
+            PORT=$((30000 + IDX))
+            if mongosh --host "$HOST" --port "$PORT" \
+                    --username root --password dockTest \
+                    --authenticationDatabase admin \
+                    --tls --tlsAllowInvalidHostnames \
+                    --tlsCAFile "$CONN_CA" \
+                    --tlsCertificateKeyFile "$CONN_CERT" \
+                    --quiet \
+                    --eval "db.adminCommand({rotateCertificates: 1, message: 'SPIRE SVID renewal'})" \
+                    </dev/null 2>/dev/null; then
+                echo "  rotateCertificates succeeded on ${HOST}:${PORT}: $(date)"
+            else
+                echo "  rotateCertificates failed on ${HOST}:${PORT} (will retry next cycle): $(date)"
+            fi
+        done
+    else
+        echo "Certificate renewal failed: $(date)"
+    fi
+done) &
+
+# ---------------------------------------------------------------------------
+# Wait for MongoDB nodes, then initialize replica set and users
+# ---------------------------------------------------------------------------
+CONN_STR="mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin"
+
+echo "Waiting for mongo1 on port 30001..."
+until mongosh --host mongo1 --port 30001 --tls --tlsAllowInvalidHostnames \
+        --tlsCAFile /certs/ca.pem --tlsCertificateKeyFile /certs/mongo.pem \
+        --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
+    echo "  mongo1 not ready yet..."
+    sleep 5
+done
+echo "mongo1 is up"
+
+# Check / initialize replica set
+IS_INITIATED=$(mongosh --host mongo1 --port 30001 --tls --tlsAllowInvalidHostnames \
+    --tlsCAFile /certs/ca.pem --tlsCertificateKeyFile /certs/mongo.pem \
+    --quiet --eval "try { rs.status().ok } catch(e) { 0 }")
+
+if [ "$IS_INITIATED" = "1" ]; then
+    echo "Replica set already initiated"
+else
+    echo "Initializing replica set..."
+    INIT_CMD='var cfg = {
+        "_id": "dbrs", "version": 1,
+        "members": [
+            { "_id": 0, "host": "mongo1:30001" },
+            { "_id": 1, "host": "mongo2:30002" },
+            { "_id": 2, "host": "mongo3:30003" }
+        ]
+    };
+    rs.initiate(cfg, { force: true });'
+
+    if ! mongosh --tls --tlsAllowInvalidHostnames --tlsCAFile /certs/ca.pem \
+            --tlsCertificateKeyFile /certs/mongo.pem --host mongo1:30001 \
+            --eval "$INIT_CMD" > /dev/null 2>&1; then
+        echo "  Unauthenticated initiate failed, trying with root credentials..."
+        mongosh --tls --tlsAllowInvalidHostnames --tlsCAFile /certs/ca.pem \
+            --tlsCertificateKeyFile /certs/mongo.pem -u root -p dockTest \
+            --authenticationDatabase admin --host mongo1:30001 \
+            --eval "$INIT_CMD" || true
+    fi
+
+    echo "Waiting for primary election..."
+    until mongosh "$CONN_STR" --quiet --eval "db.hello().isWritablePrimary" 2>/dev/null | grep -q "true"; do
+        echo "  Waiting for primary..."
+        sleep 5
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# Create / update $external users for SPIFFE X.509 authentication
+# ---------------------------------------------------------------------------
+echo "Creating/updating \$external users..."
+
+USER_SCRIPT="
+const users = [
+  {
+    user: '${GOSIGNALS_USER}',
+    roles: [
+      { role: 'readWrite', db: 'goSignals1' },
+      { role: 'readWrite', db: 'goSignals2' },
+      { role: 'dbAdmin',   db: 'goSignals1' },
+      { role: 'dbAdmin',   db: 'goSignals2' }
+    ]
+  },
+  {
+    user: '${GOSSF_USER}',
+    roles: [
+      { role: 'readWrite', db: 'SsfServer1' },
+      { role: 'dbAdmin',   db: 'SsfServer1' }
+    ]
+  },
+  {
+    user: '${SCIM_USER}',
+    roles: [
+      { role: 'readWrite', db: 'goSignals1' },
+      { role: 'readWrite', db: 'goSignals2' }
+    ]
+  }
+];
+
+users.forEach(u => {
+  try {
+    const existing = db.getSiblingDB('\\\$external').getUser(u.user);
+    if (existing) {
+      print('Updating user: ' + u.user);
+      db.getSiblingDB('\\\$external').updateUser(u.user, { roles: u.roles });
+    } else {
+      print('Creating user: ' + u.user);
+      db.getSiblingDB('\\\$external').createUser({ user: u.user, roles: u.roles });
+    }
+  } catch (e) {
+    if (e.message && e.message.includes('already exists')) {
+      db.getSiblingDB('\\\$external').updateUser(u.user, { roles: u.roles });
+    } else {
+      print('Error for user ' + u.user + ': ' + e);
+      throw e;
+    }
+  }
+});
+print('User creation complete');
+"
+
+for i in $(seq 1 10); do
+    if mongosh "$CONN_STR" --eval "$USER_SCRIPT"; then
+        echo "Users processed successfully"
+        break
+    else
+        echo "User creation attempt $i failed, retrying in 5s..."
+        sleep 5
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Signal completion for the docker-compose healthcheck
+# ---------------------------------------------------------------------------
+touch /certs/.init_complete
+echo "Initialization complete: $(date)"
+
+# Keep alive for cert renewal
+wait

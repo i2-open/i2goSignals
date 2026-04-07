@@ -1,268 +1,493 @@
-# SPIFFE/SPIRE Integration Plan for i2goSignals
+# SPIFFE/SPIRE Support in i2goSignals
 
 ## Overview
 
-This document proposes integrating [SPIFFE](https://spiffe.io/) (Secure Production Identity Framework for Everyone) and [SPIRE](https://spiffe.io/docs/latest/spire-about/) (SPIFFE Runtime Environment) into the goSignalsServer and goSsfServer stack. The integration **augments** existing authentication mechanisms (HMAC, OAuth2, static tokens) rather than replacing them, and uses the [`go-spiffe`](https://github.com/spiffe/go-spiffe) library throughout.
+i2goSignals uses [SPIFFE](https://spiffe.io/) (Secure Production Identity Framework for Everyone) and [SPIRE](https://spiffe.io/docs/latest/spire-about/) to provide cryptographically-verifiable workload identities. When SPIFFE is enabled:
 
-SPIFFE provides cryptographically verifiable workload identities (SVIDs — SPIFFE Verifiable Identity Documents) in the form of short-lived X.509 certificates and JWT tokens, issued by the SPIRE server based on node/workload attestation. This eliminates the need for pre-shared secrets, long-lived credentials, or manual certificate management for internal service-to-service communication.
+- Inter-cluster wake-up calls use mTLS instead of a static HMAC shared secret.
+- MongoDB connections use X.509 client certificates instead of embedded passwords.
+- SSF stream management to SPIFFE-aware remote servers uses mTLS.
+- Certificate rotation is fully automatic — no manual cert management.
 
----
-
-## Current Security Architecture
-
-| Concern | Current Mechanism | Location |
-|---|---|---|
-| Inter-cluster wake-up calls | HMAC-SHA256 shared secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) | `internal/eventRouter/event_router.go` |
-| SSF stream management (outbound) | OAuth2 CC, static Bearer token, or plain TLS | `pkg/oauthClient/client.go:GetClientForServer()` |
-| SET signing | RSA-2048 (RS256) keys managed in MongoDB | `internal/services/key_service.go` |
-| SET verification | JWKS endpoints (`/jwks.json`, `/jwks/{keyName}`) | `pkg/goSet/jwks_loader.go` |
-| MongoDB authentication | Username/password in connection URI | `internal/providers/dbProviders/mongo_provider/provider.go` |
-| Outbound TLS (stream/event delivery) | Per-server PEM cert or `InsecureSkipVerify` | `pkg/oauthClient/tls_helpers.go:GetTlsConfigForServer()` |
-| Inbound TLS | File-based cert/key via `TLS_ENABLED` env | `pkg/tlsSupport/key.go`, `cmd/goSignalsServer/main.go` |
-
-### Pain Points Addressed by SPIFFE
-
-- The cluster HMAC secret is a static shared secret — compromise of any node exposes the secret for all nodes.
-- Per-server TLS certificate management in `ssfModels.Server` requires manual updates when certs rotate.
-- MongoDB uses password authentication; mTLS would be stronger and avoids credential rotation.
-- Cross-domain SSF federation requires manual trust establishment for each external domain.
+All SPIFFE features are **opt-in**. Deployments without `SPIFFE_ENDPOINT_SOCKET` operate identically to non-SPIFFE deployments. Existing OAuth2, HMAC, and password-based mechanisms continue to work as fallbacks.
 
 ---
 
-## SPIFFE/SPIRE Architecture for i2goSignals
+## Architecture
 
 ### Trust Domains
 
 | Trust Domain | Scope |
 |---|---|
-| `cluster.i2gosignals.internal` | All nodes in a single goSignals cluster (goSignals1, goSignals1b, goSignals2, goSsfServer) |
-| `<partner-domain>.example.com` | Federated external SSF server (for cross-domain stream management) |
+| `cluster.i2gosignals.internal` | All nodes in one goSignals cluster |
+| `<partner-domain>` | Federated external SSF server (cross-domain stream management) |
 
-### SVID Naming Convention
-
-SPIFFE IDs follow the form `spiffe://<trust-domain>/workload/<role>`:
+### SPIFFE IDs
 
 | Workload | SPIFFE ID |
 |---|---|
 | goSignalsServer node | `spiffe://cluster.i2gosignals.internal/workload/gosignals-node` |
 | goSsfServer | `spiffe://cluster.i2gosignals.internal/workload/gossf-node` |
-| MongoDB | `spiffe://cluster.i2gosignals.internal/workload/mongodb` |
+| MongoDB replica | `spiffe://cluster.i2gosignals.internal/workload/mongodb` |
+| SCIM service | `spiffe://cluster.i2gosignals.internal/workload/scim` |
 
-### Components Added
+### Components
+
+| Component | Role |
+|---|---|
+| SPIRE Server | Issues SVIDs; one per cluster trust domain |
+| SPIRE Agent | Proxies workload API; runs as sidecar/DaemonSet alongside workloads |
+| `uniqueid` CredentialComposer | SPIRE server plugin that adds a deterministic `x500UniqueIdentifier` to every SVID Subject (required for MongoDB X.509 auth) |
+
+### Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `SPIFFE_ENDPOINT_SOCKET` | Path to SPIRE agent Unix socket | (unset — disables SPIFFE) |
+| `SPIFFE_TRUST_DOMAIN` | Trust domain for this cluster | `cluster.i2gosignals.internal` |
+| `SPIFFE_MONGO_ENABLED` | Enable SPIFFE mTLS for MongoDB connections | `false` |
+
+---
+
+## Docker Compose (Development)
+
+The reference implementation is `docker-compose-spiffe-dev.yml`.
+
+### Quick Start
+
+```bash
+docker compose -f docker-compose-spiffe-dev.yml up
+```
+
+No manual workload registration is needed — the `spire-registration` service runs `config/spire/registration/register.sh` automatically on startup.
+
+**On first run or after `docker compose down -v`**, Docker creates fresh volumes. On subsequent `docker compose up` (without `-v`), existing volumes are reused and the SPIRE agent reconnects using its persisted key material.
+
+### Service Startup Order
 
 ```
-docker-compose additions:
-  spire-server   — SPIRE Server for trust domain (one per cluster)
-  spire-agent    — SPIRE Agent sidecar on each workload node (socket at /run/spire/sockets/agent.sock)
+spire-setup → spire-server → spire-token-gen → spire-agent → spire-registration
+                                                              ↓
+                                                         mongo-init (writes certs + replica.key,
+                                                                     initialises replica set,
+                                                                     creates $external users)
+                                                              ↓
+                                                    gosignals1 / gosignals2 / gossfserver
 ```
 
-Each container mounts the SPIRE agent Unix socket:
+MongoDB nodes (`mongo1`, `mongo2`, `mongo3`) start in parallel with the SPIRE stack and wait for `/certs/mongo.pem` and `/data/config/replica.key` to appear on the shared `mongo_certs` and `mongo_config` volumes before launching `mongod`.
+
+### Key Volumes
+
+| Volume | Purpose |
+|---|---|
+| `spire_sockets` | SPIRE agent Unix socket shared with all workload containers |
+| `spire_bin` | SPIRE agent binary shared with `mongo-init` |
+| `mongo_certs` | Shared SPIFFE certs for MongoDB nodes and `mongo-init` |
+| `mongo_config` | Shared `replica.key` for MongoDB keyFile cluster auth |
+
+### Node Attestation
+
+Development uses the `join_token` attestor. `spire-token-gen` generates one token, writes it to the `spire_tokens` volume, and `spire-agent` reads it with `-joinTokenFile`. Join tokens are single-use; the agent persists its SVID to `spire_agent_data` so container restarts do not require a new token.
+
+### SPIRE Image Registry
+
+The public `ghcr.io/spiffe/spire-*` images do not include a shell, which is required by the registration scripts and is not publicly available. Use the `dhi.io` registry images (`dhi.io/spire-server:1.14.4-dev`, `dhi.io/spire-agent:1.14.4-dev`) which include `sh`.
+
+---
+
+## MongoDB SPIFFE mTLS
+
+### How It Works
+
+When `SPIFFE_MONGO_ENABLED=true` and `SPIFFE_ENDPOINT_SOCKET` is set:
+
+1. The Go driver (`internal/providers/dbProviders/mongo_provider/provider.go`) obtains the workload X.509-SVID from the SPIRE agent.
+2. The SVID is presented as the MongoDB TLS client certificate.
+3. MongoDB validates the client cert against the SPIRE CA bundle and looks up the Subject DN in the `$external` database.
+4. The connection URI uses `authMechanism=MONGODB-X509&authSource=$external` with no embedded credentials.
+
+Connection string format (in `env_file`, dollar signs must be doubled):
+
+```
+MONGO_URL=mongodb://mongo1:30001,mongo2:30002,mongo3:30003/?tls=true&replicaSet=dbrs&authMechanism=MONGODB-X509&authSource=$$external
+```
+
+If SPIFFE is unavailable at startup, the driver falls back to any username/password in the URI.
+
+### The `uniqueid` Plugin Requirement
+
+Standard SPIFFE SVIDs have an **empty Subject** — identity is carried in the URI SAN (`spiffe://...`). MongoDB X.509 auth uses the Subject DN exclusively; an empty Subject always produces `AuthenticationFailed`.
+
+The `uniqueid` CredentialComposer plugin (enabled in `config/spire/server/server.conf`) adds OID `2.5.4.45` (`x500UniqueIdentifier`) to every workload SVID's Subject:
+
+```
+SHA256(spiffe_id_uri)[0:16]  →  32-character hex string
+```
+
+This value is **deterministic** (same SPIFFE ID always produces the same hash) and **stable** across certificate rotations, which is essential for pre-creating `$external` users.
+
+Example — `spiffe://cluster.i2gosignals.internal/workload/gosignals-node` produces Subject:
+
+```
+x500UniqueIdentifier=9f361d2aea911b52e50be001f4c6a91e,O=SPIRE,C=US
+```
+
+After enabling `uniqueid`, restart the SPIRE server. Existing SVIDs rotate automatically within their TTL (default 1 hour) or immediately if the `spire_data` volume is removed.
+
+### `$external` User Creation (`mongo_spiffe_init.sh`)
+
+`config/mongo/mongo_spiffe_init.sh` runs in the `mongo-init` container. It:
+
+1. Waits for the SPIRE agent binary and socket.
+2. Creates `replica.key` for MongoDB keyFile cluster authentication.
+3. Fetches the `workload/mongodb` SVID from SPIRE.
+4. Extracts the Subject DN and verifies that the computed SHA256 hash is present — confirming `uniqueid` is active and the hash algorithm is correct. Exits with a diagnostic if not.
+5. Detects the RFC2253 OID format (`2.5.4.45=` vs `x500UniqueIdentifier=`) at runtime to handle OpenSSL version differences.
+6. Computes Subject DNs for the three workload users (`gosignals-node`, `gossf-node`, `scim`).
+7. Waits for `mongo1` to be ready, initialises the replica set, waits for a primary.
+8. Creates or updates the three `$external` users.
+9. Writes `/certs/.init_complete` as a sentinel file.
+
+The `mongo-init` healthcheck checks for `/certs/.init_complete`. All goSignals services use `condition: service_healthy` against `mongo-init` so they never attempt X.509 auth before the users exist.
+
+> **Note:** The `workload/mongodb` SVID Subject is intentionally **not** created as a `$external` user — see the cluster authentication section below.
+
+### MongoDB Cluster Authentication and the `clusterAuthX509` Problem
+
+All SPIRE SVIDs share `O=SPIRE,C=US` in their Subject. By default, MongoDB derives its cluster-member identification criteria from the replica node's own TLS certificate attributes. Because the MongoDB nodes are also SPIRE workloads with `O=SPIRE,C=US`, MongoDB treats **every** SPIFFE certificate as a potential cluster member and blocks `$external` user creation with:
+
+```
+MongoServerError: Cannot create an x.509 user with a subjectname that would be recognized as an internal cluster member
+```
+
+**The fix** is `config/mongo/mongod.conf`, mounted read-only into each replica node at `/etc/mongo/mongod.conf`:
 
 ```yaml
+security:
+  keyFile: "/data/config/replica.key"
+  clusterAuthMode: sendKeyFile
+
+net:
+  tls:
+    clusterAuthX509:
+      attributes: "x500UniqueIdentifier=6ff4e8d38b5f843e7b91b001b8820e7f"
+```
+
+**How it works:**
+
+- `clusterAuthX509.attributes` overrides the cluster-member cert criteria to the specific `x500UniqueIdentifier` value of the `workload/mongodb` SVID. This value is `SHA256("spiffe://cluster.i2gosignals.internal/workload/mongodb")[0:32]`.
+- MongoDB validates that its own TLS certificate contains these attributes — the MongoDB nodes use the `workload/mongodb` SVID, which does → server starts cleanly.
+- Workload certs (`gosignals-node`, `gossf-node`, `scim`) carry different `x500UniqueIdentifier` hashes → NOT recognised as cluster members → `$external` user creation succeeds.
+- The mongodb workload's own Subject still cannot be a `$external` user (correctly — it IS the cluster member cert), so it is not included in the user creation list.
+
+**Why `sendKeyFile` and not `keyFile`:**
+Both `clusterAuthX509.attributes` and `clusterAuthX509.extensionValue` require `clusterAuthMode` to allow X.509. `keyFile` mode does not satisfy this (mongod refuses to start with "clusterAuthMode does not allow X.509"). `sendKeyFile` keeps keyFile as the outgoing credential (replica set initialises without needing `$external` users) while accepting x.509 on incoming connections.
+
+**If the trust domain or workload path changes**, recompute the hash:
+
+```bash
+printf '%s' "spiffe://<domain>/workload/mongodb" | \
+  openssl dgst -sha256 | awk '{print $NF}' | cut -c1-32
+```
+
+Then update `clusterAuthX509.attributes` in `mongod.conf`.
+
+**Config path reference:**
+
+| Config path | Works? | Notes |
+|---|---|---|
+| `security.clusterAuthX509.extensionValue` | No | "Unrecognized option" — mongod crash |
+| `net.tls.clusterAuthX509.extensionValue` | No (for this use case) | Requires `clusterAuthMode: x509` → chicken-and-egg: replica set quorum check fails before `$external` users exist |
+| `net.tls.clusterAuthX509.attributes: "O=..."` | No | MongoDB validates that server cert contains the attributes; `O=SPIRE` would allow all SPIFFE certs, a fake value causes "InvalidSSLConfiguration" |
+| `net.tls.clusterAuthX509.attributes: "x500UniqueIdentifier=<mongodb-hash>"` | **Yes** | Server cert contains its own hash; workload certs have different hashes |
+
+### Hostname Verification
+
+SPIFFE SVIDs carry identity in the URI SAN, not DNS SANs. `mongod` and `mongosh` are started with `--tlsAllowInvalidHostnames` to bypass hostname verification while still validating the certificate chain against the SPIRE CA.
+
+---
+
+## Kubernetes Deployment
+
+### SPIRE on Kubernetes — Overview
+
+The standard Kubernetes deployment uses:
+
+- **SPIRE Server**: `StatefulSet` with persistent storage for the datastore and keys.
+- **SPIRE Agent**: `DaemonSet` so every node runs one agent. Workload containers reach the agent via a `hostPath` volume mounting the agent's Unix socket.
+- **Node attestor**: `k8s_sat` (Kubernetes Service Account Token) — the agent proves its identity to the server using a projected service account token bound to a specific audience.
+- **Workload attestor**: `k8s` — the agent identifies workloads by matching Kubernetes metadata (namespace, service account, labels, container images).
+
+The [SPIRE Helm chart](https://github.com/spiffe/helm-charts-hardened) is the recommended installation method.
+
+### SPIRE Server Configuration (Kubernetes)
+
+```hcl
+server {
+  trust_domain = "cluster.i2gosignals.internal"
+  bind_address = "0.0.0.0"
+  bind_port    = "8081"
+  data_dir     = "/run/spire/data"
+}
+
+plugins {
+  DataStore "sql" {
+    plugin_data {
+      database_type   = "sqlite3"
+      connection_string = "/run/spire/data/datastore.sqlite3"
+    }
+  }
+
+  NodeAttestor "k8s_psat" {
+    plugin_data {
+      clusters = {
+        "my-cluster" = {
+          service_account_allow_list = ["spire:spire-agent"]
+        }
+      }
+    }
+  }
+
+  KeyManager "disk" {
+    plugin_data { keys_path = "/run/spire/data/keys.json" }
+  }
+
+  # Required for MongoDB X.509 auth — adds x500UniqueIdentifier to all SVIDs
+  CredentialComposer "uniqueid" {}
+}
+```
+
+### SPIRE Agent Configuration (Kubernetes)
+
+```hcl
+agent {
+  data_dir            = "/run/spire/agent-data"
+  log_level           = "INFO"
+  server_address      = "spire-server.spire.svc.cluster.local"
+  server_port         = "8081"
+  socket_path         = "/run/spire/sockets/agent.sock"
+  trust_domain        = "cluster.i2gosignals.internal"
+}
+
+plugins {
+  NodeAttestor "k8s_psat" {
+    plugin_data {
+      cluster = "my-cluster"
+    }
+  }
+
+  KeyManager "disk" {
+    plugin_data { directory = "/run/spire/agent-data" }
+  }
+
+  WorkloadAttestor "k8s" {
+    plugin_data {
+      skip_kubelet_verification = true
+    }
+  }
+}
+```
+
+### Workload Registration (Kubernetes)
+
+Register each workload with the SPIRE server, selecting it by namespace and service account:
+
+```bash
+# goSignals nodes
+spire-server entry create \
+  -spiffeID spiffe://cluster.i2gosignals.internal/workload/gosignals-node \
+  -parentID spiffe://cluster.i2gosignals.internal/spire/agent/k8s_psat/my-cluster/<node-uid> \
+  -selector k8s:ns:i2gosignals \
+  -selector k8s:sa:gosignals
+
+# goSsfServer
+spire-server entry create \
+  -spiffeID spiffe://cluster.i2gosignals.internal/workload/gossf-node \
+  -parentID spiffe://cluster.i2gosignals.internal/spire/agent/k8s_psat/my-cluster/<node-uid> \
+  -selector k8s:ns:i2gosignals \
+  -selector k8s:sa:gossf
+
+# MongoDB
+spire-server entry create \
+  -spiffeID spiffe://cluster.i2gosignals.internal/workload/mongodb \
+  -parentID spiffe://cluster.i2gosignals.internal/spire/agent/k8s_psat/my-cluster/<node-uid> \
+  -selector k8s:ns:i2gosignals \
+  -selector k8s:sa:mongodb
+```
+
+Use `-spiffeID` to match exactly the SPIFFE IDs above — the `x500UniqueIdentifier` hashes in `mongod.conf` are derived from these IDs.
+
+### SPIRE Agent Socket in Pod Specs
+
+```yaml
+# DaemonSet agent volume
 volumes:
-  - /run/spire/sockets:/run/spire/sockets
-environment:
-  - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+  - name: spire-agent-socket
+    hostPath:
+      path: /run/spire/sockets
+      type: DirectoryOrCreate
+
+# Workload container volume mount
+volumeMounts:
+  - name: spire-agent-socket
+    mountPath: /run/spire/sockets
+    readOnly: true
+
+# Workload container environment
+env:
+  - name: SPIFFE_ENDPOINT_SOCKET
+    value: "unix:///run/spire/sockets/agent.sock"
+  - name: SPIFFE_TRUST_DOMAIN
+    value: "cluster.i2gosignals.internal"
+  - name: SPIFFE_MONGO_ENABLED
+    value: "true"
 ```
+
+### MongoDB on Kubernetes
+
+For a self-managed MongoDB replica set on Kubernetes (e.g., via the [MongoDB Community Operator](https://github.com/mongodb/mongodb-kubernetes-operator)), the same `mongod.conf` approach applies. Mount `config/mongo/mongod.conf` as a `ConfigMap` into each MongoDB pod.
+
+The `mongo-init` logic can be run as a Kubernetes `Job` or init container. The `mongo_certs` shared volume becomes a Kubernetes `emptyDir` or `PersistentVolumeClaim` shared between the init job and the MongoDB pods. The SPIRE agent socket is mounted from the `hostPath` as above.
+
+For **MongoDB Atlas** (managed), SPIFFE-based X.509 client auth is available via Atlas's X.509 authentication feature. Supply the SVID as the client certificate in the connection string; no `$external` user management is needed (Atlas handles it). The `clusterAuthX509` issue does not apply to Atlas.
 
 ---
 
-## Area 1: Inter-Cluster Communication (WakeTransmitter)
+## AWS EKS
 
-### Current State
+### Node Attestation Options
 
-`internal/eventRouter/event_router.go` creates a bare HTTP client with no transport-level security:
+**Option A — `k8s_psat` (recommended):** Use the standard Kubernetes projected service account token attestor. Works identically to the generic Kubernetes setup above. No AWS-specific configuration needed.
 
-```go
-// event_router.go:106
-httpClient: &http.Client{Timeout: 5 * time.Second},
-clusterSecret: os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-```
-
-`callWakeupAPI()` adds an HMAC `Authorization: Bearer <token>` header but makes no TLS verification of the remote node's identity.
-
-### Proposed Change
-
-Replace the plain HTTP client with an mTLS client using `go-spiffe`'s workload API, falling back gracefully to the existing HMAC mechanism when SPIFFE is not configured (i.e., `SPIFFE_ENDPOINT_SOCKET` is not set).
-
-#### Key go-spiffe APIs
-
-```go
-import (
-    "github.com/spiffe/go-spiffe/v2/spiffeid"
-    "github.com/spiffe/go-spiffe/v2/spiffetls"
-    "github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
-    "github.com/spiffe/go-spiffe/v2/workloadapi"
-)
-
-// Create an X.509 source that auto-rotates from the SPIRE agent
-x509Source, err := workloadapi.NewX509Source(ctx)
-
-// Build an mTLS transport that authorizes only SVIDs from the cluster trust domain
-clusterID := spiffeid.RequireTrustDomainFromString("cluster.i2gosignals.internal")
-transport := &http.Transport{
-    TLSClientConfig: tlsconfig.MTLSClientConfig(x509Source, x509Source,
-        tlsconfig.AuthorizeMemberOf(clusterID)),
-}
-httpClient = &http.Client{Timeout: 5 * time.Second, Transport: transport}
-```
-
-On the server side (`pkg/goSignals/server/api_cluster.go`), `WakeTransmitter` validates the HMAC token. With SPIFFE the mTLS handshake provides peer identity; the HMAC check can be relaxed to optional when mTLS is confirmed (peer SVID belongs to the cluster trust domain).
-
-#### Implementation Locations
-
-| File | Change |
-|---|---|
-| `internal/eventRouter/event_router.go` | `NewRouter()`: optionally build SPIFFE-backed `http.Client`; fallback to current plain client |
-| `internal/eventRouter/event_router.go` | `callWakeupAPI()`: no change needed — uses `router.httpClient` |
-| `pkg/goSignals/server/api_cluster.go` | `WakeTransmitter()`: when peer cert is a valid cluster SVID, relax HMAC requirement |
-| `pkg/tlsSupport/key.go` | Add `NewSpiffeX509Source()` helper shared by server and router |
-
-#### Fallback Logic
-
-```
-if SPIFFE_ENDPOINT_SOCKET is set:
-    use SPIFFE mTLS transport (HMAC still computed but server may not require it)
-else:
-    use current HMAC-only plain HTTP client
-```
-
-No change to `I2SIG_CLUSTER_INTERNAL_TOKEN` behaviour — operators can keep using pure HMAC if SPIFFE is not deployed.
-
----
-
-## Area 2: SSF Stream Management via oauthClient
-
-### Current State
-
-`pkg/oauthClient/client.go` provides `GetClientForServer(ctx, server *model.Server)` as the unified entry point for getting an authenticated HTTP client when talking to remote SSF/transmitter servers. Auth priority:
-
-1. OAuth2 Client Credentials (`OAuthClientConfig` populated)
-2. Static Bearer token (`ClientToken` populated)
-3. Base TLS-only client (fallback)
-
-`pkg/ssfModels/model_server.go` defines `Server` with `TLSCertificate` and `TLSSkipVerify` for custom TLS, and `OAuthClientConfig` for OAuth2.
-
-### Proposed Change
-
-#### 1. Add `SpiffeConfig` to `ssfModels.Server`
-
-```go
-// pkg/ssfModels/model_server.go
-type SpiffeConfig struct {
-    // TrustDomain of the remote server's SPIFFE trust domain.
-    // Used to authorize the peer SVID during mTLS.
-    // Example: "partner.example.com"
-    TrustDomain string
-
-    // SpiffeID is an optional specific SPIFFE ID to authorize.
-    // If empty, any SVID from TrustDomain is accepted.
-    // Example: "spiffe://partner.example.com/workload/ssf-server"
-    SpiffeID string
-}
-
-type Server struct {
-    // ... existing fields ...
-    SpiffeConfig *SpiffeConfig `bson:"spiffeConfig,omitempty" json:"spiffeConfig,omitempty"`
-}
-```
-
-Auth mode in `GetAuthMode()` gains a new priority:
-
-```
-SPIFFE > OAuth Client Credentials > IaT > Static Token > STS
-```
-
-#### 2. Add `GetSpiffeClient()` to `pkg/oauthClient/`
-
-New file `pkg/oauthClient/spiffe_client.go`:
-
-```go
-// GetSpiffeClient returns an http.Client using SPIFFE mTLS to authenticate
-// to the remote server identified by server.SpiffeConfig.
-// The local SVID is obtained from the workload API socket at SPIFFE_ENDPOINT_SOCKET.
-func GetSpiffeClient(ctx context.Context, server *ssfModels.Server) (*http.Client, error) {
-    socketPath := os.Getenv("SPIFFE_ENDPOINT_SOCKET")
-    if socketPath == "" {
-        return nil, errors.New("SPIFFE_ENDPOINT_SOCKET not configured")
-    }
-    x509Source, err := workloadapi.NewX509Source(ctx,
-        workloadapi.WithClientOptions(workloadapi.WithAddr(socketPath)))
-    if err != nil {
-        return nil, fmt.Errorf("spiffe x509 source: %w", err)
-    }
-
-    var authorizer tlsconfig.Authorizer
-    if server.SpiffeConfig.SpiffeID != "" {
-        id, err := spiffeid.IDFromString(server.SpiffeConfig.SpiffeID)
-        if err != nil {
-            return nil, err
-        }
-        authorizer = tlsconfig.AuthorizeID(id)
-    } else {
-        td, err := spiffeid.TrustDomainFromString(server.SpiffeConfig.TrustDomain)
-        if err != nil {
-            return nil, err
-        }
-        authorizer = tlsconfig.AuthorizeMemberOf(td)
-    }
-
-    transport := &http.Transport{
-        TLSClientConfig: tlsconfig.MTLSClientConfig(x509Source, x509Source, authorizer),
-    }
-    return &http.Client{Timeout: 30 * time.Second, Transport: transport}, nil
-}
-```
-
-#### 3. Update `GetClientForServer()` in `pkg/oauthClient/client.go`
-
-Add SPIFFE as the first check in `GetClientForServer()` (line ~501):
-
-```go
-func (m *Manager) GetClientForServer(ctx context.Context, server *model.Server) (*http.Client, error) {
-    if server.SpiffeConfig != nil {
-        client, err := GetSpiffeClient(ctx, server)
-        if err == nil {
-            return client, nil
-        }
-        // log warning and fall through to next mode
-        logger.Warn("SPIFFE client failed, falling back", "err", err)
-    }
-    // ... existing OAuth CC, static token, base client logic unchanged ...
-}
-```
-
-This means all callers in `internal/services/stream_service.go` (`CreateStream`, `UpdateStream`, `DeleteStream`) and `internal/eventRouter/event_router.go` (`pushEvent`) automatically use SPIFFE when `SpiffeConfig` is populated on a server record — no changes needed in those files.
-
-#### 4. Server Management API
-
-The existing stream management API should allow setting `SpiffeConfig` when registering or updating a remote server entry. The management UI/CLI can populate `TrustDomain` from the partner's SSF configuration discovery response.
-
----
-
-## Area 3: SPIRE Federation
-
-SPIRE federation enables goSignals nodes in one trust domain to authenticate to SSF servers in a different organizational trust domain, enabling cross-domain stream management without pre-shared credentials.
-
-### How Federation Works
-
-1. Each SPIRE server exposes a **federation bundle endpoint** (HTTPS) that serves its trust bundle (CA certificate set).
-2. Peer organizations exchange their SPIRE server's bundle endpoint URL and bootstrap bundle (first-time only, out-of-band).
-3. Each SPIRE server is configured with the peer's endpoint URL; it then automatically fetches and refreshes the peer's trust bundle on a configurable interval.
-4. Workloads receiving a registration entry with `federates_with` obtain both their own SVID and the federated trust bundle — allowing them to verify SVIDs from the partner domain.
-
-### SPIRE Server Configuration (per cluster)
+**Option B — `aws_iid` (EC2 Instance Identity Document):** The SPIRE agent proves its node identity using the AWS EC2 Instance Identity Document. Useful when you want node identity tied to specific IAM roles or instance profiles rather than just Kubernetes service accounts.
 
 ```hcl
 # spire-server.conf
-server {
-  trust_domain = "cluster.i2gosignals.internal"
+NodeAttestor "aws_iid" {
+  plugin_data {
+    access_key_id     = ""  # Use instance profile — no static keys
+    secret_access_key = ""
+  }
+}
 
+# spire-agent.conf
+NodeAttestor "aws_iid" {
+  plugin_data {}
+}
+```
+
+### EKS-Specific Notes
+
+- **IRSA (IAM Roles for Service Accounts):** SPIFFE and IRSA are complementary. Use IRSA for AWS API access (S3, Secrets Manager, etc.) and SPIFFE for service-to-service mTLS within the cluster.
+- **EKS Pod Identity:** EKS Pod Identity (newer than IRSA) also complements SPIFFE. Use EKS Pod Identity for AWS SDK calls; SPIFFE for inter-workload authentication.
+- **EKS Fargate:** The SPIRE agent `DaemonSet` cannot run on Fargate nodes. Use the [SPIFFE CSI Driver](https://github.com/spiffe/spiffe-csi) instead, which delivers SVIDs via a CSI volume without requiring a per-node agent daemon.
+- **ALB/NLB:** If workloads are behind an Application Load Balancer, SPIFFE mTLS applies only to pod-to-pod traffic inside the cluster. TLS termination at the ALB uses a separate certificate (ACM).
+- **Secrets Manager:** The MongoDB `replica.key` can be stored in AWS Secrets Manager and injected via the [AWS Secrets and Configuration Provider (ASCP)](https://docs.aws.amazon.com/secretsmanager/latest/userguide/integrating_csi_driver.html) rather than generated by `mongo-init`.
+
+### Recommended SPIRE Helm Values for EKS
+
+```yaml
+spire-server:
+  nodeAttestor:
+    k8sPsat:
+      enabled: true
+  credentialComposers:
+    uniqueid:
+      enabled: true  # Required for MongoDB X.509 auth
+
+spire-agent:
+  nodeAttestor:
+    k8sPsat:
+      enabled: true
+```
+
+---
+
+## GCP GKE
+
+### Node Attestation Options
+
+**Option A — `k8s_psat` (recommended):** Same as generic Kubernetes. Simplest option for GKE.
+
+**Option B — `gcp_iit` (GCP Instance Identity Token):** The SPIRE agent uses the GCE metadata server instance identity token to prove node identity. Ties node attestation to GCP project/zone/instance metadata.
+
+```hcl
+# spire-server.conf
+NodeAttestor "gcp_iit" {
+  plugin_data {
+    projectid_allow_list = ["my-gcp-project"]
+  }
+}
+
+# spire-agent.conf
+NodeAttestor "gcp_iit" {
+  plugin_data {}
+}
+```
+
+### GKE-Specific Notes
+
+- **GCP Workload Identity:** Workload Identity binds Kubernetes service accounts to GCP service accounts for Google API calls. Use Workload Identity for GCP API access and SPIFFE for inter-workload mTLS — they coexist on the same pod without conflict.
+- **GKE Autopilot:** SPIRE agent DaemonSets are not permitted on Autopilot clusters. Use the [SPIFFE CSI Driver](https://github.com/spiffe/spiffe-csi) to deliver SVIDs via a CSI volume, or use a managed SPIFFE solution such as [Certificate Authority Service](https://cloud.google.com/certificate-authority-service) with SPIFFE integration.
+- **Cloud SQL:** If using Cloud SQL (managed Postgres/MySQL) instead of self-managed MongoDB, SPIFFE mTLS does not apply to Cloud SQL connections directly. Use Cloud SQL's built-in IAM database authentication or mTLS with client certificates managed separately.
+- **Secret Manager:** Store the MongoDB `replica.key` in GCP Secret Manager and inject it using the [Secret Manager CSI Driver](https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp).
+- **Binary Authorization:** GKE Binary Authorization can enforce that only attested container images run. Pair with SPIRE's container image selector for defence-in-depth: a workload must pass both Binary Authorization (image identity) and SPIRE attestation (runtime identity) to be granted an SVID.
+
+---
+
+## Azure AKS
+
+### Node Attestation Options
+
+**Option A — `k8s_psat` (recommended):** Same as generic Kubernetes. Simplest option for AKS.
+
+**Option B — `azure_msi` (Azure Managed Service Identity):** The SPIRE agent uses the Azure Instance Metadata Service to prove node identity via MSI. Useful when node identity must be tied to specific Azure resource groups or subscriptions.
+
+```hcl
+# spire-server.conf
+NodeAttestor "azure_msi" {
+  plugin_data {
+    tenants = {
+      "<tenant-id>" = {
+        resource_id = "https://management.azure.com/"
+      }
+    }
+  }
+}
+
+# spire-agent.conf
+NodeAttestor "azure_msi" {
+  plugin_data {
+    resource_id = "https://management.azure.com/"
+  }
+}
+```
+
+### AKS-Specific Notes
+
+- **Azure Workload Identity:** Replaces the older pod-managed identity (aad-pod-identity) for Azure SDK calls. Use Azure Workload Identity for Azure API access (Key Vault, Storage, etc.) and SPIFFE for inter-workload mTLS — both use projected service account tokens and coexist on the same pod.
+- **AKS Virtual Nodes (ACI):** Virtual nodes run as Azure Container Instances. The SPIRE agent DaemonSet cannot run on ACI nodes. Use the SPIFFE CSI Driver for workloads on virtual nodes.
+- **Azure Key Vault:** Store the MongoDB `replica.key` in Azure Key Vault and inject it via the [Azure Key Vault Provider for Secrets Store CSI Driver](https://github.com/Azure/secrets-store-csi-driver-provider-azure).
+- **Azure Container Registry (ACR):** When pulling SPIRE images from ACR, attach the ACR to the AKS cluster or configure image pull secrets. The `dhi.io` SPIRE images used in the development docker-compose setup may need to be mirrored to ACR for production use.
+- **Azure Application Gateway Ingress:** As with ALB/NLB, SPIFFE mTLS applies to pod-to-pod traffic. TLS at the ingress controller uses certificates from Azure-managed sources (Key Vault, App Service Certificates).
+
+---
+
+## SPIRE Federation (Cross-Domain SSF)
+
+Federation enables two independent i2goSignals deployments (different organizations, different trust domains) to establish mTLS for SSF stream management without pre-shared credentials.
+
+### Setup
+
+On each SPIRE server, enable the federation bundle endpoint in `server.conf`:
+
+```hcl
+server {
   federation {
     bundle_endpoint {
       address = "0.0.0.0"
       port    = 8443
-      # Use SPIFFE auth: our own SVID authenticates the endpoint
       profile "https_spiffe" {
         endpoint_spiffe_id = "spiffe://cluster.i2gosignals.internal/spire/server"
       }
@@ -278,347 +503,194 @@ server {
 }
 ```
 
-### Bootstrap Procedure (one-time per federation)
+Bootstrap bundle exchange (one-time, out-of-band):
 
 ```bash
-# On our SPIRE server — export our bundle
+# Export our bundle and send to partner
 spire-server bundle show -format spiffe > our-bundle.json
 
-# On partner's SPIRE server — import our bundle
-spire-server bundle set -format spiffe -id spiffe://cluster.i2gosignals.internal < our-bundle.json
-
-# Repeat symmetrically (partner exports their bundle, we import it)
+# Import partner's bundle
 spire-server bundle set -format spiffe -id spiffe://partner.example.com < partner-bundle.json
 ```
 
-After bootstrap, SPIRE automatically refreshes bundles at the configured interval (default: per the SPIFFE bundle's `refresh_hint`).
-
-### Registration Entry for Federated Workloads
-
-```bash
-spire-server entry create \
-  -spiffeID spiffe://cluster.i2gosignals.internal/workload/gosignals-node \
-  -parentID spiffe://cluster.i2gosignals.internal/spire/agent/docker/gosignals1 \
-  -selector docker:label:com.i2gosignals.role:gosignals-node \
-  -federatesWith spiffe://partner.example.com
-```
-
-Workloads registered with `-federatesWith` receive the partner's trust bundle automatically, enabling `tlsconfig.AuthorizeMemberOf(partnerTrustDomain)` to work in `GetSpiffeClient()`.
-
-### docker-compose Integration
-
-```yaml
-# Addition to docker-compose-dev.yml
-
-  spire-server:
-    image: dhi.io/spire-server:1.14.4-dev
-    container_name: spire-server
-    hostname: spire-server
-    networks:
-      - backend
-    ports:
-      - "8081:8081"   # SPIRE gRPC API
-      - "8443:8443"   # Federation bundle endpoint
-    volumes:
-      - ./config/spire/server:/etc/spire/server
-      - spire_data:/var/lib/spire/server
-    entrypoint: ["/usr/local/bin/spire-server", "run", "-config", "/etc/spire/server/server.conf", "-socketPath", "/run/spire/sockets/registration.sock"]
-
-  spire-token-gen:
-    image: dhi.io/spire-server:1.14.4-dev
-    container_name: spire-token-gen
-    networks:
-      - backend
-    depends_on:
-      spire-server:
-        condition: service_healthy
-    volumes:
-      - spire_sockets:/run/spire/sockets
-      - spire_tokens:/run/spire/tokens
-    entrypoint:
-      - "sh"
-      - "-c"
-      - |
-        until /usr/local/bin/spire-server healthcheck -socketPath /run/spire/sockets/registration.sock; do sleep 1; done;
-        TOKEN_OUT=$$(/usr/local/bin/spire-server token generate -socketPath /run/spire/sockets/registration.sock -output json);
-        if echo "$$TOKEN_OUT" | grep -q '"value"'; then
-          echo "$$TOKEN_OUT" | sed 's/.*"value": *"\([^"]*\)".*/\1/' > /run/spire/tokens/agent.token;
-          echo "Token generated successfully";
-        else
-          echo "Failed to generate token: $$TOKEN_OUT";
-          exit 1;
-        fi
-
-  spire-agent:
-    image: dhi.io/spire-agent:1.14.4-dev
-    container_name: spire-agent
-    networks:
-      - backend
-    depends_on:
-      spire-server:
-        condition: service_healthy
-      spire-token-gen:
-        condition: service_completed_successfully
-      spire-setup:
-        condition: service_completed_successfully
-    volumes:
-      - ./config/spire/agent:/etc/spire/agent
-      - spire_agent_data:/var/lib/spire/agent
-      - spire_sockets:/run/spire/sockets   # shared with workloads
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker workload attestation
-      - spire_bin:/opt/spire/shared_bin    # Shared volume for binaries
-      - spire_tokens:/run/spire/tokens
-    entrypoint:
-      - "sh"
-      - "-c"
-      - |
-        echo "Starting spire-agent entrypoint..."
-        cmp -s /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent || cp /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent
-        chmod +x /opt/spire/shared_bin/spire-agent
-        echo "Binary copied to shared volume"
-        echo "Starting spire-agent daemon..."
-        exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf -joinTokenFile /run/spire/tokens/agent.token
-    pid: "host"
-
-  spire-registration:
-    image: dhi.io/spire-server:1.14.4-dev
-    container_name: spire-registration
-    networks:
-      - backend
-    depends_on:
-      spire-server:
-        condition: service_healthy
-      spire-agent:
-        condition: service_started
-    volumes:
-      - ./config/spire/registration:/etc/spire/registration
-      - spire_sockets:/run/spire/sockets
-    entrypoint:
-      - "sh"
-      - "-c"
-      - |
-        echo "Waiting for spire-server to be healthy..."
-        until /usr/local/bin/spire-server healthcheck -socketPath /run/spire/sockets/registration.sock; do sleep 2; done
-        echo "Running registration loop..."
-        until sh /etc/spire/registration/register.sh; do
-          echo "Registration failed (likely waiting for agent), retrying in 5s..."
-          sleep 5
-        done
-        echo "Registration completed successfully"
-
-volumes:
-  spire_data: {}
-  spire_sockets: {}
-  spire_tokens: {}
-```
-
-Each goSignals container mounts the agent socket:
-
-```yaml
-  goSignals1:
-    # ... existing config ...
-    volumes:
-      - /run/spire/sockets:/run/spire/sockets  # add this
-    environment:
-      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock  # add this
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal              # add this
-```
-
-### Operational Notes
-
-- **Registry Choice**: `ghcr.io/spiffe/spire-server` images are not publicly accessible. Use the `dhi.io` registry (e.g., `dhi.io/spire-server:1.14.4-dev`) which includes necessary shell environments for registration scripts.
-- **Automated Workload Registration**: A dedicated `spire-registration` service handles the idempotent registration of all service entries using a robust `register.sh` script.
-    - **Robust Agent Identification**: The script uses `spire-server agent list -output json` to precisely extract the latest active agent's SPIFFE ID as the `parentID`. This handles scenarios where stale agent entries might persist in the server database after a partial reset. It includes a robust wait loop to ensure the agent has joined before attempting registration.
-    - **Aggressive Cleanup**: Before registering, the script deletes ALL existing workload entries to ensure a completely clean state and avoid stale parent ID mismatches.
-    - **Redundant Selectors**: Workloads are registered with multiple selectors (labels AND container names, including `/` prefix variants) to ensure a match regardless of how the SPIRE agent's docker attestor perceives the container.
-    - **Comprehensive Coverage**: Entries are automatically created for all nodes, including `gosignals`, `gossfserver`, `mongodb`, `prometheus`, `grafana`, `keycloak`, `postgres`, and `scim`.
-- **Robust Helper Bootstrapping**: Init-containers or setup scripts (like `mongo-init`) should use robust wait loops for both the SPIRE agent socket and the SVID fetching. For example, `mongo-init` loops `api fetch x509` until the registration entry is available and the SVID is issued, ensuring that downstream services like MongoDB only start once their identities are ready.
-- **Node Attestation**: The `join_token` node attestor plugin is used for automated bootstrapping in the development environment. A dedicated `spire-token-gen` service generates a join token once the server is healthy and saves it to a shared volume, which the `spire-agent` reads during startup using the `-joinTokenFile` flag.
-    - **Persistence**: The `spire-agent` must use a persistent volume for its `data_dir` (e.g., `/var/lib/spire/agent`) and be configured with `KeyManager "disk"`. For the agent, the plugin requires the `directory` parameter (e.g., `directory = "/var/lib/spire/agent"`), whereas the server uses `keys_path`. This ensures that after a container restart, the agent retains its SVID and private keys on disk, avoiding the need for a new join token (which are one-time use).
-    - **Robust Token Generation**: The `spire-token-gen` service should use `-output json` and verify that a token was actually generated (by checking for the `"value"` key in the JSON output) before writing to the shared `agent.token` file. This prevents the agent from attempting attestation with an empty or malformed token if the server is not yet ready.
-    - Omit the `-spiffeID` flag when generating tokens to allow SPIRE to assign a default ID in its reserved `/spire/agent/` namespace; manual assignment of IDs in the `/spire/` namespace via the API is restricted and may result in "path is in the reserved namespace" errors.
-    - The `docker` plugin is used only for **workload attestation** (identifying containers), not for node attestation, as it is not a built-in node attestor in version 1.14.4.
-- **Healthchecks**: Both `spire-server` and `spire-agent` are configured with healthchecks using their respective CLI commands. Dependent services (like `spire-registration` and `mongo-init`) use `service_healthy` conditions to ensure they only attempt communication when the SPIRE infrastructure is fully operational.
-- **Binary Sharing**: Avoid mounting volumes directly over `/usr/local/bin` in provider containers as it can cause `runc` ELOOP (too many levels of symbolic links) errors if the path is a symlink in the base image. Instead, mount the shared volume to a dedicated path (e.g., `/opt/spire/shared_bin`) and copy the binary there. Use `cmp -s source destination || cp source destination` in the agent's entrypoint to avoid "same file" errors during container restarts while ensuring the shared binary is always up to date with the image.
-- **Binary Locations**: In `dhi.io` images, SPIRE binaries are located in `/usr/local/bin/`.
-- **Command-line Flags**: Use `-socketPath` for CLI commands instead of the deprecated `-registrationUDSPath`.
-- **Config Paths**: Ensure the server uses the `-config` flag explicitly to avoid falling back to image-specific default paths (like `/conf/server/server.conf`).
-- For **Kubernetes production**, use the `k8s_sat` (service account token) attestor — no changes to Go code required.
-- SPIRE bundles have a `refresh_hint` (typically 5 minutes) that controls how often federated trust bundles are re-fetched.
-- The bootstrap bundle exchange is the only manual step; all subsequent rotation is automated.
-
----
-
-## Area 4: MongoDB mTLS via SPIFFE X.509
-
-### Current State
-
-MongoDB connections use password authentication (`MONGO_INITDB_ROOT_USERNAME/PASSWORD`) via the connection URI. No TLS is configured in the docker-compose files. The Go driver connects via `internal/providers/dbProviders/mongo_provider/provider.go` `connect()`.
-
-### Proposed Change
-
-When SPIFFE is available, obtain the local X.509-SVID from the workload API and use it as the MongoDB client certificate. MongoDB must be configured to accept mTLS with the SPIRE CA as the trusted CA.
-
-#### MongoDB Server Configuration
-
-```yaml
-# mongod.conf addition
-net:
-  tls:
-    mode: requireTLS
-    CAFile: /etc/spire/ca-bundle.pem          # SPIRE trust bundle (rotated externally)
-    PEMKeyFile: /etc/mongo/mongo-svid.pem     # MongoDB's own SVID (fetched by SPIRE agent helper)
-    allowConnectionsWithoutCertificates: false
-```
-
-Alternatively, use the `spire-helper` sidecar tool to write the SVID and trust bundle to files that MongoDB reads, with automatic rotation via a `renewSignal`.
-
-#### Go Driver Change
-
-In `mongo_provider/provider.go`, `connect()` currently does:
-
-```go
-opts := options.Client().ApplyURI(p.DbUrl)
-```
-
-Proposed addition (when `SPIFFE_ENDPOINT_SOCKET` is set):
-
-```go
-if socket := os.Getenv("SPIFFE_ENDPOINT_SOCKET"); socket != "" {
-    x509Source, err := workloadapi.NewX509Source(ctx,
-        workloadapi.WithClientOptions(workloadapi.WithAddr(socket)))
-    if err == nil {
-        tlsConfig := tlsconfig.MTLSClientConfig(x509Source, x509Source,
-            tlsconfig.AuthorizeMemberOf(mongoTrustDomain))
-        opts.SetTLSConfig(tlsConfig)
-    }
-}
-```
-
-`mongoTrustDomain` is `spiffeid.RequireTrustDomainFromString(os.Getenv("SPIFFE_TRUST_DOMAIN"))`.
-
-The MongoDB connection URI would change from `mongodb://user:pass@mongo1:30001/` to `mongodb://mongo1:30001/?tls=true` (credentials removed; identity comes from the client cert).
-
-#### Replica Set Considerations
-
-- All three replica set members (mongo1, mongo2, mongo3) need SVIDs, either via `spire-helper` sidecars or a shared secrets mechanism.
-- The SPIRE trust bundle must be distributed to MongoDB as a CA file, refreshed as bundles rotate.
-- Internal replica set member authentication (currently via `keyFile`) can continue unchanged, or be replaced with X.509 member authentication (MongoDB supports both modes).
-
-#### Fallback
-
-If `SPIFFE_ENDPOINT_SOCKET` is not set, the connection reverts to username/password from the URI — no operational change for existing deployments.
-
----
-
-## New Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `SPIFFE_ENDPOINT_SOCKET` | Path to SPIRE agent Unix socket | (unset — disables SPIFFE) |
-| `SPIFFE_TRUST_DOMAIN` | Trust domain for this cluster | `cluster.i2gosignals.internal` |
-| `SPIFFE_CLUSTER_SPIFFE_ID` | Full SPIFFE ID for this node (for validation by peers) | Auto-derived |
-| `SPIFFE_MONGO_ENABLED` | Enable SPIFFE mTLS for MongoDB connections | `false` |
-
-All SPIFFE features are opt-in: existing deployments without `SPIFFE_ENDPOINT_SOCKET` continue to operate identically to today.
-
----
-
-## go-spiffe Dependency
-
-Add to `go.mod`:
-
-```
-github.com/spiffe/go-spiffe/v2 v2.x.y
-```
-
-Key packages used:
-
-| Package | Use |
-|---|---|
-| `workloadapi` | Fetch SVIDs and trust bundles from SPIRE agent |
-| `spiffeid` | Parse and validate SPIFFE IDs and trust domains |
-| `spiffetls` | High-level mTLS dial/listen |
-| `spiffetls/tlsconfig` | Build `*tls.Config` for custom HTTP transports |
-
-The library automatically handles SVID rotation — the `X509Source` returned by `workloadapi.NewX509Source()` watches the workload API and updates certificates in place, so long-running HTTP transports pick up new SVIDs without restart.
-
----
-
-## Phased Rollout Plan
-
-### Phase 1: Infrastructure (no Go code changes)
-
-1. Add SPIRE server and agent services to `docker-compose-dev.yml`.
-2. Write SPIRE server and agent configuration files in `config/spire/`.
-3. Create workload registration entries for each service.
-4. Validate that SVIDs are issued and auto-rotated.
-
-### Phase 2: Inter-cluster mTLS (Area 1)
-
-1. Add `go-spiffe` to `go.mod`.
-2. Add `NewSpiffeX509Source()` helper to `pkg/tlsSupport/`.
-3. Modify `NewRouter()` in `event_router.go` to use SPIFFE transport when `SPIFFE_ENDPOINT_SOCKET` is set.
-4. Update `WakeTransmitter` in `api_cluster.go` to accept SPIFFE-authenticated requests.
-5. Test: cluster wake-up calls succeed with mTLS; HMAC fallback still works without SPIFFE.
-
-### Phase 3: Stream Management (Area 2)
-
-1. Add `SpiffeConfig` struct to `pkg/ssfModels/model_server.go`.
-2. Add `pkg/oauthClient/spiffe_client.go` with `GetSpiffeClient()`.
-3. Update `GetClientForServer()` in `pkg/oauthClient/client.go` to check `SpiffeConfig` first.
-4. Test: stream create/update/delete to a SPIFFE-aware server uses mTLS; OAuth fallback still works.
-
-### Phase 4: MongoDB mTLS (Area 4)
-
-1. Configure MongoDB with TLS and SVID-based client certificates.
-2. Modify `mongo_provider/provider.go` `connect()` to use SPIFFE TLS config.
-3. Test: MongoDB connection succeeds with mTLS; password-URI fallback works without SPIFFE.
-
-### Phase 5: Federation (Area 3)
-
-1. Deploy a second SPIRE server for a partner test domain.
-2. Exchange bootstrap bundles.
-3. Register a federated workload entry.
-4. Test: `GetSpiffeClient()` using a `SpiffeConfig` with the partner trust domain establishes mTLS successfully.
-
----
-
-## Files to Modify
-
-| File | Change |
-|---|---|
-| `go.mod` | Add `github.com/spiffe/go-spiffe/v2` |
-| `pkg/ssfModels/model_server.go` | Add `SpiffeConfig` struct and field to `Server` |
-| `pkg/oauthClient/client.go` | Add SPIFFE as first auth mode in `GetClientForServer()` |
-| `pkg/oauthClient/spiffe_client.go` | **New file**: `GetSpiffeClient()` implementation |
-| `pkg/tlsSupport/key.go` | Add `NewSpiffeX509Source()` helper |
-| `internal/eventRouter/event_router.go` | `NewRouter()`: optional SPIFFE transport for cluster HTTP client |
-| `pkg/goSignals/server/api_cluster.go` | `WakeTransmitter()`: accept SPIFFE-authenticated requests |
-| `internal/providers/dbProviders/mongo_provider/provider.go` | `connect()`: optional SPIFFE TLS config for MongoDB |
-| `docker-compose-dev.yml` | Add `spire-server`, `spire-agent` services; mount socket on node containers |
-| `config/spire/` | **New directory**: SPIRE server and agent configuration files |
+After bootstrap, SPIRE refreshes bundles automatically. Workloads registered with `-federatesWith spiffe://partner.example.com` receive the partner trust bundle and can establish mTLS with partner workloads.
 
 ---
 
 ## Security Considerations
 
-- **Short-lived SVIDs** (default 1 hour) limit the blast radius of a compromised credential.
-- **No secret distribution** required for cluster nodes — attestation handles identity bootstrapping.
-- **Automatic rotation** means no manual certificate renewal procedures.
-- **Audit logs** from SPIRE server record all SVID issuances.
-- **Existing mechanisms preserved** — operators can run without SPIFFE in dev/test environments.
-- **MongoDB mTLS** eliminates database credentials from environment variables/config files.
+- **Short-lived SVIDs** (default 1 hour TTL) limit the blast radius of a compromised credential.
+- **No secret distribution** — attestation handles identity bootstrapping. Cluster nodes never share a long-lived secret for mTLS.
+- **Automatic rotation** — `go-spiffe`'s `X509Source` watches the workload API and updates certificates in-process. No restart required on rotation.
+- **MongoDB credentials eliminated** — with `SPIFFE_MONGO_ENABLED=true` the MONGO_URL contains no username or password. Credential rotation is not required.
+- **Audit trail** — the SPIRE server logs all SVID issuances, providing a workload-level access log.
+- **Defence in depth** — SPIFFE augments, not replaces, existing auth mechanisms (HMAC, OAuth2, static tokens). Deployments can run without SPIFFE.
+
+### Important Operational Notes
+
+- **`uniqueid` plugin is mandatory for MongoDB.** Without it, all SVID Subjects are empty and MongoDB authentication always fails. After enabling the plugin, the SPIRE server must be restarted.
+- **The `mongo-init` sentinel file** (`/certs/.init_complete`) must be used for the `mongo-init` healthcheck — not cert file existence. Checking only for cert existence causes a race where goSignals containers start before `$external` users are created.
+- **`mongod.conf` must be consistent across all replica members.** The `clusterAuthX509.attributes` value must be the same on all three replica nodes.
+- **The `x500UniqueIdentifier` hash in `mongod.conf` is derived from the SPIFFE ID.** If the trust domain or workload path changes, recompute it and update `mongod.conf`.
+- **`--tlsAllowInvalidHostnames` is required** for both `mongod` and `mongosh` because SPIFFE SVIDs use URI SANs, not DNS SANs.
+- **`authSource=$$external`** in docker-compose env files — the dollar sign must be doubled to prevent docker-compose from interpreting `$external` as an undefined variable.
+- **Stale certs on restart** — `mongo_spiffe_init.sh` deletes old `.pem` and `.key` files at startup. This ensures `mongod` waits for fresh SVIDs rather than starting with expired certs from a previous run.
 
 ---
+
+## Troubleshooting
+
+### `AuthenticationFailed` on MongoDB connection
+
+1. Verify `CredentialComposer "uniqueid" {}` is in `config/spire/server/server.conf` and the SPIRE server has been restarted since it was added.
+2. Check `mongo-init` logs for `Actual SVID Subject (RFC2253)` — the Subject must be non-empty and contain `x500UniqueIdentifier=`.
+3. Verify the `$external` user exists: `mongosh ... --eval "db.getSiblingDB('\$external').getUsers()"`.
+4. Confirm the connection URI contains `authMechanism=MONGODB-X509&authSource=$$external`.
+
+### `Cannot create an x.509 user with a subjectname that would be recognized as an internal cluster member`
+
+The `clusterAuthX509.attributes` in `mongod.conf` is either missing, using the wrong value, or `clusterAuthMode` does not allow X.509. Verify:
+- `security.clusterAuthMode` is `sendKeyFile` (not `keyFile`).
+- `net.tls.clusterAuthX509.attributes` is set to `x500UniqueIdentifier=<mongodb-hash>`.
+- The hash matches `SHA256("spiffe://<trust-domain>/workload/mongodb")[0:32]` exactly.
+- `mongod.conf` is mounted at `/etc/mongo/mongod.conf` and `--config /etc/mongo/mongod.conf` is passed to `mongod`.
+
+### `Error during global initialization: InvalidSSLConfiguration`
+
+The `clusterAuthX509.attributes` value is not present in the server's own TLS certificate. The attributes value must be an attribute that IS in the MongoDB workload SVID's Subject. A synthetic value like `O=MongoDB_Cluster_Internal` does not work. Use `x500UniqueIdentifier=<mongodb-hash>` as described above.
+
+### `rpc error: code = PermissionDenied desc = no identity issued`
+
+The SPIRE workload entry for this container has not been registered yet, or the agent has not received it. The `mongo_spiffe_init.sh` script retries every 5 seconds and proceeds once the SVID is issued. If it never resolves, check `spire-registration` logs and verify the workload selector matches.
+
+### `replSetInitiate quorum check failed`
+
+Occurs when `clusterAuthMode: x509` (not `sendKeyFile`) is used. With pure x.509 cluster auth, the quorum check connects to replica members before `$external` users exist. Use `sendKeyFile` so the quorum check uses the keyFile credential.
+
+### SPIRE agent fails to start after container restart
+
+The agent's persistent volume (`spire_agent_data`) may be missing or corrupted. The `KeyManager "disk"` plugin requires `directory = "/var/lib/spire/agent"` (not `keys_path`, which is the server plugin parameter). Check agent configuration.
+
+---
+
+---
+
+## MongoDB Certificate Rotation
+
+### Background: the Static-Load Problem
+
+SPIRE is designed around short-lived, automatically-rotated SVIDs. Go workloads use `go-spiffe`'s `X509Source`, which watches the Workload API and swaps certificates in-process without any restart. Naively, MongoDB appears to share this limitation:
+
+- `mongod` reads its TLS certificate and CA bundle at startup and holds them in memory.
+- Updating cert files on disk has no effect on a running `mongod`.
+
+This creates two failure modes:
+
+| Event | Effect |
+|---|---|
+| MongoDB's own SVID expires | `mongod` presents an expired server certificate; new TLS handshakes fail |
+| SPIRE CA rotates and old CA is pruned from the trust bundle | Go workload SVIDs signed by the new CA are not trusted by MongoDB's in-memory CA bundle — client auth fails |
+
+### Solution: `db.adminCommand({rotateCertificates: 1})`
+
+MongoDB provides the [`rotateCertificates`](https://www.mongodb.com/docs/manual/reference/command/rotateCertificates/) admin command (Community, Enterprise, and Atlas) which re-reads **all three TLS file paths** from disk **without restarting `mongod`**:
+
+- `net.tls.certificateKeyFile` (server cert + key)
+- `net.tls.CAFile` **(CA bundle — including the SPIRE trust bundle)**
+- `net.tls.CRLFile` (CRL, on Linux/Windows)
+
+Key behaviours:
+- Existing connections keep the old cert/CA bundle until they close naturally — no connection disruption.
+- All new connections immediately use the reloaded material.
+- A failed rotation (expired cert, file missing) leaves the current TLS configuration intact; `mongod` does not crash.
+- Requires the `rotateCertificates` privilege action (part of the built-in `hostManager` role; the `root` user has it).
+- The new cert must have the **same filename and path** as the old one — already satisfied by the fixed paths `/certs/mongo.pem` and `/certs/ca.pem`.
+
+### Implementation
+
+**`config/mongo/mongo_spiffe_init.sh`** — the renewal loop saves the previous cert/CA before overwriting, then uses them to connect for the `rotateCertificates` call:
+
+```bash
+# Save current cert/CA before overwriting
+cp /certs/mongo.pem /certs/mongo.pem.prev
+cp /certs/ca.pem    /certs/ca.pem.prev
+
+# Write new cert/CA from SPIRE
+cp /certs/svid.0.pem /certs/mongo.pem && cat /certs/svid.0.key >> /certs/mongo.pem
+cp /certs/bundle.0.pem /certs/ca.pem
+
+# Connect using PREVIOUS cert; call rotateCertificates on each node
+CONN_CERT=/certs/mongo.pem.prev; [ -f "$CONN_CERT" ] || CONN_CERT=/certs/mongo.pem
+CONN_CA=/certs/ca.pem.prev;     [ -f "$CONN_CA"   ] || CONN_CA=/certs/ca.pem
+
+for HOST in mongo1 mongo2 mongo3; do
+    IDX=${HOST##mongo}; PORT=$((30000 + IDX))
+    mongosh --host "$HOST" --port "$PORT" \
+        --username root --password dockTest --authenticationDatabase admin \
+        --tls --tlsAllowInvalidHostnames \
+        --tlsCAFile "$CONN_CA" --tlsCertificateKeyFile "$CONN_CERT" \
+        --quiet \
+        --eval "db.adminCommand({rotateCertificates: 1, message: 'SPIRE SVID renewal'})"
+done
+```
+
+**Why the previous cert is used for the connection:**
+
+- `mongod` enforces mutual TLS when `--tlsCAFile` is configured — clients must present a valid certificate even for password-based authentication.
+- After a SPIRE CA rotation, the new SVID (just written to `/certs/mongo.pem`) is signed by the new CA. `mongod`'s in-memory CA bundle still only knows the old CA, so it would reject the new client cert.
+- Connecting with the _previous_ cert (signed by the old CA, still trusted by `mongod`) allows the `rotateCertificates` call to succeed. `mongod` then atomically reloads both the new server cert and the new CA bundle from disk.
+- On the first renewal cycle no `.prev` files exist yet; the script falls back to the new cert, which is safe because the CA has not rotated at that point (it only rotates every 24h by default).
+
+**Rotation timeline with 1h SVID TTL (default):**
+
+| Time | Event |
+|---|---|
+| T+0 | SPIRE issues SVID (valid 1h) |
+| T+30m | SPIRE prepares rotation: new CA added to trust bundle, new SVID issued (signed by new CA), old CA kept in bundle during transition |
+| T+30–35m | Renewal loop (5-min interval) detects new SVID; writes `/certs/mongo.pem` and `/certs/ca.pem` (bundle contains both old + new CA); calls `rotateCertificates` on each node |
+| T+35m | All new `mongod` connections use new cert + CA bundle; old connections drain naturally |
+| T+1h | Old SVID expires; new one has been active for ~25 minutes |
+
+MongoDB SVIDs use the same 1h server default as all other workloads. No per-entry TTL override or extended `ca_ttl` is needed.
+
+**`docker-compose-spiffe-dev.yml`** — MongoDB container startup loop validates cert expiry before starting `mongod`:
+
+```bash
+until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] \
+      && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do
+    echo 'Waiting for valid certs and key...'
+    sleep 5
+done
+```
+
+`openssl -checkend 60` exits non-zero if the cert is already expired or expires within 60 seconds. This prevents the infinite restart loop that occurs when a mongo container restarts and finds a stale cert on the shared `mongo_certs` volume.
+
+### Alternatives Considered and Rejected
+
+**`spiffe-helper` + container restart:** The [`spiffe-helper`](https://github.com/spiffe/spiffe-helper) sidecar detects SVID rotations and executes a configurable command. For MongoDB it would need to restart the container, requiring careful orchestration to preserve replica-set quorum and avoid connection disruption on both sides simultaneously. `rotateCertificates` is simpler and avoids all restarts.
+
+**Envoy/NGINX TLS sidecar:** A proxy handles TLS termination with SPIFFE SVIDs via the Workload API (automatic rotation); MongoDB listens on localhost without TLS. This is the canonical service-mesh pattern but adds significant infrastructure overhead. `rotateCertificates` achieves the same outcome within the existing setup.
+
+**Long-lived certs:** Setting `ca_ttl` and per-entry SVID TTL to 1 year avoids restarts but degrades the security posture: a compromised MongoDB SVID or CA key has a 1-year blast radius. `rotateCertificates` maintains the 1h TTL and eliminates this tradeoff entirely.
+
+### Operational Notes
+
+- **After `docker compose down -v`:** All volumes are recreated; SPIRE issues a fresh CA and fresh SVIDs. No manual action needed.
+- **After `docker compose down` (without `-v`):** Existing volumes reused. MongoDB containers check cert validity via `openssl -checkend` before starting, so they wait for the renewal loop to provide a fresh cert if the previous one has expired.
+- **`rotateCertificates` is idempotent:** Calling it when the cert has not changed is harmless — `mongod` re-reads the same files and logs the rotation.
+- **Production:** The same `rotateCertificates` approach applies on Kubernetes. Run a sidecar that calls `rotateCertificates` via `mongosh` after writing updated cert files, triggered by a file-watch or timer.
 
 ## References
 
 - [SPIFFE Specification](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE.md)
 - [SPIRE Documentation](https://spiffe.io/docs/latest/spire-about/)
+- [SPIRE Helm Charts (Hardened)](https://github.com/spiffe/helm-charts-hardened)
 - [go-spiffe Library](https://github.com/spiffe/go-spiffe)
-- [SPIFFE Federation Architecture](https://spiffe.io/docs/latest/architecture/federation/readme/)
+- [SPIFFE CSI Driver](https://github.com/spiffe/spiffe-csi) — for Fargate, Autopilot, ACI
 - [spire-helper](https://github.com/spiffe/spire-helper) — sidecar for file-based SVID rotation
-- [MongoDB TLS with go-mongodb-driver](https://www.mongodb.com/docs/drivers/go/current/fundamentals/connection/tls/)
+- [MongoDB X.509 Authentication](https://www.mongodb.com/docs/manual/tutorial/configure-x509-client-authentication/)
+- [MongoDB `clusterAuthX509` Configuration](https://www.mongodb.com/docs/manual/reference/configuration-options/#mongodb-setting-net.tls.clusterAuthX509.attributes)
+- [MongoDB `rotateCertificates` Command](https://www.mongodb.com/docs/manual/reference/command/rotateCertificates/)
+- [MongoDB Community Kubernetes Operator](https://github.com/mongodb/mongodb-kubernetes-operator)
+- [SPIFFE Federation Architecture](https://spiffe.io/docs/latest/architecture/federation/readme/)
 - [OpenID Shared Signals Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0.html)
-- [RFC 8417 — Security Event Token (SET)](https://www.rfc-editor.org/rfc/rfc8417)

@@ -49,14 +49,15 @@ services:
       - backend
     ports:
       - "30001:30001"
-    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ]; do echo 'Waiting for certs and key...'; sleep 5; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30001 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem"]
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30001 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     volumes:
       - mongo1_data:/data/db
       - mongo_config:/data/config
       - spire_sockets:/run/spire/sockets
       - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--port", "30001", "--tls", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--port", "30001", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,14 +77,15 @@ services:
       - backend
     ports:
       - "30002:30002"
-    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ]; do echo 'Waiting for certs and key...'; sleep 5; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30002 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem"]
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30002 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     volumes:
       - mongo2_data:/data/db
       - mongo_config:/data/config
       - spire_sockets:/run/spire/sockets
       - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--port", "30002", "--tls", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--port", "30002", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -101,7 +103,7 @@ services:
       - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     ports:
       - "30003:30003"
-    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ]; do echo 'Waiting for certs and key...'; sleep 5; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30003 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem"]
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30003 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     networks:
       - backend
     volumes:
@@ -109,8 +111,9 @@ services:
       - mongo_config:/data/config
       - spire_sockets:/run/spire/sockets
       - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--port", "30003", "--tls", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--port", "30003", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -138,64 +141,18 @@ services:
       - mongo_config:/data/config
     labels:
       com.i2gosignals.role: mongodb
-    entrypoint:
-      - "bash"
-      - "-c"
-      - |
-        echo "Waiting for spire-agent binary..."
-        until [ -f /usr/local/bin/spire-agent ]; do sleep 2; done
-        
-        echo "Waiting for spire-agent socket..."
-        until [ -S /run/spire/sockets/agent.sock ]; do sleep 2; done
-        
-        echo "Setting up replica.key..."
-        if [ ! -f /data/config/replica.key ]; then
-          openssl rand -base64 756 > /data/config/replica.key
-          chmod 400 /data/config/replica.key
-          chown 999:999 /data/config/replica.key
-          echo "replica.key created"
-        fi
-
-        echo "Fetching initial SPIFFE SVID for MongoDB..."
-        until /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock; do
-          echo "Waiting for SVID registration to be completed..."
-          sleep 5
-        done
-        
-        cp /certs/svid.0.pem /certs/mongo.pem
-        cat /certs/svid.0.key >> /certs/mongo.pem
-        cp /certs/bundle.0.pem /certs/ca.pem
-        echo "Initial certificates fetched and prepared"
-        
-        echo "Starting certificate renewal loop in background..."
-        (while true; do
-          sleep 300
-          if /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock; then
-            cp /certs/svid.0.pem /certs/mongo.pem
-            cat /certs/svid.0.key >> /certs/mongo.pem
-            cp /certs/bundle.0.pem /certs/ca.pem
-            echo "Certificates updated: $(date)"
-          else
-            echo "Certificate renewal failed: $(date)"
-          fi
-        done) &
-        
-        echo "Waiting for MongoDB nodes to be ready for initialization..."
-        until mongosh --port 30001 --tls --tlsCAFile /certs/ca.pem --tlsCertificateKeyFile /certs/mongo.pem --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
-          echo "Waiting for mongo1 on port 30001..."
-          sleep 5
-        done
-        
-        echo "Initializing replica set..."
-        /scripts/mongo_init.sh
-        
-        echo "Initialization complete. Keeping container alive for cert renewal."
-        wait
+    networks:
+      - backend
+    entrypoint: ["bash", "/scripts/mongo_spiffe_init.sh"]
     healthcheck:
-      test: ["CMD", "sh", "-c", "[ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ]"]
-      interval: 30s
+      # Check for the sentinel written at the END of mongo_spiffe_init.sh, after
+      # replica-set initialisation and $external user creation are both complete.
+      # Dependent services (goSignals1/2, goSsfServer) must not start until this
+      # is healthy, otherwise they will connect before their X.509 users exist.
+      test: ["CMD", "sh", "-c", "[ -f /certs/.init_complete ]"]
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 20
 
   # ---------------------------------------------------------------------------
   # SPIRE Setup — fixes volume permissions for non-root users

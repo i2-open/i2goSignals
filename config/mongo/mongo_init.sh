@@ -10,7 +10,7 @@ until [ -f /certs/mongo.pem ]; do
 done
 
 # Initialize replica set using TLS
-mongosh --tls --tlsCAFile /certs/ca.pem --tlsCertificateKeyFile /certs/mongo.pem -u root -p dockTest --host mongo1:30001 <<EOF
+mongosh --tls --tlsAllowInvalidHostnames --tlsCAFile /certs/ca.pem --tlsCertificateKeyFile /certs/mongo.pem -u root -p dockTest --host mongo1:30001 <<EOF
   var cfg = {
     "_id": "dbrs",
     "version": 1,
