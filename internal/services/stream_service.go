@@ -274,6 +274,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
 			var client *http.Client
+			var closeClient func()
 			var err error
 			var req *http.Request
 			var resp *http.Response
@@ -291,10 +292,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 
 			// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
-			client, err = oauthClient.GetClientForServer(ctx, txServer)
+			client, closeClient, err = oauthClient.GetClientForServer(ctx, txServer)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
 			}
+			defer closeClient()
 
 			ssLog.Debug("Submitting POLL stream registration request to transmitter...")
 			reqBody, err := json.Marshal(transmitStreamReq)
@@ -452,15 +454,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
 		var client *http.Client
+		var closeClient func()
 		var err error
 		var req *http.Request
 		var resp *http.Response
 
 		// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
-		client, err = oauthClient.GetClientForServer(ctx, txServer)
+		client, closeClient, err = oauthClient.GetClientForServer(ctx, txServer)
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
 		}
+		defer closeClient()
 
 		method := streamRec.StreamConfiguration.Delivery.PushReceiveMethod
 		endpoint := s.getFullUrl(method.EndpointUrl)

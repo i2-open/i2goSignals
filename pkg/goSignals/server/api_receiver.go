@@ -174,7 +174,8 @@ func (sa *SignalsApplication) getServerForStream(ctx context.Context, stream *mo
 	return nil, nil
 }
 
-func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, error) {
+func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, func(), error) {
+	noop := func() {}
 	conf := stream.StreamConfiguration
 	var server *model.Server
 	var err error
@@ -194,9 +195,9 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 
 	// Use unified client acquisition if server is available
 	if server != nil {
-		client, err := oauthClient.GetClientForServer(ctx, server)
+		client, closeClient, err := oauthClient.GetClientForServer(ctx, server)
 		if err == nil {
-			return client, "", nil // Client handles Authorization header
+			return client, "", closeClient, nil // Client handles Authorization header
 		}
 		alias := ""
 		if conf.TxAlias != nil {
@@ -210,13 +211,13 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
 		client := &http.Client{}
 		tlsSupport.CheckCaInstalled(client)
-		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, nil
+		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, noop, nil
 	}
 
 	// Default client without extra authorization
 	client := &http.Client{}
 	tlsSupport.CheckCaInstalled(client)
-	return client, "", nil
+	return client, "", noop, nil
 }
 
 /*
@@ -420,12 +421,13 @@ func (rps *ReceiverPushStream) initiateVerification() {
 		State: state,
 	}
 
-	client, _, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
+	client, _, closeClient, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
 	if err != nil {
 		serverLog.Error("PUSH-RCV: Failed to get authenticated client", "error", err)
 		rps.fallbackToStatusCheck()
 		return
 	}
+	defer closeClient()
 
 	err = goSsfUtils.PostVerification(rps.ctx, client, verifyUrl, params)
 	if err != nil {
@@ -544,10 +546,11 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 
 func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
 	server, _ := rps.sa.getServerForStream(ctx, rps.stream)
-	client, _, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
+	client, _, closeClient, err := rps.sa.getHTTPClientForStream(ctx, rps.stream)
 	if err != nil {
 		return nil, err
 	}
+	defer closeClient()
 
 	if server != nil {
 		return goSsfUtils.GetStreamStatus(ctx, client, server, rps.stream.StreamConfiguration.Id)
@@ -726,10 +729,11 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
 	server, _ := ps.sa.getServerForStream(ctx, ps.stream)
-	client, _, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
+	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
 	if err != nil {
 		return nil, err
 	}
+	defer closeClient()
 
 	if server != nil {
 		return goSsfUtils.GetStreamStatus(ctx, client, server, ps.stream.StreamConfiguration.Id)
@@ -859,10 +863,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	var acks []string
 	var setErrs map[string]goSetPoll.SetErrType
 
-	client, auth, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	client, auth, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
 	if err != nil {
 		serverLog.Error("POLL-RCV: Failed to get authenticated client", "sid", sid, "error", err)
 	}
+	defer closeClient()
 
 	if ps.stream.Delivery == nil || ps.stream.Delivery.PollReceiveMethod == nil {
 		serverLog.Error("POLL-RCV: Missing delivery configuration", "sid", sid)
@@ -1009,8 +1014,10 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 						ps.stream = updatedStream
 						ps.mu.Unlock()
 					}
-					// Refresh the client and auth header before retrying
-					client, auth, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+					// Refresh the client and auth header before retrying.
+					// Close the old X509Source before creating a new one.
+					closeClient()
+					client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
 					if err != nil {
 						serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", err)
 					}

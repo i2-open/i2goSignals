@@ -12,14 +12,14 @@ import (
 )
 
 func TestGetSpiffeClient_NilServer(t *testing.T) {
-	_, err := GetSpiffeClient(context.Background(), nil)
+	_, _, err := GetSpiffeClient(context.Background(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil")
 }
 
 func TestGetSpiffeClient_NilSpiffeConfig(t *testing.T) {
 	server := &model.Server{Host: "https://example.com"}
-	_, err := GetSpiffeClient(context.Background(), server)
+	_, _, err := GetSpiffeClient(context.Background(), server)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil")
 }
@@ -30,7 +30,7 @@ func TestGetSpiffeClient_NoSocket(t *testing.T) {
 		Host:         "https://example.com",
 		SpiffeConfig: &model.SpiffeConfig{TrustDomain: "example.com"},
 	}
-	_, err := GetSpiffeClient(context.Background(), server)
+	_, _, err := GetSpiffeClient(context.Background(), server)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SPIFFE_ENDPOINT_SOCKET")
 }
@@ -42,7 +42,7 @@ func TestGetSpiffeClient_InvalidSpiffeID(t *testing.T) {
 		SpiffeConfig: &model.SpiffeConfig{SpiffeID: "not-a-valid-spiffe-id"},
 	}
 	// SpiffeID is validated before contacting the SPIRE agent.
-	_, err := GetSpiffeClient(context.Background(), server)
+	_, _, err := GetSpiffeClient(context.Background(), server)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SpiffeID")
 }
@@ -54,7 +54,7 @@ func TestGetSpiffeClient_InvalidTrustDomain(t *testing.T) {
 		SpiffeConfig: &model.SpiffeConfig{TrustDomain: "bad domain!!!"},
 	}
 	// TrustDomain is validated before contacting the SPIRE agent.
-	_, err := GetSpiffeClient(context.Background(), server)
+	_, _, err := GetSpiffeClient(context.Background(), server)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TrustDomain")
 }
@@ -65,7 +65,7 @@ func TestGetSpiffeClient_EmptySpiffeConfig(t *testing.T) {
 		Host:         "https://example.com",
 		SpiffeConfig: &model.SpiffeConfig{}, // neither SpiffeID nor TrustDomain
 	}
-	_, err := GetSpiffeClient(context.Background(), server)
+	_, _, err := GetSpiffeClient(context.Background(), server)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SpiffeID or TrustDomain")
 }
@@ -83,7 +83,7 @@ func TestGetSpiffeClient_AgentUnavailable(t *testing.T) {
 		Host:         "https://example.com",
 		SpiffeConfig: &model.SpiffeConfig{TrustDomain: "example.com"},
 	}
-	_, err := GetSpiffeClient(ctx, server)
+	_, _, err := GetSpiffeClient(ctx, server)
 	assert.Error(t, err)
 }
 

@@ -302,6 +302,13 @@ func (m *MongoProvider) connect() error {
 	// authentication with cryptographic workload identity, provided the MongoDB
 	// server is configured to accept mTLS with the SPIRE CA bundle.
 	if os.Getenv(CEnvSpiffeMongoEnabled) == "true" && tlsSupport.SpiffeEnabled() {
+		// Close any existing X509Source before creating a new one on reconnection.
+		// Without this, the old source's background watcher goroutine leaks.
+		if m.x509Source != nil {
+			_ = m.x509Source.Close()
+			m.x509Source = nil
+		}
+
 		// Dedicate 30 seconds of the overall timeout to obtaining the X509Source.
 		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 30*time.Second)
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)

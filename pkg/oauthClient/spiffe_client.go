@@ -15,8 +15,13 @@ import (
 )
 
 // GetSpiffeClient returns an *http.Client configured with SPIFFE X.509-SVID
-// mutual TLS for the given server. The local workload's SVID is obtained from
-// the SPIRE agent at SPIFFE_ENDPOINT_SOCKET and is automatically rotated.
+// mutual TLS for the given server, plus a close function the caller must invoke
+// when done with the client. The close function stops the background X509Source
+// watcher that keeps the client's TLS certificate up to date.
+//
+//	client, closeClient, err := GetSpiffeClient(ctx, server)
+//	if err != nil { ... }
+//	defer closeClient()
 //
 // The authorizer used depends on server.SpiffeConfig:
 //   - If SpiffeID is set: authorizes only that exact SPIFFE ID
@@ -28,23 +33,25 @@ import (
 //   - The SPIRE agent cannot be reached or has no SVID yet
 //
 // Callers should fall back to the next authentication mode on error.
-func GetSpiffeClient(ctx context.Context, server *model.Server) (*http.Client, error) {
+func GetSpiffeClient(ctx context.Context, server *model.Server) (*http.Client, func(), error) {
 	if server == nil || server.SpiffeConfig == nil {
-		return nil, errors.New("spiffe: server or SpiffeConfig is nil")
+		return nil, nil, errors.New("spiffe: server or SpiffeConfig is nil")
 	}
 	if !tlsSupport.SpiffeEnabled() {
-		return nil, errors.New("spiffe: SPIFFE_ENDPOINT_SOCKET is not configured")
+		return nil, nil, errors.New("spiffe: SPIFFE_ENDPOINT_SOCKET is not configured")
 	}
 
 	authorizer, err := buildAuthorizer(server.SpiffeConfig)
 	if err != nil {
-		return nil, fmt.Errorf("spiffe: invalid SpiffeConfig: %w", err)
+		return nil, nil, fmt.Errorf("spiffe: invalid SpiffeConfig: %w", err)
 	}
 
 	x509Source, err := tlsSupport.NewX509Source(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("spiffe: failed to create X509Source: %w", err)
+		return nil, nil, fmt.Errorf("spiffe: failed to create X509Source: %w", err)
 	}
+
+	closeFunc := func() { _ = x509Source.Close() }
 
 	tlsCfg := tlsconfig.MTLSClientConfig(x509Source, x509Source, authorizer)
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
@@ -52,7 +59,7 @@ func GetSpiffeClient(ctx context.Context, server *model.Server) (*http.Client, e
 	return &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: transport,
-	}, nil
+	}, closeFunc, nil
 }
 
 // buildAuthorizer constructs the appropriate tlsconfig.Authorizer from the

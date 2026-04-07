@@ -12,13 +12,15 @@ import (
 // TestNewApplication_BackgroundReconnect verifies that the application can start
 // even if the initial MongoDB connection fails, and that it doesn't panic.
 func TestNewApplication_BackgroundReconnect(t *testing.T) {
-	// Use a non-existent Mongo URL to force a connection failure
-	mongoUrl := "mongodb://localhost:27019/nonexistent"
+	// Use a non-existent Mongo URL to force a connection failure.
+	// serverSelectionTimeoutMS=3000 caps the driver's retry loop so the test fails fast.
+	mongoUrl := "mongodb://localhost:27019/nonexistent?serverSelectionTimeoutMS=3000"
 	dbName := "test_db_bg_reconnect"
 
-	// Create provider - should return a non-nil provider despite failure
+	// Create provider - Open returns an error on initial failure but always returns a
+	// valid (non-nil) provider so that background reconnect can proceed.
 	p, err := mongo_provider.Open(mongoUrl, dbName)
-	assert.NoError(t, err)
+	assert.Error(t, err)
 	assert.NotNil(t, p)
 	defer p.Close()
 

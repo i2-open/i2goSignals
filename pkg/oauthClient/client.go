@@ -495,20 +495,28 @@ func GetClientCredentialsClient(ctx context.Context, cfg Config, server *model.S
 	return m.GetClientCredentialsHTTPClient(ctx, cfg.Scopes, cfg.Resource, server)
 }
 
-// GetClientForServer returns an http.Client configured for the given server based on its auth mode.
+// GetClientForServer returns an http.Client configured for the given server based
+// on its auth mode, plus a close function the caller must invoke when done with
+// the client. For non-SPIFFE paths the close function is a no-op.
+//
 // Priority order: SPIFFE mTLS > OAuth2 Client Credentials > Static Token > Base TLS client.
 // The returned client automatically handles the Authorization header for OAuth2 and Static Token modes.
 // For SPIFFE mode, mutual TLS provides authentication at the transport layer.
-func GetClientForServer(ctx context.Context, server *model.Server) (*http.Client, error) {
+//
+//	client, closeClient, err := GetClientForServer(ctx, server)
+//	if err != nil { ... }
+//	defer closeClient()
+func GetClientForServer(ctx context.Context, server *model.Server) (*http.Client, func(), error) {
+	noop := func() {}
 	if server == nil {
-		return nil, errors.New("server is nil")
+		return nil, noop, errors.New("server is nil")
 	}
 
 	// Try SPIFFE mTLS first — falls through to next mode if SPIRE is not configured.
 	if server.SpiffeConfig != nil {
-		client, err := GetSpiffeClient(ctx, server)
+		client, closeFunc, err := GetSpiffeClient(ctx, server)
 		if err == nil {
-			return client, nil
+			return client, closeFunc, nil
 		}
 		clientLog.Warn("SPIFFE client unavailable, falling back to next auth mode",
 			"host", server.Host, "err", err)
@@ -525,16 +533,18 @@ func GetClientForServer(ctx context.Context, server *model.Server) (*http.Client
 			Scopes:       server.OAuthClientConfig.Scopes,
 		}
 
-		return GetClientCredentialsClient(ctx, cfg, server)
+		client, err := GetClientCredentialsClient(ctx, cfg, server)
+		return client, noop, err
 	}
 
 	// Fallback to static token from server with proper TLS
 	if server.ClientToken != nil && *server.ClientToken != "" {
-		return GetStaticTokenClient(ctx, server)
+		client, err := GetStaticTokenClient(ctx, server)
+		return client, noop, err
 	}
 
 	// Default client with server TLS settings
-	return GetBaseHTTPClientForServer(server), nil
+	return GetBaseHTTPClientForServer(server), noop, nil
 }
 
 func (c Config) key() string {
