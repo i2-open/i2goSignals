@@ -160,6 +160,11 @@ services:
       - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals1.env
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   goSignals2:
     build:
@@ -188,6 +193,11 @@ services:
       - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals2.env
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   goSsfServer:
     build:
@@ -227,11 +237,12 @@ services:
       mongo-init:
         condition: service_completed_successfully
       goSignals1:
-        condition: service_started
+        condition: service_healthy
       goSignals2:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - "./config/scim:/scim"
+      - "./config/certs:/scim/certs"
     restart: "no"
     networks:
       - backend
@@ -239,11 +250,12 @@ services:
     environment:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
+      - CA_CERT=/scim/certs/ca-cert.pem
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.8.1
     container_name: scim_cluster1
     networks:
       - frontend
@@ -259,7 +271,7 @@ services:
     env_file:
       - ./config/scim/scim_cluster.env
   scim_cluster2:
-    image: independentid/i2scim-universal:0.8.0
+    image: independentid/i2scim-universal:0.8.1
     container_name: scim_cluster2
     ports:
       - "9001:8080"

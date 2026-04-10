@@ -45,7 +45,7 @@ clean: dev-clean
 # --- Dev/debug in Docker with Delve ---
 # Build the dev image used by docker-compose-dev (installs Delve and mounts source)
 dev-build-image:
-	 docker build -f Dockerfile-dev -t i2gosignals-dev:latest .
+	 sh build.sh -n latest
 
 # Bring up the minimal dev stack with the debug-enabled goSignals1
 dev-up: check-certs
@@ -55,8 +55,13 @@ dev-up: check-certs
 dev-rebuild: dev-build-image
 	 docker compose -f docker-compose-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
 
+dev-reset-spiffe:
+	docker compose -f docker-compose-spiffe-dev.yml down -v
+	rm $(SCIM_CONFIG)/*.pem $(SCIM_CONFIG)/*.txt $(SCIM_CONFIG)/config.json $(SCIM_CONFIG)/data1/*.pem $(SCIM_CONFIG)/data2/*.pem
+	docker compose -f docker-compose-spiffe-dev.yml up -d
+
 # Rebuild the dev image and restart for spiffe
-dev-rebuild-spiffe: dev-build-image
+dev-rebuild-spiffe-goSignals: dev-build-image
 	 docker compose -f docker-compose-spiffe-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
 
 # Stop and remove the dev stack containers
