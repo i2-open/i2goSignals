@@ -119,7 +119,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	// uses mutual TLS backed by the workload's X509-SVID. This allows inter-cluster
 	// wake-up calls to authenticate via SPIFFE without the shared HMAC secret.
 	if tlsSupport.SpiffeEnabled() {
-		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 10*time.Second)
+		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 60*time.Second)
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 		spiffeCancel()
 		if err == nil {

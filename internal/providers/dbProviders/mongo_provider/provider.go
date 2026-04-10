@@ -183,17 +183,21 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	clientService := services.NewClientService(clientDAO, keyService)
 	serverService := services.NewServerService(serverDAO)
 
-	// Initialize BaseProvider with services
-	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
-		keyService, streamService, eventService, clientService, serverService, tokenService,
-	)
-
-	// Initialize token keys
+	// Initialize token keys before replacing m.BaseProvider so that a failed
+	// InitializeTokenKey (e.g. context deadline on a slow MongoDB reconnect)
+	// does not leave m.BaseProvider pointing at a new AuthIssuer whose
+	// PublicKey is nil, which would cause all subsequent token validations to
+	// return 503 until the next successful reconnect.
 	err = keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
 	if err != nil {
 		return err
 	}
+
+	// Initialize BaseProvider with services (only after keys are ready)
+	m.BaseProvider = common.NewBaseProvider(
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+		keyService, streamService, eventService, clientService, serverService, tokenService,
+	)
 
 	m.dbInit = true
 
@@ -309,8 +313,8 @@ func (m *MongoProvider) connect() error {
 			m.x509Source = nil
 		}
 
-		// Dedicate 30 seconds of the overall timeout to obtaining the X509Source.
-		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 30*time.Second)
+		// Dedicate 60 seconds of the overall timeout to obtaining the X509Source.
+		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 60*time.Second)
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 		spiffeCancel()
 		if err == nil {
@@ -348,31 +352,58 @@ func (m *MongoProvider) connect() error {
 }
 
 func (m *MongoProvider) monitor() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	const (
+		minRetryInterval  = 5 * time.Second
+		maxRetryInterval  = 60 * time.Second
+		healthCheckPeriod = time.Minute
+	)
+
+	retryInterval := minRetryInterval
+
+	// Start retrying immediately if the initial connect already failed;
+	// otherwise begin with the normal health-check cadence.
+	m.mu.RLock()
+	firstInterval := healthCheckPeriod
+	if !m.dbInit {
+		firstInterval = minRetryInterval
+	}
+	m.mu.RUnlock()
+
+	timer := time.NewTimer(firstInterval)
+	defer timer.Stop()
+
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			m.mu.RLock()
 			dbInit := m.dbInit
 			m.mu.RUnlock()
+
 			if !dbInit {
 				pLog.Info("Attempting to reconnect to Mongo...")
-				err := m.connect()
-				if err != nil {
+				if err := m.connect(); err != nil {
 					pLog.Error("Reconnect failed", "error", err)
+					timer.Reset(retryInterval)
+					retryInterval = min(retryInterval*2, maxRetryInterval)
 				} else {
 					pLog.Info("Reconnect successful")
+					retryInterval = minRetryInterval
+					timer.Reset(healthCheckPeriod)
 				}
 			} else {
-				err := m.Check()
-				if err != nil {
+				if err := m.Check(); err != nil {
 					pLog.Warn("Mongo availability check failed", "error", err)
 					m.mu.Lock()
 					m.dbInit = false
 					m.mu.Unlock()
+					retryInterval = minRetryInterval
+					timer.Reset(retryInterval)
+					retryInterval = min(retryInterval*2, maxRetryInterval)
+				} else {
+					timer.Reset(healthCheckPeriod)
 				}
 			}
+
 		case <-m.stopMonitor:
 			pLog.Info("Stopping Mongo monitor goroutine")
 			return

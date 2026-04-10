@@ -49,6 +49,9 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 		s.tokenKey = key
 		s.tokenKid = kid
 		s.tokenPubKey = s.getInternalPublicJWKS(ctx, s.tokenIssuer)
+		if s.tokenPubKey == nil {
+			return fmt.Errorf("failed to build public JWKS for token issuer %q; MongoDB may be temporarily unavailable", s.tokenIssuer)
+		}
 		s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
 		return nil
 	}
@@ -59,7 +62,12 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 		return fmt.Errorf("failed to create token key: %v", err)
 	}
 	s.tokenKid = s.tokenIssuer
+	// Refresh JWKS after key creation; storeKeyPair already called UpdateTokenKey but
+	// we re-check here to catch any transient failure in that path.
 	s.tokenPubKey = s.getInternalPublicJWKS(ctx, s.tokenIssuer)
+	if s.tokenPubKey == nil {
+		return fmt.Errorf("failed to build public JWKS for token issuer %q after key creation", s.tokenIssuer)
+	}
 	s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
 
 	if defaultIssuer != s.tokenIssuer {
@@ -90,8 +98,13 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 	if keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = keyName
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, keyName, privateKey, s.tokenPubKey)
+		jwks := s.getInternalPublicJWKS(ctx, keyName)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, keyName, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key pair creation", "keyName", keyName)
+		}
 	}
 
 	return privateKey, nil
@@ -120,8 +133,13 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 	if keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		jwks := s.getInternalPublicJWKS(ctx, keyName)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key rotation", "keyName", keyName)
+		}
 	}
 
 	return privateKey, kid, nil
@@ -146,8 +164,13 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 	if err == nil && keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		jwks := s.getInternalPublicJWKS(ctx, keyName)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key store", "keyName", keyName)
+		}
 	}
 	return err
 }
@@ -185,8 +208,13 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 	if err == nil && keyName == s.tokenIssuer && privateKey != nil {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		jwks := s.getInternalPublicJWKS(ctx, keyName)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key add", "keyName", keyName)
+		}
 	}
 	return err
 }
