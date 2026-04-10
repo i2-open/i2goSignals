@@ -105,12 +105,25 @@ func (sa *SignalsApplication) SetBaseUrl(u *url.URL) {
 }
 
 func (sa *SignalsApplication) HealthCheck() bool {
+	if sa.Provider == nil {
+		return false // memory provider should be true?
+	}
 	err := sa.Provider.Check()
 	if err != nil {
 		serverLog.Error("MongoProvider ping failed", "error", err)
 		return false
 	}
 	return true
+}
+
+func (sa *SignalsApplication) Health(w http.ResponseWriter, r *http.Request) {
+	if sa.HealthCheck() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("Service Unavailable"))
+	}
 }
 
 func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {

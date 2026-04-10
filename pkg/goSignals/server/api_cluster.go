@@ -146,7 +146,7 @@ func (sa *SignalsApplication) startInternalServer() {
 
 	// When SPIFFE is available, serve with mTLS so peers can present SVIDs.
 	if tlsSupport.SpiffeEnabled() {
-		spiffeCtx, spiffeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		spiffeCtx, spiffeCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 		spiffeCancel()
 		if err != nil {

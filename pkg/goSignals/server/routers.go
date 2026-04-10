@@ -91,6 +91,13 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.Index,
 			false,
 		},
+		Route{
+			"Health",
+			"GET",
+			"/health",
+			h.sa.Health,
+			false,
+		},
 
 		Route{
 			"GenerateIat",
