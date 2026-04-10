@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
@@ -54,6 +55,14 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 		}
 		s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
 		return nil
+	}
+
+	// Only create a new key if the key genuinely does not exist in the database.
+	// Any other error (e.g. a transient MongoDB failure) must propagate so that the
+	// caller retries rather than accidentally inserting a duplicate kid=DEFAULT record,
+	// which would cause non-deterministic JWKS construction and signature-mismatch 503s.
+	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+		return fmt.Errorf("failed to load token key %q: %w", s.tokenIssuer, err)
 	}
 
 	// Create new key
@@ -358,6 +367,14 @@ func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) 
 		ksLog.Error("No keys found", "keyName", keyName)
 		return nil
 	}
+
+	// Sort oldest-first so that when multiple records share the same kid (which can
+	// happen after a transient DB error causes a duplicate insert), the newest
+	// record's public key overwrites older ones in the givenKeys map — keeping the
+	// JWKS consistent with FindLatestByKeyName, which is used for signing.
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].Id.Hex() < keys[j].Id.Hex()
+	})
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
 	for _, rec := range keys {
