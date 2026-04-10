@@ -46,7 +46,9 @@ func GetSpiffeClient(ctx context.Context, server *model.Server) (*http.Client, f
 		return nil, nil, fmt.Errorf("spiffe: invalid SpiffeConfig: %w", err)
 	}
 
-	x509Source, err := tlsSupport.NewX509Source(ctx)
+	spiffeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spiffe: failed to create X509Source: %w", err)
 	}
@@ -54,6 +56,9 @@ func GetSpiffeClient(ctx context.Context, server *model.Server) (*http.Client, f
 	closeFunc := func() { _ = x509Source.Close() }
 
 	tlsCfg := tlsconfig.MTLSClientConfig(x509Source, x509Source, authorizer)
+	// We must set InsecureSkipVerify to true because we are using SPIFFE ID
+	// verification instead of standard hostname verification.
+	tlsCfg.InsecureSkipVerify = true
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
 
 	return &http.Client{
