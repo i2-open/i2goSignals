@@ -108,6 +108,9 @@ make_mongo_user() {
 GOSIGNALS_USER=$(make_mongo_user "workload/gosignals-node")
 GOSSF_USER=$(make_mongo_user "workload/gossf-node")
 SCIM_USER=$(make_mongo_user "workload/scim")
+# Compute the goSignals Admin workload Subject DN
+ADMIN_USER=$(make_mongo_user "workload/gosignals-admin")
+
 # NOTE: the mongodb workload Subject is NOT added as a $external user.
 # With clusterAuthMode sendKeyFile, replica nodes authenticate to each other
 # via the shared keyFile — not via $external x.509 lookup.  The mongodb cert
@@ -115,9 +118,10 @@ SCIM_USER=$(make_mongo_user "workload/scim")
 # refuses to create a $external user with that subject anyway.
 
 echo "Computed MongoDB \$external users:"
-echo "  gosignals-node: ${GOSIGNALS_USER}"
-echo "  gossf-node:     ${GOSSF_USER}"
-echo "  scim:           ${SCIM_USER}"
+echo "  gosignals-node:  ${GOSIGNALS_USER}"
+echo "  gossf-node:      ${GOSSF_USER}"
+echo "  scim:            ${SCIM_USER}"
+echo "  gosignals-admin: ${ADMIN_USER}"
 
 # ---------------------------------------------------------------------------
 # Background certificate renewal loop (every 5 minutes)
@@ -269,6 +273,12 @@ const users = [
       { role: 'readWrite', db: 'goSignals1' },
       { role: 'readWrite', db: 'goSignals2' }
     ]
+  },
+  {
+    user: '${ADMIN_USER}',
+    roles: [
+      { role: 'readWrite', db: 'gosignalsadmin' }
+    ]
   }
 ];
 
@@ -291,6 +301,7 @@ users.forEach(u => {
     }
   }
 });
+
 print('User creation complete');
 "
 
