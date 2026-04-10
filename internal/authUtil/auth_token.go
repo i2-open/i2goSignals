@@ -326,7 +326,7 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 		return nil, http.StatusUnauthorized
 	}
 	parts := strings.Split(authorization, " ")
-	if len(parts) < 2 || parts[0] != "Bearer" {
+	if len(parts) < 2 || strings.ToLower(parts[0]) != "bearer" {
 		return nil, http.StatusUnauthorized
 	}
 
@@ -434,7 +434,26 @@ func (a *AuthIssuer) ParseAuthToken(tokenString string) (*authSupport.EventAuthT
 // ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
 // When verbose is false, it does not log "Error validating token"
 func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*authSupport.EventAuthToken, error) {
-	if a.PublicKey == nil {
+	// If the public key is not yet loaded (server still starting up or in the middle
+	// of a MongoDB reconnect), wait up to 1 second for it to become available before
+	// giving up. This avoids 503 responses during the brief window between service
+	// start and successful key initialization.
+	a.mu.RLock()
+	pubKey := a.PublicKey
+	a.mu.RUnlock()
+	if pubKey == nil {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			a.mu.RLock()
+			pubKey = a.PublicKey
+			a.mu.RUnlock()
+			if pubKey != nil {
+				break
+			}
+		}
+	}
+	if pubKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
 	}
 
@@ -442,10 +461,12 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 	tokenString = strings.TrimSpace(tokenString)
 
 	valid := true
-	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, a.PublicKey.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, pubKey.Keyfunc)
 	if err != nil {
 		if verbose {
 			authLog.Error("Error validating token", "error", err)
+		} else {
+			authLog.Debug("Local token validation failed", "kids", pubKey.KIDs(), "error", err)
 		}
 		valid = false
 	}
