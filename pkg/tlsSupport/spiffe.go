@@ -4,6 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -40,8 +44,12 @@ func SpiffeEnabled() bool {
 // Returns an error if the socket is not set or the initial SVID cannot be fetched.
 func NewX509Source(ctx context.Context) (*workloadapi.X509Source, error) {
 	socket := os.Getenv(EnvSpiffeSocket)
-	return workloadapi.NewX509Source(ctx,
+	source, err := workloadapi.NewX509Source(ctx,
 		workloadapi.WithClientOptions(workloadapi.WithAddr(socket)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to SPIRE agent at %s: %w", socket, err)
+	}
+	return source, nil
 }
 
 // ClusterTrustDomain returns the trust domain for this cluster from
@@ -66,6 +74,74 @@ func NewClusterMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Config
 	}
 	return tlsconfig.MTLSClientConfig(x509Source, x509Source,
 		tlsconfig.AuthorizeMemberOf(td)), nil
+}
+
+// NewSpiffeServerConfig returns a *tls.Config that presents the workload's
+// X509-SVID to connecting clients and optionally requests a client X509-SVID
+// for mTLS. ClientAuth is set to tls.RequestClientCert to allow fallback to
+// non-SPIFFE authentication (e.g. HMAC or OAuth).
+func NewSpiffeServerConfig(x509Source *workloadapi.X509Source) (*tls.Config, error) {
+	return &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		ClientAuth:     tls.RequestClientCert,
+		GetCertificate: tlsconfig.GetCertificate(x509Source),
+		// Since we're requesting but not requiring a client cert,
+		// we allow all through and let the handlers authorize the peer.
+		VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
+			return nil
+		},
+	}, nil
+}
+
+// NewClusterMTLSClientTransport returns an *http.Transport that is configured
+// for inter-cluster SPIFFE mTLS, authorizing the cluster trust domain.
+func NewClusterMTLSClientTransport(x509Source *workloadapi.X509Source) *http.Transport {
+	td, err := ClusterTrustDomain()
+	if err != nil {
+		return &http.Transport{}
+	}
+	tlsConfig := tlsconfig.MTLSClientConfig(x509Source, x509Source,
+		tlsconfig.AuthorizeMemberOf(td))
+
+	// We must set InsecureSkipVerify to true because we are using SPIFFE ID
+	// verification instead of standard hostname verification.
+	tlsConfig.InsecureSkipVerify = true
+
+	return &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+}
+
+// ExportTrustBundle writes the SPIFFE trust bundle for the current trust domain
+// to a file in PEM format.
+func ExportTrustBundle(x509Source *workloadapi.X509Source, path string) error {
+	td, err := ClusterTrustDomain()
+	if err != nil {
+		return err
+	}
+	bundle, err := x509Source.GetX509BundleForTrustDomain(td)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for _, cert := range bundle.X509Authorities() {
+		if err := encodeCert(f, cert); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func encodeCert(out io.Writer, cert *x509.Certificate) error {
+	return pem.Encode(out, &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Raw,
+	})
 }
 
 // NewClusterMTLSServerConfig returns a *tls.Config for the internal cluster

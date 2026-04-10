@@ -1,39 +1,97 @@
 package tlsSupport
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
+	"time"
+
+	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 )
 
-func InitTransportLayerSecurity(app *http.Server) (bool, error) {
-	if found := stripQuotes(os.Getenv("TLS_ENABLED")); strings.ToLower(found) == "true" {
+func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
+	tlsEnabled := stripQuotes(os.Getenv("TLS_ENABLED")) == "true"
+	spiffeEnabled := SpiffeEnabled()
+
+	if !tlsEnabled && !spiffeEnabled {
+		return nil, false, nil
+	}
+
+	var closer io.Closer
+	var fileCert *tls.Certificate
+
+	if tlsEnabled {
 		certFile, keyFile := GetCertKeyPaths()
 		cert, certErr := os.ReadFile(certFile)
 		if certErr != nil {
-			return false, certErr
+			return nil, false, certErr
 		}
 		key, keyErr := os.ReadFile(keyFile)
 		if keyErr != nil {
-			return false, keyErr
+			return nil, false, keyErr
 		}
 		pair, pairErr := tls.X509KeyPair(cert, key)
 		if pairErr != nil {
-			return false, pairErr
+			return nil, false, pairErr
 		}
+		fileCert = &pair
+	}
+
+	if spiffeEnabled {
+		spiffeCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		x509Source, err := NewX509Source(spiffeCtx)
+		if err != nil {
+			slog.Warn("SPIFFE enabled but X509Source failed; falling back to file-based TLS", "error", err)
+		} else {
+			closer = x509Source
+			spiffeGetCert := tlsconfig.GetCertificate(x509Source)
+
+			app.TLSConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				ClientAuth: tls.RequestClientCert,
+				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					slog.Debug("TLS handshake started", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
+
+					// If we have a file-based cert and the SNI matches a local/host name, prefer it.
+					// This allows browsers on the host (hitting localhost) to use the trusted-ish file cert.
+					if fileCert != nil {
+						switch hello.ServerName {
+						case "localhost", "127.0.0.1", "::1":
+							return fileCert, nil
+						}
+					}
+
+					// Otherwise, prefer the SPIFFE SVID. Internal workloads (like scim_cluster1)
+					// will expect this and trust it via the SPIRE CA.
+					return spiffeGetCert(hello)
+				},
+				VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
+					// Allow all certs through the handshake; handlers must authorize.
+					return nil
+				},
+			}
+			return closer, true, nil
+		}
+	}
+
+	// SPIFFE not available or failed; use file-based TLS if enabled.
+	if fileCert != nil {
 		app.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{pair},
+			Certificates: []tls.Certificate{*fileCert},
 			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-				slog.Debug("TLS handshake started", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
+				slog.Debug("TLS handshake started (file-based)", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
 				return nil, nil
 			},
 		}
-		return true, nil
+		return nil, true, nil
 	}
-	return false, nil
+
+	return nil, false, nil
 }
 
 func GetCertKeyPaths() (certFile string, keyFile string) {
@@ -123,17 +181,30 @@ func CheckCaInstalled(client *http.Client) {
 			}
 			return
 		}
-		var caPool *x509.CertPool
+
 		if client != nil {
-			slog.Debug("Installing CA certificate into HTTP client", "file", caCertPath)
-			caPool = x509.NewCertPool()
-			t := &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: caPool},
+			if t, ok := client.Transport.(*http.Transport); ok {
+				if t.TLSClientConfig == nil {
+					t.TLSClientConfig = &tls.Config{}
+				}
+				if t.TLSClientConfig.RootCAs == nil {
+					t.TLSClientConfig.RootCAs = x509.NewCertPool()
+				}
+				slog.Debug("Installing CA certificate into HTTP client's existing transport", "file", caCertPath)
+				t.TLSClientConfig.RootCAs.AppendCertsFromPEM(caCertPem)
+			} else if client.Transport == nil {
+				slog.Debug("Installing CA certificate into HTTP client's new transport", "file", caCertPath)
+				caPool := x509.NewCertPool()
+				caPool.AppendCertsFromPEM(caCertPem)
+				client.Transport = &http.Transport{
+					TLSClientConfig: &tls.Config{RootCAs: caPool},
+				}
+			} else {
+				slog.Warn("HTTP client has non-standard transport, skipping CA installation")
 			}
-			client.Transport = t
 		} else {
 			slog.Debug("Installing CA certificate into default transport", "file", caCertPath)
-			caPool, _ = x509.SystemCertPool()
+			caPool, _ := x509.SystemCertPool()
 			if caPool == nil {
 				caPool = x509.NewCertPool()
 			}
@@ -141,13 +212,11 @@ func CheckCaInstalled(client *http.Client) {
 				if t.TLSClientConfig == nil {
 					t.TLSClientConfig = &tls.Config{}
 				}
-				t.TLSClientConfig.RootCAs = caPool
+				if t.TLSClientConfig.RootCAs == nil {
+					t.TLSClientConfig.RootCAs = caPool
+				}
+				t.TLSClientConfig.RootCAs.AppendCertsFromPEM(caCertPem)
 			}
 		}
-		ok := caPool.AppendCertsFromPEM(caCertPem)
-		if !ok {
-			slog.Error("Error loading CA PEM")
-		}
-
 	}
 }
