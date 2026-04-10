@@ -49,6 +49,64 @@ All SPIFFE features are **opt-in**. Deployments without `SPIFFE_ENDPOINT_SOCKET`
 
 ---
 
+## Dual TLS (Hybrid Mode)
+
+To support both internal SPIFFE-enabled workloads and external clients (such as browsers on a development host), the i2goSignals main listener (port 8888/8889) operates in a **Hybrid TLS** mode when `SPIFFE_ENDPOINT_SOCKET` is set:
+
+1.  **Certificate Selection**: The server uses SNI (Server Name Indication) to decide which certificate to present during the TLS handshake:
+    -   **SPIRE SVID**: Presented for internal hostnames (e.g., `goSignals1`, `goSsfServer`) or when no SNI is provided. This allows internal SPIFFE-aware clients like the SCIM server to trust the connection via the SPIRE CA.
+    -   **File-based Certificate**: Presented for host-local names (`localhost`, `127.0.0.1`, `::1`). This allows developers to use browsers or tools on the host machine that trust the local development CA (`config/certs/ca-cert.pem`).
+
+2.  **Optional mTLS**: `ClientAuth` is set to `tls.RequestClientCert`. This allows SPIFFE-to-SPIFFE mTLS for workloads that provide an SVID, while still permitting standard HTTPS (without client certificates) for external clients.
+
+This hybrid approach ensures that `scim_cluster1` can securely communicate with `goSignals1` using SPIFFE identity without requiring the developer to import the SPIRE CA into their host's trust store.
+
+---
+
+## SCIM Server Trust
+
+While the Go-based servers (`goSignalsServer`, `goSsfServer`) natively support the SPIRE Workload API to obtain identities and trust bundles, the Java-based SCIM server (`i2scim-universal`) requires the CA trust bundle to be provided as a file to verify the SSF server's certificate.
+
+### SPIFFE Environment (SPIRE)
+
+#### Exporting the Trust Bundle
+
+The `goSignals` CLI includes a command to export the current SPIRE trust bundle in PEM format:
+
+```bash
+goSignals create bundle --output /path/to/spire-bundle.pem
+```
+
+In the development environment (`docker-compose-spiffe-dev.yml`), this command is executed by the `scimSsfSetup` container during the registration phase, saving the bundle to a shared volume (`/scim/spire-bundle.pem`).
+
+#### Configuring `i2scim`
+
+To use the exported bundle, the following property must be set in the SCIM server's environment or configuration:
+
+```properties
+scim.signals.ssf.trust.certs.path=/scim/spire-bundle.pem
+```
+
+This ensures that the SCIM server trusts the SPIFFE SVID presented by `goSignals1` during SSF registration, well-known configuration requests, and JWKS retrieval.
+
+### Non-SPIFFE Environment
+
+In a standard development environment (`docker-compose-dev.yml`), the Go servers use file-based certificates (e.g., `config/certs/server-cert.pem`) signed by a local development CA (`config/certs/ca-cert.pem`).
+
+The `register.sh` script automatically detects if a SPIRE bundle is missing and, if the `CA_CERT` environment variable is provided, copies the standard development CA to `/scim/ca-bundle.pem`.
+
+#### Configuring `i2scim`
+
+The same property is used to point to the non-SPIFFE CA:
+
+```properties
+scim.signals.ssf.trust.certs.path=/scim/ca-bundle.pem
+```
+
+This ensures that the SCIM server trusts the file-based certificate presented by `goSignals1`.
+
+---
+
 ## Docker Compose (Development)
 
 The reference implementation is `docker-compose-spiffe-dev.yml`.
