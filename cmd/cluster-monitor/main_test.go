@@ -15,6 +15,7 @@ import (
 
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/stretchr/testify/assert"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestCheckCertificate(t *testing.T) {
@@ -170,5 +171,78 @@ func TestCheckSpireAgent(t *testing.T) {
 		}
 		m.checkSpireAgent(context.Background())
 		assert.NotNil(t, m.x509Source)
+	})
+}
+
+func TestEvaluateReplicaSetStatus(t *testing.T) {
+	m := &Monitor{}
+
+	t.Run("Valid status with bson.A and bson.D", func(t *testing.T) {
+		status := bson.M{
+			"members": bson.A{
+				bson.D{
+					{Key: "name", Value: "host1"},
+					{Key: "stateStr", Value: "PRIMARY"},
+					{Key: "health", Value: 1.0},
+				},
+				bson.D{
+					{Key: "name", Value: "host2"},
+					{Key: "stateStr", Value: "SECONDARY"},
+					{Key: "health", Value: 1.0},
+				},
+				bson.D{
+					{Key: "name", Value: "host3"},
+					{Key: "stateStr", Value: "SECONDARY"},
+					{Key: "health", Value: 0.0},
+				},
+			},
+		}
+
+		healthy, total := m.evaluateReplicaSetStatus(status)
+		if healthy != 2 {
+			t.Errorf("expected 2 healthy nodes, got %d", healthy)
+		}
+		if total != 3 {
+			t.Errorf("expected 3 total nodes, got %d", total)
+		}
+	})
+
+	t.Run("Status with bson.M and integer health", func(t *testing.T) {
+		status := bson.M{
+			"members": bson.A{
+				bson.M{
+					"name":     "host1",
+					"stateStr": "PRIMARY",
+					"health":   int32(1),
+				},
+				bson.M{
+					"name":     "host2",
+					"stateStr": "SECONDARY",
+					"health":   int64(0),
+				},
+			},
+		}
+
+		healthy, total := m.evaluateReplicaSetStatus(status)
+		if healthy != 1 {
+			t.Errorf("expected 1 healthy node, got %d", healthy)
+		}
+		if total != 2 {
+			t.Errorf("expected 2 total nodes, got %d", total)
+		}
+	})
+
+	t.Run("Status with missing members", func(t *testing.T) {
+		status := bson.M{
+			"ok": 1,
+		}
+
+		healthy, total := m.evaluateReplicaSetStatus(status)
+		if healthy != 0 {
+			t.Errorf("expected 0 healthy nodes, got %d", healthy)
+		}
+		if total != 0 {
+			t.Errorf("expected 0 total nodes, got %d", total)
+		}
 	})
 }
