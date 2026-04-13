@@ -65,6 +65,28 @@ register_workload() {
     done
 }
 
+register_workload_with_dns() {
+    SPIFFE_PATH=$1
+    DNS_LIST=$2
+    shift 2
+    echo "Registering spiffe://${TRUST_DOMAIN}/$SPIFFE_PATH with DNS [$DNS_LIST]..."
+    for SELECTOR in "$@"; do
+        echo "  Adding selector: $SELECTOR"
+        # Split DNS_LIST by spaces and build -dns flags
+        DNS_FLAGS=""
+        for d in $DNS_LIST; do
+            DNS_FLAGS="$DNS_FLAGS -dns $d"
+        done
+        $SPIRE_CLI entry create \
+            -socketPath "$SOCKET" \
+            -spiffeID "spiffe://${TRUST_DOMAIN}/$SPIFFE_PATH" \
+            -parentID "$AGENT_ID" \
+            $DNS_FLAGS \
+            -selector "$SELECTOR" >/dev/null \
+            || echo "  (Error creating entry for $SPIFFE_PATH with $SELECTOR)"
+    done
+}
+
 # Same as register_workload but sets a per-entry x509 SVID TTL.
 # Used for workloads (e.g. MongoDB) that cannot hot-reload their TLS cert.
 # The TTL should match ca_ttl in server.conf so the cert remains valid for
@@ -91,15 +113,20 @@ register_workload_with_ttl() {
 # ----------------------------------------------------------------------------
 
 # goSignals nodes (cluster components)
-register_workload "workload/gosignals-node" \
+# Register all goSignals nodes using the role label and include all relevant DNS names.
+# This ensures that any node in the cluster can serve any of the hostnames,
+# which is useful for development and failover scenarios.
+register_workload_with_dns "workload/gosignals-node" "goSignals1 gosignals1 goSignals1b gosignals1b goSignals2 gosignals2 localhost" \
     "docker:label:com.i2gosignals.role:gosignals-node" \
     "docker:container_name:gosignals1" \
-    "docker:container_name:gosignals2" \
     "docker:container_name:goSignals1" \
+    "docker:container_name:gosignals1b" \
+    "docker:container_name:goSignals1b" \
+    "docker:container_name:gosignals2" \
     "docker:container_name:goSignals2"
 
 # goSsfServer (security event publisher)
-register_workload "workload/gossf-node" \
+register_workload_with_dns "workload/gossf-node" "goSsfServer gossfserver" \
     "docker:label:com.i2gosignals.role:gossf-node" \
     "docker:container_name:gossfserver" \
     "docker:container_name:goSsfServer"
