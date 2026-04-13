@@ -1,5 +1,5 @@
 
-if [ -s /scim/registration-iat.env ]; then
+if [ -s /scim/iat1.txt ]; then
     echo "Registration IAT file already exists, skipping token generation"
     exit 0
 fi
@@ -9,16 +9,12 @@ echo ""
 
 export GOSIGNALS_HOME=/scim/config.json
 /app/goSignals </scim/scripts/auto-reg.gosignals
-if [[ ! -f "/scim/iat1.txt" ]]; then
+if [ ! -f "/scim/iat-gosignals1.jwt" ]; then
         echo "Error: IAT and Key Generation failed."
         exit 1
 fi
-
-echo ""
-echo "Creating .env file for SCIM servers"
-
-cp /scim/scripts/scim-template.env /scim/scim_cluster.env
-echo "scim.signals.ssf.authorization=BEARER $(cat /scim/iat1.txt)" >>/scim/scim_cluster.env
+cp /scim/iat-gosignals1.jwt /scim/data1/iat.jwt
+cp /scim/iat-gosignals1.jwt /scim/data2/iat.jwt
 
 echo ""
 

@@ -101,12 +101,21 @@ echo "Subject format: prefix='${SUBJ_PREFIX}' suffix='${SUBJ_SUFFIX}'"
 
 make_mongo_user() {
     local HASH
+    local CN=$2
     HASH=$(spiffe_hash "spiffe://${TRUST_DOMAIN}/$1")
-    echo "${SUBJ_PREFIX}${HASH}${SUBJ_SUFFIX}"
+    if [ -n "$CN" ]; then
+        # SVIDs registered with -dns names (via register_workload_with_dns) have
+        # the first DNS name as a CN in the Subject DN.
+        echo "${SUBJ_PREFIX}${HASH},CN=${CN}${SUBJ_SUFFIX}"
+    else
+        echo "${SUBJ_PREFIX}${HASH}${SUBJ_SUFFIX}"
+    fi
 }
 
-GOSIGNALS_USER=$(make_mongo_user "workload/gosignals-node")
-GOSSF_USER=$(make_mongo_user "workload/gossf-node")
+GOSIGNALS1_USER=$(make_mongo_user "workload/gosignals-node" "goSignals1")
+GOSIGNALS1B_USER=$(make_mongo_user "workload/gosignals-node" "goSignals1b")
+GOSIGNALS2_USER=$(make_mongo_user "workload/gosignals-node" "goSignals2")
+GOSSF_USER=$(make_mongo_user "workload/gossf-node" "goSsfServer")
 SCIM_USER=$(make_mongo_user "workload/scim")
 # Compute the goSignals Admin workload Subject DN
 ADMIN_USER=$(make_mongo_user "workload/gosignals-admin")
@@ -118,7 +127,9 @@ ADMIN_USER=$(make_mongo_user "workload/gosignals-admin")
 # refuses to create a $external user with that subject anyway.
 
 echo "Computed MongoDB \$external users:"
-echo "  gosignals-node:  ${GOSIGNALS_USER}"
+echo "  gosignals-node1: ${GOSIGNALS1_USER}"
+echo "  gosignals-node1b:${GOSIGNALS1B_USER}"
+echo "  gosignals-node2: ${GOSIGNALS2_USER}"
 echo "  gossf-node:      ${GOSSF_USER}"
 echo "  scim:            ${SCIM_USER}"
 echo "  gosignals-admin: ${ADMIN_USER}"
@@ -142,6 +153,11 @@ echo "  gosignals-admin: ${ADMIN_USER}"
 echo "Starting certificate renewal loop in background..."
 (while true; do
     sleep 300
+    if [ ! -S /run/spire/sockets/agent.sock ]; then
+        echo "ERROR: SPIRE agent socket missing. Waiting for agent recovery...: $(date)"
+        continue
+    fi
+
     if /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock 2>/dev/null; then
         # Save the current cert/CA before overwriting.
         # We must connect to mongod using the PREVIOUS cert (which mongod's
@@ -179,6 +195,7 @@ echo "Starting certificate renewal loop in background..."
                     --username root --password dockTest \
                     --authenticationDatabase admin \
                     --tls --tlsAllowInvalidHostnames \
+                    --tlsAllowInvalidCertificates \
                     --tlsCAFile "$CONN_CA" \
                     --tlsCertificateKeyFile "$CONN_CERT" \
                     --quiet \
@@ -186,11 +203,11 @@ echo "Starting certificate renewal loop in background..."
                     </dev/null 2>/dev/null; then
                 echo "  rotateCertificates succeeded on ${HOST}:${PORT}: $(date)"
             else
-                echo "  rotateCertificates failed on ${HOST}:${PORT} (will retry next cycle): $(date)"
+                echo "  ERROR: rotateCertificates failed on ${HOST}:${PORT} (will retry next cycle): $(date)"
             fi
         done
     else
-        echo "Certificate renewal failed: $(date)"
+        echo "ERROR: Certificate fetch from SPIRE agent failed. Ensure agent is running and workload is registered: $(date)"
     fi
 done) &
 
@@ -252,7 +269,25 @@ echo "Creating/updating \$external users..."
 USER_SCRIPT="
 const users = [
   {
-    user: '${GOSIGNALS_USER}',
+    user: '${GOSIGNALS1_USER}',
+    roles: [
+      { role: 'readWrite', db: 'goSignals1' },
+      { role: 'readWrite', db: 'goSignals2' },
+      { role: 'dbAdmin',   db: 'goSignals1' },
+      { role: 'dbAdmin',   db: 'goSignals2' }
+    ]
+  },
+  {
+    user: '${GOSIGNALS1B_USER}',
+    roles: [
+      { role: 'readWrite', db: 'goSignals1' },
+      { role: 'readWrite', db: 'goSignals2' },
+      { role: 'dbAdmin',   db: 'goSignals1' },
+      { role: 'dbAdmin',   db: 'goSignals2' }
+    ]
+  },
+  {
+    user: '${GOSIGNALS2_USER}',
     roles: [
       { role: 'readWrite', db: 'goSignals1' },
       { role: 'readWrite', db: 'goSignals2' },

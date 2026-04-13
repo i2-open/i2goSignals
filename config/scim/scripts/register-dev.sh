@@ -1,5 +1,5 @@
 
-if [ -s /scim/registration-iat.env ]; then
+if [ -s /scim/iat1.txt ]; then
     echo "Registration IAT file already exists, skipping token generation"
     exit 0
 fi
@@ -11,19 +11,14 @@ export GOSIGNALS_HOME=/scim/config.json
 # Use go run to ensure we're using the latest source code in the dev environment.
 # This avoids issues with host-built binaries (e.g. Darwin vs Linux).
 go run /app/cmd/goSignals </scim/scripts/auto-reg.gosignals
-if [ ! -f "/scim/iat1.txt" ]; then
+if [ ! -f "/scim/iat-gosignals1.jwt" ]; then
         echo "Error: IAT and Key Generation failed."
         exit 1
 fi
+cp /scim/iat-gosignals1.jwt /scim/data1/iat.jwt
+cp /scim/iat-gosignals1.jwt /scim/data2/iat.jwt
 
 echo ""
-echo "Creating .env file for SCIM servers"
-
-cp /scim/scripts/scim-template.env /scim/scim_cluster.env
-echo "scim.signals.ssf.authorization=BEARER $(cat /scim/iat1.txt)" >>/scim/scim_cluster.env
-
-echo ""
-
 if [ -f "/scim/spire-bundle.pem" ]; then
     echo "Configuring for SPIFFE cert bundle"
     cp /scim/spire-bundle.pem /scim/ca-bundle.pem
