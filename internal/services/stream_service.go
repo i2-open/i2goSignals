@@ -852,31 +852,46 @@ func isPermanentJwksError(err error) bool {
 
 func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *model.StreamStateRecord) {
 	if streamState.Status == model.StreamStateEnabled {
-		if streamState.IssuerJWKSUrl == "" {
-			return
-		}
-		ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
-		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
-		if err != nil {
-			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
+		var jwks *keyfunc.JWKS
+		var err error
 
-			// Determine if this is a permanent error that should disable the stream
-			if isPermanentJwksError(err) {
-				// Permanent error - disable the stream immediately
-				ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
-				streamState.Status = model.StreamStateDisable
-				streamState.ErrorMsg = msg
-				// Update the stream in the database
-				err = s.streamDAO.Update(ctx, streamState)
-				if err != nil {
-					ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
-				}
-			} else {
-				// Temporary error - log but don't change stream state
-				// Let the polling client handle retries with backoff
-				ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+		if streamState.IssuerJWKSUrl == "" {
+			ssLog.Debug("Attempting to lLoading JWKS internally", "iss", streamState.Iss)
+			jwksJson := s.keyService.GetPublicJWKS(ctx, streamState.Iss)
+			if jwksJson == nil {
+				ssLog.Debug("No JWKS key found for issuer", "iss", streamState.Iss)
+				return
 			}
-			return
+
+			// Convert json.RawMessage to keyfunc.JWKS
+			jwks, err = keyfunc.NewJSON(*jwksJson)
+			if jwks == nil && err != nil {
+				ssLog.Error("Unable to parse internal key", "iss", streamState.Iss, "err", err.Error())
+			}
+		} else {
+			ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
+			jwks, err = goSet.GetJwks(streamState.IssuerJWKSUrl)
+			if err != nil {
+				msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
+
+				// Determine if this is a permanent error that should disable the stream
+				if isPermanentJwksError(err) {
+					// Permanent error - disable the stream immediately
+					ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+					streamState.Status = model.StreamStateDisable
+					streamState.ErrorMsg = msg
+					// Update the stream in the database
+					err = s.streamDAO.Update(ctx, streamState)
+					if err != nil {
+						ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
+					}
+				} else {
+					// Temporary error - log but don't change stream state
+					// Let the polling client handle retries with backoff
+					ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+				}
+				return
+			}
 		}
 		streamState.ValidateJwks = jwks
 	}

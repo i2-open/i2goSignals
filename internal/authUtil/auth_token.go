@@ -3,6 +3,8 @@ package authUtil
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	mathRand "math/rand"
@@ -53,6 +55,20 @@ func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.P
 	a.TokenKid = kid
 	a.PrivateKey = privateKey
 	a.PublicKey = publicKey
+	privReady := privateKey != nil
+	pubReady := publicKey != nil
+	var pubKids []string
+	if publicKey != nil {
+		pubKids = publicKey.KIDs()
+	}
+	authLog.Debug("UpdateTokenKey", "issuer", issuer, "kid", kid, "privateKey", privReady, "publicKey", pubReady, "jwksKids", pubKids)
+}
+
+// IsReady returns true when both the signing key and verification key are loaded.
+func (a *AuthIssuer) IsReady() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.PrivateKey != nil && a.PublicKey != nil
 }
 
 // GetOAuthServers checks the environment variable OAUTH_SERVERS for OAuth Authorization server discovery endpoints
@@ -203,8 +219,11 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
+	authLog.Debug("IssueProjectIat signing", "issuer", issuer, "kid", kid, "privateKeyNil", privateKey == nil, "projectId", projectId)
 	signed, err := token.SignedString(privateKey)
-	if err == nil && a.TokenTracker != nil {
+	if err != nil {
+		authLog.Error("IssueProjectIat signing failed", "kid", kid, "error", err)
+	} else if a.TokenTracker != nil {
 		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeIAT)
 	}
 	return signed, err
@@ -460,13 +479,27 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 	// In case of cut/paste error, trim extra spaces
 	tokenString = strings.TrimSpace(tokenString)
 
+	// Extract kid from token header for debug logging (parse header only, no sig check)
+	var tokenKid string
+	if parts := strings.Split(tokenString, "."); len(parts) >= 1 {
+		if hdrBytes, err2 := base64.RawURLEncoding.DecodeString(parts[0]); err2 == nil {
+			var hdr map[string]interface{}
+			if err2 = json.Unmarshal(hdrBytes, &hdr); err2 == nil {
+				if k, ok := hdr["kid"].(string); ok {
+					tokenKid = k
+				}
+			}
+		}
+	}
+	authLog.Debug("ParseAuthTokenVerbose", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs())
+
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, pubKey.Keyfunc)
 	if err != nil {
 		if verbose {
-			authLog.Error("Error validating token", "error", err)
+			authLog.Error("Error validating token", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
 		} else {
-			authLog.Debug("Local token validation failed", "kids", pubKey.KIDs(), "error", err)
+			authLog.Debug("Local token validation failed", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
 		}
 		valid = false
 	}

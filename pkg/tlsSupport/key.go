@@ -38,6 +38,12 @@ func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
 		if pairErr != nil {
 			return nil, false, pairErr
 		}
+		if len(pair.Certificate) > 0 {
+			leaf, err := x509.ParseCertificate(pair.Certificate[0])
+			if err == nil {
+				pair.Leaf = leaf
+			}
+		}
 		fileCert = &pair
 	}
 
@@ -57,18 +63,42 @@ func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
 				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					slog.Debug("TLS handshake started", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
 
-					// If we have a file-based cert and the SNI matches a local/host name, prefer it.
-					// This allows browsers on the host (hitting localhost) to use the trusted-ish file cert.
-					if fileCert != nil {
-						switch hello.ServerName {
-						case "localhost", "127.0.0.1", "::1":
-							return fileCert, nil
+					spiffeCert, spiffeErr := spiffeGetCert(hello)
+
+					// 1. Try to find a certificate that matches the requested SNI.
+					if hello.ServerName != "" {
+						// Check if SPIFFE SVID matches the requested SNI.
+						if spiffeErr == nil && spiffeCert != nil {
+							leaf := spiffeCert.Leaf
+							if leaf == nil && len(spiffeCert.Certificate) > 0 {
+								leaf, _ = x509.ParseCertificate(spiffeCert.Certificate[0])
+							}
+							if leaf != nil && leaf.VerifyHostname(hello.ServerName) == nil {
+								return spiffeCert, nil
+							}
+						}
+
+						// Fallback to file-based cert if it matches the SNI.
+						// This handles cases where the SVID might be missing DNS SANs (e.g. for scim_cluster1).
+						if fileCert != nil && fileCert.Leaf != nil {
+							if err := fileCert.Leaf.VerifyHostname(hello.ServerName); err == nil {
+								return fileCert, nil
+							}
 						}
 					}
 
-					// Otherwise, prefer the SPIFFE SVID. Internal workloads (like scim_cluster1)
-					// will expect this and trust it via the SPIRE CA.
-					return spiffeGetCert(hello)
+					// 2. Default: prefer the file-based cert if no match or no SNI.
+					// This provides maximum compatibility with legacy/external clients (like Java).
+					if fileCert != nil {
+						return fileCert, nil
+					}
+
+					// 3. Last resort: use the SPIFFE SVID.
+					if spiffeErr == nil && spiffeCert != nil {
+						return spiffeCert, nil
+					}
+
+					return spiffeCert, spiffeErr
 				},
 				VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
 					// Allow all certs through the handshake; handlers must authorize.

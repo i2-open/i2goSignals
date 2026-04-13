@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -209,6 +210,9 @@ func (b *BaseProvider) CreateStream(request model.StreamConfiguration, authCtx *
 		}
 	}
 
+	if strings.EqualFold(request.IssuerJWKSUrl, "NONE") { // scim servers assume the current server has the key internally
+		request.IssuerJWKSUrl = ""
+	}
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
 	res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, txServer)
 	if err == nil {

@@ -237,6 +237,12 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 }
 
 func (m *MongoProvider) Check() error {
+	m.mu.RLock()
+	dbInit := m.dbInit
+	m.mu.RUnlock()
+	if !dbInit {
+		return errors.New("database not initialized")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return m.CheckWithContext(ctx)
@@ -292,6 +298,12 @@ func (m *MongoProvider) connect() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Disconnect existing client if it exists to prevent leaks
+	if m.mongoClient != nil {
+		_ = m.mongoClient.Disconnect(context.Background())
+		m.mongoClient = nil
+	}
+
 	// Overall timeout for the connection attempt, including SPIFFE setup, MongoDB connection, ping, and initialization.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -318,7 +330,7 @@ func (m *MongoProvider) connect() error {
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 		spiffeCancel()
 		if err == nil {
-			tlsCfg, cfgErr := tlsSupport.NewClusterMTLSClientConfig(x509Source)
+			tlsCfg, cfgErr := tlsSupport.NewResilientMTLSClientConfig(x509Source)
 			if cfgErr == nil {
 				opts.SetTLSConfig(tlsCfg)
 				m.x509Source = x509Source

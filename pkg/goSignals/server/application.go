@@ -113,6 +113,11 @@ func (sa *SignalsApplication) HealthCheck() bool {
 		serverLog.Error("MongoProvider ping failed", "error", err)
 		return false
 	}
+	auth := sa.GetAuth()
+	if auth == nil || !auth.IsReady() {
+		serverLog.Warn("Health check: token keys not yet initialized")
+		return false
+	}
 	return true
 }
 

@@ -12,8 +12,14 @@ import (
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
+
+// FromX509Certificate returns the SPIFFE ID from the given X.509 certificate.
+func FromX509Certificate(cert *x509.Certificate) (spiffeid.ID, error) {
+	return x509svid.IDFromCert(cert)
+}
 
 const (
 	// EnvSpiffeSocket is the environment variable that specifies the SPIRE agent
@@ -62,18 +68,85 @@ func ClusterTrustDomain() (spiffeid.TrustDomain, error) {
 	return spiffeid.TrustDomainFromString(name)
 }
 
-// NewClusterMTLSClientConfig returns a *tls.Config that presents the workload's
-// X509-SVID to the server and authorizes peer SVIDs that belong to the cluster
-// trust domain. Used for outbound inter-cluster calls (e.g. WakeTransmitter).
+// NewResilientMTLSClientConfig returns a *tls.Config that presents the workload's
+// X509-SVID and validates the peer using either its SPIFFE ID (internal)
+// or standard hostname verification (external/legacy). This resilient configuration
+// is required to prevent connectivity regressions to non-SPIRE HTTPS endpoints
+// (e.g. JWKS, public APIs) while maintaining SPIFFE-level security for internal calls.
 //
-// Returns an error if SPIFFE_TRUST_DOMAIN is malformed.
-func NewClusterMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Config, error) {
+// Internal Logic (Dual-Validation):
+//  1. SPIFFE Path: Attempts to extract a SPIFFE ID. If it matches the cluster
+//     trust domain, validation is performed against the SPIRE trust bundle.
+//  2. Standard Path: If the peer is NOT in the trust domain, falls back to
+//     standard X.509 chain and hostname verification using the combined Root CAs.
+func NewResilientMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Config, error) {
 	td, err := ClusterTrustDomain()
 	if err != nil {
 		return nil, err
 	}
-	return tlsconfig.MTLSClientConfig(x509Source, x509Source,
-		tlsconfig.AuthorizeMemberOf(td)), nil
+
+	// 1. Prepare combined RootCAs: System + Global CA (ca-cert.pem) + SPIRE Bundle
+	roots := GetGlobalCertPool()
+	bundle, err := x509Source.GetX509BundleForTrustDomain(td)
+	if err == nil {
+		for _, cert := range bundle.X509Authorities() {
+			roots.AddCert(cert)
+		}
+	}
+
+	// 2. Base SPIFFE config for client cert presentation
+	spiffeCfg := tlsconfig.MTLSClientConfig(x509Source, x509Source, tlsconfig.AuthorizeAny())
+
+	return &tls.Config{
+		MinVersion:           tls.VersionTLS12,
+		GetClientCertificate: spiffeCfg.GetClientCertificate,
+		RootCAs:              roots,
+		InsecureSkipVerify:   true, // Manual verification required for dual-path in VerifyConnection
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("no peer certificates provided")
+			}
+			cert := cs.PeerCertificates[0]
+
+			// PATH A: SPIFFE ID Validation
+			id, err := FromX509Certificate(cert)
+			if err == nil && id.TrustDomain() == td {
+				// Peer is a member of the cluster trust domain.
+				// Verify the chain against our combined roots (includes SPIRE bundle).
+				_, err = cert.Verify(x509.VerifyOptions{
+					Roots: roots,
+				})
+				if err == nil {
+					return nil // SPIFFE validation successful
+				}
+			}
+
+			// PATH B: Standard X.509 Hostname & Chain Validation
+			// Fallback for external SSF endpoints or non-SPIRE internal nodes.
+			opts := x509.VerifyOptions{
+				Roots:         roots,
+				DNSName:       cs.ServerName,
+				Intermediates: x509.NewCertPool(),
+			}
+			for i, c := range cs.PeerCertificates {
+				if i > 0 {
+					opts.Intermediates.AddCert(c)
+				}
+			}
+			_, err = cert.Verify(opts)
+			return err
+		},
+	}, nil
+}
+
+// NewClusterMTLSClientConfig returns a *tls.Config that presents the workload's
+// X509-SVID to the server and validates the peer using the resilient
+// dual-validation strategy (SPIFFE ID + standard X.509 hostname/chain).
+// Used for outbound inter-cluster calls (e.g. WakeTransmitter).
+//
+// Returns an error if SPIFFE_TRUST_DOMAIN is malformed.
+func NewClusterMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Config, error) {
+	return NewResilientMTLSClientConfig(x509Source)
 }
 
 // NewSpiffeServerConfig returns a *tls.Config that presents the workload's
@@ -93,23 +166,28 @@ func NewSpiffeServerConfig(x509Source *workloadapi.X509Source) (*tls.Config, err
 	}, nil
 }
 
+// NewResilientMTLSClientTransport returns an *http.Transport configured with the
+// "Dual-Validation" strategy (SPIFFE ID + standard X.509 hostname/chain).
+// This transport is suitable for all outbound cluster calls, as it correctly
+// handles both internal SPIRE-enabled nodes and external HTTPS services.
+func NewResilientMTLSClientTransport(x509Source *workloadapi.X509Source) (*http.Transport, error) {
+	tlsConfig, err := NewResilientMTLSClientConfig(x509Source)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}, nil
+}
+
 // NewClusterMTLSClientTransport returns an *http.Transport that is configured
-// for inter-cluster SPIFFE mTLS, authorizing the cluster trust domain.
+// for inter-cluster SPIFFE mTLS, using the resilient "Dual-Validation" strategy.
 func NewClusterMTLSClientTransport(x509Source *workloadapi.X509Source) *http.Transport {
-	td, err := ClusterTrustDomain()
+	transport, err := NewResilientMTLSClientTransport(x509Source)
 	if err != nil {
 		return &http.Transport{}
 	}
-	tlsConfig := tlsconfig.MTLSClientConfig(x509Source, x509Source,
-		tlsconfig.AuthorizeMemberOf(td))
-
-	// We must set InsecureSkipVerify to true because we are using SPIFFE ID
-	// verification instead of standard hostname verification.
-	tlsConfig.InsecureSkipVerify = true
-
-	return &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	return transport
 }
 
 // ExportTrustBundle writes the SPIFFE trust bundle for the current trust domain

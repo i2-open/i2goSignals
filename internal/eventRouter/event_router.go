@@ -123,17 +123,17 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
 		spiffeCancel()
 		if err == nil {
-			tlsCfg, cfgErr := tlsSupport.NewClusterMTLSClientConfig(x509Source)
+			tlsCfg, cfgErr := tlsSupport.NewResilientMTLSClientConfig(x509Source)
 			if cfgErr == nil {
 				router.httpClient = &http.Client{
 					Timeout:   5 * time.Second,
 					Transport: &http.Transport{TLSClientConfig: tlsCfg},
 				}
 				router.x509Source = x509Source
-				eventLogger.Info("ROUTER: SPIFFE mTLS enabled for inter-cluster communication")
+				eventLogger.Info("ROUTER: Resilient SPIFFE mTLS enabled for inter-cluster communication")
 			} else {
 				_ = x509Source.Close()
-				eventLogger.Warn("ROUTER: SPIFFE config invalid; using HMAC-only", "err", cfgErr)
+				eventLogger.Warn("ROUTER: Resilient SPIFFE config invalid; using HMAC-only", "err", cfgErr)
 			}
 		} else {
 			eventLogger.Warn("ROUTER: SPIFFE configured but X509Source failed; using HMAC-only", "err", err)

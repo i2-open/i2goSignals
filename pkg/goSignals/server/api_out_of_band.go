@@ -523,6 +523,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 }
 
 func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	serverLog.Debug("IssuerProjectIatHandler called", "remoteAddr", r.RemoteAddr)
 	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
@@ -553,6 +554,8 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 }
 
 func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	serverLog.Debug("RegisterClientHandler", "authHeader", authHeader)
 	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister})
 	if stat != http.StatusOK {
 		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
