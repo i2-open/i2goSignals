@@ -20,6 +20,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,7 +37,13 @@ import (
 func getHttpClient(timeout time.Duration) *http.Client {
 	client := &http.Client{Timeout: timeout}
 	if spiffeSource != nil {
-		client.Transport = tlsSupport.NewClusterMTLSClientTransport(spiffeSource)
+		transport, err := tlsSupport.NewResilientMTLSClientTransport(spiffeSource)
+		if err == nil {
+			client.Transport = transport
+		} else {
+			log.Printf("Warning: Failed to create resilient SPIFFE transport: %v", err)
+			client.Transport = tlsSupport.NewClusterMTLSClientTransport(spiffeSource)
+		}
 	} else {
 		tlsSupport.CheckCaInstalled(client)
 	}
