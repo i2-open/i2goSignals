@@ -198,7 +198,7 @@ services:
     volumes:
       - ./config/scim/data1:/scim
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
   scim_cluster2:
     image: independentid/i2scim-universal:0.8.1
     container_name: scim_cluster2
@@ -212,7 +212,7 @@ services:
     volumes:
       - ./config/scim/data2:/scim
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
   postgres:
     image: postgres:alpine
     volumes:
