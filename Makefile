@@ -55,9 +55,11 @@ dev-up: check-certs
 dev-rebuild: dev-build-image
 	 docker compose -f docker-compose-dev.yml up -d --no-deps --build goSignals1 goSignals2 goSsfServer
 
-dev-reset-spiffe:
+clean-scim:
+	rm -f -v $(SCIM_CONFIG)/*.pem $(SCIM_CONFIG)/*.jwt $(SCIM_CONFIG)/config.json $(SCIM_CONFIG)/data1/*.pem $(SCIM_CONFIG)/data2/*.pem $(SCIM_CONFIG)/data1/*.j* $(SCIM_CONFIG)/data2/*.j*
+
+dev-reset-spiffe: clean-scim
 	docker compose -f docker-compose-spiffe-dev.yml down -v
-	rm $(SCIM_CONFIG)/*.pem $(SCIM_CONFIG)/*.txt $(SCIM_CONFIG)/config.json $(SCIM_CONFIG)/data1/*.pem $(SCIM_CONFIG)/data2/*.pem
 	docker compose -f docker-compose-spiffe-dev.yml up -d
 
 # Rebuild the dev image and restart for spiffe
