@@ -126,3 +126,25 @@ Updated `docs/spiffe_support.md` to include:
 ### Invariants
 *   Major cluster changes MUST be documented in `docs/spiffe_support.md`.
 *   Operational notes and troubleshooting guides MUST be kept up-to-date with new resilience features.
+
+---
+
+## [2026-04-13] SPIRE Agent & MongoDB Rotation Deadlock Fix
+
+### Problem
+1.  **SPIRE Agent Restart Loop**: The self-healing logic added on 2026-04-12 caused an infinite restart loop. It cleared agent state on every restart if a `joinTokenFile` existed. Since tokens are single-use and the file persisted in the volume, subsequent restarts failed to attest, leading to continuous crashes.
+2.  **MongoDB Rotation Deadlock**: When certificates expired during SPIRE agent downtime, the renewal script could not reconnect to MongoDB to issue `rotateCertificates` because MongoDB rejects expired client certificates.
+3.  **Renewal Loop Fragility**: The background renewal loop in `mongo_spiffe_init.sh` could exit silently due to `set -e` on transient errors, and it blindly picked the first SVID returned by the agent.
+
+### Solution
+1.  **Join Token Idempotency**: Modified `spire-agent` entrypoint to move the join token to `.used` and pass it to the agent via `-joinToken` ONLY if the agent's data directory appears empty. This version explicitly sanitizes the token (removing potential whitespaces/newlines) and uses the direct token value to ensure robust attestation across bootstrap retries, while still preventing "token already used" errors once the agent is successfully bootstrapped and restarted.
+2.  **Robust Renewal Loop**:
+    - Added `set +e` to the background loop in `mongo_spiffe_init.sh` to prevent it from exiting.
+    - Implemented SPIFFE ID validation to find the correct `workload/mongodb` SVID among multiple returned identities.
+    - Improved `rotateCertificates` to try both the "previous" and "current" certificates, increasing the chance of a successful hot-reload.
+    - Added explicit logging for rotation failures, noting that node restarts (triggered by healthcheck failures) will eventually resolve expiration deadlocks if the certs on disk are updated.
+    - Modified `spire-agent` script to put in proper escaping in TOKEN_VAL calculation  (docker reported a phantom TOKEN_ARG unset error)
+
+### Invariants
+*   The `spire-agent` MUST NOT clear its data directory unless a fresh, unused join token is present.
+*   The MongoDB renewal script MUST continue its loop even if individual rotation calls or agent fetches fail.

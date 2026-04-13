@@ -41,9 +41,29 @@ until /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/
 done
 
 # Prepare the combined PEM file mongod requires (cert + key)
-cp /certs/svid.0.pem /certs/mongo.pem
-cat /certs/svid.0.key >> /certs/mongo.pem
-cp /certs/bundle.0.pem /certs/ca.pem
+# Search for the correct SVID among all fetched identities
+SVID_PEM=""
+for p in /certs/svid.*.pem; do
+    [ -f "$p" ] || continue
+    if openssl x509 -in "$p" -noout -ext subjectAltName | grep -q "URI:spiffe://$TRUST_DOMAIN/workload/mongodb"; then
+        SVID_PEM="$p"
+        break
+    fi
+done
+
+if [ -z "$SVID_PEM" ]; then
+    echo "ERROR: Could not find SVID for workload/mongodb in initial fetch."
+    exit 1
+fi
+
+IDX=$(echo "$SVID_PEM" | sed 's/.*svid\.\([0-9]*\)\.pem/\1/')
+SVID_KEY="/certs/svid.${IDX}.key"
+SVID_BUNDLE="/certs/bundle.${IDX}.pem"
+
+cp "$SVID_PEM" /certs/svid.current.pem
+cp "$SVID_PEM" /certs/mongo.pem
+cat "$SVID_KEY" >> /certs/mongo.pem
+cp "$SVID_BUNDLE" /certs/ca.pem
 chmod 644 /certs/mongo.pem /certs/ca.pem
 chown 999:999 /certs/mongo.pem /certs/ca.pem
 echo "Initial certificates fetched and prepared"
@@ -70,7 +90,7 @@ spiffe_hash() {
 }
 
 MONGODB_SPIFFE_ID="spiffe://${TRUST_DOMAIN}/workload/mongodb"
-ACTUAL_SUBJECT=$(openssl x509 -in /certs/svid.0.pem -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+ACTUAL_SUBJECT=$(openssl x509 -in /certs/svid.current.pem -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
 echo "Actual SVID Subject (RFC2253): '${ACTUAL_SUBJECT}'"
 
 if [ -z "$ACTUAL_SUBJECT" ]; then
@@ -144,14 +164,11 @@ echo "  gosignals-admin: ${ADMIN_USER}"
 # After writing new cert files we call db.adminCommand({rotateCertificates:1})
 # on each mongod node. That command re-reads net.tls.certificateKeyFile,
 # net.tls.CAFile, and net.tls.CRLFile from disk without restarting mongod.
-# New connections immediately use the new cert and CA bundle; existing
-# connections continue with the old material until they close naturally.
-# A failed rotateCertificates call (node unreachable, etc.) is non-fatal:
-# the call is retried on the next loop iteration 5 minutes later, and MongoDB
-# keeps the previous (still-valid) TLS configuration in the meantime.
 # ---------------------------------------------------------------------------
 echo "Starting certificate renewal loop in background..."
-(while true; do
+(
+set +e # Don't exit the loop if a command fails
+while true; do
     sleep 300
     if [ ! -S /run/spire/sockets/agent.sock ]; then
         echo "ERROR: SPIRE agent socket missing. Waiting for agent recovery...: $(date)"
@@ -159,55 +176,91 @@ echo "Starting certificate renewal loop in background..."
     fi
 
     if /usr/local/bin/spire-agent api fetch x509 -write /certs/ -socketPath /run/spire/sockets/agent.sock 2>/dev/null; then
-        # Save the current cert/CA before overwriting.
-        # We must connect to mongod using the PREVIOUS cert (which mongod's
-        # in-memory CA bundle already trusts) to issue rotateCertificates.
-        # Using the newly-written cert would fail if the SPIRE CA has rotated:
-        # mongod's old CA bundle would reject a cert signed by the new CA.
-        # On the first renewal cycle .prev files do not exist; we fall back to
-        # the new cert (safe because the CA hasn't rotated yet).
-        cp /certs/mongo.pem /certs/mongo.pem.prev 2>/dev/null || true
-        cp /certs/ca.pem    /certs/ca.pem.prev    2>/dev/null || true
+        # 1. Identify the correct SVID for the mongodb workload
+        SVID_PEM=""
+        for p in /certs/svid.*.pem; do
+            [ -f "$p" ] || continue
+            if openssl x509 -in "$p" -noout -ext subjectAltName | grep -q "URI:spiffe://$TRUST_DOMAIN/workload/mongodb"; then
+                SVID_PEM="$p"
+                break
+            fi
+        done
 
-        cp /certs/svid.0.pem /certs/mongo.pem
-        cat /certs/svid.0.key >> /certs/mongo.pem
-        cp /certs/bundle.0.pem /certs/ca.pem
-        chmod 644 /certs/mongo.pem /certs/ca.pem
-        chown 999:999 /certs/mongo.pem /certs/ca.pem
-        echo "Certificates updated: $(date)"
+        if [ -z "$SVID_PEM" ]; then
+            echo "ERROR: Could not find SVID for workload/mongodb in fetched certificates: $(date)"
+            continue
+        fi
 
-        # Use previous cert/CA for the connection; fall back to new if no .prev.
-        CONN_CERT=/certs/mongo.pem.prev
-        CONN_CA=/certs/ca.pem.prev
-        [ -f "$CONN_CERT" ] || CONN_CERT=/certs/mongo.pem
-        [ -f "$CONN_CA"   ] || CONN_CA=/certs/ca.pem
+        IDX=$(echo "$SVID_PEM" | sed 's/.*svid\.\([0-9]*\)\.pem/\1/')
+        SVID_KEY="/certs/svid.${IDX}.key"
+        SVID_BUNDLE="/certs/bundle.${IDX}.pem"
 
-        # Hot-reload TLS material on each replica node.
-        # mongod requires a TLS client cert (it enforces mutual TLS when
-        # --tlsCAFile is configured), so CONN_CERT must be provided.
-        # rotateCertificates reloads net.tls.certificateKeyFile, net.tls.CAFile,
-        # and net.tls.CRLFile from disk; new connections immediately use the new
-        # material while existing connections drain with the old cert.
+        # 2. Check if the certificate has actually changed
+        if ! cmp -s "$SVID_PEM" /certs/svid.current.pem 2>/dev/null; then
+            echo "New SVID detected for workload/mongodb. Updating certificates on disk..."
+            
+            # Save the current cert/CA as "previous" for the rotation connection.
+            # We must connect using a cert that the server's CURRENT in-memory CA trusts.
+            cp /certs/mongo.pem /certs/mongo.pem.prev 2>/dev/null || true
+            cp /certs/ca.pem    /certs/ca.pem.prev    2>/dev/null || true
+
+            cp "$SVID_PEM" /certs/svid.current.pem
+            cp "$SVID_PEM" /certs/mongo.pem
+            cat "$SVID_KEY" >> /certs/mongo.pem
+            cp "$SVID_BUNDLE" /certs/ca.pem
+            chmod 644 /certs/mongo.pem /certs/ca.pem
+            chown 999:999 /certs/mongo.pem /certs/ca.pem
+            echo "Certificates updated on disk: $(date)"
+        fi
+
+        # 3. Hot-reload TLS material on each replica node.
+        # We try rotation using both the "previous" and "current" certificates.
+        # If rotation failed previously, the node might still be on an even older cert,
+        # in which case it will eventually be restarted by Docker's healthcheck.
         for HOST in mongo1 mongo2 mongo3; do
-            IDX=${HOST##mongo}   # strips "mongo" prefix → 1, 2, or 3
-            PORT=$((30000 + IDX))
-            if mongosh --host "$HOST" --port "$PORT" \
-                    --username root --password dockTest \
-                    --authenticationDatabase admin \
-                    --tls --tlsAllowInvalidHostnames \
-                    --tlsAllowInvalidCertificates \
-                    --tlsCAFile "$CONN_CA" \
-                    --tlsCertificateKeyFile "$CONN_CERT" \
-                    --quiet \
-                    --eval "db.adminCommand({rotateCertificates: 1, message: 'SPIRE SVID renewal'})" \
-                    </dev/null 2>/dev/null; then
-                echo "  rotateCertificates succeeded on ${HOST}:${PORT}: $(date)"
-            else
-                echo "  ERROR: rotateCertificates failed on ${HOST}:${PORT} (will retry next cycle): $(date)"
+            IDX_HOST=${HOST##mongo}
+            PORT=$((30000 + IDX_HOST))
+            
+            # Rotation strategy: 
+            # a) Try with .prev (usually what the server expects)
+            # b) If fails, try with current (maybe it already rotated)
+            # c) Both fail? Log and wait for next cycle or node restart.
+            
+            SUCCESS=false
+            for TRY_CERT in "/certs/mongo.pem.prev" "/certs/mongo.pem"; do
+                [ -f "$TRY_CERT" ] || continue
+                
+                if [ "$TRY_CERT" = "/certs/mongo.pem.prev" ]; then
+                    TRY_CA="/certs/ca.pem.prev"
+                else
+                    TRY_CA="/certs/ca.pem"
+                fi
+                # Fallback to current CA if .prev CA is missing
+                [ -f "$TRY_CA" ] || TRY_CA="/certs/ca.pem"
+
+                if mongosh --host "$HOST" --port "$PORT" \
+                        --username root --password dockTest \
+                        --authenticationDatabase admin \
+                        --tls --tlsAllowInvalidHostnames \
+                        --tlsAllowInvalidCertificates \
+                        --tlsCAFile "$TRY_CA" \
+                        --tlsCertificateKeyFile "$TRY_CERT" \
+                        --quiet \
+                        --eval "db.adminCommand({rotateCertificates: 1, message: 'SPIRE SVID renewal'})" \
+                        </dev/null 2>/dev/null; then
+                    echo "  rotateCertificates succeeded on ${HOST}:${PORT} using ${TRY_CERT}: $(date)"
+                    SUCCESS=true
+                    break
+                fi
+            done
+            
+            if [ "$SUCCESS" = false ]; then
+                echo "  ERROR: rotateCertificates failed on ${HOST}:${PORT} with all cert candidates: $(date)"
+                echo "  Node may need restart if certificates are expired."
             fi
         done
     else
-        echo "ERROR: Certificate fetch from SPIRE agent failed. Ensure agent is running and workload is registered: $(date)"
+        echo "ERROR: Certificate fetch from SPIRE agent failed: $(date)"
     fi
 done) &
 

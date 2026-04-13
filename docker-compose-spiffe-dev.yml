@@ -265,17 +265,31 @@ services:
         # Self-healing: If we have a join token and insecure_bootstrap is enabled, 
         # clear the old bundle to avoid "certificate signed by unknown authority" 
         # errors if the SPIRE server has been reset.
-        if [ -f /run/spire/tokens/agent.token ] && grep -q "insecure_bootstrap = true" /etc/spire/agent/agent.conf; then
-          echo "Join token found and insecure_bootstrap enabled. Clearing old agent state for fresh bootstrap..."
-          # Clear all persisted agent state to ensure a clean re-bootstrap.
-          # This avoids "unknown authority" errors if the server was reset.
-          # We remove all files in the data directory, including SVID, bundle, and keys.
-          ls -la /var/lib/spire/agent
-          find /var/lib/spire/agent -mindepth 1 -delete
+        if [ -f /run/spire/tokens/agent.token ]; then
+            if grep -q "insecure_bootstrap = true" /etc/spire/agent/agent.conf; then
+              echo "New join token detected and insecure_bootstrap enabled. Clearing old agent state for fresh bootstrap..."
+              # Clear all persisted agent state to ensure a clean re-bootstrap.
+              # This avoids "unknown authority" errors if the server was reset.
+              # We remove all files in the data directory, including SVID, bundle, and keys.
+              find /var/lib/spire/agent -mindepth 1 -delete
+            fi
+            # Move the token so we don't clear state again on next restart.
+            # This handles the case where the agent is restarted without the server reset.
+            mv /run/spire/tokens/agent.token /run/spire/tokens/agent.token.used
         fi
 
+        if [ -f /run/spire/tokens/agent.token.used ] && ! find /var/lib/spire/agent -mindepth 1 ! -name "keys.json" | grep -q .; then
+            # We ONLY pass the join token if the agent appears to need attestation.
+            # Sanitization: Ensure no leading/trailing whitespace or newlines.
+            TOKEN_VAL=$$(cat /run/spire/tokens/agent.token.used | tr -d '\n\r ')
+            if [ -n "$$TOKEN_VAL" ]; then
+                echo "No persisted agent state found. Passing join token for attestation..."
+                exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf -joinToken "$$TOKEN_VAL"
+            fi
+        fi
+ 
         echo "Starting spire-agent daemon..."
-        exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf -joinTokenFile /run/spire/tokens/agent.token
+        exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf
     pid: "host"  # required for PID-based workload attestation
     restart: unless-stopped
     healthcheck:
