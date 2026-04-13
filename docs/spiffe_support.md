@@ -38,6 +38,7 @@ All SPIFFE features are **opt-in**. Deployments without `SPIFFE_ENDPOINT_SOCKET`
 | SPIRE Server | Issues SVIDs; one per cluster trust domain |
 | SPIRE Agent | Proxies workload API; runs as sidecar/DaemonSet alongside workloads |
 | `uniqueid` CredentialComposer | SPIRE server plugin that adds a deterministic `x500UniqueIdentifier` to every SVID Subject (required for MongoDB X.509 auth) |
+| `cluster-monitor` | Monitors SPIRE agent health, MongoDB replica set status, and certificate validity |
 
 ### Environment Variables
 
@@ -46,6 +47,7 @@ All SPIFFE features are **opt-in**. Deployments without `SPIFFE_ENDPOINT_SOCKET`
 | `SPIFFE_ENDPOINT_SOCKET` | Path to SPIRE agent Unix socket | (unset — disables SPIFFE) |
 | `SPIFFE_TRUST_DOMAIN` | Trust domain for this cluster | `cluster.i2gosignals.internal` |
 | `SPIFFE_MONGO_ENABLED` | Enable SPIFFE mTLS for MongoDB connections | `false` |
+| `MONITOR_INTERVAL` | Interval between cluster health checks | `5m` |
 
 ---
 
@@ -263,6 +265,39 @@ Then update `clusterAuthX509.attributes` in `mongod.conf`.
 ### Hostname Verification
 
 SPIFFE SVIDs carry identity in the URI SAN, not DNS SANs. `mongod` and `mongosh` are started with `--tlsAllowInvalidHostnames` to bypass hostname verification while still validating the certificate chain against the SPIRE CA.
+
+---
+
+## Cluster Health Monitoring
+
+The `cluster-monitor` service (`cmd/cluster-monitor`) provides automated health checks for the SPIFFE-enabled cluster. It is designed to detect and report issues that could lead to cluster outages, such as SPIRE agent crashes or certificate expirations.
+
+### Monitored Areas
+
+1.  **SPIRE Agent Health**:
+    -   Verifies connectivity to the SPIRE agent via the Unix socket.
+    -   Attempts to fetch an X.509-SVID to ensure the agent is attested and functional.
+2.  **MongoDB Replica Set Health**:
+    -   Performs a `ping` and `replSetGetStatus` on the MongoDB cluster.
+    -   Uses a **Resilient mTLS connection** that correctly handles SPIFFE identities without DNS SANs.
+    -   Reports the status of all replica set members (Primary, Secondary, etc.).
+3.  **Certificate Validity**:
+    -   Monitors certificate files on disk (e.g., `/certs/mongo.pem`, `/certs/ca.pem`).
+    -   Parses all certificates in a PEM bundle to ensure trust remains valid even during rotation.
+    -   Logs warnings when certificates are nearing expiry (within 24 hours) and errors if they have expired.
+
+### Configuration
+
+In the development environment, the monitor is configured via environment variables in `docker-compose-spiffe-dev.yml`:
+
+```yaml
+cluster-monitor:
+  environment:
+    - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+    - SPIFFE_MONGO_ENABLED=true
+    - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin
+    - MONITOR_INTERVAL=1m
+```
 
 ---
 
@@ -592,11 +627,24 @@ After bootstrap, SPIRE refreshes bundles automatically. Workloads registered wit
 - **The `x500UniqueIdentifier` hash in `mongod.conf` is derived from the SPIFFE ID.** If the trust domain or workload path changes, recompute it and update `mongod.conf`.
 - **`--tlsAllowInvalidHostnames` is required** for both `mongod` and `mongosh` because SPIFFE SVIDs use URI SANs, not DNS SANs.
 - **`authSource=$$external`** in docker-compose env files — the dollar sign must be doubled to prevent docker-compose from interpreting `$external` as an undefined variable.
+- **Self-healing Agent Bootstrap** — In the development environment, the `spire-agent` entrypoint automatically clears its persisted state (`agent-data.json`, `keys.json`) if a new join token is provided and `insecure_bootstrap` is enabled. This prevents "unknown authority" errors that occur when the SPIRE server is reset but the agent attempts to use stale credentials.
 - **Stale certs on restart** — `mongo_spiffe_init.sh` deletes old `.pem` and `.key` files at startup. This ensures `mongod` waits for fresh SVIDs rather than starting with expired certs from a previous run.
 
 ---
 
 ## Troubleshooting
+
+### Using Cluster Monitor for Diagnosis
+
+The `cluster-monitor` service is the first place to check when encountering SPIFFE or MongoDB connectivity issues. It logs detailed information about:
+- **SPIRE Agent unreachable**: "CRITICAL: SPIRE Agent is UNHEALTHY or unreachable"
+- **MongoDB connection failures**: "MongoDB Cluster connection FAILED"
+- **Certificate issues**: "CRITICAL: Certificate has EXPIRED" or "URGENT: Certificate is nearing expiry"
+
+Check the logs using:
+```bash
+docker logs cluster-monitor
+```
 
 ### `AuthenticationFailed` on MongoDB connection
 

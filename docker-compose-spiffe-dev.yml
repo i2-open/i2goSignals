@@ -49,6 +49,7 @@ services:
       - backend
     ports:
       - "30001:30001"
+    restart: unless-stopped
     command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30001 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     volumes:
       - mongo1_data:/data/db
@@ -77,6 +78,7 @@ services:
       - backend
     ports:
       - "30002:30002"
+    restart: unless-stopped
     command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30002 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     volumes:
       - mongo2_data:/data/db
@@ -103,6 +105,7 @@ services:
       - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     ports:
       - "30003:30003"
+    restart: unless-stopped
     command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30003 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
     networks:
       - backend
@@ -258,9 +261,23 @@ services:
         cmp -s /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent || cp /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent
         chmod +x /opt/spire/shared_bin/spire-agent
         echo "Binary copied to shared volume"
+        
+        # Self-healing: If we have a join token and insecure_bootstrap is enabled, 
+        # clear the old bundle to avoid "certificate signed by unknown authority" 
+        # errors if the SPIRE server has been reset.
+        if [ -f /run/spire/tokens/agent.token ] && grep -q "insecure_bootstrap = true" /etc/spire/agent/agent.conf; then
+          echo "Join token found and insecure_bootstrap enabled. Clearing old agent state for fresh bootstrap..."
+          # Clear all persisted agent state to ensure a clean re-bootstrap.
+          # This avoids "unknown authority" errors if the server was reset.
+          # We remove all files in the data directory, including SVID, bundle, and keys.
+          ls -la /var/lib/spire/agent
+          find /var/lib/spire/agent -mindepth 1 -delete
+        fi
+
         echo "Starting spire-agent daemon..."
         exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf -joinTokenFile /run/spire/tokens/agent.token
     pid: "host"  # required for PID-based workload attestation
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "/usr/local/bin/spire-agent", "healthcheck", "-socketPath", "/run/spire/sockets/agent.sock"]
       interval: 10s
@@ -528,9 +545,40 @@ services:
       - "./config/certs:/opt/keycloak/certs"
       - spire_sockets:/run/spire/sockets
 
+# cluster-monitor checks the health of spire and mongo cluster and reports any issues
+  cluster-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: cluster-monitor
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    networks:
+      - backend
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - SPIFFE_MONGO_ENABLED=true
+      - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin
+      - MONITOR_INTERVAL=1m
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+    command: ["go", "run", "./cmd/cluster-monitor/main.go"]
+
   # ---------------------------------------------------------------------------
   # SCIM Services — SPIFFE-enabled
   # ---------------------------------------------------------------------------
+
   scimSsfSetup:
     build:
       context: .
@@ -581,7 +629,7 @@ services:
       - ./config/scim/data1:/scim
       - spire_sockets:/run/spire/sockets
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
@@ -605,7 +653,7 @@ services:
       - ./config/scim/data2:/scim
       - spire_sockets:/run/spire/sockets
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
