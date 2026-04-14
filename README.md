@@ -2,146 +2,97 @@
 
 <div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300  alt="i2GoSignals!"/></div>
 
-**_goSignals_** is a security signals processor that provides the ability to route Security Events between systems.
-A Security Event is a token that describes an event that has occurred within the domain of an issuer. A 
-[Security Event Token RFC8417](https://www.rfc-editor.org/rfc/rfc8417) is a specialized type of Json Web Token 
-traditionally used in [OAuth2](https://www.rfc-editor.org/rfc/rfc6749) based authentication and authorization systems. Typically a series of "SET" tokens
-are shared in a series called a stream between a publisher and receiver. The management of these streams is defined by
-the OpenID [Shared Signals Events Framework](https://openid.net/specs/openid-sharedsignals-framework-1_0-02.html).  The mechanism for the transfer of Security Event Tokens is defined
-by the SET Event transfer protocols ([RFC8935](https://www.rfc-editor.org/rfc/rfc8935) and [RFC8936](https://www.rfc-editor.org/rfc/rfc8936)). 
+**_i2goSignals_** is a high-performance security event router and processor designed to facilitate the secure exchange of Security Event Tokens (SETs) between systems. It acts as a bridge, gateway, or store-and-forward server, connecting security event generators (transmitters) to receivers across different domains.
 
-The **_goSignals_** server works as a gateway router or store and forward server connecting one or more security 
-event generators to one or more receivers across domains using streams. An **_goSignals_** server is able to receive, 
-validate, route, and forward Security Event Tokens (SETs) in streams to registered receivers.
+### Key Concepts
+- **Security Event Token ([RFC8417](https://www.rfc-editor.org/rfc/rfc8417))**: A specialized JSON Web Token (JWT) used to describe security-related events.
+- **Shared Signals Framework ([SSF](https://openid.net/specs/openid-sharedsignals-framework-1_0-final.txt))**: The framework defining how these event streams are managed and shared.
+- **Delivery Protocols**: Support for both Push ([RFC8935](https://www.rfc-editor.org/rfc/rfc8935)) and Poll ([RFC8936](https://www.rfc-editor.org/rfc/rfc8936)) delivery mechanisms.
 
-The i2goSignals server has the following capabilities:
-* Implementation of both SET PUSH (RFC8935) and SET POLL (RFC8936) Protocols
-* Organizes SETS into streams between publishers (event generators) and receivers (as defined in RFC8935/8936). 
-* Support for multiple inbound and outbound streams and routing between them
-* Acts as a protocol converter such as enabling Receivers that support Poll transfer only (e.g. from behind a firewall) to pick up events from SET Push-only transmitters.
-* Support for fault-tolerant stream recovery including automatic re-transmission and stream resets as well as configurable stream resets to a specified date or event identifier (`JTI`).
-* Supports routing which controls how events are forwarded, and/or re-published to one or more outbound streams
-* Validates events based on configured stream signing and encryption requirements.
+### Capabilities
+- **Protocol Interoperability**: Acts as a protocol converter, allowing Poll-only receivers to pick up events from Push-only transmitters.
+- **Advanced Routing**: Controls how events are validated, filtered, and re-published to one or more outbound streams based on issuer and audience.
+- **Stream Management**: Implements full SSF stream lifecycle management, including registration, status updates, and subject management.
+- **Fault Tolerance**: Supports stream recovery, automatic re-transmission, and configurable resets to specific dates or Event Identifiers (`JTI`).
+- **Security & Identity**: 
+  - Validates events based on configured signing and encryption requirements.
+  - Integrates with **SPIFFE/SPIRE** for workload identity and mutual TLS (mTLS).
+  - Supports OAuth2 and HMAC for API and inter-cluster authentication.
 
-The i2goSignals project is currently under development and is published for feedback and community involvement at this time.  This 
-preview code is not yet ready for production. Key features such as administration API security, multi-node co-ordination and TLS are still in progress.
+### Project Status
+The i2goSignals project is currently under active development. This preview code is intended for feedback and community involvement and is **not yet ready for production**. Key features like administration API security and multi-node coordination are being finalized.
 
-There are 3 main components to this project
-* goSet - utility functions to create SET tokens (which are a profile of JWT tokens) and a set of convenience methods to add, validate, and parse events. Includes support for SCIM Events.
-* cmd/goSignalsServer - provides a services framework to implement push and pull delivery services. This framework depends on MongoDB to store configuration and key data. SSEF also uses Kafka to pick up and store event streams per registered stream.
-* cmd/goSignalsTool - A command line tool which can be used to configure and administrator an goSignals server.
+### Main Components
+* **[goSignals Tool](docs/gosignals_tool.md)** (`cmd/goSignals`): A powerful command-line utility for configuring and administering i2goSignals and SSF-compliant servers.
+* **goSignals Server** (`cmd/goSignalsServer`): The core service implementing SET delivery protocols and the SSF framework. It uses **MongoDB** for persistent storage of configuration, keys, and event streams.
+* **goSet Library** (`pkg/goSet`): A Go package for creating, parsing, and validating SET tokens, with built-in support for SCIM, RISC, and CAEP event types.
 
 ## Getting Started
 
-Clone or download the codebase from GitHub to your local machine and install the following prerequisites.
-
-* [Go 1.21.5](https://go.dev) - Note: in GoLand make sure to select the correct version of go `Preferences > Go > GOROOT`.
+### Prerequisites
+* [Go 1.25+](https://go.dev)
 * [Docker Desktop](https://www.docker.com/products/docker-desktop) for local testing and development
+* [MongoDB](https://www.mongodb.com/) (provided in Docker Compose setups)
 
+### Installation
 ```bash
-cd /home/user/workspace/
-git clone git@github.com:i2-open/i2gosignals.git
+git clone https://github.com/i2-open/i2gosignals.git
+cd i2gosignals
+make build
 ```
-To run the demonstration configuration, see Demonstration Set Up below.
 
+## Docker Compose Setups
 
-Building a local docker image (starting from the main project directory):
+The project provides several Docker Compose configurations for various use cases.
+
+| File | Purpose | Key Features |
+| :--- | :--- | :--- |
+| `docker-compose.yml` | **Standard Demo** | Full stack with 2 nodes, MongoDB replica set, Keycloak, and monitoring (Prometheus/Grafana). |
+| `docker-compose-dev.yml` | **Development** | Optimized for dev: live code mounting, Delve debugger (ports 2345-2347). |
+| `docker-compose-spiffe.yml` | **SPIFFE Demo** | Adds SPIRE for workload identity and mTLS between nodes and MongoDB. |
+| `docker-compose-cluster.yml` | **Clustered Demo** | Adds Nginx load balancer and redundant nodes for high-availability testing. |
+
+**Note**: The `-dev` variants use `Dockerfile-dev` and mount the source code for live changes.
+
+### SPIFFE Registration
+When using SPIFFE-enabled setups, register workloads once the services are healthy:
 ```bash
-go install ./...
-docker build . --tag i2gosignals
-```
-> [!NOTE] 
-> The 0.7.0 release image is also available at ghcr.io/i2-open/i2gosignals:0.7.0
-
-This project uses MongoDB for event, key, and stream storage, management, and recovery. By default, unit testing is done with the MongoDb server defined in [docker-compose.yml](docker-compose.yml).
-
-The use of Mongo can be changed out to other database systems. However at this time, it would depend on contributors to implement or sponsor such support.
-
-Run the i2goSignals server and Mongo database using docker-compose
-
-## Documentation
-* [goSignals administration tool](docs/gosignals_tool.md)
-* [Supported environment properties](docs/configuration_properties.md)
-* [Security model](docs/security_model.md)
-* [SPIFFE/SPIRE integration plan](docs/spiffe_support.md)
-
-## SPIFFE/SPIRE Support
-
-i2goSignals supports [SPIFFE](https://spiffe.io/) workload identity for mutual TLS, augmenting
-the existing HMAC and OAuth2 mechanisms without replacing them.
-
-**What it enables:**
-- Inter-cluster `WakeTransmitter` calls authenticated by X.509-SVID instead of a shared HMAC secret
-- SSF stream management to SPIFFE-aware servers via `SpiffeConfig` on server records
-- MongoDB connections secured with SVID client certificates (opt-in)
-- SPIRE Federation for cross-domain SSF deployments
-
-**Quick start (SPIFFE-enabled dev environment):**
-```bash
-docker-compose -f docker-compose-spiffe-dev.yml up -d
-
-# After SPIRE server and agent are healthy, register workloads:
 docker exec spire-server sh /etc/spire/registration/register.sh
 ```
 
-Setting `SPIFFE_ENDPOINT_SOCKET` enables SPIFFE features; when unset the server operates
-identically to previous releases. See [`docs/security_model.md`](docs/security_model.md) for details.
-
+## Documentation
+* [GoSignals Administration Tool](docs/gosignals_tool.md) - CLI usage and commands.
+* [Configuration Properties](docs/configuration_properties.md) - Environment variables and settings.
+* [Security Model](docs/security_model.md) - Authentication, authorization, and SPIFFE details.
+* [Clustering & High Availability](docs/Cluster.md) - Multi-node deployment and lease management.
+* [Metrics & Monitoring](docs/Metrics.md) - Prometheus and Grafana integration.
+* [OIDC Implementation](docs/OIDC_IMPLEMENTATION.md) - Keycloak integration and administrative authentication.
+* [SPIFFE/SPIRE Support](docs/spiffe_support.md) - SPIFFE integration support.
 
 ## Demonstration Set Up
-in the file [docker-compose.yml](docker-compose.yml) is a sample set up that demonstrates both Push and Pull stream scenarios between 2 separate i2goSignals
-servers. Additionally, 2 i2scim.io servers are used to demonstrate multi-master replication using SCIM defined provisioning events.
 
-To configure the demonstration do the following:
-1. Build the goSignals project (see above)
-2. In /ect/hosts or your localdns configuration, define goSignals1 and goSignals2 to point to the corresponding goSignals server in docker (e.g. 127.0.0.1).
-3. Start all servocers in `docker-compose.yml`
-4. Start the `goSignals` tool and perform the following configuration
-```bash
-To be completed.
-```
+The `docker-compose.yml` file provides a sample environment demonstrating Push and Poll scenarios between two i2goSignals servers, along with `i2scim.io` servers for multi-master replication.
 
-## Developing and debugging inside Docker (GoLand/JetBrains)
+1. **Build the project**: `make build`
+2. **Configure local DNS**: Add `goSignals1` and `goSignals2` to your `/etc/hosts` pointing to `127.0.0.1`.
+3. **Start services**: `docker compose up -d`
+4. **Automated Configuration**: The `scimSsfSetup` service automatically configures the streams. To perform manual configuration or explore the tool:
+   ```bash
+   ./goSignals
+   goSignals> add server gs1 http://goSignals1:8888
+   ```
 
-Use the dev stack to run `goSignalsServer` under the Delve debugger in Docker so you can attach from GoLand or IntelliJ with the Go plugin.
+## Developing and Debugging (GoLand/IntelliJ)
 
-Prerequisites:
-- Docker Desktop running
-- GoLand or IntelliJ IDEA Ultimate with Go plugin
+1. **Build dev image**: `make dev-build-image`
+2. **Start dev stack**: `make dev-up`
+3. **Attach Debugger**:
+   - Create a **Go Remote** configuration in GoLand.
+   - Set Host to `localhost`, Port to `2345`.
+   - Map local root to `/app` in "Paths mapping".
+   - Set breakpoints and click Debug.
 
-Start the dev stack with the debug-enabled service:
+Use `make dev-logs` to follow logs and `make dev-down` to stop the stack.
 
-```bash
-# Build the dev image (installs Delve)
-make dev-build-image
-
-# Start Mongo, Prometheus, Grafana, and goSignals1 under Delve
-make dev-up
-
-# Follow logs if desired
-make dev-logs
-```
-
-Notes:
-- The dev image is defined in `Dockerfile-dev` and started by `docker-compose-dev.yml`.
-- The project source is volume-mounted into the container at `/app`. Delve recompiles the server inside the container, so first start may take a little longer while modules download.
-- Ports exposed:
-  - 8888: application API/UI
-  - 2345: Delve debug port
-
-Attach the debugger from JetBrains (GoLand/IntelliJ):
-1. Run > Edit Configurations… > add “Go Remote”.
-2. Set Host to `localhost` and Port to `2345`.
-3. Open “Paths mapping” and add a mapping from your local project root to `/app` (container path).
-4. Click Debug to attach. Set breakpoints in server code under `cmd/goSignalsServer` or packages it uses.
-
-Iterating:
-```bash
-# Rebuild the dev image (if Dockerfile-dev changed) and restart just goSignals1
-make dev-rebuild
-
-# Stop the dev stack
-make dev-down
-```
-
-Production image builds are unchanged; continue to use `./build.sh` to create the normal release image `i2gosignals:<tag>` and `docker-compose.yml` for the full demo stack.
+---
+*Production image builds use `sh ./build.sh` and the standard `docker-compose.yml`.*

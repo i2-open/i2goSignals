@@ -1,10 +1,10 @@
 # GoSignals Security Model
 
 ## Shared Signals Framework and GoSignals
-The current model is based on the OpenID SSF specification which essentially enables clients to register to receive events. 
-The client may be given an Initial Access Token (IAT) which permits the registration, when successful, the client receives
-a permanent token which it uses to pick up events, and/or to manage its stream.  Of particualr note, the SSF endpoints
-use a common endpoint which no direct stream identifier.  The stream identifier is usually encoded in the access token.
+The current model is based on the OpenID SSF specification, which enables clients to register to receive events. 
+The client may be given an Initial Access Token (IAT) which permits registration. When successful, the client receives
+a permanent token used to retrieve events and manage its stream. Of particular note, the SSF endpoints
+use a common endpoint with no direct stream identifier; instead, the stream identifier is typically encoded in the access token.
 
 ## GoSignals Command Line 
 At present, GoSignals only has a command line utility.  It accepts IATs, but if not, it will try to get an IAT.  From
@@ -42,15 +42,15 @@ When complete, the shell script takes iat1.txt and creates the file registration
 ## Limitations
 
 The current goSignals command line only knows about streams that is has configured to facilitate a demo. 
-At present the `show server` command only shows the locally known information and streams.  For example, you might chose to 
+At present the `show server` command only shows the locally known information and streams. For example, you might choose to 
 create a push receiver on goSignals2 and a push publisher on goSignals1 using the `create push connection` command. If you specify
-the same audience as the SCIM cluster, you fill find that goSignals1 starts automatically forwarding events to goSignals2.
+the same audience as the SCIM cluster, you will find that goSignals1 starts automatically forwarding events to goSignals2.
 You can monitor the events by creating a poll publisher on goSignals2 and then using the poll command to display incoming events
 to the command line utility.
 
 ## SPIFFE/SPIRE Mutual TLS
 
-i2goSignals supports [SPIFFE](https://spiffe.io/) (Secure Production Identity Framework for Everyone)
+As part of a defense-in-depth strategy, i2goSignals supports [SPIFFE](https://spiffe.io/) (Secure Production Identity Framework for Everyone)
 for cryptographic workload identity, implemented via [SPIRE](https://spiffe.io/docs/latest/spire-about/)
 and the [`go-spiffe`](https://github.com/spiffe/go-spiffe) library. SPIFFE **augments** the existing
 HMAC and OAuth2 mechanisms; deployments without SPIRE continue to operate unchanged.
