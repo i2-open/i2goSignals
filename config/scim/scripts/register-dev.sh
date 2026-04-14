@@ -10,7 +10,11 @@ echo ""
 export GOSIGNALS_HOME=/scim/config.json
 # Use go run to ensure we're using the latest source code in the dev environment.
 # This avoids issues with host-built binaries (e.g. Darwin vs Linux).
-go run /app/cmd/goSignals </scim/scripts/auto-reg.gosignals
+if command -v go >/dev/null 2>&1; then
+    go run /app/cmd/goSignals </scim/scripts/auto-reg.gosignals
+else
+    /app/goSignals </scim/scripts/auto-reg.gosignals
+fi
 if [ ! -f "/scim/iat-gosignals1.jwt" ]; then
         echo "Error: IAT and Key Generation failed."
         exit 1
