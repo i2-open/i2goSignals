@@ -18,9 +18,12 @@ WORKDIR /app
 
 USER ${USER}
 
-ADD --chmod=0755 ./goSignals ./goSignals
-ADD --chmod=0755 ./goSignalsServer ./goSignalsServer
-ADD --chmod=0755 ./goSsfServer ./goSsfServer
+ADD --chmod=0755 ./bin/goSignals ./goSignals
+ADD --chmod=0755 ./bin/goSignalsServer ./goSignalsServer
+ADD --chmod=0755 ./bin/goSsfServer ./goSsfServer
+ADD --chmod=0755 ./bin/cluster-monitor ./cluster-monitor
+ADD --chmod=0755 ./bin/genTlsKeys ./genTlsKeys
+ADD --chmod=0755 ./bin/healthcheck ./healthcheck
 ADD --chmod=0766 --chown=${USER} ./cmd/goSignals/resources ./resources
 
 # Optional:
