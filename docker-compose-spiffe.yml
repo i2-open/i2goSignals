@@ -597,7 +597,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.8.1
+    image: independentid/i2scim-universal:latest
     container_name: scim_cluster1
     networks:
       - frontend
@@ -621,7 +621,7 @@ services:
       - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
 
   scim_cluster2:
-    image: independentid/i2scim-universal:0.8.1
+    image: independentid/i2scim-universal:latest
     container_name: scim_cluster2
     networks:
       - frontend

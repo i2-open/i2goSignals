@@ -210,7 +210,7 @@ services:
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
   scim_cluster1:
-    image: independentid/i2scim-universal:0.8.1
+    image: independentid/i2scim-universal:latest
     container_name: scim_cluster1
     ports:
       - "9000:8080"
@@ -224,7 +224,7 @@ services:
     env_file:
       - ./config/scim/scripts/scim-server.env
   scim_cluster2:
-    image: independentid/i2scim-universal:0.8.1
+    image: independentid/i2scim-universal:latest
     container_name: scim_cluster2
     ports:
       - "9001:8080"
