@@ -148,3 +148,45 @@ Updated `docs/spiffe_support.md` to include:
 ### Invariants
 *   The `spire-agent` MUST NOT clear its data directory unless a fresh, unused join token is present.
 *   The MongoDB renewal script MUST continue its loop even if individual rotation calls or agent fetches fail.
+
+---
+
+## [2026-04-13] Hardened Container Health Checks (No-curl strategy)
+
+### Problem
+The project switched to Chainguard "hardened" images (`cgr.dev/chainguard/bash`) for production builds. These images lack `curl`, `wget`, and other standard network utilities, which broke the `docker-compose-spiffe.yml` health checks that relied on `curl` to verify application health.
+
+### Solution
+1.  **Custom Health Check Tool**: Created a minimal Go-based health check utility in `cmd/healthcheck/main.go`. This tool performs HTTP(S) GET requests, supports insecure TLS (for internal mTLS endpoints), and has configurable timeouts.
+2.  **Built-in Binary**: Added the `healthcheck` binary to the `Dockerfile` and `build.sh` so it is always available in the `i2gosignals` container without adding extra OS-level dependencies.
+3.  **Composition Alignment**: Updated `docker-compose-spiffe.yml` to use `/app/healthcheck` for `goSignals1`, `goSignals2`, and `goSsfServer`.
+4.  **Image Standardisation**: Updated `docker-compose-spiffe.yml` to use the official `independentid/i2gosignals:latest` image for all project-related services, ensuring they run the same hardened environment.
+
+### Invariants
+*   Health checks in hardened images MUST NOT depend on external OS packages like `curl`.
+*   The `healthcheck` tool MUST be included in all production-ready images built from `Dockerfile`.
+
+---
+
+## [2026-04-14] MongoDB Replica Set Startup & Auth Fix (docker-compose-dev)
+
+### Problem
+In `docker-compose-dev.yml` and `docker-compose.yml`, MongoDB services (`mongo1`, `mongo2`, `mongo3`) and the `mongo-init` setup job failed to start properly because:
+1.  **Script Permissions**: `config/mongo/mongo_init.sh` was not executable on the host, causing "Permission denied" in the container.
+2.  **TLS Mismatch**: `mongo_init.sh` unconditionally waited for TLS certificates and used `--tls` for `mongosh`, but the dev environment is non-TLS.
+3.  **Auth Initialization Bypass**: The `command` for MongoDB nodes used `exec mongod`, which bypassed the official image's `docker-entrypoint.sh` logic. This prevented the `MONGO_INITDB_ROOT_USERNAME` from being processed, leading to "UserNotFound" errors when `mongo-init` tried to connect.
+
+### Solution
+1.  **Robust Initialization Script**: Updated `config/mongo/mongo_init.sh` to:
+    -   Use `set -e` for better error handling.
+    -   Check for certificates and only use TLS if they exist.
+    -   Implement a retry loop for the initial connection to allow `mongod` time to initialize.
+2.  **Entrypoint Alignment**: Updated `docker-compose-dev.yml` and `docker-compose.yml` to:
+    -   Execute `mongo_init.sh` via `bash` to avoid permission issues.
+    -   Call `/usr/local/bin/docker-entrypoint.sh mongod ...` instead of `mongod ...` directly. This ensures that the root user is created during the first-run initialization.
+3.  **Permissions**: Made `config/mongo/mongo_init.sh` executable on the host.
+
+### Invariants
+*   The `mongo-init` service MUST use `bash /scripts/mongo_init.sh` to execute the setup script.
+*   MongoDB node `command` overrides MUST call `docker-entrypoint.sh` if `MONGO_INITDB` environment variables are used for user creation.
+*   `mongo_init.sh` MUST support both TLS and non-TLS modes based on the presence of certificates.

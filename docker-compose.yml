@@ -21,7 +21,7 @@ services:
       - backend
     ports:
       - "30001:30001"
-    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30001"]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30001"]
     volumes:
       - mongo1_data:/data/db
       - mongo_config:/data/config
@@ -41,7 +41,7 @@ services:
       - backend
     ports:
       - "30002:30002"
-    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30002"]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30002"]
     volumes:
       - mongo2_data:/data/db
       - mongo_config:/data/config
@@ -61,7 +61,7 @@ services:
       - "30003:30003"
     networks:
       - backend
-    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30003"]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30003"]
     volumes:
       - mongo3_data:/data/db
       - mongo_config:/data/config
@@ -96,7 +96,7 @@ services:
           chmod 400 /data/config/replica.key
           chown 999:999 /data/config/replica.key
         fi
-        exec /scripts/mongo_init.sh
+        exec bash /scripts/mongo_init.sh
 
   prometheus:
     image: prom/prometheus:latest
@@ -138,7 +138,7 @@ services:
     env_file:
       - ./config/goSignals1.env
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
+      test: [ "CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8888/health || /app/healthcheck http://localhost:8888/health" ]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -158,10 +158,34 @@ services:
     env_file:
       - ./config/goSignals2.env
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
+      test: [ "CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8889/health || /app/healthcheck http://localhost:8889/health" ]
       interval: 10s
       timeout: 5s
       retries: 30
+
+  goSsfServer:
+    image: i2gosignals:latest
+    command: /app/goSsfServer
+    container_name: gossfserver
+    hostname: goSsfServer
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    ports:
+      - "8890:8890"
+    env_file:
+      - ./config/goSsf1.env
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8890/health || /app/healthcheck http://localhost:8890/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   scimSsfSetup:
     image: i2gosignals:latest
    # command: sh /scim/register.sh
