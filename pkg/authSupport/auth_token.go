@@ -1,10 +1,17 @@
 package authSupport
 
 import (
+	"context"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// TokenTracker is an interface for tracking and checking token revocation.
+type TokenTracker interface {
+	TrackToken(ctx context.Context, claims *EventAuthToken, tokenPurpose string) error
+	IsRevoked(ctx context.Context, jti string) (bool, error)
+}
 
 const (
 	ScopeStreamMgmt    = "stream"
@@ -19,34 +26,37 @@ const (
 type EventAuthToken struct {
 	StreamIds []string `json:"streams,omitempty"`
 	ProjectId string   `json:"project_id"`
-	Scopes    []string `json:"roles,omitempty"`
+	Roles     []string `json:"roles,omitempty"`
 	ClientId  string   `json:"client_id,omitempty"`
 	jwt.RegisteredClaims
-	OAuthScope string `json:"scope,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
-// IsScopeMatch checks both Event token scopes array and oauth style space-delimited scope claim.
+// IsScopeMatch checks both Event token roles array and oauth style space-delimited scope claim.
 func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
 	if t == nil {
 		return false
 	}
-	oauthScope := t.OAuthScope
-	oauthScopes := strings.Split(oauthScope, " ")
 	for _, acceptedScope := range scopesAccepted {
-		for _, scope := range t.Scopes {
-			if strings.EqualFold(scope, ScopeRoot) {
+		// Check Roles (roles claim)
+		for _, role := range t.Roles {
+			if strings.EqualFold(role, ScopeRoot) {
 				return true
 			}
-			if strings.EqualFold(scope, acceptedScope) {
+			if strings.EqualFold(role, acceptedScope) {
 				return true
 			}
 		}
-		for _, scope := range oauthScopes {
-			if strings.EqualFold(scope, ScopeRoot) {
-				return true
-			}
-			if strings.EqualFold(scope, acceptedScope) {
-				return true
+		// Check Scope (scope claim)
+		if t.Scope != "" {
+			scopesFromClaim := strings.Split(t.Scope, " ")
+			for _, scope := range scopesFromClaim {
+				if strings.EqualFold(scope, ScopeRoot) {
+					return true
+				}
+				if strings.EqualFold(scope, acceptedScope) {
+					return true
+				}
 			}
 		}
 	}

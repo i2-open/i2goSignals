@@ -77,13 +77,13 @@ func newTestTokens() testTokensSet {
 		fmt.Printf("Failed to issue stream client token: %s\n", err.Error())
 		os.Exit(-1)
 	}
-	streamToken, err := auth.IssueStreamToken("1", "abc")
+	streamToken, err := auth.IssueStreamToken("1", "abc", nil)
 	if err != nil {
 		fmt.Printf("Failed to issue stream event token: %s\n", err.Error())
 		os.Exit(-1)
 	}
 
-	streamTokenBad, err := altAuth.IssueStreamToken("1", "abc")
+	streamTokenBad, err := altAuth.IssueStreamToken("1", "abc", nil)
 	if err != nil {
 		fmt.Printf("Failed to issue alt stream event token: %s\n", err.Error())
 		os.Exit(-1)
@@ -117,7 +117,8 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 	type fields struct {
 		StreamIds        []string
 		ProjectId        string
-		Scopes           []string
+		Roles            []string
+		Scope            string
 		ClientId         string
 		RegisteredClaims jwt.RegisteredClaims
 	}
@@ -136,7 +137,7 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Scopes:           []string{authSupport.ScopeEventDelivery},
+				Roles:            []string{authSupport.ScopeEventDelivery},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
@@ -151,7 +152,7 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Scopes:           []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
@@ -166,7 +167,7 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Scopes:           []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
@@ -181,7 +182,7 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Scopes:           []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
@@ -197,7 +198,8 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			t := &authSupport.EventAuthToken{
 				StreamIds:        tt.fields.StreamIds,
 				ProjectId:        tt.fields.ProjectId,
-				Scopes:           tt.fields.Scopes,
+				Roles:            tt.fields.Roles,
+				Scope:            tt.fields.Scope,
 				ClientId:         tt.fields.ClientId,
 				RegisteredClaims: tt.fields.RegisteredClaims,
 			}
@@ -220,7 +222,8 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 	type fields struct {
 		StreamIds        []string
 		ProjectId        string
-		Scopes           []string
+		Roles            []string
+		Scope            string
 		ClientId         string
 		RegisteredClaims jwt.RegisteredClaims
 	}
@@ -238,7 +241,7 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Scopes:           []string{"wrong"},
+				Roles:            []string{"wrong"},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
@@ -252,7 +255,7 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Scopes:           []string{authSupport.ScopeEventDelivery},
+				Roles:            []string{authSupport.ScopeEventDelivery},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
@@ -266,7 +269,7 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Scopes:           []string{"bleh", authSupport.ScopeEventDelivery},
+				Roles:            []string{"bleh", authSupport.ScopeEventDelivery},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
@@ -280,8 +283,41 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Scopes:           []string{authSupport.ScopeRoot},
+				Roles:            []string{authSupport.ScopeRoot},
 				ClientId:         "1234",
+				RegisteredClaims: standardClaims,
+			},
+			args: args{
+				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+			},
+			want: true,
+		},
+		{
+			name: "Test OAuth scope single",
+			fields: fields{
+				Scope:            authSupport.ScopeEventDelivery,
+				RegisteredClaims: standardClaims,
+			},
+			args: args{
+				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+			},
+			want: true,
+		},
+		{
+			name: "Test OAuth scope multi",
+			fields: fields{
+				Scope:            "bleh " + authSupport.ScopeEventDelivery,
+				RegisteredClaims: standardClaims,
+			},
+			args: args{
+				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+			},
+			want: true,
+		},
+		{
+			name: "Test OAuth scope root",
+			fields: fields{
+				Scope:            authSupport.ScopeRoot,
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
@@ -295,7 +331,8 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			t := &authSupport.EventAuthToken{
 				StreamIds:        tt.fields.StreamIds,
 				ProjectId:        tt.fields.ProjectId,
-				Scopes:           tt.fields.Scopes,
+				Roles:            tt.fields.Roles,
+				Scope:            tt.fields.Scope,
 				ClientId:         tt.fields.ClientId,
 				RegisteredClaims: tt.fields.RegisteredClaims,
 			}
@@ -374,8 +411,8 @@ func TestParseAuthToken(t *testing.T) {
 			want: func(token *authSupport.EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Scopes[0] == authSupport.ScopeRegister &&
-					len(token.Scopes) == 1 &&
+					token.Roles[0] == authSupport.ScopeRegister &&
+					len(token.Roles) == 1 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
 			wantErr: false,
@@ -386,8 +423,8 @@ func TestParseAuthToken(t *testing.T) {
 			want: func(token *authSupport.EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Scopes[0] == authSupport.ScopeStreamAdmin &&
-					len(token.Scopes) == 2 &&
+					token.Roles[0] == authSupport.ScopeStreamAdmin &&
+					len(token.Roles) == 2 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
 			wantErr: false,
@@ -398,8 +435,8 @@ func TestParseAuthToken(t *testing.T) {
 			want: func(token *authSupport.EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Scopes[0] == authSupport.ScopeEventDelivery &&
-					len(token.Scopes) == 1 &&
+					token.Roles[0] == authSupport.ScopeEventDelivery &&
+					len(token.Roles) == 1 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
 			wantErr: false,
@@ -632,9 +669,8 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	defer srv.Close()
 
 	// Point OAUTH_SERVERS to the discovery endpoint
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -664,9 +700,7 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.OAuthPubKeys = nil
@@ -712,9 +746,7 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.mu.Lock()
@@ -782,9 +814,7 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	defer srv.Close()
 	jwksURL = srv.URL + "/jwks"
 
-	prev := os.Getenv("OAUTH_SERVERS")
-	_ = os.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -830,7 +860,7 @@ func TestAuthIssuer_TokenKid(t *testing.T) {
 		PrivateKey:  privateKey,
 	}
 
-	tokenString, err := a.IssueStreamToken("stream1", "proj1")
+	tokenString, err := a.IssueStreamToken("stream1", "proj1", nil)
 	assert.NoError(t, err)
 
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
@@ -851,7 +881,7 @@ func TestAuthIssuer_TokenKidFallback(t *testing.T) {
 		PrivateKey:  privateKey,
 	}
 
-	tokenString, err := a.IssueStreamToken("stream1", "proj1")
+	tokenString, err := a.IssueStreamToken("stream1", "proj1", nil)
 	assert.NoError(t, err)
 
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
@@ -872,7 +902,7 @@ func (a *AuthIssuer) generateTestToken(exp time.Time, scopes []string, projectId
 
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    scopes,
+		Roles:     scopes,
 		ClientId:  clientId,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -901,10 +931,8 @@ func TestValidateAuthorizationAny_PartialOAuthFailure(t *testing.T) {
 	}))
 	defer srv2.Close()
 
-	prev := os.Getenv("OAUTH_SERVERS")
 	// Configure both servers
-	_ = os.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
-	defer os.Setenv("OAUTH_SERVERS", prev)
+	t.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.mu.Lock()

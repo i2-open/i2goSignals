@@ -21,12 +21,12 @@ func OpenProvider(mongoUrl string, dbName string) (DbProviderInterface, error) {
 	}
 
 	p, err := mongo_provider.Open(mongoUrl, dbName)
-	if err == nil {
-		// Verify connectivity.
-		err = p.Check()
-	}
-
 	if err != nil {
+		if strings.ToUpper(os.Getenv("MONGO_BACKGROUND_RECONNECT")) == "TRUE" {
+			factoryLog.Warn("Mongo connection failed. Background reconnect enabled.", "error", err)
+			return p, nil
+		}
+
 		failToMem := strings.ToUpper(os.Getenv("MONGO_FAILTOMEM"))
 		if failToMem == "FALSE" {
 			factoryLog.Error("Mongo Server connection failed. Exiting.", "error", err)

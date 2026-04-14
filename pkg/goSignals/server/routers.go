@@ -91,6 +91,13 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.Index,
 			false,
 		},
+		Route{
+			"Health",
+			"GET",
+			"/health",
+			h.sa.Health,
+			false,
+		},
 
 		Route{
 			"GenerateIat",
@@ -339,10 +346,39 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"WakeTransmitter",
+			http.MethodPost,
+			"/_cluster/wake-transmitter",
+			h.sa.WakeTransmitter,
+			false,
+		},
+
+		Route{
 			"ProtectedResourceMetadata",
 			http.MethodGet,
 			"/.well-known/oauth-protected-resource",
 			h.sa.ProtectedResourceMetadata,
+			false,
+		},
+		Route{
+			"Introspect",
+			http.MethodPost,
+			"/introspect",
+			h.sa.IntrospectHandler,
+			false,
+		},
+		Route{
+			"TokenRevoke",
+			http.MethodDelete,
+			"/token/{jti}",
+			h.sa.TokenRevokeHandler,
+			false,
+		},
+		Route{
+			"TokenList",
+			http.MethodGet,
+			"/token",
+			h.sa.TokenListHandler,
 			false,
 		},
 	}

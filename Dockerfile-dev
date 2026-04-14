@@ -25,6 +25,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 
+# Install curl for health checks and ca-certificates for TLS
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Expose application and Delve ports
 EXPOSE 8888
 EXPOSE 2345

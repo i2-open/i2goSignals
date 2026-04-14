@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
@@ -77,10 +78,15 @@ func main() {
 	mLog.Info("Base URL", "url", baseUrl)
 
 	ssfApplication := ssf.StartServer(":"+port, provider, baseUrl)
-	tlsMode, err := tlsSupport.InitTransportLayerSecurity(ssfApplication.Server)
+	closer, tlsMode, err := tlsSupport.InitTransportLayerSecurity(ssfApplication.Server)
 	if err != nil {
 		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
 		panic(err)
+	}
+	if closer != nil {
+		defer func(closer io.Closer) {
+			_ = closer.Close()
+		}(closer)
 	}
 	mLog.Info("HTTP Listening", "tls", tlsMode, "port", port)
 	if tlsMode {

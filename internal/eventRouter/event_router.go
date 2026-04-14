@@ -1,26 +1,34 @@
 package eventRouter
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 var eventLogger = logger.Sub("ROUTER")
@@ -39,6 +47,7 @@ type EventRouter interface {
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
 	SetStatsHandler(stats interface{})
 	ResetStream(sid string)
+	WakeTransmitter(sid string, mode string)
 }
 
 type router struct {
@@ -56,6 +65,16 @@ type router struct {
 	provider            dbProviders.DbProviderInterface
 	eventsIn, eventsOut *prometheus.CounterVec
 	stats               statsTracker
+
+	httpClient          *http.Client
+	clusterSecret       string
+	recentOutboundWakes map[string]time.Time
+	outboundWakesMu     sync.Mutex
+	backfillInterval    time.Duration
+	backfillBatch       int
+	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
+	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
+	x509Source *workloadapi.X509Source
 }
 
 type statsTracker interface {
@@ -80,18 +99,62 @@ func (r *router) GetPollStreamCnt() float64 {
 func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
-		provider:    provider,
-		nodeId:      nodeId,
-		pushStreams: map[string]model.StreamStateRecord{},
-		pollStreams: map[string]model.StreamStateRecord{},
-		pushBuffers: map[string]*buffer.EventPushBuffer{},
-		pollBuffers: map[string]*buffer.EventPollBuffer{},
-		issuerKeys:  map[string]*rsa.PrivateKey{},
-		issuerKids:  map[string]string{},
-		enabled:     false,
-		ctx:         context.WithValue(ctx, "provider", provider),
-		cancel:      cancel,
+		provider:            provider,
+		nodeId:              nodeId,
+		pushStreams:         map[string]model.StreamStateRecord{},
+		pollStreams:         map[string]model.StreamStateRecord{},
+		pushBuffers:         map[string]*buffer.EventPushBuffer{},
+		pollBuffers:         map[string]*buffer.EventPollBuffer{},
+		issuerKeys:          map[string]*rsa.PrivateKey{},
+		issuerKids:          map[string]string{},
+		enabled:             false,
+		ctx:                 context.WithValue(ctx, "provider", provider),
+		cancel:              cancel,
+		httpClient:          &http.Client{Timeout: 5 * time.Second},
+		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
+		recentOutboundWakes: make(map[string]time.Time),
 	}
+
+	// When SPIFFE is configured, replace the plain HTTP client with one that
+	// uses mutual TLS backed by the workload's X509-SVID. This allows inter-cluster
+	// wake-up calls to authenticate via SPIFFE without the shared HMAC secret.
+	if tlsSupport.SpiffeEnabled() {
+		spiffeCtx, spiffeCancel := context.WithTimeout(ctx, 60*time.Second)
+		x509Source, err := tlsSupport.NewX509Source(spiffeCtx)
+		spiffeCancel()
+		if err == nil {
+			tlsCfg, cfgErr := tlsSupport.NewResilientMTLSClientConfig(x509Source)
+			if cfgErr == nil {
+				router.httpClient = &http.Client{
+					Timeout:   5 * time.Second,
+					Transport: &http.Transport{TLSClientConfig: tlsCfg},
+				}
+				router.x509Source = x509Source
+				eventLogger.Info("ROUTER: Resilient SPIFFE mTLS enabled for inter-cluster communication")
+			} else {
+				_ = x509Source.Close()
+				eventLogger.Warn("ROUTER: Resilient SPIFFE config invalid; using HMAC-only", "err", cfgErr)
+			}
+		} else {
+			eventLogger.Warn("ROUTER: SPIFFE configured but X509Source failed; using HMAC-only", "err", err)
+		}
+	}
+
+	backfillInterval := 1 * time.Second
+	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_INTERVAL"); val != "" {
+		if d, err := time.ParseDuration(val); err == nil {
+			backfillInterval = d
+		}
+	}
+	router.backfillInterval = backfillInterval
+
+	backfillBatch := 100
+	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_BATCH"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			backfillBatch = i
+		}
+	}
+	router.backfillBatch = backfillBatch
 
 	states := router.provider.GetStateMap()
 
@@ -101,23 +164,28 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	}
 	router.enabled = true
 
-	// Start the background watcher
-	go router.provider.WatchPending(ctx, func(jti string, streamId bson.ObjectID) {
-		sid := streamId.Hex()
-		router.mu.RLock()
-		pollBuf, pollOk := router.pollBuffers[sid]
-		pushBuf, pushOk := router.pushBuffers[sid]
-		router.mu.RUnlock()
+	// Start the background watcher if explicitly enabled
+	if os.Getenv("I2SIG_MONGO_WATCH_ENABLED") == "true" {
+		eventLogger.Info("Background watcher enabled via I2SIG_MONGO_WATCH_ENABLED")
+		go router.provider.WatchPending(ctx, func(jti string, streamId bson.ObjectID) {
+			sid := streamId.Hex()
+			router.mu.RLock()
+			pollBuf, pollOk := router.pollBuffers[sid]
+			pushBuf, pushOk := router.pushBuffers[sid]
+			router.mu.RUnlock()
 
-		if pollOk {
-			eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
-			pollBuf.SubmitEvent(jti)
-		}
-		if pushOk {
-			eventLogger.Debug("Background watcher: submitting event to push buffer", "sid", sid, "jti", jti)
-			pushBuf.SubmitEvent(jti)
-		}
-	})
+			if pollOk {
+				eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
+				pollBuf.SubmitEvent(jti)
+			}
+			if pushOk {
+				eventLogger.Debug("Background watcher: submitting event to push buffer", "sid", sid, "jti", jti)
+				pushBuf.SubmitEvent(jti)
+			}
+		})
+	} else {
+		eventLogger.Info("Background watcher disabled (using wake-up calls and backfill)")
+	}
 
 	return router
 }
@@ -128,6 +196,23 @@ func (r *router) ResetStream(sid string) {
 	r.mu.RUnlock()
 	if ok {
 		buf.Clear()
+	}
+	_ = r.provider.ClearPending(sid)
+}
+
+func (r *router) WakeTransmitter(sid string, mode string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if mode == "push" {
+		if buf, ok := r.pushBuffers[sid]; ok {
+			eventLogger.Debug("Waking push transmitter", "sid", sid)
+			buf.Wakeup()
+		}
+	} else if mode == "poll" {
+		if buf, ok := r.pollBuffers[sid]; ok {
+			eventLogger.Debug("Waking poll transmitter", "sid", sid)
+			buf.Wakeup()
+		}
 	}
 }
 
@@ -412,8 +497,18 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
-			// This will cause the PollStreamHandler assigned to deliver the event
-			r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
+
+			// Lease-aware routing
+			resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
+			ownerNodeId, _, _, _ := r.provider.GetLeaseOwner(resource)
+
+			if ownerNodeId == "" || ownerNodeId == r.nodeId {
+				// Local owner or no owner (we'll try to take it or backfill will find it)
+				r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
+			} else {
+				// Remote owner, send wake-up
+				go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId)
+			}
 		}
 	}
 
@@ -429,11 +524,72 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
-			// This causes the event to be available on the next poll
+			// For poll streams, every node serving a long poll should be woken up.
+			// Since we don't have a transmitter lease for poll, we just submit locally.
+			// Ideally we'd broadcast to all nodes, but let's start with local.
 			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
 	}
 	return nil
+}
+
+func (r *router) sendWakeup(sid, mode, ownerNodeId string) {
+	// Rate limiting / Coalescing
+	key := sid + ":" + mode
+	r.outboundWakesMu.Lock()
+	lastWake, exists := r.recentOutboundWakes[key]
+	if exists && time.Since(lastWake) < 250*time.Millisecond {
+		r.outboundWakesMu.Unlock()
+		return
+	}
+	r.recentOutboundWakes[key] = time.Now()
+	r.outboundWakesMu.Unlock()
+
+	node, err := r.provider.GetNode(ownerNodeId)
+	if err != nil || node == nil {
+		eventLogger.Error("ROUTER: Error getting node info for wake-up", "nodeId", ownerNodeId, "error", err)
+		return
+	}
+
+	if node.Address == "" {
+		eventLogger.Warn("ROUTER: Node address empty, cannot send wake-up", "nodeId", ownerNodeId)
+		return
+	}
+
+	r.callWakeupAPI(node.Address, sid, mode)
+}
+
+func (r *router) callWakeupAPI(address, sid, mode string) {
+	url := strings.TrimSuffix(address, "/") + "/_cluster/wake-transmitter"
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"sid":  sid,
+		"mode": mode,
+	})
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		eventLogger.Error("ROUTER: Error creating wake-up request", "url", url, "error", err)
+		return
+	}
+
+	token := authSupport.GenerateClusterToken(r.clusterSecret, sid, mode)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		eventLogger.Error("ROUTER: Wake-up call failed", "url", url, "error", err)
+		return
+	}
+
+	defer httpSupport.HandleRespClose(resp)
+
+	if resp.StatusCode != http.StatusAccepted {
+		eventLogger.Warn("ROUTER: Wake-up call rejected", "url", url, "status", resp.Status)
+	} else {
+		eventLogger.Debug("ROUTER: Wake-up call successful", "url", url, "sid", sid)
+	}
 }
 
 func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int) {
@@ -449,6 +605,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	if len(params.Acks) > 0 {
 		pollBuffer.AckEvents(params.Acks)
+		for _, jti := range params.Acks {
+			_ = r.provider.AckEvent(jti, sid, 0)
+		}
 	}
 
 	if len(params.SetErrs) > 0 {
@@ -457,6 +616,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis = append(jtis, jti)
 		}
 		pollBuffer.AckEvents(jtis)
+		for _, jti := range jtis {
+			_ = r.provider.AckEvent(jti, sid, 0)
+		}
 	}
 
 	if state.Status != model.StreamStateEnabled {
@@ -468,6 +630,19 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		eventLogger.Error("POLL-SRV: Error Poll request but stream is not active", "sid", sid)
 		return nil, false, http.StatusConflict
 	}
+
+	// Opportunistically prefetch pending JTIs if the buffer is empty
+	if pollBuffer.Cnt() == 0 {
+		jtis, _ := r.provider.GetEventIds(sid, model.PollParameters{
+			MaxEvents:         int32(r.backfillBatch),
+			ReturnImmediately: true,
+		})
+		if len(jtis) > 0 {
+			eventLogger.Debug("POLL-SRV: Prefetched events", "sid", sid, "count", len(jtis))
+			pollBuffer.SubmitEvents(jtis)
+		}
+	}
+
 	var key *rsa.PrivateKey
 	var kid string
 	forwardMode := false
@@ -613,7 +788,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		}
 	}()
 
+	backfillTicker := time.NewTicker(r.backfillInterval)
+	defer backfillTicker.Stop()
+
 	out := eventBuf.Out
+	wakeup := eventBuf.WakeupCh()
+
 	for {
 		select {
 		case <-heartbeatCtx.Done():
@@ -628,7 +808,28 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 				eventLogger.Info("PUSH-SRV is no longer active. PushHandler exiting.", "sid", stream.Id.Hex())
 				return false
 			}
+		case <-backfillTicker.C:
+			r.backfillPushBuffer(sid, eventBuf)
+		case <-wakeup:
+			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
+			r.backfillPushBuffer(sid, eventBuf)
 		}
+	}
+}
+
+func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer) {
+	if eventBuf.Cnt() > 0 {
+		return
+	}
+
+	jtis, _ := r.provider.GetEventIds(sid, model.PollParameters{
+		MaxEvents:         int32(r.backfillBatch),
+		ReturnImmediately: true,
+	})
+
+	if len(jtis) > 0 {
+		eventLogger.Debug("PUSH-SRV: Backfill found pending events", "sid", sid, "count", len(jtis))
+		eventBuf.SubmitEvents(jtis)
 	}
 }
 
@@ -678,16 +879,11 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 
 	if !result.Accepted {
 		if result.Err != nil {
-			if deliveryErr, ok := result.Err.(*goSetPush.DeliveryErr); ok {
+			var deliveryErr *goSetPush.DeliveryErr
+			if errors.As(result.Err, &deliveryErr) {
 				errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", deliveryErr.ErrCode, deliveryErr.Description)
 				eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", deliveryErr.ErrCode, "desc", deliveryErr.Description)
 				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			} else if result.StatusCode > 400 {
-				errMsg := fmt.Sprintf("PUSH-SRV[%s] HTTP Error: %d, POSTING to %s", configuration.Id, result.StatusCode, pushConfig.EndpointUrl)
-				eventLogger.Error("PUSH-SRV: HTTP Error", "sid", configuration.Id, "status", result.StatusCode, "url", pushConfig.EndpointUrl)
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			} else {
-				eventLogger.Error("PUSH-SRV: Error sending", "sid", configuration.Id, "error", result.Err)
 			}
 		}
 		return false
@@ -802,6 +998,9 @@ func (r *router) Shutdown() {
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
 	}
-
-	// Nothing need to be done for polling because.
+	if r.x509Source != nil {
+		_ = r.x509Source.Close()
+		r.x509Source = nil
+	}
+	// Nothing need to be done for polling.
 }

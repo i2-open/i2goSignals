@@ -48,3 +48,27 @@ func HandleUpdateResult(result *mongo.UpdateResult, notFoundErr error) error {
 	}
 	return nil
 }
+
+// ToFlexibleID converts a string to an ObjectID if it is a valid hex string,
+// otherwise returns the original string.
+func ToFlexibleID(id string) any {
+	if oid, err := bson.ObjectIDFromHex(id); err == nil {
+		return oid
+	}
+	return id
+}
+
+// IDToString converts a BSON value (ObjectID or string) to its string representation.
+func IDToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case bson.ObjectID:
+		return val.Hex()
+	case string:
+		return val
+	default:
+		return ""
+	}
+}

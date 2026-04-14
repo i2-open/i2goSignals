@@ -3,17 +3,24 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/chzyer/readline"
 	"github.com/google/shlex"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
+)
+
+var (
+	spiffeSource *workloadapi.X509Source
 )
 
 type ParserData struct {
@@ -42,6 +49,7 @@ type CLI struct {
 	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
 	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
 	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
+	Token    TokenCmd    `cmd:"" help:"Manage issued tokens"`
 	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
 	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
 }
@@ -183,6 +191,25 @@ func breakIntoArgs(command string) []string {
 func main() {
 	logger.Init(os.Getenv("LOG_LEVEL"))
 	tlsSupport.CheckCaInstalled(nil)
+
+	if tlsSupport.SpiffeEnabled() {
+		socket := os.Getenv("SPIFFE_ENDPOINT_SOCKET")
+		path := strings.TrimPrefix(socket, "unix://")
+		if _, err := os.Stat(path); err != nil {
+			fmt.Printf("goSignals: warning: SPIFFE socket %s not found, skipping SPIFFE init\n", path)
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			var err error
+			spiffeSource, err = workloadapi.NewX509Source(ctx)
+			if err != nil {
+				fmt.Printf("goSignals: warning: failed to initialize SPIFFE source: %v\n", err)
+			} else {
+				fmt.Printf("goSignals: SPIFFE source initialized (socket: %s)\n", path)
+				defer spiffeSource.Close()
+			}
+		}
+	}
 
 	// Check for script file in environment variable
 	scriptFile := stripQuotes(os.Getenv("GOSIGNALS_SCRIPT"))

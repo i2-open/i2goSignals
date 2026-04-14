@@ -43,7 +43,7 @@ type ssfInstance struct {
 	client          *http.Client
 	provider        dbProviders.DbProviderInterface
 	stream          model.StreamConfiguration
-	app             ssef.SignalsApplication
+	app             *ssef.SignalsApplication
 	streamToken     string
 	streamMgmtToken string
 	iatToken        string
@@ -129,7 +129,7 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 	listener, _ := net.Listen("tcp", "localhost:0")
 
 	signalsApplication := ssef.StartServer(listener.Addr().String(), mongo, "")
-	instance.app = *signalsApplication
+	instance.app = signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
 	tlsSupport.CheckCaInstalled(instance.client)

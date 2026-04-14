@@ -150,7 +150,7 @@ func (suite *LoadKeyExtensionSuite) TestLoadKeyUseParameter() {
 	jwksUrlSig := fmt.Sprintf("http://%s/jwks/%s", suite.ssf.host, issuerSig)
 	resp, _ = suite.ssf.client.Get(jwksUrlSig)
 	var jwksSig map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&jwksSig)
+	_ = json.NewDecoder(resp.Body).Decode(&jwksSig)
 	keysSig := jwksSig["keys"].([]interface{})
 	assert.Equal(suite.T(), "sig", keysSig[0].(map[string]interface{})["use"])
 
@@ -166,7 +166,7 @@ func (suite *LoadKeyExtensionSuite) TestLoadKeyUseParameter() {
 	jwksUrlEnc := fmt.Sprintf("http://%s/jwks/%s", suite.ssf.host, issuerEnc)
 	resp, _ = suite.ssf.client.Get(jwksUrlEnc)
 	var jwksEnc map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&jwksEnc)
+	_ = json.NewDecoder(resp.Body).Decode(&jwksEnc)
 	keysEnc := jwksEnc["keys"].([]interface{})
 	assert.Equal(suite.T(), "enc", keysEnc[0].(map[string]interface{})["use"])
 

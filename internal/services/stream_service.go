@@ -103,6 +103,9 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
 	mid := bson.NewObjectID()
 
+	// var authCtx authUtil.AuthContext
+	// authCtx = ctx.Value(authUtil.AuthContextKey).(authUtil.AuthContext)
+
 	if logger.IsDebugEnabled() {
 		ssLog.Debug("CreateStream dump:")
 		fmt.Println("CreateStream", mid, "projectID", projectID)
@@ -203,7 +206,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 	case model.DeliveryPoll, "DEFAULT":
 		authToken := ""
 		if !isOAuth {
-			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID)
+			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
 		}
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
@@ -231,7 +234,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		method := config.Delivery.PushReceiveMethod
 		method.EndpointUrl = s.getFullUrl(fmt.Sprintf("/events/%s", mid.Hex()))
 		if !isOAuth {
-			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID)
+			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
 			}
@@ -271,6 +274,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
 			var client *http.Client
+			var closeClient func()
 			var err error
 			var req *http.Request
 			var resp *http.Response
@@ -288,10 +292,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 			}
 
 			// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
-			client, err = oauthClient.GetClientForServer(ctx, txServer)
+			client, closeClient, err = oauthClient.GetClientForServer(ctx, txServer)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
 			}
+			defer closeClient()
 
 			ssLog.Debug("Submitting POLL stream registration request to transmitter...")
 			reqBody, err := json.Marshal(transmitStreamReq)
@@ -449,15 +454,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
 		var client *http.Client
+		var closeClient func()
 		var err error
 		var req *http.Request
 		var resp *http.Response
 
 		// Use GetClientForServer to handle OAuth Client Credentials or Static Token based on server configuration
-		client, err = oauthClient.GetClientForServer(ctx, txServer)
+		client, closeClient, err = oauthClient.GetClientForServer(ctx, txServer)
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to get client for transmitter: %v", err)
 		}
+		defer closeClient()
 
 		method := streamRec.StreamConfiguration.Delivery.PushReceiveMethod
 		endpoint := s.getFullUrl(method.EndpointUrl)
@@ -845,31 +852,46 @@ func isPermanentJwksError(err error) bool {
 
 func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *model.StreamStateRecord) {
 	if streamState.Status == model.StreamStateEnabled {
-		if streamState.IssuerJWKSUrl == "" {
-			return
-		}
-		ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
-		jwks, err := goSet.GetJwks(streamState.IssuerJWKSUrl)
-		if err != nil {
-			msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
+		var jwks *keyfunc.JWKS
+		var err error
 
-			// Determine if this is a permanent error that should disable the stream
-			if isPermanentJwksError(err) {
-				// Permanent error - disable the stream immediately
-				ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
-				streamState.Status = model.StreamStateDisable
-				streamState.ErrorMsg = msg
-				// Update the stream in the database
-				err = s.streamDAO.Update(ctx, streamState)
-				if err != nil {
-					ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
-				}
-			} else {
-				// Temporary error - log but don't change stream state
-				// Let the polling client handle retries with backoff
-				ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+		if streamState.IssuerJWKSUrl == "" {
+			ssLog.Debug("Attempting to lLoading JWKS internally", "iss", streamState.Iss)
+			jwksJson := s.keyService.GetPublicJWKS(ctx, streamState.Iss)
+			if jwksJson == nil {
+				ssLog.Debug("No JWKS key found for issuer", "iss", streamState.Iss)
+				return
 			}
-			return
+
+			// Convert json.RawMessage to keyfunc.JWKS
+			jwks, err = keyfunc.NewJSON(*jwksJson)
+			if jwks == nil && err != nil {
+				ssLog.Error("Unable to parse internal key", "iss", streamState.Iss, "err", err.Error())
+			}
+		} else {
+			ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
+			jwks, err = goSet.GetJwks(streamState.IssuerJWKSUrl)
+			if err != nil {
+				msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
+
+				// Determine if this is a permanent error that should disable the stream
+				if isPermanentJwksError(err) {
+					// Permanent error - disable the stream immediately
+					ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+					streamState.Status = model.StreamStateDisable
+					streamState.ErrorMsg = msg
+					// Update the stream in the database
+					err = s.streamDAO.Update(ctx, streamState)
+					if err != nil {
+						ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
+					}
+				} else {
+					// Temporary error - log but don't change stream state
+					// Let the polling client handle retries with backoff
+					ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
+				}
+				return
+			}
 		}
 		streamState.ValidateJwks = jwks
 	}

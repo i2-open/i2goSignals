@@ -24,6 +24,10 @@
 - **Coverage**: Ensure that new logic is covered by unit or integration tests.
 - **Race**: When testing concurrent code, use `go test -race` to detect potential race conditions, but ensure reasonable timeouts or lock detections to ensure tests finish within 5 minutes.
 
+#### Debugging and Diagnosis
+- **Decision Log**: Maintain a log of all changes and decisions to help prevent repeated attempts to do the same fix and regressions in general.  See `./DECISIONS_LOG.md`
+- **Implement tests**: Implement reproduction tests when feasible and keep if resonable
+
 #### Coding Standards
 - **Logging**: Use the internal logging package (`github.com/i2-open/i2goSignals/internal/logger`) which uses `slog`. Use `logger.Sub("Component")` to create sub-loggers for specific components.
 - **Database**: When interacting with MongoDB, follow existing patterns in `internal/providers/dbProviders/mongo_provider`.

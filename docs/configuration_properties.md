@@ -18,6 +18,11 @@ Currently i2goSignals has minimal configuration properties. The current values a
 | <BR>**Clustering**           |                                                                                                                                            |                                                        |
 | `NODE_ID`                    | Unique identifier for the server node in a cluster.                                                                                        | `POD_NAME` if set, else `hostname-timestamp`           |
 | `POD_NAME`                   | Fallback for `NODE_ID` when running in Kubernetes.                                                                                         | _none_                                                 |
+| `I2SIG_CLUSTER_INTERNAL_TOKEN` | Shared secret for intra-cluster communication (HMAC).                                                                                    | _none_ (Required for clustered wake-ups)               |
+| `I2SIG_CLUSTER_INTERNAL_PORT` | Port for the internal cluster wake-up API. If not set, the main server port is used.                                                       | _none_                                                 |
+| `I2SIG_TRANSMITTER_BACKFILL_INTERVAL` | Interval for periodic backfill from MongoDB when buffers are empty.                                                               | 1s                                                     |
+| `I2SIG_TRANSMITTER_BACKFILL_BATCH` | Maximum number of events to fetch in one backfill operation.                                                                          | 100                                                    |
+| `I2SIG_MONGO_WATCH_ENABLED`  | If `true`, the server will use MongoDB Change Streams to watch for new events. (Deprecated in favor of wake-ups).                          | false                                                  |
 | <BR>**Mongo DB**             |                                                                                                                                            |                                                        |
 | `MONGO_URL`                  | The connection URL used to connect to a Mongo DB. Note: Should be a clustered replica set.                                                 | mongodb://root:dockTest@0.0.0.0:8880<br>_testing only_ |
 | `DBNAME`                     | The name of the database to store goSignals data.                                                                                          | ssef                                                   |
@@ -41,6 +46,10 @@ Currently i2goSignals has minimal configuration properties. The current values a
 | `SERVER_KEY_PATH`            | Path to the PEM-encoded server private key.                                                                                                | `config/certs/server-key.pem`                          |
 | `CA_CERT`                    | Path to the CA certificate PEM file. Used to trust the server in clients and sign certificates if using `genTlsKeys`.                      | `config/certs/ca-cert.pem`                             |
 | `CERT_CA_PUB_KEY`             | Alias for `CA_CERT`.                                                                                                                       | `_same as CA_CERT_`                                    |
+| <BR>**SPIFFE/SPIRE**         |                                                                                                                                            |                                                        |
+| `SPIFFE_ENDPOINT_SOCKET`     | Path to the SPIRE agent Unix socket. Setting this value enables all SPIFFE features. When unset, the server operates in HMAC/OAuth mode.  | _none_ (SPIFFE disabled)                               |
+| `SPIFFE_TRUST_DOMAIN`        | SPIFFE trust domain for this cluster. Used to authorize peer SVIDs in inter-cluster calls and inbound WakeTransmitter requests.            | `cluster.i2gosignals.internal`                         |
+| `SPIFFE_MONGO_ENABLED`       | If `true`, use SPIFFE X.509-SVID mutual TLS for MongoDB connections instead of username/password. Requires `SPIFFE_ENDPOINT_SOCKET`.       | `false`                                                |
 
 
 

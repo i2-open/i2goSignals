@@ -3,6 +3,7 @@ package tlsSupport
 import (
 	"bytes"
 	"crypto/tls"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,9 +43,14 @@ func TestSNILogging(t *testing.T) {
 		Addr: "127.0.0.1:0",
 	}
 
-	enabled, err := InitTransportLayerSecurity(server)
+	closer, enabled, err := InitTransportLayerSecurity(server)
 	if err != nil {
 		t.Fatalf("Failed to init TLS: %v", err)
+	}
+	if closer != nil {
+		defer func(closer io.Closer) {
+			_ = closer.Close()
+		}(closer)
 	}
 	if !enabled {
 		t.Fatal("TLS should be enabled")

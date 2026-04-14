@@ -67,6 +67,10 @@ func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamI
 	return err
 }
 
+func (s *EventService) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+	return s.eventDAO.ClearPendingForStream(ctx, streamID)
+}
+
 func (s *EventService) GetEvent(ctx context.Context, jti string) *goSet.SecurityEventToken {
 	res, err := s.eventDAO.FindByJTI(ctx, jti)
 	if err != nil || res == nil {

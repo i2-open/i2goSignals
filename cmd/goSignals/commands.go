@@ -20,6 +20,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +32,23 @@ import (
 	_ "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
+
+// getHttpClient returns a standard or SPIFFE-aware HTTP client
+func getHttpClient(timeout time.Duration) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if spiffeSource != nil {
+		transport, err := tlsSupport.NewResilientMTLSClientTransport(spiffeSource)
+		if err == nil {
+			client.Transport = transport
+		} else {
+			log.Printf("Warning: Failed to create resilient SPIFFE transport: %v", err)
+			client.Transport = tlsSupport.NewClusterMTLSClientTransport(spiffeSource)
+		}
+	} else {
+		tlsSupport.CheckCaInstalled(client)
+	}
+	return client
+}
 
 type AddServerCmd struct {
 	Alias string `arg:"" help:"A unique name to identify the server"`
@@ -69,8 +87,7 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
-	client := &http.Client{Timeout: 30 * time.Second}
-	tlsSupport.CheckCaInstalled(client)
+	client := getHttpClient(30 * time.Second)
 	resp, err = client.Get(tryUrl.String())
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -131,7 +148,6 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		regBytes, _ := json.Marshal(&clientReg)
 		req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(regBytes))
 		req.Header.Set("Authorization", "Bearer "+server.IatToken)
-		tlsSupport.CheckCaInstalled(client)
 		resp, err = client.Do(req)
 		defer httpSupport.HandleRespClose(resp)
 		if err != nil {
@@ -729,7 +745,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		fmt.Println("No server client token detected. Attempting anonymous request...")
 	}
 
-	client := http.Client{}
+	client := getHttpClient(0)
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -835,7 +851,7 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	} else {
 		fmt.Println(fmt.Sprintf("No authorization information for %s, attempting anonymous request.", server.Alias))
 	}
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
@@ -888,7 +904,7 @@ func (g *CreateIatCmd) Run(c *CLI) error {
 			req.Header.Set("Authorization", "Bearer "+server.ClientToken)
 		}
 	}
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
@@ -915,6 +931,38 @@ type CreateCmd struct {
 	Stream CreateStreamCmd `cmd:"" aliases:"s" help:"Create a stream on a specified server."`
 	Key    CreateKeyCmd    `cmd:"" help:"Obtain an issuer key from an i2goSignals server (returns a PEM)."`
 	Iat    CreateIatCmd    `cmd:"" help:"Create/obtain an initial access token (IAT) from a server which allows a stream client to register."`
+	Bundle CreateBundleCmd `cmd:"" help:"Export the SPIFFE trust bundle to a file."`
+}
+
+type CreateBundleCmd struct {
+	//  Output string `short:"o" help:"The file path to write the SPIFFE trust bundle (PEM format)." type:"path" required:""`
+}
+
+func (b *CreateBundleCmd) Run(cli *CLI) error {
+	if !tlsSupport.SpiffeEnabled() {
+		return errors.New("SPIFFE is not enabled (SPIFFE_ENDPOINT_SOCKET not set)")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var err error
+	source := spiffeSource
+	if source == nil {
+		source, err = tlsSupport.NewX509Source(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create X509 source: %w", err)
+		}
+		defer source.Close()
+	}
+
+	err = tlsSupport.ExportTrustBundle(source, cli.Output)
+	if err != nil {
+		return fmt.Errorf("failed to export trust bundle: %w", err)
+	}
+
+	fmt.Printf("SPIFFE trust bundle exported to %s\n", cli.Output)
+	return nil
 }
 
 type ExitCmd struct {
@@ -1100,7 +1148,7 @@ func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
-	client := http.Client{}
+	client := getHttpClient(0)
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -1131,7 +1179,7 @@ func (s *GetStreamConfigCmd) Run(cli *CLI) error {
 		return errors.New("Could not locate locally defined stream alias: " + streamAlias)
 	}
 
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 	config, err := getStreamConfig(client, server, streamConfig)
 	if err != nil {
@@ -1234,7 +1282,7 @@ type DeleteStreamCmd struct {
 }
 
 func (d *DeleteStreamCmd) Run(cli *CLI) error {
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 
 	stream, server := cli.Data.GetStreamAndServer(d.Alias)
@@ -1282,7 +1330,7 @@ type SetStreamConfigCmd struct {
 }
 
 func (s *SetStreamConfigCmd) Run(cli *CLI) error {
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 
 	streamAlias := s.Alias
@@ -1411,7 +1459,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 		fmt.Println(fmt.Sprintf("No client admin token for %s, attempting anonymous request.", server.Alias))
 	}
 
-	client := http.Client{}
+	client := getHttpClient(0)
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -1517,7 +1565,7 @@ func (p *PollCmd) Run(cli *CLI) error {
 
 func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stream, params model.PollParameters, exitCh chan struct{}) {
 	var setErrs map[string]model.SetErrorType
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 
 	var err error
@@ -1609,7 +1657,7 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 	}
 }
 
-func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params model.PollParameters, endpoint string, token string, exitCh chan struct{}) (*model.PollResponse, error) {
+func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params model.PollParameters, endpoint string, token string, exitCh chan struct{}) (*model.PollResponse, error) {
 	bodyBytes, err := json.MarshalIndent(params, "", " ")
 	if err != nil {
 		return nil, err
@@ -1649,7 +1697,7 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client http.Client, params 
 	return &pollResponse, nil
 }
 
-func (p *PollCmd) DoAckOnly(ctx context.Context, client http.Client, endpoint string, token string, exitCh chan struct{}) {
+func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint string, token string, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
 			MaxEvents:         0,
@@ -1733,7 +1781,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		return nil
 	}
 
-	client := http.Client{}
+	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
 
 	event.IssuedAt = jwt.NewNumericDate(time.Now())
@@ -1800,4 +1848,127 @@ func parseMode(param string) string {
 		mode = model.RouteModePublish
 	}
 	return mode
+}
+
+type TokenListCmd struct {
+	Project string `help:"Filter by project ID"`
+	Client  string `help:"Filter by client ID"`
+}
+
+func (t *TokenListCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/token"
+	if t.Client != "" {
+		reqUrl += "?client_id=" + t.Client
+	} else if t.Project != "" {
+		reqUrl += "?project_id=" + t.Project
+	} else {
+		// Default to current project if available
+		if server.ProjectId != "" {
+			reqUrl += "?project_id=" + server.ProjectId
+		} else {
+			return errors.New("must specify --project or --client")
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := getHttpClient(10 * time.Second)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error listing tokens: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Println(string(body))
+	return nil
+}
+
+type TokenRevokeCmd struct {
+	Jti string `arg:"" help:"The JTI of the token to revoke"`
+}
+
+func (t *TokenRevokeCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/token/" + t.Jti
+	req, err := http.NewRequest(http.MethodDelete, reqUrl, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := getHttpClient(10 * time.Second)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("error revoking token: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Printf("Token %s revoked.\n", t.Jti)
+	return nil
+}
+
+type TokenIntrospectCmd struct {
+	Token string `arg:"" help:"The token string to introspect"`
+}
+
+func (t *TokenIntrospectCmd) Run(cli *CLI) error {
+	server, err := cli.Data.GetServer("")
+	if err != nil {
+		return err
+	}
+
+	reqUrl := server.Host + "/introspect"
+	data := url.Values{}
+	data.Set("token", t.Token)
+
+	req, err := http.NewRequest(http.MethodPost, reqUrl, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+
+	client := getHttpClient(10 * time.Second)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error introspecting token: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Println(string(body))
+	return nil
+}
+
+type TokenCmd struct {
+	List       TokenListCmd       `cmd:"" help:"List issued tokens"`
+	Revoke     TokenRevokeCmd     `cmd:"" help:"Revoke a token by JTI"`
+	Introspect TokenIntrospectCmd `cmd:"" help:"Introspect a token (RFC7662)"`
 }

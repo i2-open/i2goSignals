@@ -4,12 +4,33 @@ volumes:
   prometheus_data: {}
   postgres_data:
     driver: local
+  mongo1_data: {}
+  mongo2_data: {}
+  mongo3_data: {}
+  mongo_config: {}
   go_mod_cache: {}
   go_build_cache: {}
 
 services:
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/certs:/etc/nginx/certs:ro
+    ports:
+      - "8888:8888"
+      - "9000:9000"
+      - "9080:9080"
+    depends_on:
+      - goSignals1
+      - goSignals1b
+      - goSignals2
+      - goSsfServer
+      - keycloak
+      - scim_cluster1
+      - scim_cluster2
+
   mongo1:
-    container_name: mongo1
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -17,12 +38,16 @@ services:
       - MONGO_REPLICA_SET_NAME=dbrs
     ports:
       - "30001:30001"
-    command: ["--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30001"]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30001"]
     volumes:
-      - ".mongo/replica.key:/data/replica.key"
-      - ".mongo/mongo1:/data/db"
+      - mongo1_data:/data/db
+      - mongo_config:/data/config
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30001", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   mongo2:
-    container_name: mongo2
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -30,12 +55,16 @@ services:
       - MONGO_REPLICA_SET_NAME=dbrs
     ports:
       - "30002:30002"
-    command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30002" ]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30002"]
     volumes:
-      - ".mongo/replica.key:/data/replica.key"
-      - ".mongo/mongo2:/data/db"
+      - mongo2_data:/data/db
+      - mongo_config:/data/config
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30002", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   mongo3:
-    container_name: mongo3
     image: mongo:latest
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
@@ -43,24 +72,43 @@ services:
       - MONGO_REPLICA_SET_NAME=dbrs
     ports:
       - "30003:30003"
-    command: [ "--replSet","dbrs","--keyFile","/data/replica.key","--bind_ip_all","--port","30003" ]
+    command: ["sh", "-c", "until [ -f /data/config/replica.key ]; do echo 'Waiting for replica.key...'; sleep 2; done; exec mongod --replSet dbrs --keyFile /data/config/replica.key --bind_ip_all --port 30003"]
     volumes:
-      - ".mongo/replica.key:/data/replica.key"
-      - ".mongo/mongo3:/data/db"
-  mongoSetup:
+      - mongo3_data:/data/db
+      - mongo_config:/data/config
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30003", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  mongo-init:
     image: mongo:latest
+    container_name: mongo-init
     depends_on:
-      - mongo1
-      - mongo2
-      - mongo3
+      mongo1:
+        condition: service_started
+      mongo2:
+        condition: service_started
+      mongo3:
+        condition: service_started
     volumes:
-      - ".mongo/:/scripts"
+      - "./config/mongo:/scripts"
+      - mongo_config:/data/config
     restart: "no"
-    entrypoint: [ "bash", "/scripts/mongo_init.sh"]
+    entrypoint:
+      - "bash"
+      - "-c"
+      - |
+        if [ ! -f /data/config/replica.key ]; then
+          echo "Generating replica.key..."
+          openssl rand -base64 756 > /data/config/replica.key
+          chmod 400 /data/config/replica.key
+          chown 999:999 /data/config/replica.key
+        fi
+        exec /scripts/mongo_init.sh
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
@@ -72,7 +120,6 @@ services:
 
   grafana:
     image: grafana/grafana
-    container_name: grafana
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -87,16 +134,12 @@ services:
       context: .
       dockerfile: Dockerfile-dev
     image: i2gosignals-dev:latest
-    container_name: gosignals1
     hostname: goSignals1
     depends_on:
       mongo1:
-        condition: service_started
-      mongoSetup:
+        condition: service_healthy
+      mongo-init:
         condition: service_completed_successfully
-    ports:
-      - "8888:8888"
-      - "2345:2345"
     volumes:
       - ./:/app
       - go_mod_cache:/go/pkg/mod
@@ -105,23 +148,23 @@ services:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1
-      - BASE_URL=https://goSignals1:8888/
+      - BASE_URL=https://gosignals1:8888/
+      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_TRANSMITTER_BACKFILL_INTERVAL=1s
 
   goSignals1b:
     build:
       context: .
       dockerfile: Dockerfile-dev
     image: i2gosignals-dev:latest
-    container_name: gosignals1b
     hostname: goSignals1b
     depends_on:
       mongo1:
-        condition: service_started
-      mongoSetup:
+        condition: service_healthy
+      mongo-init:
         condition: service_completed_successfully
-    ports:
-      - "8890:8888"
-      - "2347:2345"
     volumes:
       - ./:/app
       - go_mod_cache:/go/pkg/mod
@@ -130,23 +173,23 @@ services:
       - ./config/goSignals1.env
     environment:
       - NODE_ID=goSignals1b
-      - BASE_URL=https://goSignals1:8888/
+      - BASE_URL=https://gosignals1:8888/
+      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_TRANSMITTER_BACKFILL_INTERVAL=1s
 
   goSignals2:
     build:
       context: .
       dockerfile: Dockerfile-dev
     image: i2gosignals-dev:latest
-    container_name: gosignals2
     hostname: goSignals2
     depends_on:
       mongo1:
-        condition: service_started
-      mongoSetup:
+        condition: service_healthy
+      mongo-init:
         condition: service_completed_successfully
-    ports:
-      - "8889:8889"
-      - "2346:2345"
     volumes:
       - ./:/app
       - go_mod_cache:/go/pkg/mod
@@ -155,16 +198,49 @@ services:
       - ./config/goSignals2.env
     environment:
       - NODE_ID=goSignals2
-      - BASE_URL=https://goSignals2:8888/
+      - BASE_URL=https://gosignals2:8888/
+      - I2SIG_ISSUER=https://gosignals2:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_TRANSMITTER_BACKFILL_INTERVAL=1s
+
+  goSsfServer:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    hostname: goSsfServer
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+    env_file:
+      - ./config/goSsf1.env
+    environment:
+      - NODE_ID=goSsfServer
+      - BASE_URL=https://gossfserver:8888/
+      - I2SIG_ISSUER=https://gossfserver:8888
+      - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_TRANSMITTER_BACKFILL_INTERVAL=1s
+    command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
     image: i2gosignals:v0.8
     depends_on:
-      - mongo1
-      - mongo2
-      - mongo3
-      - goSignals1
-      - goSignals2
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+      goSignals1:
+        condition: service_started
+      goSignals2:
+        condition: service_started
     volumes:
       - "./config/scim:/scim"
     restart: "no"
@@ -175,9 +251,6 @@ services:
 
   scim_cluster1:
     image: independentid/i2scim-universal:0.8.0
-    container_name: scim_cluster1
-    ports:
-      - "9000:8080"
     depends_on:
       goSignals1:
         condition: service_started
@@ -186,12 +259,9 @@ services:
     volumes:
       - ./config/scim/data1:/scim
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
   scim_cluster2:
     image: independentid/i2scim-universal:0.8.0
-    container_name: scim_cluster2
-    ports:
-      - "9001:8080"
     depends_on:
       goSignals1:
         condition: service_started
@@ -200,7 +270,7 @@ services:
     volumes:
       - ./config/scim/data2:/scim
     env_file:
-      - ./config/scim/scim_cluster.env
+      - ./config/scim/scripts/scim-server.env
   postgres:
     image: postgres:alpine
     volumes:
@@ -211,7 +281,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
   keycloak:
     image: quay.io/keycloak/keycloak:26.4.7
-    container_name: keycloak-signals
     hostname: keycloak
     command: start-dev --import-realm
     environment:
@@ -230,8 +299,6 @@ services:
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       QUARKUS_HTTP_HOST: 0.0.0.0
-    ports:
-      - 9080:9080
     depends_on:
       - postgres
     volumes:

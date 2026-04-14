@@ -280,7 +280,7 @@ include streams created by other means.  `ServerConfiguration` contains the SSF 
 >     <dest-alias>          The alias of receiving server or existing stream alias.
 > 
 > poll                  Create a SET Polling Stream (RFC8936)
->   receive | punlidsh    Create a POLLING Receiver|Publisher stream
+>   receive | publish     Create a POLLING Receiver|Publisher stream
 >     <alias>               The alias of the server to create the stream on (default is selected server)
 >   connection (c)        Create a polling stream connection between servers
 >     <source-alias>    The alias of the publishing server or existing stream alias.

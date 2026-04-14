@@ -523,6 +523,7 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 }
 
 func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	serverLog.Debug("IssuerProjectIatHandler called", "remoteAddr", r.RemoteAddr)
 	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
@@ -539,7 +540,7 @@ func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 //
 // Inputs:
 //   - Authorization (header): IAT with 'register' scope.
-//   - Request body (JSON): RegisterParameters containing Email, Description, and Scopes.
+//   - Request body (JSON): RegisterParameters containing Email, Description, and Roles.
 //
 // Return values:
 //   - 200 OK: JSON object containing client registration details (ClientId, ClientSecret, etc.).
@@ -553,6 +554,8 @@ func (sa *SignalsApplication) RegisterClient(w http.ResponseWriter, r *http.Requ
 }
 
 func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	serverLog.Debug("RegisterClientHandler", "authHeader", authHeader)
 	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister})
 	if stat != http.StatusOK {
 		serverLog.Error("ERROR: Issued token was not validated", "HTTP Status", stat)
@@ -606,9 +609,55 @@ func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Reques
 	TriggerEventHandler(sa, w, r)
 }
 
-func TriggerEventHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
+func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	var req struct {
+		StreamID  string         `json:"stream_id"`
+		EventType string         `json:"event_type"`
+		Subject   map[string]any `json:"subject"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	state, err := sa.GetProvider().GetStreamState(req.StreamID)
+	if err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
+	}
+
+	if authCtx.ProjectId != "" && state.ProjectId != authCtx.ProjectId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	subject := &goSet.EventSubject{}
+	if sub, ok := req.Subject["sub"].(string); ok {
+		subject.Sub = sub
+	} else {
+		// Try to marshal back to SubjectIdentifier
+		subBytes, _ := json.Marshal(req.Subject)
+		_ = json.Unmarshal(subBytes, &subject.SubjectIdentifier)
+	}
+
+	set := goSet.CreateSet(subject, state.Iss, state.Aud)
+	set.AddEventPayload(req.EventType, nil)
+
+	// HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	if err := sa.GetEventRouter().HandleEvent(&set, "", state.Id.Hex()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
+	w.WriteHeader(http.StatusOK)
 }
 
 // ProtectedResourceMetadata returns RFC9728 metadata describing OAuth access to the server.
@@ -1085,6 +1134,101 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// IntrospectHandler implements RFC7662 token introspection.
+func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Validate authorization (Relatively open) - should this be anyone?
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	// 2. Parse token from form
+	token := r.FormValue("token")
+	if token == "" {
+		http.Error(w, "Missing token", http.StatusBadRequest)
+		return
+	}
+
+	// 3. Extract JTI if it's a JWT, or use as is if it's an opaque JTI
+	jti := token
+	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
+		jti = claims.ID
+	}
+
+	// 4. Introspect
+	resp, err := sa.GetProvider().GetTokenService().IntrospectToken(r.Context(), jti)
+	if err != nil {
+		serverLog.Error("Introspection error", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// TokenRevokeHandler revokes a token by its JTI.
+func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	vars := mux.Vars(r)
+	jti := vars["jti"]
+	if jti == "" {
+		http.Error(w, "Missing jti", http.StatusBadRequest)
+		return
+	}
+
+	err := sa.GetProvider().GetTokenService().RevokeToken(r.Context(), jti)
+	if err != nil {
+		serverLog.Error("Revocation error", "jti", jti, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// TokenListHandler lists tokens by project or client.
+func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	queryParams := r.URL.Query()
+	projectId := queryParams.Get("project_id")
+	clientId := queryParams.Get("client_id")
+
+	var tokens []*model.TokenRecord
+	var err error
+
+	if clientId != "" {
+		tokens, err = sa.GetProvider().GetTokenService().ListByClient(r.Context(), clientId)
+	} else if projectId != "" {
+		tokens, err = sa.GetProvider().GetTokenService().ListByProject(r.Context(), projectId)
+	} else {
+		// List all? DAO doesn't have list all yet. I'll use projectId if provided, else return error for now
+		// or I can add ListAll to DAO.
+		http.Error(w, "Missing project_id or client_id", http.StatusBadRequest)
+		return
+	}
+
+	if err != nil {
+		serverLog.Error("Token list error", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(tokens)
 }
 
 // JwksIssuers lists all issuers that have JWKS available.

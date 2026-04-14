@@ -77,6 +77,16 @@ type ClientDAO interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// TokenDAO handles token management data access
+type TokenDAO interface {
+	Insert(ctx context.Context, record *model.TokenRecord) error
+	FindByJTI(ctx context.Context, jti string) (*model.TokenRecord, error)
+	Revoke(ctx context.Context, jti string) error
+	DeleteExpired(ctx context.Context) error
+	FindByProjectID(ctx context.Context, projectID string) ([]*model.TokenRecord, error)
+	FindByClientID(ctx context.Context, clientID string) ([]*model.TokenRecord, error)
+}
+
 // ServerDAO handles server configuration data access
 type ServerDAO interface {
 	Create(ctx context.Context, server *model.Server) error

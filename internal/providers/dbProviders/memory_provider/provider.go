@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
@@ -41,6 +42,10 @@ type MemoryProvider struct {
 	DefaultIssuer string
 	TokenIssuer   string
 
+	// Cluster coordination
+	nodes map[string]model.ClusterNode
+	mu    sync.RWMutex
+
 	// Persistence
 	persistence *PersistenceManager
 }
@@ -57,15 +62,19 @@ func (m *MemoryProvider) Name() string {
 func (m *MemoryProvider) initialize() {
 	pLog.Info("Initializing new in-memory database", "dbName", m.DbName)
 
+	m.nodes = make(map[string]model.ClusterNode)
+
 	// Initialize DAOs
 	streamDAO := memory.NewStreamDAO()
 	eventDAO := memory.NewEventDAO()
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
 	serverDAO := memory.NewServerDAO()
+	tokenDAO := memory.NewTokenDAO()
 
 	// Initialize Services
-	keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+	tokenService := services.NewTokenService(tokenDAO)
+	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 	eventService := services.NewEventService(eventDAO)
 	clientService := services.NewClientService(clientDAO, keyService)
@@ -73,8 +82,8 @@ func (m *MemoryProvider) initialize() {
 
 	// Initialize BaseProvider with services
 	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
-		keyService, streamService, eventService, clientService, serverService,
+		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+		keyService, streamService, eventService, clientService, serverService, tokenService,
 	)
 
 	// Initialize token keys
@@ -99,10 +108,12 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 	keyDAO := memory.NewKeyDAO()
 	clientDAO := memory.NewClientDAO()
 	serverDAO := memory.NewServerDAO()
+	tokenDAO := memory.NewTokenDAO()
 
 	if initialize {
 		// Re-initialize services with new DAOs
-		keyService := services.NewKeyService(keyDAO, m.TokenIssuer)
+		tokenService := services.NewTokenService(tokenDAO)
+		keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 		streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
 		eventService := services.NewEventService(eventDAO)
 		clientService := services.NewClientService(clientDAO, keyService)
@@ -110,8 +121,8 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 
 		// Reinitialize BaseProvider
 		m.BaseProvider = common.NewBaseProvider(
-			streamDAO, eventDAO, keyDAO, clientDAO, serverDAO,
-			keyService, streamService, eventService, clientService, serverService,
+			streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
+			keyService, streamService, eventService, clientService, serverService, tokenService,
 		)
 
 		ctx := context.Background()
@@ -234,10 +245,49 @@ func (m *MemoryProvider) ReleaseLeaseIfOwned(_ string, _ string) error {
 	return nil
 }
 
-func (m *MemoryProvider) RegisterNode(_ model.ClusterNode) error {
+func (m *MemoryProvider) RegisterNode(node model.ClusterNode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nodes[node.Id] = node
 	return nil
 }
 
 func (m *MemoryProvider) GetActiveNodeCount() (int64, error) {
-	return 1, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := int64(0)
+	threshold := time.Now().UTC().Add(-60 * time.Second)
+	for _, node := range m.nodes {
+		if node.LastSeenAt.After(threshold) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (m *MemoryProvider) GetActiveNodes() ([]model.ClusterNode, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var activeNodes []model.ClusterNode
+	threshold := time.Now().UTC().Add(-60 * time.Second)
+	for _, node := range m.nodes {
+		if node.LastSeenAt.After(threshold) {
+			activeNodes = append(activeNodes, node)
+		}
+	}
+	return activeNodes, nil
+}
+
+func (m *MemoryProvider) GetLeaseOwner(_ string) (string, time.Time, int64, error) {
+	return "", time.Time{}, 0, nil
+}
+
+func (m *MemoryProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	node, ok := m.nodes[nodeId]
+	if !ok {
+		return nil, nil
+	}
+	return &node, nil
 }

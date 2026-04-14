@@ -13,6 +13,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -44,6 +45,15 @@ func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 }
 
 func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
+	if sa.Provider != nil {
+		auth := sa.Provider.GetAuthIssuer()
+		if auth != nil {
+			sa.mu.Lock()
+			sa.Auth = auth
+			sa.mu.Unlock()
+		}
+		return auth
+	}
 	return sa.Auth
 }
 
@@ -192,12 +202,30 @@ func (sa *SsfApplication) SetBaseUrl(u *url.URL) {
 }
 
 func (sa *SsfApplication) HealthCheck() bool {
+	if sa.Provider == nil {
+		return false // for memory provider should be true?
+	}
 	err := sa.Provider.Check()
 	if err != nil {
 		serverLog.Error("MongoProvider ping failed", "error", err)
 		return false
 	}
+	auth := sa.GetAuth()
+	if auth == nil || !auth.IsReady() {
+		serverLog.Warn("Health check: token keys not yet initialized")
+		return false
+	}
 	return true
+}
+
+func (sa *SsfApplication) Health(w http.ResponseWriter, r *http.Request) {
+	if sa.HealthCheck() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("Service Unavailable"))
+	}
 }
 func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
 	role := os.Getenv("SSEF_ADMIN_ROLE")
@@ -217,9 +245,12 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	sa := &SsfApplication{
 		Provider:  provider,
 		AdminRole: role,
-		Auth:      provider.GetAuthIssuer(),
 		NodeID:    nodeID,
 		StartedAt: time.Now().UTC(),
+	}
+
+	if sa.Provider != nil {
+		sa.Auth = sa.Provider.GetAuthIssuer()
 	}
 
 	serverLog.Info("Starting goSsfApplication", "nodeID", nodeID)
@@ -307,7 +338,7 @@ func (sa *SsfApplication) registerNode() {
 	node := model.ClusterNode{
 		Id:         sa.NodeID,
 		Address:    addr,
-		Version:    "1.0.0", // TODO: use actual version
+		Version:    constants.GoSignalsVersion,
 		StartedAt:  sa.StartedAt,
 		LastSeenAt: time.Now().UTC(),
 	}

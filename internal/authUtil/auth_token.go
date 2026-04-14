@@ -3,6 +3,8 @@ package authUtil
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	mathRand "math/rand"
@@ -23,6 +25,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
+const AuthContextKey = "AuthContext"
+
 var authLog = logger.Sub("AUTH")
 
 type AuthContext struct {
@@ -40,7 +44,8 @@ type AuthIssuer struct {
 	PublicKey    *keyfunc.JWKS
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
-	OAuthServer []string // OAuth Authorization Server identifiers
+	OAuthServer  []string                 // OAuth Authorization Server identifiers
+	TokenTracker authSupport.TokenTracker // Tracker for revocation
 }
 
 func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *keyfunc.JWKS) {
@@ -50,6 +55,20 @@ func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.P
 	a.TokenKid = kid
 	a.PrivateKey = privateKey
 	a.PublicKey = publicKey
+	privReady := privateKey != nil
+	pubReady := publicKey != nil
+	var pubKids []string
+	if publicKey != nil {
+		pubKids = publicKey.KIDs()
+	}
+	authLog.Debug("UpdateTokenKey", "issuer", issuer, "kid", kid, "privateKey", privReady, "publicKey", pubReady, "jwksKids", pubKids)
+}
+
+// IsReady returns true when both the signing key and verification key are loaded.
+func (a *AuthIssuer) IsReady() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.PrivateKey != nil && a.PublicKey != nil
 }
 
 // GetOAuthServers checks the environment variable OAUTH_SERVERS for OAuth Authorization server discovery endpoints
@@ -173,10 +192,21 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	privateKey := a.PrivateKey
 	a.mu.RUnlock()
 
+	clientId := ""
+	if authCtx != nil && authCtx.Eat != nil {
+		clientId = authCtx.Eat.ClientId
+	}
+	subject := ""
+	if authCtx != nil && authCtx.Eat != nil {
+		subject = authCtx.Eat.Subject
+	}
+
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    []string{authSupport.ScopeRegister},
+		Roles:     []string{authSupport.ScopeRegister},
+		ClientId:  clientId,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   subject,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
 			Audience:  []string{issuer},
@@ -189,7 +219,14 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	authLog.Debug("IssueProjectIat signing", "issuer", issuer, "kid", kid, "privateKeyNil", privateKey == nil, "projectId", projectId)
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		authLog.Error("IssueProjectIat signing failed", "kid", kid, "error", err)
+	} else if a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeIAT)
+	}
+	return signed, err
 }
 
 func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
@@ -211,7 +248,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 
 	eat := authSupport.EventAuthToken{
 		ProjectId: projectId,
-		Scopes:    scopes,
+		Roles:     scopes,
 		ClientId:  client.Id.Hex(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -226,10 +263,14 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+	}
+	return signed, err
 }
 
-func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string, error) {
+func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session *AuthContext) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
 	a.mu.RLock()
@@ -243,6 +284,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 
 	eat := authSupport.EventAuthToken{
 		StreamIds: []string{streamId},
+		ProjectId: projectId,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -254,13 +296,24 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string) (string
 	if projectId != "" {
 		eat.ProjectId = projectId
 	}
-	eat.Scopes = []string{authSupport.ScopeEventDelivery}
+	eat.Roles = []string{authSupport.ScopeEventDelivery}
+	if session != nil {
+		if session.Eat != nil {
+			eat.ClientId = session.Eat.ClientId
+			eat.Subject, _ = session.Eat.GetSubject()
+		}
+
+	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
 	token.Header["typ"] = "jwt"
 	token.Header["kid"] = kid
 
-	return token.SignedString(privateKey)
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+	}
+	return signed, err
 }
 
 // ValidateAuthorizationAny validates the Authorization header against either a locally issued token
@@ -292,7 +345,7 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 		return nil, http.StatusUnauthorized
 	}
 	parts := strings.Split(authorization, " ")
-	if len(parts) < 2 || parts[0] != "Bearer" {
+	if len(parts) < 2 || strings.ToLower(parts[0]) != "bearer" {
 		return nil, http.StatusUnauthorized
 	}
 
@@ -369,7 +422,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		reason := "OAuth token validation failed"
 		if loadErr != nil {
 			reason += " while some JWKS failed to load"
-		} else if isMissingKID {
+		} else {
 			reason += " because Key ID was not found in JWKS (refresh may be in progress)"
 		}
 		authLog.Warn(reason, "error", loadErr)
@@ -400,18 +453,53 @@ func (a *AuthIssuer) ParseAuthToken(tokenString string) (*authSupport.EventAuthT
 // ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
 // When verbose is false, it does not log "Error validating token"
 func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*authSupport.EventAuthToken, error) {
-	if a.PublicKey == nil {
+	// If the public key is not yet loaded (server still starting up or in the middle
+	// of a MongoDB reconnect), wait up to 1 second for it to become available before
+	// giving up. This avoids 503 responses during the brief window between service
+	// start and successful key initialization.
+	a.mu.RLock()
+	pubKey := a.PublicKey
+	a.mu.RUnlock()
+	if pubKey == nil {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			a.mu.RLock()
+			pubKey = a.PublicKey
+			a.mu.RUnlock()
+			if pubKey != nil {
+				break
+			}
+		}
+	}
+	if pubKey == nil {
 		return nil, errors.New("ERROR: No public key provided to validate authorization token.")
 	}
 
 	// In case of cut/paste error, trim extra spaces
 	tokenString = strings.TrimSpace(tokenString)
 
+	// Extract kid from token header for debug logging (parse header only, no sig check)
+	var tokenKid string
+	if parts := strings.Split(tokenString, "."); len(parts) >= 1 {
+		if hdrBytes, err2 := base64.RawURLEncoding.DecodeString(parts[0]); err2 == nil {
+			var hdr map[string]interface{}
+			if err2 = json.Unmarshal(hdrBytes, &hdr); err2 == nil {
+				if k, ok := hdr["kid"].(string); ok {
+					tokenKid = k
+				}
+			}
+		}
+	}
+	authLog.Debug("ParseAuthTokenVerbose", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs())
+
 	valid := true
-	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, a.PublicKey.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, pubKey.Keyfunc)
 	if err != nil {
 		if verbose {
-			authLog.Error("Error validating token", "error", err)
+			authLog.Error("Error validating token", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
+		} else {
+			authLog.Debug("Local token validation failed", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
 		}
 		valid = false
 	}
@@ -427,6 +515,12 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 	// authLog.Println(claimString)
 	if token != nil {
 		if claims, ok := token.Claims.(*authSupport.EventAuthToken); ok && valid {
+			if a.TokenTracker != nil {
+				revoked, _ := a.TokenTracker.IsRevoked(context.Background(), claims.ID)
+				if revoked {
+					return nil, errors.New("token has been revoked")
+				}
+			}
 			return claims, nil
 		}
 	}

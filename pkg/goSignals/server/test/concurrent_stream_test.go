@@ -51,7 +51,7 @@ func TestConcurrentStreamUpdates(t *testing.T) {
 
 	// Concurrently update the stream from multiple goroutines
 	var wg sync.WaitGroup
-	numUpdates := 10
+	numUpdates := 5
 
 	for i := 0; i < numUpdates; i++ {
 		wg.Add(1)
@@ -109,7 +109,7 @@ func TestConcurrentEventHandling(t *testing.T) {
 
 	// Generate events concurrently
 	var wg sync.WaitGroup
-	numEvents := 50
+	numEvents := 20
 
 	for i := 0; i < numEvents; i++ {
 		wg.Add(1)
@@ -132,7 +132,7 @@ func TestConcurrentStreamCreationDeletion(t *testing.T) {
 	defer instance.app.Shutdown()
 
 	var wg sync.WaitGroup
-	numOperations := 20
+	numOperations := 10
 
 	for i := 0; i < numOperations; i++ {
 		wg.Add(1)

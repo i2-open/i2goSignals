@@ -18,7 +18,7 @@ import (
 
 type MongoProviderSuite struct {
 	suite.Suite
-	provider    mongo_provider.MongoProvider
+	provider    *mongo_provider.MongoProvider
 	stream      model.StreamConfiguration
 	projectIat  string
 	streamToken string
@@ -46,7 +46,7 @@ func (s *MongoProviderSuite) SetupSuite() {
 			s.FailNow("Received error generating test token: " + err.Error())
 		}
 
-		s.provider = *provider
+		s.provider = provider
 		s.auth = provider.GetAuthIssuer()
 
 		s.InitStream([]string{"*"})
@@ -116,7 +116,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 	s.Nil(err, "taken parse check")
 	s.NotNil(tkn, "mgmt token is valid check")
 
-	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project)
+	s.streamToken, err = s.auth.IssueStreamToken(s.stream.Id, s.project, nil)
 	s.Nil(err, "issue stream token error check")
 }
 

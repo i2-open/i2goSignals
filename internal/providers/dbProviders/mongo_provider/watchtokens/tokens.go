@@ -17,14 +17,27 @@ type TokenData struct {
 }
 
 func (tok *TokenData) Store() {
-	tf, err := os.Create(storeFilename())
-	defer func(tf *os.File) {
-		_ = tf.Close()
-	}(tf)
+	filename := storeFilename()
+	if filename == "" {
+		log.Default().Println("No filename for watch token, skipping Store")
+		return
+	}
+	// Ensure directory exists
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0770); err != nil {
+		log.Default().Println("Error creating directory for watch token:", err)
+		return
+	}
+
+	tf, err := os.Create(filename)
 	if err != nil {
 		log.Default().Println("Mongo resume token file creation failed", err)
 		return
 	}
+	defer func(tf *os.File) {
+		_ = tf.Close()
+	}(tf)
+
 	jsonOut, err := json.Marshal(tok)
 	if err != nil {
 		log.Default().Println("Failed to marshal Mongo resume token data", err)
@@ -33,7 +46,6 @@ func (tok *TokenData) Store() {
 	_, err = tf.Write(jsonOut)
 	if err != nil {
 		log.Default().Println("Failed to save Mongo resume token data", err)
-		_ = tf.Close()
 		return
 	}
 	err = tf.Close()
@@ -80,24 +92,15 @@ func Load() *TokenData {
 }
 
 func storeFilename() string {
+	watchFile := os.Getenv("MONGO_WATCH_FILE")
+	if watchFile != "" {
+		return watchFile
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		log.Default().Println("Error getting current directory for watch token: " + err.Error())
 		cwd = "."
 	}
-	watchFile := os.Getenv("MONGO_WATCH_FILE")
-	if watchFile == "" {
-		resDir := filepath.Join(cwd, "resources")
-		_, err := os.Stat(resDir)
-		if os.IsNotExist(err) {
-			err := os.Mkdir(resDir, 0770)
-			if err != nil {
-				log.Default().Println("Error creating directory for watch token: " + err.Error())
-				return ""
-			}
-		}
-		watchFile = filepath.Join(cwd, "resources/mongo_token.json")
-
-	}
-	return watchFile
+	return filepath.Join(cwd, "resources/mongo_token.json")
 }

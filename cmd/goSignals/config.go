@@ -132,7 +132,7 @@ func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfigura
 	if config != nil {
 		return config, nil
 	}
-	client := http.Client{}
+	client := getHttpClient(0)
 	stream, server := c.GetStreamAndServer(streamAlias)
 	if stream == nil {
 		return nil, errors.New("stream alias not defined")
@@ -146,7 +146,7 @@ func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfigura
 	return config, nil
 }
 
-func getStreamConfig(client http.Client, server *SsfServer, stream *Stream) (*model.StreamConfiguration, error) {
+func getStreamConfig(client *http.Client, server *SsfServer, stream *Stream) (*model.StreamConfiguration, error) {
 	fmt.Println("Retrieving stream configuration...")
 
 	req, err := http.NewRequest(http.MethodGet, server.ServerConfiguration.ConfigurationEndpoint+"?stream_id="+stream.Id, nil)

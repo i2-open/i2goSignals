@@ -30,6 +30,9 @@ func NewEventDAO(eventCol, pendingCol, deliveredCol *mongo.Collection) interface
 }
 
 func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) error {
+	if d.eventCol == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	_, err := d.eventCol.InsertOne(ctx, record)
 	if err != nil {
 		eLog.Error("Error inserting event", "error", err)
@@ -38,6 +41,9 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) e
 }
 
 func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
+	if d.eventCol == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	filter := bson.M{"jti": jti}
 	var res model.EventRecord
 	cursor := d.eventCol.FindOne(ctx, filter)
@@ -53,6 +59,9 @@ func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.Event
 }
 
 func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+	if d.eventCol == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	filter := bson.M{"jti": bson.M{"$in": jtis}}
 	cursor, err := d.eventCol.Find(ctx, filter)
 	if err != nil {
@@ -70,6 +79,9 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
 }
 
 func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+	if d.eventCol == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	var queryFilter bson.D
 	if to != nil {
 		queryFilter = bson.D{
@@ -113,6 +125,9 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 }
 
 func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error {
+	if d.pendingCol == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	deliverable := interfaces.DeliverableEvent{
 		Jti:      jti,
 		StreamId: streamID,
@@ -122,6 +137,9 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID bso
 }
 
 func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
+	if d.pendingCol == nil {
+		return nil, 0, errors.New("mongo collection not initialized")
+	}
 	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return nil, 0, err
@@ -166,6 +184,9 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 }
 
 func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
+	if d.pendingCol == nil {
+		return nil, errors.New("mongo collection not initialized")
+	}
 	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return nil, err
@@ -201,6 +222,9 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 }
 
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+	if d.pendingCol == nil {
+		return 0, errors.New("mongo collection not initialized")
+	}
 	sid, err := bson.ObjectIDFromHex(streamID)
 	if err != nil {
 		return 0, err
@@ -216,6 +240,9 @@ func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID stri
 }
 
 func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
+	if d.deliveredCol == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	acked := interfaces.DeliveredEvent{
 		DeliverableEvent: *event,
 		AckDate:          ackDate,
@@ -225,6 +252,9 @@ func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.Del
 }
 
 func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) error {
+	if d.pendingCol == nil {
+		return errors.New("mongo collection not initialized")
+	}
 	matchInserts := bson.D{
 		bson.E{
 			Key: "$match", Value: bson.D{

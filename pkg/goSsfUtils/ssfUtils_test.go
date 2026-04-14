@@ -20,7 +20,7 @@ func TestGetStreamConfig(t *testing.T) {
 		assert.Equal(t, "/config", r.URL.Path)
 		assert.Equal(t, "stream123", r.URL.Query().Get("stream_id"))
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(expectedConfig)
+		_ = json.NewEncoder(w).Encode(expectedConfig)
 	}))
 	defer ts.Close()
 
@@ -44,7 +44,7 @@ func TestGetStreamStatus(t *testing.T) {
 		assert.Equal(t, "/status", r.URL.Path)
 		assert.Equal(t, "stream123", r.URL.Query().Get("stream_id"))
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(expectedStatus)
+		_ = json.NewEncoder(w).Encode(expectedStatus)
 	}))
 	defer ts.Close()
 

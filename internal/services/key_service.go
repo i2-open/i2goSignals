@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -29,12 +31,13 @@ type KeyService struct {
 	authIssuer  *authUtil.AuthIssuer
 }
 
-func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string) *KeyService {
+func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker) *KeyService {
 	return &KeyService{
 		keyDAO:      keyDAO,
 		tokenIssuer: tokenIssuer,
 		authIssuer: &authUtil.AuthIssuer{
-			TokenIssuer: tokenIssuer,
+			TokenIssuer:  tokenIssuer,
+			TokenTracker: tokenTracker,
 		},
 	}
 }
@@ -46,19 +49,39 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	if err == nil && key != nil {
 		s.tokenKey = key
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, s.tokenIssuer)
+		// Use buildAuthJWKS with the loaded key so that, even when there are duplicate
+		// kid=DEFAULT records in the DB (race between two nodes on first start), the
+		// JWKS entry for this kid always reflects the private key we actually loaded.
+		s.tokenPubKey = s.buildAuthJWKS(ctx, s.tokenIssuer, key, kid)
+		if s.tokenPubKey == nil {
+			return fmt.Errorf("failed to build public JWKS for token issuer %q; MongoDB may be temporarily unavailable", s.tokenIssuer)
+		}
 		s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
 		return nil
 	}
 
-	// Create new key
+	// Only create a new key if the key genuinely does not exist in the database.
+	// Any other error (e.g. a transient MongoDB failure) must propagate so that the
+	// caller retries rather than accidentally inserting a duplicate kid=DEFAULT record,
+	// which would cause non-deterministic JWKS construction and signature-mismatch 503s.
+	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+		return fmt.Errorf("failed to load token key %q: %w", s.tokenIssuer, err)
+	}
+
+	// Create new key. CreateKeyPair → storeKeyPair sets AuthIssuer atomically using
+	// buildAuthJWKS with the signing key override. Do NOT re-query getInternalPublicJWKS
+	// here — doing so would race with concurrent cluster nodes inserting their own
+	// kid=DEFAULT key, causing the JWKS to contain a different node's public key while
+	// this node's private key is used for signing.
 	s.tokenKey, err = s.CreateKeyPair(ctx, s.tokenIssuer, "sig", "")
 	if err != nil {
 		return fmt.Errorf("failed to create token key: %v", err)
 	}
 	s.tokenKid = s.tokenIssuer
-	s.tokenPubKey = s.getInternalPublicJWKS(ctx, s.tokenIssuer)
-	s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, s.tokenPubKey)
+	s.tokenPubKey = s.authIssuer.PublicKey // already set correctly by storeKeyPair
+	if s.tokenPubKey == nil {
+		return fmt.Errorf("failed to build public JWKS for token issuer %q after key creation", s.tokenIssuer)
+	}
 
 	if defaultIssuer != s.tokenIssuer {
 		// Also create default issuer signing key if different
@@ -67,7 +90,6 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 			ksLog.Error("Error creating default issuer key", "error", err)
 		}
 	}
-	s.tokenPubKey = s.getInternalPublicJWKS(ctx, s.tokenIssuer)
 	return nil
 }
 
@@ -85,12 +107,9 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 		return nil, err
 	}
 
-	if keyName == s.tokenIssuer {
-		s.tokenKey = privateKey
-		s.tokenKid = keyName
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, keyName, privateKey, s.tokenPubKey)
-	}
+	// storeKeyPair above already called buildAuthJWKS + UpdateTokenKey for the token
+	// issuer key. No need to re-query the DB here; doing so would reintroduce the
+	// race where a concurrent node's same-kid record overwrites our JWKS entry.
 
 	return privateKey, nil
 }
@@ -118,8 +137,13 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 	if keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		jwks := s.buildAuthJWKS(ctx, keyName, privateKey, kid)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key rotation", "keyName", keyName)
+		}
 	}
 
 	return privateKey, kid, nil
@@ -144,8 +168,16 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 	if err == nil && keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		// Use buildAuthJWKS with the signing key override to guarantee that the JWKS
+		// entry for this kid matches privateKey, regardless of concurrent inserts from
+		// other cluster nodes with the same kid.
+		jwks := s.buildAuthJWKS(ctx, keyName, privateKey, kid)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key store", "keyName", keyName)
+		}
 	}
 	return err
 }
@@ -183,8 +215,13 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 	if err == nil && keyName == s.tokenIssuer && privateKey != nil {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
-		s.tokenPubKey = s.getInternalPublicJWKS(ctx, keyName)
-		s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		jwks := s.getInternalPublicJWKS(ctx, keyName)
+		if jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(keyName, kid, privateKey, s.tokenPubKey)
+		} else {
+			ksLog.Error("Failed to build JWKS after key add", "keyName", keyName)
+		}
 	}
 	return err
 }
@@ -318,16 +355,34 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 }
 
 func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) *keyfunc.JWKS {
+	return s.buildAuthJWKS(ctx, keyName, nil, "")
+}
+
+// buildAuthJWKS constructs a keyfunc.JWKS from all stored public keys for keyName.
+// When signingKey/signingKid are provided, the map entry for signingKid is always
+// set to signingKey's public component — overriding whatever the DB returned for
+// that kid. This guarantees that the signing private key and the verification
+// public key in the returned JWKS are always a matched pair, even when a concurrent
+// cluster node has inserted a different key with the same kid.
+func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingKey *rsa.PrivateKey, signingKid string) *keyfunc.JWKS {
 	keys, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil {
 		ksLog.Error("Error retrieving keys", "keyName", keyName, "error", err)
 		return nil
 	}
 
-	if len(keys) == 0 {
+	if len(keys) == 0 && signingKey == nil {
 		ksLog.Error("No keys found", "keyName", keyName)
 		return nil
 	}
+
+	// Sort oldest-first so that when multiple records share the same kid (which can
+	// happen after a transient DB error causes a duplicate insert), the newest
+	// record's public key overwrites older ones in the givenKeys map — keeping the
+	// JWKS consistent with FindLatestByKeyName, which is used for signing.
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].Id.Hex() < keys[j].Id.Hex()
+	})
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
 	for _, rec := range keys {
@@ -342,11 +397,26 @@ func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) 
 			kid = rec.KeyName
 		}
 
-		givenKey := keyfunc.NewGivenRSA(pubKey, keyfunc.GivenKeyOptions{
+		givenKeys[kid] = keyfunc.NewGivenRSA(pubKey, keyfunc.GivenKeyOptions{
 			Algorithm: "RS256",
 		})
-		givenKeys[kid] = givenKey
 	}
+
+	// Always use the caller-supplied signing key for its kid, overriding whatever the
+	// DB returned. This is safe because the caller has the canonical private key in
+	// hand; a concurrent node's conflicting DB record cannot affect signing/verify
+	// consistency.
+	if signingKey != nil && signingKid != "" {
+		givenKeys[signingKid] = keyfunc.NewGivenRSA(&signingKey.PublicKey, keyfunc.GivenKeyOptions{
+			Algorithm: "RS256",
+		})
+	}
+
+	if len(givenKeys) == 0 {
+		ksLog.Error("No valid keys found", "keyName", keyName)
+		return nil
+	}
+
 	return keyfunc.NewGiven(givenKeys)
 }
 

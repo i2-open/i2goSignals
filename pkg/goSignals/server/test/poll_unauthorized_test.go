@@ -15,7 +15,7 @@ import (
 
 func TestPollUnauthorizedTightLoop(t *testing.T) {
 	// Ensure default delay is used or set it explicitly
-	os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
+	_ = os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
 
 	var pollCount int32
 
@@ -68,10 +68,10 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	assert.NotNil(t, ps)
 
 	// Wait a bit to observe the loop
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
-	t.Logf("Poll count after 500ms: %d", finalCount)
+	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's in Pause state
 	updatedState, err := instance.provider.GetStreamState(streamID)
@@ -85,10 +85,8 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 
 func TestPollUnauthorizedRetry(t *testing.T) {
 	// Set a short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_LIMIT")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.2")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
 
 	var pollCount int32
 
@@ -166,10 +164,8 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 
 func TestPollUnauthorizedLimit(t *testing.T) {
 	// Set a very short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_LIMIT")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_LIMIT", "2")
 
 	var pollCount int32
 
@@ -223,8 +219,8 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 
 	// Wait enough time for 2 attempts (initial + 1 retry)
 	// 0.01s delay * 1 retry = 0.01s + some processing time.
-	// 500ms should be plenty.
-	time.Sleep(500 * time.Millisecond)
+	// 100ms should be plenty.
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
 	t.Logf("Poll count: %d", finalCount)
@@ -243,8 +239,7 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 
 func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	// Set a very short retry delay for the test
-	os.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
-	defer os.Unsetenv("POLL_UNAUTHORIZED_RETRY_DELAY")
+	t.Setenv("POLL_UNAUTHORIZED_RETRY_DELAY", "0.01")
 	// Use default limit (now 10)
 
 	var pollCount int32
@@ -298,10 +293,10 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	assert.NotNil(t, ps)
 
 	// Wait for at least 3 attempts to prove it didn't stop at 2
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&pollCount)
-	t.Logf("Poll count after 500ms: %d", finalCount)
+	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's NOT disabled yet
 	updatedState, err := instance.provider.GetStreamState(streamID)

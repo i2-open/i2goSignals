@@ -1,0 +1,681 @@
+name: i2gosignals-spiffe
+
+# SPIFFE/SPIRE-enabled development environment.
+# Extends docker-compose-dev.yml by adding a SPIRE server and agent that
+# issue X.509-SVIDs to each goSignals node. Inter-cluster communication and
+# MongoDB connections use SPIFFE mTLS when SPIFFE_ENDPOINT_SOCKET is set.
+#
+# Usage:
+#   docker-compose -f docker-compose-spiffe-dev.yml up
+#
+# After startup, register workloads with SPIRE:
+#   docker exec spire-server sh /etc/spire/registration/register.sh
+
+volumes:
+  prometheus_data: {}
+  postgres_data:
+    driver: local
+  go_mod_cache: {}
+  go_build_cache: {}
+  spire_data: {}
+  # Shared Unix socket between SPIRE agent and workload containers
+  spire_sockets:
+  # Shared volume for MongoDB SPIFFE certificates
+  mongo_certs:
+  # Shared volume for SPIRE agent binaries
+  spire_bin:
+  # Shared volume for SPIRE agent join tokens
+  spire_tokens:
+  mongo1_data: {}
+  mongo2_data: {}
+  mongo3_data: {}
+  mongo_config: {}
+  spire_agent_data: {}
+
+services:
+  # ---------------------------------------------------------------------------
+  # MongoDB replica set (same as docker-compose-dev.yml)
+  # ---------------------------------------------------------------------------
+  mongo1:
+    container_name: mongo1
+    image: mongo:latest
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    networks:
+      - backend
+    ports:
+      - "30001:30001"
+    restart: unless-stopped
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30001 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
+    volumes:
+      - mongo1_data:/data/db
+      - mongo_config:/data/config
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30001", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      com.i2gosignals.role: mongodb
+
+  mongo2:
+    container_name: mongo2
+    image: mongo:latest
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    networks:
+      - backend
+    ports:
+      - "30002:30002"
+    restart: unless-stopped
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30002 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
+    volumes:
+      - mongo2_data:/data/db
+      - mongo_config:/data/config
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30002", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      com.i2gosignals.role: mongodb
+
+  mongo3:
+    container_name: mongo3
+    image: mongo:latest
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=dockTest
+      - MONGO_REPLICA_SET_NAME=dbrs
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    ports:
+      - "30003:30003"
+    restart: unless-stopped
+    command: ["sh","-c","until [ -f /certs/mongo.pem ] && [ -f /data/config/replica.key ] && openssl x509 -in /certs/mongo.pem -noout -checkend 60 2>/dev/null; do echo 'Waiting for valid certs and key...'; sleep 5; done; exec /usr/local/bin/docker-entrypoint.sh mongod --config /etc/mongo/mongod.conf --replSet dbrs --bind_ip_all --port 30003 --tlsMode requireTLS --tlsCertificateKeyFile /certs/mongo.pem --tlsCAFile /certs/ca.pem --tlsAllowInvalidHostnames"]
+    networks:
+      - backend
+    volumes:
+      - mongo3_data:/data/db
+      - mongo_config:/data/config
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+      - ./config/mongo:/etc/mongo:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "30003", "--tls", "--tlsAllowInvalidHostnames", "--tlsCAFile", "/certs/ca.pem", "--tlsCertificateKeyFile", "/certs/mongo.pem", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      com.i2gosignals.role: mongodb
+
+  # Combined helper and setup service
+  mongo-init:
+    image: mongo:latest
+    container_name: mongo-init
+    depends_on:
+      spire-registration:
+        condition: service_completed_successfully
+      mongo1:
+        condition: service_started
+      mongo2:
+        condition: service_started
+      mongo3:
+        condition: service_started
+    volumes:
+      - "./config/mongo:/scripts"
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+      - spire_bin:/usr/local/bin:ro
+      - mongo_config:/data/config
+    labels:
+      com.i2gosignals.role: mongodb
+    networks:
+      - backend
+    entrypoint: ["bash", "/scripts/mongo_spiffe_init.sh"]
+    healthcheck:
+      # Check for the sentinel written at the END of mongo_spiffe_init.sh, after
+      # replica-set initialisation and $external user creation are both complete.
+      # Dependent services (goSignals1/2, goSsfServer) must not start until this
+      # is healthy, otherwise they will connect before their X.509 users exist.
+      test: ["CMD", "sh", "-c", "[ -f /certs/.init_complete ]"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # SPIRE Setup — fixes volume permissions for non-root users
+  # ---------------------------------------------------------------------------
+  spire-setup:
+    image: alpine:latest
+    container_name: spire-setup
+    volumes:
+      - spire_data:/var/lib/spire/server
+      - spire_agent_data:/var/lib/spire/agent
+      - spire_sockets:/run/spire/sockets
+      - spire_bin:/opt/spire/shared_bin
+    command: ["sh", "-c", "chown -R 0:0 /var/lib/spire/server && chown -R 0:0 /var/lib/spire/agent && chown -R 0:0 /run/spire/sockets && chown -R 0:0 /opt/spire/shared_bin"]
+    restart: "no"
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # SPIRE Server — issues SVIDs for the cluster trust domain
+  # ---------------------------------------------------------------------------
+  spire-server:
+    image: dhi.io/spire-server:1.14.4-dev
+    container_name: spire-server
+    hostname: spire-server
+    networks:
+      - backend
+    depends_on:
+      spire-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8081"   # SPIRE gRPC API (agents connect here)
+      - "8443:8443"   # Federation bundle endpoint (cross-domain)
+    volumes:
+      - ./config/spire/server:/etc/spire/server
+      - ./config/spire/registration:/etc/spire/registration
+      - spire_data:/var/lib/spire/server
+      - spire_sockets:/run/spire/sockets
+    entrypoint: ["/usr/local/bin/spire-server", "run", "-config", "/etc/spire/server/server.conf", "-socketPath", "/run/spire/sockets/registration.sock"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/spire-server", "healthcheck", "-socketPath", "/run/spire/sockets/registration.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # SPIRE Token Generator — automates agent bootstrapping
+  # ---------------------------------------------------------------------------
+  spire-token-gen:
+    image: dhi.io/spire-server:1.14.4-dev
+    container_name: spire-token-gen
+    networks:
+      - backend
+    depends_on:
+      spire-server:
+        condition: service_healthy
+    volumes:
+      - spire_sockets:/run/spire/sockets
+      - spire_tokens:/run/spire/tokens
+    # Generate a join token and extract it to a file.
+    # Uses $$ for escaping dollars for docker-compose.
+    entrypoint:
+      - "sh"
+      - "-c"
+      - |
+        until /usr/local/bin/spire-server healthcheck -socketPath /run/spire/sockets/registration.sock; do sleep 1; done;
+        TOKEN_OUT=$$(/usr/local/bin/spire-server token generate -socketPath /run/spire/sockets/registration.sock -output json);
+        if echo "$$TOKEN_OUT" | grep -q '"value"'; then
+          echo "$$TOKEN_OUT" | sed 's/.*"value": *"\([^"]*\)".*/\1/' > /run/spire/tokens/agent.token;
+          echo "Token generated successfully";
+        else
+          echo "Failed to generate token: $$TOKEN_OUT";
+          exit 1;
+        fi
+
+  # ---------------------------------------------------------------------------
+  # SPIRE Agent — proxies workload API requests to the SPIRE server
+  # ---------------------------------------------------------------------------
+  spire-agent:
+    image: dhi.io/spire-agent:1.14.4-dev
+    container_name: spire-agent
+    hostname: spire-agent
+    networks:
+      - backend
+    depends_on:
+      spire-server:
+        condition: service_healthy
+      spire-token-gen:
+        condition: service_completed_successfully
+      spire-setup:
+        condition: service_completed_successfully
+    volumes:
+      - ./config/spire/agent:/etc/spire/agent
+      - spire_agent_data:/var/lib/spire/agent
+      - spire_sockets:/run/spire/sockets   # shared with workload containers
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker workload attestation
+      - spire_bin:/opt/spire/shared_bin    # Shared volume for binaries
+      - spire_tokens:/run/spire/tokens
+    entrypoint:
+      - "sh"
+      - "-c"
+      - |
+        echo "Starting spire-agent entrypoint..."
+        cmp -s /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent || cp /usr/local/bin/spire-agent /opt/spire/shared_bin/spire-agent
+        chmod +x /opt/spire/shared_bin/spire-agent
+        echo "Binary copied to shared volume"
+        
+        # Self-healing: If we have a join token and insecure_bootstrap is enabled, 
+        # clear the old bundle to avoid "certificate signed by unknown authority" 
+        # errors if the SPIRE server has been reset.
+        if [ -f /run/spire/tokens/agent.token ]; then
+            if grep -q "insecure_bootstrap = true" /etc/spire/agent/agent.conf; then
+              echo "New join token detected and insecure_bootstrap enabled. Clearing old agent state for fresh bootstrap..."
+              # Clear all persisted agent state to ensure a clean re-bootstrap.
+              # This avoids "unknown authority" errors if the server was reset.
+              # We remove all files in the data directory, including SVID, bundle, and keys.
+              find /var/lib/spire/agent -mindepth 1 -delete
+            fi
+            # Move the token so we don't clear state again on next restart.
+            # This handles the case where the agent is restarted without the server reset.
+            mv /run/spire/tokens/agent.token /run/spire/tokens/agent.token.used
+        fi
+
+        if [ -f /run/spire/tokens/agent.token.used ] && ! find /var/lib/spire/agent -mindepth 1 ! -name "keys.json" | grep -q .; then
+            # We ONLY pass the join token if the agent appears to need attestation.
+            # Sanitization: Ensure no leading/trailing whitespace or newlines.
+            TOKEN_VAL=$$(cat /run/spire/tokens/agent.token.used | tr -d '\n\r ')
+            if [ -n "$$TOKEN_VAL" ]; then
+                echo "No persisted agent state found. Passing join token for attestation..."
+                exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf -joinToken "$$TOKEN_VAL"
+            fi
+        fi
+ 
+        echo "Starting spire-agent daemon..."
+        exec /usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf
+    pid: "host"  # required for PID-based workload attestation
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/spire-agent", "healthcheck", "-socketPath", "/run/spire/sockets/agent.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # SPIRE Registration — automates workload registration
+  # ---------------------------------------------------------------------------
+  spire-registration:
+    image: dhi.io/spire-server:1.14.4-dev
+    container_name: spire-registration
+    networks:
+      - backend
+    depends_on:
+      spire-server:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    volumes:
+      - ./config/spire/registration:/etc/spire/registration
+      - spire_sockets:/run/spire/sockets
+    entrypoint:
+      - "sh"
+      - "-c"
+      - |
+        echo "Waiting for spire-server to be healthy..."
+        until /usr/local/bin/spire-server healthcheck -socketPath /run/spire/sockets/registration.sock; do sleep 2; done
+        echo "Running registration loop..."
+        until sh /etc/spire/registration/register.sh; do
+          echo "Registration failed (likely waiting for agent), retrying in 5s..."
+          sleep 5
+        done
+        echo "Registration completed successfully"
+
+  # ---------------------------------------------------------------------------
+  # Monitoring
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks:
+      - backend
+    volumes:
+      - "./config/monitor/prometheus:/etc/prometheus"
+      - prometheus_data:/prometheus
+      - spire_sockets:/run/spire/sockets
+    labels:
+      com.i2gosignals.role: prometheus
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    networks:
+      - frontend
+      - backend
+    labels:
+      com.i2gosignals.role: grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=grafana
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    volumes:
+      - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - spire_sockets:/run/spire/sockets
+
+  # ---------------------------------------------------------------------------
+  # goSignals nodes — SPIFFE-enabled
+  # ---------------------------------------------------------------------------
+  goSignals1:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: gosignals1
+    hostname: goSignals1
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    ports:
+      - "8888:8888"
+      - "2345:2345"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+      - spire_sockets:/run/spire/sockets  # SPIRE agent socket
+    env_file:
+      - ./config/goSignals1-spiffe.env
+    environment:
+      # SPIFFE configuration — enables mTLS for inter-cluster calls and MongoDB
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - SPIFFE_MONGO_ENABLED=true
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    labels:
+      com.i2gosignals.role: gosignals-node
+
+  goSignals2:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: gosignals2
+    hostname: goSignals2
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    ports:
+      - "8889:8889"
+      - "2346:2345"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+      - spire_sockets:/run/spire/sockets
+    env_file:
+      - ./config/goSignals2-spiffe.env
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - SPIFFE_MONGO_ENABLED=true
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    labels:
+      com.i2gosignals.role: gosignals-node
+
+  goSsfServer:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: gossfserver
+    hostname: goSsfServer
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    ports:
+      - "8890:8890"
+      - "2347:2345"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -skf https://localhost:8890/health || curl -sf http://localhost:8890/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+      - spire_sockets:/run/spire/sockets
+    env_file:
+      - ./config/goSsf1-spiffe.env
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - SPIFFE_MONGO_ENABLED=true
+    labels:
+      com.i2gosignals.role: gossf-node
+    command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
+
+  # ---------------------------------------------------------------------------
+  # Keycloak (OAuth2 AS) — same as docker-compose-dev.yml
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:alpine
+    container_name: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - spire_sockets:/run/spire/sockets
+    networks:
+      - backend
+    labels:
+      com.i2gosignals.role: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
+      SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.7
+    container_name: keycloak-signals
+    hostname: keycloak
+    networks:
+      - frontend
+      - backend
+    command: start-dev --import-realm
+    environment:
+      KC_HEALTH_ENABLED: true
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_URL: https://keycloak:9080
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/server-cert.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/server-key.pem
+      KC_HTTPS_PORT: 9080
+      KC_FEATURES: scripts
+      KC_SCRIPT_UPLOAD_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      QUARKUS_HTTP_HOST: 0.0.0.0
+      SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
+      SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
+    ports:
+      - 9080:9080
+    depends_on:
+      - postgres
+    volumes:
+      - "./config/keycloak/realm:/opt/keycloak/data/import"
+      - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
+      - "./config/certs:/opt/keycloak/certs"
+      - spire_sockets:/run/spire/sockets
+
+# cluster-monitor checks the health of spire and mongo cluster and reports any issues
+  cluster-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: cluster-monitor
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    networks:
+      - backend
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - SPIFFE_MONGO_ENABLED=true
+      - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin
+      - MONITOR_INTERVAL=1m
+    volumes:
+      - ./:/app
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+      - spire_sockets:/run/spire/sockets
+      - mongo_certs:/certs
+    command: ["go", "run", "./cmd/cluster-monitor/main.go"]
+
+  # ---------------------------------------------------------------------------
+  # SCIM Services — SPIFFE-enabled
+  # ---------------------------------------------------------------------------
+
+  scimSsfSetup:
+    build:
+      context: .
+      dockerfile: Dockerfile-dev
+    image: i2gosignals-dev:latest
+    container_name: scim-ssf-setup
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_healthy
+      goSignals1:
+        condition: service_healthy
+      spire-agent:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+      - "./config/scim:/scim"
+      - "./config/certs:/scim/certs"
+      - spire_sockets:/run/spire/sockets
+    networks:
+      - backend
+      - frontend
+    environment:
+      - ISSUER=cluster.scim.example.com
+      - GOSIGNALS_HOME=/scim/config.json
+      - CA_CERT=/scim/certs/ca-cert.pem
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+    entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
+
+  scim_cluster1:
+    image: independentid/i2scim-universal:0.8.1
+    container_name: scim_cluster1
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "9000:8080"
+    depends_on:
+      goSignals1:
+        condition: service_healthy
+      scimSsfSetup:
+        condition: service_completed_successfully
+      spire-agent:
+        condition: service_healthy
+    volumes:
+      - ./config/scim/data1:/scim
+      - spire_sockets:/run/spire/sockets
+    env_file:
+      - ./config/scim/scripts/scim-server.env
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+
+  scim_cluster2:
+    image: independentid/i2scim-universal:0.8.1
+    container_name: scim_cluster2
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "9001:8080"
+    depends_on:
+      goSignals1:
+        condition: service_healthy
+      scimSsfSetup:
+        condition: service_completed_successfully
+      spire-agent:
+        condition: service_healthy
+    volumes:
+      - ./config/scim/data2:/scim
+      - spire_sockets:/run/spire/sockets
+    env_file:
+      - ./config/scim/scripts/scim-server.env
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
+      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+
+networks:
+  frontend:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+  backend:
+    driver: bridge

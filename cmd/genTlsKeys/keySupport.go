@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,9 @@ const (
 	EnvServerKey       string = "SERVER_KEY_PATH"
 	EnvServerDNS       string = "SERVER_DNS_NAME"
 	EnvAutoCreate      string = "AUTO_SELFSIGN"
+
+	DefaultTrustDomain   = "cluster.i2gosignals.internal"
+	EnvSpiffeTrustDomain = "SPIFFE_TRUST_DOMAIN"
 )
 
 type KeyConfig struct {
@@ -273,6 +277,28 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 		dnsNames = strings.Split(domainName, ",")
 	}
 
+	if config.ServerCertExists() {
+		log.Info(fmt.Sprintf("Loading existing Server Certificate from %s ...", config.ServerCertPath))
+		certBytes, err := os.ReadFile(config.ServerCertPath)
+		if err == nil {
+			block, _ := pem.Decode(certBytes)
+			if block != nil {
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err == nil {
+					// Check if URI SANs are present and correct (exactly one)
+					if len(cert.URIs) == 1 && strings.HasPrefix(cert.URIs[0].String(), "spiffe://") {
+						log.Info("Existing Server Certificate has valid SPIFFE URI SAN. Skipping regeneration.")
+					} else {
+						log.Info("Existing Server Certificate missing or invalid SPIFFE URI SAN. Forcing regeneration.")
+						// Remove existing cert to force regeneration below
+						_ = os.Remove(config.ServerCertPath)
+						_ = os.Remove(config.ServerKeyPath)
+					}
+				}
+			}
+		}
+	}
+
 	if !config.ServerCertExists() && auto {
 		log.Info("Generating server key pair")
 		certPEM, certPrivKeyPEM, err := config.generateCert(
@@ -346,10 +372,25 @@ func (config *KeyConfig) generateCert(
 		subject.CommonName = dnsNames[0]
 	}
 
+	// For compatibility with SPIFFE-aware Go tools (like scim-ssf-setup)
+	// when using standard file-based certificates, add the URI SANs.
+	// SPIFFE SVID spec requires EXACTLY ONE URI SAN.
+	td := DefaultTrustDomain
+	if domain := os.Getenv(EnvSpiffeTrustDomain); domain != "" {
+		td = domain
+	}
+	uris := []*url.URL{}
+	// Use a generic workload identity for the shared dev certificate.
+	// As long as it belongs to the trust domain, AuthorizeMemberOf will accept it.
+	if u, err := url.Parse("spiffe://" + td + "/workload/gosignals-node"); err == nil {
+		uris = append(uris, u)
+	}
+
 	cert := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      subject,
 		DNSNames:     dnsNames,
+		URIs:         uris,
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().AddDate(2, 0, 0),
