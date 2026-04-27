@@ -190,3 +190,27 @@ In `docker-compose-dev.yml` and `docker-compose.yml`, MongoDB services (`mongo1`
 *   The `mongo-init` service MUST use `bash /scripts/mongo_init.sh` to execute the setup script.
 *   MongoDB node `command` overrides MUST call `docker-entrypoint.sh` if `MONGO_INITDB` environment variables are used for user creation.
 *   `mongo_init.sh` MUST support both TLS and non-TLS modes based on the presence of certificates.
+
+---
+
+## [2026-04-27] MongoDB Initialization Deadlock Fix (docker-compose-dev)
+
+### Problem
+The `mongo-init` service in `docker-compose-dev.yml` would sometimes hang indefinitely with "Waiting for primary" logs. This was caused by several issues in `config/mongo/mongo_init.sh`:
+1.  **Invalid Shell Helper**: The script used `rs.isMaster().ismaster` in a `while` loop. `rs.isMaster` is not a standard helper in `mongosh`, and its incorrect use led to an infinite loop.
+2.  **Invalid API Usage**: `rs.initiate` was called with a second argument `{ force: true }`, which is only valid for `rs.reconfig`.
+3.  **Lack of Idempotency**: The script attempted to call `rs.initiate` without checking if the replica set was already initiated, leading to errors on subsequent runs.
+4.  **Single-Host Connection**: User creation was attempted on a single host (`mongo1`) which might not have been the primary.
+
+### Solution
+Refactored `config/mongo/mongo_init.sh` to align with the more robust patterns used in `mongo_spiffe_init.sh`:
+1.  **Idempotency Check**: Added a check using `rs.status()` to skip initiation if the replica set is already configured.
+2.  **Correct API Usage**: Removed the invalid `{ force: true }` argument from `rs.initiate`.
+3.  **Robust Primary Wait**: Replaced the Javascript-based wait loop with a Bash-based `until` loop using `db.hello().isWritablePrimary` and a multi-host replica set connection string.
+4.  **Primary-Aware User Creation**: Updated user creation commands to use a multi-host connection string, ensuring they are executed on the primary node.
+5.  **SPIFFE Alignment**: Corrected a similar invalid `{ force: true }` argument in `mongo_spiffe_init.sh`.
+
+### Invariants
+*   The `mongo-init` script MUST be idempotent and check `rs.status()` before initiating.
+*   Waiting for primary SHOULD use `db.hello().isWritablePrimary` as it is the modern replacement for `isMaster`.
+*   Commands requiring primary (like user creation) MUST use a connection string that includes all replica set members.

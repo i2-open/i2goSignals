@@ -21,7 +21,14 @@ until mongosh $TLS_ARGS -u root -p dockTest --host mongo1:30001 --quiet --eval "
   sleep 2
 done
 
-mongosh $TLS_ARGS -u root -p dockTest --host mongo1:30001 <<EOF
+# Check / initialize replica set
+IS_INITIATED=$(mongosh $TLS_ARGS -u root -p dockTest --host mongo1:30001 --quiet --eval "try { rs.status().ok } catch(e) { 0 }")
+
+if [ "$IS_INITIATED" = "1" ]; then
+    echo "Replica set already initiated"
+else
+    echo "Initializing replica set..."
+    mongosh $TLS_ARGS -u root -p dockTest --host mongo1:30001 <<EOF
   var cfg = {
     "_id": "dbrs",
     "version": 1,
@@ -40,16 +47,21 @@ mongosh $TLS_ARGS -u root -p dockTest --host mongo1:30001 <<EOF
       }
     ]
   };
-  rs.initiate(cfg,{ force: true });
-  
-  // Wait for primary to be elected
-  while (!rs.isMaster().ismaster) {
-    print("Waiting for primary...");
-    sleep(2000);
-  }
+  rs.initiate(cfg);
+EOF
+fi
 
-  // Create SPIFFE user for goSignals workload (always good to have if SPIFFE is later enabled)
-  // Note: This matches the Subject computed in mongo_spiffe_init.sh for workload/gosignals-node
+# Wait for primary to be elected
+echo "Waiting for primary election..."
+until mongosh $TLS_ARGS -u root -p dockTest --host dbrs/mongo1:30001,mongo2:30002,mongo3:30003 --authenticationDatabase admin --quiet --eval "db.hello().isWritablePrimary" 2>/dev/null | grep -q "true"; do
+  echo "Waiting for primary..."
+  sleep 2
+done
+
+# Create SPIFFE user for goSignals workload (always good to have if SPIFFE is later enabled)
+# Note: This matches the Subject computed in mongo_spiffe_init.sh for workload/gosignals-node
+echo "Creating SPIFFE users..."
+mongosh $TLS_ARGS -u root -p dockTest --host dbrs/mongo1:30001,mongo2:30002,mongo3:30003 --authenticationDatabase admin <<EOF
   db.getSiblingDB("\$external").runCommand(
     {
       createUser: "CN=spiffe://cluster.i2gosignals.internal/workload/gosignals-node",

@@ -295,7 +295,7 @@ else
             { "_id": 2, "host": "mongo3:30003" }
         ]
     };
-    rs.initiate(cfg, { force: true });'
+    rs.initiate(cfg);'
 
     if ! mongosh --tls --tlsAllowInvalidHostnames --tlsCAFile /certs/ca.pem \
             --tlsCertificateKeyFile /certs/mongo.pem --host mongo1:30001 \
