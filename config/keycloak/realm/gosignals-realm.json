@@ -88,14 +88,19 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "fullScopeAllowed": false,
+      "fullScopeAllowed": true,
       "attributes": {
         "standard.token.exchange.enabled": "true",
         "oauth2.token.exchange.grant.enabled": "true"
       },
       "redirectUris": [],
       "webOrigins": [],
-      "defaultClientScopes": [],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
       "optionalClientScopes": [
         "stream",
         "event",
@@ -108,16 +113,14 @@
         {
           "name": "roles-as-scope",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "protocolMapper": "oidc-script-based-protocol-mapper",
           "consentRequired": false,
           "config": {
             "access.token.claim": "true",
             "id.token.claim": "false",
             "userinfo.token.claim": "false",
             "claim.name": "scope",
-            "jsonType.label": "String",
-            "multivalued": "true",
-            "usermodel.realmRoleMapping.rolePrefix": ""
+            "script": "var roles = user.getRealmRoleMappings();\nvar roleNames = [];\nvar it = roles.iterator();\nwhile (it.hasNext()) {\n  roleNames.push(it.next().getName());\n}\nexports = roleNames.join(' ');"
           }
         },
         {
@@ -159,11 +162,16 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "fullScopeAllowed": false,
+      "fullScopeAllowed": true,
       "attributes": {},
       "redirectUris": [],
       "webOrigins": [],
-      "defaultClientScopes": [],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
       "optionalClientScopes": [
         "stream",
         "event",
@@ -175,16 +183,14 @@
         {
           "name": "roles-as-scope",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "protocolMapper": "oidc-script-based-protocol-mapper",
           "consentRequired": false,
           "config": {
             "access.token.claim": "true",
             "id.token.claim": "false",
             "userinfo.token.claim": "false",
             "claim.name": "scope",
-            "jsonType.label": "String",
-            "multivalued": "true",
-            "usermodel.realmRoleMapping.rolePrefix": ""
+            "script": "var roles = user.getRealmRoleMappings();\nvar roleNames = [];\nvar it = roles.iterator();\nwhile (it.hasNext()) {\n  roleNames.push(it.next().getName());\n}\nexports = roleNames.join(' ');"
           }
         },
         {
