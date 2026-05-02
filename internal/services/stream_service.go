@@ -749,6 +749,21 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 	}
 }
 
+func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP) {
+	err := s.streamDAO.UpdateRemoteAddress(ctx, streamID, addr)
+	if err != nil {
+		ssLog.Error("Error updating remote address", "streamID", streamID, "error", err)
+	}
+
+	// Update cache if receiver stream
+	s.mu.RLock()
+	state, ok := s.receiverStreams[streamID]
+	s.mu.RUnlock()
+	if ok {
+		state.RemoteAddress = addr
+	}
+}
+
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
 	state, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {

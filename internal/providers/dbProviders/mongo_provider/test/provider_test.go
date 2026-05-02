@@ -394,3 +394,20 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 	s.InitStream(supportedEvents)
 	s.Equal(len(supportedEvents), len(s.stream.EventsDelivered), "All events enabled")
 }
+
+func (s *MongoProviderSuite) TestI_UpdateRemoteAddress() {
+	addr := &model.RemoteIP{
+		Protocol:  "https",
+		IP:        "10.0.1.5:443",
+		Forwarded: "203.0.113.42",
+	}
+
+	s.provider.UpdateRemoteAddress(s.stream.Id, addr)
+
+	state, err := s.provider.GetStreamState(s.stream.Id)
+	s.NoError(err, "GetStreamState should succeed")
+	s.Require().NotNil(state.RemoteAddress, "RemoteAddress should be populated")
+	s.Equal("https", state.RemoteAddress.Protocol)
+	s.Equal("10.0.1.5:443", state.RemoteAddress.IP)
+	s.Equal("203.0.113.42", state.RemoteAddress.Forwarded)
+}

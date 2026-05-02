@@ -45,6 +45,7 @@ type DbProviderInterface interface {
 
 	GetStreamState(id string) (*model.StreamStateRecord, error)
 	UpdateStreamStatus(streamId string, status string, errorMsg string)
+	UpdateRemoteAddress(streamId string, addr *model.RemoteIP)
 	GetStatus(streamId string) (*model.StreamStatus, error)
 	ListStreams() []model.StreamConfiguration
 	GetStateMap() map[string]model.StreamStateRecord

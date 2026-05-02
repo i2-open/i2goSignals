@@ -31,6 +31,9 @@ type StreamDAO interface {
 
 	// Status updates
 	UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error
+
+	// UpdateRemoteAddress persists only the remote_address sub-document for the given stream.
+	UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error
 }
 
 // EventDAO handles event data access

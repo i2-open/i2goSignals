@@ -250,6 +250,11 @@ func (b *BaseProvider) UpdateStreamStatus(streamId string, status string, errorM
 	b.notifyWrite()
 }
 
+func (b *BaseProvider) UpdateRemoteAddress(streamId string, addr *model.RemoteIP) {
+	b.streamService.UpdateRemoteAddress(context.Background(), streamId, addr)
+	b.notifyWrite()
+}
+
 func (b *BaseProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
 	return b.streamService.GetStatus(context.Background(), streamId)
 }

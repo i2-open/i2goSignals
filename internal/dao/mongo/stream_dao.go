@@ -173,3 +173,28 @@ func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status str
 
 	return HandleUpdateResult(res, errors.New("not found"))
 }
+
+func (d *StreamDAOMongo) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
+	if d.collection == nil {
+		return errors.New("mongo collection not initialized")
+	}
+	docId, err := ParseObjectID(id)
+	if err != nil {
+		return err
+	}
+
+	filter := bson.M{"_id": docId}
+	update := bson.M{
+		"$set": bson.M{
+			"remote_address": addr,
+		},
+	}
+
+	res, err := d.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		sLog.Error("Error updating stream remote address", "error", err)
+		return err
+	}
+
+	return HandleUpdateResult(res, errors.New("not found"))
+}

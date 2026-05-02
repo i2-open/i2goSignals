@@ -49,8 +49,8 @@ func (t *EventAuthToken) IsScopeMatch(scopesAccepted []string) bool {
 		}
 		// Check Scope (scope claim)
 		if t.Scope != "" {
-			scopesFromClaim := strings.Split(t.Scope, " ")
-			for _, scope := range scopesFromClaim {
+			scopes := strings.Fields(t.Scope)
+			for _, scope := range scopes {
 				if strings.EqualFold(scope, ScopeRoot) {
 					return true
 				}

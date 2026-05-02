@@ -207,6 +207,48 @@ func TestStreamDAOMemory_UpdateStatus(t *testing.T) {
 	}
 }
 
+func TestStreamDAOMemory_UpdateRemoteAddress(t *testing.T) {
+	dao := NewStreamDAO()
+	ctx := context.Background()
+
+	streamState := &model.StreamStateRecord{
+		Id:        bson.NewObjectID(),
+		ProjectId: "test-project",
+		StreamConfiguration: model.StreamConfiguration{
+			Id:  "stream-remote",
+			Iss: "test-issuer",
+		},
+		Status:    model.StreamStateEnabled,
+		CreatedAt: time.Now(),
+	}
+	_ = dao.Create(ctx, streamState)
+
+	addr := &model.RemoteIP{
+		Protocol:  "https",
+		IP:        "10.1.2.3:443",
+		Forwarded: "203.0.113.1",
+	}
+
+	err := dao.UpdateRemoteAddress(ctx, "stream-remote", addr)
+	if err != nil {
+		t.Fatalf("UpdateRemoteAddress failed: %v", err)
+	}
+
+	retrieved, _ := dao.FindByID(ctx, "stream-remote")
+	if retrieved.RemoteAddress == nil {
+		t.Fatal("expected RemoteAddress to be set, got nil")
+	}
+	if retrieved.RemoteAddress.Protocol != "https" {
+		t.Errorf("expected Protocol https, got %s", retrieved.RemoteAddress.Protocol)
+	}
+	if retrieved.RemoteAddress.IP != "10.1.2.3:443" {
+		t.Errorf("expected IP 10.1.2.3:443, got %s", retrieved.RemoteAddress.IP)
+	}
+	if retrieved.RemoteAddress.Forwarded != "203.0.113.1" {
+		t.Errorf("expected Forwarded 203.0.113.1, got %s", retrieved.RemoteAddress.Forwarded)
+	}
+}
+
 func TestStreamDAOMemory_FindReceiverStreams(t *testing.T) {
 	dao := NewStreamDAO()
 	ctx := context.Background()

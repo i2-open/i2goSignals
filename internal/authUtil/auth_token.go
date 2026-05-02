@@ -402,7 +402,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 				hasScopes = claims.RealmAccess.Roles
 			}
 			if claims.Scope != "" {
-				hasScopes = append(hasScopes, strings.Split(claims.Scope, " ")...)
+				hasScopes = append(hasScopes, strings.Fields(claims.Scope)...)
 			}
 			if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
 				// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access

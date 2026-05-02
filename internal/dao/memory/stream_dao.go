@@ -88,6 +88,15 @@ func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status st
 	return errors.New("not found")
 }
 
+func (d *StreamDAOMemory) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
+	if state, ok := d.store.Get(id); ok {
+		state.RemoteAddress = addr
+		d.store.Set(id, state)
+		return nil
+	}
+	return errors.New("not found")
+}
+
 func (d *StreamDAOMemory) GetState() map[string]*model.StreamStateRecord {
 	return d.store.GetAll()
 }
