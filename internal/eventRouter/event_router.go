@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -838,7 +840,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	// Get the event
 	if eventRecord != nil {
 
-		delivered := r.pushEvent(config.StreamConfiguration, eventRecord, rsaKey, kid)
+		delivered := r.pushEvent(config, eventRecord, rsaKey, kid)
 		if delivered {
 			err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
 			if err != nil {
@@ -851,7 +853,8 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 
 // pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
 // Note: Moved from the api_transmitter.go in server package
-func (r *router) pushEvent(configuration model.StreamConfiguration, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
+func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
+	configuration := stream.StreamConfiguration
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
 	// Prepare the token string (application-layer: signing or forwarding)
@@ -871,8 +874,17 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 		}
 	}
 
+	// Capture the TCP peer address via httptrace (GotConn fires for both new and reused connections)
+	var capturedAddr string
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			capturedAddr = info.Conn.RemoteAddr().String()
+		},
+	}
+	ctx := httptrace.WithClientTrace(context.Background(), trace)
+
 	// Use goSetPush for the RFC8935 wire protocol
-	result := goSetPush.PushSET(context.Background(), tokenString, goSetPush.TransmitterConfig{
+	result := goSetPush.PushSET(ctx, tokenString, goSetPush.TransmitterConfig{
 		EndpointURL:   pushConfig.EndpointUrl,
 		Authorization: pushConfig.AuthorizationHeader,
 	})
@@ -887,6 +899,20 @@ func (r *router) pushEvent(configuration model.StreamConfiguration, event *model
 			}
 		}
 		return false
+	}
+
+	// Persist the resolved peer address when it changes
+	if capturedAddr != "" {
+		endpointURL, _ := url.Parse(pushConfig.EndpointUrl)
+		scheme := "http"
+		if endpointURL != nil && endpointURL.Scheme != "" {
+			scheme = endpointURL.Scheme
+		}
+		remoteIP := model.BuildOutboundRemoteIP(scheme, capturedAddr)
+		if !remoteIP.Equals(stream.RemoteAddress) {
+			r.provider.UpdateRemoteAddress(configuration.Id, remoteIP)
+		}
+		eventLogger.Debug("PUSH-SRV: Remote address information", "sid", configuration.Id, "old", stream.RemoteAddress.String(), "new", remoteIP.String())
 	}
 
 	eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)

@@ -50,6 +50,12 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		return
 	}
 
+	remoteIP := model.BuildRemoteIPFromRequest(r)
+	if !remoteIP.Equals(streamState.RemoteAddress) {
+		serverLog.Debug("POLL-RCV: Remote address information", "sid", streamState.StreamConfiguration.Id, "old", streamState.RemoteAddress.String(), "new", remoteIP.String())
+		sa.GetProvider().UpdateRemoteAddress(authCtx.StreamId, remoteIP)
+	}
+
 	behavior := os.Getenv("POLL_SRV_BEHAVIOR")
 	if behavior == "" {
 		behavior = "MODE"

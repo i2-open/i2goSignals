@@ -57,8 +57,10 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 
 	tokenString := string(bodyBytes)
 
-	// Parse the SET token
-	token, err := goSet.Parse(tokenString, config.JWKS)
+	// Parse unverified first to check issuer/audience before signature verification.
+	// This ensures we return the correct RFC8935 error code (invalid_issuer, invalid_audience)
+	// rather than a generic invalid_request when the JWKS kid lookup fails due to a wrong issuer.
+	unverified, err := goSet.Parse(tokenString, nil)
 	if err != nil {
 		log.Warn("RFC8935: Error parsing SET token", "error", err)
 		return nil, &DeliveryErr{
@@ -67,31 +69,44 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 		}
 	}
 
-	// Validate issuer
+	// Validate issuer before signature verification
 	if config.ExpectedIssuer != "" {
-		if token.Issuer != config.ExpectedIssuer {
-			log.Warn("RFC8935: Invalid issuer", "expected", config.ExpectedIssuer, "actual", token.Issuer)
+		if unverified.Issuer != config.ExpectedIssuer {
+			log.Warn("RFC8935: Invalid issuer", "expected", config.ExpectedIssuer, "actual", unverified.Issuer)
 			return nil, &DeliveryErr{
 				ErrCode:     ErrInvalidIssuer,
-				Description: "The SET Issuer is invalid for the SET Recipient.",
+				Description: "Issuer is invalid for this SET Recipient.",
 			}
 		}
 	}
 
-	// Validate audience
+	// Validate audience before signature verification
 	if len(config.ExpectedAudiences) > 0 {
 		audMatch := false
 		for _, aud := range config.ExpectedAudiences {
-			if slices.Contains([]string(token.Audience), aud) {
+			if slices.Contains([]string(unverified.Audience), aud) {
 				audMatch = true
 				break
 			}
 		}
 		if !audMatch {
-			log.Warn("RFC8935: Audience mismatch", "expected", config.ExpectedAudiences, "actual", token.Audience)
+			log.Warn("RFC8935: Audience mismatch", "expected", config.ExpectedAudiences, "actual", unverified.Audience)
 			return nil, &DeliveryErr{
 				ErrCode:     ErrInvalidAudience,
-				Description: "The SET Audience does not correspond to the SET Recipient.",
+				Description: "Audience does not correspond to this SET Recipient.",
+			}
+		}
+	}
+
+	// Now verify the signature if a JWKS is configured
+	token := unverified
+	if config.JWKS != nil {
+		token, err = goSet.Parse(tokenString, config.JWKS)
+		if err != nil {
+			log.Warn("RFC8935: Error validating SET token signature", "error", err)
+			return nil, &DeliveryErr{
+				ErrCode:     ErrInvalidRequest,
+				Description: "The request could not be parsed as a SET.",
 			}
 		}
 	}

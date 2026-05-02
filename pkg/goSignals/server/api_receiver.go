@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strconv"
@@ -971,7 +972,14 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		}
 
 		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
-		parsed, httpStatus, err := goSetPoll.Poll(heartbeatCtx, pollReq, goSetPoll.ReceiverConfig{
+		var capturedPollAddr string
+		pollTrace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				capturedPollAddr = info.Conn.RemoteAddr().String()
+			},
+		}
+		tracedCtx := httptrace.WithClientTrace(heartbeatCtx, pollTrace)
+		parsed, httpStatus, err := goSetPoll.Poll(tracedCtx, pollReq, goSetPoll.ReceiverConfig{
 			EndpointURL:       eventUrl,
 			Authorization:     auth,
 			HTTPClient:        client,
@@ -1116,6 +1124,26 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			setErrs = parsed.Errors
 		}
 
+		// Persist the resolved peer address on first connection or when it changes
+		if capturedPollAddr != "" {
+			endpointURL, _ := url.Parse(eventUrl)
+			scheme := "http"
+			if endpointURL != nil && endpointURL.Scheme != "" {
+				scheme = endpointURL.Scheme
+			}
+			remoteIP := model.BuildOutboundRemoteIP(scheme, capturedPollAddr)
+			ps.mu.RLock()
+			currentRemote := ps.stream.RemoteAddress
+			ps.mu.RUnlock()
+			if !remoteIP.Equals(currentRemote) {
+				serverLog.Debug("POLL-RCV: Remote address information", "sid", sid, "old", currentRemote.String(), "new", remoteIP.String())
+				ps.sa.Provider.UpdateRemoteAddress(sid, remoteIP)
+				ps.mu.Lock()
+				ps.stream.RemoteAddress = remoteIP
+				ps.mu.Unlock()
+			}
+		}
+
 		// Successful poll - reset retry count and error tracking
 		retryCount = 0
 		unauthorizedCount = 0
@@ -1187,19 +1215,24 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain a stream identifier")
 		return
 	}
-	config, err := sa.GetProvider().GetStream(sid)
-	if config == nil || err != nil {
+	streamState, err := sa.GetProvider().GetStreamState(sid)
+	if streamState == nil || err != nil {
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+authContext.StreamId+" could not be located or was deleted")
 		return
+	}
+
+	remoteIP := model.BuildRemoteIPFromRequest(r)
+	if !remoteIP.Equals(streamState.RemoteAddress) {
+		sa.GetProvider().UpdateRemoteAddress(sid, remoteIP)
 	}
 
 	// Use goSetPush to handle RFC8935 protocol parsing and validation
 	jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
 	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
 		JWKS:              jwksKey,
-		ExpectedIssuer:    config.Iss,
-		ExpectedAudiences: config.Aud,
+		ExpectedIssuer:    streamState.Iss,
+		ExpectedAudiences: streamState.Aud,
 	})
 	if deliveryErr != nil {
 		goSetPush.WriteDeliveryError(w, deliveryErr.ErrCode, deliveryErr.Description)

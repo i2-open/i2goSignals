@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -42,6 +43,24 @@ func BuildOutboundRemoteIP(scheme, capturedAddr string) *RemoteIP {
 		Protocol: scheme,
 		IP:       capturedAddr,
 	}
+}
+
+// Equals reports whether r and other represent the same peer address.
+func (r *RemoteIP) Equals(other *RemoteIP) bool {
+	if r == nil || other == nil {
+		return r == nil && other == nil
+	}
+	return r.IP == other.IP && r.Protocol == other.Protocol && r.Forwarded == other.Forwarded
+}
+
+func (r *RemoteIP) String() string {
+	if r == nil {
+		return ""
+	}
+	if r.Forwarded != "" {
+		return fmt.Sprintf("%s://%s (forwarded via %s)", r.Protocol, r.Forwarded, r.IP)
+	}
+	return fmt.Sprintf("%s://%s", r.Protocol, r.IP)
 }
 
 // StreamStateRecord is stored in MongoProvider.streamCol
