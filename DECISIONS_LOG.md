@@ -214,3 +214,36 @@ Refactored `config/mongo/mongo_init.sh` to align with the more robust patterns u
 *   The `mongo-init` script MUST be idempotent and check `rs.status()` before initiating.
 *   Waiting for primary SHOULD use `db.hello().isWritablePrimary` as it is the modern replacement for `isMaster`.
 *   Commands requiring primary (like user creation) MUST use a connection string that includes all replica set members.
+
+## [2026-04-30] Keycloak Scope Claim Array Fix (Realm Config)
+
+### Problem
+Keycloak was emitting the `scope` claim as a JSON array because it was using the `oidc-usermodel-realm-role-mapper` with `multivalued: true` to map realm roles to scopes. This caused parsing errors in the Go backend which strictly expects a space-separated string for interoperability and OIDC compliance.
+
+### Solution
+1.  **Realm Configuration Fix**: Modified `gosignals-realm.json` to replace the problematic `roles-as-scope` mapper with an `oidc-script-based-protocol-mapper`. The script explicitly joins the user's realm roles into a single space-separated string, fulfilling the interoperability requirement while still conveying role-based permissions in the `scope` claim.
+2.  **Strict Go Types**: Maintained the `string` type for `Scope` in `OidcClaims` and `EventAuthToken` structs. Reverted any attempts to use flexible parsing (e.g., `ScopeClaim` type) to ensure the codebase remains aligned with OIDC standards.
+
+### Invariants
+*   The `scope` claim MUST ALWAYS be a single string.
+*   The Go backend will NOT support array-based `scope` claims; production configurations must ensure the issuer provides the correct format.
+
+---
+
+## [2026-04-30] Keycloak Client Scope & Role Fix
+
+### Problem
+Service clients `goSignalsAdminService` and `goSignalsClient` were not receiving realm roles or standard scopes (profile, email) in their tokens. This prevented them from having roles similar to the `adminui` client, even when performing token exchange or acting as service accounts.
+
+### Solution
+1.  **Full Scope Enabled**: Set `fullScopeAllowed: true` for both `goSignalsAdminService` and `goSignalsClient`. This allows the clients to access realm roles without needing explicit scope mappings for every role.
+2.  **Default Scopes**: Added `web-origins`, `profile`, `roles`, and `email` to `defaultClientScopes` for both clients to match the configuration of `adminui`.
+
+### Invariants
+*   Service clients that need to represent users or perform administrative tasks MUST have `fullScopeAllowed: true` or explicit scope mappings for required roles.
+*   Standard OIDC scopes (`profile`, `email`, `roles`) SHOULD be included in `defaultClientScopes` if the client expects these claims in the token.
+
+### Regression Verification
+1.  Verify `config/keycloak/realm/gosignals-realm.json` has `fullScopeAllowed: true` for the affected clients.
+2.  Verify `defaultClientScopes` includes `roles`, `profile`, and `email` for these clients.
+

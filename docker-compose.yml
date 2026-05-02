@@ -1,4 +1,44 @@
 name: i2gosignals
+# Demonstration docker-compose file for i2gosignals
+#
+# This file set up a demonstration set of services including GoSignals, an SsfServer, as well as 2 SCIM servers used
+# to demonstrate SCIM Event generation and consumption via GoSignals. Also provided are auxilary services such as:
+# Keycloak, Prometheus, Grafana, and various backend services. It also includes
+# network definitions for frontend and backend services.
+#
+# Networks:
+# - frontend: Services accessible from the host machine
+# - backend: Services internal to the application, not directly accessible from the host
+#
+# Volumes:
+# - prometheus_data: Persistent storage for Prometheus metrics
+# - postgres_data: Persistent storage for PostgreSQL database
+# - mongo1_data: Persistent storage for MongoDB replica set 1
+# - mongo2_data: Persistent storage for MongoDB replica set 2
+# - mongo3_data: Persistent storage for MongoDB replica set 3
+# - mongo_config: Persistent storage for MongoDB configuration files
+#
+# Mongo Cluster:
+#   - Three-node replica set for high availability and data redundancy
+#   - Configured with shared storage for data persistence
+#   - Uses Docker volumes for persistent storage
+#
+# GoSignals Nodes:
+# Each node (goSignals1, goSignals2, and goSsfServer) stores their data in the Mongo Cluster
+# using a separate DBNAME. This allows each server to run as an isolated server instance so that
+# streams can be set up between servers for testing and demonstration purposes
+#
+# Keycloak OAuth Services:
+# Keycloak is used to demonstrate OAuth and OIDC support in goSignals servers.
+# Keycloak is configured with a PostgreSQL database for user storage and management.
+#
+# SCIM Cluster:
+# scim_cluster1 and scim_cluster2 are configured each with private memory storage
+# using Docker volumes for persistent storage. They are used to demonstrate SCIM (System for Cross-domain Identity Management)
+# integration with goSignals servers.  The demo shows a SCIM Directory cluster starting and auto-registering
+# with goSignals1.  Each node registers 2 streams with goSignals1 with a shared common audience. When one node receives
+# SCIM protocol request, a SCIM Event is generated and sent to goSignals1 for processing. The other node, receives the event
+# and processes the event as well demonstrating co-ordinated provisioning between nodes - an effective cluster.
 
 volumes:
   prometheus_data: {}
@@ -101,6 +141,8 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    networks:
+      - backend
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
@@ -113,9 +155,14 @@ services:
   grafana:
     image: grafana/grafana
     container_name: grafana
+    networks:
+      - frontend
+      - backend
     ports:
       - "3000:3000"
     restart: unless-stopped
+    depends_on:
+      - prometheus
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
@@ -127,6 +174,9 @@ services:
     command: /app/goSignalsServer
     container_name: gosignals1
     hostname: goSignals1
+    networks:
+      - frontend
+      - backend
     depends_on:
       mongo1:
         condition: service_healthy
@@ -148,6 +198,9 @@ services:
     command: /app/goSignalsServer
     container_name: gosignals2
     hostname: goSignals2
+    networks:
+      - frontend
+      - backend
     depends_on:
       mongo1:
         condition: service_healthy
@@ -202,6 +255,9 @@ services:
       - "./config/scim:/scim"
       - "./config/certs:/scim/certs"
     restart: "no"
+    networks:
+      - backend
+      - frontend
     environment:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
@@ -212,6 +268,8 @@ services:
   scim_cluster1:
     image: independentid/i2scim-universal:latest
     container_name: scim_cluster1
+    networks:
+      - frontend
     ports:
       - "9000:8080"
     depends_on:
@@ -226,6 +284,8 @@ services:
   scim_cluster2:
     image: independentid/i2scim-universal:latest
     container_name: scim_cluster2
+    networks:
+      - frontend
     ports:
       - "9001:8080"
     depends_on:
@@ -241,6 +301,8 @@ services:
     image: postgres:alpine
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -249,7 +311,11 @@ services:
     image: quay.io/keycloak/keycloak:26.4.7
     container_name: keycloak-signals
     hostname: keycloak
-    command: start --import-realm
+    networks:
+      - frontend
+      - backend
+    command: start-dev --import-realm
+    # --spi-theme-static-max-age=-1 --spi-theme-cache-themes=false --spi-theme-cache-templates=false --log-level=org.keycloak.theme:DEBUG
     environment:
       KC_HEALTH_ENABLED: true
       KC_HOSTNAME_STRICT: false
@@ -275,4 +341,10 @@ services:
       - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
       - "./config/certs:/opt/keycloak/certs"
 
-
+networks:
+  frontend:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+  backend:
+    driver: bridge

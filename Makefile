@@ -52,7 +52,7 @@ dev-build-image:
 
 # Bring up the minimal dev stack with the debug-enabled goSignals1
 dev-up: check-certs
-	docker compose -f docker-compose-dev.yml up -d mongo1 mongo2 mongo3 mongo-init prometheus grafana keycloak goSignals1 goSignals2 goSsfServer
+	docker compose -f docker-compose-dev.yml up -d
 
 # Rebuild the dev image and restart goSignals1
 dev-rebuild: dev-build-image
