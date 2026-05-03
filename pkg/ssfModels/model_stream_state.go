@@ -67,7 +67,7 @@ func (r *RemoteIP) String() string {
 type StreamStateRecord struct {
 	Id                  bson.ObjectID `bson:"_id" json:"id,omitempty"`
 	ProjectId           string        `json:"project_id" bson:"project_id" json:"projectId,omitempty"` // ProjectId links SsfClient entities to streams.
-	StreamConfiguration `bson:",inline" json:"streamConfiguration"`
+	StreamConfiguration `bson:",inline"`
 	StartDate           time.Time `json:"start_date" bson:"start_date" json:"startDate"`
 	CreatedAt           time.Time `json:"created_at" bson:"created_at" json:"createdAt"`
 	ModifiedAt          time.Time `json:"modified_at" bson:"modified_at" json:"modifiedAt"`
