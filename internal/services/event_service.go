@@ -24,7 +24,7 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 	}
 }
 
-func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
+func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
 	jti := event.ID
 	keys := make([]string, 0, len(event.Events))
 	for k := range event.Events {
@@ -41,7 +41,7 @@ func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventT
 		sortTime = time.Now()
 	}
 
-	rec := &model.EventRecord{
+	rec := &model.AgEventRecord{
 		Jti:      jti,
 		Event:    *event,
 		Original: raw,
@@ -94,7 +94,7 @@ func (s *EventService) GetEvents(ctx context.Context, jtis []string) []*goSet.Se
 	return res
 }
 
-func (s *EventService) GetEventRecord(ctx context.Context, jti string) *model.EventRecord {
+func (s *EventService) GetEventRecord(ctx context.Context, jti string) *model.AgEventRecord {
 	rec, err := s.eventDAO.FindByJTI(ctx, jti)
 	if err != nil {
 		esLog.Error("Error getting event record", "error", err)
@@ -142,7 +142,7 @@ func (s *EventService) WatchPending(ctx context.Context, callback func(jti strin
 	}
 }
 
-func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
 	// Validate the request
 	if jti == "" && resetDate == nil {
 		return errors.New("reset error: a date or jti must be provided")
@@ -159,7 +159,7 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	esLog.Debug("Removed pending events before reset", "count", deleteCount)
 
 	// Now search and re-assign events from the event store
-	var events []*model.EventRecord
+	var events []*model.AgEventRecord
 	if jti != "" {
 		// TODO: Implement JTI-based reset (need to add to DAO)
 		esLog.Warn("JTI-based reset not yet implemented, using time-based reset")

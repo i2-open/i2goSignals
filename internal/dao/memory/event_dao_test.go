@@ -20,7 +20,7 @@ func TestEventDAOMemory_Insert(t *testing.T) {
 	}
 	event.ID = "test-jti"
 
-	record := &model.EventRecord{
+	record := &model.AgEventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		Original: `{"jti":"test-jti"}`,
@@ -55,7 +55,7 @@ func TestEventDAOMemory_FindByJTIs(t *testing.T) {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 		event.ID = jti
 
-		record := &model.EventRecord{
+		record := &model.AgEventRecord{
 			Jti:      jti,
 			Event:    *event,
 			Original: `{"jti":"` + jti + `"}`,
@@ -83,7 +83,7 @@ func TestEventDAOMemory_AddPending(t *testing.T) {
 	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 	event.ID = "test-jti"
 
-	record := &model.EventRecord{
+	record := &model.AgEventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		SortTime: time.Now(),
@@ -124,7 +124,7 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 	event.ID = "test-jti"
 
-	record := &model.EventRecord{
+	record := &model.AgEventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		SortTime: time.Now(),
@@ -185,7 +185,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 		jti := bson.NewObjectID().Hex()
 		event.ID = jti
 
-		record := &model.EventRecord{
+		record := &model.AgEventRecord{
 			Jti:      jti,
 			Event:    *event,
 			SortTime: time.Now(),
@@ -234,7 +234,7 @@ func TestEventDAOMemory_FindByTimeRange(t *testing.T) {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 		event.ID = e.jti
 
-		record := &model.EventRecord{
+		record := &model.AgEventRecord{
 			Jti:      e.jti,
 			Event:    *event,
 			SortTime: e.time,
@@ -275,7 +275,7 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 		jti := bson.NewObjectID().Hex()
 		event.ID = jti
 
-		record := &model.EventRecord{
+		record := &model.AgEventRecord{
 			Jti:      jti,
 			Event:    *event,
 			SortTime: time.Now(),

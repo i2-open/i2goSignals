@@ -623,7 +623,7 @@ func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
 	return m.getBaseProvider().GetEvents(jtis)
 }
 
-func (m *MongoProvider) GetEventRecord(jti string) *model.EventRecord {
+func (m *MongoProvider) GetEventRecord(jti string) *model.AgEventRecord {
 	return m.getBaseProvider().GetEventRecord(jti)
 }
 
@@ -631,7 +631,7 @@ func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken
 	return m.getBaseProvider().AckEvent(jtiString, streamId, fencingToken)
 }
 
-func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
+func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
 	return m.getBaseProvider().AddEvent(event, sid, raw)
 }
 
@@ -647,7 +647,7 @@ func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti stri
 	m.getBaseProvider().WatchPending(ctx, callback)
 }
 
-func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
 	return m.getBaseProvider().ResetEventStream(streamId, jti, resetDate, isStreamEvent)
 }
 

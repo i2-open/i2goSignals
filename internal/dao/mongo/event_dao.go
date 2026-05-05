@@ -29,7 +29,7 @@ func NewEventDAO(eventCol, pendingCol, deliveredCol *mongo.Collection) interface
 	}
 }
 
-func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) error {
+func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord) error {
 	if d.eventCol == nil {
 		return errors.New("mongo collection not initialized")
 	}
@@ -40,12 +40,12 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) e
 	return err
 }
 
-func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
+func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error) {
 	if d.eventCol == nil {
 		return nil, errors.New("mongo collection not initialized")
 	}
 	filter := bson.M{"jti": jti}
-	var res model.EventRecord
+	var res model.AgEventRecord
 	cursor := d.eventCol.FindOne(ctx, filter)
 	err := cursor.Decode(&res)
 	if err != nil {
@@ -58,7 +58,7 @@ func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.Event
 	return &res, nil
 }
 
-func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error) {
 	if d.eventCol == nil {
 		return nil, errors.New("mongo collection not initialized")
 	}
@@ -69,7 +69,7 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
 		return nil, err
 	}
 
-	var records []*model.EventRecord
+	var records []*model.AgEventRecord
 	err = cursor.All(ctx, &records)
 	if err != nil {
 		eLog.Error("Error parsing event records", "error", err)
@@ -78,7 +78,7 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
 	return records, nil
 }
 
-func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
 	if d.eventCol == nil {
 		return nil, errors.New("mongo collection not initialized")
 	}
@@ -103,7 +103,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 		return nil, err
 	}
 
-	var allRecords []*model.EventRecord
+	var allRecords []*model.AgEventRecord
 	err = cursor.All(ctx, &allRecords)
 	if err != nil {
 		eLog.Error("Error parsing events", "error", err)
@@ -115,7 +115,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 	}
 
 	// Apply custom filter
-	var filtered []*model.EventRecord
+	var filtered []*model.AgEventRecord
 	for _, rec := range allRecords {
 		if filter(rec) {
 			filtered = append(filtered, rec)
