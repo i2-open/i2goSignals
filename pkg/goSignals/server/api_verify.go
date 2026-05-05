@@ -7,7 +7,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/logger"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var verifyLog = logger.Sub("VERIFY")
@@ -69,28 +68,11 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		return
 	}
 
-	// Create the verification event
-	// We need issuer and audience.
-	// Issuer is stream.Iss, Audience is stream.Aud
+	// Create the verification event scoped to the requested stream's iss/aud and submit it directly
+	// via the operational-event path (point-to-point, bypasses StreamEventMatch).
 	event := events.CreateVerifyEvent(payload.StreamId, payload.State, stream.Iss, stream.Aud)
-
-	// Add the event to the system
-	eventRec, err := sa.GetProvider().AddEvent(event, payload.StreamId, "")
-	if err != nil {
-		verifyLog.Error("Error adding verify event", "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	// Trigger the event on the stream
-	streamObjId, err := bson.ObjectIDFromHex(payload.StreamId)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	err = sa.GetProvider().AddEventToStream(eventRec.Jti, streamObjId)
-	if err != nil {
-		verifyLog.Error("Error adding verify event to stream", "error", err)
+	if _, err := sa.GetEventRouter().SubmitOperationalEvent(payload.StreamId, event, ""); err != nil {
+		verifyLog.Error("Error submitting verify event", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

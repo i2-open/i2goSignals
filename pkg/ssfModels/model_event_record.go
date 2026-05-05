@@ -23,6 +23,11 @@ type AgEventRecord struct {
     // Types indicates the event URIs available. This may be used for filtering and sorting of events
     Types []string `json:"types,omitempty" bson:"types,omitempty"`
 
+    // Operational marks the event as a point-to-point operational event (e.g. SSF verify, stream-updated)
+    // scoped to a single SSF endpoint relationship. Operational events bypass StreamEventMatch routing,
+    // are persisted for audit, and are excluded from ResetDate/ResetJti replay queries.
+    Operational bool `json:"operational,omitempty" bson:"operational,omitempty"`
+
     /*
     	SortTime is used to reset event streams and allow searching historical events from a certain point in time.
     	When set it is based upon one of the following attributes in order of preference:  toe, iat, time of insertion

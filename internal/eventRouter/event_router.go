@@ -39,6 +39,10 @@ type EventRouter interface {
 	UpdateStreamState(stream *model.StreamStateRecord)
 	RemoveStream(sid string)
 	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	// SubmitOperationalEvent persists an operational event (Operational=true) and submits it directly
+	// to the target stream's pending list, bypassing StreamEventMatch. Operational events are point-to-point
+	// SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify, stream-updated).
+	SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
 	Shutdown()
@@ -535,6 +539,55 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	return nil
 }
 
+// SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to
+// the target stream's pending list. It bypasses StreamEventMatch (operational events are point-to-point), and
+// is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
+// is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
+func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
+	stream, err := r.provider.GetStreamState(sid)
+	if err != nil {
+		return nil, err
+	}
+	if stream == nil {
+		return nil, fmt.Errorf("stream not found: %s", sid)
+	}
+
+	rec, err := r.provider.AddOperationalEvent(eventToken, sid, rawEvent)
+	if err != nil {
+		return nil, err
+	}
+	r.IncrementCounter(stream, eventToken, true)
+
+	if err := r.provider.AddEventToStream(rec.Jti, stream.Id); err != nil {
+		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
+		return rec, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if pushBuf, ok := r.pushBuffers[sid]; ok {
+		resource := fmt.Sprintf("push-transmitter:%s", sid)
+		ownerNodeId, _, _, _ := r.provider.GetLeaseOwner(resource)
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			pushBuf.SubmitEvent(rec.Jti)
+		} else {
+			go r.sendWakeup(sid, "push", ownerNodeId)
+		}
+		eventLogger.Info("ROUTER: Operational event submitted (push)", "sid", sid, "jti", rec.Jti, "types", rec.Types)
+		return rec, nil
+	}
+
+	if pollBuf, ok := r.pollBuffers[sid]; ok {
+		pollBuf.SubmitEvent(rec.Jti)
+		eventLogger.Info("ROUTER: Operational event submitted (poll)", "sid", sid, "jti", rec.Jti, "types", rec.Types)
+		return rec, nil
+	}
+
+	eventLogger.Warn("ROUTER: Operational event persisted but stream has no buffer", "sid", sid, "jti", rec.Jti)
+	return rec, nil
+}
+
 func (r *router) sendWakeup(sid, mode, ownerNodeId string) {
 	// Rate limiting / Coalescing
 	key := sid + ":" + mode
@@ -957,16 +1010,6 @@ func StreamEventMatch(stream *model.StreamStateRecord, event *model.AgEventRecor
 	}
 
 	for _, eventType := range event.Types {
-		// The following events should always be returned.
-		if eventType == "https://schemas.openid.net/secevent/sse/event-type/verification" {
-			return true
-		}
-		if eventType == "https://schemas.openid.net/secevent/ssf/event-type/verification" {
-			return true
-		}
-		if eventType == "https://schemas.openid.net/secevent/ssf/event-type/stream-updated" {
-			return true
-		}
 		for _, streamType := range stream.EventsDelivered {
 			if strings.EqualFold(eventType, streamType) {
 				return true

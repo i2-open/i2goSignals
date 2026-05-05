@@ -635,6 +635,10 @@ func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, ra
 	return m.getBaseProvider().AddEvent(event, sid, raw)
 }
 
+func (m *MongoProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
+	return m.getBaseProvider().AddOperationalEvent(event, sid, raw)
+}
+
 func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
 	return m.getBaseProvider().AddEventToStream(jti, streamId)
 }
