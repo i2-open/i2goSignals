@@ -50,10 +50,13 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 		_ = resp.Body.Close()
 	}()
 
+	retryAfter := ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+
 	if resp.StatusCode == http.StatusAccepted {
 		return PushResult{
 			StatusCode: resp.StatusCode,
 			Accepted:   true,
+			RetryAfter: retryAfter,
 		}
 	}
 
@@ -64,6 +67,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 			return PushResult{
 				StatusCode: resp.StatusCode,
 				Err:        fmt.Errorf("RFC8935: unable to read error response: %w", err),
+				RetryAfter: retryAfter,
 			}
 		}
 
@@ -72,6 +76,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 			return PushResult{
 				StatusCode: resp.StatusCode,
 				Err:        fmt.Errorf("RFC8935: unable to parse error response: %w", err),
+				RetryAfter: retryAfter,
 			}
 		}
 
@@ -79,6 +84,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 		return PushResult{
 			StatusCode: resp.StatusCode,
 			Err:        &deliveryErr,
+			RetryAfter: retryAfter,
 		}
 	}
 
@@ -86,5 +92,6 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 	return PushResult{
 		StatusCode: resp.StatusCode,
 		Err:        fmt.Errorf("RFC8935: HTTP %s from %s", resp.Status, config.EndpointURL),
+		RetryAfter: retryAfter,
 	}
 }
