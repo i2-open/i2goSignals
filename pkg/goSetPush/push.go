@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -21,6 +22,9 @@ const (
 	ErrInvalidRequest       = "invalid_request"
 	ErrInvalidIssuer        = "invalid_issuer"
 	ErrInvalidAudience      = "invalid_audience"
+	ErrInvalidKey           = "invalid_key"
+	ErrJwsSignatureFailed   = "jws_signature_failed"
+	ErrJweDecryptionFailed  = "jwe_decryption_failed"
 )
 
 // DeliveryErr represents an RFC8935 SET delivery error response.
@@ -82,4 +86,8 @@ type PushResult struct {
 
 	// Accepted is true when the receiver returned 202 Accepted.
 	Accepted bool
+
+	// RetryAfter is the parsed value of the Retry-After response header, if present.
+	// Set for any response (typically 429 or 503). Zero when the header is absent or unparseable.
+	RetryAfter time.Duration
 }
