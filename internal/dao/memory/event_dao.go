@@ -16,7 +16,7 @@ import (
 
 type EventDAOMemory struct {
 	mu              sync.RWMutex
-	events          map[string]*model.EventRecord
+	events          map[string]*model.AgEventRecord
 	pendingEvents   map[string][]interfaces.DeliverableEvent // streamId -> events
 	deliveredEvents map[string][]interfaces.DeliveredEvent   // streamId -> events
 
@@ -27,7 +27,7 @@ type EventDAOMemory struct {
 
 func NewEventDAO() *EventDAOMemory {
 	return &EventDAOMemory{
-		events:          make(map[string]*model.EventRecord),
+		events:          make(map[string]*model.AgEventRecord),
 		pendingEvents:   make(map[string][]interfaces.DeliverableEvent),
 		deliveredEvents: make(map[string][]interfaces.DeliveredEvent),
 	}
@@ -46,7 +46,7 @@ func (d *EventDAOMemory) SetPersistDir(dir string) {
 	}
 }
 
-func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
+func (d *EventDAOMemory) Insert(_ context.Context, record *model.AgEventRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -63,7 +63,7 @@ func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) er
 	return nil
 }
 
-func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.AgEventRecord, error) {
 	d.mu.RLock()
 	eventRec, ok := d.events[jti]
 	d.mu.RUnlock()
@@ -82,11 +82,11 @@ func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventR
 	return nil, nil
 }
 
-func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.AgEventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	var records []*model.EventRecord
+	var records []*model.AgEventRecord
 	for _, jti := range jtis {
 		if eventRec, ok := d.events[jti]; ok {
 			copyRec := *eventRec
@@ -96,14 +96,14 @@ func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.
 	return records, nil
 }
 
-func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
+func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	// Truncate resetDate to second precision to match JWT NumericDate behavior
 	fromTruncated := from.Truncate(time.Second)
 
-	var sortedEvents []*model.EventRecord
+	var sortedEvents []*model.AgEventRecord
 	for _, event := range d.events {
 		// Check time range
 		inRange := event.SortTime.Equal(fromTruncated) || event.SortTime.After(fromTruncated)
@@ -221,7 +221,7 @@ func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, st
 
 // Persistence helpers
 
-func (d *EventDAOMemory) saveEventToDiskLocked(record *model.EventRecord) error {
+func (d *EventDAOMemory) saveEventToDiskLocked(record *model.AgEventRecord) error {
 	if d.persistDir == "" {
 		return nil
 	}
@@ -233,7 +233,7 @@ func (d *EventDAOMemory) saveEventToDiskLocked(record *model.EventRecord) error 
 	return os.WriteFile(path, data, 0644)
 }
 
-func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, error) {
+func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.AgEventRecord, error) {
 	if d.persistDir == "" {
 		return nil, os.ErrNotExist
 	}
@@ -242,7 +242,7 @@ func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, erro
 	if err != nil {
 		return nil, err
 	}
-	var record model.EventRecord
+	var record model.AgEventRecord
 	err = json.Unmarshal(data, &record)
 	if err != nil {
 		return nil, err
@@ -250,11 +250,11 @@ func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, erro
 	return &record, nil
 }
 
-func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+func (d *EventDAOMemory) GetState() (events map[string]*model.AgEventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	events = make(map[string]*model.EventRecord)
+	events = make(map[string]*model.AgEventRecord)
 	for k, v := range d.events {
 		copyRec := *v
 		events[k] = &copyRec
@@ -277,7 +277,7 @@ func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pendi
 	return events, pending, delivered
 }
 
-func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
+func (d *EventDAOMemory) SetState(events map[string]*model.AgEventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if events != nil {

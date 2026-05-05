@@ -207,12 +207,12 @@ func (pm *PersistenceManager) LoadState() {
 	dOk := pm.loadFile("delivered_events.json", &delivered)
 
 	// For individual events, we need to scan the events directory
-	events := make(map[string]*model.EventRecord)
+	events := make(map[string]*model.AgEventRecord)
 	eventFiles, _ := filepath.Glob(filepath.Join(pm.directory, "events", "*.set"))
 	for _, file := range eventFiles {
 		data, err := os.ReadFile(file)
 		if err == nil {
-			var rec model.EventRecord
+			var rec model.AgEventRecord
 			if err := json.Unmarshal(data, &rec); err == nil {
 				// Memory optimization: clear Original if we favor disk
 				rec.Original = ""

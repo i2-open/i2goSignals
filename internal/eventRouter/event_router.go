@@ -853,7 +853,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 
 // pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
 // Note: Moved from the api_transmitter.go in server package
-func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.EventRecord, key *rsa.PrivateKey, kid string) bool {
+func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEventRecord, key *rsa.PrivateKey, kid string) bool {
 	configuration := stream.StreamConfiguration
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
@@ -924,7 +924,7 @@ StreamEventMatch checks provided event to see if it should be routed to the sele
 is not specified for the stream is will be considered a wildcard. If the event has no value for aud or iss, they too
 will be considered a wildcard leading to the event being a match.
 */
-func StreamEventMatch(stream *model.StreamStateRecord, event *model.EventRecord) bool {
+func StreamEventMatch(stream *model.StreamStateRecord, event *model.AgEventRecord) bool {
 	// First check that the direction of the stream matches the event InBound = true means local consumption
 	if stream.IsReceiver() && stream.GetRouteMode() == model.RouteModeImport {
 		return false

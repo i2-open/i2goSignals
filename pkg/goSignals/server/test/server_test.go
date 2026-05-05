@@ -374,7 +374,7 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	assert.NoError(suite.T(), err, "No error generating event")
 	// time.Sleep(2 * time.Second)
 	testLog.Println("Looking for event on SSF2...")
-	var event *model.EventRecord
+	var event *model.AgEventRecord
 	event = suite.servers[1].provider.GetEventRecord(jti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 500)
@@ -539,7 +539,7 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	assert.NoError(suite.T(), err, "No error generating event")
 	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
-	var event *model.EventRecord
+	var event *model.AgEventRecord
 	event = suite.servers[1].provider.GetEventRecord(jti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 250)

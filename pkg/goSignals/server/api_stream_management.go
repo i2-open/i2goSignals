@@ -404,7 +404,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
-		err := sa.GetProvider().ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
+		err := sa.GetProvider().ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
 			// Because reset goes through all events, this function confirms the stream should get the event
 			return eventRouter.StreamEventMatch(streamState, eventRecord)
 		})

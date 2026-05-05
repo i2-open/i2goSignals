@@ -39,10 +39,10 @@ type StreamDAO interface {
 // EventDAO handles event data access
 type EventDAO interface {
 	// Event storage
-	Insert(ctx context.Context, record *model.EventRecord) error
-	FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error)
-	FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error)
-	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
+	Insert(ctx context.Context, record *model.AgEventRecord) error
+	FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error)
+	FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error)
+	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error)
 
 	// Pending events
 	AddPending(ctx context.Context, jti string, streamID bson.ObjectID) error

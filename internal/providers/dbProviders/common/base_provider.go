@@ -285,7 +285,7 @@ func (b *BaseProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
 	return b.eventService.GetEvents(context.Background(), jtis)
 }
 
-func (b *BaseProvider) GetEventRecord(jti string) *model.EventRecord {
+func (b *BaseProvider) GetEventRecord(jti string) *model.AgEventRecord {
 	return b.eventService.GetEventRecord(context.Background(), jti)
 }
 
@@ -297,7 +297,7 @@ func (b *BaseProvider) AckEvent(jtiString string, streamId string, fencingToken 
 	return err
 }
 
-func (b *BaseProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
+func (b *BaseProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
 	res, err := b.eventService.AddEvent(context.Background(), event, sid, raw)
 	if err == nil {
 		b.notifyWrite()
@@ -325,7 +325,7 @@ func (b *BaseProvider) WatchPending(ctx context.Context, callback func(jti strin
 	b.eventService.WatchPending(ctx, callback)
 }
 
-func (b *BaseProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+func (b *BaseProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
 	err := b.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 	if err == nil {
 		b.notifyWrite()
