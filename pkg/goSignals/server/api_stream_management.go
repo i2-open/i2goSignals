@@ -405,6 +405,10 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
 		err := sa.GetProvider().ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
+			// Operational events (verify, stream-updated) are point-to-point and excluded from replay.
+			if eventRecord.Operational {
+				return false
+			}
 			// Because reset goes through all events, this function confirms the stream should get the event
 			return eventRouter.StreamEventMatch(streamState, eventRecord)
 		})

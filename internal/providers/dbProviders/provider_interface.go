@@ -56,6 +56,7 @@ type DbProviderInterface interface {
 	GetEventRecord(jti string) *model.AgEventRecord
 	AckEvent(jtiString string, streamId string, fencingToken int64) error
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.AgEventRecord, err error)
+	AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.AgEventRecord, err error)
 	AddEventToStream(jti string, streamId bson.ObjectID) error
 	ClearPending(streamId string) error
 	WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID))

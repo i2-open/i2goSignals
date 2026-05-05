@@ -305,6 +305,14 @@ func (b *BaseProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw
 	return res, err
 }
 
+func (b *BaseProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
+	res, err := b.eventService.AddOperationalEvent(context.Background(), event, sid, raw)
+	if err == nil {
+		b.notifyWrite()
+	}
+	return res, err
+}
+
 func (b *BaseProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
 	err := b.eventService.AddEventToStream(context.Background(), jti, streamId)
 	if err == nil {

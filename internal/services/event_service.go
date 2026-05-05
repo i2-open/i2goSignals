@@ -25,6 +25,17 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
+	return s.addEvent(ctx, event, sid, raw, false)
+}
+
+// AddOperationalEvent persists an operational event (Operational=true). Operational events are point-to-point
+// SSF protocol events (verify, stream-updated) scoped to a single SSF endpoint relationship and are excluded
+// from ResetDate/ResetJti replay queries.
+func (s *EventService) AddOperationalEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
+	return s.addEvent(ctx, event, sid, raw, true)
+}
+
+func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string, operational bool) (*model.AgEventRecord, error) {
 	jti := event.ID
 	keys := make([]string, 0, len(event.Events))
 	for k := range event.Events {
@@ -42,12 +53,13 @@ func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventT
 	}
 
 	rec := &model.AgEventRecord{
-		Jti:      jti,
-		Event:    *event,
-		Original: raw,
-		Types:    keys,
-		Sid:      sid,
-		SortTime: sortTime,
+		Jti:         jti,
+		Event:       *event,
+		Original:    raw,
+		Types:       keys,
+		Sid:         sid,
+		SortTime:    sortTime,
+		Operational: operational,
 	}
 
 	err := s.eventDAO.Insert(ctx, rec)
