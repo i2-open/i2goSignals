@@ -1245,6 +1245,9 @@ func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEvent
 		remoteIP := model.BuildOutboundRemoteIP(scheme, capturedAddr)
 		if !remoteIP.Equals(stream.RemoteAddress) {
 			r.provider.UpdateRemoteAddress(configuration.Id, remoteIP)
+			// Keep the loop's local stream pointer in sync so the next pushEvent's
+			// Equals check can short-circuit instead of triggering a redundant DB write.
+			stream.RemoteAddress = remoteIP
 		}
 	}
 
