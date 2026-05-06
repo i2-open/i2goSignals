@@ -42,6 +42,10 @@ type EventRouter interface {
 	// to the target stream's pending list, bypassing StreamEventMatch. Operational events are point-to-point
 	// SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify, stream-updated).
 	SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error)
+	// GenerateVerifyEvent creates an SSF verification SET scoped to the target stream's iss/aud,
+	// persists it as an operational event, and submits it to the target stream's pending list.
+	// Used by both the operator-triggered API handler and the push-side T3 idle keepalive.
+	GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
 	Shutdown()
@@ -847,6 +851,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 
 	recoveryCfg := LoadRecoveryConfig()
 	statusFetcher := r.pushStatusFetcher()
+	idleVerifyInterval := LoadIdleVerifyInterval()
 
 	// T2 pre-flight: check the receiver's reported state before draining the buffer. If the
 	// receiver self-paused or self-disabled while we were not the lease holder, we should not
@@ -862,6 +867,17 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 
 	backfillTicker := time.NewTicker(r.backfillInterval)
 	defer backfillTicker.Stop()
+
+	// T3 idle keepalive timer. A non-positive interval disables the feature: idleC stays nil,
+	// which means the corresponding select arm is never chosen. The timer is local to this
+	// lease-holding goroutine (C1) — failover resets the idle clock to "now" naturally.
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if idleVerifyInterval > 0 {
+		idleTimer = time.NewTimer(idleVerifyInterval)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
 
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
@@ -879,13 +895,15 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			rsaKey, kid = newKey, newKid
 
 			if cls.Class == goSetPush.ClassAccepted {
+				// R1: reset T3 idle timer on every successful push, including verify itself.
+				resetIdleTimer(idleTimer, idleVerifyInterval)
 				continue
 			}
 
 			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
 			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
 			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker)
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idleTimer, idleVerifyInterval)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -898,6 +916,23 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		case <-wakeup:
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
+		case <-idleC:
+			// T3 fired: no successful push in the last idleVerifyInterval. Generate a real
+			// verify event via the operational-event direct-submission path. The new JTI lands
+			// in eventBuf and the next iteration of this loop will pull it from `out` and push
+			// it via the normal path. If the push succeeds, R1 resets the timer above; if it
+			// fails, the failure dispatch stops the timer for the duration of recovery.
+			//
+			// Pre-emptively reset here so we don't fire again while the verify push is in
+			// flight; the success-path reset is idempotent.
+			if _, err := r.GenerateVerifyEvent(sid, ""); err != nil {
+				eventLogger.Warn("PUSH-SRV: T3 idle verify generation failed", "sid", sid, "error", err)
+			} else {
+				eventLogger.Debug("PUSH-SRV: T3 idle verify event generated", "sid", sid, "interval", idleVerifyInterval)
+			}
+			if idleTimer != nil {
+				idleTimer.Reset(idleVerifyInterval)
+			}
 		}
 	}
 }
@@ -954,6 +989,8 @@ func (r *router) dispatchPushFailure(
 	fetcher StatusFetcher,
 	cfg RecoveryConfig,
 	backfillTicker *time.Ticker,
+	idleTimer *time.Timer,
+	idleVerifyInterval time.Duration,
 ) (RecoveryOutcome, bool) {
 	sid := stream.StreamConfiguration.Id
 
@@ -1010,13 +1047,21 @@ func (r *router) dispatchPushFailure(
 	}
 	r.updateStream(stream, model.StreamStatePause, enterReason)
 
-	// Pause backfill while we are in recovery — no point pulling more JTIs from the provider
-	// just to re-classify the same failure. Restart on Resumed.
+	// Pause backfill and the T3 idle timer while we are in recovery — no point pulling more
+	// JTIs from the provider just to re-classify the same failure, and no point synthesizing
+	// idle-keepalive verify events when we are already actively probing /status. Restart both
+	// on Resumed; failure paths leave them stopped (the goroutine exits).
 	backfillTicker.Stop()
+	if idleTimer != nil {
+		idleTimer.Stop()
+	}
 	outcome := r.recoveryLoop(ctx, stream, mode, fetcher, cfg)
 	switch outcome {
 	case RecoveryOutcomeResumed:
 		backfillTicker.Reset(r.backfillInterval)
+		if idleTimer != nil && idleVerifyInterval > 0 {
+			idleTimer.Reset(idleVerifyInterval)
+		}
 		return outcome, false
 	case RecoveryOutcomeDisabled:
 		return outcome, true

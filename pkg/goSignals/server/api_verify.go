@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
-	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 )
 
@@ -61,17 +60,20 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		return
 	}
 
-	// Check if the stream exists
+	// Existence check up front so we can return a clean 404 rather than a generic 500. The
+	// shared GenerateVerifyEvent helper does its own lookup internally; the duplicate read here
+	// is the cost of mapping "not found" to the correct HTTP status without coupling the helper
+	// to HTTP semantics.
 	stream, err := sa.GetProvider().GetStream(payload.StreamId)
 	if err != nil || stream == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	// Create the verification event scoped to the requested stream's iss/aud and submit it directly
-	// via the operational-event path (point-to-point, bypasses StreamEventMatch).
-	event := events.CreateVerifyEvent(payload.StreamId, payload.State, stream.Iss, stream.Aud)
-	if _, err := sa.GetEventRouter().SubmitOperationalEvent(payload.StreamId, event, ""); err != nil {
+	// Generation, persistence (Operational=true), and direct submission to the target stream's
+	// pending list all live in eventRouter.GenerateVerifyEvent — the same code path the push
+	// idle-keepalive timer (T3) uses.
+	if _, err := sa.GetEventRouter().GenerateVerifyEvent(payload.StreamId, payload.State); err != nil {
 		verifyLog.Error("Error submitting verify event", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
