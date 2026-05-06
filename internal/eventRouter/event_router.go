@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptrace"
@@ -800,7 +799,10 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 	}
 }
 
-// runPushLoop handles the event push loop for a given stream, including lease renewal and event processing.
+// runPushLoop handles the event push loop for a given stream, including lease renewal, T2
+// pre-flight, T1 reactive recovery on push failures, and event processing. Returns true if the
+// caller should attempt to re-acquire the lease (e.g. lease lost), false if the lifecycle
+// goroutine should exit (buffer closed, stream disabled, shutdown).
 func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer, fencingToken int64) bool {
 	sid := stream.StreamConfiguration.Id
 	eventLogger.Info("PUSH-SRV: Starting transmission loop", "sid", sid)
@@ -843,6 +845,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		}
 	}()
 
+	recoveryCfg := LoadRecoveryConfig()
+	statusFetcher := r.pushStatusFetcher()
+
+	// T2 pre-flight: check the receiver's reported state before draining the buffer. If the
+	// receiver self-paused or self-disabled while we were not the lease holder, we should not
+	// attempt the first push; that wastes a JTI on a known failure and produces noise in logs.
+	// Transport/auth/decode errors are tolerated — they will surface immediately on the first
+	// push attempt and dispatch to T1 with the right RecoveryMode.
+	switch outcome := r.preflightCheckStatus(heartbeatCtx, stream, statusFetcher, recoveryCfg); outcome {
+	case RecoveryOutcomeDisabled:
+		return false
+	case RecoveryOutcomeContextDone:
+		return true
+	}
+
 	backfillTicker := time.NewTicker(r.backfillInterval)
 	defer backfillTicker.Stop()
 
@@ -858,10 +875,23 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 				return false // Buffer closed, stop entirely
 			}
 			jti := v.(string)
-			r.prepareAndSendEvent(jti, stream, rsaKey, kid, fencingToken)
-			if stream.Status != model.StreamStateEnabled {
-				eventLogger.Info("PUSH-SRV is no longer active. PushHandler exiting.", "sid", stream.Id.Hex())
-				return false
+			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, rsaKey, kid, fencingToken)
+			rsaKey, kid = newKey, newKid
+
+			if cls.Class == goSetPush.ClassAccepted {
+				continue
+			}
+
+			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
+			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
+			// the recovery sub-loop doesn't have to know about either.
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker)
+			if exit {
+				return recoverOutcome == RecoveryOutcomeContextDone
+			}
+			// Resumed — refresh signing key in case the issuer rotated while we were paused.
+			if stream.GetRouteMode() == model.RouteModePublish {
+				rsaKey, kid = r.checkAndLoadKey(sid, stream.Iss)
 			}
 		case <-backfillTicker.C:
 			r.backfillPushBuffer(sid, eventBuf)
@@ -869,6 +899,129 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
 		}
+	}
+}
+
+// preflightCheckStatus performs the T2 pre-flight /status fetch right after lease acquisition.
+// Possible outcomes returned to the caller:
+//   - RecoveryOutcomeResumed (fall through and start delivering): receiver reports enabled, or
+//     the fetch failed (we tolerate — first push will surface the real failure).
+//   - RecoveryOutcomeDisabled (return false from runPushLoop): receiver reports disabled, OR
+//     receiver was paused and recoveryLoop later observed disabled.
+//   - RecoveryOutcomeContextDone (return true from runPushLoop): heartbeat ctx cancelled while
+//     waiting for receiver to un-pause.
+func (r *router) preflightCheckStatus(ctx context.Context, stream *model.StreamStateRecord, fetcher StatusFetcher, cfg RecoveryConfig) RecoveryOutcome {
+	sid := stream.StreamConfiguration.Id
+	status, err := fetcher(ctx, stream)
+	if err != nil {
+		eventLogger.Debug("PUSH-SRV: T2 pre-flight status check failed; proceeding with delivery",
+			"sid", sid, "error", err)
+		return RecoveryOutcomeResumed
+	}
+	if status == nil {
+		return RecoveryOutcomeResumed
+	}
+	switch status.Status {
+	case model.StreamStateEnabled:
+		eventLogger.Debug("PUSH-SRV: T2 pre-flight: receiver enabled", "sid", sid)
+		return RecoveryOutcomeResumed
+	case model.StreamStateDisable:
+		reason := fmt.Sprintf("PUSH-SRV: T2 pre-flight: receiver disabled: %s", status.Reason)
+		r.updateStream(stream, model.StreamStateDisable, reason)
+		return RecoveryOutcomeDisabled
+	case model.StreamStatePause:
+		reason := fmt.Sprintf("PUSH-SRV: T2 pre-flight: receiver paused: %s", status.Reason)
+		r.updateStream(stream, model.StreamStatePause, reason)
+		return r.recoveryLoop(ctx, stream, RecoveryModePausedByRemote, fetcher, cfg)
+	}
+	// Unknown status string: be permissive and proceed.
+	return RecoveryOutcomeResumed
+}
+
+// dispatchPushFailure reacts to a non-Accepted push Classification. It either:
+//   - sleeps the receiver-suggested Retry-After (rate-limited), then returns Resumed (no exit);
+//   - disables the stream and returns (Disabled, true);
+//   - dispatches into recoveryLoop with the appropriate RecoveryMode and propagates its outcome,
+//     stopping/restarting the backfill ticker around the call.
+//
+// Returns (outcome, shouldExit). When shouldExit is true the caller's runPushLoop must return
+// (true if outcome == ContextDone for re-acquire, false otherwise for terminal exit).
+func (r *router) dispatchPushFailure(
+	ctx context.Context,
+	stream *model.StreamStateRecord,
+	jti string,
+	cls goSetPush.Classification,
+	fetcher StatusFetcher,
+	cfg RecoveryConfig,
+	backfillTicker *time.Ticker,
+) (RecoveryOutcome, bool) {
+	sid := stream.StreamConfiguration.Id
+
+	switch cls.Class {
+	case goSetPush.ClassRateLimited:
+		// 429 (or 503 + Retry-After) is peer back-pressure, not a state change. Honor the
+		// suggested delay and continue. JTI stays unacked; backfill will re-pull it.
+		delay := cls.NextDelay
+		if delay <= 0 {
+			delay = cfg.BaseDelay
+		}
+		eventLogger.Info("PUSH-SRV: rate-limited, honoring Retry-After", "sid", sid, "jti", jti, "delay", delay)
+		if !cfg.Sleep(ctx, delay) {
+			return RecoveryOutcomeContextDone, true
+		}
+		return RecoveryOutcomeResumed, false
+
+	case goSetPush.ClassForbidden:
+		reason := fmt.Sprintf("PUSH-SRV: 403 Forbidden on jti=%s", jti)
+		r.updateStream(stream, model.StreamStateDisable, reason)
+		return RecoveryOutcomeDisabled, true
+
+	case goSetPush.ClassRFC8935Error:
+		// Caller already retried jws_signature_failed once via the key-flush sub-policy. Any
+		// RFC8935 §2.4 error reaching us here is deterministic per-SET — disable.
+		reason := fmt.Sprintf("PUSH-SRV: RFC8935 %s on jti=%s: %s", cls.RFC8935ErrCode, jti, cls.RFC8935Description)
+		r.updateStream(stream, model.StreamStateDisable, reason)
+		return RecoveryOutcomeDisabled, true
+
+	case goSetPush.ClassWeirdClientError:
+		reason := fmt.Sprintf("PUSH-SRV: weird 4xx on jti=%s", jti)
+		r.updateStream(stream, model.StreamStateDisable, reason)
+		return RecoveryOutcomeDisabled, true
+
+	case goSetPush.ClassWeirdResponse:
+		reason := fmt.Sprintf("PUSH-SRV: weird response on jti=%s", jti)
+		r.updateStream(stream, model.StreamStateDisable, reason)
+		return RecoveryOutcomeDisabled, true
+	}
+
+	// Remaining classes route into recoveryLoop with the appropriate mode.
+	var mode RecoveryMode
+	var enterReason string
+	switch cls.Class {
+	case goSetPush.ClassUnauthorized:
+		mode = RecoveryModeAuthBounded
+		enterReason = fmt.Sprintf("PUSH-SRV: 401 on jti=%s; entering auth-bounded recovery", jti)
+	case goSetPush.ClassTransport:
+		mode = RecoveryModeTransportBackoff
+		enterReason = fmt.Sprintf("PUSH-SRV: transport failure on jti=%s; entering transport-backoff recovery", jti)
+	default: // ClassServerError
+		mode = RecoveryModeTransportBackoff
+		enterReason = fmt.Sprintf("PUSH-SRV: 5xx on jti=%s; entering transport-backoff recovery", jti)
+	}
+	r.updateStream(stream, model.StreamStatePause, enterReason)
+
+	// Pause backfill while we are in recovery — no point pulling more JTIs from the provider
+	// just to re-classify the same failure. Restart on Resumed.
+	backfillTicker.Stop()
+	outcome := r.recoveryLoop(ctx, stream, mode, fetcher, cfg)
+	switch outcome {
+	case RecoveryOutcomeResumed:
+		backfillTicker.Reset(r.backfillInterval)
+		return outcome, false
+	case RecoveryOutcomeDisabled:
+		return outcome, true
+	default: // ContextDone
+		return outcome, true
 	}
 }
 
@@ -888,25 +1041,67 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 	}
 }
 
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) {
+// prepareAndSendEvent fetches the event, signs+pushes once, and acks if the receiver returned 202.
+// Returns the final Classification along with the (possibly-updated) signing key and kid — the
+// jws_signature_failed sub-policy may invalidate the cached key and reload, so the caller's
+// subsequent pushes should reuse what we hand back.
+//
+// Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled by
+// the next backfill iteration once the caller has resolved any required recovery.
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) (goSetPush.Classification, *rsa.PrivateKey, string) {
 	eventRecord := r.provider.GetEventRecord(jti)
-	// Get the event
-	if eventRecord != nil {
+	if eventRecord == nil {
+		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
+		// success so the caller advances rather than entering recovery for a stale JTI.
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+	}
 
-		delivered := r.pushEvent(config, eventRecord, rsaKey, kid)
-		if delivered {
-			err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken)
-			if err != nil {
-				eventLogger.Error("PUSH-SRV: Error acking event", "sid", config.StreamConfiguration.Id, "jti", jti, "error", err)
-			}
-			r.IncrementCounter(config, &eventRecord.Event, false)
+	cls := r.pushEvent(config, eventRecord, rsaKey, kid)
+
+	// RFC8935 §2.4 jws_signature_failed sub-policy (4a-i++):
+	// invalidate the cached key, reload from the provider (handles key rotation race), re-sign and
+	// retry exactly once. Only applicable when we are signing locally (publish route). If the retry
+	// also fails, the second classification flows through and the normal disable path runs.
+	if cls.Class == goSetPush.ClassRFC8935Error &&
+		cls.RFC8935ErrCode == goSetPush.ErrJwsSignatureFailed &&
+		config.GetRouteMode() != model.RouteModeForward {
+		eventLogger.Warn("PUSH-SRV: jws_signature_failed; flushing key cache and retrying once",
+			"sid", config.StreamConfiguration.Id,
+			"jti", jti,
+			"issuer", config.StreamConfiguration.Iss,
+		)
+		r.invalidateIssuerKey(config.StreamConfiguration.Iss)
+		newKey, newKid := r.checkAndLoadKey(config.StreamConfiguration.Id, config.StreamConfiguration.Iss)
+		if newKey != nil {
+			cls = r.pushEvent(config, eventRecord, newKey, newKid)
+			rsaKey = newKey
+			kid = newKid
 		}
 	}
+
+	if cls.Class == goSetPush.ClassAccepted {
+		if err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking event", "sid", config.StreamConfiguration.Id, "jti", jti, "error", err)
+		}
+		r.IncrementCounter(config, &eventRecord.Event, false)
+		return cls, rsaKey, kid
+	}
+
+	eventLogger.Warn("PUSH-SRV: push failed",
+		"sid", config.StreamConfiguration.Id,
+		"jti", jti,
+		"errClass", cls.Class.String(),
+		"rfc8935ErrCode", cls.RFC8935ErrCode,
+		"retryAfter", cls.NextDelay,
+	)
+	return cls, rsaKey, kid
 }
 
-// pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events
-// Note: Moved from the api_transmitter.go in server package
-func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEventRecord, key *rsa.PrivateKey, kid string) bool {
+// pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events.
+// It signs (or forwards), pushes once, and returns the goSetPush.Classification of the receiver's
+// response. State transitions and retry decisions are the caller's responsibility — pushEvent itself
+// has no recovery side effects beyond capturing the peer's resolved address on a successful push.
+func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEventRecord, key *rsa.PrivateKey, kid string) goSetPush.Classification {
 	configuration := stream.StreamConfiguration
 	pushConfig := configuration.Delivery.PushTransmitMethod
 
@@ -942,19 +1137,10 @@ func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEvent
 		Authorization: pushConfig.AuthorizationHeader,
 	})
 
-	if !result.Accepted {
-		if result.Err != nil {
-			var deliveryErr *goSetPush.DeliveryErr
-			if errors.As(result.Err, &deliveryErr) {
-				errMsg := fmt.Sprintf("PUSH-SRV[%s] %s", deliveryErr.ErrCode, deliveryErr.Description)
-				eventLogger.Error("PUSH-SRV: Push failed", "sid", configuration.Id, "code", deliveryErr.ErrCode, "desc", deliveryErr.Description)
-				r.provider.UpdateStreamStatus(configuration.Id, model.StreamStatePause, errMsg)
-			}
-		}
-		return false
-	}
+	cls := goSetPush.ClassifyResult(result)
 
-	// Persist the resolved peer address when it changes
+	// Persist the resolved peer address whenever the connection got far enough to give us one,
+	// regardless of the SET acceptance outcome. Useful for diagnosing recovery against the same peer.
 	if capturedAddr != "" {
 		endpointURL, _ := url.Parse(pushConfig.EndpointUrl)
 		scheme := "http"
@@ -965,11 +1151,22 @@ func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEvent
 		if !remoteIP.Equals(stream.RemoteAddress) {
 			r.provider.UpdateRemoteAddress(configuration.Id, remoteIP)
 		}
-		eventLogger.Debug("PUSH-SRV: Remote address information", "sid", configuration.Id, "old", stream.RemoteAddress.String(), "new", remoteIP.String())
 	}
 
-	eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
-	return true
+	if cls.Class == goSetPush.ClassAccepted {
+		eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
+	}
+	return cls
+}
+
+// invalidateIssuerKey drops the cached private key + kid for the given issuer so the next
+// checkAndLoadKey call re-fetches from the provider. Used by the jws_signature_failed
+// single-shot retry path to recover from key rotation that happened after the cache was warmed.
+func (r *router) invalidateIssuerKey(issuer string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.issuerKeys, issuer)
+	delete(r.issuerKids, issuer)
 }
 
 /*
