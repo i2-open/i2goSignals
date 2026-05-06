@@ -256,6 +256,9 @@ func (m *MongoProvider) CheckWithContext(ctx context.Context) error {
 }
 
 func (m *MongoProvider) ResetDb(initialize bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.ssefDb == nil {
 		return errors.New("database not initialized")
 	}
@@ -267,10 +270,6 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	m.dbInit = false
 
 	if initialize {
-		err = m.ssefDb.Drop(context.TODO())
-		if err != nil {
-			pLog.Error("Error dropping database during re-initialization", "error", err)
-		}
 		m.pendingCol = nil
 		m.ssefDb = nil
 		m.eventCol = nil
