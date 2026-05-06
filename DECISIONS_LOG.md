@@ -1,5 +1,34 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] Stream `remote_address` field on StreamStateRecord
+
+### Change
+`StreamStateRecord` now carries a `*RemoteIP` (`pkg/ssfModels`) populated for all four
+delivery modes — `ReceivePush`, `DeliveryPoll` (inbound, from `r.RemoteAddr` and
+`X-Forwarded-For`/`X-Real-IP`), and `DeliveryPush`, `ReceivePoll` (outbound, captured
+via `httptrace.WithClientTrace` on the resolved TCP peer). It surfaces in stream
+state JSON as `remote_address` with `protocol`, `ip`, and `forwarded` sub-fields,
+omitted on streams that have never had a successful connection.
+
+### Invariants
+- Capture happens only after authorization succeeds — unauthenticated probes never
+  pollute the field.
+- `X-Forwarded-For` / `X-Real-IP` are stored as informational metadata only; no auth
+  or trust path consumes them.
+- Mongo persistence uses a `$set` scoped to `remote_address`, so it does not race
+  with concurrent `UpdateStreamStatus` writes on the same document.
+- `pushEvent` and `runPollLoop` mirror the persisted value back into their local
+  stream pointer after a successful update so the only-when-changed guard on the
+  next iteration short-circuits instead of issuing redundant DB writes (see
+  regression #27).
+
+### Regression Verification
+- `go test ./pkg/ssfModels/...`
+- `go test ./internal/eventRouter/... -run TestPushEvent_`
+- `go test ./pkg/goSignals/server/test/... -run TestRemoteAddressSuite`
+
+---
+
 ## [2026-04-10] SPIFFE Dual-Validation Strategy (Resilient MTLS)
 
 ### Problem
