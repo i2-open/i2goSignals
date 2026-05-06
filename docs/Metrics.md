@@ -20,6 +20,18 @@ These metrics track the flow of Security Event Tokens (SETs) and the state of ev
 | `goSignals_router_stream_start_date_seconds` | Gauge | `stream_id` | Timestamp when the stream was started (Unix seconds). |
 | `goSignals_router_stream_modified_at_seconds` | Gauge | `stream_id` | Timestamp when the stream was last modified (Unix seconds). |
 
+## Push Delivery Metrics
+
+These metrics surface the push state machine described in `docs/operations.md`. They give operators
+visibility into receiver health, recovery activity, and the T3 idle keepalive feature.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `goSignals_router_push_failures_total` | Counter | `stream_id`, `err_class` | Push delivery failures, labeled by `FailureClass` (`Transport`, `ServerError`, `Unauthorized`, `Forbidden`, `RateLimited`, `RFC8935Error`, `WeirdClientError`, `WeirdResponse`). |
+| `goSignals_router_push_state_transitions_total` | Counter | `stream_id`, `from`, `to` | One increment per actual stream state change (`enabled`/`paused`/`disabled`). Mirrors the `PUSH-SRV: state transition` audit log. |
+| `goSignals_router_push_recovery_duration_seconds` | Histogram | `stream_id` | Wall-time elapsed inside `recoveryLoop`, from entry to exit. Long-tail buckets up to 6h to surface streams stuck in transport recovery. |
+| `goSignals_router_push_idle_verify_total` | Counter | `stream_id`, `outcome` | Verify-event push outcomes (`acked` or `failed`). Dominated in production by T3 idle keepalives; operator-triggered verifies also pass through. |
+
 ## HTTP Metrics
 
 | Metric Name | Type | Labels | Description |

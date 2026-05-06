@@ -26,6 +26,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -90,6 +91,27 @@ type statsTracker interface {
 	TrackLeaseAcquisition(resource string, success bool)
 	IncLeasesHeld()
 	DecLeasesHeld()
+
+	// RecordPushFailure increments push_failures_total{sid, errClass}. Called from the
+	// failure path in prepareAndSendEvent for every non-Accepted push response. errClass
+	// values come from goSetPush.FailureClass.String().
+	RecordPushFailure(sid, errClass string)
+
+	// RecordStateTransition increments push_state_transitions_total{sid, from, to}. Called
+	// from updateStream whenever the persisted status actually changes (no-op suppressions
+	// are not counted), so the counter exactly mirrors the audit log.
+	RecordStateTransition(sid, from, to string)
+
+	// ObservePushRecoveryDuration observes push_recovery_duration_seconds{sid}. Called from
+	// logRecoveryResolved with the elapsed wall time from recovery entry to exit (any outcome).
+	ObservePushRecoveryDuration(sid string, seconds float64)
+
+	// RecordIdleVerifyOutcome increments push_idle_verify_total{sid, outcome}. Outcome is
+	// "acked" when the verify-event push receives 202, or "failed" otherwise. This counts any
+	// push of an operational verification SET, which in practice is dominated by T3 idle
+	// keepalives — operator-triggered verifications also flow through the same path and
+	// contribute to the same counter (rare in production).
+	RecordIdleVerifyOutcome(sid, outcome string)
 }
 
 func (r *router) GetPushStreamCnt() float64 {
@@ -1124,22 +1146,50 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		}
 	}
 
+	sid := config.StreamConfiguration.Id
+	isVerifyPush := isOperationalVerify(eventRecord)
+
 	if cls.Class == goSetPush.ClassAccepted {
-		if err := r.provider.AckEvent(jti, config.StreamConfiguration.Id, fencingToken); err != nil {
-			eventLogger.Error("PUSH-SRV: Error acking event", "sid", config.StreamConfiguration.Id, "jti", jti, "error", err)
+		if err := r.provider.AckEvent(jti, sid, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking event", "sid", sid, "jti", jti, "error", err)
 		}
 		r.IncrementCounter(config, &eventRecord.Event, false)
+		if isVerifyPush && r.stats != nil {
+			r.stats.RecordIdleVerifyOutcome(sid, "acked")
+		}
 		return cls, rsaKey, kid
 	}
 
 	eventLogger.Warn("PUSH-SRV: push failed",
-		"sid", config.StreamConfiguration.Id,
+		"sid", sid,
 		"jti", jti,
 		"errClass", cls.Class.String(),
 		"rfc8935ErrCode", cls.RFC8935ErrCode,
 		"retryAfter", cls.NextDelay,
 	)
+	if r.stats != nil {
+		r.stats.RecordPushFailure(sid, cls.Class.String())
+		if isVerifyPush {
+			r.stats.RecordIdleVerifyOutcome(sid, "failed")
+		}
+	}
 	return cls, rsaKey, kid
+}
+
+// isOperationalVerify returns true when the event was both submitted via the operational-event
+// path (slice 2) AND carries the SSF verification event-type. Used at push time to attribute
+// the outcome to push_idle_verify_total{outcome=acked|failed}. In production this is dominated
+// by T3 idle keepalives; operator-triggered verifies (rare) also pass through this branch.
+func isOperationalVerify(rec *model.AgEventRecord) bool {
+	if rec == nil || !rec.Operational {
+		return false
+	}
+	for _, t := range rec.Types {
+		if t == events.VerificationEventUri {
+			return true
+		}
+	}
+	return false
 }
 
 // pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events.

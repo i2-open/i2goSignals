@@ -334,7 +334,10 @@ func nextBackoff(current time.Duration, factor float64, maxDelay time.Duration) 
 	return next
 }
 
-// logRecoveryResolved emits the structured INFO log when recoveryLoop exits.
+// logRecoveryResolved emits the structured INFO log when recoveryLoop exits and observes the
+// elapsed duration into push_recovery_duration_seconds. Both the log and the histogram fire
+// regardless of outcome — operators dashboarding "stream stuck in recovery" want to see the
+// long tail (Disabled cap-out at 6h is the primary alerting signal).
 func (r *router) logRecoveryResolved(sid string, outcome RecoveryOutcome, mode RecoveryMode, elapsed time.Duration) {
 	eventLogger.Info("PUSH-SRV: recovery resolved",
 		"sid", sid,
@@ -342,4 +345,7 @@ func (r *router) logRecoveryResolved(sid string, outcome RecoveryOutcome, mode R
 		"mode", mode.String(),
 		"elapsed", elapsed,
 	)
+	if r.stats != nil {
+		r.stats.ObservePushRecoveryDuration(sid, elapsed.Seconds())
+	}
 }
