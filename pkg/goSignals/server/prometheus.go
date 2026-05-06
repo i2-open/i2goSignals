@@ -21,6 +21,14 @@ type PrometheusHandler struct {
 	ClusterLeasesHeld      prometheus.Gauge
 	ClusterLeaseAcq        *prometheus.CounterVec
 	ClusterNodes           prometheus.GaugeFunc
+
+	// Push state-machine instrumentation (PRD #28). Labels are intentionally low-cardinality:
+	// stream_id is bounded by the number of configured streams, errClass / from / to / outcome
+	// are bounded by enum values defined in goSetPush + push state names + idle outcomes.
+	PushFailures           *prometheus.CounterVec
+	PushStateTransitions   *prometheus.CounterVec
+	PushRecoveryDuration   *prometheus.HistogramVec
+	PushIdleVerifyOutcomes *prometheus.CounterVec
 }
 
 type streamCollector struct {
@@ -180,6 +188,40 @@ func (h *PrometheusHandler) DecLeasesHeld() {
 	}
 }
 
+// RecordPushFailure satisfies the eventRouter statsTracker contract for push delivery failures.
+// errClass is the FailureClass.String() label from goSetPush (e.g. "Forbidden", "Transport").
+func (h *PrometheusHandler) RecordPushFailure(sid, errClass string) {
+	if h != nil && h.PushFailures != nil {
+		h.PushFailures.WithLabelValues(sid, errClass).Inc()
+	}
+}
+
+// RecordStateTransition is called once per actual stream state change (no-op transitions are
+// suppressed at the call site in updateStream). Mirrors the audit log line emitted there.
+func (h *PrometheusHandler) RecordStateTransition(sid, from, to string) {
+	if h != nil && h.PushStateTransitions != nil {
+		h.PushStateTransitions.WithLabelValues(sid, from, to).Inc()
+	}
+}
+
+// ObservePushRecoveryDuration records the wall-time elapsed between recovery entry and exit
+// (any outcome). Bucket boundaries lean toward the long tail because the most actionable
+// signal is "this stream sat in recovery for hours" rather than sub-second flicker.
+func (h *PrometheusHandler) ObservePushRecoveryDuration(sid string, seconds float64) {
+	if h != nil && h.PushRecoveryDuration != nil {
+		h.PushRecoveryDuration.WithLabelValues(sid).Observe(seconds)
+	}
+}
+
+// RecordIdleVerifyOutcome counts verify-event push outcomes. Outcome is "acked" or "failed".
+// In production this counter is dominated by T3 idle keepalives; operator-triggered verifies
+// also pass through and contribute (rare).
+func (h *PrometheusHandler) RecordIdleVerifyOutcome(sid, outcome string) {
+	if h != nil && h.PushIdleVerifyOutcomes != nil {
+		h.PushIdleVerifyOutcomes.WithLabelValues(sid, outcome).Inc()
+	}
+}
+
 func (sa *SignalsApplication) InitializePrometheus() {
 	sa.InitializePrometheusWithRegisterer(prometheus.DefaultRegisterer)
 }
@@ -272,6 +314,46 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 				count, _ := sa.Provider.GetActiveNodeCount()
 				return float64(count)
 			}),
+		PushFailures: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "push_failures_total",
+				Help:      "Push delivery failures, labeled by stream and FailureClass.",
+			},
+			[]string{"stream_id", "err_class"},
+		),
+		PushStateTransitions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "push_state_transitions_total",
+				Help:      "Push stream state transitions, mirroring the audit log.",
+			},
+			[]string{"stream_id", "from", "to"},
+		),
+		PushRecoveryDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "push_recovery_duration_seconds",
+				Help:      "Wall-time elapsed inside recoveryLoop, from entry to exit (any outcome).",
+				// Long-tail buckets — the operationally interesting question is "how long did
+				// this stream sit in recovery", not sub-second flicker. Boundaries cover the
+				// 6h transport cap and the 10×15s auth cap with reasonable resolution between.
+				Buckets: []float64{1, 5, 30, 60, 300, 900, 3600, 21600},
+			},
+			[]string{"stream_id"},
+		),
+		PushIdleVerifyOutcomes: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "push_idle_verify_total",
+				Help:      "Verify-event push outcomes (T3 idle keepalive + operator-triggered).",
+			},
+			[]string{"stream_id", "outcome"},
+		),
 	}
 
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
@@ -286,6 +368,10 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	registerTo(reg, prometheusHandler.ClusterLeasesHeld)
 	registerTo(reg, prometheusHandler.ClusterLeaseAcq)
 	registerTo(reg, prometheusHandler.ClusterNodes)
+	registerTo(reg, prometheusHandler.PushFailures)
+	registerTo(reg, prometheusHandler.PushStateTransitions)
+	registerTo(reg, prometheusHandler.PushRecoveryDuration)
+	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)
 	registerTo(reg, newStreamCollector(sa))
 	registerTo(reg, newClusterCollector(sa))
 

@@ -39,4 +39,7 @@ func (r *router) updateStream(stream *model.StreamStateRecord, newState string, 
 		"to", newState,
 		"reason", reason,
 	)
+	if r.stats != nil {
+		r.stats.RecordStateTransition(sid, from, newState)
+	}
 }
