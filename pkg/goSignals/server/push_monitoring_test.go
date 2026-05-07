@@ -83,7 +83,7 @@ func TestClientPushStream_Verification(t *testing.T) {
 
 	provider, _ := dbProviders.OpenProvider("", "test_verification")
 	pcs := &ReceiverPushStream{
-		sa:          &SignalsApplication{Provider: provider},
+		sa:          newTestApplication(provider),
 		stream:      streamState,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -158,7 +158,7 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 
 	provider, _ := dbProviders.OpenProvider("", "test_fallback")
 	pcs := &ReceiverPushStream{
-		sa:        &SignalsApplication{Provider: provider},
+		sa:        newTestApplication(provider),
 		stream:    &model.StreamStateRecord{StreamConfiguration: streamConfig},
 		statusUrl: statusUrl,
 		active:    true,
@@ -196,7 +196,7 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 	defer cancel()
 
 	rps := &ReceiverPushStream{
-		sa:          &SignalsApplication{Provider: provider},
+		sa:          newTestApplication(provider),
 		stream:      streamState,
 		ctx:         ctx,
 		cancel:      cancel,

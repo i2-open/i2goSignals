@@ -129,17 +129,13 @@ func (b *BaseProvider) GetStreamService() *services.StreamService {
 	return b.streamService
 }
 
-func (b *BaseProvider) GetEventService() *services.EventService {
-	return b.eventService
-}
-
-func (b *BaseProvider) GetClientService() *services.ClientService {
-	return b.clientService
-}
-
-func (b *BaseProvider) GetServerService() *services.ServerService {
-	return b.serverService
-}
+// Per-service accessors used by the SignalsApplication / SsfApplication
+// service-source interface assertion. After PRD #39 PR4, callers in
+// pkg/goSignals/server depend on these directly instead of going through
+// the BaseProvider façade methods below.
+func (b *BaseProvider) GetEventService() *services.EventService   { return b.eventService }
+func (b *BaseProvider) GetClientService() *services.ClientService { return b.clientService }
+func (b *BaseProvider) GetServerService() *services.ServerService { return b.serverService }
 
 func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
 	return b.serverDAO

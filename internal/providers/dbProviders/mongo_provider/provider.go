@@ -2,23 +2,16 @@ package mongo_provider
 
 import (
 	"context"
-	"crypto/rsa"
-	"encoding/json"
 	"errors"
-	"net/url"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -523,187 +516,13 @@ func (m *MongoProvider) Close() error {
 	return nil
 }
 
-// getBaseProvider returns the embedded BaseProvider with proper RLock protection
-func (m *MongoProvider) getBaseProvider() *common.BaseProvider {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.BaseProvider
-}
-
-// DbProviderInterface delegation with thread-safety
-
-func (m *MongoProvider) DeleteKeysByName(keyName string) error {
-	return m.getBaseProvider().DeleteKeysByName(keyName)
-}
-
-func (m *MongoProvider) GetPublicJWKS(keyName string) *json.RawMessage {
-	return m.getBaseProvider().GetPublicJWKS(keyName)
-}
-
-func (m *MongoProvider) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
-	return m.getBaseProvider().GetPrivateKey(keyName)
-}
-
-func (m *MongoProvider) GetAuthValidatorPubKey() *keyfunc.JWKS {
-	return m.getBaseProvider().GetAuthValidatorPubKey()
-}
-
-func (m *MongoProvider) GetAuthIssuer() *authUtil.AuthIssuer {
-	return m.getBaseProvider().GetAuthIssuer()
-}
-
-func (m *MongoProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
-	return m.getBaseProvider().GetIssuerJwksForReceiver(sid)
-}
-
-func (m *MongoProvider) CreateKeyPair(keyName string, use string, projectId string) (*rsa.PrivateKey, error) {
-	return m.getBaseProvider().CreateKeyPair(keyName, use, projectId)
-}
-
-func (m *MongoProvider) RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error) {
-	return m.getBaseProvider().RotateKey(keyName, projectId)
-}
-
-func (m *MongoProvider) ListKeyNames() []string {
-	return m.getBaseProvider().ListKeyNames()
-}
-
-func (m *MongoProvider) ListSummaries() ([]interfaces.KeySummary, error) {
-	return m.getBaseProvider().ListSummaries()
-}
-
-func (m *MongoProvider) GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, string, error) {
-	return m.getBaseProvider().GetPrivateKeyWithKid(keyName)
-}
-
-func (m *MongoProvider) AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
-	return m.getBaseProvider().AddKey(keyName, use, kid, privateKey, publicKey, projectId)
-}
-
-func (m *MongoProvider) RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse {
-	return m.getBaseProvider().RegisterClient(request, projectId)
-}
-
-func (m *MongoProvider) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
-	return m.getBaseProvider().CreateStream(request, authCtx)
-}
-
-func (m *MongoProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
-	return m.getBaseProvider().UpdateStream(streamId, projectId, configReq)
-}
-
-func (m *MongoProvider) DeleteStream(streamId string) error {
-	return m.getBaseProvider().DeleteStream(streamId)
-}
-
-func (m *MongoProvider) GetStream(id string) (*model.StreamConfiguration, error) {
-	return m.getBaseProvider().GetStream(id)
-}
-
-func (m *MongoProvider) GetStreamState(id string) (*model.StreamStateRecord, error) {
-	return m.getBaseProvider().GetStreamState(id)
-}
-
-func (m *MongoProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
-	m.getBaseProvider().UpdateStreamStatus(streamId, status, errorMsg)
-}
-
-func (m *MongoProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
-	return m.getBaseProvider().GetStatus(streamId)
-}
-
-func (m *MongoProvider) ListStreams() []model.StreamConfiguration {
-	return m.getBaseProvider().ListStreams()
-}
-
-func (m *MongoProvider) GetStateMap() map[string]model.StreamStateRecord {
-	return m.getBaseProvider().GetStateMap()
-}
-
-func (m *MongoProvider) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	return m.getBaseProvider().GetEventIds(streamId, params)
-}
-
-func (m *MongoProvider) GetEvent(jti string) *goSet.SecurityEventToken {
-	return m.getBaseProvider().GetEvent(jti)
-}
-
-func (m *MongoProvider) GetEvents(jtis []string) []*goSet.SecurityEventToken {
-	return m.getBaseProvider().GetEvents(jtis)
-}
-
-func (m *MongoProvider) GetEventRecord(jti string) *model.AgEventRecord {
-	return m.getBaseProvider().GetEventRecord(jti)
-}
-
-func (m *MongoProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
-	return m.getBaseProvider().AckEvent(jtiString, streamId, fencingToken)
-}
-
-func (m *MongoProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
-	return m.getBaseProvider().AddEvent(event, sid, raw)
-}
-
-func (m *MongoProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
-	return m.getBaseProvider().AddOperationalEvent(event, sid, raw)
-}
-
-func (m *MongoProvider) AddEventToStream(jti string, streamId string) error {
-	return m.getBaseProvider().AddEventToStream(jti, streamId)
-}
-
-func (m *MongoProvider) ClearPending(streamId string) error {
-	return m.getBaseProvider().ClearPending(streamId)
-}
-
-func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId string)) {
-	m.getBaseProvider().WatchPending(ctx, callback)
-}
-
-func (m *MongoProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
-	return m.getBaseProvider().ResetEventStream(streamId, jti, resetDate, isStreamEvent)
-}
-
-func (m *MongoProvider) SetBaseUrl(u *url.URL) {
-	m.getBaseProvider().SetBaseUrl(u)
-}
-
-func (m *MongoProvider) CreateServer(ctx context.Context, server *model.Server) error {
-	return m.getBaseProvider().CreateServer(ctx, server)
-}
-
-func (m *MongoProvider) GetServer(ctx context.Context, id string) (*model.Server, error) {
-	return m.getBaseProvider().GetServer(ctx, id)
-}
-
-func (m *MongoProvider) GetServerByAlias(ctx context.Context, alias string) (*model.Server, error) {
-	return m.getBaseProvider().GetServerByAlias(ctx, alias)
-}
-
-func (m *MongoProvider) UpdateServer(ctx context.Context, server *model.Server) error {
-	return m.getBaseProvider().UpdateServer(ctx, server)
-}
-
-func (m *MongoProvider) DeleteServer(ctx context.Context, id string) error {
-	return m.getBaseProvider().DeleteServer(ctx, id)
-}
-
-func (m *MongoProvider) ListServers(ctx context.Context) ([]model.Server, error) {
-	return m.getBaseProvider().ListServers(ctx)
-}
-
-func (m *MongoProvider) GetTokenService() *services.TokenService {
-	return m.getBaseProvider().GetTokenService()
-}
-
-// Helper methods for external key management (used by tests)
-func (m *MongoProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
-	return m.getBaseProvider().StoreExternalKey(keyName, kids, streamID, use, jwksUri)
-}
-
-func (m *MongoProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {
-	return m.getBaseProvider().GetKeyByStreamID(streamID)
-}
+// MongoProvider's wrapper-method tax (~160 methods that delegated to
+// BaseProvider behind an RWMutex-protected swap) is gone. After PR4 phase B
+// (#46) the BaseProvider is no longer swapped — the embedded *BaseProvider
+// promotes its accessors directly. After PR4 phase C (#47) consumers go
+// through the per-service references on SignalsApplication anyway, so the
+// wrappers had no callers. SetBaseUrl, GetAuthIssuer, and the service
+// accessors come from *BaseProvider via embedding.
 
 // TryAcquireOrRenewLease delegates to the embedded MongoCoordinator. The
 // method is retained on MongoProvider so existing call sites keep compiling
