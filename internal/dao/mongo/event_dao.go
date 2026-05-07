@@ -29,25 +29,61 @@ type deliveredDoc struct {
     AckDate    time.Time `bson:"ackDate"`
 }
 
+var errEventNotInit = errors.New("mongo collection not initialized")
+
 type EventDAOMongo struct {
-    eventCol     *mongo.Collection
-    pendingCol   *mongo.Collection
-    deliveredCol *mongo.Collection
+    events    collectionRef
+    pending   collectionRef
+    delivered collectionRef
 }
 
 func NewEventDAO(eventCol, pendingCol, deliveredCol *mongo.Collection) interfaces.EventDAO {
-    return &EventDAOMongo{
-        eventCol:     eventCol,
-        pendingCol:   pendingCol,
-        deliveredCol: deliveredCol,
+    d := &EventDAOMongo{}
+    d.events.set(eventCol)
+    d.pending.set(pendingCol)
+    d.delivered.set(deliveredCol)
+    return d
+}
+
+// SetCollections rebinds all three collections used by EventDAOMongo. The
+// rebind is atomic per-collection; in-flight callers see consistent values
+// for the collection they originally loaded.
+func (d *EventDAOMongo) SetCollections(eventCol, pendingCol, deliveredCol *mongo.Collection) {
+    d.events.set(eventCol)
+    d.pending.set(pendingCol)
+    d.delivered.set(deliveredCol)
+}
+
+func (d *EventDAOMongo) eventColLoad() (*mongo.Collection, error) {
+    c := d.events.load()
+    if c == nil {
+        return nil, errEventNotInit
     }
+    return c, nil
+}
+
+func (d *EventDAOMongo) pendingColLoad() (*mongo.Collection, error) {
+    c := d.pending.load()
+    if c == nil {
+        return nil, errEventNotInit
+    }
+    return c, nil
+}
+
+func (d *EventDAOMongo) deliveredColLoad() (*mongo.Collection, error) {
+    c := d.delivered.load()
+    if c == nil {
+        return nil, errEventNotInit
+    }
+    return c, nil
 }
 
 func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord) error {
-    if d.eventCol == nil {
-        return errors.New("mongo collection not initialized")
+    c, err := d.eventColLoad()
+    if err != nil {
+        return err
     }
-    _, err := d.eventCol.InsertOne(ctx, record)
+    _, err = c.InsertOne(ctx, record)
     if err != nil {
         eLog.Error("Error inserting event", "error", err)
     }
@@ -55,13 +91,14 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord)
 }
 
 func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error) {
-    if d.eventCol == nil {
-        return nil, errors.New("mongo collection not initialized")
+    c, err := d.eventColLoad()
+    if err != nil {
+        return nil, err
     }
     filter := bson.M{"jti": jti}
     var res model.AgEventRecord
-    cursor := d.eventCol.FindOne(ctx, filter)
-    err := cursor.Decode(&res)
+    cursor := c.FindOne(ctx, filter)
+    err = cursor.Decode(&res)
     if err != nil {
         if errors.Is(err, mongo.ErrNoDocuments) {
             return nil, nil
@@ -73,11 +110,12 @@ func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.AgEve
 }
 
 func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error) {
-    if d.eventCol == nil {
-        return nil, errors.New("mongo collection not initialized")
+    c, err := d.eventColLoad()
+    if err != nil {
+        return nil, err
     }
     filter := bson.M{"jti": bson.M{"$in": jtis}}
-    cursor, err := d.eventCol.Find(ctx, filter)
+    cursor, err := c.Find(ctx, filter)
     if err != nil {
         eLog.Error("Error finding events", "error", err)
         return nil, err
@@ -93,8 +131,9 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
 }
 
 func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
-    if d.eventCol == nil {
-        return nil, errors.New("mongo collection not initialized")
+    c, err := d.eventColLoad()
+    if err != nil {
+        return nil, err
     }
     var queryFilter bson.D
     if to != nil {
@@ -111,7 +150,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
     }
 
     opts := options.Find().SetSort(bson.D{bson.E{Key: "jti", Value: 1}})
-    cursor, err := d.eventCol.Find(ctx, queryFilter, opts)
+    cursor, err := c.Find(ctx, queryFilter, opts)
     if err != nil {
         eLog.Error("Error finding events by time range", "error", err)
         return nil, err
@@ -139,21 +178,23 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 }
 
 func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID string) error {
-    if d.pendingCol == nil {
-        return errors.New("mongo collection not initialized")
+    c, err := d.pendingColLoad()
+    if err != nil {
+        return err
     }
     sid, err := ParseObjectID(streamID)
     if err != nil {
         return err
     }
     doc := pendingDoc{Jti: jti, Sid: sid}
-    _, err = d.pendingCol.InsertOne(ctx, &doc)
+    _, err = c.InsertOne(ctx, &doc)
     return err
 }
 
 func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
-    if d.pendingCol == nil {
-        return nil, 0, errors.New("mongo collection not initialized")
+    c, err := d.pendingColLoad()
+    if err != nil {
+        return nil, 0, err
     }
     sid, err := ParseObjectID(streamID)
     if err != nil {
@@ -162,7 +203,7 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 
     filter := bson.M{"sid": sid}
 
-    totalCount, err := d.pendingCol.CountDocuments(ctx, filter, options.Count())
+    totalCount, err := c.CountDocuments(ctx, filter, options.Count())
     if err != nil {
         eLog.Error("Error counting pending events", "error", err)
         return nil, 0, err
@@ -178,7 +219,7 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
     }
 
     var docs []pendingDoc
-    cursor, err := d.pendingCol.Find(ctx, filter, opts)
+    cursor, err := c.Find(ctx, filter, opts)
     if err != nil {
         eLog.Error("Error getting event batch", "error", err)
         return nil, 0, err
@@ -199,8 +240,9 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 }
 
 func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
-    if d.pendingCol == nil {
-        return nil, errors.New("mongo collection not initialized")
+    c, err := d.pendingColLoad()
+    if err != nil {
+        return nil, err
     }
     sid, err := ParseObjectID(streamID)
     if err != nil {
@@ -212,7 +254,7 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
         "sid": sid,
     }
 
-    res := d.pendingCol.FindOne(ctx, filter)
+    res := c.FindOne(ctx, filter)
     if res.Err() != nil {
         if errors.Is(res.Err(), mongo.ErrNoDocuments) {
             return nil, nil
@@ -227,7 +269,7 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
         return nil, err
     }
 
-    _, err = d.pendingCol.DeleteOne(ctx, filter)
+    _, err = c.DeleteOne(ctx, filter)
     if err != nil {
         eLog.Error("Error deleting pending event", "error", err)
         return nil, err
@@ -237,8 +279,9 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 }
 
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
-    if d.pendingCol == nil {
-        return 0, errors.New("mongo collection not initialized")
+    c, err := d.pendingColLoad()
+    if err != nil {
+        return 0, err
     }
     sid, err := ParseObjectID(streamID)
     if err != nil {
@@ -246,7 +289,7 @@ func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID stri
     }
 
     filter := bson.D{bson.E{Key: "sid", Value: sid}}
-    many, err := d.pendingCol.DeleteMany(ctx, filter)
+    many, err := c.DeleteMany(ctx, filter)
     if err != nil {
         eLog.Error("Error clearing pending events", "error", err)
         return 0, err
@@ -255,8 +298,9 @@ func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID stri
 }
 
 func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
-    if d.deliveredCol == nil {
-        return errors.New("mongo collection not initialized")
+    c, err := d.deliveredColLoad()
+    if err != nil {
+        return err
     }
     sid, err := ParseObjectID(event.StreamId)
     if err != nil {
@@ -266,13 +310,14 @@ func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.Del
         pendingDoc: pendingDoc{Jti: event.Jti, Sid: sid},
         AckDate:    ackDate,
     }
-    _, err = d.deliveredCol.InsertOne(ctx, &doc)
+    _, err = c.InsertOne(ctx, &doc)
     return err
 }
 
 func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
-    if d.pendingCol == nil {
-        return errors.New("mongo collection not initialized")
+    c, err := d.pendingColLoad()
+    if err != nil {
+        return err
     }
     matchInserts := bson.D{
         bson.E{
@@ -282,7 +327,7 @@ func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti stri
     }
 
     opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-    eventStream, err := d.pendingCol.Watch(ctx, mongo.Pipeline{matchInserts}, opts)
+    eventStream, err := c.Watch(ctx, mongo.Pipeline{matchInserts}, opts)
     if err != nil {
         eLog.Error("Unable to initialize background event stream", "error", err)
         return err

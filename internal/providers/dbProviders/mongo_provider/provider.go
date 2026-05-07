@@ -187,46 +187,36 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		}
 	}
 
-	// Initialize DAOs
-	streamDAO := mongodao.NewStreamDAO(m.streamCol)
-	eventDAO := mongodao.NewEventDAO(m.eventCol, m.pendingCol, m.deliveredCol)
-	keyDAO := mongodao.NewKeyDAO(m.keyCol)
-	clientDAO := mongodao.NewClientDAO(m.clientCol)
-	serverDAO := mongodao.NewServerDAO(m.serverCol)
-	tokenDAO := mongodao.NewTokenDAO(m.tokenCol)
+    // Rebind the existing DAOs in place. The DAOs are created once by
+    // initBaseProvider with nil collections; here we point them at the
+    // collections from the freshly-(re)connected database. This replaces
+    // the previous "rebuild BaseProvider on every initialize" pattern.
+    m.BaseProvider.GetStreamDAO().(*mongodao.StreamDAOMongo).SetCollection(m.streamCol)
+    m.BaseProvider.GetEventDAO().(*mongodao.EventDAOMongo).SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
+    m.BaseProvider.GetKeyDAO().(*mongodao.KeyDAOMongo).SetCollection(m.keyCol)
+    m.BaseProvider.GetClientDAO().(*mongodao.ClientDAOMongo).SetCollection(m.clientCol)
+    m.BaseProvider.GetServerDAO().(*mongodao.ServerDAOMongo).SetCollection(m.serverCol)
+    m.BaseProvider.GetTokenDAOForRebind().(*mongodao.TokenDAOMongo).SetCollection(m.tokenCol)
 
-	// Initialize Services
-	tokenService := services.NewTokenService(tokenDAO)
-	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
-	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
-	eventService := services.NewEventService(eventDAO)
-	clientService := services.NewClientService(clientDAO, keyService)
-	serverService := services.NewServerService(serverDAO)
+    // Initialize token keys against the existing keyService so a slow
+    // reconnect doesn't leave the AuthIssuer with a nil PublicKey.
+    err = m.BaseProvider.GetKeyService().InitializeTokenKey(ctx, m.DefaultIssuer)
+    if err != nil {
+        return err
+    }
 
-	// Initialize token keys before replacing m.BaseProvider so that a failed
-	// InitializeTokenKey (e.g. context deadline on a slow MongoDB reconnect)
-	// does not leave m.BaseProvider pointing at a new AuthIssuer whose
-	// PublicKey is nil, which would cause all subsequent token validations to
-	// return 503 until the next successful reconnect.
-	err = keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
-	if err != nil {
-		return err
-	}
+    // BaseProvider is constructed once at startup (initBaseProvider). After
+    // a (re)connect we keep the same BaseProvider/services and only rebind
+    // collections (above). This is the swap-on-reconnect kill point.
+    m.dbInit = true
 
-	// Initialize BaseProvider with services (only after keys are ready)
-	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
-		keyService, streamService, eventService, clientService, serverService, tokenService,
-	)
+    // Load receiver streams against the same StreamService instance we
+    // wired into BaseProvider at startup.
+    if m.BaseProvider.GetStreamService().LoadReceiverStreams(ctx) == nil {
+        pLog.Warn("No receiver streams loaded during initialization")
+    }
 
-	m.dbInit = true
-
-	// Load receiver streams
-	if streamService.LoadReceiverStreams(ctx) == nil {
-		pLog.Warn("No receiver streams loaded during initialization")
-	}
-
-	return nil
+    return nil
 }
 
 func (m *MongoProvider) createIndexes(ctx context.Context) error {

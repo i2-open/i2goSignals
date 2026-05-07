@@ -40,8 +40,12 @@ func TestNewApplication_BackgroundReconnect(t *testing.T) {
 	sa.Shutdown()
 }
 
-// TestNewApplication_LazyAuthRefresh verifies that sa.GetAuth() correctly
-// reflects the updated AuthIssuer once the provider connects.
+// TestNewApplication_LazyAuthRefresh verifies that the AuthIssuer carries
+// fresh signing material once the provider has (re)initialized. After
+// PRD #39 PR4 phase B the AuthIssuer is no longer rebuilt on reconnect —
+// the same long-lived instance has its key rotated in place via
+// UpdateTokenKey. The behaviour that matters is "post-reset signing keys
+// are fresh", not object identity.
 func TestNewApplication_LazyAuthRefresh(t *testing.T) {
 	mongoUrl := os.Getenv("MONGO_URL")
 	if mongoUrl == "" {
@@ -67,16 +71,18 @@ func TestNewApplication_LazyAuthRefresh(t *testing.T) {
 	auth1 := sa.GetAuth()
 	assert.NotNil(t, auth1)
 	assert.NotNil(t, auth1.PrivateKey)
+	keyBefore := auth1.PrivateKey
 
-	// Simulate a "reset" which replaces the internal BaseProvider and AuthIssuer
+	// ResetDb wipes the database and re-initialises the provider. The
+	// rebind-in-place pattern keeps the same AuthIssuer instance alive
+	// but rotates its signing material.
 	err = p.ResetDb(true)
 	assert.NoError(t, err)
 
-	// sa.GetAuth() should now return a different (new) AuthIssuer
 	auth2 := sa.GetAuth()
 	assert.NotNil(t, auth2)
-	assert.NotSame(t, auth1, auth2)
 	assert.NotNil(t, auth2.PrivateKey)
+	assert.NotSame(t, keyBefore, auth2.PrivateKey, "signing key should be fresh after ResetDb")
 
 	sa.Shutdown()
 }

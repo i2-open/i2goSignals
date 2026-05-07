@@ -1,5 +1,96 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] Mongo DAOs hold rebindable collections; swap-on-reconnect retired
+
+### Change
+Each Mongo DAO now holds its `*mongo.Collection` behind an
+`atomic.Pointer[mongo.Collection]` (wrapped in a tiny `collectionRef`
+helper, `internal/dao/mongo/collection_ref.go`). Each DAO exposes
+`SetCollection(*mongo.Collection)` (or `SetCollections(...)` for
+`EventDAOMongo`'s three-collection case).
+
+`MongoProvider.initialize()` no longer constructs new DAOs and a new
+`*BaseProvider` on every reconnect. Instead it rebinds the existing
+DAOs' collection pointers in place:
+
+```go
+m.BaseProvider.GetStreamDAO().(*mongodao.StreamDAOMongo).SetCollection(m.streamCol)
+m.BaseProvider.GetEventDAO().(*mongodao.EventDAOMongo).SetCollections(eventCol, pendingCol, deliveredCol)
+// ... etc
+```
+
+The same long-lived `BaseProvider`, services, and `AuthIssuer` survive
+across reconnects; only their underlying collections are rotated.
+
+### Why this carries weight
+- **Eliminates the swap-on-reconnect race window.** Previously, every
+  reconnect replaced `m.BaseProvider` behind an `RWMutex`. A caller
+  holding a method reference (`sa.Provider.GetStreamDAO()`) could end
+  up calling against a stale BaseProvider whose collection pointers
+  had been freed. The atomic-pointer rebind path doesn't have this
+  shape: in-flight callers see either the old or the new collection,
+  never a partial state, and the `*BaseProvider` value is stable.
+- **Drops the wrapper-method tax.** With BaseProvider stable, the ~160
+  wrapper methods on `MongoProvider` that existed solely to mediate
+  the swap can go away in #47.
+- **Unblocks the BaseProvider deletion.** With DAO collections rebound
+  in place, "delete `BaseProvider`, hold services directly" becomes a
+  consumer-side rewire only (#47 scope).
+
+### Invariants
+- A long-held DAO reference (e.g. `provider.GetKeyDAO()`) remains
+  operational across `ResetDb(true)`. Verified by
+  `mongo_provider/test/rebind_test.go::TestKeyDAOSurvivesReset`.
+- Concurrent writes during a `ResetDb` storm complete or fail cleanly
+  with no panics and no nil-pointer dereferences. Verified by
+  `TestConcurrentWritesDuringRebind` under `-race`.
+- Post-`ResetDb`, the `AuthIssuer` instance is *the same object* (no
+  more swap) but its signing material is fresh. The behavioural test
+  (`TestNewApplication_LazyAuthRefresh`) was updated to assert key
+  freshness instead of object identity.
+
+### Regression Verification
+- `go test -race -timeout 300s ./internal/...` — green incl. the new
+  `RebindTestSuite` and the updated `LazyAuthRefresh` test.
+- `go test -race -timeout 600s ./pkg/...` — green incl. the server
+  integration suite (~125s).
+- `go vet ./...` — pre-existing warnings only.
+
+---
+
+## [2026-05-06] CreateStream logic lifted from BaseProvider into StreamService
+
+### Change
+Two pieces of logic moved out of `common.BaseProvider.CreateStream` and
+into `services.StreamService.CreateStream`:
+
+1. **`tx_alias` resolution.** `StreamService` now holds an optional
+   `*ServerService` (set via `SetServerService`). `BaseProvider` wires
+   the dependency at construction time. When a `StreamConfiguration`
+   carries `TxAlias`, the service resolves it to a `Server` before the
+   rest of the pipeline runs.
+2. **Case-insensitive `IssuerJWKSUrl == "NONE"` normalisation.** SCIM
+   servers signal "key is internal" with NONE; downstream code expects
+   empty.
+
+After the lift, `BaseProvider.CreateStream` is a pass-through:
+auth-context plumbing + service call + `notifyWrite` fan-out.
+
+### Why this carries weight
+The two pieces of logic are the only real behaviour `BaseProvider`
+carried beyond pure delegation. Lifting them is the prerequisite for
+deleting `BaseProvider` outright in #47 — once it's a pure
+pass-through, removing it is a consumer-side rewire only.
+
+### Regression Verification
+- New unit tests in `internal/services/stream_service_txalias_test.go`
+  cover unknown-alias error, known-alias resolution, and NONE
+  normalisation, all without spinning up a provider.
+- Existing `internal/services/...` and
+  `internal/providers/dbProviders/...` suites unchanged.
+
+---
+
 ## [2026-05-06] Cluster coordination and storage extracted as their own seams
 
 ### Change
