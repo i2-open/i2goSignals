@@ -108,6 +108,27 @@ func (b *BaseProvider) GetClientDAO() interfaces.ClientDAO {
 	return b.clientDAO
 }
 
+// GetTokenDAOForRebind exposes the underlying TokenDAO so MongoProvider's
+// reconnect path can rebind its collection. The non-rebind public surface
+// goes through services.TokenService.
+func (b *BaseProvider) GetTokenDAOForRebind() interfaces.TokenDAO {
+	return b.tokenDAO
+}
+
+// GetKeyService returns the embedded *KeyService. Used by MongoProvider's
+// reconnect path to call InitializeTokenKey on the long-lived service
+// instance instead of constructing a new one.
+func (b *BaseProvider) GetKeyService() *services.KeyService {
+	return b.keyService
+}
+
+// GetStreamService returns the embedded *StreamService. Used by
+// MongoProvider's reconnect path to call LoadReceiverStreams on the
+// long-lived service instance.
+func (b *BaseProvider) GetStreamService() *services.StreamService {
+	return b.streamService
+}
+
 func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
 	return b.serverDAO
 }

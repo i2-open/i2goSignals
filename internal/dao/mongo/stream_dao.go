@@ -1,179 +1,206 @@
 package mongo
 
 import (
-	"context"
-	"errors"
+    "context"
+    "errors"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/pkg/logger"
-	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
+    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    "github.com/i2-open/i2goSignals/pkg/logger"
+    "github.com/i2-open/i2goSignals/pkg/ssfModels"
+    "go.mongodb.org/mongo-driver/v2/bson"
+    "go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 var sLog = logger.Sub("STREAM_DAO")
 
+// errStreamNotInit is the canonical "the DAO has no collection bound yet"
+// error. Returned during the brief window between provider construction and
+// the first successful Mongo connect, and after a disconnect that has not
+// yet reconnected.
+var errStreamNotInit = errors.New("mongo collection not initialized")
+
 type StreamDAOMongo struct {
-	collection *mongo.Collection
+    ref collectionRef
 }
 
 func NewStreamDAO(collection *mongo.Collection) interfaces.StreamDAO {
-	return &StreamDAOMongo{collection: collection}
+    d := &StreamDAOMongo{}
+    d.ref.set(collection)
+    return d
+}
+
+// SetCollection rebinds the underlying *mongo.Collection. Used by
+// MongoProvider's reconnect path so DAOs can be reused across connections
+// without reconstructing services.
+func (d *StreamDAOMongo) SetCollection(c *mongo.Collection) {
+    d.ref.set(c)
+}
+
+func (d *StreamDAOMongo) col() (*mongo.Collection, error) {
+    c := d.ref.load()
+    if c == nil {
+        return nil, errStreamNotInit
+    }
+    return c, nil
 }
 
 func (d *StreamDAOMongo) Create(ctx context.Context, state *model.StreamStateRecord) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	_, err := d.collection.InsertOne(ctx, state)
-	if err != nil {
-		sLog.Error("Error inserting stream", "error", err)
-	}
-	return err
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    _, err = c.InsertOne(ctx, state)
+    if err != nil {
+        sLog.Error("Error inserting stream", "error", err)
+    }
+    return err
 }
 
 func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	docId, err := ParseObjectID(id)
-	if err != nil {
-		return nil, err
-	}
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    docId, err := ParseObjectID(id)
+    if err != nil {
+        return nil, err
+    }
 
-	filter := bson.M{"_id": docId}
-	res := d.collection.FindOne(ctx, filter)
+    filter := bson.M{"_id": docId}
+    res := c.FindOne(ctx, filter)
 
-	if err := HandleFindError(res.Err(), errors.New("not found")); err != nil {
-		return nil, err
-	}
+    if err := HandleFindError(res.Err(), errors.New("not found")); err != nil {
+        return nil, err
+    }
 
-	var rec model.StreamStateRecord
-	err = res.Decode(&rec)
-	if err != nil {
-		sLog.Error("Error parsing StreamStateRecord", "error", err)
-		return nil, err
-	}
-	return &rec, nil
+    var rec model.StreamStateRecord
+    err = res.Decode(&rec)
+    if err != nil {
+        sLog.Error("Error parsing StreamStateRecord", "error", err)
+        return nil, err
+    }
+    return &rec, nil
 }
 
 func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRecord) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"_id": state.Id}
-	res, err := d.collection.ReplaceOne(ctx, filter, state)
-	if err != nil {
-		return errors.New("stream update error: " + err.Error())
-	}
-
-	return HandleUpdateResult(res, errors.New("not found"))
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    filter := bson.M{"_id": state.Id}
+    res, err := c.ReplaceOne(ctx, filter, state)
+    if err != nil {
+        return errors.New("stream update error: " + err.Error())
+    }
+    return HandleUpdateResult(res, errors.New("not found"))
 }
 
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	docId, err := ParseObjectID(id)
-	if err != nil {
-		return err
-	}
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    docId, err := ParseObjectID(id)
+    if err != nil {
+        return err
+    }
 
-	filter := bson.M{"_id": docId}
-	resp, err := d.collection.DeleteOne(ctx, filter)
-	if err != nil {
-		return err
-	}
-
-	return HandleDeleteResult(resp, errors.New("not found"))
+    filter := bson.M{"_id": docId}
+    resp, err := c.DeleteOne(ctx, filter)
+    if err != nil {
+        return err
+    }
+    return HandleDeleteResult(resp, errors.New("not found"))
 }
 
 func (d *StreamDAOMongo) List(ctx context.Context) ([]model.StreamStateRecord, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	cursor, err := d.collection.Find(ctx, bson.D{})
-	if err != nil {
-		sLog.Error("Error listing Stream Configs", "error", err)
-		return nil, err
-	}
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    cursor, err := c.Find(ctx, bson.D{})
+    if err != nil {
+        sLog.Error("Error listing Stream Configs", "error", err)
+        return nil, err
+    }
 
-	var recs []model.StreamStateRecord
-	err = cursor.All(ctx, &recs)
-	if err != nil {
-		sLog.Error("Error parsing Stream Configs", "error", err)
-		return nil, err
-	}
-	return recs, nil
+    var recs []model.StreamStateRecord
+    err = cursor.All(ctx, &recs)
+    if err != nil {
+        sLog.Error("Error parsing Stream Configs", "error", err)
+        return nil, err
+    }
+    return recs, nil
 }
 
 func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) ([]model.StreamStateRecord, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"project_id": projectID}
-	cursor, err := d.collection.Find(ctx, filter)
-	if err != nil {
-		sLog.Error("Error finding streams by project", "projectID", projectID, "error", err)
-		return nil, err
-	}
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{"project_id": projectID}
+    cursor, err := c.Find(ctx, filter)
+    if err != nil {
+        sLog.Error("Error finding streams by project", "projectID", projectID, "error", err)
+        return nil, err
+    }
 
-	var recs []model.StreamStateRecord
-	err = cursor.All(ctx, &recs)
-	if err != nil {
-		sLog.Error("Error parsing Stream Configs", "error", err)
-		return nil, err
-	}
-	return recs, nil
+    var recs []model.StreamStateRecord
+    err = cursor.All(ctx, &recs)
+    if err != nil {
+        sLog.Error("Error parsing Stream Configs", "error", err)
+        return nil, err
+    }
+    return recs, nil
 }
 
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	docId, err := ParseObjectID(id)
-	if err != nil {
-		return err
-	}
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    docId, err := ParseObjectID(id)
+    if err != nil {
+        return err
+    }
 
-	filter := bson.M{"_id": docId}
-	update := bson.M{
-		"$set": bson.M{
-			"status":    status,
-			"error_msg": errorMsg,
-		},
-	}
+    filter := bson.M{"_id": docId}
+    update := bson.M{
+        "$set": bson.M{
+            "status":    status,
+            "error_msg": errorMsg,
+        },
+    }
 
-	res, err := d.collection.UpdateOne(ctx, filter, update)
-	if err != nil {
-		sLog.Error("Error updating stream status", "error", err)
-		return err
-	}
-
-	return HandleUpdateResult(res, errors.New("not found"))
+    res, err := c.UpdateOne(ctx, filter, update)
+    if err != nil {
+        sLog.Error("Error updating stream status", "error", err)
+        return err
+    }
+    return HandleUpdateResult(res, errors.New("not found"))
 }
 
 func (d *StreamDAOMongo) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	docId, err := ParseObjectID(id)
-	if err != nil {
-		return err
-	}
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    docId, err := ParseObjectID(id)
+    if err != nil {
+        return err
+    }
 
-	filter := bson.M{"_id": docId}
-	update := bson.M{
-		"$set": bson.M{
-			"remote_address": addr,
-		},
-	}
+    filter := bson.M{"_id": docId}
+    update := bson.M{
+        "$set": bson.M{
+            "remote_address": addr,
+        },
+    }
 
-	res, err := d.collection.UpdateOne(ctx, filter, update)
-	if err != nil {
-		sLog.Error("Error updating stream remote address", "error", err)
-		return err
-	}
-
-	return HandleUpdateResult(res, errors.New("not found"))
+    res, err := c.UpdateOne(ctx, filter, update)
+    if err != nil {
+        sLog.Error("Error updating stream remote address", "error", err)
+        return err
+    }
+    return HandleUpdateResult(res, errors.New("not found"))
 }
