@@ -55,7 +55,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 	defer cancel()
 
 	ps := &ClientPollStream{
-		sa:     &SignalsApplication{Provider: provider},
+		sa:     newTestApplication(provider),
 		stream: streamState,
 		active: true,
 		ctx:    ctx,

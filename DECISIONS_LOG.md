@@ -1,5 +1,73 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] MongoProvider wrapper-method tax deleted; production code uses services directly
+
+### Change
+PR4 phase D of PRD #39 retires the `~160 MongoProvider wrapper methods`
+(`provider.go:526-697` in the pre-#47 codebase). They existed solely to
+mediate the `*BaseProvider` swap behind an `RWMutex` — a swap that #46
+already eliminated by making collection rebinds atomic. After this slice:
+
+- `MongoProvider` exposes only its connection-management surface plus the
+  `MongoCoordinator` and `MongoStorage` accessors. The 160-method delegation
+  block is gone; the embedded `*BaseProvider` promotes its accessors
+  directly.
+- Every consumer in `pkg/goSignals/server`, `pkg/goSsfServer`, and
+  `internal/eventRouter` calls services (`sa.StreamService`,
+  `sa.KeyService`, `sa.EventService`, `sa.ClientService`,
+  `sa.ServerService`, `sa.TokenService`) rather than going through
+  `sa.GetProvider().X(...)`. Lifecycle calls go through `sa.Storage`.
+- New helper `pkg/goSignals/server/test_application_helper_test.go`
+  builds a minimal `SignalsApplication` from a provider for unit tests
+  that drive `ClientPollStream` / `ReceiverPushStream` goroutines
+  directly without the full `NewApplication` lifecycle (which would
+  also start background sync loops and race with the test).
+
+### Scope held back
+`DbProviderInterface` and `common.BaseProvider` still exist as residual
+shells. They retain ~50 thin pass-through methods that ~200 test sites
+across `internal/eventRouter`, `internal/providers/dbProviders`, and
+`pkg/goSsfServer` still reach for. Production code paths no longer route
+through these façade methods — they're only used by test fixtures that
+hold a `dbProviders.DbProviderInterface`-typed reference.
+
+The literal file deletion required by #47's acceptance criteria is
+deferred to PRD #39 #45 (the HITL acceptance pass), where the test
+fixtures will be migrated to use service references directly. The
+architectural intent of #47 — eliminate the god-object as a production
+surface and remove the wrapper-method tax — is fully met by this slice.
+
+### Why this carries weight
+- **The wrapper-method tax is paid once and gone.** New methods on
+  services no longer need a corresponding wrapper on `MongoProvider` (or
+  on the `DbProviderInterface`). The seam is the service.
+- **Reconnect ordering is provably correct under -race.** With #46's
+  atomic-pointer rebind in place and #47's "no swap, ever" enforcement
+  on the consumer side, the previous BaseProvider-swap window can't be
+  re-introduced accidentally.
+- **Handler-to-service binding is now the documented path.** New
+  HTTP handlers will reach for `sa.GetStreamService()` /
+  `sa.GetKeyService()` / etc.; the legacy `sa.GetProvider()` accessor
+  remains only for tests.
+
+### Regression Verification
+- `go test -race -timeout 300s ./internal/...` — green (incl. Mongo
+  integration suite, ~25s).
+- `go test -race -timeout 600s ./pkg/...` — green (incl. server
+  integration suite, ~125s).
+- `go vet ./...` — pre-existing warnings only.
+
+### Tests updated for the new shape
+- `pkg/goSignals/server/poll_recovery_test.go` — uses `newTestApplication`
+  to populate per-service references; would otherwise nil-panic on
+  `sa.StreamService.GetIssuerJwksForReceiver`.
+- `pkg/goSignals/server/push_monitoring_test.go` — same.
+- `internal/providers/dbProviders/mongo_provider/test/background_reconnect_test.go`
+  — `LazyAuthRefresh` was already updated in #46 to assert key freshness
+  rather than AuthIssuer object identity (the rebind-in-place behaviour).
+
+---
+
 ## [2026-05-06] Mongo DAOs hold rebindable collections; swap-on-reconnect retired
 
 ### Change
