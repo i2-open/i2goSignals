@@ -67,17 +67,6 @@ func (d *StreamDAOMemory) FindByProjectID(ctx context.Context, projectID string)
 	return recs, nil
 }
 
-func (d *StreamDAOMemory) FindReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
-	matches := d.store.FindAll(func(state *model.StreamStateRecord) bool {
-		return state.IsReceiver()
-	})
-	recs := make([]model.StreamStateRecord, 0, len(matches))
-	for _, state := range matches {
-		recs = append(recs, *state)
-	}
-	return recs, nil
-}
-
 func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
 	if state, ok := d.store.Get(id); ok {
 		state.Status = status
