@@ -59,7 +59,7 @@ InitializeReceivers handles updates to a receiver client polling stream when cha
 func (sa *SignalsApplication) InitializeReceivers() {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-	states := sa.Provider.GetStateMap()
+	states := sa.StreamService.GetStateMap(context.Background())
 
 	newPushReceivers := make(map[string]model.StreamStateRecord)
 	currentPollClients := make(map[string]bool)
@@ -153,7 +153,7 @@ func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Cont
 
 	// Try to get server configuration for TLS settings
 	if conf.TxAlias != nil && *conf.TxAlias != "" {
-		server, err := sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+		server, err := sa.ServerService.GetServerByAlias(ctx, *conf.TxAlias)
 		if err == nil && server != nil {
 			client := oauthClient.GetBaseHTTPClientForServer(server)
 			client.Timeout = 10 * time.Second
@@ -170,7 +170,7 @@ func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Cont
 func (sa *SignalsApplication) getServerForStream(ctx context.Context, stream *model.StreamStateRecord) (*model.Server, error) {
 	conf := stream.StreamConfiguration
 	if conf.TxAlias != nil && *conf.TxAlias != "" {
-		return sa.Provider.GetServerByAlias(ctx, *conf.TxAlias)
+		return sa.ServerService.GetServerByAlias(ctx, *conf.TxAlias)
 	}
 	return nil, nil
 }
@@ -318,7 +318,7 @@ func (rps *ReceiverPushStream) handleVerificationEvent(state string) {
 
 		// Mark as enabled and clear error upon successful verification
 		if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
-			rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+			rps.sa.StreamService.UpdateStreamStatus(context.Background(), rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
 			rps.stream.Status = model.StreamStateEnabled
 			rps.stream.ErrorMsg = ""
 		}
@@ -369,7 +369,7 @@ func (rps *ReceiverPushStream) monitorPushStream() {
 
 			// If we receive an event, the stream is active - ensure it's marked as enabled
 			if rps.stream.Status != model.StreamStateEnabled || rps.stream.ErrorMsg != "" {
-				rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
+				rps.sa.StreamService.UpdateStreamStatus(context.Background(), rps.stream.StreamConfiguration.Id, model.StreamStateEnabled, "")
 				rps.stream.Status = model.StreamStateEnabled
 				rps.stream.ErrorMsg = ""
 			}
@@ -581,7 +581,7 @@ func (rps *ReceiverPushStream) fallbackToStatusCheck() {
 			reason = "Transmitter reported status: " + status.Status
 		}
 		serverLog.Info("PUSH-RCV: Syncing stream status from transmitter", "sid", rps.stream.StreamConfiguration.Id, "status", status.Status, "reason", reason)
-		rps.sa.Provider.UpdateStreamStatus(rps.stream.StreamConfiguration.Id, status.Status, reason)
+		rps.sa.StreamService.UpdateStreamStatus(context.Background(), rps.stream.StreamConfiguration.Id, status.Status, reason)
 		rps.stream.Status = status.Status
 		rps.stream.ErrorMsg = reason
 	}
@@ -876,7 +876,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	}
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
 	eventUrl := receiveMethod.EndpointUrl
-	jwks := ps.sa.Provider.GetIssuerJwksForReceiver(ps.stream.StreamConfiguration.Id)
+	jwks := ps.sa.StreamService.GetIssuerJwksForReceiver(context.Background(), ps.stream.StreamConfiguration.Id)
 
 	// Heartbeat for lease renewal
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ps.ctx)
@@ -1016,7 +1016,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				select {
 				case <-time.After(delay):
 					// Refresh the stream state to check if it's still enabled/active
-					updatedStream, _ := ps.sa.Provider.GetStreamState(sid)
+					updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), sid)
 					if updatedStream != nil {
 						ps.mu.Lock()
 						ps.stream = updatedStream
@@ -1076,7 +1076,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					}
 
 					// Refresh the stream state to check if it's still enabled/active
-					updatedStream, _ := ps.sa.Provider.GetStreamState(stream.StreamConfiguration.Id)
+					updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
 					if updatedStream != nil {
 						ps.mu.Lock()
 						ps.stream = updatedStream
@@ -1137,7 +1137,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			ps.mu.RUnlock()
 			if !remoteIP.Equals(currentRemote) {
 				serverLog.Debug("POLL-RCV: Remote address information", "sid", sid, "old", currentRemote.String(), "new", remoteIP.String())
-				ps.sa.Provider.UpdateRemoteAddress(sid, remoteIP)
+				ps.sa.StreamService.UpdateRemoteAddress(context.Background(), sid, remoteIP)
 				ps.mu.Lock()
 				ps.stream.RemoteAddress = remoteIP
 				ps.mu.Unlock()
@@ -1152,7 +1152,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""
 		ps.mu.RUnlock()
 		if needsUpdate {
-			ps.sa.Provider.UpdateStreamStatus(sid, model.StreamStateEnabled, "")
+			ps.sa.StreamService.UpdateStreamStatus(context.Background(), sid, model.StreamStateEnabled, "")
 			ps.mu.Lock()
 			ps.stream.Status = model.StreamStateEnabled
 			ps.stream.ErrorMsg = ""
@@ -1215,7 +1215,7 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain a stream identifier")
 		return
 	}
-	streamState, err := sa.GetProvider().GetStreamState(sid)
+	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), sid)
 	if streamState == nil || err != nil {
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+authContext.StreamId+" could not be located or was deleted")
@@ -1224,11 +1224,11 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 
 	remoteIP := model.BuildRemoteIPFromRequest(r)
 	if !remoteIP.Equals(streamState.RemoteAddress) {
-		sa.GetProvider().UpdateRemoteAddress(sid, remoteIP)
+		sa.GetStreamService().UpdateRemoteAddress(r.Context(), sid, remoteIP)
 	}
 
 	// Use goSetPush to handle RFC8935 protocol parsing and validation
-	jwksKey := sa.GetProvider().GetIssuerJwksForReceiver(sid)
+	jwksKey := sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), sid)
 	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
 		JWKS:              jwksKey,
 		ExpectedIssuer:    streamState.Iss,
@@ -1276,10 +1276,10 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 }
 
 func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode string, reason string) {
-	sa.Provider.UpdateStreamStatus(streamId, mode, reason)
+	sa.StreamService.UpdateStreamStatus(context.Background(), streamId, mode, reason)
 }
 
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
-	sa.Provider.UpdateStreamStatus(streamId, model.StreamStatePause, errMsg)
+	sa.StreamService.UpdateStreamStatus(context.Background(), streamId, model.StreamStatePause, errMsg)
 	// TODO:  Update event router with stream state change??
 }

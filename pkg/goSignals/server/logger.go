@@ -24,7 +24,7 @@ func (sa *SignalsApplication) Logger(inner http.Handler, name string) http.Handl
 		inner.ServeHTTP(w, r)
 
 		httpLog.Info("Request",
-			"db", sa.Provider.Name(),
+			"db", sa.Name(),
 			"method", r.Method,
 			"uri", r.RequestURI,
 			"handler", name,

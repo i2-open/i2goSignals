@@ -17,11 +17,23 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
+
+// serviceSource is satisfied by both *MongoProvider and *MemoryProvider —
+// they each embed *common.BaseProvider which exposes per-service accessors.
+type serviceSource interface {
+	GetStreamService() *services.StreamService
+	GetKeyService() *services.KeyService
+	GetEventService() *services.EventService
+	GetClientService() *services.ClientService
+	GetServerService() *services.ServerService
+	GetTokenService() *services.TokenService
+}
 
 // coordinatorSource is satisfied by both *mongo_provider.MongoProvider and
 // *memory_provider.MemoryProvider — they each expose Coordinator() returning
@@ -68,12 +80,30 @@ type SsfApplicationInterface interface {
 	Name() string
 	CloseReceiver(sid string)
 	HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream
+
+	// Service accessors. Handlers should depend on these directly rather
+	// than on GetProvider().X — the latter is going away with the rest of
+	// DbProviderInterface in PRD #39 PR4 phase D.
+	GetStreamService() *services.StreamService
+	GetKeyService() *services.KeyService
+	GetEventService() *services.EventService
+	GetClientService() *services.ClientService
+	GetServerService() *services.ServerService
+	GetTokenService() *services.TokenService
+	GetCoordinator() cluster.ClusterCoordinator
+	GetStorage() storage.Storage
 }
 
 type SignalsApplication struct {
 	Provider       dbProviders.DbProviderInterface
 	Coordinator    cluster.ClusterCoordinator
 	Storage        storage.Storage
+	StreamService  *services.StreamService
+	KeyService     *services.KeyService
+	EventService   *services.EventService
+	ClientService  *services.ClientService
+	ServerService  *services.ServerService
+	TokenService   *services.TokenService
 	Server         *http.Server
 	Handler        http.Handler
 	EventRouter    eventRouter.EventRouter
@@ -94,8 +124,8 @@ type SignalsApplication struct {
 }
 
 func (sa *SignalsApplication) Name() string {
-	if sa.Provider != nil {
-		return sa.Provider.Name()
+	if sa.Storage != nil {
+		return sa.Storage.Name()
 	}
 	return "goSignals"
 }
@@ -108,17 +138,26 @@ func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
 }
 
+func (sa *SignalsApplication) GetStreamService() *services.StreamService { return sa.StreamService }
+func (sa *SignalsApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
+func (sa *SignalsApplication) GetEventService() *services.EventService   { return sa.EventService }
+func (sa *SignalsApplication) GetClientService() *services.ClientService { return sa.ClientService }
+func (sa *SignalsApplication) GetServerService() *services.ServerService { return sa.ServerService }
+func (sa *SignalsApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
+func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
+func (sa *SignalsApplication) GetStorage() storage.Storage               { return sa.Storage }
+
 func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
-	if sa.Provider != nil {
-		auth := sa.Provider.GetAuthIssuer()
-		if auth != nil {
-			sa.mu.Lock()
-			sa.Auth = auth
-			sa.mu.Unlock()
-		}
-		return auth
+	if sa.KeyService == nil {
+		return nil
 	}
-	return nil
+	auth := sa.KeyService.GetAuthIssuer()
+	if auth != nil {
+		sa.mu.Lock()
+		sa.Auth = auth
+		sa.mu.Unlock()
+	}
+	return auth
 }
 
 func (sa *SignalsApplication) GetDefIssuer() string {
@@ -135,18 +174,18 @@ func (sa *SignalsApplication) SetBaseUrl(u *url.URL) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 	sa.BaseUrl = u
-	if sa.Provider != nil {
-		sa.Provider.SetBaseUrl(u)
+	if sa.Storage != nil {
+		sa.Storage.SetBaseUrl(u)
 	}
 }
 
 func (sa *SignalsApplication) HealthCheck() bool {
-	if sa.Provider == nil {
-		return false // memory provider should be true?
+	if sa.Storage == nil {
+		return false
 	}
-	err := sa.Provider.Check()
+	err := sa.Storage.Check()
 	if err != nil {
-		serverLog.Error("MongoProvider ping failed", "error", err)
+		serverLog.Error("Storage ping failed", "error", err)
 		return false
 	}
 	auth := sa.GetAuth()
@@ -205,10 +244,18 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	if ss, ok := provider.(storageSource); ok {
 		sa.Storage = providerStorageAdapter{source: ss}
 	}
+	if svcs, ok := provider.(serviceSource); ok {
+		sa.StreamService = svcs.GetStreamService()
+		sa.KeyService = svcs.GetKeyService()
+		sa.EventService = svcs.GetEventService()
+		sa.ClientService = svcs.GetClientService()
+		sa.ServerService = svcs.GetServerService()
+		sa.TokenService = svcs.GetTokenService()
+	}
 
 	// Initialize Auth if available
-	if sa.Provider != nil {
-		sa.Auth = sa.Provider.GetAuthIssuer()
+	if sa.KeyService != nil {
+		sa.Auth = sa.KeyService.GetAuthIssuer()
 	}
 
 	serverLog.Info("Starting goSignalsApplication", "nodeID", nodeID)
@@ -228,8 +275,8 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		}
 	}
 	sa.BaseUrl = baseUrl
-	if sa.Provider != nil {
-		sa.Provider.SetBaseUrl(baseUrl)
+	if sa.Storage != nil {
+		sa.Storage.SetBaseUrl(baseUrl)
 	}
 
 	sa.InitializePrometheus()
@@ -278,7 +325,7 @@ func (sa *SignalsApplication) backgroundSync() {
 				sa.InitializeReceivers()
 
 				// Sync router state
-				states := sa.Provider.GetStateMap()
+				states := sa.StreamService.GetStateMap(context.Background())
 				for _, state := range states {
 					sa.EventRouter.UpdateStreamState(&state)
 				}
@@ -356,17 +403,24 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	if sa.BaseUrl == nil {
 		baseUrl, _ := url.Parse("http://" + server.Addr + "/")
 		sa.BaseUrl = baseUrl
-		if sa.Provider != nil {
-			sa.Provider.SetBaseUrl(baseUrl)
+		if sa.Storage != nil {
+			sa.Storage.SetBaseUrl(baseUrl)
 		}
 	}
 	sa.mu.Unlock()
-	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)
+	dbName := ""
+	if sa.Storage != nil {
+		dbName = sa.Storage.Name()
+	}
+	serverLog.Info("Server listening", "db", dbName, "addr", addr)
 	return sa
 }
 
 func (sa *SignalsApplication) Shutdown() {
-	name := sa.Provider.Name()
+	name := ""
+	if sa.Storage != nil {
+		name = sa.Storage.Name()
+	}
 	serverLog.Info("Shutdown initiated", "db", name)
 
 	if sa.stopSync != nil {
@@ -399,8 +453,10 @@ func (sa *SignalsApplication) Shutdown() {
 	// Give some time to ensure all ops are finished.
 	time.Sleep(time.Second)
 
-	// Shutdown the provider
-	_ = sa.Provider.Close()
+	// Shutdown the storage
+	if sa.Storage != nil {
+		_ = sa.Storage.Close()
+	}
 
 	serverLog.Info("Shutdown Complete", "db", name)
 }

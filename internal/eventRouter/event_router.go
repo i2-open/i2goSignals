@@ -24,6 +24,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
@@ -74,6 +75,9 @@ type router struct {
 	pushBuffers         map[string]*buffer.EventPushBuffer
 	provider            dbProviders.DbProviderInterface
 	coordinator         cluster.ClusterCoordinator
+	streamService       *services.StreamService
+	keyService          *services.KeyService
+	eventService        *services.EventService
 	eventsIn, eventsOut *prometheus.CounterVec
 	stats               statsTracker
 
@@ -135,15 +139,32 @@ type coordinatorSource interface {
 	Coordinator() cluster.ClusterCoordinator
 }
 
+type serviceSource interface {
+	GetStreamService() *services.StreamService
+	GetKeyService() *services.KeyService
+	GetEventService() *services.EventService
+}
+
 func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	var coord cluster.ClusterCoordinator
 	if cs, ok := provider.(coordinatorSource); ok {
 		coord = cs.Coordinator()
 	}
+	var streamSvc *services.StreamService
+	var keySvc *services.KeyService
+	var eventSvc *services.EventService
+	if svcs, ok := provider.(serviceSource); ok {
+		streamSvc = svcs.GetStreamService()
+		keySvc = svcs.GetKeyService()
+		eventSvc = svcs.GetEventService()
+	}
 	router := &router{
 		provider:            provider,
 		coordinator:         coord,
+		streamService:       streamSvc,
+		keyService:          keySvc,
+		eventService:        eventSvc,
 		nodeId:              nodeId,
 		pushStreams:         map[string]model.StreamStateRecord{},
 		pollStreams:         map[string]model.StreamStateRecord{},
@@ -200,7 +221,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	}
 	router.backfillBatch = backfillBatch
 
-	states := router.provider.GetStateMap()
+	states := router.streamService.GetStateMap(ctx)
 
 	for k, state := range states {
 		eventLogger.Info("Initializing", "streamKey", k, "configId", state.StreamConfiguration.Id)
@@ -211,7 +232,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	// Start the background watcher if explicitly enabled
 	if os.Getenv("I2SIG_MONGO_WATCH_ENABLED") == "true" {
 		eventLogger.Info("Background watcher enabled via I2SIG_MONGO_WATCH_ENABLED")
-		go router.provider.WatchPending(ctx, func(jti string, streamId string) {
+		go router.eventService.WatchPending(ctx, func(jti string, streamId string) {
 			sid := streamId
 			router.mu.RLock()
 			pollBuf, pollOk := router.pollBuffers[sid]
@@ -241,7 +262,7 @@ func (r *router) ResetStream(sid string) {
 	if ok {
 		buf.Clear()
 	}
-	_ = r.provider.ClearPending(sid)
+	_, _ = r.eventService.ClearPendingForStream(r.ctx, sid)
 }
 
 func (r *router) WakeTransmitter(sid string, mode string) {
@@ -395,7 +416,7 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKe
 		key, ok = r.issuerKeys[issuer]
 		if !ok {
 			var err error
-			key, kid, err = r.provider.GetPrivateKeyWithKid(issuer)
+			key, kid, err = r.keyService.GetPrivateKeyWithKeyname(r.ctx, issuer)
 			if err != nil {
 				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
 				r.mu.Unlock()
@@ -460,7 +481,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			// Preload any outstanding pending events (because we may be re-starting)
 			// We release the lock for provider call
 			r.mu.Unlock()
-			jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
+			jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
 				MaxEvents:         0,
 				ReturnImmediately: true,
 				Acks:              nil,
@@ -484,7 +505,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		// preload the buffer with any existing events
 		// We release the lock for provider call
 		r.mu.Unlock()
-		jtis, _ := r.provider.GetEventIds(stream.StreamConfiguration.Id, model.PollParameters{
+		jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
 			Acks:              nil,
@@ -511,12 +532,12 @@ evaluates if it should be added to any streams for outgoing propagation
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
-	streamState, err := r.provider.GetStreamState(sid)
+	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil {
 		return err
 	}
 
-	event, err := r.provider.AddEvent(eventToken, sid, rawEvent)
+	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
 	if err != nil {
 		return err
 	}
@@ -537,7 +558,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.provider.AddEventToStream(event.Jti, stream.Id.Hex())
+			err = r.eventService.AddEventToStream(r.ctx, event.Jti, stream.Id.Hex())
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
@@ -564,7 +585,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.provider.AddEventToStream(event.Jti, pollStream.Id.Hex())
+			err = r.eventService.AddEventToStream(r.ctx, event.Jti, pollStream.Id.Hex())
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
@@ -582,7 +603,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 // is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
-	stream, err := r.provider.GetStreamState(sid)
+	stream, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -590,13 +611,13 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 		return nil, fmt.Errorf("stream not found: %s", sid)
 	}
 
-	rec, err := r.provider.AddOperationalEvent(eventToken, sid, rawEvent)
+	rec, err := r.eventService.AddOperationalEvent(r.ctx, eventToken, sid, rawEvent)
 	if err != nil {
 		return nil, err
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	if err := r.provider.AddEventToStream(rec.Jti, stream.Id.Hex()); err != nil {
+	if err := r.eventService.AddEventToStream(r.ctx, rec.Jti, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err
 	}
@@ -699,7 +720,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	if len(params.Acks) > 0 {
 		pollBuffer.AckEvents(params.Acks)
 		for _, jti := range params.Acks {
-			_ = r.provider.AckEvent(jti, sid, 0)
+			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
 		}
 	}
 
@@ -710,7 +731,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 		pollBuffer.AckEvents(jtis)
 		for _, jti := range jtis {
-			_ = r.provider.AckEvent(jti, sid, 0)
+			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
 		}
 	}
 
@@ -726,7 +747,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	// Opportunistically prefetch pending JTIs if the buffer is empty
 	if pollBuffer.Cnt() == 0 {
-		jtis, _ := r.provider.GetEventIds(sid, model.PollParameters{
+		jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 			MaxEvents:         int32(r.backfillBatch),
 			ReturnImmediately: true,
 		})
@@ -765,7 +786,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		if forwardMode {
 			jtis := *jtiSlice
 			for _, jti := range jtis {
-				eventRecord := r.provider.GetEventRecord(jti)
+				eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
 				if eventRecord == nil {
 					eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
 					continue
@@ -773,7 +794,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 				sets[jti] = eventRecord.Original
 			}
 		} else {
-			tokens := r.provider.GetEvents(*jtiSlice)
+			tokens := r.eventService.GetEvents(r.ctx, *jtiSlice)
 			for _, token := range tokens {
 				token.Issuer = state.StreamConfiguration.Iss
 				token.Audience = state.StreamConfiguration.Aud
@@ -1110,7 +1131,7 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 		return
 	}
 
-	jtis, _ := r.provider.GetEventIds(sid, model.PollParameters{
+	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 		MaxEvents:         int32(r.backfillBatch),
 		ReturnImmediately: true,
 	})
@@ -1129,7 +1150,7 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 // Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled by
 // the next backfill iteration once the caller has resolved any required recovery.
 func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) (goSetPush.Classification, *rsa.PrivateKey, string) {
-	eventRecord := r.provider.GetEventRecord(jti)
+	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
 	if eventRecord == nil {
 		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
 		// success so the caller advances rather than entering recovery for a stale JTI.
@@ -1163,7 +1184,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	isVerifyPush := isOperationalVerify(eventRecord)
 
 	if cls.Class == goSetPush.ClassAccepted {
-		if err := r.provider.AckEvent(jti, sid, fencingToken); err != nil {
+		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
 			eventLogger.Error("PUSH-SRV: Error acking event", "sid", sid, "jti", jti, "error", err)
 		}
 		r.IncrementCounter(config, &eventRecord.Event, false)
@@ -1257,7 +1278,7 @@ func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEvent
 		}
 		remoteIP := model.BuildOutboundRemoteIP(scheme, capturedAddr)
 		if !remoteIP.Equals(stream.RemoteAddress) {
-			r.provider.UpdateRemoteAddress(configuration.Id, remoteIP)
+			r.streamService.UpdateRemoteAddress(r.ctx, configuration.Id, remoteIP)
 			// Keep the loop's local stream pointer in sync so the next pushEvent's
 			// Equals check can short-circuit instead of triggering a redundant DB write.
 			stream.RemoteAddress = remoteIP

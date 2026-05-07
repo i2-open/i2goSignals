@@ -129,6 +129,18 @@ func (b *BaseProvider) GetStreamService() *services.StreamService {
 	return b.streamService
 }
 
+func (b *BaseProvider) GetEventService() *services.EventService {
+	return b.eventService
+}
+
+func (b *BaseProvider) GetClientService() *services.ClientService {
+	return b.clientService
+}
+
+func (b *BaseProvider) GetServerService() *services.ServerService {
+	return b.serverService
+}
+
 func (b *BaseProvider) GetServerDAO() interfaces.ServerDAO {
 	return b.serverDAO
 }

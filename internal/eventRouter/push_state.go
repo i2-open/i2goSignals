@@ -29,7 +29,7 @@ func (r *router) updateStream(stream *model.StreamStateRecord, newState string, 
 	}
 
 	sid := stream.StreamConfiguration.Id
-	r.provider.UpdateStreamStatus(sid, newState, reason)
+	r.streamService.UpdateStreamStatus(r.ctx, sid, newState, reason)
 	stream.Status = newState
 	stream.ErrorMsg = reason
 

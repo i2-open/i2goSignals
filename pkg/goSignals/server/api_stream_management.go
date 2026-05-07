@@ -8,6 +8,7 @@ simplification, there is no way for a client to ask for a specific stream or all
 Because of this, administrative access is via admin.go
 */
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -71,7 +73,7 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 		return
 	}
 
-	streamStatus, err := sa.GetProvider().GetStatus(sid)
+	streamStatus, err := sa.GetStreamService().GetStatus(r.Context(), sid)
 	if err != nil {
 		serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
 		w.WriteHeader(http.StatusNotFound)
@@ -137,7 +139,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	serverLog.Warn(fmt.Sprintf("Stream %s DELETE requested.", authContext.StreamId))
 
-	state, err := sa.GetProvider().GetStreamState(authContext.StreamId)
+	state, err := sa.GetStreamService().GetStreamState(r.Context(), authContext.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -151,7 +153,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// Stop any outbound activity
 	sa.GetEventRouter().RemoveStream(authContext.StreamId)
 
-	err = sa.GetProvider().DeleteStream(authContext.StreamId)
+	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -252,7 +254,7 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 		return
 	}
 
-	config, err := sa.GetProvider().GetStream(authCtx.StreamId)
+	config, err := sa.GetStreamService().GetStream(r.Context(), authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -304,7 +306,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetProvider().CreateStream(jsonRequest, authCtx)
+	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -317,7 +319,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetProvider().GetStreamState(configResp.Id)
+	state, err := sa.GetStreamService().GetStreamState(r.Context(), configResp.Id)
 	if err != nil {
 		serverLog.Error("Error getting stream state after creation", "id", configResp.Id, "error", err)
 	}
@@ -383,7 +385,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetProvider().UpdateStream(authCtx.StreamId, authCtx.ProjectId, jsonRequest)
+	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), authCtx.StreamId, authCtx.ProjectId, jsonRequest)
 	if err != nil || configResp == nil {
 		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
@@ -398,13 +400,13 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
-		err := sa.GetProvider().ResetEventStream(authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
+		err := sa.GetEventService().ResetEventStream(r.Context(), authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
 			// Operational events (verify, stream-updated) are point-to-point and excluded from replay.
 			if eventRecord.Operational {
 				return false
@@ -423,7 +425,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+	state, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state for event router update", "id", authCtx.StreamId, "error", err)
 	}
@@ -485,7 +487,7 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	modified := false
-	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -504,10 +506,10 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if jsonRequest.Status != "" {
 		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
-				sa.GetProvider().UpdateStreamStatus(authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
+				sa.GetStreamService().UpdateStreamStatus(r.Context(), authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
 				// Refresh streamState after update
-				updatedState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+				updatedState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 				if err == nil && updatedState != nil {
 					streamState = updatedState
 				}
@@ -521,7 +523,7 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		sa.HandleReceiver(streamState)
 	}
 
-	statusResp, err := sa.GetProvider().GetStatus(authCtx.StreamId)
+	statusResp, err := sa.GetStreamService().GetStatus(r.Context(), authCtx.StreamId)
 	if err != nil {
 		serverLog.Error("Error getting status after update", "id", authCtx.StreamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)

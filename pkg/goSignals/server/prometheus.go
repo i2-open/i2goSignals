@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -85,7 +86,7 @@ func (c *streamCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *streamCollector) Collect(ch chan<- prometheus.Metric) {
-	states := c.sa.Provider.GetStateMap()
+	states := c.sa.StreamService.GetStateMap(context.Background())
 	for _, state := range states {
 		streamID := state.StreamConfiguration.Id
 		ch <- prometheus.MustNewConstMetric(c.statusDesc, prometheus.GaugeValue, 1, streamID, state.Status)
@@ -379,7 +380,7 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	registerTo(reg, newClusterCollector(sa))
 
 	// Pre-initialize counters for existing streams
-	states := sa.Provider.GetStateMap()
+	states := sa.StreamService.GetStateMap(context.Background())
 	for _, state := range states {
 		sa.EventRouter.PreInitializeCounter(&state)
 	}

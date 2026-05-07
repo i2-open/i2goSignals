@@ -14,6 +14,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/internal/providers/storage"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -23,25 +25,68 @@ import (
 var serverLog = logger.Sub("SERVER")
 
 type SsfApplication struct {
-	Provider    dbProviders.DbProviderInterface
-	Coordinator cluster.ClusterCoordinator
-	Server      *http.Server
-	Handler     http.Handler
-	EventRouter eventRouter.EventRouter
-	BaseUrl     *url.URL
-	HostName    string
-	DefIssuer   string
-	AdminRole   string
-	Auth        *authUtil.AuthIssuer
-	mu          sync.RWMutex
-	NodeID      string
-	StartedAt   time.Time
+	Provider      dbProviders.DbProviderInterface
+	Coordinator   cluster.ClusterCoordinator
+	Storage       storage.Storage
+	StreamService *services.StreamService
+	KeyService    *services.KeyService
+	EventService  *services.EventService
+	ClientService *services.ClientService
+	ServerService *services.ServerService
+	TokenService  *services.TokenService
+	Server        *http.Server
+	Handler       http.Handler
+	EventRouter   eventRouter.EventRouter
+	BaseUrl       *url.URL
+	HostName      string
+	DefIssuer     string
+	AdminRole     string
+	Auth          *authUtil.AuthIssuer
+	mu            sync.RWMutex
+	NodeID        string
+	StartedAt     time.Time
 }
 
 // coordinatorSource matches the accessor present on both concrete providers.
 type coordinatorSource interface {
 	Coordinator() cluster.ClusterCoordinator
 }
+
+type storageSource interface {
+	Name() string
+	Check() error
+	Close() error
+	ResetDb(initialize bool) error
+	SetBaseUrl(u *url.URL)
+}
+
+type providerStorageAdapter struct {
+	source storageSource
+}
+
+func (a providerStorageAdapter) Name() string                  { return a.source.Name() }
+func (a providerStorageAdapter) Check() error                  { return a.source.Check() }
+func (a providerStorageAdapter) Close() error                  { return a.source.Close() }
+func (a providerStorageAdapter) ResetDb(initialize bool) error { return a.source.ResetDb(initialize) }
+func (a providerStorageAdapter) SetBaseUrl(u *url.URL)         { a.source.SetBaseUrl(u) }
+
+type serviceSource interface {
+	GetStreamService() *services.StreamService
+	GetKeyService() *services.KeyService
+	GetEventService() *services.EventService
+	GetClientService() *services.ClientService
+	GetServerService() *services.ServerService
+	GetTokenService() *services.TokenService
+}
+
+func (sa *SsfApplication) GetStreamService() *services.StreamService { return sa.StreamService }
+func (sa *SsfApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
+func (sa *SsfApplication) GetEventService() *services.EventService   { return sa.EventService }
+func (sa *SsfApplication) GetClientService() *services.ClientService { return sa.ClientService }
+func (sa *SsfApplication) GetServerService() *services.ServerService { return sa.ServerService }
+func (sa *SsfApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
+func (sa *SsfApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
+func (sa *SsfApplication) GetStorage() storage.Storage               { return sa.Storage }
 
 func (sa *SsfApplication) GetProvider() dbProviders.DbProviderInterface {
 	return sa.Provider
@@ -52,16 +97,16 @@ func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 }
 
 func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
-	if sa.Provider != nil {
-		auth := sa.Provider.GetAuthIssuer()
-		if auth != nil {
-			sa.mu.Lock()
-			sa.Auth = auth
-			sa.mu.Unlock()
-		}
-		return auth
+	if sa.KeyService == nil {
+		return sa.Auth
 	}
-	return sa.Auth
+	auth := sa.KeyService.GetAuthIssuer()
+	if auth != nil {
+		sa.mu.Lock()
+		sa.Auth = auth
+		sa.mu.Unlock()
+	}
+	return auth
 }
 
 func (sa *SsfApplication) GetDefIssuer() string {
@@ -78,8 +123,8 @@ func (sa *SsfApplication) HandleReceiver(_ *model.StreamStateRecord) *server.Cli
 }
 
 func (sa *SsfApplication) Name() string {
-	if sa.Provider != nil {
-		return sa.Provider.Name()
+	if sa.Storage != nil {
+		return sa.Storage.Name()
 	}
 	return "goSSF"
 }
@@ -203,16 +248,16 @@ func (sa *SsfApplication) SetBaseUrl(u *url.URL) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 	sa.BaseUrl = u
-	if sa.Provider != nil {
-		sa.Provider.SetBaseUrl(u)
+	if sa.Storage != nil {
+		sa.Storage.SetBaseUrl(u)
 	}
 }
 
 func (sa *SsfApplication) HealthCheck() bool {
-	if sa.Provider == nil {
+	if sa.Storage == nil {
 		return false // for memory provider should be true?
 	}
-	err := sa.Provider.Check()
+	err := sa.Storage.Check()
 	if err != nil {
 		serverLog.Error("MongoProvider ping failed", "error", err)
 		return false
@@ -256,11 +301,23 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		StartedAt: time.Now().UTC(),
 	}
 
-	if sa.Provider != nil {
-		sa.Auth = sa.Provider.GetAuthIssuer()
-	}
 	if cs, ok := provider.(coordinatorSource); ok {
 		sa.Coordinator = cs.Coordinator()
+	}
+	if ss, ok := provider.(storageSource); ok {
+		sa.Storage = providerStorageAdapter{source: ss}
+	}
+	if svcs, ok := provider.(serviceSource); ok {
+		sa.StreamService = svcs.GetStreamService()
+		sa.KeyService = svcs.GetKeyService()
+		sa.EventService = svcs.GetEventService()
+		sa.ClientService = svcs.GetClientService()
+		sa.ServerService = svcs.GetServerService()
+		sa.TokenService = svcs.GetTokenService()
+	}
+
+	if sa.KeyService != nil {
+		sa.Auth = sa.KeyService.GetAuthIssuer()
 	}
 
 	serverLog.Info("Starting goSsfApplication", "nodeID", nodeID)
@@ -280,8 +337,8 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		}
 	}
 	sa.BaseUrl = baseUrl
-	if sa.Provider != nil {
-		sa.Provider.SetBaseUrl(baseUrl)
+	if sa.Storage != nil {
+		sa.Storage.SetBaseUrl(baseUrl)
 	}
 
 	// Set defaults
@@ -322,7 +379,7 @@ func (sa *SsfApplication) backgroundSync() {
 				serverLog.Debug("Periodic background sync starting")
 
 				// Sync router state
-				states := sa.Provider.GetStateMap()
+				states := sa.StreamService.GetStateMap(context.Background())
 				for _, state := range states {
 					sa.EventRouter.UpdateStreamState(&state)
 				}
@@ -376,8 +433,8 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 	if sa.BaseUrl == nil {
 		baseUrl, _ := url.Parse("http://" + httpServer.Addr + "/")
 		sa.BaseUrl = baseUrl
-		if sa.Provider != nil {
-			sa.Provider.SetBaseUrl(baseUrl)
+		if sa.Storage != nil {
+			sa.Storage.SetBaseUrl(baseUrl)
 		}
 	}
 	sa.mu.Unlock()
@@ -386,7 +443,10 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 }
 
 func (sa *SsfApplication) Shutdown() {
-	name := sa.Provider.Name()
+	name := ""
+	if sa.Storage != nil {
+		name = sa.Storage.Name()
+	}
 	serverLog.Info("Shutdown initiated", "db", name)
 
 	// Turn off the server (if present)
@@ -403,7 +463,9 @@ func (sa *SsfApplication) Shutdown() {
 	time.Sleep(time.Second)
 
 	// Shutdown the provider
-	_ = sa.Provider.Close()
+	if sa.Storage != nil {
+		_ = sa.Storage.Close()
+	}
 
 	serverLog.Info("Shutdown Complete", "db", name)
 }

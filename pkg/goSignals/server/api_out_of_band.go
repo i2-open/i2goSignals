@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -42,7 +43,7 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
-	issuerKey, kid, err := sa.GetProvider().RotateKey(issuer, authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -51,7 +52,7 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	// If the rotated issuer is the token issuer, update the application's AuthIssuer
 	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
-		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
+		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	// Update the router with the new key/kid
@@ -153,7 +154,7 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 		}
 
 		if force == "replace" {
-			err := sa.GetProvider().DeleteKeysByName(keyName)
+			err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
 			if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 				serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
 				http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
@@ -162,7 +163,7 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 		}
 	}
 
-	issuerKey, err := sa.GetProvider().CreateKeyPair(keyName, "sig", authCtx.ProjectId)
+	issuerKey, err := sa.GetKeyService().CreateKeyPair(r.Context(), keyName, "sig", authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
@@ -171,7 +172,7 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 
 	// If the created issuer is the token issuer, update the application's AuthIssuer
 	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName {
-		sa.GetAuth().UpdateTokenKey(keyName, keyName, issuerKey, sa.GetProvider().GetAuthValidatorPubKey())
+		sa.GetAuth().UpdateTokenKey(keyName, keyName, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
@@ -240,6 +241,7 @@ func CreateKeyNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *
 }
 
 func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+	ctx := request.Context()
 	vars := mux.Vars(request)
 	rawKeyName := vars["keyName"]
 	if rawKeyName == "" {
@@ -290,7 +292,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 			use = request.Use
 		}
 
-		err = sa.GetProvider().StoreExternalKey(keyName, jwksExtern.KIDs(), request.StreamId, use, request.JwksUri)
+		err = sa.GetKeyService().StoreExternalKey(ctx, keyName, jwksExtern.KIDs(), request.StreamId, use, request.JwksUri)
 		if err != nil {
 			msg := fmt.Sprintf("Error storing keyName %s: %v", keyName, err)
 			http.Error(writer, msg, http.StatusInternalServerError)
@@ -364,7 +366,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	kid := ""
 	if force == "replace" {
-		err := sa.GetProvider().DeleteKeysByName(keyName)
+		err := sa.GetKeyService().DeleteKeysByName(ctx, keyName)
 		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 			serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
 			http.Error(writer, "Error replacing existing keys", http.StatusInternalServerError)
@@ -382,7 +384,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	err := sa.GetProvider().AddKey(keyName, use, kid, priv, pub, authCtx.ProjectId)
+	err := sa.GetKeyService().AddKey(ctx, keyName, use, kid, priv, pub, authCtx.ProjectId)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
@@ -394,7 +396,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		if kid == "" {
 			kid = keyName
 		}
-		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetProvider().GetAuthValidatorPubKey())
+		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	writer.WriteHeader(http.StatusOK)
@@ -428,7 +430,7 @@ func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		rawKeyName = vars["issuer"]
 	}
 	keyName, _ := url.QueryUnescape(rawKeyName)
-	err := sa.GetProvider().DeleteKeysByName(keyName)
+	err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
 	if err != nil {
 		serverLog.Error("Error deleting keys for keyName", keyName, err.Error())
 		if errors.Is(err, interfaces.ErrKeyNotFound) {
@@ -590,7 +592,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Id:            bson.NewObjectID(),
 	}
 
-	response := sa.GetProvider().RegisterClient(client, authCtx.ProjectId)
+	response := sa.GetClientService().RegisterClient(r.Context(), client, authCtx.ProjectId)
 	if response == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -627,7 +629,7 @@ func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	state, err := sa.GetProvider().GetStreamState(req.StreamID)
+	state, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamID)
 	if err != nil {
 		http.Error(w, "Stream not found", http.StatusNotFound)
 		return
@@ -713,7 +715,7 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		return
 	}
 	projectId := authCtx.ProjectId
-	mapStreams := sa.GetProvider().GetStateMap()
+	mapStreams := sa.GetStreamService().GetStateMap(r.Context())
 	result := make([]model.StreamStateRecord, 0)
 	for _, stream := range mapStreams {
 		if projectId == "" || stream.ProjectId == projectId {
@@ -764,7 +766,7 @@ func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		return
 	}
 
-	config, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+	config, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -838,7 +840,7 @@ func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	server.ProjectId = authCtx.ProjectId
 
-	err = sa.GetProvider().CreateServer(r.Context(), &server)
+	err = sa.GetServerService().CreateServer(r.Context(), &server)
 	if err != nil {
 		if errors.Is(err, services.ErrServerAlreadyExists) {
 			http.Error(w, "Server alias already exists", http.StatusConflict)
@@ -882,7 +884,7 @@ func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	rawAlias := vars["alias"]
 	alias, _ := url.QueryUnescape(rawAlias)
 
-	server, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	server, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
 		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -934,7 +936,7 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	alias, _ := url.QueryUnescape(rawAlias)
 
 	// Find the existing server
-	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
 		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -960,7 +962,7 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	server.Id = existing.Id
 	server.ProjectId = existing.ProjectId // Don't allow changing project id via update
 
-	err = sa.GetProvider().UpdateServer(r.Context(), &server)
+	err = sa.GetServerService().UpdateServer(r.Context(), &server)
 	if err != nil {
 		if errors.Is(err, services.ErrServerAlreadyExists) {
 			http.Error(w, "Server alias already exists", http.StatusConflict)
@@ -1004,7 +1006,7 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	rawAlias := vars["alias"]
 	alias, _ := url.QueryUnescape(rawAlias)
 
-	existing, err := sa.GetProvider().GetServerByAlias(r.Context(), alias)
+	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
 		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -1019,7 +1021,7 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	err = sa.GetProvider().DeleteServer(r.Context(), existing.Id.Hex())
+	err = sa.GetServerService().DeleteServer(r.Context(), existing.Id.Hex())
 	if err != nil {
 		serverLog.Error("Error deleting server", "error", err)
 		http.Error(w, "Error deleting server: "+err.Error(), http.StatusInternalServerError)
@@ -1051,7 +1053,7 @@ func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		return
 	}
 
-	servers, err := sa.GetProvider().ListServers(r.Context())
+	servers, err := sa.GetServerService().ListServers(r.Context())
 	if err != nil {
 		serverLog.Error("Error listing servers", "error", err)
 		http.Error(w, "Error listing servers: "+err.Error(), http.StatusInternalServerError)
@@ -1082,10 +1084,10 @@ func (sa *SignalsApplication) JwksJson(w http.ResponseWriter, r *http.Request) {
 	JwksJsonHandler(sa, w, r)
 }
 
-func JwksJsonHandler(sa SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
+func JwksJsonHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	jsonKey := sa.GetProvider().GetPublicJWKS(sa.GetDefIssuer())
+	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), sa.GetDefIssuer())
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -1114,7 +1116,7 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	summaries, err := sa.GetProvider().ListSummaries()
+	summaries, err := sa.GetKeyService().ListSummaries(r.Context())
 	if err != nil {
 		serverLog.Warn("Error listing summaries", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1159,7 +1161,7 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 	}
 
 	// 4. Introspect
-	resp, err := sa.GetProvider().GetTokenService().IntrospectToken(r.Context(), jti)
+	resp, err := sa.GetTokenService().IntrospectToken(r.Context(), jti)
 	if err != nil {
 		serverLog.Error("Introspection error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1185,7 +1187,7 @@ func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err := sa.GetProvider().GetTokenService().RevokeToken(r.Context(), jti)
+	err := sa.GetTokenService().RevokeToken(r.Context(), jti)
 	if err != nil {
 		serverLog.Error("Revocation error", "jti", jti, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1211,9 +1213,9 @@ func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Re
 	var err error
 
 	if clientId != "" {
-		tokens, err = sa.GetProvider().GetTokenService().ListByClient(r.Context(), clientId)
+		tokens, err = sa.GetTokenService().ListByClient(r.Context(), clientId)
 	} else if projectId != "" {
-		tokens, err = sa.GetProvider().GetTokenService().ListByProject(r.Context(), projectId)
+		tokens, err = sa.GetTokenService().ListByProject(r.Context(), projectId)
 	} else {
 		// List all? DAO doesn't have list all yet. I'll use projectId if provided, else return error for now
 		// or I can add ListAll to DAO.
@@ -1254,7 +1256,7 @@ func JwksIssuersHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *ht
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	names := sa.GetProvider().ListKeyNames()
+	names, _ := sa.GetKeyService().ListKeyNames(r.Context())
 	issuerResponse := IssuerResponse{
 		Issuers: names,
 	}
@@ -1291,7 +1293,7 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		rawKeyName = vars["issuer"]
 	}
 	keyName, _ := url.QueryUnescape(rawKeyName)
-	jsonKey := sa.GetProvider().GetPublicJWKS(keyName)
+	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), keyName)
 	if jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -1336,6 +1338,6 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {
 	// Check for existing key
-	keyNames := sa.GetProvider().ListKeyNames()
+	keyNames, _ := sa.GetKeyService().ListKeyNames(context.Background())
 	return slices.Contains(keyNames, keyName)
 }
