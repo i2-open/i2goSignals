@@ -9,7 +9,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -18,20 +17,34 @@ var persistLog = logger.Sub("MEMORY_PERSIST")
 
 // PersistenceManager handles saving and loading of memory provider state to/from disk
 type PersistenceManager struct {
-	directory    string
-	saveRate     int
-	stopSave     chan struct{}
-	mu           sync.Mutex
-	dirty        bool
-	baseProvider *common.BaseProvider
+	directory string
+	saveRate  int
+	stopSave  chan struct{}
+	mu        sync.Mutex
+	dirty     bool
+
+	// Direct references to the raw memory DAOs whose state we serialize.
+	// The provider passes these in instead of a baseProvider to avoid
+	// type-asserting through a wrapper-DAO layer (#44).
+	streamDAO *memory.StreamDAOMemory
+	eventDAO  *memory.EventDAOMemory
+	keyDAO    *memory.KeyDAOMemory
+	clientDAO *memory.ClientDAOMemory
+	serverDAO *memory.ServerDAOMemory
 }
 
-// NewPersistenceManager creates a new persistence manager
-func NewPersistenceManager(directory string, saveRate int, baseProvider *common.BaseProvider) *PersistenceManager {
+// newPersistenceManagerForProvider builds a PersistenceManager bound to the
+// raw DAOs that the given MemoryProvider holds. This is the only constructor
+// — the WriteHook-coupled NewPersistenceManager(baseProvider) is gone.
+func newPersistenceManagerForProvider(directory string, saveRate int, m *MemoryProvider) *PersistenceManager {
 	return &PersistenceManager{
-		directory:    directory,
-		saveRate:     saveRate,
-		baseProvider: baseProvider,
+		directory: directory,
+		saveRate:  saveRate,
+		streamDAO: m.rawStreamDAO,
+		eventDAO:  m.rawEventDAO,
+		keyDAO:    m.rawKeyDAO,
+		clientDAO: m.rawClientDAO,
+		serverDAO: m.rawServerDAO,
 	}
 }
 
@@ -49,9 +62,10 @@ func (pm *PersistenceManager) Initialize() error {
 		return err
 	}
 
-	// Set persist dir in EventDAO
-	if ed, ok := pm.baseProvider.GetEventDAO().(*memory.EventDAOMemory); ok {
-		ed.SetPersistDir(pm.directory)
+	// Set persist dir on the raw EventDAO (it streams individual SETs to
+	// disk on every Insert, separately from the bulk save below).
+	if pm.eventDAO != nil {
+		pm.eventDAO.SetPersistDir(pm.directory)
 	}
 
 	// Load existing state
@@ -115,36 +129,23 @@ func (pm *PersistenceManager) SaveState() {
 
 	persistLog.Debug("Saving state to disk", "dir", pm.directory)
 
-	// Save StreamDAO state
-	if sd, ok := pm.baseProvider.GetStreamDAO().(*memory.StreamDAOMemory); ok {
-		state := sd.GetState()
-		pm.saveFile("streams.json", state)
+	if pm.streamDAO != nil {
+		pm.saveFile("streams.json", pm.streamDAO.GetState())
 	}
-
-	// Save KeyDAO state
-	if kd, ok := pm.baseProvider.GetKeyDAO().(*memory.KeyDAOMemory); ok {
-		state := kd.GetState()
-		pm.saveFile("keys.json", state)
+	if pm.keyDAO != nil {
+		pm.saveFile("keys.json", pm.keyDAO.GetState())
 	}
-
-	// Save ClientDAO state
-	if cd, ok := pm.baseProvider.GetClientDAO().(*memory.ClientDAOMemory); ok {
-		state := cd.GetState()
-		pm.saveFile("clients.json", state)
+	if pm.clientDAO != nil {
+		pm.saveFile("clients.json", pm.clientDAO.GetState())
 	}
-
-	// Save ServerDAO state
-	if sd, ok := pm.baseProvider.GetServerDAO().(*memory.ServerDAOMemory); ok {
-		state := sd.GetState()
-		pm.saveFile("servers.json", state)
+	if pm.serverDAO != nil {
+		pm.saveFile("servers.json", pm.serverDAO.GetState())
 	}
-
-	// Save EventDAO state (pending and delivered)
-	if ed, ok := pm.baseProvider.GetEventDAO().(*memory.EventDAOMemory); ok {
-		_, pending, delivered := ed.GetState()
+	if pm.eventDAO != nil {
+		_, pending, delivered := pm.eventDAO.GetState()
 		pm.saveFile("pending_events.json", pending)
 		pm.saveFile("delivered_events.json", delivered)
-		// Individual events are already saved in Insert
+		// Individual SETs are streamed to disk in EventDAOMemory.Insert.
 	}
 }
 
@@ -168,63 +169,56 @@ func (pm *PersistenceManager) LoadState() {
 		return
 	}
 
-	// Load StreamDAO state
-	var streams map[string]*model.StreamStateRecord
-	if pm.loadFile("streams.json", &streams) {
-		if sd, ok := pm.baseProvider.GetStreamDAO().(*memory.StreamDAOMemory); ok {
-			sd.SetState(streams)
+	if pm.streamDAO != nil {
+		var streams map[string]*model.StreamStateRecord
+		if pm.loadFile("streams.json", &streams) {
+			pm.streamDAO.SetState(streams)
 		}
 	}
 
-	// Load KeyDAO state
-	var keys map[string]*interfaces.JwkKeyRec
-	if pm.loadFile("keys.json", &keys) {
-		if kd, ok := pm.baseProvider.GetKeyDAO().(*memory.KeyDAOMemory); ok {
-			kd.SetState(keys)
+	if pm.keyDAO != nil {
+		var keys map[string]*interfaces.JwkKeyRec
+		if pm.loadFile("keys.json", &keys) {
+			pm.keyDAO.SetState(keys)
 		}
 	}
 
-	// Load ClientDAO state
-	var clients map[string]*model.SsfClient
-	if pm.loadFile("clients.json", &clients) {
-		if cd, ok := pm.baseProvider.GetClientDAO().(*memory.ClientDAOMemory); ok {
-			cd.SetState(clients)
+	if pm.clientDAO != nil {
+		var clients map[string]*model.SsfClient
+		if pm.loadFile("clients.json", &clients) {
+			pm.clientDAO.SetState(clients)
 		}
 	}
 
-	// Load ServerDAO state
-	var servers map[string]*model.Server
-	if pm.loadFile("servers.json", &servers) {
-		if sd, ok := pm.baseProvider.GetServerDAO().(*memory.ServerDAOMemory); ok {
-			sd.SetState(servers)
+	if pm.serverDAO != nil {
+		var servers map[string]*model.Server
+		if pm.loadFile("servers.json", &servers) {
+			pm.serverDAO.SetState(servers)
 		}
 	}
 
-	// Load EventDAO state
-	var pending map[string][]interfaces.DeliverableEvent
-	var delivered map[string][]interfaces.DeliveredEvent
-	pOk := pm.loadFile("pending_events.json", &pending)
-	dOk := pm.loadFile("delivered_events.json", &delivered)
+	if pm.eventDAO != nil {
+		var pending map[string][]interfaces.DeliverableEvent
+		var delivered map[string][]interfaces.DeliveredEvent
+		pOk := pm.loadFile("pending_events.json", &pending)
+		dOk := pm.loadFile("delivered_events.json", &delivered)
 
-	// For individual events, we need to scan the events directory
-	events := make(map[string]*model.AgEventRecord)
-	eventFiles, _ := filepath.Glob(filepath.Join(pm.directory, "events", "*.set"))
-	for _, file := range eventFiles {
-		data, err := os.ReadFile(file)
-		if err == nil {
-			var rec model.AgEventRecord
-			if err := json.Unmarshal(data, &rec); err == nil {
-				// Memory optimization: clear Original if we favor disk
-				rec.Original = ""
-				events[rec.Jti] = &rec
+		events := make(map[string]*model.AgEventRecord)
+		eventFiles, _ := filepath.Glob(filepath.Join(pm.directory, "events", "*.set"))
+		for _, file := range eventFiles {
+			data, err := os.ReadFile(file)
+			if err == nil {
+				var rec model.AgEventRecord
+				if err := json.Unmarshal(data, &rec); err == nil {
+					rec.Original = ""
+					events[rec.Jti] = &rec
+				}
 			}
 		}
-	}
 
-	if ed, ok := pm.baseProvider.GetEventDAO().(*memory.EventDAOMemory); ok {
-		ed.SetState(events, pending, delivered)
+		pm.eventDAO.SetState(events, pending, delivered)
+		_ = pOk || dOk
 	}
-	_ = pOk || dOk // use them to avoid unused var
 }
 
 // loadFile reads and unmarshals JSON from file
