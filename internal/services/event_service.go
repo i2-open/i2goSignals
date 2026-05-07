@@ -9,7 +9,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var esLog = logger.Sub("EVENT_SERVICE")
@@ -71,7 +70,7 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 	return rec, nil
 }
 
-func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID bson.ObjectID) error {
+func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
 	err := s.eventDAO.AddPending(ctx, jti, streamID)
 	if err != nil {
 		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
@@ -147,7 +146,7 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 	return nil
 }
 
-func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID bson.ObjectID)) {
+func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID string)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
@@ -186,13 +185,8 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	}
 
 	// Re-add events to pending
-	streamObjId, err := bson.ObjectIDFromHex(streamID)
-	if err != nil {
-		return err
-	}
-
 	for _, event := range events {
-		err = s.AddEventToStream(ctx, event.Jti, streamObjId)
+		err = s.AddEventToStream(ctx, event.Jti, streamID)
 		if err != nil {
 			esLog.Error("Error re-adding event to stream during reset", "jti", event.Jti, "streamID", streamID, "error", err)
 		}

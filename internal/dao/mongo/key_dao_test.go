@@ -57,7 +57,7 @@ func (suite *KeyDAOMongoSuite) TestKeySummaryRotations() {
 
 	// Case 1: 1 key -> 0 rotations
 	key1 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: keyName,
 		Kid:     keyName,
 		Use:     "sig",
@@ -75,13 +75,13 @@ func (suite *KeyDAOMongoSuite) TestKeySummaryRotations() {
 
 	// Case 2: Add 2 more keys -> 3 keys total -> 2 rotations
 	key2 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: keyName,
 		Kid:     keyName + "-2",
 		Use:     "sig",
 	}
 	key3 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: keyName,
 		Kid:     keyName + "-3",
 		Use:     "sig",
@@ -100,17 +100,17 @@ func (suite *KeyDAOMongoSuite) TestListSummaries() {
 
 	// Add keys for multiple key names
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: "key-a",
 		Kid:     "key-a",
 	})
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: "key-b",
 		Kid:     "key-b",
 	})
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      bson.NewObjectID().Hex(),
 		KeyName: "key-b",
 		Kid:     "key-b-2",
 	})

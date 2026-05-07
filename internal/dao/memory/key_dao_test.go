@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/ids"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type KeyDAOMemorySuite struct {
@@ -28,7 +28,7 @@ func (suite *KeyDAOMemorySuite) TestKeySummaryRotations() {
 
 	// Case 1: 1 key -> 0 rotations
 	key1 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: keyName,
 		Kid:     keyName,
 		Use:     "sig",
@@ -46,13 +46,13 @@ func (suite *KeyDAOMemorySuite) TestKeySummaryRotations() {
 
 	// Case 2: Add 2 more keys -> 3 keys total -> 2 rotations
 	key2 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: keyName,
 		Kid:     keyName + "-2",
 		Use:     "sig",
 	}
 	key3 := &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: keyName,
 		Kid:     keyName + "-3",
 		Use:     "sig",
@@ -71,17 +71,17 @@ func (suite *KeyDAOMemorySuite) TestListSummaries() {
 
 	// Add keys for multiple key names
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: "key-a",
 		Kid:     "key-a",
 	})
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: "key-b",
 		Kid:     "key-b",
 	})
 	_ = suite.dao.Insert(ctx, &interfaces.JwkKeyRec{
-		Id:      bson.NewObjectID(),
+		Id:      ids.NewObjectID(),
 		KeyName: "key-b",
 		Kid:     "key-b-2",
 	})

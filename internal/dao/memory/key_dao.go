@@ -5,8 +5,8 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/i2-open/i2goSignals/internal/dao/ids"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // KeyDAOMemory uses a simpler mutex-based approach because it stores
@@ -26,15 +26,15 @@ func (d *KeyDAOMemory) Insert(_ context.Context, keyRec *interfaces.JwkKeyRec) e
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if keyRec.Id.IsZero() {
-		keyRec.Id = bson.NewObjectID()
+	if keyRec.Id == "" {
+		keyRec.Id = ids.NewObjectID()
 	}
 
 	if keyRec.Kid == "" {
 		if keyRec.KeyName != "" {
 			keyRec.Kid = keyRec.KeyName
 		} else {
-			keyRec.Kid = keyRec.Id.Hex()
+			keyRec.Kid = keyRec.Id
 		}
 	}
 
@@ -76,7 +76,7 @@ func (d *KeyDAOMemory) FindLatestByKeyName(_ context.Context, keyName string) (*
 	var latest *interfaces.JwkKeyRec
 	for _, rec := range d.keys {
 		if rec.KeyName == keyName {
-			if latest == nil || rec.Id.Hex() > latest.Id.Hex() {
+			if latest == nil || rec.Id > latest.Id {
 				latest = rec
 			}
 		}

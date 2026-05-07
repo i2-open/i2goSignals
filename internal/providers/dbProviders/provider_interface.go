@@ -12,7 +12,6 @@ import (
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/MicahParks/keyfunc/v2"
 )
@@ -57,9 +56,9 @@ type DbProviderInterface interface {
 	AckEvent(jtiString string, streamId string, fencingToken int64) error
 	AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.AgEventRecord, err error)
 	AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (eventRecord *model.AgEventRecord, err error)
-	AddEventToStream(jti string, streamId bson.ObjectID) error
+	AddEventToStream(jti string, streamId string) error
 	ClearPending(streamId string) error
-	WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID))
+	WatchPending(ctx context.Context, callback func(jti string, streamId string))
 	ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error
 
 	ResetDb(initialize bool) error
