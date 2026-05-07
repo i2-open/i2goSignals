@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
-	"errors"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -58,7 +56,7 @@ func NewBaseProvider(
 	serverService *services.ServerService,
 	tokenService *services.TokenService,
 ) *BaseProvider {
-	return &BaseProvider{
+	bp := &BaseProvider{
 		streamDAO:     streamDAO,
 		eventDAO:      eventDAO,
 		keyDAO:        keyDAO,
@@ -72,6 +70,12 @@ func NewBaseProvider(
 		serverService: serverService,
 		tokenService:  tokenService,
 	}
+	// Wire the ServerService into StreamService so CreateStream can resolve
+	// tx_alias internally (logic lifted out of this façade in PRD #39 PR 4).
+	if streamService != nil && serverService != nil {
+		streamService.SetServerService(serverService)
+	}
+	return bp
 }
 
 // SetWriteHook sets a callback to be invoked after successful write operations
@@ -199,25 +203,14 @@ func (b *BaseProvider) GetIssuerJwksForReceiver(sid string) *keyfunc.JWKS {
 }
 
 func (b *BaseProvider) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
-	var txServer *model.Server
-
-	if request.TxAlias != nil && *request.TxAlias != "" {
-		var err error
-		txServer, err = b.serverService.GetServerByAlias(context.Background(), *request.TxAlias)
-		if err != nil {
-			return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
-		}
-	}
-
-	if strings.EqualFold(request.IssuerJWKSUrl, "NONE") { // scim servers assume the current server has the key internally
-		request.IssuerJWKSUrl = ""
-	}
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
-	res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, txServer)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return res, err
+    // tx_alias resolution and IssuerJWKSUrl="NONE" normalisation now live
+    // inside StreamService.CreateStream — this façade is a thin pass-through.
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+    res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, nil)
+    if err == nil {
+        b.notifyWrite()
+    }
+    return res, err
 }
 
 func (b *BaseProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
