@@ -275,7 +275,7 @@ func (s *MongoProviderSuite) generateEvent() {
 
 	state, _ := s.provider.GetStreamState(s.stream.Id)
 
-	_ = s.provider.AddEventToStream(test1.ID, state.Id)
+	_ = s.provider.AddEventToStream(test1.ID, state.Id.Hex())
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {

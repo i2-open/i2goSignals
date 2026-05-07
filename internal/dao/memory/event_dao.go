@@ -11,7 +11,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type EventDAOMemory struct {
@@ -127,17 +126,16 @@ func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *
 	return sortedEvents, nil
 }
 
-func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID bson.ObjectID) error {
+func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if _, ok := d.events[jti]; ok {
-		streamIdHex := streamID.Hex()
 		deliverable := interfaces.DeliverableEvent{
 			Jti:      jti,
 			StreamId: streamID,
 		}
-		d.pendingEvents[streamIdHex] = append(d.pendingEvents[streamIdHex], deliverable)
+		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], deliverable)
 	}
 	return nil
 }
@@ -202,16 +200,15 @@ func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.Deli
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	streamID := event.StreamId.Hex()
 	delivered := interfaces.DeliveredEvent{
 		DeliverableEvent: *event,
 		AckDate:          ackDate,
 	}
-	d.deliveredEvents[streamID] = append(d.deliveredEvents[streamID], delivered)
+	d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], delivered)
 	return nil
 }
 
-func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID bson.ObjectID)) error {
+func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID string)) error {
 	// Mock implementation: for now, we don't need to do anything here
 	// since HandleEvent already updates local buffers in the router.
 	// In a real mock test, we might want to simulate external events.

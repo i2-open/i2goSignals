@@ -638,7 +638,7 @@ func (m *MongoProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid
 	return m.getBaseProvider().AddOperationalEvent(event, sid, raw)
 }
 
-func (m *MongoProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
+func (m *MongoProvider) AddEventToStream(jti string, streamId string) error {
 	return m.getBaseProvider().AddEventToStream(jti, streamId)
 }
 
@@ -646,7 +646,7 @@ func (m *MongoProvider) ClearPending(streamId string) error {
 	return m.getBaseProvider().ClearPending(streamId)
 }
 
-func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
+func (m *MongoProvider) WatchPending(ctx context.Context, callback func(jti string, streamId string)) {
 	m.getBaseProvider().WatchPending(ctx, callback)
 }
 

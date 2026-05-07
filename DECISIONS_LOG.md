@@ -1,5 +1,54 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] String IDs across persistence interfaces; bson.ObjectID becomes Mongo-internal
+
+### Change
+Persistence interfaces and DAO types no longer expose `bson.ObjectID`:
+
+- `DbProviderInterface.AddEventToStream(jti, streamId)` and `WatchPending` now take string IDs.
+- `interfaces.EventDAO.AddPending` and `interfaces.EventDAO.WatchPending` callback take string IDs.
+- `interfaces.JwkKeyRec.Id` and `interfaces.DeliverableEvent.StreamId` are now `string`.
+- `provider_interface.go` and `dao_interfaces.go` no longer import `go.mongodb.org/mongo-driver/v2/bson`.
+
+The Mongo adapter keeps `bson.ObjectID` as the on-disk storage type for backward
+compatibility with existing data. New private doc types (`keyDoc`, `pendingDoc`,
+`deliveredDoc`) inside `internal/dao/mongo/` mirror the public records but carry
+`bson.ObjectID` for `_id`/`sid`. Conversion happens at the read/write boundary.
+
+A new helper package `internal/dao/ids` provides `ids.NewObjectID() string` —
+a 24-character lowercase hex string generated from `crypto/rand`. Memory and
+service callers use this helper instead of `bson.NewObjectID().Hex()`. The
+format matches MongoDB ObjectID hex so existing IDs remain round-trip safe
+through `mongo.ParseObjectID`.
+
+### Out of scope (deferred to PRD #39 PR 4)
+The bson type leak remains in `pkg/ssfModels` for `StreamStateRecord.Id`,
+`SsfClient.Id`, and `Server.Id`. Those public model types are migrated as
+part of the BaseProvider deletion / handler refactor in PR 4. Until then,
+callers must continue to use `record.Id.Hex()` to produce the string form
+when calling persistence methods that take string IDs. EventRouter already
+does this at all four call sites (`event_router.go:201, 527, 554, 586`).
+
+### Invariants
+- The DAO interface and provider interface have NO Mongo driver dependency.
+  Adding a Postgres or etcd adapter no longer requires importing bson to
+  satisfy the seam.
+- Mongo storage shape is unchanged: `_id` is `bson.ObjectID`, `sid` is
+  `bson.ObjectID`. Existing data round-trips identically.
+- Memory DAOs use string IDs natively — no parse / convert step on the hot
+  path.
+- ID generation in service-layer code (key minting, kid suffixes) goes
+  through `ids.NewObjectID()`. Direct `bson.NewObjectID()` calls remain only
+  for `StreamStateRecord.Id` minting in `StreamService.CreateStream` (PR 4).
+
+### Regression Verification
+- `go test -race -timeout 300s ./internal/... ./pkg/...`
+- `go vet ./...` (no new warnings)
+- Mongo round-trip: `internal/providers/dbProviders/mongo_provider/test/...`
+  exercises Insert→Find paths over the new private doc types.
+
+---
+
 ## [2026-05-06] Receiver-stream predicate lifted from DAOs into `StreamService`
 
 ### Change

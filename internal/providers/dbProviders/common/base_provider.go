@@ -15,7 +15,6 @@ import (
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // WriteHook is a callback function that can be invoked after write operations
@@ -313,7 +312,7 @@ func (b *BaseProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid 
 	return res, err
 }
 
-func (b *BaseProvider) AddEventToStream(jti string, streamId bson.ObjectID) error {
+func (b *BaseProvider) AddEventToStream(jti string, streamId string) error {
 	err := b.eventService.AddEventToStream(context.Background(), jti, streamId)
 	if err == nil {
 		b.notifyWrite()
@@ -329,7 +328,7 @@ func (b *BaseProvider) ClearPending(streamId string) error {
 	return err
 }
 
-func (b *BaseProvider) WatchPending(ctx context.Context, callback func(jti string, streamId bson.ObjectID)) {
+func (b *BaseProvider) WatchPending(ctx context.Context, callback func(jti string, streamId string)) {
 	b.eventService.WatchPending(ctx, callback)
 }
 

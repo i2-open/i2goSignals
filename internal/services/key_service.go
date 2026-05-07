@@ -13,11 +13,11 @@ import (
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/dao/ids"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var ksLog = logger.Sub("KEY_SERVICE")
@@ -121,7 +121,7 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 		return nil, "", err
 	}
 
-	kid := fmt.Sprintf("%s-%s", keyName, bson.NewObjectID().Hex())
+	kid := fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
 
 	// Preserve the use from the existing key if available
 	use := "sig"
@@ -155,7 +155,7 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 	pubKeyBytes := x509.MarshalPKCS1PublicKey(&publicKey)
 
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:          bson.NewObjectID(),
+		Id:          ids.NewObjectID(),
 		KeyName:     keyName,
 		Kid:         kid,
 		Use:         use,
@@ -202,7 +202,7 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 	}
 
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:          bson.NewObjectID(),
+		Id:          ids.NewObjectID(),
 		KeyName:     keyName,
 		Kid:         kid,
 		Use:         use,
@@ -381,7 +381,7 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 	// record's public key overwrites older ones in the givenKeys map — keeping the
 	// JWKS consistent with FindLatestByKeyName, which is used for signing.
 	sort.Slice(keys, func(i, j int) bool {
-		return keys[i].Id.Hex() < keys[j].Id.Hex()
+		return keys[i].Id < keys[j].Id
 	})
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
@@ -477,7 +477,7 @@ func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, kids 
 		kid = kids[0]
 	}
 	keyPairRec := &interfaces.JwkKeyRec{
-		Id:              bson.NewObjectID(),
+		Id:              ids.NewObjectID(),
 		KeyName:         keyName,
 		Kid:             kid,
 		Use:             use,

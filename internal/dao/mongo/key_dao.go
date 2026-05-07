@@ -1,260 +1,318 @@
 package mongo
 
 import (
-	"context"
-	"errors"
-	"slices"
+    "context"
+    "errors"
+    "slices"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
-	"github.com/i2-open/i2goSignals/pkg/logger"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+    "github.com/i2-open/i2goSignals/internal/dao/ids"
+    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    "github.com/i2-open/i2goSignals/pkg/logger"
+    "go.mongodb.org/mongo-driver/v2/bson"
+    "go.mongodb.org/mongo-driver/v2/mongo"
+    "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var kLog = logger.Sub("KEY_DAO")
 
+// keyDoc is the on-disk shape of a JwkKeyRec inside Mongo. _id stays as
+// bson.ObjectID for backward compatibility with existing data; the public
+// JwkKeyRec exposes Id as a string and converts at the boundary.
+type keyDoc struct {
+    Id              bson.ObjectID `bson:"_id"`
+    KeyName         string        `bson:"key_name"`
+    Kid             string        `bson:"kid"`
+    Use             string        `bson:"use"`
+    ProjectId       string        `bson:"project_id"`
+    StreamId        string        `bson:"stream_id"`
+    KeyBytes        []byte        `bson:"key_bytes"`
+    PubKeyBytes     []byte        `bson:"pub_jwks"`
+    ReceiverJwksUrl string        `bson:"receiver_jwks_url"`
+}
+
+func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
+    return &interfaces.JwkKeyRec{
+        Id:              d.Id.Hex(),
+        KeyName:         d.KeyName,
+        Kid:             d.Kid,
+        Use:             d.Use,
+        ProjectId:       d.ProjectId,
+        StreamId:        d.StreamId,
+        KeyBytes:        d.KeyBytes,
+        PubKeyBytes:     d.PubKeyBytes,
+        ReceiverJwksUrl: d.ReceiverJwksUrl,
+    }
+}
+
+func recToDoc(rec *interfaces.JwkKeyRec) (*keyDoc, error) {
+    oid, err := ParseObjectID(rec.Id)
+    if err != nil {
+        return nil, err
+    }
+    return &keyDoc{
+        Id:              oid,
+        KeyName:         rec.KeyName,
+        Kid:             rec.Kid,
+        Use:             rec.Use,
+        ProjectId:       rec.ProjectId,
+        StreamId:        rec.StreamId,
+        KeyBytes:        rec.KeyBytes,
+        PubKeyBytes:     rec.PubKeyBytes,
+        ReceiverJwksUrl: rec.ReceiverJwksUrl,
+    }, nil
+}
+
 type KeyDAOMongo struct {
-	collection *mongo.Collection
+    collection *mongo.Collection
 }
 
 func NewKeyDAO(collection *mongo.Collection) interfaces.KeyDAO {
-	return &KeyDAOMongo{collection: collection}
+    return &KeyDAOMongo{collection: collection}
 }
 
 func (d *KeyDAOMongo) Insert(ctx context.Context, keyRec *interfaces.JwkKeyRec) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	_, err := d.collection.InsertOne(ctx, keyRec)
-	if err != nil {
-		kLog.Error("Error inserting key", "error", err)
-	}
-	return err
+    if d.collection == nil {
+        return errors.New("mongo collection not initialized")
+    }
+    if keyRec.Id == "" {
+        keyRec.Id = ids.NewObjectID()
+    }
+    doc, err := recToDoc(keyRec)
+    if err != nil {
+        return err
+    }
+    _, err = d.collection.InsertOne(ctx, doc)
+    if err != nil {
+        kLog.Error("Error inserting key", "error", err)
+    }
+    return err
 }
 
 func (d *KeyDAOMongo) FindByKid(ctx context.Context, kid string) (*interfaces.JwkKeyRec, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"kid": kid}
-	res := d.collection.FindOne(ctx, filter)
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"kid": kid}
+    res := d.collection.FindOne(ctx, filter)
 
-	var rec interfaces.JwkKeyRec
-	err := res.Decode(&rec)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, interfaces.ErrKeyNotFound
-		}
-		kLog.Error("Error finding key by kid", "kid", kid, "error", err)
-		return nil, err
-	}
-	return &rec, nil
+    var doc keyDoc
+    err := res.Decode(&doc)
+    if err != nil {
+        if errors.Is(err, mongo.ErrNoDocuments) {
+            return nil, interfaces.ErrKeyNotFound
+        }
+        kLog.Error("Error finding key by kid", "kid", kid, "error", err)
+        return nil, err
+    }
+    return doc.toRec(), nil
 }
 
 func (d *KeyDAOMongo) FindByKeyName(ctx context.Context, keyName string) ([]*interfaces.JwkKeyRec, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"key_name": keyName}
-	cursor, err := d.collection.Find(ctx, filter)
-	if err != nil {
-		kLog.Error("Error retrieving keys for keyName", "keyName", keyName, "error", err)
-		return nil, err
-	}
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"key_name": keyName}
+    cursor, err := d.collection.Find(ctx, filter)
+    if err != nil {
+        kLog.Error("Error retrieving keys for keyName", "keyName", keyName, "error", err)
+        return nil, err
+    }
 
-	var keys []*interfaces.JwkKeyRec
-	err = cursor.All(ctx, &keys)
-	if err != nil {
-		kLog.Error("Error parsing JwkKeyRec", "error", err)
-		return nil, err
-	}
-	return keys, nil
+    var docs []keyDoc
+    err = cursor.All(ctx, &docs)
+    if err != nil {
+        kLog.Error("Error parsing JwkKeyRec", "error", err)
+        return nil, err
+    }
+    keys := make([]*interfaces.JwkKeyRec, len(docs))
+    for i := range docs {
+        keys[i] = docs[i].toRec()
+    }
+    return keys, nil
 }
 
 func (d *KeyDAOMongo) FindLatestByKeyName(ctx context.Context, keyName string) (*interfaces.JwkKeyRec, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"key_name": keyName}
-	opts := options.FindOne().SetSort(bson.M{"_id": -1}) // Newest first based on ObjectID
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"key_name": keyName}
+    opts := options.FindOne().SetSort(bson.M{"_id": -1}) // Newest first based on ObjectID
 
-	res := d.collection.FindOne(ctx, filter, opts)
+    res := d.collection.FindOne(ctx, filter, opts)
 
-	var rec interfaces.JwkKeyRec
-	err := res.Decode(&rec)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, interfaces.ErrKeyNotFound
-		}
-		kLog.Error("Error parsing JwkKeyRec for keyName", "keyName", keyName, "error", err)
-		return nil, err
-	}
+    var doc keyDoc
+    err := res.Decode(&doc)
+    if err != nil {
+        if errors.Is(err, mongo.ErrNoDocuments) {
+            return nil, interfaces.ErrKeyNotFound
+        }
+        kLog.Error("Error parsing JwkKeyRec for keyName", "keyName", keyName, "error", err)
+        return nil, err
+    }
 
-	if len(rec.KeyBytes) == 0 {
-		return nil, interfaces.ErrKeyNotFound
-	}
+    if len(doc.KeyBytes) == 0 {
+        return nil, interfaces.ErrKeyNotFound
+    }
 
-	return &rec, nil
+    return doc.toRec(), nil
 }
 
 func (d *KeyDAOMongo) FindByStreamID(ctx context.Context, streamID string) (*interfaces.JwkKeyRec, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"stream_id": streamID}
-	res := d.collection.FindOne(ctx, filter)
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"stream_id": streamID}
+    res := d.collection.FindOne(ctx, filter)
 
-	var rec interfaces.JwkKeyRec
-	err := res.Decode(&rec)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil
-		}
-		kLog.Error("Error locating key by streamId", "streamId", streamID, "error", err)
-		return nil, err
-	}
-	return &rec, nil
+    var doc keyDoc
+    err := res.Decode(&doc)
+    if err != nil {
+        if errors.Is(err, mongo.ErrNoDocuments) {
+            return nil, nil
+        }
+        kLog.Error("Error locating key by streamId", "streamId", streamID, "error", err)
+        return nil, err
+    }
+    return doc.toRec(), nil
 }
 
 func (d *KeyDAOMongo) DeleteByKid(ctx context.Context, kid string) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"kid": kid}
-	res, err := d.collection.DeleteOne(ctx, filter)
-	if err != nil {
-		kLog.Error("Error deleting key by kid", "kid", kid, "error", err)
-		return err
-	}
-	if res.DeletedCount == 0 {
-		return interfaces.ErrKeyNotFound
-	}
-	return nil
+    if d.collection == nil {
+        return errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"kid": kid}
+    res, err := d.collection.DeleteOne(ctx, filter)
+    if err != nil {
+        kLog.Error("Error deleting key by kid", "kid", kid, "error", err)
+        return err
+    }
+    if res.DeletedCount == 0 {
+        return interfaces.ErrKeyNotFound
+    }
+    return nil
 }
 
 func (d *KeyDAOMongo) DeleteByKeyName(ctx context.Context, keyName string) error {
-	if d.collection == nil {
-		return errors.New("mongo collection not initialized")
-	}
-	filter := bson.M{"key_name": keyName}
-	res := d.collection.FindOne(ctx, filter)
-	if res.Err() != nil {
-		err := res.Err()
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return interfaces.ErrKeyNotFound
-		}
-		return err
-	}
+    if d.collection == nil {
+        return errors.New("mongo collection not initialized")
+    }
+    filter := bson.M{"key_name": keyName}
+    res := d.collection.FindOne(ctx, filter)
+    if res.Err() != nil {
+        err := res.Err()
+        if errors.Is(err, mongo.ErrNoDocuments) {
+            return interfaces.ErrKeyNotFound
+        }
+        return err
+    }
 
-	delResult, err := d.collection.DeleteMany(ctx, filter)
-	if err != nil {
-		kLog.Error("Error deleting keys for keyName", "keyName", keyName, "error", err)
-		return err
-	}
+    delResult, err := d.collection.DeleteMany(ctx, filter)
+    if err != nil {
+        kLog.Error("Error deleting keys for keyName", "keyName", keyName, "error", err)
+        return err
+    }
 
-	if delResult.DeletedCount == 0 {
-		return interfaces.ErrKeyNotFound
-	}
+    if delResult.DeletedCount == 0 {
+        return interfaces.ErrKeyNotFound
+    }
 
-	kLog.Info("Deleted keys for keyName", "keyName", keyName, "count", delResult.DeletedCount)
-	return nil
+    kLog.Info("Deleted keys for keyName", "keyName", keyName, "count", delResult.DeletedCount)
+    return nil
 }
 
 func (d *KeyDAOMongo) ListKids(ctx context.Context) ([]string, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	cursor, err := d.collection.Find(ctx, bson.M{})
-	if err != nil {
-		kLog.Error("Error listing kids", "error", err)
-		return nil, err
-	}
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    cursor, err := d.collection.Find(ctx, bson.M{})
+    if err != nil {
+        kLog.Error("Error listing kids", "error", err)
+        return nil, err
+    }
 
-	var keys []*interfaces.JwkKeyRec
-	err = cursor.All(ctx, &keys)
-	if err != nil {
-		kLog.Error("Error parsing keys for kid list", "error", err)
-		return nil, err
-	}
+    var docs []keyDoc
+    err = cursor.All(ctx, &docs)
+    if err != nil {
+        kLog.Error("Error parsing keys for kid list", "error", err)
+        return nil, err
+    }
 
-	kids := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if key.Kid != "" {
-			kids = append(kids, key.Kid)
-		}
-	}
-	return kids, nil
+    kids := make([]string, 0, len(docs))
+    for _, doc := range docs {
+        if doc.Kid != "" {
+            kids = append(kids, doc.Kid)
+        }
+    }
+    return kids, nil
 }
 
 func (d *KeyDAOMongo) ListKeyNames(ctx context.Context) ([]string, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	cursor, err := d.collection.Find(ctx, bson.D{})
-	if err != nil {
-		kLog.Error("Error retrieving key names", "error", err)
-		return nil, err
-	}
+    if d.collection == nil {
+        return nil, errors.New("mongo collection not initialized")
+    }
+    cursor, err := d.collection.Find(ctx, bson.D{})
+    if err != nil {
+        kLog.Error("Error retrieving key names", "error", err)
+        return nil, err
+    }
 
-	var keys []*interfaces.JwkKeyRec
-	err = cursor.All(ctx, &keys)
-	if err != nil {
-		kLog.Error("Error parsing key names", "error", err)
-		return nil, err
-	}
+    var docs []keyDoc
+    err = cursor.All(ctx, &docs)
+    if err != nil {
+        kLog.Error("Error parsing key names", "error", err)
+        return nil, err
+    }
 
-	// There can be more than one key for a particular keyname
-	var names []string
-	for _, key := range keys {
-		keyName := key.KeyName
-		if !slices.Contains(names, keyName) {
-			names = append(names, keyName)
-		}
-	}
+    // There can be more than one key for a particular keyname
+    var names []string
+    for _, doc := range docs {
+        if !slices.Contains(names, doc.KeyName) {
+            names = append(names, doc.KeyName)
+        }
+    }
 
-	return names, nil
+    return names, nil
 }
 
 func (d *KeyDAOMongo) KeySummary(ctx context.Context, keyName string) (*interfaces.KeySummary, error) {
-	recs, err := d.FindByKeyName(ctx, keyName)
-	if err != nil {
-		return nil, err
-	}
-	if len(recs) == 0 {
-		return nil, nil
-	}
-	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
-	firstKey := recs[0]
-	var kids []string
-	for _, rec := range recs {
-		kids = append(kids, rec.Kid)
-	}
-	summary := firstKey.ToSummary()
-	summary.Kids = kids
-	summary.Rotations = len(recs) - 1
-	return &summary, nil
+    recs, err := d.FindByKeyName(ctx, keyName)
+    if err != nil {
+        return nil, err
+    }
+    if len(recs) == 0 {
+        return nil, nil
+    }
+    // If multiple keys are returned assume it is rotated.  Just produce one summary for all.
+    firstKey := recs[0]
+    var kids []string
+    for _, rec := range recs {
+        kids = append(kids, rec.Kid)
+    }
+    summary := firstKey.ToSummary()
+    summary.Kids = kids
+    summary.Rotations = len(recs) - 1
+    return &summary, nil
 }
 
 func (d *KeyDAOMongo) ListSummaries(ctx context.Context) ([]interfaces.KeySummary, error) {
 
-	names, err := d.ListKeyNames(ctx)
-	if err != nil {
-		return nil, err
-	}
+    names, err := d.ListKeyNames(ctx)
+    if err != nil {
+        return nil, err
+    }
 
-	var summaries []interfaces.KeySummary
-	for _, name := range names {
-		summary, err := d.KeySummary(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		if summary == nil {
-			kLog.Error("Received unexpected nil summary", "keyName", name)
-			continue
-		}
-		summaries = append(summaries, *summary)
-	}
+    var summaries []interfaces.KeySummary
+    for _, name := range names {
+        summary, err := d.KeySummary(ctx, name)
+        if err != nil {
+            return nil, err
+        }
+        if summary == nil {
+            kLog.Error("Received unexpected nil summary", "keyName", name)
+            continue
+        }
+        summaries = append(summaries, *summary)
+    }
 
-	return summaries, nil
+    return summaries, nil
 }

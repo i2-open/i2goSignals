@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/ids"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestEventDAOMemory_Insert(t *testing.T) {
@@ -91,14 +91,14 @@ func TestEventDAOMemory_AddPending(t *testing.T) {
 	_ = dao.Insert(ctx, record)
 
 	// Add to pending
-	streamID := bson.NewObjectID()
+	streamID := ids.NewObjectID()
 	err := dao.AddPending(ctx, "test-jti", streamID)
 	if err != nil {
 		t.Fatalf("AddPending failed: %v", err)
 	}
 
 	// Verify pending
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID.Hex(), 10)
+	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 10)
 	if err != nil {
 		t.Fatalf("GetPendingForStream failed: %v", err)
 	}
@@ -131,11 +131,11 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	}
 	_ = dao.Insert(ctx, record)
 
-	streamID := bson.NewObjectID()
+	streamID := ids.NewObjectID()
 	_ = dao.AddPending(ctx, "test-jti", streamID)
 
 	// Remove from pending
-	removed, err := dao.RemovePending(ctx, "test-jti", streamID.Hex())
+	removed, err := dao.RemovePending(ctx, "test-jti", streamID)
 	if err != nil {
 		t.Fatalf("RemovePending failed: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	}
 
 	// Verify removal
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamID.Hex(), 10)
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamID, 10)
 	if len(jtis) != 0 {
 		t.Errorf("Expected 0 pending events after removal, got %d", len(jtis))
 	}
@@ -159,7 +159,7 @@ func TestEventDAOMemory_MarkDelivered(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	streamID := bson.NewObjectID()
+	streamID := ids.NewObjectID()
 	deliverable := &interfaces.DeliverableEvent{
 		Jti:      "test-jti",
 		StreamId: streamID,
@@ -179,10 +179,10 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup: Add multiple pending events
-	streamID := bson.NewObjectID()
+	streamID := ids.NewObjectID()
 	for i := 1; i <= 3; i++ {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
-		jti := bson.NewObjectID().Hex()
+		jti := ids.NewObjectID()
 		event.ID = jti
 
 		record := &model.AgEventRecord{
@@ -195,7 +195,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	}
 
 	// Clear pending
-	count, err := dao.ClearPendingForStream(ctx, streamID.Hex())
+	count, err := dao.ClearPendingForStream(ctx, streamID)
 	if err != nil {
 		t.Fatalf("ClearPendingForStream failed: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	}
 
 	// Verify clearing
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamID.Hex(), 10)
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamID, 10)
 	if len(jtis) != 0 {
 		t.Errorf("Expected 0 pending events after clear, got %d", len(jtis))
 	}
@@ -267,12 +267,12 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	streamID := bson.NewObjectID()
+	streamID := ids.NewObjectID()
 
 	// Add 5 pending events
 	for i := 1; i <= 5; i++ {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
-		jti := bson.NewObjectID().Hex()
+		jti := ids.NewObjectID()
 		event.ID = jti
 
 		record := &model.AgEventRecord{
@@ -285,7 +285,7 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 	}
 
 	// Get with limit
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID.Hex(), 3)
+	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 3)
 	if err != nil {
 		t.Fatalf("GetPendingForStream with limit failed: %v", err)
 	}

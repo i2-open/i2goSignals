@@ -20,7 +20,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
@@ -198,8 +197,8 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 	// Start the background watcher if explicitly enabled
 	if os.Getenv("I2SIG_MONGO_WATCH_ENABLED") == "true" {
 		eventLogger.Info("Background watcher enabled via I2SIG_MONGO_WATCH_ENABLED")
-		go router.provider.WatchPending(ctx, func(jti string, streamId bson.ObjectID) {
-			sid := streamId.Hex()
+		go router.provider.WatchPending(ctx, func(jti string, streamId string) {
+			sid := streamId
 			router.mu.RLock()
 			pollBuf, pollOk := router.pollBuffers[sid]
 			pushBuf, pushOk := router.pushBuffers[sid]
@@ -524,7 +523,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.provider.AddEventToStream(event.Jti, stream.Id)
+			err = r.provider.AddEventToStream(event.Jti, stream.Id.Hex())
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
@@ -551,7 +550,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.provider.AddEventToStream(event.Jti, pollStream.Id)
+			err = r.provider.AddEventToStream(event.Jti, pollStream.Id.Hex())
 			if err != nil {
 				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
 			}
@@ -583,7 +582,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	if err := r.provider.AddEventToStream(rec.Jti, stream.Id); err != nil {
+	if err := r.provider.AddEventToStream(rec.Jti, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err
 	}
