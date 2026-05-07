@@ -37,12 +37,21 @@ const ErrorInvalidDeliveryMethod = "cannot change delivery method"
 type StreamService struct {
 	streamDAO               interfaces.StreamDAO
 	keyService              *KeyService
+	serverService           *ServerService
 	defaultIssuer           string
 	receiverStreams         map[string]*model.StreamStateRecord
 	BaseUrl                 *url.URL
 	mu                      sync.RWMutex
 	minVerificationInterval int
 	maxInactivityTimeout    int
+}
+
+// SetServerService wires in the ServerService that owns Server records. Once
+// set, CreateStream resolves a tx_alias request field to the corresponding
+// Server before delegating to the rest of the pipeline. Lifted out of the
+// provider façade as part of PRD #39 PR 4.
+func (s *StreamService) SetServerService(svc *ServerService) {
+    s.serverService = svc
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
@@ -101,7 +110,25 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 }
 
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
-	mid := bson.NewObjectID()
+    // Resolve tx_alias → Server when the caller didn't pre-resolve it. This
+    // logic was previously in BaseProvider.CreateStream; it lives here now
+    // so the provider façade can be a pass-through.
+    if txServer == nil && request.TxAlias != nil && *request.TxAlias != "" && s.serverService != nil {
+        resolved, err := s.serverService.GetServerByAlias(ctx, *request.TxAlias)
+        if err != nil {
+            return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
+        }
+        txServer = resolved
+    }
+
+    // Normalise IssuerJWKSUrl == "NONE" (any case) to the empty string. SCIM
+    // servers signal "key is internal to this server" via "NONE"; downstream
+    // code expects an empty value.
+    if strings.EqualFold(request.IssuerJWKSUrl, "NONE") {
+        request.IssuerJWKSUrl = ""
+    }
+
+    mid := bson.NewObjectID()
 
 	// var authCtx authUtil.AuthContext
 	// authCtx = ctx.Value(authUtil.AuthContextKey).(authUtil.AuthContext)
