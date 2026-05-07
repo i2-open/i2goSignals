@@ -15,11 +15,13 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
-// WriteHook is a callback function that can be invoked after write operations
-type WriteHook func()
-
 // BaseProvider provides common delegation methods for all provider implementations
-// It contains the service layer instances and delegates interface methods to them
+// It contains the service layer instances and delegates interface methods to them.
+//
+// Persistence-side after-mutation tracking (used by the file-backed memory
+// adapter) used to live here as a WriteHook plumbed through every façade
+// method. After #44 that responsibility moved into per-DAO decorator
+// wrappers inside memory_provider — this struct carries no hook.
 type BaseProvider struct {
 	// DAOs - stored for reference but primarily used by services
 	streamDAO interfaces.StreamDAO
@@ -36,9 +38,6 @@ type BaseProvider struct {
 	clientService *services.ClientService
 	serverService *services.ServerService
 	tokenService  *services.TokenService
-
-	// Optional hook for write operations (used by memory provider for dirty tracking)
-	afterWrite WriteHook
 }
 
 // NewBaseProvider creates a new base provider with the given DAOs and services
@@ -76,18 +75,6 @@ func NewBaseProvider(
 		streamService.SetServerService(serverService)
 	}
 	return bp
-}
-
-// SetWriteHook sets a callback to be invoked after successful write operations
-func (b *BaseProvider) SetWriteHook(hook WriteHook) {
-	b.afterWrite = hook
-}
-
-// notifyWrite calls the write hook if it's set
-func (b *BaseProvider) notifyWrite() {
-	if b.afterWrite != nil {
-		b.afterWrite()
-	}
 }
 
 // DAO accessor methods for provider-specific operations (e.g., persistence)
@@ -155,11 +142,7 @@ func (b *BaseProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec {
 // Key Management Methods
 
 func (b *BaseProvider) DeleteKeysByName(keyName string) error {
-	err := b.keyService.DeleteKeysByName(context.Background(), keyName)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.keyService.DeleteKeysByName(context.Background(), keyName)
 }
 
 func (b *BaseProvider) GetPublicJWKS(keyName string) *json.RawMessage {
@@ -179,19 +162,11 @@ func (b *BaseProvider) GetAuthIssuer() *authUtil.AuthIssuer {
 }
 
 func (b *BaseProvider) CreateKeyPair(keyName string, use string, projectId string) (*rsa.PrivateKey, error) {
-	key, err := b.keyService.CreateKeyPair(context.Background(), keyName, use, projectId)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return key, err
+	return b.keyService.CreateKeyPair(context.Background(), keyName, use, projectId)
 }
 
 func (b *BaseProvider) RotateKey(keyName string, projectId string) (*rsa.PrivateKey, string, error) {
-	key, kid, err := b.keyService.RotateKey(context.Background(), keyName, projectId)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return key, kid, err
+	return b.keyService.RotateKey(context.Background(), keyName, projectId)
 }
 
 func (b *BaseProvider) ListKeyNames() []string {
@@ -208,21 +183,13 @@ func (b *BaseProvider) GetPrivateKeyWithKid(keyName string) (*rsa.PrivateKey, st
 }
 
 func (b *BaseProvider) AddKey(keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
-	err := b.keyService.AddKey(context.Background(), keyName, use, kid, privateKey, publicKey, projectId)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.keyService.AddKey(context.Background(), keyName, use, kid, privateKey, publicKey, projectId)
 }
 
 // Client Management Methods
 
 func (b *BaseProvider) RegisterClient(request model.SsfClient, projectId string) *model.RegisterResponse {
-	resp := b.clientService.RegisterClient(context.Background(), request, projectId)
-	if resp != nil {
-		b.notifyWrite()
-	}
-	return resp
+	return b.clientService.RegisterClient(context.Background(), request, projectId)
 }
 
 // Stream Management Methods
@@ -235,27 +202,15 @@ func (b *BaseProvider) CreateStream(request model.StreamConfiguration, authCtx *
     // tx_alias resolution and IssuerJWKSUrl="NONE" normalisation now live
     // inside StreamService.CreateStream — this façade is a thin pass-through.
     ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
-    res, err := b.streamService.CreateStream(ctx, request, authCtx.ProjectId, nil)
-    if err == nil {
-        b.notifyWrite()
-    }
-    return res, err
+    return b.streamService.CreateStream(ctx, request, authCtx.ProjectId, nil)
 }
 
 func (b *BaseProvider) UpdateStream(streamId string, projectId string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
-	res, err := b.streamService.UpdateStream(context.Background(), streamId, projectId, configReq)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return res, err
+	return b.streamService.UpdateStream(context.Background(), streamId, projectId, configReq)
 }
 
 func (b *BaseProvider) DeleteStream(streamId string) error {
-	err := b.streamService.DeleteStream(context.Background(), streamId)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.streamService.DeleteStream(context.Background(), streamId)
 }
 
 func (b *BaseProvider) GetStream(id string) (*model.StreamConfiguration, error) {
@@ -268,12 +223,10 @@ func (b *BaseProvider) GetStreamState(id string) (*model.StreamStateRecord, erro
 
 func (b *BaseProvider) UpdateStreamStatus(streamId string, status string, errorMsg string) {
 	b.streamService.UpdateStreamStatus(context.Background(), streamId, status, errorMsg)
-	b.notifyWrite()
 }
 
 func (b *BaseProvider) UpdateRemoteAddress(streamId string, addr *model.RemoteIP) {
 	b.streamService.UpdateRemoteAddress(context.Background(), streamId, addr)
-	b.notifyWrite()
 }
 
 func (b *BaseProvider) GetStatus(streamId string) (*model.StreamStatus, error) {
@@ -311,42 +264,23 @@ func (b *BaseProvider) GetEventRecord(jti string) *model.AgEventRecord {
 }
 
 func (b *BaseProvider) AckEvent(jtiString string, streamId string, fencingToken int64) error {
-	err := b.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.eventService.AckEvent(context.Background(), jtiString, streamId, fencingToken)
 }
 
 func (b *BaseProvider) AddEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
-	res, err := b.eventService.AddEvent(context.Background(), event, sid, raw)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return res, err
+	return b.eventService.AddEvent(context.Background(), event, sid, raw)
 }
 
 func (b *BaseProvider) AddOperationalEvent(event *goSet.SecurityEventToken, sid string, raw string) (*model.AgEventRecord, error) {
-	res, err := b.eventService.AddOperationalEvent(context.Background(), event, sid, raw)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return res, err
+	return b.eventService.AddOperationalEvent(context.Background(), event, sid, raw)
 }
 
 func (b *BaseProvider) AddEventToStream(jti string, streamId string) error {
-	err := b.eventService.AddEventToStream(context.Background(), jti, streamId)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.eventService.AddEventToStream(context.Background(), jti, streamId)
 }
 
 func (b *BaseProvider) ClearPending(streamId string) error {
 	_, err := b.eventService.ClearPendingForStream(context.Background(), streamId)
-	if err == nil {
-		b.notifyWrite()
-	}
 	return err
 }
 
@@ -355,21 +289,13 @@ func (b *BaseProvider) WatchPending(ctx context.Context, callback func(jti strin
 }
 
 func (b *BaseProvider) ResetEventStream(streamId string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
-	err := b.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.eventService.ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }
 
 // Server Management Methods
 
 func (b *BaseProvider) CreateServer(ctx context.Context, server *model.Server) error {
-	err := b.serverService.CreateServer(ctx, server)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.serverService.CreateServer(ctx, server)
 }
 
 func (b *BaseProvider) GetServer(ctx context.Context, id string) (*model.Server, error) {
@@ -381,19 +307,11 @@ func (b *BaseProvider) GetServerByAlias(ctx context.Context, alias string) (*mod
 }
 
 func (b *BaseProvider) UpdateServer(ctx context.Context, server *model.Server) error {
-	err := b.serverService.UpdateServer(ctx, server)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.serverService.UpdateServer(ctx, server)
 }
 
 func (b *BaseProvider) DeleteServer(ctx context.Context, id string) error {
-	err := b.serverService.DeleteServer(ctx, id)
-	if err == nil {
-		b.notifyWrite()
-	}
-	return err
+	return b.serverService.DeleteServer(ctx, id)
 }
 
 func (b *BaseProvider) ListServers(ctx context.Context) ([]model.Server, error) {

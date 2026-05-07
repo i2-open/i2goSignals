@@ -1,5 +1,64 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] Memory persistence as DAO-level decorator; WriteHook plumbing removed
+
+### Change
+PRD #39 #44 replaces the `WriteHook` / `SetWriteHook` / `afterWrite` /
+`notifyWrite` machinery — previously threaded through ~25 mutating
+methods on `common.BaseProvider` — with a true decorator pattern at the
+DAO seam. The decorator lives only inside `memory_provider`. Mongo
+carries no decorator and pays no overhead.
+
+- `memory_provider/notifying_dao.go` defines six small wrappers
+  (`notifyingStreamDAO`, `notifyingEventDAO`, `notifyingKeyDAO`,
+  `notifyingClientDAO`, `notifyingServerDAO`, `notifyingTokenDAO`).
+  Each wraps the corresponding `interfaces.X` DAO and calls a single
+  `notify()` callback after every successful mutation. Reads pass
+  through unchanged.
+- `MemoryProvider.initialize()` and `MemoryProvider.ResetDb()` build
+  raw memory DAOs (`*memory.StreamDAOMemory`, etc.) and then the
+  notifying wrappers around them. Services receive the wrappers; the
+  raw refs live on `MemoryProvider` so the persistence layer can
+  call `GetState`/`SetState`/`SetPersistDir` directly.
+- `PersistenceManager` now takes direct `*memory.X` refs instead of
+  type-asserting through `BaseProvider.GetXDAO()`. The replaced
+  type-assertion path was the only reason `BaseProvider` had to expose
+  raw DAOs at all.
+- `BaseProvider` shrinks: no `WriteHook` field, no `SetWriteHook`, no
+  `notifyWrite`, no `afterWrite`-conditional return paths in any
+  façade method. Every method that used to be
+  `err := svc.X(...); if err == nil { b.notifyWrite() }; return err`
+  is now `return svc.X(...)`.
+
+### Why this carries weight
+- **The decorator is the right seam.** DAO mutations are the lowest
+  level at which "a write happened" is observable. Wrapping there
+  makes it impossible to bypass — every successful mutation, no
+  matter which façade path it travels through, fires `MarkDirty`.
+- **No more cross-cutting plumbing.** Adding a new mutating method
+  to a service used to mean adding a `b.notifyWrite()` call to its
+  BaseProvider façade or risking silent persistence drift. Now the
+  responsibility lives once, at the DAO interface, and is enforced by
+  the wrapper's signature.
+- **Mongo pays nothing.** The wrappers are constructed only inside
+  `memory_provider`. The Mongo composition path returns DAOs unwrapped
+  to services — zero overhead, zero indirection.
+- **Persistence is structurally decoupled from BaseProvider.** Once
+  PRD #39 #45 deletes `BaseProvider`, persistence already won't need
+  to be re-plumbed; it's already wired against raw memory DAO refs.
+
+### Verification
+- New `memory_provider/notifying_dao_test.go` exercises every mutating
+  method on every wrapper: 22 successful mutations across all six
+  DAOs produce exactly 22 `notify()` calls. A failed `Update` (on a
+  missing stream) produces zero — proving the decorator only fires on
+  success.
+- Existing `persistence_test.go` continues to pass: a stream + event
+  written via `provider.CreateStream` / `provider.AddEvent` survives
+  Close/Open via files on disk.
+- `go test -race -timeout 300s ./internal/...` and `./pkg/...` green.
+- `go vet ./...` only pre-existing warnings.
+
 ## [2026-05-06] MongoProvider wrapper-method tax deleted; production code uses services directly
 
 ### Change

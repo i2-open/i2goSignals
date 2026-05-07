@@ -48,8 +48,29 @@ type MemoryProvider struct {
 
 	mu sync.RWMutex
 
+	// Direct references to the raw memory DAOs. Services see notifyingDAO
+	// wrappers around these for after-mutation persistence triggering (#44);
+	// PersistenceManager works against the raw DAOs because it needs the
+	// concrete GetState/SetState/SetPersistDir methods.
+	rawStreamDAO *memory.StreamDAOMemory
+	rawEventDAO  *memory.EventDAOMemory
+	rawKeyDAO    *memory.KeyDAOMemory
+	rawClientDAO *memory.ClientDAOMemory
+	rawServerDAO *memory.ServerDAOMemory
+	rawTokenDAO  *memory.TokenDAOMemory
+
 	// Persistence
 	persistence *PersistenceManager
+}
+
+// markDirty is the after-mutation callback installed on every notifyingDAO.
+// It funnels through MemoryProvider so that mutations performed before
+// PersistenceManager has been created (during initialize()) are no-ops, and
+// later mutations after Open() / ResetDb() flow into the live persistence.
+func (m *MemoryProvider) markDirty() {
+	if m.persistence != nil {
+		m.persistence.MarkDirty()
+	}
 }
 
 // Coordinator returns the in-process MemoryCoordinator. Always non-nil after
@@ -74,15 +95,26 @@ func (m *MemoryProvider) initialize() {
 		m.coordinator = NewMemoryCoordinator()
 	}
 
-	// Initialize DAOs
-	streamDAO := memory.NewStreamDAO()
-	eventDAO := memory.NewEventDAO()
-	keyDAO := memory.NewKeyDAO()
-	clientDAO := memory.NewClientDAO()
-	serverDAO := memory.NewServerDAO()
-	tokenDAO := memory.NewTokenDAO()
+	// Raw DAOs (concrete types — PersistenceManager calls GetState/SetState
+	// on these directly). Stash them on the provider so the persistence
+	// layer can find them without type-asserting through the wrapper.
+	m.rawStreamDAO = memory.NewStreamDAO().(*memory.StreamDAOMemory)
+	m.rawEventDAO = memory.NewEventDAO()
+	m.rawKeyDAO = memory.NewKeyDAO().(*memory.KeyDAOMemory)
+	m.rawClientDAO = memory.NewClientDAO().(*memory.ClientDAOMemory)
+	m.rawServerDAO = memory.NewServerDAO().(*memory.ServerDAOMemory)
+	m.rawTokenDAO = memory.NewTokenDAO().(*memory.TokenDAOMemory)
 
-	// Initialize Services
+	// Wrap each raw DAO so that successful mutations trigger MarkDirty.
+	// Replaces the BaseProvider WriteHook plumbing (#44).
+	streamDAO := newNotifyingStreamDAO(m.rawStreamDAO, m.markDirty)
+	eventDAO := newNotifyingEventDAO(m.rawEventDAO, m.markDirty)
+	keyDAO := newNotifyingKeyDAO(m.rawKeyDAO, m.markDirty)
+	clientDAO := newNotifyingClientDAO(m.rawClientDAO, m.markDirty)
+	serverDAO := newNotifyingServerDAO(m.rawServerDAO, m.markDirty)
+	tokenDAO := newNotifyingTokenDAO(m.rawTokenDAO, m.markDirty)
+
+	// Initialize Services with the wrapped DAOs.
 	tokenService := services.NewTokenService(tokenDAO)
 	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
@@ -90,7 +122,7 @@ func (m *MemoryProvider) initialize() {
 	clientService := services.NewClientService(clientDAO, keyService)
 	serverService := services.NewServerService(serverDAO)
 
-	// Initialize BaseProvider with services
+	// Initialize BaseProvider with services.
 	m.BaseProvider = common.NewBaseProvider(
 		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
 		keyService, streamService, eventService, clientService, serverService, tokenService,
@@ -112,16 +144,24 @@ func (m *MemoryProvider) Check() error {
 }
 
 func (m *MemoryProvider) ResetDb(initialize bool) error {
-	// Create new DAOs to reset all data
-	streamDAO := memory.NewStreamDAO()
-	eventDAO := memory.NewEventDAO()
-	keyDAO := memory.NewKeyDAO()
-	clientDAO := memory.NewClientDAO()
-	serverDAO := memory.NewServerDAO()
-	tokenDAO := memory.NewTokenDAO()
-
 	if initialize {
-		// Re-initialize services with new DAOs
+		// Re-initialize raw DAOs and the wrapping notifying DAOs. The
+		// notifyingDAOs route after-mutation callbacks back through
+		// m.markDirty — which finds the (recreated) PersistenceManager.
+		m.rawStreamDAO = memory.NewStreamDAO().(*memory.StreamDAOMemory)
+		m.rawEventDAO = memory.NewEventDAO()
+		m.rawKeyDAO = memory.NewKeyDAO().(*memory.KeyDAOMemory)
+		m.rawClientDAO = memory.NewClientDAO().(*memory.ClientDAOMemory)
+		m.rawServerDAO = memory.NewServerDAO().(*memory.ServerDAOMemory)
+		m.rawTokenDAO = memory.NewTokenDAO().(*memory.TokenDAOMemory)
+
+		streamDAO := newNotifyingStreamDAO(m.rawStreamDAO, m.markDirty)
+		eventDAO := newNotifyingEventDAO(m.rawEventDAO, m.markDirty)
+		keyDAO := newNotifyingKeyDAO(m.rawKeyDAO, m.markDirty)
+		clientDAO := newNotifyingClientDAO(m.rawClientDAO, m.markDirty)
+		serverDAO := newNotifyingServerDAO(m.rawServerDAO, m.markDirty)
+		tokenDAO := newNotifyingTokenDAO(m.rawTokenDAO, m.markDirty)
+
 		tokenService := services.NewTokenService(tokenDAO)
 		keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
 		streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
@@ -141,13 +181,12 @@ func (m *MemoryProvider) ResetDb(initialize bool) error {
 			pLog.Error("Error reinitializing token key", "error", err)
 		}
 
-		// Recreate persistence with new BaseProvider
+		// Recreate persistence pointing at the newly-allocated raw DAOs.
 		if m.persistence != nil {
 			memDir := m.persistence.directory
 			saveRate := m.persistence.saveRate
 			m.persistence.Close()
-			m.persistence = NewPersistenceManager(memDir, saveRate, m.BaseProvider)
-			m.BaseProvider.SetWriteHook(m.persistence.MarkDirty)
+			m.persistence = newPersistenceManagerForProvider(memDir, saveRate, m)
 		}
 	}
 
@@ -215,9 +254,11 @@ func Open(mongoUrl string, dbName string) (*MemoryProvider, error) {
 
 	m.initialize()
 
-	// Initialize persistence
-	m.persistence = NewPersistenceManager(memDir, saveRate, m.BaseProvider)
-	m.BaseProvider.SetWriteHook(m.persistence.MarkDirty)
+	// Initialize persistence using direct refs to the raw memory DAOs.
+	// The notifyingDAO wrappers around those DAOs invoke m.markDirty after
+	// every successful mutation, so MarkDirty fires automatically once
+	// m.persistence is non-nil. No WriteHook plumbing is required (#44).
+	m.persistence = newPersistenceManagerForProvider(memDir, saveRate, m)
 	err = m.persistence.Initialize()
 	if err != nil {
 		pLog.Warn("Persistence initialization failed, continuing in memory-only mode", "error", err)
