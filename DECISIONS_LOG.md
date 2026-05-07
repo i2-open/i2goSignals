@@ -1,5 +1,73 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] Cluster coordination and storage extracted as their own seams
+
+### Change
+The provider chain previously bundled cluster lease/node-registry methods,
+storage lifecycle, services, and auth bridges behind one god-interface
+(`DbProviderInterface`). PR slice 3 of PRD #39 splits the cluster and
+lifecycle concerns into their own narrow interfaces:
+
+- New `internal/providers/cluster.ClusterCoordinator` interface owns the
+  seven lease + node-registry methods (TryAcquireOrRenewLease, ReleaseLeaseIfOwned,
+  GetLeaseOwner, RegisterNode, GetActiveNodeCount, GetActiveNodes, GetNode).
+- New `internal/providers/storage.Storage` interface owns the five lifecycle
+  methods (Name, Check, Close, ResetDb, SetBaseUrl).
+- New `dbProviders.Persistence` composition record bundles
+  `{ Provider, Coordinator, Storage }`. `OpenPersistence(url, db)` returns it;
+  `OpenProvider(...)` is preserved as a thin wrapper for legacy callers.
+- New `MongoCoordinator` (`mongo_provider/cluster_coordinator.go`) holds the
+  existing Mongo `FindOneAndUpdate` lease logic verbatim. Collections are
+  rebound atomically via `SetCollections` after each (re)connect, eliminating
+  the BaseProvider-swap dance for cluster ops.
+- New `MemoryCoordinator` (`memory_provider/cluster_coordinator.go`) replaces
+  the old single-node stub with **real** lease semantics: atomic acquire under
+  a mutex, time-based expiry, strict fencing-token monotonicity per resource,
+  and compare-and-release for `ReleaseLeaseIfOwned`. Five new unit tests pin
+  these invariants down (mutual exclusion under 50-goroutine contention,
+  takeover after expiry, fencing-token monotonicity, release semantics, and
+  60s active-window node filtering).
+- Consumers (`SignalsApplication`, `SsfApplication`, EventRouter, prometheus
+  collector, api_receiver poll-receiver lease loop) now call `sa.Coordinator.X`
+  / `r.coordinator.X` instead of `sa.Provider.X`. The provider methods remain
+  in place as thin delegators so existing tests and the legacy
+  `DbProviderInterface` continue to compile until PR 4 deletes the interface.
+
+### Why this carries weight
+- **Cluster invariants are now unit-testable.** Mutual exclusion, expiry, and
+  fencing-token monotonicity were previously only exercised by docker-compose
+  suites; the MemoryCoordinator tests run in <5s under `-race`.
+- **Reconnect simplifies.** `MongoCoordinator` uses `atomic.Pointer[mongo.Collection]`
+  for its lease/node collection refs. PR 4 will use the same pattern across
+  all DAOs to drop the swap-`*BaseProvider` pattern entirely.
+- **The bson import vanishes from the cluster surface.** `cluster.ClusterCoordinator`
+  and its callers depend only on `pkg/ssfModels` types — no Mongo driver
+  reachable from `eventRouter`, `application.go`, `api_receiver.go`, or the
+  prometheus collector.
+
+### Scope held back
+`DbProviderInterface` *still carries* the cluster and lifecycle method
+declarations. Removing them would propagate to ~30 call sites that already
+have the new seams available; that diff is rolled forward to PR 4 (BaseProvider
+deletion) where the entire interface goes away. Until then, callers may use
+either path; the seam is the canonical one.
+
+### Invariants
+- `MemoryCoordinator` and `MongoCoordinator` honour the same contract — mutual
+  exclusion, monotonic fencing tokens, owner-only release, 60s active-window.
+- Both providers expose `Coordinator() cluster.ClusterCoordinator`. Type
+  assertion at the consumer boundary stays clean.
+- `Persistence.Coordinator` and `Persistence.Storage` are guaranteed non-nil
+  after `OpenPersistence` succeeds.
+
+### Regression Verification
+- `go test -race -timeout 300s ./internal/...` (incl. Mongo integration suite)
+- `go test -race -timeout 600s ./pkg/...` (incl. server integration suite)
+- `go vet ./...` — no new warnings (pre-existing warnings in pkg/goScim,
+  pkg/ssfModels, cmd/cluster-monitor unchanged).
+
+---
+
 ## [2026-05-06] String IDs across persistence interfaces; bson.ObjectID becomes Mongo-internal
 
 ### Change

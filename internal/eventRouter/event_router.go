@@ -22,6 +22,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -72,6 +73,7 @@ type router struct {
 	pollBuffers         map[string]*buffer.EventPollBuffer
 	pushBuffers         map[string]*buffer.EventPushBuffer
 	provider            dbProviders.DbProviderInterface
+	coordinator         cluster.ClusterCoordinator
 	eventsIn, eventsOut *prometheus.CounterVec
 	stats               statsTracker
 
@@ -126,10 +128,22 @@ func (r *router) GetPollStreamCnt() float64 {
 	return float64(len(r.pollStreams))
 }
 
+// coordinatorSource is the accessor present on both *MongoProvider and
+// *MemoryProvider; used by NewRouter to derive the cluster seam without
+// importing the concrete provider packages.
+type coordinatorSource interface {
+	Coordinator() cluster.ClusterCoordinator
+}
+
 func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
+	var coord cluster.ClusterCoordinator
+	if cs, ok := provider.(coordinatorSource); ok {
+		coord = cs.Coordinator()
+	}
 	router := &router{
 		provider:            provider,
+		coordinator:         coord,
 		nodeId:              nodeId,
 		pushStreams:         map[string]model.StreamStateRecord{},
 		pollStreams:         map[string]model.StreamStateRecord{},
@@ -530,7 +544,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 
 			// Lease-aware routing
 			resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
-			ownerNodeId, _, _, _ := r.provider.GetLeaseOwner(resource)
+			ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 
 			if ownerNodeId == "" || ownerNodeId == r.nodeId {
 				// Local owner or no owner (we'll try to take it or backfill will find it)
@@ -592,7 +606,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 
 	if pushBuf, ok := r.pushBuffers[sid]; ok {
 		resource := fmt.Sprintf("push-transmitter:%s", sid)
-		ownerNodeId, _, _, _ := r.provider.GetLeaseOwner(resource)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			pushBuf.SubmitEvent(rec.Jti)
 		} else {
@@ -624,7 +638,7 @@ func (r *router) sendWakeup(sid, mode, ownerNodeId string) {
 	r.recentOutboundWakes[key] = time.Now()
 	r.outboundWakesMu.Unlock()
 
-	node, err := r.provider.GetNode(ownerNodeId)
+	node, err := r.coordinator.GetNode(ownerNodeId)
 	if err != nil || node == nil {
 		eventLogger.Error("ROUTER: Error getting node info for wake-up", "nodeId", ownerNodeId, "error", err)
 		return
@@ -789,7 +803,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 		}
 
 		// Attempt to acquire or renew the lease
-		acquired, fencingToken, err := r.provider.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
+		acquired, fencingToken, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
 		if r.stats != nil {
 			r.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
@@ -855,7 +869,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		for {
 			select {
 			case <-ticker.C:
-				ok, _, err := r.provider.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
+				ok, _, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
 				if r.stats != nil {
 					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
 				}

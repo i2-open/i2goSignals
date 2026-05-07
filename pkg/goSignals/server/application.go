@@ -14,12 +14,46 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/internal/providers/storage"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
+
+// coordinatorSource is satisfied by both *mongo_provider.MongoProvider and
+// *memory_provider.MemoryProvider — they each expose Coordinator() returning
+// the cluster seam. Used by NewApplication to derive the coordinator without
+// importing the concrete provider packages.
+type coordinatorSource interface {
+	Coordinator() cluster.ClusterCoordinator
+}
+
+// storageSource is satisfied by both providers. The lifecycle methods used
+// here (Name, Check, Close, ResetDb, SetBaseUrl) live on the provider
+// directly; storageSource wraps that subset.
+type storageSource interface {
+	Name() string
+	Check() error
+	Close() error
+	ResetDb(initialize bool) error
+	SetBaseUrl(u *url.URL)
+}
+
+// providerStorageAdapter exposes a provider-via-Storage view without importing
+// the concrete provider packages.
+type providerStorageAdapter struct {
+	source storageSource
+}
+
+func (a providerStorageAdapter) Name() string                  { return a.source.Name() }
+func (a providerStorageAdapter) Check() error                  { return a.source.Check() }
+func (a providerStorageAdapter) Close() error                  { return a.source.Close() }
+func (a providerStorageAdapter) ResetDb(initialize bool) error { return a.source.ResetDb(initialize) }
+func (a providerStorageAdapter) SetBaseUrl(u *url.URL)         { a.source.SetBaseUrl(u) }
+
 
 // var sa *SignalsApplication
 
@@ -38,6 +72,8 @@ type SsfApplicationInterface interface {
 
 type SignalsApplication struct {
 	Provider       dbProviders.DbProviderInterface
+	Coordinator    cluster.ClusterCoordinator
+	Storage        storage.Storage
 	Server         *http.Server
 	Handler        http.Handler
 	EventRouter    eventRouter.EventRouter
@@ -158,6 +194,16 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
 		stopSync:      make(chan struct{}),
+	}
+
+	// Derive the cluster + storage seams from the concrete provider. After
+	// slice 4 deletes DbProviderInterface, callers will pass these in
+	// directly — for now the provider is the single source of truth.
+	if cs, ok := provider.(coordinatorSource); ok {
+		sa.Coordinator = cs.Coordinator()
+	}
+	if ss, ok := provider.(storageSource); ok {
+		sa.Storage = providerStorageAdapter{source: ss}
 	}
 
 	// Initialize Auth if available
@@ -286,7 +332,11 @@ func (sa *SignalsApplication) registerNode() {
 		StartedAt:  sa.StartedAt,
 		LastSeenAt: time.Now().UTC(),
 	}
-	err := sa.Provider.RegisterNode(node)
+	if sa.Coordinator == nil {
+		serverLog.Warn("RegisterNode skipped: coordinator not initialized")
+		return
+	}
+	err := sa.Coordinator.RegisterNode(node)
 	if err != nil {
 		serverLog.Error("Failed to register node", "error", err)
 	}
