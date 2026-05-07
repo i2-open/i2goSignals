@@ -822,7 +822,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		}
 
 		// Attempt to acquire or renew the lease
-		acquired, _, err := ps.sa.Provider.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+		acquired, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
 		if ps.sa.Stats != nil {
 			ps.sa.Stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
@@ -888,7 +888,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		for {
 			select {
 			case <-ticker.C:
-				ok, _, err := ps.sa.Provider.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+				ok, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
 				if ps.sa.Stats != nil {
 					ps.sa.Stats.TrackLeaseAcquisition(resource, ok && err == nil)
 				}

@@ -134,7 +134,7 @@ func (c *clusterCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *clusterCollector) Collect(ch chan<- prometheus.Metric) {
-	nodes, err := c.sa.Provider.GetActiveNodes()
+	nodes, err := c.sa.Coordinator.GetActiveNodes()
 	if err != nil {
 		pLog.Error("Failed to get active nodes", "error", err)
 		return
@@ -311,7 +311,10 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 				Help:      "Number of active nodes in the cluster",
 			},
 			func() float64 {
-				count, _ := sa.Provider.GetActiveNodeCount()
+				if sa.Coordinator == nil {
+					return 0
+				}
+				count, _ := sa.Coordinator.GetActiveNodeCount()
 				return float64(count)
 			}),
 		PushFailures: prometheus.NewCounterVec(

@@ -12,6 +12,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSignals/server"
@@ -23,6 +24,7 @@ var serverLog = logger.Sub("SERVER")
 
 type SsfApplication struct {
 	Provider    dbProviders.DbProviderInterface
+	Coordinator cluster.ClusterCoordinator
 	Server      *http.Server
 	Handler     http.Handler
 	EventRouter eventRouter.EventRouter
@@ -34,6 +36,11 @@ type SsfApplication struct {
 	mu          sync.RWMutex
 	NodeID      string
 	StartedAt   time.Time
+}
+
+// coordinatorSource matches the accessor present on both concrete providers.
+type coordinatorSource interface {
+	Coordinator() cluster.ClusterCoordinator
 }
 
 func (sa *SsfApplication) GetProvider() dbProviders.DbProviderInterface {
@@ -252,6 +259,9 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	if sa.Provider != nil {
 		sa.Auth = sa.Provider.GetAuthIssuer()
 	}
+	if cs, ok := provider.(coordinatorSource); ok {
+		sa.Coordinator = cs.Coordinator()
+	}
 
 	serverLog.Info("Starting goSsfApplication", "nodeID", nodeID)
 
@@ -342,7 +352,11 @@ func (sa *SsfApplication) registerNode() {
 		StartedAt:  sa.StartedAt,
 		LastSeenAt: time.Now().UTC(),
 	}
-	err := sa.Provider.RegisterNode(node)
+	if sa.Coordinator == nil {
+		serverLog.Warn("RegisterNode skipped: coordinator not initialized")
+		return
+	}
+	err := sa.Coordinator.RegisterNode(node)
 	if err != nil {
 		serverLog.Error("Failed to register node", "error", err)
 	}

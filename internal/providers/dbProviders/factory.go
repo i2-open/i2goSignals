@@ -5,26 +5,63 @@ import (
 
 	"os"
 
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/internal/providers/storage"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 )
 
 var factoryLog = logger.Sub("dbProviders")
 
-// OpenProvider detects the database URL and returns the appropriate provider implementation.
-// If the URL starts with "memorydb:" or is empty, it returns an in-memory provider.
-// Otherwise, it attempts to return a real MongoDB provider.
+// Persistence is the composition root the server uses for everything that
+// ultimately reaches the database. It bundles the legacy provider façade
+// (still required while DbProviderInterface is alive — slice 4 deletes it),
+// the cluster coordinator, and the lifecycle storage seam.
+//
+// Callers that only need one concern should depend on the narrowest type
+// available (Coordinator or Storage), not on Provider.
+type Persistence struct {
+	Provider    DbProviderInterface
+	Coordinator cluster.ClusterCoordinator
+	Storage     storage.Storage
+}
+
+// OpenProvider preserves the original signature for callers that still
+// expect just a DbProviderInterface. New callers should prefer
+// OpenPersistence.
 func OpenProvider(mongoUrl string, dbName string) (DbProviderInterface, error) {
+	p, err := OpenPersistence(mongoUrl, dbName)
+	if err != nil {
+		return nil, err
+	}
+	return p.Provider, nil
+}
+
+// OpenPersistence detects the database URL and returns the full Persistence
+// record (Provider + Coordinator + Storage).
+func OpenPersistence(mongoUrl string, dbName string) (*Persistence, error) {
 	if strings.HasPrefix(mongoUrl, "memorydb:") || mongoUrl == "" {
-		return memory_provider.Open(mongoUrl, dbName)
+		mp, err := memory_provider.Open(mongoUrl, dbName)
+		if err != nil {
+			return nil, err
+		}
+		return &Persistence{
+			Provider:    mp,
+			Coordinator: mp.Coordinator(),
+			Storage:     memory_provider.NewMemoryStorage(mp),
+		}, nil
 	}
 
-	p, err := mongo_provider.Open(mongoUrl, dbName)
+	mp, err := mongo_provider.Open(mongoUrl, dbName)
 	if err != nil {
 		if strings.ToUpper(os.Getenv("MONGO_BACKGROUND_RECONNECT")) == "TRUE" {
 			factoryLog.Warn("Mongo connection failed. Background reconnect enabled.", "error", err)
-			return p, nil
+			return &Persistence{
+				Provider:    mp,
+				Coordinator: mp.Coordinator(),
+				Storage:     mongo_provider.NewMongoStorage(mp),
+			}, nil
 		}
 
 		failToMem := strings.ToUpper(os.Getenv("MONGO_FAILTOMEM"))
@@ -34,11 +71,23 @@ func OpenProvider(mongoUrl string, dbName string) (DbProviderInterface, error) {
 		}
 
 		factoryLog.Warn("Mongo Server connection failed, falling back to memory provider", "error", err)
-		if p != nil {
-			_ = p.Close()
+		if mp != nil {
+			_ = mp.Close()
 		}
-		return memory_provider.Open("memorydb:", dbName)
+		fb, ferr := memory_provider.Open("memorydb:", dbName)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return &Persistence{
+			Provider:    fb,
+			Coordinator: fb.Coordinator(),
+			Storage:     memory_provider.NewMemoryStorage(fb),
+		}, nil
 	}
 
-	return p, nil
+	return &Persistence{
+		Provider:    mp,
+		Coordinator: mp.Coordinator(),
+		Storage:     mongo_provider.NewMongoStorage(mp),
+	}, nil
 }

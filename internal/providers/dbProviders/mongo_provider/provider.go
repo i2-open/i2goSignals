@@ -14,6 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
@@ -88,6 +89,10 @@ type MongoProvider struct {
 	// x509Source is non-nil when SPIFFE mTLS is enabled for MongoDB connections.
 	// It is closed in Close().
 	x509Source interface{ Close() error }
+
+	// coordinator owns the cluster lease/node-registry methods. Collections
+	// are pushed in via SetCollections during initialize/reconnect.
+	coordinator *MongoCoordinator
 }
 
 func (m *MongoProvider) Name() string {
@@ -122,6 +127,16 @@ func (m *MongoProvider) initBaseProvider() {
 		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
 		keyService, streamService, eventService, clientService, serverService, tokenService,
 	)
+
+	if m.coordinator == nil {
+		m.coordinator = NewMongoCoordinator()
+	}
+}
+
+// Coordinator returns the MongoCoordinator owning lease and node-registry
+// state. Always non-nil after Open / initBaseProvider.
+func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
+    return m.coordinator
 }
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
@@ -158,6 +173,11 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.leaseCol = m.ssefDb.Collection(CDbLeases)
 	m.nodeCol = m.ssefDb.Collection(CDbNodes)
 	m.tokenCol = m.ssefDb.Collection(CDbTokens)
+
+	if m.coordinator == nil {
+		m.coordinator = NewMongoCoordinator()
+	}
+	m.coordinator.SetCollections(m.leaseCol, m.nodeCol)
 
 	// Create indexes
 	if !dbExists {
@@ -695,209 +715,35 @@ func (m *MongoProvider) GetKeyByStreamID(streamID string) *interfaces.JwkKeyRec 
 	return m.getBaseProvider().GetKeyByStreamID(streamID)
 }
 
-// TryAcquireOrRenewLease atomically acquires the lease if it is expired/unowned, or renews it if already owned by nodeId.
+// TryAcquireOrRenewLease delegates to the embedded MongoCoordinator. The
+// method is retained on MongoProvider so existing call sites keep compiling
+// during the slice-by-slice provider collapse.
 func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
-	m.mu.RLock()
-	col := m.leaseCol
-	m.mu.RUnlock()
-	if col == nil {
-		return false, 0, errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	now := time.Now().UTC()
-	leaseUntil := now.Add(leaseDuration)
-
-	filter := bson.M{
-		"_id": resource,
-		"$or": []bson.M{
-			{"leaseUntil": bson.M{"$lte": now}},
-			{"ownerNodeId": nodeId},
-		},
-	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"ownerNodeId": nodeId,
-			"leaseUntil":  leaseUntil,
-			"updatedAt":   now,
-		},
-		"$inc":         bson.M{"fencingToken": 1},
-		"$setOnInsert": bson.M{"createdAt": now},
-	}
-
-	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
-
-	var lease model.ClusterLease
-	err := col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
-	if err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return false, 0, nil
-		}
-		return false, 0, err
-	}
-
-	return lease.OwnerNodeId == nodeId, lease.FencingToken, nil
+    return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 
-// ReleaseLeaseIfOwned clears/shortens the lease if (and only if) it's owned by nodeId.
 func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
-	m.mu.RLock()
-	col := m.leaseCol
-	m.mu.RUnlock()
-	if col == nil {
-		return errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	filter := bson.M{
-		"_id":         resource,
-		"ownerNodeId": nodeId,
-	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"leaseUntil": time.Now().UTC(),
-			"updatedAt":  time.Now().UTC(),
-		},
-	}
-
-	_, err := col.UpdateOne(ctx, filter, update)
-	return err
+    return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
 }
 
-// RegisterNode updates the node registry with heartbeats and metadata.
 func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
-	m.mu.RLock()
-	col := m.nodeCol
-	m.mu.RUnlock()
-	if col == nil {
-		return errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	filter := bson.M{"_id": node.Id}
-	update := bson.M{
-		"$set": bson.M{
-			"address":    node.Address,
-			"version":    node.Version,
-			"lastSeenAt": node.LastSeenAt,
-		},
-		"$setOnInsert": bson.M{
-			"startedAt": node.StartedAt,
-		},
-	}
-
-	opts := options.UpdateOne().SetUpsert(true)
-	_, err := col.UpdateOne(ctx, filter, update, opts)
-	return err
+    return m.coordinator.RegisterNode(node)
 }
 
-// GetActiveNodeCount returns the number of nodes that have heartbeated within the last 60 seconds.
 func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
-	m.mu.RLock()
-	col := m.nodeCol
-	m.mu.RUnlock()
-	if col == nil {
-		return 0, errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	threshold := time.Now().UTC().Add(-60 * time.Second)
-	filter := bson.M{
-		"lastSeenAt": bson.M{"$gte": threshold},
-	}
-
-	return col.CountDocuments(ctx, filter)
+    return m.coordinator.GetActiveNodeCount()
 }
 
-// GetActiveNodes returns the nodes that have heartbeated within the last 60 seconds.
 func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
-	m.mu.RLock()
-	col := m.nodeCol
-	m.mu.RUnlock()
-	if col == nil {
-		return nil, errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	threshold := time.Now().UTC().Add(-60 * time.Second)
-	filter := bson.M{
-		"lastSeenAt": bson.M{"$gte": threshold},
-	}
-
-	cursor, err := col.Find(ctx, filter)
-	if err != nil {
-		return nil, err
-	}
-	defer func(cursor *mongo.Cursor, ctx context.Context) {
-		_ = cursor.Close(ctx)
-	}(cursor, ctx)
-
-	var nodes []model.ClusterNode
-	if err := cursor.All(ctx, &nodes); err != nil {
-		return nil, err
-	}
-
-	return nodes, nil
+    return m.coordinator.GetActiveNodes()
 }
 
-// GetLeaseOwner returns the owner node ID and lease expiration time for a resource.
 func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
-	m.mu.RLock()
-	col := m.leaseCol
-	m.mu.RUnlock()
-	if col == nil {
-		return "", time.Time{}, 0, errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var lease model.ClusterLease
-	err := col.FindOne(ctx, bson.M{"_id": resource}).Decode(&lease)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return "", time.Time{}, 0, nil
-		}
-		return "", time.Time{}, 0, err
-	}
-
-	return lease.OwnerNodeId, lease.LeaseUntil, lease.FencingToken, nil
+    return m.coordinator.GetLeaseOwner(resource)
 }
 
-// GetNode returns a node by its ID.
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
-	m.mu.RLock()
-	col := m.nodeCol
-	m.mu.RUnlock()
-	if col == nil {
-		return nil, errors.New("mongo provider not initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var node model.ClusterNode
-	err := col.FindOne(ctx, bson.M{"_id": nodeId}).Decode(&node)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	return &node, nil
+    return m.coordinator.GetNode(nodeId)
 }
 
 // SetBaseUrl is delegated to BaseProvider which handles it

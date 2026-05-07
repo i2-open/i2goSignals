@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -42,12 +43,19 @@ type MemoryProvider struct {
 	DefaultIssuer string
 	TokenIssuer   string
 
-	// Cluster coordination
-	nodes map[string]model.ClusterNode
-	mu    sync.RWMutex
+	// Cluster coordination — owned by a MemoryCoordinator value-typed field.
+	coordinator *MemoryCoordinator
+
+	mu sync.RWMutex
 
 	// Persistence
 	persistence *PersistenceManager
+}
+
+// Coordinator returns the in-process MemoryCoordinator. Always non-nil after
+// initialize/Open completes.
+func (m *MemoryProvider) Coordinator() cluster.ClusterCoordinator {
+	return m.coordinator
 }
 
 func (m *MemoryProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
@@ -62,7 +70,9 @@ func (m *MemoryProvider) Name() string {
 func (m *MemoryProvider) initialize() {
 	pLog.Info("Initializing new in-memory database", "dbName", m.DbName)
 
-	m.nodes = make(map[string]model.ClusterNode)
+	if m.coordinator == nil {
+		m.coordinator = NewMemoryCoordinator()
+	}
 
 	// Initialize DAOs
 	streamDAO := memory.NewStreamDAO()
@@ -235,59 +245,33 @@ func (m *MemoryProvider) Close() error {
 	return nil
 }
 
-// Cluster coordination methods (stub implementations for single-node memory provider)
+// Cluster coordination methods delegate to MemoryCoordinator. Real lease
+// semantics (atomic acquire, expiry, fencing-token monotonicity) live there.
 
-func (m *MemoryProvider) TryAcquireOrRenewLease(_ string, _ string, _ time.Duration) (bool, int64, error) {
-	return true, 1, nil
+func (m *MemoryProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 
-func (m *MemoryProvider) ReleaseLeaseIfOwned(_ string, _ string) error {
-	return nil
+func (m *MemoryProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
+	return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
 }
 
 func (m *MemoryProvider) RegisterNode(node model.ClusterNode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nodes[node.Id] = node
-	return nil
+	return m.coordinator.RegisterNode(node)
 }
 
 func (m *MemoryProvider) GetActiveNodeCount() (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	count := int64(0)
-	threshold := time.Now().UTC().Add(-60 * time.Second)
-	for _, node := range m.nodes {
-		if node.LastSeenAt.After(threshold) {
-			count++
-		}
-	}
-	return count, nil
+	return m.coordinator.GetActiveNodeCount()
 }
 
 func (m *MemoryProvider) GetActiveNodes() ([]model.ClusterNode, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var activeNodes []model.ClusterNode
-	threshold := time.Now().UTC().Add(-60 * time.Second)
-	for _, node := range m.nodes {
-		if node.LastSeenAt.After(threshold) {
-			activeNodes = append(activeNodes, node)
-		}
-	}
-	return activeNodes, nil
+	return m.coordinator.GetActiveNodes()
 }
 
-func (m *MemoryProvider) GetLeaseOwner(_ string) (string, time.Time, int64, error) {
-	return "", time.Time{}, 0, nil
+func (m *MemoryProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
+	return m.coordinator.GetLeaseOwner(resource)
 }
 
 func (m *MemoryProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	node, ok := m.nodes[nodeId]
-	if !ok {
-		return nil, nil
-	}
-	return &node, nil
+	return m.coordinator.GetNode(nodeId)
 }
