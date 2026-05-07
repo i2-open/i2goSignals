@@ -27,7 +27,6 @@ type StreamDAO interface {
 
 	// Queries
 	FindByProjectID(ctx context.Context, projectID string) ([]model.StreamStateRecord, error)
-	FindReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error)
 
 	// Status updates
 	UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error

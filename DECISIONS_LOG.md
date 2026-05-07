@@ -1,5 +1,47 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-06] Receiver-stream predicate lifted from DAOs into `StreamService`
+
+### Change
+The "find receiver streams" filter previously lived in both stream DAOs and had drifted:
+- `StreamDAOMongo.FindReceiverStreams` filtered `route_mode == "import"`.
+- `StreamDAOMemory.FindReceiverStreams` filtered `state.IsReceiver()` (delivery method
+  is `ReceivePush` or `ReceivePoll`).
+
+These predicates are not equivalent. `RouteMode` describes routing intent (publish /
+import / forward) and is independent of delivery direction. A `ReceivePush` stream
+may legitimately be in any RouteMode, and a `DeliveryPush` stream in `RouteModeForward`
+is not a receiver but is also not import-mode.
+
+`FindReceiverStreams` is removed from `StreamDAO` and both implementations. The
+canonical predicate is `StreamStateRecord.IsReceiver()`, applied once in the new
+`StreamService.ListReceiverStreams` (a pure query) and reused by the existing
+`StreamService.LoadReceiverStreams` (load + warm cache + JWKS).
+
+### DAO audit (sibling concern)
+Audit of remaining DAO methods for adapter-divergent behaviour:
+- `EventDAO.WatchPending` — Mongo opens a change stream; memory blocks on `ctx.Done()`.
+  Intentional divergence: change streams are a Mongo-only capability. The memory
+  no-op is correct because file-backed memory mode has no equivalent push-notification
+  primitive; recovery there relies on the backfill ticker.
+- All other DAO methods (CRUD + simple project/stream-id equality matches) behave
+  equivalently across adapters.
+
+### Invariants
+- DAOs hold storage operations only — no business predicates beyond field-equality
+  filters that map directly to a Mongo query expression and a memory linear scan.
+- The receiver-stream predicate (`IsReceiver()`) is the only place that decides
+  whether a stream is a receiver. Future code MUST consult `StreamStateRecord.IsReceiver()`
+  or `StreamService.ListReceiverStreams` rather than re-deriving the predicate from
+  `RouteMode` or `Delivery.Method`.
+
+### Regression Verification
+- `go test -race ./internal/services/... -run TestStreamService_ListReceiverStreams`
+- `go test -race ./internal/dao/...`
+- `go test -race ./internal/...`
+
+---
+
 ## [2026-05-06] Stream `remote_address` field on StreamStateRecord
 
 ### Change

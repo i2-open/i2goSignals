@@ -793,8 +793,26 @@ func (s *StreamService) GetStateMap(ctx context.Context) map[string]model.Stream
 	return stateMap
 }
 
-func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*model.StreamStateRecord {
+// ListReceiverStreams returns the streams whose delivery method makes this server a receiver
+// (ReceivePush or ReceivePoll). It is a pure query — no cache mutation, no JWKS loading —
+// and is the canonical home for the receiver-stream predicate. The DAO layer no longer
+// owns this filter; both adapters used to apply different predicates here, masking drift.
+func (s *StreamService) ListReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
 	recs, err := s.streamDAO.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.StreamStateRecord, 0, len(recs))
+	for _, rec := range recs {
+		if rec.IsReceiver() {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
+}
+
+func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*model.StreamStateRecord {
+	recs, err := s.ListReceiverStreams(ctx)
 	if err != nil {
 		ssLog.Error("Error loading receiver streams", "error", err)
 		return nil
@@ -802,11 +820,9 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
-		if streamState.IsReceiver() {
-			state := streamState
-			res[streamState.StreamConfiguration.Id] = &state
-			s.loadJwksForReceiver(ctx, &state)
-		}
+		state := streamState
+		res[streamState.StreamConfiguration.Id] = &state
+		s.loadJwksForReceiver(ctx, &state)
 	}
 	s.mu.Lock()
 	s.receiverStreams = res

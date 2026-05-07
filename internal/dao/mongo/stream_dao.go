@@ -127,27 +127,6 @@ func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
 	return recs, nil
 }
 
-func (d *StreamDAOMongo) FindReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
-	if d.collection == nil {
-		return nil, errors.New("mongo collection not initialized")
-	}
-	// Receiver streams have RouteMode = "import"
-	filter := bson.M{"route_mode": model.RouteModeImport}
-	cursor, err := d.collection.Find(ctx, filter)
-	if err != nil {
-		sLog.Error("Error finding receiver streams", "error", err)
-		return nil, err
-	}
-
-	var recs []model.StreamStateRecord
-	err = cursor.All(ctx, &recs)
-	if err != nil {
-		sLog.Error("Error parsing receiver streams", "error", err)
-		return nil, err
-	}
-	return recs, nil
-}
-
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
 	if d.collection == nil {
 		return errors.New("mongo collection not initialized")
