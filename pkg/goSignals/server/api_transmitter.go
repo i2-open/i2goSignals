@@ -44,7 +44,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		return
 	}
 
-	streamState, err := sa.GetProvider().GetStreamState(authCtx.StreamId)
+	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -53,7 +53,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	remoteIP := model.BuildRemoteIPFromRequest(r)
 	if !remoteIP.Equals(streamState.RemoteAddress) {
 		serverLog.Debug("POLL-RCV: Remote address information", "sid", streamState.StreamConfiguration.Id, "old", streamState.RemoteAddress.String(), "new", remoteIP.String())
-		sa.GetProvider().UpdateRemoteAddress(authCtx.StreamId, remoteIP)
+		sa.GetStreamService().UpdateRemoteAddress(r.Context(), authCtx.StreamId, remoteIP)
 	}
 
 	behavior := os.Getenv("POLL_SRV_BEHAVIOR")
@@ -122,11 +122,11 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	// First, process the acknowledgements
 	for _, jti := range request.Acks {
 		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
-		err = sa.GetProvider().AckEvent(jti, authCtx.StreamId, 0)
+		err = sa.GetEventService().AckEvent(r.Context(), jti, authCtx.StreamId, 0)
 		if err != nil {
 			serverLog.Error("Error acking event in poll", "sid", authCtx.StreamId, "jti", jti, "error", err)
 		}
-		event := sa.GetProvider().GetEvent(jti)
+		event := sa.GetEventService().GetEvent(r.Context(), jti)
 		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
 		sa.GetEventRouter().IncrementCounter(streamState, event, false)
 	}

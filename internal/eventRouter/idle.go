@@ -39,7 +39,7 @@ func LoadIdleVerifyInterval() time.Duration {
 // Both call paths produce identical persisted records: the only difference is who triggered the
 // generation. Returns the persisted AgEventRecord (with Operational=true) on success.
 func (r *router) GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error) {
-    stream, err := r.provider.GetStreamState(sid)
+    stream, err := r.streamService.GetStreamState(r.ctx, sid)
     if err != nil {
         return nil, fmt.Errorf("GenerateVerifyEvent: lookup stream %s: %w", sid, err)
     }

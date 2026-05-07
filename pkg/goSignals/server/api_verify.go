@@ -64,7 +64,7 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 	// shared GenerateVerifyEvent helper does its own lookup internally; the duplicate read here
 	// is the cost of mapping "not found" to the correct HTTP status without coupling the helper
 	// to HTTP semantics.
-	stream, err := sa.GetProvider().GetStream(payload.StreamId)
+	stream, err := sa.GetStreamService().GetStream(r.Context(), payload.StreamId)
 	if err != nil || stream == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
