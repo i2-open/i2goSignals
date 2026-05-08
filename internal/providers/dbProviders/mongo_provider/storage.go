@@ -26,4 +26,4 @@ func (s *MongoStorage) Name() string                  { return s.p.Name() }
 func (s *MongoStorage) Check() error                  { return s.p.Check() }
 func (s *MongoStorage) Close() error                  { return s.p.Close() }
 func (s *MongoStorage) ResetDb(initialize bool) error { return s.p.ResetDb(initialize) }
-func (s *MongoStorage) SetBaseUrl(u *url.URL)         { s.p.SetBaseUrl(u) }
+func (s *MongoStorage) SetBaseUrl(u *url.URL)         { s.p.streamService.SetBaseUrl(u) }

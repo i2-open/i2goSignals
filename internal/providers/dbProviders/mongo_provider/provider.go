@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/common"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -50,13 +50,36 @@ const ErrorInvalidProject = "invalid project_id - invalid token"
 
 var pLog = logger.Sub("MONGO")
 
+// MongoProvider is the production persistence adapter. After PRD #39 PR4
+// phase E it holds its DAOs and services as direct fields rather than
+// embedding *common.BaseProvider — the dbProviders god-interface and façade
+// have been deleted, and consumers depend on services directly via the
+// Persistence record.
 type MongoProvider struct {
-	*common.BaseProvider
-
 	mu          sync.RWMutex
 	DbUrl       string
 	DbName      string
 	mongoClient *mongo.Client
+
+	// DAOs are constructed once in initServices() with nil collections and
+	// rebound in initialize() after each (re)connect via SetCollection. The
+	// concrete *mongodao.* types are needed for the rebind path; the
+	// interfaces.* references satisfy the service constructors.
+	streamDAO *mongodao.StreamDAOMongo
+	eventDAO  *mongodao.EventDAOMongo
+	keyDAO    *mongodao.KeyDAOMongo
+	clientDAO *mongodao.ClientDAOMongo
+	serverDAO *mongodao.ServerDAOMongo
+	tokenDAO  *mongodao.TokenDAOMongo
+
+	// Services — long-lived, never swapped after Open returns. Reconnects
+	// only rebind DAO collections in place (rebindable-collection pattern).
+	streamService *services.StreamService
+	keyService    *services.KeyService
+	eventService  *services.EventService
+	clientService *services.ClientService
+	serverService *services.ServerService
+	tokenService  *services.TokenService
 
 	// dbInit is a flag confirming a valid SSEF database is connected and initialized
 	dbInit bool
@@ -92,42 +115,54 @@ func (m *MongoProvider) Name() string {
 	return m.DbName
 }
 
-// initBaseProvider initializes the embedded BaseProvider with "disconnected" services
-// that use nil collections. This prevents nil pointer panics when the provider is
-// accessed before the initial MongoDB connection is established.
-func (m *MongoProvider) initBaseProvider() {
+// initServices constructs the long-lived DAO and service instances. DAOs are
+// created with nil collections so that handlers reaching the provider before
+// the initial MongoDB connection completes don't panic; the connect path
+// later calls SetCollection on each DAO. Services are wired once and never
+// rebuilt — reconnects only rebind collections.
+func (m *MongoProvider) initServices() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Initialize DAOs with nil collections (mongodao.New... handles nil safely)
-	streamDAO := mongodao.NewStreamDAO(nil)
-	eventDAO := mongodao.NewEventDAO(nil, nil, nil)
-	keyDAO := mongodao.NewKeyDAO(nil)
-	clientDAO := mongodao.NewClientDAO(nil)
-	serverDAO := mongodao.NewServerDAO(nil)
-	tokenDAO := mongodao.NewTokenDAO(nil)
+	m.streamDAO = mongodao.NewStreamDAO(nil).(*mongodao.StreamDAOMongo)
+	m.eventDAO = mongodao.NewEventDAO(nil, nil, nil).(*mongodao.EventDAOMongo)
+	m.keyDAO = mongodao.NewKeyDAO(nil).(*mongodao.KeyDAOMongo)
+	m.clientDAO = mongodao.NewClientDAO(nil).(*mongodao.ClientDAOMongo)
+	m.serverDAO = mongodao.NewServerDAO(nil).(*mongodao.ServerDAOMongo)
+	m.tokenDAO = mongodao.NewTokenDAO(nil).(*mongodao.TokenDAOMongo)
 
-	// Initialize Services (services.New... handles nil safely)
-	tokenService := services.NewTokenService(tokenDAO)
-	keyService := services.NewKeyService(keyDAO, m.TokenIssuer, tokenService)
-	streamService := services.NewStreamService(streamDAO, keyService, m.DefaultIssuer)
-	eventService := services.NewEventService(eventDAO)
-	clientService := services.NewClientService(clientDAO, keyService)
-	serverService := services.NewServerService(serverDAO)
+	m.tokenService = services.NewTokenService(m.tokenDAO)
+	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService)
+	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
+	m.eventService = services.NewEventService(m.eventDAO)
+	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
+	m.serverService = services.NewServerService(m.serverDAO)
 
-	// Initialize BaseProvider with services
-	m.BaseProvider = common.NewBaseProvider(
-		streamDAO, eventDAO, keyDAO, clientDAO, serverDAO, tokenDAO,
-		keyService, streamService, eventService, clientService, serverService, tokenService,
-	)
+	// StreamService.CreateStream needs ServerService to resolve tx_alias.
+	m.streamService.SetServerService(m.serverService)
 
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator()
 	}
 }
 
+// Service accessors used by dbProviders.OpenPersistence to hydrate the
+// Persistence composition root. MongoProvider keeps its services for the
+// lifetime of the process, so these never change after initServices().
+func (m *MongoProvider) GetStreamService() *services.StreamService { return m.streamService }
+func (m *MongoProvider) GetKeyService() *services.KeyService       { return m.keyService }
+func (m *MongoProvider) GetEventService() *services.EventService   { return m.eventService }
+func (m *MongoProvider) GetClientService() *services.ClientService { return m.clientService }
+func (m *MongoProvider) GetServerService() *services.ServerService { return m.serverService }
+func (m *MongoProvider) GetTokenService() *services.TokenService   { return m.tokenService }
+
+// GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in
+// internal/providers/dbProviders/mongo_provider/test/rebind_test.go to assert
+// that collection rebinding takes effect on the same DAO instance.
+func (m *MongoProvider) GetKeyDAO() interfaces.KeyDAO { return m.keyDAO }
+
 // Coordinator returns the MongoCoordinator owning lease and node-registry
-// state. Always non-nil after Open / initBaseProvider.
+// state. Always non-nil after Open / initServices.
 func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
     return m.coordinator
 }
@@ -181,31 +216,31 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	}
 
     // Rebind the existing DAOs in place. The DAOs are created once by
-    // initBaseProvider with nil collections; here we point them at the
-    // collections from the freshly-(re)connected database. This replaces
-    // the previous "rebuild BaseProvider on every initialize" pattern.
-    m.BaseProvider.GetStreamDAO().(*mongodao.StreamDAOMongo).SetCollection(m.streamCol)
-    m.BaseProvider.GetEventDAO().(*mongodao.EventDAOMongo).SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
-    m.BaseProvider.GetKeyDAO().(*mongodao.KeyDAOMongo).SetCollection(m.keyCol)
-    m.BaseProvider.GetClientDAO().(*mongodao.ClientDAOMongo).SetCollection(m.clientCol)
-    m.BaseProvider.GetServerDAO().(*mongodao.ServerDAOMongo).SetCollection(m.serverCol)
-    m.BaseProvider.GetTokenDAOForRebind().(*mongodao.TokenDAOMongo).SetCollection(m.tokenCol)
+    // initServices with nil collections; here we point them at the
+    // collections from the freshly-(re)connected database. Services hold
+    // the same DAO instances so they immediately see the new collections.
+    m.streamDAO.SetCollection(m.streamCol)
+    m.eventDAO.SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
+    m.keyDAO.SetCollection(m.keyCol)
+    m.clientDAO.SetCollection(m.clientCol)
+    m.serverDAO.SetCollection(m.serverCol)
+    m.tokenDAO.SetCollection(m.tokenCol)
 
     // Initialize token keys against the existing keyService so a slow
     // reconnect doesn't leave the AuthIssuer with a nil PublicKey.
-    err = m.BaseProvider.GetKeyService().InitializeTokenKey(ctx, m.DefaultIssuer)
+    err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
     if err != nil {
         return err
     }
 
-    // BaseProvider is constructed once at startup (initBaseProvider). After
-    // a (re)connect we keep the same BaseProvider/services and only rebind
+    // Services are constructed once at startup (initServices). After a
+    // (re)connect we keep the same services and only rebind DAO
     // collections (above). This is the swap-on-reconnect kill point.
     m.dbInit = true
 
     // Load receiver streams against the same StreamService instance we
-    // wired into BaseProvider at startup.
-    if m.BaseProvider.GetStreamService().LoadReceiverStreams(ctx) == nil {
+    // wired up at startup.
+    if m.streamService.LoadReceiverStreams(ctx) == nil {
         pLog.Warn("No receiver streams loaded during initialization")
     }
 
@@ -463,9 +498,9 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		stopMonitor:   make(chan struct{}),
 	}
 
-	// Initialize a minimal BaseProvider so that methods like GetAuthIssuer can be called
-	// safely even before the initial connection is established.
-	m.initBaseProvider()
+	// Construct services with nil-collection DAOs so callers reaching the
+	// provider before the initial Mongo connection completes don't panic.
+	m.initServices()
 
 	if os.Getenv("PAUSE_FOR_DEBUG") == "TRUE" {
 		pLog.Info("Pausing to allow debug to load")
@@ -516,17 +551,8 @@ func (m *MongoProvider) Close() error {
 	return nil
 }
 
-// MongoProvider's wrapper-method tax (~160 methods that delegated to
-// BaseProvider behind an RWMutex-protected swap) is gone. After PR4 phase B
-// (#46) the BaseProvider is no longer swapped — the embedded *BaseProvider
-// promotes its accessors directly. After PR4 phase C (#47) consumers go
-// through the per-service references on SignalsApplication anyway, so the
-// wrappers had no callers. SetBaseUrl, GetAuthIssuer, and the service
-// accessors come from *BaseProvider via embedding.
-
-// TryAcquireOrRenewLease delegates to the embedded MongoCoordinator. The
-// method is retained on MongoProvider so existing call sites keep compiling
-// during the slice-by-slice provider collapse.
+// Cluster pass-throughs retained for the lease/cluster integration tests
+// under mongo_provider/test/. Production callers use Persistence.Coordinator.
 func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
     return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
@@ -554,5 +580,3 @@ func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
     return m.coordinator.GetNode(nodeId)
 }
-
-// SetBaseUrl is delegated to BaseProvider which handles it

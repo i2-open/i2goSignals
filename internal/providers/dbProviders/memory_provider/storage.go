@@ -22,4 +22,4 @@ func (s *MemoryStorage) Name() string                  { return s.p.Name() }
 func (s *MemoryStorage) Check() error                  { return s.p.Check() }
 func (s *MemoryStorage) Close() error                  { return s.p.Close() }
 func (s *MemoryStorage) ResetDb(initialize bool) error { return s.p.ResetDb(initialize) }
-func (s *MemoryStorage) SetBaseUrl(u *url.URL)         { s.p.SetBaseUrl(u) }
+func (s *MemoryStorage) SetBaseUrl(u *url.URL)         { s.p.streamService.SetBaseUrl(u) }
