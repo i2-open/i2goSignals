@@ -1,16 +1,18 @@
 /*
-genTlsKeys is a command line tool that can be used to generate a set of self-signed keys for use by
-the goSignals development environment.
+genTlsKeys is a command-line tool that generates a set of self-signed TLS
+keys for use by the goSignals development environment.
 
 USAGE:
 
-	genTlsKeys -type=tls
-	genTlsKeys -type=jwt -action=init -dir=./certs
+	genTlsKeys                  # writes to ./config/certs (default)
+	genTlsKeys -dir=./certs     # writes to a custom directory
+	genTlsKeys -help
 
-This will generate a CA cert/key pair and use that to sign Server cert/key pair
-and Client cert/key pair.
+The output directory may also be set via the CERT_DIRECTORY environment
+variable; the -dir flag takes precedence when supplied.
 
-Use these certs for tests such as websupport_test and orchestrator_test.
+The tool produces a self-signed CA (ca-cert.pem, ca-key.pem) and a server
+cert/key pair signed by it (server-cert.pem, server-key.pem).
 */
 package main
 
