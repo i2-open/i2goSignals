@@ -1,5 +1,102 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-07] DbProviderInterface and BaseProvider deleted; consumers depend on services directly
+
+### Change
+PRD #39 #45 retires the residual god-interface (`DbProviderInterface`)
+and god-object (`common.BaseProvider`) shells that #47 left in place.
+The remaining surface is the per-domain services, the
+`ClusterCoordinator`, and the `Storage` seam — bundled into a single
+composition record:
+
+```go
+type Persistence struct {
+    StreamService *services.StreamService
+    KeyService    *services.KeyService
+    EventService  *services.EventService
+    ClientService *services.ClientService
+    ServerService *services.ServerService
+    TokenService  *services.TokenService
+
+    Coordinator cluster.ClusterCoordinator
+    Storage     storage.Storage
+}
+```
+
+Returned by `dbProviders.OpenPersistence(url, dbName)`. Every consumer
+— `cmd/goSignalsServer`, `cmd/goSsfServer`, `pkg/goSignals/server`,
+`pkg/goSsfServer`, `internal/eventRouter` — now takes the narrowest
+seam it actually uses (one service, or `Coordinator`, or `Storage`)
+instead of a 50-method interface.
+
+The `eventRouter.NewRouter` signature changed from
+`NewRouter(provider DbProviderInterface, nodeId string)` to
+`NewRouter(deps RouterDeps, nodeId string)`, where `RouterDeps` is a
+small struct of the four services it actually uses
+(`StreamService`, `KeyService`, `EventService`, `Coordinator`). The
+router no longer holds a provider reference — it never called through
+one anyway after PR4 phase C.
+
+### Why this carries weight
+- **The god-object shells are gone.** `provider_interface.go` and
+  `common/base_provider.go` are deleted. Adding a new persistence
+  method now touches one DAO (per adapter) and one service — three
+  files instead of five.
+- **No dispatch tax.** Callers no longer interface-assert through
+  `provider.(serviceSource)` to get a service. Service references are
+  plain struct fields on `Persistence` and on the application object.
+- **Test fixtures depend on the same seams as production.** Across
+  ~280 test sites in `pkg/goSignals/server/test/`,
+  `internal/eventRouter`, `cmd/goSignals`, and `pkg/goSsfServer`,
+  fixtures hold a `*Persistence` (or convenience wrappers on a test
+  instance) and call services directly. The legacy
+  `instance.provider.X` / `app.Provider.X` paths are gone.
+- **Reset semantics fixed at the seam.** The memory adapter rebuilds
+  its services on `Storage.ResetDb(true)` (it constructs new DAO
+  instances). `Persistence.Refresh()` re-pulls service references
+  from the underlying provider so post-reset callers see live
+  services. Mongo's reconnect path (#46) rebinds DAO collections in
+  place and so `Refresh` is a no-op there — both adapters present a
+  uniform "reset is safe to call mid-test" contract.
+
+### Composition root signatures
+- `dbProviders.OpenPersistence(url, dbName) (*Persistence, error)` —
+  the only public composition entry point. `OpenProvider` is gone.
+- `pkg/goSignals/server.NewApplication(*Persistence, baseUrl) *SignalsApplication`
+- `pkg/goSignals/server.StartServer(addr, *Persistence, baseUrl) *SignalsApplication`
+- `pkg/goSsfServer.NewApplication(*Persistence, baseUrl) *SsfApplication`
+- `pkg/goSsfServer.StartServer(addr, *Persistence, baseUrl) *SsfApplication`
+- `eventRouter.NewRouter(RouterDeps, nodeId) EventRouter`
+
+### Verification
+- `go vet ./...` — only pre-existing warnings (`bson.E` unkeyed
+  fields in `cmd/cluster-monitor`; duplicate JSON tags in
+  `pkg/ssfModels` and `pkg/goScim/resource`). Zero new warnings.
+- `go test -race -timeout 300s ./internal/...` — green.
+- `go test -race -timeout 600s ./pkg/...` — green.
+- The receiver-stream predicate audit landed in #40; no further
+  drift between adapters.
+
+### Files deleted
+- `internal/providers/dbProviders/provider_interface.go`
+- `internal/providers/dbProviders/common/base_provider.go`
+
+### Migration support: Persistence.Refresh
+The `Persistence` record carries a private `src` pointing back at the
+underlying provider. `Refresh()` re-pulls service references — call
+it after `Storage.ResetDb(true)` on the in-memory adapter (which
+rebuilds services). Mongo's reconnect path (#46) rebinds in place, so
+`Refresh` is a structural no-op there.
+
+```go
+persistence, _ := dbProviders.OpenPersistence(url, name)
+_ = persistence.Storage.ResetDb(true)
+persistence.Refresh()  // re-pull live services post-reset
+app := server.NewApplication(persistence, "")
+```
+
+---
+
 ## [2026-05-06] Memory persistence as DAO-level decorator; WriteHook plumbing removed
 
 ### Change
