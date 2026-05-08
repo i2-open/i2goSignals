@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -24,7 +25,17 @@ type ApiServerCrudTestSuite struct {
 func (s *ApiServerCrudTestSuite) SetupSuite() {
 	provider, err := memory_provider.Open("memorydb:", "api_server_crud_test")
 	s.NoError(err)
-	s.sa = ssef.NewApplication(provider, "")
+	persistence := &dbProviders.Persistence{
+		StreamService: provider.GetStreamService(),
+		KeyService:    provider.GetKeyService(),
+		EventService:  provider.GetEventService(),
+		ClientService: provider.GetClientService(),
+		ServerService: provider.GetServerService(),
+		TokenService:  provider.GetTokenService(),
+		Coordinator:   provider.Coordinator(),
+		Storage:       memory_provider.NewMemoryStorage(provider),
+	}
+	s.sa = ssef.NewApplication(persistence, "")
 	s.ts = httptest.NewServer(s.sa.Handler)
 	s.ssfServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/ssf-configuration" {

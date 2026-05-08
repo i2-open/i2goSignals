@@ -1,12 +1,12 @@
 package eventRouter
 
 import (
+    "context"
     "net/http"
     "net/http/httptest"
     "testing"
 
     "github.com/i2-open/i2goSignals/internal/authUtil"
-    "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/i2-open/i2goSignals/pkg/goSetPush"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -16,7 +16,7 @@ import (
 
 // mustCreateForwardModeStream creates a DeliveryPush stream in RouteModeForward (no signing key needed)
 // pointing at the supplied endpoint URL.
-func mustCreateForwardModeStream(t *testing.T, provider dbProviders.DbProviderInterface, projectId, endpoint string) *model.StreamStateRecord {
+func mustCreateForwardModeStream(t *testing.T, h *testHarness, projectId, endpoint string) *model.StreamStateRecord {
     t.Helper()
     cfg := model.StreamConfiguration{
         Iss:             "DEFAULT",
@@ -30,9 +30,10 @@ func mustCreateForwardModeStream(t *testing.T, provider dbProviders.DbProviderIn
             },
         },
     }
-    created, err := provider.CreateStream(cfg, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    created, err := h.streamService.CreateStream(ctx, cfg, projectId, nil)
     require.NoError(t, err)
-    state, err := provider.GetStreamState(created.Id)
+    state, err := h.streamService.GetStreamState(context.Background(), created.Id)
     require.NoError(t, err)
     require.NotNil(t, state)
     return state
@@ -50,9 +51,9 @@ func TestPushEvent_UpdatesLocalRemoteAddressOnFirstPush(t *testing.T) {
     }))
     defer receiver.Close()
 
-    r, provider := newTestRouter(t)
-    projectId := projectIdFromProvider(t, provider)
-    stream := mustCreateForwardModeStream(t, provider, projectId, receiver.URL+"/events/test")
+    h := newTestRouter(t)
+    projectId := projectIdFromHarness(t, h)
+    stream := mustCreateForwardModeStream(t, h, projectId, receiver.URL+"/events/test")
     require.Nil(t, stream.RemoteAddress, "precondition: RemoteAddress is nil before any push")
 
     event := &model.AgEventRecord{
@@ -61,7 +62,7 @@ func TestPushEvent_UpdatesLocalRemoteAddressOnFirstPush(t *testing.T) {
         Event:    goSet.SecurityEventToken{},
     }
 
-    cls := r.pushEvent(stream, event, nil, "")
+    cls := h.router.pushEvent(stream, event, nil, "")
     require.Equal(t, goSetPush.ClassAccepted, cls.Class, "push to mock receiver should classify as accepted")
 
     // The fix: local stream pointer must reflect the persisted remote address so the next
@@ -71,7 +72,7 @@ func TestPushEvent_UpdatesLocalRemoteAddressOnFirstPush(t *testing.T) {
     assert.Equal(t, "http", stream.RemoteAddress.Protocol, "scheme should match the endpoint URL")
 
     // Also confirm the persisted record matches — this is the existing contract from #26.
-    persisted, err := provider.GetStreamState(stream.StreamConfiguration.Id)
+    persisted, err := h.streamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
     require.NoError(t, err)
     require.NotNil(t, persisted.RemoteAddress)
     assert.Equal(t, stream.RemoteAddress.IP, persisted.RemoteAddress.IP, "in-memory and persisted IP must match")
@@ -90,19 +91,19 @@ func TestPushEvent_SecondPushSamePeerIsNoop(t *testing.T) {
     }))
     defer receiver.Close()
 
-    r, provider := newTestRouter(t)
-    projectId := projectIdFromProvider(t, provider)
-    stream := mustCreateForwardModeStream(t, provider, projectId, receiver.URL+"/events/test")
+    h := newTestRouter(t)
+    projectId := projectIdFromHarness(t, h)
+    stream := mustCreateForwardModeStream(t, h, projectId, receiver.URL+"/events/test")
 
     event1 := &model.AgEventRecord{Jti: "jti-1", Original: "raw-1"}
     event2 := &model.AgEventRecord{Jti: "jti-2", Original: "raw-2"}
 
-    cls1 := r.pushEvent(stream, event1, nil, "")
+    cls1 := h.router.pushEvent(stream, event1, nil, "")
     require.Equal(t, goSetPush.ClassAccepted, cls1.Class)
     require.NotNil(t, stream.RemoteAddress, "first push should populate RemoteAddress")
     firstAddr := *stream.RemoteAddress
 
-    cls2 := r.pushEvent(stream, event2, nil, "")
+    cls2 := h.router.pushEvent(stream, event2, nil, "")
     require.Equal(t, goSetPush.ClassAccepted, cls2.Class)
     require.NotNil(t, stream.RemoteAddress, "second push must not clear RemoteAddress")
 

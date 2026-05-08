@@ -25,7 +25,6 @@ import (
 var serverLog = logger.Sub("SERVER")
 
 type SsfApplication struct {
-	Provider      dbProviders.DbProviderInterface
 	Coordinator   cluster.ClusterCoordinator
 	Storage       storage.Storage
 	StreamService *services.StreamService
@@ -47,50 +46,14 @@ type SsfApplication struct {
 	StartedAt     time.Time
 }
 
-// coordinatorSource matches the accessor present on both concrete providers.
-type coordinatorSource interface {
-	Coordinator() cluster.ClusterCoordinator
-}
-
-type storageSource interface {
-	Name() string
-	Check() error
-	Close() error
-	ResetDb(initialize bool) error
-	SetBaseUrl(u *url.URL)
-}
-
-type providerStorageAdapter struct {
-	source storageSource
-}
-
-func (a providerStorageAdapter) Name() string                  { return a.source.Name() }
-func (a providerStorageAdapter) Check() error                  { return a.source.Check() }
-func (a providerStorageAdapter) Close() error                  { return a.source.Close() }
-func (a providerStorageAdapter) ResetDb(initialize bool) error { return a.source.ResetDb(initialize) }
-func (a providerStorageAdapter) SetBaseUrl(u *url.URL)         { a.source.SetBaseUrl(u) }
-
-type serviceSource interface {
-	GetStreamService() *services.StreamService
-	GetKeyService() *services.KeyService
-	GetEventService() *services.EventService
-	GetClientService() *services.ClientService
-	GetServerService() *services.ServerService
-	GetTokenService() *services.TokenService
-}
-
-func (sa *SsfApplication) GetStreamService() *services.StreamService { return sa.StreamService }
-func (sa *SsfApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
-func (sa *SsfApplication) GetEventService() *services.EventService   { return sa.EventService }
-func (sa *SsfApplication) GetClientService() *services.ClientService { return sa.ClientService }
-func (sa *SsfApplication) GetServerService() *services.ServerService { return sa.ServerService }
-func (sa *SsfApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
+func (sa *SsfApplication) GetStreamService() *services.StreamService  { return sa.StreamService }
+func (sa *SsfApplication) GetKeyService() *services.KeyService        { return sa.KeyService }
+func (sa *SsfApplication) GetEventService() *services.EventService    { return sa.EventService }
+func (sa *SsfApplication) GetClientService() *services.ClientService  { return sa.ClientService }
+func (sa *SsfApplication) GetServerService() *services.ServerService  { return sa.ServerService }
+func (sa *SsfApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
 func (sa *SsfApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
-func (sa *SsfApplication) GetStorage() storage.Storage               { return sa.Storage }
-
-func (sa *SsfApplication) GetProvider() dbProviders.DbProviderInterface {
-	return sa.Provider
-}
+func (sa *SsfApplication) GetStorage() storage.Storage                { return sa.Storage }
 
 func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
@@ -279,7 +242,7 @@ func (sa *SsfApplication) Health(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("Service Unavailable"))
 	}
 }
-func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
+func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) *SsfApplication {
 	role := os.Getenv("SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"
@@ -295,25 +258,17 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	}
 
 	sa := &SsfApplication{
-		Provider:  provider,
-		AdminRole: role,
-		NodeID:    nodeID,
-		StartedAt: time.Now().UTC(),
-	}
-
-	if cs, ok := provider.(coordinatorSource); ok {
-		sa.Coordinator = cs.Coordinator()
-	}
-	if ss, ok := provider.(storageSource); ok {
-		sa.Storage = providerStorageAdapter{source: ss}
-	}
-	if svcs, ok := provider.(serviceSource); ok {
-		sa.StreamService = svcs.GetStreamService()
-		sa.KeyService = svcs.GetKeyService()
-		sa.EventService = svcs.GetEventService()
-		sa.ClientService = svcs.GetClientService()
-		sa.ServerService = svcs.GetServerService()
-		sa.TokenService = svcs.GetTokenService()
+		Coordinator:   persistence.Coordinator,
+		Storage:       persistence.Storage,
+		StreamService: persistence.StreamService,
+		KeyService:    persistence.KeyService,
+		EventService:  persistence.EventService,
+		ClientService: persistence.ClientService,
+		ServerService: persistence.ServerService,
+		TokenService:  persistence.TokenService,
+		AdminRole:     role,
+		NodeID:        nodeID,
+		StartedAt:     time.Now().UTC(),
 	}
 
 	if sa.KeyService != nil {
@@ -326,7 +281,12 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	// expose the handler for external server usage (e.g., httptest.Server)
 	sa.Handler = httpRouter.router
 
-	sa.EventRouter = eventRouter.NewRouter(provider, nodeID)
+	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
+		StreamService: persistence.StreamService,
+		KeyService:    persistence.KeyService,
+		EventService:  persistence.EventService,
+		Coordinator:   persistence.Coordinator,
+	}, nodeID)
 
 	var baseUrl *url.URL
 	var err error
@@ -421,8 +381,8 @@ func (sa *SsfApplication) registerNode() {
 
 // StartServer creates a real net/http server wrapping the application handler.
 // This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
-func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SsfApplication {
-	sa := NewApplication(provider, baseUrlString)
+func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string) *SsfApplication {
+	sa := NewApplication(persistence, baseUrlString)
 	httpServer := http.Server{
 		Addr:     addr,
 		Handler:  sa.Handler,
@@ -438,7 +398,11 @@ func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlS
 		}
 	}
 	sa.mu.Unlock()
-	serverLog.Info("Server listening", "db", provider.Name(), "addr", addr)
+	dbName := ""
+	if sa.Storage != nil {
+		dbName = sa.Storage.Name()
+	}
+	serverLog.Info("Server listening", "db", dbName, "addr", addr)
 	return sa
 }
 

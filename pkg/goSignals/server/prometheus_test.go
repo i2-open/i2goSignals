@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,8 +21,19 @@ func TestClusterMetrics(t *testing.T) {
 	provider, err := memory_provider.Open("memorydb://localhost", "test_metrics")
 	require.NoError(t, err)
 
+	persistence := &dbProviders.Persistence{
+		StreamService: provider.GetStreamService(),
+		KeyService:    provider.GetKeyService(),
+		EventService:  provider.GetEventService(),
+		ClientService: provider.GetClientService(),
+		ServerService: provider.GetServerService(),
+		TokenService:  provider.GetTokenService(),
+		Coordinator:   provider.Coordinator(),
+		Storage:       memory_provider.NewMemoryStorage(provider),
+	}
+
 	// 2. Setup Signals Application
-	sa := NewApplication(provider, "http://localhost:8080")
+	sa := NewApplication(persistence, "http://localhost:8080")
 	defer sa.Shutdown()
 
 	// 2.1 Use a fresh registry for testing to avoid conflicts with global registry

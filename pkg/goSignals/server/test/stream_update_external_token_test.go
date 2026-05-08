@@ -60,7 +60,7 @@ func TestStreamUpdate_ExternalToken(t *testing.T) {
 		Aud: []string{"test.example.com"},
 		Iss: "DEFAULT",
 	}
-	config, err := instance.provider.CreateStream(transConfig, authUtil.ConvertProject(""))
+	config, err := instance.CreateStream(transConfig, authUtil.ConvertProject(""))
 	assert.NoError(t, err)
 
 	// 4. Prepare update request

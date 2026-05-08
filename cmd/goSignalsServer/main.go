@@ -32,7 +32,7 @@ func stripQuotes(s string) string {
 	return s
 }
 
-func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
+func StartProvider(dbUrl string) (*dbProviders.Persistence, error) {
 
 	name := "ssef"
 	if found := stripQuotes(os.Getenv("DBNAME")); found != "" {
@@ -40,7 +40,7 @@ func StartProvider(dbUrl string) (dbProviders.DbProviderInterface, error) {
 		name = found
 	}
 
-	return dbProviders.OpenProvider(dbUrl, name)
+	return dbProviders.OpenPersistence(dbUrl, name)
 }
 
 func main() {
@@ -61,17 +61,19 @@ func main() {
 		mLog.Info("MONGO_URL not set, using memory provider")
 	}
 
-	provider, err := StartProvider(dbUrl)
+	persistence, err := StartProvider(dbUrl)
 	if err != nil {
 		mLog.Error("Fatal: Unable to start database provider", "error", err)
 		os.Exit(-1)
 	}
-	defer func(provider dbProviders.DbProviderInterface) {
-		err := provider.Close()
-		if err != nil {
-			mLog.Error("Fatal: Unable to close database provider", "error", err)
+	defer func(p *dbProviders.Persistence) {
+		if p.Storage != nil {
+			err := p.Storage.Close()
+			if err != nil {
+				mLog.Error("Fatal: Unable to close database provider", "error", err)
+			}
 		}
-	}(provider)
+	}(persistence)
 
 	baseUrl := "127.0.0.1:" + port + "/"
 	if found := stripQuotes(os.Getenv("BASE_URL")); found != "" {
@@ -79,7 +81,7 @@ func main() {
 	}
 	mLog.Info("Base URL", "url", baseUrl)
 
-	signalsApplication := ssef.StartServer(":"+port, provider, baseUrl)
+	signalsApplication := ssef.StartServer(":"+port, persistence, baseUrl)
 
 	closer, tlsMode, err := tlsSupport.InitTransportLayerSecurity(signalsApplication.Server)
 	if err != nil {

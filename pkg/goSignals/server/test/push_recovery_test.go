@@ -63,9 +63,9 @@ func createPushStream(t *testing.T, instance *ssfInstance, eventsURL string) str
         },
     }
     atx := authUtil.AuthContext{ProjectId: instance.projectId}
-    created, err := instance.provider.CreateStream(streamConfig, &atx)
+    created, err := instance.CreateStream(streamConfig, &atx)
     require.NoError(t, err)
-    state, err := instance.provider.GetStreamState(created.Id)
+    state, err := instance.GetStreamState(created.Id)
     require.NoError(t, err)
     instance.app.EventRouter.UpdateStreamState(state)
     return created.Id
@@ -74,7 +74,7 @@ func createPushStream(t *testing.T, instance *ssfInstance, eventsURL string) str
 // emitEvent generates and submits a SET to the live router for the named stream id.
 func emitEvent(t *testing.T, instance *ssfInstance, sid string) {
     t.Helper()
-    state, err := instance.provider.GetStreamState(sid)
+    state, err := instance.GetStreamState(sid)
     require.NoError(t, err)
     set := goSet.CreateSet(pushRecoveryTestSubject(), state.Iss, state.Aud)
     set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled",
@@ -87,7 +87,7 @@ func waitStreamStatus(t *testing.T, instance *ssfInstance, sid, target string) *
     t.Helper()
     var got *model.StreamStateRecord
     require.Eventually(t, func() bool {
-        st, err := instance.provider.GetStreamState(sid)
+        st, err := instance.GetStreamState(sid)
         if err != nil || st == nil {
             return false
         }
@@ -240,11 +240,11 @@ func TestPushRecovery_JwsSignatureFailedKeyFlushRetry(t *testing.T) {
 
     // Wait for the JTI to be acked (no pending events left).
     require.Eventually(t, func() bool {
-        ids, _ := instance.provider.GetEventIds(sid, model.PollParameters{ReturnImmediately: true})
+        ids, _ := instance.GetEventIds(sid, model.PollParameters{ReturnImmediately: true})
         return len(ids) == 0 && attempts.Load() >= 2
     }, 5*time.Second, 50*time.Millisecond, "JTI should be acked after key-flush retry succeeds")
 
-    st, err := instance.provider.GetStreamState(sid)
+    st, err := instance.GetStreamState(sid)
     require.NoError(t, err)
     assert.Equal(t, model.StreamStateEnabled, st.Status, "stream should remain enabled after successful retry")
     assert.GreaterOrEqual(t, attempts.Load(), int32(2), "expected at least one retry after key flush")
@@ -287,7 +287,7 @@ func TestPushRecovery_RateLimitedRetryAfterHonored(t *testing.T) {
     emitEvent(t, instance, sid)
 
     require.Eventually(t, func() bool {
-        ids, _ := instance.provider.GetEventIds(sid, model.PollParameters{ReturnImmediately: true})
+        ids, _ := instance.GetEventIds(sid, model.PollParameters{ReturnImmediately: true})
         return len(ids) == 0 && attempts.Load() >= 2
     }, 8*time.Second, 50*time.Millisecond, "JTI should be acked after Retry-After delay")
 
@@ -296,7 +296,7 @@ func TestPushRecovery_RateLimitedRetryAfterHonored(t *testing.T) {
     mu.Unlock()
     assert.GreaterOrEqual(t, gap, 800*time.Millisecond, "second attempt should respect Retry-After (allow 200ms slack)")
 
-    st, err := instance.provider.GetStreamState(sid)
+    st, err := instance.GetStreamState(sid)
     require.NoError(t, err)
     assert.Equal(t, model.StreamStateEnabled, st.Status, "stream should remain enabled after rate-limit retry succeeds")
 }

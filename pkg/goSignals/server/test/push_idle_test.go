@@ -88,7 +88,7 @@ func TestPushIdle_GeneratesVerifyAfterIdle(t *testing.T) {
     assert.EqualValues(t, 0, businessCount.Load(), "no business events were emitted; receiver should only have seen verify(s)")
 
     // The verify event must have been persisted with Operational=true (slice 2 contract).
-    state, err := instance.provider.GetStreamState(sid)
+    state, err := instance.GetStreamState(sid)
     require.NoError(t, err)
     assert.Equal(t, model.StreamStateEnabled, state.Status, "stream should remain enabled across idle verify acks")
 }

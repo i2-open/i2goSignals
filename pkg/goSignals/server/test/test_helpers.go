@@ -1,6 +1,9 @@
 package test
 
 import (
+	"context"
+	"crypto/rsa"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -10,8 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	daoInterfaces "github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -22,11 +29,15 @@ var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/
 
 var testLog = log.New(os.Stdout, "TEST: ", log.Ldate|log.Ltime)
 
+// ssfInstance holds a running test server and direct references to the
+// services backing it. Tests should call services through these fields rather
+// than via a single god-interface (the legacy provider façade was removed in
+// PRD #39 PR4 phase D).
 type ssfInstance struct {
 	ts              *httptest.Server
 	host            string
 	client          *http.Client
-	provider        dbProviders.DbProviderInterface
+	persistence     *dbProviders.Persistence
 	stream          model.StreamConfiguration
 	app             *ssef.SignalsApplication
 	streamToken     string
@@ -35,6 +46,89 @@ type ssfInstance struct {
 	projectId       string
 	startTime       *time.Time
 }
+
+// streamSvc/keySvc/eventSvc/serverSvc are convenience accessors so test code
+// can write `instance.streamSvc().GetStreamState(ctx, id)` without piping
+// through the persistence struct each time.
+func (instance *ssfInstance) streamSvc() *services.StreamService { return instance.persistence.StreamService }
+func (instance *ssfInstance) keySvc() *services.KeyService       { return instance.persistence.KeyService }
+func (instance *ssfInstance) eventSvc() *services.EventService   { return instance.persistence.EventService }
+func (instance *ssfInstance) serverSvc() *services.ServerService { return instance.persistence.ServerService }
+func (instance *ssfInstance) clientSvc() *services.ClientService { return instance.persistence.ClientService }
+
+// The methods below preserve the call shape that test files used to reach
+// through `instance.provider.X` so the per-test diff is mechanical. Each
+// forwards to the appropriate service with a fresh context.
+
+func (instance *ssfInstance) Name() string {
+	if instance.persistence != nil && instance.persistence.Storage != nil {
+		return instance.persistence.Storage.Name()
+	}
+	return ""
+}
+
+func (instance *ssfInstance) GetAuthIssuer() *authUtil.AuthIssuer {
+	return instance.keySvc().GetAuthIssuer()
+}
+
+func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	projectId := ""
+	if authCtx != nil {
+		projectId = authCtx.ProjectId
+	}
+	return instance.streamSvc().CreateStream(ctx, request, projectId, nil)
+}
+
+func (instance *ssfInstance) GetStream(id string) (*model.StreamConfiguration, error) {
+	return instance.streamSvc().GetStream(context.Background(), id)
+}
+
+func (instance *ssfInstance) GetStreamState(id string) (*model.StreamStateRecord, error) {
+	return instance.streamSvc().GetStreamState(context.Background(), id)
+}
+
+func (instance *ssfInstance) UpdateStreamStatus(streamId string, status string, errorMsg string) {
+	instance.streamSvc().UpdateStreamStatus(context.Background(), streamId, status, errorMsg)
+}
+
+func (instance *ssfInstance) DeleteStream(streamId string) error {
+	return instance.streamSvc().DeleteStream(context.Background(), streamId)
+}
+
+func (instance *ssfInstance) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
+	return instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+}
+
+func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {
+	return instance.eventSvc().GetEvent(context.Background(), jti)
+}
+
+func (instance *ssfInstance) GetEventRecord(jti string) *model.AgEventRecord {
+	return instance.eventSvc().GetEventRecord(context.Background(), jti)
+}
+
+func (instance *ssfInstance) ClearPending(streamId string) error {
+	_, err := instance.eventSvc().ClearPendingForStream(context.Background(), streamId)
+	return err
+}
+
+func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
+	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
+}
+
+func (instance *ssfInstance) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
+	return instance.keySvc().GetPrivateKey(context.Background(), keyName)
+}
+
+func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {
+	return instance.keySvc().GetPublicJWKS(context.Background(), keyName)
+}
+
+func (instance *ssfInstance) ListSummaries() ([]daoInterfaces.KeySummary, error) {
+	return instance.keySvc().ListSummaries(context.Background())
+}
+
 
 func (instance *ssfInstance) GetPollUrl(stream model.StreamConfiguration) string {
 	if stream.Delivery == nil || stream.Delivery.PollTransmitMethod == nil {
@@ -71,19 +165,21 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 		// to avoid leaving files in the source tree.
 		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
-	// mongo, err := mongo_provider.Open(TestDbUrl, dbName)
-	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
+	persistence, err := dbProviders.OpenPersistence(dbUrl, dbName)
 	if err != nil {
 		t.Error("Mongo client error: " + err.Error())
 		return nil, err
 	}
 
-	if resetDb {
-		_ = mongo.ResetDb(true)
+	if resetDb && persistence.Storage != nil {
+		_ = persistence.Storage.ResetDb(true)
+		// The in-memory adapter rebuilds its services on reset; refresh the
+		// cached service references so NewApplication sees the live ones.
+		persistence.Refresh()
 	}
 
 	// Build application and wrap with httptest.Server
-	app := ssef.NewApplication(mongo, "")
+	app := ssef.NewApplication(persistence, "")
 	ts := httptest.NewServer(app.Handler)
 	instance.ts = ts
 	instance.app = app
@@ -94,20 +190,21 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	app.SetBaseUrl(baseUrl)
 	instance.client = ts.Client()
 	tlsSupport.CheckCaInstalled(instance.client)
-	instance.provider = mongo
+	instance.persistence = persistence
 	nowTime := time.Now()
 	instance.startTime = &nowTime
 
-	instance.iatToken, err = instance.provider.GetAuthIssuer().IssueProjectIat(nil)
+	authIssuer := persistence.KeyService.GetAuthIssuer()
+	instance.iatToken, err = authIssuer.IssueProjectIat(nil)
 	if err != nil {
 		t.Logf("Error creating iat: %s\n", err.Error())
 	}
-	eat, err := instance.provider.GetAuthIssuer().ParseAuthToken(instance.iatToken)
+	eat, err := authIssuer.ParseAuthToken(instance.iatToken)
 	if err != nil {
 		t.Fatalf("Error parsing iat: %s\n", err.Error())
 	}
 
-	clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
+	clientToken, err := authIssuer.IssueStreamClientToken(model.SsfClient{
 		Id:            bson.NewObjectID(),
 		ProjectIds:    []string{eat.ProjectId},
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},

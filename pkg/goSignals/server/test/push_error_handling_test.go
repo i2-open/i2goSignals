@@ -53,7 +53,7 @@ func (suite *PushErrorSuite) SetupSuite() {
 	var createdStream model.StreamConfiguration
 	_ = json.NewDecoder(resp.Body).Decode(&createdStream)
 	suite.stream = createdStream
-	suite.jwks = instance.provider.GetPublicJWKS("DEFAULT")
+	suite.jwks = instance.GetPublicJWKS("DEFAULT")
 }
 
 func (suite *PushErrorSuite) TearDownSuite() {
@@ -118,7 +118,7 @@ func (suite *PushErrorSuite) TestInvalidIssuer() {
 	})
 
 	// Get private key and sign
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -156,7 +156,7 @@ func (suite *PushErrorSuite) TestInvalidAudience() {
 	})
 
 	// Get private key and sign
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -192,7 +192,7 @@ func (suite *PushErrorSuite) TestAuthenticationFailed() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -239,7 +239,7 @@ func (suite *PushErrorSuite) TestAccessDenied() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -257,7 +257,7 @@ func (suite *PushErrorSuite) TestAccessDenied() {
 		RouteMode: model.RouteModeImport,
 	}
 
-	stream2, _ := suite.instance.provider.CreateStream(streamConfig2, authUtil.ConvertProject(suite.instance.projectId))
+	stream2, _ := suite.instance.CreateStream(streamConfig2, authUtil.ConvertProject(suite.instance.projectId))
 
 	// Try to use stream2's auth token to access stream1's endpoint
 	req, _ := http.NewRequest(http.MethodPost, suite.stream.Delivery.PushReceiveMethod.EndpointUrl, strings.NewReader(tokenString))
@@ -290,7 +290,7 @@ func (suite *PushErrorSuite) TestInvalidContentType() {
 		"reason": "test",
 	})
 
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -326,7 +326,7 @@ func (suite *PushErrorSuite) TestDuplicateSET() {
 		"reason": "duplicate test",
 	})
 
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 
@@ -349,7 +349,7 @@ func (suite *PushErrorSuite) TestDuplicateSET() {
 	assert.Equal(t, http.StatusAccepted, resp.StatusCode, "Duplicate delivery should also return 202 Accepted (idempotent)")
 
 	// Verify only one event stored
-	event := suite.instance.provider.GetEventRecord(set.ID)
+	event := suite.instance.GetEventRecord(set.ID)
 	assert.NotNil(t, event, "Event should be stored")
 }
 
@@ -369,7 +369,7 @@ func (suite *PushErrorSuite) TestSuccessResponseFormat() {
 		"reason": "success test",
 	})
 
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, err := set.JWS(jwt.SigningMethodRS256, privKey)
 	assert.NoError(t, err)
 

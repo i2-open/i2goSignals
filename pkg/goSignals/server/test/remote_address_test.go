@@ -99,7 +99,7 @@ func (suite *RemoteAddressSuite) sendValidPush(stream model.StreamConfiguration,
 	}
 	set := goSet.CreateSet(subject, stream.Iss, stream.Aud)
 	set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
-	privKey, _ := suite.instance.provider.GetPrivateKey("DEFAULT")
+	privKey, _ := suite.instance.GetPrivateKey("DEFAULT")
 	tokenString, _ := set.JWS(jwt.SigningMethodRS256, privKey)
 
 	endpoint := suite.instance.GetPushUrl(stream)
@@ -120,7 +120,7 @@ func (suite *RemoteAddressSuite) TestInboundPushPopulatesRemoteAddress() {
 	resp := suite.sendValidPush(suite.pushStream, nil)
 	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
 
-	state, err := suite.instance.provider.GetStreamState(suite.pushStream.Id)
+	state, err := suite.instance.GetStreamState(suite.pushStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state.RemoteAddress, "RemoteAddress should be set after successful push")
 	assert.NotEmpty(t, state.RemoteAddress.IP, "RemoteAddress.IP should be non-empty")
@@ -137,7 +137,7 @@ func (suite *RemoteAddressSuite) TestInboundPushXForwardedFor() {
 	})
 	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
 
-	state, err := suite.instance.provider.GetStreamState(suite.pushStream.Id)
+	state, err := suite.instance.GetStreamState(suite.pushStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state.RemoteAddress)
 	assert.Equal(t, "203.0.113.1, 198.51.100.2", state.RemoteAddress.Forwarded)
@@ -149,14 +149,14 @@ func (suite *RemoteAddressSuite) TestInboundPushSamePeerNoChange() {
 
 	suite.sendValidPush(suite.pushStream, nil)
 
-	state1, err := suite.instance.provider.GetStreamState(suite.pushStream.Id)
+	state1, err := suite.instance.GetStreamState(suite.pushStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state1.RemoteAddress)
 	firstIP := state1.RemoteAddress.IP
 
 	suite.sendValidPush(suite.pushStream, nil)
 
-	state2, err := suite.instance.provider.GetStreamState(suite.pushStream.Id)
+	state2, err := suite.instance.GetStreamState(suite.pushStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state2.RemoteAddress)
 	assert.Equal(t, firstIP, state2.RemoteAddress.IP, "RemoteAddress should not change for the same peer")
@@ -177,7 +177,7 @@ func (suite *RemoteAddressSuite) TestInboundPollPopulatesRemoteAddress() {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	state, err := suite.instance.provider.GetStreamState(suite.pollStream.Id)
+	state, err := suite.instance.GetStreamState(suite.pollStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state.RemoteAddress, "RemoteAddress should be set after successful poll")
 	assert.NotEmpty(t, state.RemoteAddress.IP)
@@ -207,10 +207,10 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 	}
 
 	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
-	created, err := suite.instance.provider.CreateStream(streamConfig, &atx)
+	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 
-	state, err := suite.instance.provider.GetStreamState(created.Id)
+	state, err := suite.instance.GetStreamState(created.Id)
 	require.NoError(t, err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -226,11 +226,11 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 	require.NoError(t, err)
 
 	assert.Eventually(t, func() bool {
-		st, e := suite.instance.provider.GetStreamState(created.Id)
+		st, e := suite.instance.GetStreamState(created.Id)
 		return e == nil && st != nil && st.RemoteAddress != nil && st.RemoteAddress.IP != ""
 	}, 3*time.Second, 100*time.Millisecond, "RemoteAddress should be set after outbound push")
 
-	finalState, err := suite.instance.provider.GetStreamState(created.Id)
+	finalState, err := suite.instance.GetStreamState(created.Id)
 	require.NoError(t, err)
 	require.NotNil(t, finalState.RemoteAddress)
 	assert.Contains(t, finalState.RemoteAddress.IP, "127.0.0.1", "Should reflect mock server loopback address")
@@ -244,7 +244,7 @@ func (suite *RemoteAddressSuite) TestListStreamStatesReturnsRemoteAddress() {
 	resp := suite.sendValidPush(suite.pushStream, nil)
 	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
 
-	state, err := suite.instance.provider.GetStreamState(suite.pushStream.Id)
+	state, err := suite.instance.GetStreamState(suite.pushStream.Id)
 	require.NoError(t, err)
 	require.NotNil(t, state.RemoteAddress, "precondition: provider read should have RemoteAddress")
 
@@ -301,20 +301,20 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 	}
 
 	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
-	created, err := suite.instance.provider.CreateStream(streamConfig, &atx)
+	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 
-	streamState, err := suite.instance.provider.GetStreamState(created.Id)
+	streamState, err := suite.instance.GetStreamState(created.Id)
 	require.NoError(t, err)
 	ps := suite.instance.app.HandleReceiver(streamState)
 	require.NotNil(t, ps)
 
 	assert.Eventually(t, func() bool {
-		st, e := suite.instance.provider.GetStreamState(created.Id)
+		st, e := suite.instance.GetStreamState(created.Id)
 		return e == nil && st != nil && st.RemoteAddress != nil && st.RemoteAddress.IP != ""
 	}, 3*time.Second, 100*time.Millisecond, "RemoteAddress should be set after outbound poll")
 
-	finalState, err := suite.instance.provider.GetStreamState(created.Id)
+	finalState, err := suite.instance.GetStreamState(created.Id)
 	require.NoError(t, err)
 	require.NotNil(t, finalState.RemoteAddress)
 	assert.Contains(t, finalState.RemoteAddress.IP, "127.0.0.1", "Should reflect mock server loopback address")

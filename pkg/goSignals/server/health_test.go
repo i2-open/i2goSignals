@@ -10,10 +10,10 @@ import (
 )
 
 func TestHealthEndpointMemoryProvider(t *testing.T) {
-	provider, err := dbProviders.OpenProvider("memorydb:", "test_health_signals")
+	persistence, err := dbProviders.OpenPersistence("memorydb:", "test_health_signals")
 	require.NoError(t, err)
 
-	sa := NewApplication(provider, "")
+	sa := NewApplication(persistence, "")
 	defer sa.Shutdown()
 
 	ts := httptest.NewServer(sa.Handler)

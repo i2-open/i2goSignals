@@ -31,11 +31,11 @@ func TestOperationalEventScopedToTargetStream(t *testing.T) {
 	assert.True(t, rec.Operational, "event must be persisted with Operational=true")
 
 	// Stream A pending list contains the verify event
-	jtisA, _ := instance.provider.GetEventIds(streamA.Id, model.PollParameters{MaxEvents: 10})
+	jtisA, _ := instance.GetEventIds(streamA.Id, model.PollParameters{MaxEvents: 10})
 	assert.Contains(t, jtisA, rec.Jti, "stream A should receive the operational event")
 
 	// Stream B (with overlapping iss/aud) must NOT receive it
-	jtisB, _ := instance.provider.GetEventIds(streamB.Id, model.PollParameters{MaxEvents: 10})
+	jtisB, _ := instance.GetEventIds(streamB.Id, model.PollParameters{MaxEvents: 10})
 	assert.NotContains(t, jtisB, rec.Jti, "stream B must not receive an operational event scoped to stream A")
 }
 
@@ -80,13 +80,13 @@ func TestResetEventStreamExcludesOperationalEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	// Drain pending so the replay starts from an empty pending list
-	require.NoError(t, instance.provider.ClearPending(stream.Id))
+	require.NoError(t, instance.ClearPending(stream.Id))
 
 	// Run the same replay filter the stream-management API installs (operational excluded).
-	streamState, err := instance.provider.GetStreamState(stream.Id)
+	streamState, err := instance.GetStreamState(stream.Id)
 	require.NoError(t, err)
 	resetDate := time.Now().Add(-1 * time.Hour)
-	err = instance.provider.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.AgEventRecord) bool {
+	err = instance.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.AgEventRecord) bool {
 		if rec.Operational {
 			return false
 		}
@@ -94,7 +94,7 @@ func TestResetEventStreamExcludesOperationalEvents(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	jtis, _ := instance.provider.GetEventIds(stream.Id, model.PollParameters{MaxEvents: 10})
+	jtis, _ := instance.GetEventIds(stream.Id, model.PollParameters{MaxEvents: 10})
 	assert.NotContains(t, jtis, opRec.Jti, "operational event must be excluded from ResetDate replay")
 }
 
@@ -111,7 +111,7 @@ func mustCreatePollStream(t *testing.T, instance *ssfInstance, iss string, aud [
 			},
 		},
 	}
-	created, err := instance.provider.CreateStream(cfg, authUtil.ConvertProject(instance.projectId))
+	created, err := instance.CreateStream(cfg, authUtil.ConvertProject(instance.projectId))
 	require.NoError(t, err)
 	return created
 }

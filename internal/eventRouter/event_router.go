@@ -23,7 +23,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
-	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -73,7 +72,6 @@ type router struct {
 	issuerKids          map[string]string
 	pollBuffers         map[string]*buffer.EventPollBuffer
 	pushBuffers         map[string]*buffer.EventPushBuffer
-	provider            dbProviders.DbProviderInterface
 	coordinator         cluster.ClusterCoordinator
 	streamService       *services.StreamService
 	keyService          *services.KeyService
@@ -132,39 +130,23 @@ func (r *router) GetPollStreamCnt() float64 {
 	return float64(len(r.pollStreams))
 }
 
-// coordinatorSource is the accessor present on both *MongoProvider and
-// *MemoryProvider; used by NewRouter to derive the cluster seam without
-// importing the concrete provider packages.
-type coordinatorSource interface {
-	Coordinator() cluster.ClusterCoordinator
+// RouterDeps is the dependency bundle the event router needs from the
+// composition root. Callers wire it directly from a *dbProviders.Persistence
+// (or build one ad hoc in tests).
+type RouterDeps struct {
+	StreamService *services.StreamService
+	KeyService    *services.KeyService
+	EventService  *services.EventService
+	Coordinator   cluster.ClusterCoordinator
 }
 
-type serviceSource interface {
-	GetStreamService() *services.StreamService
-	GetKeyService() *services.KeyService
-	GetEventService() *services.EventService
-}
-
-func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRouter {
+func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
-	var coord cluster.ClusterCoordinator
-	if cs, ok := provider.(coordinatorSource); ok {
-		coord = cs.Coordinator()
-	}
-	var streamSvc *services.StreamService
-	var keySvc *services.KeyService
-	var eventSvc *services.EventService
-	if svcs, ok := provider.(serviceSource); ok {
-		streamSvc = svcs.GetStreamService()
-		keySvc = svcs.GetKeyService()
-		eventSvc = svcs.GetEventService()
-	}
 	router := &router{
-		provider:            provider,
-		coordinator:         coord,
-		streamService:       streamSvc,
-		keyService:          keySvc,
-		eventService:        eventSvc,
+		coordinator:         deps.Coordinator,
+		streamService:       deps.StreamService,
+		keyService:          deps.KeyService,
+		eventService:        deps.EventService,
 		nodeId:              nodeId,
 		pushStreams:         map[string]model.StreamStateRecord{},
 		pollStreams:         map[string]model.StreamStateRecord{},
@@ -173,7 +155,7 @@ func NewRouter(provider dbProviders.DbProviderInterface, nodeId string) EventRou
 		issuerKeys:          map[string]*rsa.PrivateKey{},
 		issuerKids:          map[string]string{},
 		enabled:             false,
-		ctx:                 context.WithValue(ctx, "provider", provider),
+		ctx:                 ctx,
 		cancel:              cancel,
 		httpClient:          &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),

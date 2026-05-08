@@ -93,10 +93,10 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 				},
 			}
 
-			createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+			createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 			assert.NoError(t, err)
 
-			streamState, _ := instance.provider.GetStreamState(createdConfig.Id)
+			streamState, _ := instance.GetStreamState(createdConfig.Id)
 			ps := instance.app.HandleReceiver(streamState)
 			assert.NotNil(t, ps)
 

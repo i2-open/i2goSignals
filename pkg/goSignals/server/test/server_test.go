@@ -2,6 +2,7 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -67,7 +68,7 @@ func TestServer(t *testing.T) {
 	testLog.Println("** Shutting down test servers.. ")
 	for i := 1; i > -1; i-- {
 		instance := serverSuite.servers[i]
-		testLog.Printf("** Shutting down server %s...", instance.provider.Name())
+		testLog.Printf("** Shutting down server %s...", instance.Name())
 		if instance.ts != nil {
 			instance.ts.Close()
 		}
@@ -308,7 +309,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	config, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
+	config, _ := suite.servers[0].CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
 	streamToken := config.Delivery.PollTransmitMethod.AuthorizationHeader
 
 	suite.servers[0].streamToken = streamToken
@@ -365,7 +366,7 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	// Start server 2 and hopefully it polls!
 	suite.setUpPollStreamConnection()
 
-	rcvState, err := suite.servers[1].app.Provider.GetStreamState(suite.servers[1].stream.Id)
+	rcvState, err := suite.servers[1].app.StreamService.GetStreamState(context.Background(), suite.servers[1].stream.Id)
 	assert.NoError(suite.T(), err, "Stream should be defined")
 	assert.Equal(suite.T(), model.StreamStateEnabled, rcvState.Status, "Stream is active")
 
@@ -375,11 +376,11 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	// time.Sleep(2 * time.Second)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.AgEventRecord
-	event = suite.servers[1].provider.GetEventRecord(jti)
+	event = suite.servers[1].GetEventRecord(jti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 500)
 		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].provider.GetEventRecord(jti)
+		event = suite.servers[1].GetEventRecord(jti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -408,10 +409,10 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	ssf2Stream := suite.servers[1].stream.Id
 	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
-	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
+	_ = suite.servers[1].DeleteStream(ssf2Stream)
 
 	// Check that there are no pending events
-	jtis, more := suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
+	jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(), suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 0, "No event jtis returned")
 
@@ -452,7 +453,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	   time.Sleep(time.Millisecond * 500)
 	   // After PUT reset request
 	   require.Eventually(suite.T(), func() bool {
-	       jtis, more := suite.servers[0].app.Provider.GetEventIds(
+	       jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(), 
 	           suite.servers[0].stream.Id,
 	           model.PollParameters{ReturnImmediately: true},
 	       )
@@ -467,14 +468,14 @@ func (suite *ServerSuite) Test6_ResetStream() {
 
 	// Check that there are pending events
 	time.Sleep(time.Millisecond * 150)
-	jtis, more = suite.servers[0].app.Provider.GetEventIds(suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
+	jtis, more = suite.servers[0].app.EventService.GetEventIds(context.Background(), suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
 	assert.Contains(suite.T(), jtis, jtiNew, "The new event should be present")
 
 	ssf1Stream := suite.servers[0].stream.Id
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
-	_ = suite.servers[0].provider.DeleteStream(ssf1Stream)
+	_ = suite.servers[0].DeleteStream(ssf1Stream)
 }
 
 // Test7_PushStreamDelivery sets up a push stream from SSF1 to SSF2 and then send test events
@@ -498,9 +499,9 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		IssuerJWKSUrl:   jwksIssuer.String(),
 		RouteMode:       model.RouteModeImport,
 	}
-	stream, err := suite.servers[1].provider.CreateStream(reg, authUtil.ConvertProject("DEFAULT"))
+	stream, err := suite.servers[1].CreateStream(reg, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
-	state, _ := suite.servers[1].provider.GetStreamState(stream.Id)
+	state, _ := suite.servers[1].GetStreamState(stream.Id)
 	suite.servers[1].app.EventRouter.UpdateStreamState(state)
 
 	streamToken1 := stream.Delivery.PushReceiveMethod.AuthorizationHeader
@@ -524,9 +525,9 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		EventsRequested: stream.EventsDelivered,
 	}
 
-	stream, err = suite.servers[0].provider.CreateStream(regPush, authUtil.ConvertProject("DEFAULT"))
+	stream, err = suite.servers[0].CreateStream(regPush, authUtil.ConvertProject("DEFAULT"))
 	assert.Nil(suite.T(), err, "No errors on stream creation")
-	state, _ = suite.servers[0].provider.GetStreamState(stream.Id)
+	state, _ = suite.servers[0].GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
 
 	suite.servers[0].stream = stream
@@ -540,11 +541,11 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.AgEventRecord
-	event = suite.servers[1].provider.GetEventRecord(jti)
+	event = suite.servers[1].GetEventRecord(jti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 250)
 		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].provider.GetEventRecord(jti)
+		event = suite.servers[1].GetEventRecord(jti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -913,7 +914,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
 
 	// Verify it was saved
-	savedKey, err := suite.servers[0].provider.GetPrivateKey(issuer)
+	savedKey, err := suite.servers[0].GetPrivateKey(issuer)
 	assert.NoError(suite.T(), err)
 	assert.Equal(suite.T(), privateKey.N, savedKey.N)
 
@@ -930,7 +931,7 @@ func (suite *ServerSuite) TestD_LoadKey() {
 	assert.Equal(suite.T(), http.StatusOK, respPub.StatusCode)
 
 	// Verify it was saved as public key
-	issPubJson := suite.servers[0].provider.GetPublicJWKS(issuerPub)
+	issPubJson := suite.servers[0].GetPublicJWKS(issuerPub)
 	assert.NotNil(suite.T(), issPubJson)
 
 	// 3. Test loading PKCS#1 Public Key (DER)
@@ -949,10 +950,10 @@ func (suite *ServerSuite) TestD_LoadKey() {
 func (suite *ServerSuite) resetStreams(ssf2Stream, ssf1Stream string) {
 	suite.servers[1].app.CloseReceiver(ssf2Stream)
 	suite.servers[1].app.EventRouter.RemoveStream(ssf2Stream)
-	_ = suite.servers[1].provider.DeleteStream(ssf2Stream)
+	_ = suite.servers[1].DeleteStream(ssf2Stream)
 
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
-	_ = suite.servers[0].provider.DeleteStream(ssf1Stream)
+	_ = suite.servers[0].DeleteStream(ssf1Stream)
 }
 
 func (suite *ServerSuite) setUpPollStreamConnection() {
@@ -968,8 +969,8 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
 
-	stream, _ := suite.servers[0].provider.CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
-	state, _ := suite.servers[0].provider.GetStreamState(stream.Id)
+	stream, _ := suite.servers[0].CreateStream(transConfig, authUtil.ConvertProject(suite.servers[0].projectId))
+	state, _ := suite.servers[0].GetStreamState(stream.Id)
 	suite.servers[0].app.EventRouter.UpdateStreamState(state)
 	streamToken := stream.Delivery.PollTransmitMethod.AuthorizationHeader
 
@@ -1095,7 +1096,7 @@ func (suite *ServerSuite) TestE_StatusUpdateReflection() {
 	}
 	method := &model.PollTransmitMethod{Method: model.DeliveryPoll}
 	transConfig.Delivery = &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: method}
-	config, err := server.provider.CreateStream(transConfig, authUtil.ConvertProject(server.projectId))
+	config, err := server.CreateStream(transConfig, authUtil.ConvertProject(server.projectId))
 	assert.NoError(suite.T(), err)
 	streamId := config.Id
 
