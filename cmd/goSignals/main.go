@@ -258,12 +258,11 @@ func main() {
 			oneCommand = true
 		} else {
 			for i, arg := range initialArgs {
-				prefix := arg[0:8]
-				if strings.EqualFold("--config", prefix) {
-					filepath := arg[strings.Index(arg, "=")+1:]
-					td.cli.Globals.Config = filepath
-					initialArgs = append(initialArgs[0:i], initialArgs[i+1:]...)
+				if len(arg) < 9 || !strings.EqualFold("--config=", arg[0:9]) {
+					continue
 				}
+				td.cli.Globals.Config = arg[9:]
+				initialArgs = append(initialArgs[0:i], initialArgs[i+1:]...)
 			}
 		}
 

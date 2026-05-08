@@ -2,7 +2,7 @@ echo "\nGo Signals builder utility\n"
 echo "\nThis utility is meant for building docker images only.\nUse the Make utility for normal development.\n"
 
 BIN_DIR=bin
-tag="v0.9.3"
+tag="0.11.0-beta.1"
 test="N"
 doPush="N"
 aIn="amd64,arm64"
@@ -64,7 +64,7 @@ fi
 
 echo "* building docker container image ($tag)..."
 echo "  - downloading latest chainguard platform image"
-docker pull docker.io/chainguard/static:latest
+docker pull cgr.dev/chainguard/bash:latest
 
 mkdir -p ${BIN_DIR}
 
