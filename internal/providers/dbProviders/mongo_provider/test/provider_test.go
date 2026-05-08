@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"log"
@@ -47,7 +48,7 @@ func (s *MongoProviderSuite) SetupSuite() {
 		}
 
 		s.provider = provider
-		s.auth = provider.GetAuthIssuer()
+		s.auth = provider.GetKeyService().GetAuthIssuer()
 
 		s.InitStream([]string{"*"})
 	}
@@ -89,7 +90,9 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	if len(events) > 0 {
 		req.EventsRequested = events
 	}
-	s.stream, _ = s.provider.CreateStream(req, authUtil.ConvertProject(s.project))
+	authCtx := authUtil.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
 }
 
 func TestMongoProvider(t *testing.T) {
@@ -109,7 +112,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 		AllowedScopes: []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
 	}
 
-	resp := s.provider.RegisterClient(client, s.project)
+	resp := s.provider.GetClientService().RegisterClient(context.Background(), client, s.project)
 	s.NotNil(resp, "Client registration response return check")
 	s.mgmtToken = resp.Token
 	tkn, err := s.auth.ParseAuthToken(s.mgmtToken)
@@ -124,18 +127,18 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 func (s *MongoProviderSuite) TestB_StreamConfig() {
 	s.Equal(mongo_provider.CDbName, s.provider.Name(), "Confirm name is set")
 
-	configs := s.provider.ListStreams()
+	configs := s.provider.GetStreamService().ListStreams(context.Background())
 	s.Equal(1, len(configs), "should be one registered")
 
 	s.Equal(s.stream.Id, configs[0].Id, "should be the same s.stream id")
 	s.Equal(26, len(configs[0].EventsDelivered), "Should be 26 events configured for delivery")
-	events, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{
+	events, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{
 		MaxEvents: 5, ReturnImmediately: true,
 	})
 	s.Equal(0, len(events), "should be no events")
 
 	id := s.stream.Id
-	theConfig, err := s.provider.GetStream(id)
+	theConfig, err := s.provider.GetStreamService().GetStream(context.Background(), id)
 	s.NoError(err, "Should be able to locate config id "+id)
 	s.Equal(id, theConfig.Id, "Retrieved config id matches")
 }
@@ -149,20 +152,20 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 
 	// Check Events by s.stream id
-	eventIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	eventIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(1, len(eventIds), "should be 1 event")
 
 	if len(eventIds) == 0 {
 		return
 	}
 	// Check event collection (all s.streams)
-	events := s.provider.GetEvents(eventIds)
+	events := s.provider.GetEventService().GetEvents(context.Background(), eventIds)
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	_ = s.provider.AckEvent(eventIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id, 0)
 
-	nextIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(0, len(nextIds), "Should be no pending events")
 
 	s.generateEvent()
@@ -172,13 +175,13 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 	s.generateEvent()
 
-	nextIds, _ = s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(5, len(nextIds), "Should be 5 max events")
 	s.ackEvents(nextIds)
 
-	finalIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	finalIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
 	s.Equal(1, len(finalIds), "should be 1 event")
-	_ = s.provider.AckEvent(finalIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id, 0)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -192,7 +195,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 
 	var eventIds []string
 	s.Eventually(func() bool {
-		eventIds, _ = s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true})
+		eventIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true})
 		return len(eventIds) > 0
 	}, 15*time.Second, 500*time.Millisecond)
 
@@ -205,7 +208,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 	callCount := 0
 	for len(events) < 10 && callCount < 30 {
 		log.Println("\nPolling for next events...")
-		nextIds, _ := s.provider.GetEventIds(s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
+		nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
 		if len(nextIds) == 0 {
 			time.Sleep(1 * time.Second)
 			continue
@@ -223,7 +226,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 		s.FailNow("No events collected")
 	}
 
-	sets := s.provider.GetEvents(events)
+	sets := s.provider.GetEventService().GetEvents(context.Background(), events)
 
 	s.Equal(len(events), len(sets), "Sets return matches GetEvents")
 	tokenRef := sets[0]
@@ -234,7 +237,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			_ = s.provider.AckEvent(id, s.stream.Id, 0)
+			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id, 0)
 		}
 	}
 }
@@ -271,29 +274,29 @@ func (s *MongoProviderSuite) generateEvent() {
 	}
 	test1.AddEventPayload("https://schemas.openid.net/secevent/sse/event-type/verification", payloadClaims)
 
-	_, _ = s.provider.AddEvent(&test1, "", "")
+	_, _ = s.provider.GetEventService().AddEvent(context.Background(), &test1, "", "")
 
-	state, _ := s.provider.GetStreamState(s.stream.Id)
+	state, _ := s.provider.GetStreamService().GetStreamState(context.Background(), s.stream.Id)
 
-	_ = s.provider.AddEventToStream(test1.ID, state.Id.Hex())
+	_ = s.provider.GetEventService().AddEventToStream(context.Background(), test1.ID, state.Id.Hex())
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	issuer := "i2test.example.org"
-	key, err := s.provider.CreateKeyPair(issuer, "sig", "")
+	key, err := s.provider.GetKeyService().CreateKeyPair(context.Background(), issuer, "sig", "")
 	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
-	keyRetrieved, err := s.provider.GetPrivateKey(issuer)
+	keyRetrieved, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuer)
 	s.NoError(err, "Should be no error")
 	s.NotNil(keyRetrieved)
 	s.True(key.Equal(keyRetrieved), "Should be same key")
 
-	keyFail, err := s.provider.GetPrivateKey("should.fail")
+	keyFail, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), "should.fail")
 	s.Error(err, "No key found for: should.fail")
 	s.Nil(keyFail, "Should be no key returned")
 
-	issPubJson := s.provider.GetPublicJWKS(issuer)
+	issPubJson := s.provider.GetKeyService().GetPublicJWKS(context.Background(), issuer)
 	s.NotNil(issPubJson, "Check public key returned")
 	jwtBytes, err := issPubJson.MarshalJSON()
 
@@ -306,7 +309,7 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 		s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
 	}
 
-	keys := s.provider.ListKeyNames()
+	keys, _ := s.provider.GetKeyService().ListKeyNames(context.Background())
 	s.Len(keys, 2, "Should be 2 keys")
 	s.Contains(keys, issuer, "Confirm issuer i2test.example.org present")
 	s.Contains(keys, "DEFAULT", "Confirm issuer DEFAULT present")
@@ -318,20 +321,20 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 
 	// Test adding private key
-	err := s.provider.AddKey(issuer, "sig", "key-1", privateKey, nil, "")
+	err := s.provider.GetKeyService().AddKey(context.Background(), issuer, "sig", "key-1", privateKey, nil, "")
 	s.NoError(err)
 
-	keyRetrieved, err := s.provider.GetPrivateKey(issuer)
+	keyRetrieved, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuer)
 	s.NoError(err)
 	s.NotNil(keyRetrieved)
 	s.True(privateKey.Equal(keyRetrieved))
 
 	// Test adding only public key
 	issuerPub := "addkey-pub.example.org"
-	err = s.provider.AddKey(issuerPub, "sig", "key-pub", nil, &privateKey.PublicKey, "")
+	err = s.provider.GetKeyService().AddKey(context.Background(), issuerPub, "sig", "key-pub", nil, &privateKey.PublicKey, "")
 	s.NoError(err)
 
-	issPubJson := s.provider.GetPublicJWKS(issuerPub)
+	issPubJson := s.provider.GetKeyService().GetPublicJWKS(context.Background(), issuerPub)
 	s.NotNil(issPubJson)
 	if issPubJson != nil {
 		issPub, err := keyfunc.NewJSON(*issPubJson)
@@ -340,22 +343,22 @@ func (s *MongoProviderSuite) TestF2_AddIssuerKey() {
 	}
 
 	// Verify private key is NOT there
-	keyFail, err := s.provider.GetPrivateKey(issuerPub)
+	keyFail, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuerPub)
 	s.Error(err)
 	s.Nil(keyFail)
 }
 
 func (s *MongoProviderSuite) TestG_ReceiverKeys() {
-	err := s.provider.StoreExternalKey("example.org", nil, s.stream.Id, "sig", "https://example.org/jwksKey")
+	err := s.provider.GetKeyService().StoreExternalKey(context.Background(), "example.org", nil, s.stream.Id, "sig", "https://example.org/jwksKey")
 	s.NoError(err)
 
-	jwkRecord := s.provider.GetKeyByStreamID(s.stream.Id)
+	jwkRecord, _ := s.provider.GetKeyService().GetKeyByStreamID(context.Background(), s.stream.Id)
 
 	s.NotNil(jwkRecord)
 
 	s.Equal("example.org", jwkRecord.KeyName)
 
-	res := s.provider.GetKeyByStreamID("dummy")
+	res, _ := s.provider.GetKeyService().GetKeyByStreamID(context.Background(), "dummy")
 	s.Nil(res)
 }
 
@@ -372,10 +375,10 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 		Format:          orig.Format,
 	}
 
-	_, err := s.provider.UpdateStream("1234", s.project, config)
+	_, err := s.provider.GetStreamService().UpdateStream(context.Background(), "1234", s.project, config)
 	s.Error(err, "not found")
 
-	res, err := s.provider.UpdateStream(sid, s.project, config)
+	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, config)
 	s.NoError(err, "Update should have no error")
 	s.Equal(orig.Aud, res.Aud, "Audience should not change")
 	s.Equal(orig.Iss, res.Iss, "Issuer should not change")
@@ -383,11 +386,11 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 	s.Equal(0, len(res.EventsDelivered), "Should be no delivered events")
 
 	res.EventsRequested = res.EventsSupported // request all events
-	res2, err := s.provider.UpdateStream(sid, s.project, *res)
+	res2, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, *res)
 	s.NoError(err, "2nd Update should have no error")
 	s.Equal(res.EventsSupported, res2.EventsDelivered, "All events enabled")
 
-	err = s.provider.DeleteStream(s.stream.Id)
+	err = s.provider.GetStreamService().DeleteStream(context.Background(), s.stream.Id)
 	s.NoError(err, "Delete should be successful")
 
 	supportedEvents := model.GetSupportedEvents()
@@ -402,9 +405,9 @@ func (s *MongoProviderSuite) TestI_UpdateRemoteAddress() {
 		Forwarded: "203.0.113.42",
 	}
 
-	s.provider.UpdateRemoteAddress(s.stream.Id, addr)
+	s.provider.GetStreamService().UpdateRemoteAddress(context.Background(), s.stream.Id, addr)
 
-	state, err := s.provider.GetStreamState(s.stream.Id)
+	state, err := s.provider.GetStreamService().GetStreamState(context.Background(), s.stream.Id)
 	s.NoError(err, "GetStreamState should succeed")
 	s.Require().NotNil(state.RemoteAddress, "RemoteAddress should be populated")
 	s.Equal("https", state.RemoteAddress.Protocol)

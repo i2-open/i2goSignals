@@ -1,6 +1,7 @@
 package memory_provider
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,15 +58,15 @@ func TestMemoryProviderBasicOperations(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Test ListStreams (should be empty initially)
-	streams := provider.ListStreams()
+	streams := provider.streamService.ListStreams(context.Background())
 	assert.Empty(t, streams)
 
 	// Test GetAuthIssuer
-	authIssuer := provider.GetAuthIssuer()
+	authIssuer := provider.keyService.GetAuthIssuer()
 	assert.NotNil(t, authIssuer)
 	assert.NotNil(t, authIssuer.PrivateKey)
 
 	// Test GetPublicJWKS
-	jwks := provider.GetPublicJWKS("DEFAULT")
+	jwks := provider.keyService.GetPublicJWKS(context.Background(), "DEFAULT")
 	assert.NotNil(t, jwks)
 }
