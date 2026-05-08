@@ -81,9 +81,9 @@ func TestClientPushStream_Verification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	provider, _ := dbProviders.OpenProvider("", "test_verification")
+	persistence, _ := dbProviders.OpenPersistence("", "test_verification")
 	pcs := &ReceiverPushStream{
-		sa:          newTestApplication(provider),
+		sa:          newTestApplication(persistence),
 		stream:      streamState,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -156,9 +156,9 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 	// Manually set statusUrl to avoid discovery
 	statusUrl := mockTx.URL + "/status"
 
-	provider, _ := dbProviders.OpenProvider("", "test_fallback")
+	persistence, _ := dbProviders.OpenPersistence("", "test_fallback")
 	pcs := &ReceiverPushStream{
-		sa:        newTestApplication(provider),
+		sa:        newTestApplication(persistence),
 		stream:    &model.StreamStateRecord{StreamConfiguration: streamConfig},
 		statusUrl: statusUrl,
 		active:    true,
@@ -173,15 +173,17 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 }
 
 func TestReceiverPushStream_Recovery(t *testing.T) {
-	provider, _ := dbProviders.OpenProvider("", "test_recovery")
+	persistence, _ := dbProviders.OpenPersistence("", "test_recovery")
 	sid := "recovery-stream"
 
 	streamConfig := model.StreamConfiguration{
 		Id: sid,
 	}
 
-	// Create the stream in provider so UpdateStreamStatus doesn't fail
-	created, _ := provider.CreateStream(streamConfig, authUtil.ConvertProject("test-project"))
+	// Create the stream via the StreamService so UpdateStreamStatus doesn't fail
+	atx := authUtil.ConvertProject("test-project")
+	createCtx := context.WithValue(context.Background(), authUtil.AuthContextKey, atx)
+	created, _ := persistence.StreamService.CreateStream(createCtx, streamConfig, atx.ProjectId, nil)
 	sid = created.Id
 
 	streamState := &model.StreamStateRecord{
@@ -190,13 +192,13 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 		ErrorMsg:            "Initial error",
 	}
 
-	provider.UpdateStreamStatus(sid, model.StreamStatePause, "Initial error")
+	persistence.StreamService.UpdateStreamStatus(context.Background(), sid, model.StreamStatePause, "Initial error")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	rps := &ReceiverPushStream{
-		sa:          newTestApplication(provider),
+		sa:          newTestApplication(persistence),
 		stream:      streamState,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -216,13 +218,13 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 	assert.Equal(t, model.StreamStateEnabled, rps.stream.Status)
 	assert.Empty(t, rps.stream.ErrorMsg)
 
-	// Check provider
-	st, _ := provider.GetStreamState(sid)
+	// Check persisted state
+	st, _ := persistence.StreamService.GetStreamState(context.Background(), sid)
 	assert.Equal(t, model.StreamStateEnabled, st.Status)
 	assert.Empty(t, st.ErrorMsg)
 
 	// 2. Test recovery via event
-	provider.UpdateStreamStatus(sid, model.StreamStatePause, "Another error")
+	persistence.StreamService.UpdateStreamStatus(context.Background(), sid, model.StreamStatePause, "Another error")
 	rps.mu.Lock()
 	rps.stream.Status = model.StreamStatePause
 	rps.stream.ErrorMsg = "Another error"
@@ -239,8 +241,8 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 		return rps.stream.Status == model.StreamStateEnabled && rps.stream.ErrorMsg == ""
 	}, 2*time.Second, 100*time.Millisecond)
 
-	// Check provider
-	st, _ = provider.GetStreamState(sid)
+	// Check persisted state
+	st, _ = persistence.StreamService.GetStreamState(context.Background(), sid)
 	assert.Equal(t, model.StreamStateEnabled, st.Status)
 	assert.Empty(t, st.ErrorMsg)
 }

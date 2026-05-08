@@ -13,26 +13,28 @@ import (
 
 type SsfServerTestSuite struct {
 	suite.Suite
-	app      *SsfApplication
-	server   *httptest.Server
-	provider dbProviders.DbProviderInterface
+	app         *SsfApplication
+	server      *httptest.Server
+	persistence *dbProviders.Persistence
 }
 
 func (suite *SsfServerTestSuite) SetupSuite() {
 	// Use a memory database
 	suite.T().Setenv("MEM_DIRECTORY", suite.T().TempDir())
 	dbUrl := "memorydb:"
-	provider, err := dbProviders.OpenProvider(dbUrl, "ssf_test")
+	persistence, err := dbProviders.OpenPersistence(dbUrl, "ssf_test")
 	suite.Require().NoError(err)
-	suite.provider = provider
+	suite.persistence = persistence
 
-	suite.app = NewApplication(provider, "http://localhost:8889/")
+	suite.app = NewApplication(persistence, "http://localhost:8889/")
 	suite.server = httptest.NewServer(suite.app.Handler)
 }
 
 func (suite *SsfServerTestSuite) TearDownSuite() {
 	suite.server.Close()
-	_ = suite.provider.Close()
+	if suite.persistence != nil && suite.persistence.Storage != nil {
+		_ = suite.persistence.Storage.Close()
+	}
 }
 
 func (suite *SsfServerTestSuite) TestWellKnownSSFConfiguration() {

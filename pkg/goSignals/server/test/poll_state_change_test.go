@@ -38,9 +38,9 @@ func (suite *PollStateChangeSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
-	state, err := instance.provider.GetStreamState(stream.Id)
+	state, err := instance.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)
 	instance.app.EventRouter.UpdateStreamState(state)
 
@@ -62,7 +62,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 	t := suite.T()
 
 	// Ensure stream is enabled
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(t, err)
 	state.Status = model.StreamStateEnabled
 	suite.instance.app.EventRouter.UpdateStreamState(state)
@@ -100,7 +100,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnPause() {
 	time.Sleep(1 * time.Second)
 
 	// Now update the stream status to paused
-	state, err = suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err = suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(t, err)
 	state.Status = model.StreamStatePause
 	suite.instance.app.EventRouter.UpdateStreamState(state)
@@ -129,7 +129,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnDisable() {
 	t := suite.T()
 
 	// Re-enable the stream first
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(t, err)
 	state.Status = model.StreamStateEnabled
 	suite.instance.app.EventRouter.UpdateStreamState(state)
@@ -163,7 +163,7 @@ func (suite *PollStateChangeSuite) TestPollTerminatesOnDisable() {
 	time.Sleep(1 * time.Second)
 
 	// Now update the stream status to disabled
-	state, err = suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err = suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(t, err)
 	state.Status = model.StreamStateDisable
 	suite.instance.app.EventRouter.UpdateStreamState(state)

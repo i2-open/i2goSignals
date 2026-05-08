@@ -53,7 +53,7 @@ func TestPushStatusFetcher_ReturnsStreamStatus(t *testing.T) {
     }))
     defer server.Close()
 
-    r, _ := newTestRouter(t)
+    r := newTestRouter(t).router
     stream := &model.StreamStateRecord{}
     stream.StreamConfiguration = model.StreamConfiguration{
         Id: "abc123",
@@ -80,7 +80,7 @@ func TestPushStatusFetcher_NonOKReturnsError(t *testing.T) {
     }))
     defer server.Close()
 
-    r, _ := newTestRouter(t)
+    r := newTestRouter(t).router
     stream := &model.StreamStateRecord{}
     stream.StreamConfiguration = model.StreamConfiguration{
         Id: "abc123",
@@ -97,7 +97,7 @@ func TestPushStatusFetcher_NonOKReturnsError(t *testing.T) {
 }
 
 func TestPushStatusFetcher_NilDelivery(t *testing.T) {
-    r, _ := newTestRouter(t)
+    r := newTestRouter(t).router
     stream := &model.StreamStateRecord{}
     stream.StreamConfiguration = model.StreamConfiguration{Id: "abc123"}
     _, err := r.pushStatusFetcher()(context.Background(), stream)

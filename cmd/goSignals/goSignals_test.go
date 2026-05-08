@@ -41,7 +41,7 @@ var server2name = "test2server"
 type ssfInstance struct {
 	server          *http.Server
 	client          *http.Client
-	provider        dbProviders.DbProviderInterface
+	persistence     *dbProviders.Persistence
 	stream          model.StreamConfiguration
 	app             *ssef.SignalsApplication
 	streamToken     string
@@ -49,6 +49,13 @@ type ssfInstance struct {
 	iatToken        string
 	projectId       string
 	startTime       *time.Time
+}
+
+func (i *ssfInstance) Name() string {
+	if i.persistence != nil && i.persistence.Storage != nil {
+		return i.persistence.Storage.Name()
+	}
+	return ""
 }
 
 type toolSuite struct {
@@ -95,7 +102,7 @@ func (suite *toolSuite) initialize(t *testing.T) error {
 func (suite *toolSuite) cleanup() {
 
 	for _, instance := range suite.servers {
-		testLog.Printf("** Shutting down server %s...", instance.provider.Name())
+		testLog.Printf("** Shutting down server %s...", instance.Name())
 		instance.app.Shutdown()
 		time.Sleep(time.Second)
 	}
@@ -118,22 +125,25 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 		t.Setenv("MEM_DIRECTORY", t.TempDir())
 	}
 
-	mongo, err := dbProviders.OpenProvider(dbUrl, dbName)
+	persistence, err := dbProviders.OpenPersistence(dbUrl, dbName)
 	if err != nil {
 		t.Log("Mongo client error: " + err.Error())
 		return nil, err
 	}
 
-	_ = mongo.ResetDb(true)
+	if persistence.Storage != nil {
+		_ = persistence.Storage.ResetDb(true)
+		persistence.Refresh()
+	}
 
 	listener, _ := net.Listen("tcp", "localhost:0")
 
-	signalsApplication := ssef.StartServer(listener.Addr().String(), mongo, "")
+	signalsApplication := ssef.StartServer(listener.Addr().String(), persistence, "")
 	instance.app = signalsApplication
 	instance.server = signalsApplication.Server
 	instance.client = &http.Client{}
 	tlsSupport.CheckCaInstalled(instance.client)
-	instance.provider = mongo
+	instance.persistence = persistence
 	nowTime := time.Now()
 	instance.startTime = &nowTime
 
@@ -222,12 +232,12 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 	testLog.Println("Test 0 - Issue Stream Mgmt Tokens")
 	var err error
 	for _, instance := range suite.servers {
-		testLog.Printf("  Getting registration IAT for %s...", instance.provider.Name())
-		instance.iatToken, err = instance.provider.GetAuthIssuer().IssueProjectIat(nil)
+		testLog.Printf("  Getting registration IAT for %s...", instance.Name())
+		instance.iatToken, err = instance.persistence.KeyService.GetAuthIssuer().IssueProjectIat(nil)
 		if err != nil {
 			suite.T().Fatalf("Error creating iat: %s\n", err.Error())
 		}
-		eat, err := instance.provider.GetAuthIssuer().ParseAuthToken(instance.iatToken)
+		eat, err := instance.persistence.KeyService.GetAuthIssuer().ParseAuthToken(instance.iatToken)
 		if err != nil {
 			suite.T().Fatalf("Error parsing iat: %s\n", err.Error())
 		}
@@ -235,9 +245,9 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		project := eat.ProjectId
 		assert.NotEqualf(suite.T(), "", project, "Check project not empty")
 
-		testLog.Printf("  Getting Client admin token for %s...", instance.provider.Name())
+		testLog.Printf("  Getting Client admin token for %s...", instance.Name())
 
-		clientToken, err := instance.provider.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
+		clientToken, err := instance.persistence.KeyService.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
 			Id:            bson.NewObjectID(),
 			ProjectIds:    []string{eat.ProjectId},
 			AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
@@ -247,7 +257,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		instance.streamMgmtToken = clientToken
 
 		testLog.Println("  Checking validation and project ids...")
-		cat, err := instance.provider.GetAuthIssuer().ParseAuthToken(clientToken)
+		cat, err := instance.persistence.KeyService.GetAuthIssuer().ParseAuthToken(clientToken)
 		if err != nil {
 			suite.T().Fatalf("Error parsing client token: %s\n", err.Error())
 		}
@@ -262,7 +272,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 }
 func (suite *toolSuite) Test1_AddServers() {
 	testLog.Println("Test 1 - Add Server Test")
-	serverName := suite.servers[0].provider.Name()
+	serverName := suite.servers[0].Name()
 	cmd := fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com", serverName, suite.servers[0].server.Addr)
 
 	res, err := suite.executeCommand(cmd, false)
@@ -272,7 +282,7 @@ func (suite *toolSuite) Test1_AddServers() {
 	assert.NoError(suite.T(), err, "Add server successful")
 	assert.Equal(suite.T(), serverName, server.Alias, "Found server and matched")
 
-	serverName = suite.servers[1].provider.Name()
+	serverName = suite.servers[1].Name()
 	cmd = fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com", serverName, suite.servers[1].server.Addr)
 	res, err = suite.executeCommand(cmd, false)
 	assert.NoError(suite.T(), err, "Add server successful")
@@ -286,7 +296,7 @@ func (suite *toolSuite) Test1_AddServers() {
 	assert.Contains(suite.T(), resultString, fmt.Sprintf("http://%s/jwks.json", suite.servers[1].server.Addr), "Has jwksuri")
 
 	testLog.Println("  Test issuing IAT and Register Client with it")
-	serverName = suite.servers[0].provider.Name()
+	serverName = suite.servers[0].Name()
 
 	var iatFile = fmt.Sprintf("%s/iat-%s.txt", suite.testDir, server1name)
 	cmd = fmt.Sprintf("create iat %s -o %s", serverName, iatFile)
@@ -341,7 +351,7 @@ func (suite *toolSuite) Test2_CreatePublisherKey() {
 func (suite *toolSuite) Test3_PushStream() {
 	testLog.Println("Test3 Test Push Stream Management.")
 	testLog.Println("  Testing simple Add Push Receiver...")
-	server2Name := suite.servers[1].provider.Name()
+	server2Name := suite.servers[1].Name()
 	server2Addr := suite.servers[1].server.Addr
 	server1Addr := suite.servers[0].server.Addr
 	cmd := fmt.Sprintf("create stream push receive %s --name=scim1Push --mode=FORWARD --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:full,*:prov:delete --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server2Name, server1Addr)
@@ -397,7 +407,7 @@ func (suite *toolSuite) Test3_PushStream() {
 
 	testLog.Println("  Testing create stream publisher connection to existing scim1Push stream...")
 
-	server1Name := suite.servers[0].provider.Name()
+	server1Name := suite.servers[0].Name()
 	cmd = fmt.Sprintf("create stream push connection %s scim1Push --mode=F", server1Name)
 	testLog.Println("    Executing:\n" + cmd)
 
@@ -439,8 +449,8 @@ func (suite *toolSuite) Test3_PushStream() {
 func (suite *toolSuite) Test4_PollStream() {
 	testLog.Println("Test 4 - Testing Poll Stream Management.")
 	testLog.Println("  Testing Create Add Poll Publisher...")
-	server2Name := suite.servers[1].provider.Name()
-	server1Name := suite.servers[0].provider.Name()
+	server2Name := suite.servers[1].Name()
+	server1Name := suite.servers[0].Name()
 	server1Addr := suite.servers[0].server.Addr
 	cmd := fmt.Sprintf("create stream poll publish %s --name=scimPoll --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:(feed|sig):* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server1Addr)
 	testLog.Println("    Executing:\n" + cmd)
@@ -605,7 +615,7 @@ func (suite *toolSuite) Test7_Show() {
 	testLog.Println(string(result))
 
 	testLog.Println("  Show server <name> ...")
-	cmd = fmt.Sprintf("show server %s", suite.servers[0].provider.Name())
+	cmd = fmt.Sprintf("show server %s", suite.servers[0].Name())
 	testLog.Println(cmd)
 	result, err = suite.executeCommand(cmd, true)
 	testLog.Println(string(result))
@@ -632,7 +642,7 @@ func (suite *toolSuite) Test7_Show() {
 }
 
 func (suite *toolSuite) Test8_GetStreamConfigTest() {
-	serverName := suite.servers[0].provider.Name()
+	serverName := suite.servers[0].Name()
 
 	serverSsf := suite.pd.cli.Data.Servers[serverName]
 
@@ -669,8 +679,8 @@ func (suite *toolSuite) Test9_GenAndPoll() {
 	testLog.Println("Test 9 - Generate route and Poll")
 
 	testLog.Println("  Resetting streams...")
-	server1Name := suite.servers[0].provider.Name()
-	server2Name := suite.servers[1].provider.Name()
+	server1Name := suite.servers[0].Name()
+	server2Name := suite.servers[1].Name()
 	// server2Addr := suite.servers[1].server.Addr
 	server1Addr := suite.servers[0].server.Addr
 

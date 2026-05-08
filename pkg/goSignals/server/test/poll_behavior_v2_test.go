@@ -39,9 +39,9 @@ func (suite *PollBehaviorSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
-	state, err := instance.provider.GetStreamState(stream.Id)
+	state, err := instance.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)
 	instance.app.EventRouter.UpdateStreamState(state)
 
@@ -64,9 +64,9 @@ func (suite *PollBehaviorSuite) TestPollDisabledMode() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -87,9 +87,9 @@ func (suite *PollBehaviorSuite) TestPollPausedModeNoAcks() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
 	// Update router's view of the stream
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -110,9 +110,9 @@ func (suite *PollBehaviorSuite) TestPollPausedModeWithAcks() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
 	// Update router's view of the stream
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -141,9 +141,9 @@ func (suite *PollBehaviorSuite) TestPollDisabledModeWithAcks() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -168,8 +168,8 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Ensure stream is enabled
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateEnabled, "")
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateEnabled, "")
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -238,8 +238,8 @@ func (suite *PollBehaviorSuite) TestPollPausedWithSetErrs() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to paused
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -266,8 +266,8 @@ func (suite *PollBehaviorSuite) TestPollDisabledWithSetErrs() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
 
 	// Set stream to disabled
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -294,9 +294,9 @@ func (suite *PollBehaviorSuite) TestPollAlwaysOnDisabled() {
 	suite.T().Setenv("POLL_SRV_BEHAVIOR", "ALWAYSON")
 
 	// Set stream to disabled
-	suite.instance.provider.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
 	// Update router's view of the stream
-	state, err := suite.instance.provider.GetStreamState(suite.stream.Id)
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
 	assert.NoError(suite.T(), err)
 	suite.instance.app.EventRouter.UpdateStreamState(state)
 
@@ -341,9 +341,9 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 		},
 	}
 
-	createdConfig, err := suite.instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
-	state, _ := suite.instance.provider.GetStreamState(createdConfig.Id)
+	state, _ := suite.instance.GetStreamState(createdConfig.Id)
 
 	// Start receiver
 	ps := suite.instance.app.HandleReceiver(state)
@@ -353,7 +353,7 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 	time.Sleep(500 * time.Millisecond)
 
 	// Check if stream is now DISABLED in provider
-	updatedState, _ := suite.instance.provider.GetStreamState(createdConfig.Id)
+	updatedState, _ := suite.instance.GetStreamState(createdConfig.Id)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "Stream disabled by transmitter")
 }

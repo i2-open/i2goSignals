@@ -15,7 +15,7 @@ import (
 )
 
 func TestClientPollStream_Recovery(t *testing.T) {
-	provider, _ := dbProviders.OpenProvider("", "test_poll_recovery")
+	persistence, _ := dbProviders.OpenPersistence("", "test_poll_recovery")
 	sid := "recovery-poll-stream"
 
 	serverShouldFail := true
@@ -42,8 +42,10 @@ func TestClientPollStream_Recovery(t *testing.T) {
 		},
 	}
 
-	// Create the stream in provider
-	created, _ := provider.CreateStream(streamConfig, authUtil.ConvertProject("test-project"))
+	// Create the stream via the StreamService.
+	atx := authUtil.ConvertProject("test-project")
+	createCtx := context.WithValue(context.Background(), authUtil.AuthContextKey, atx)
+	created, _ := persistence.StreamService.CreateStream(createCtx, streamConfig, atx.ProjectId, nil)
 	sid = created.Id
 
 	streamState := &model.StreamStateRecord{
@@ -55,7 +57,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 	defer cancel()
 
 	ps := &ClientPollStream{
-		sa:     newTestApplication(provider),
+		sa:     newTestApplication(persistence),
 		stream: streamState,
 		active: true,
 		ctx:    ctx,
@@ -71,8 +73,8 @@ func TestClientPollStream_Recovery(t *testing.T) {
 		return ps.stream.Status == model.StreamStatePause && ps.stream.ErrorMsg != ""
 	}, 2*time.Second, 100*time.Millisecond, "Should be paused on failure")
 
-	// Verify provider too
-	st, _ := provider.GetStreamState(sid)
+	// Verify persisted state too.
+	st, _ := persistence.StreamService.GetStreamState(context.Background(), sid)
 	assert.Equal(t, model.StreamStatePause, st.Status)
 
 	// 2. Make it succeed
@@ -85,8 +87,8 @@ func TestClientPollStream_Recovery(t *testing.T) {
 		return ps.stream.Status == model.StreamStateEnabled && ps.stream.ErrorMsg == ""
 	}, 5*time.Second, 200*time.Millisecond, "Should be recovered to enabled")
 
-	// Verify provider
-	st, _ = provider.GetStreamState(sid)
+	// Verify persisted state.
+	st, _ = persistence.StreamService.GetStreamState(context.Background(), sid)
 	assert.Equal(t, model.StreamStateEnabled, st.Status)
 	assert.Empty(t, st.ErrorMsg)
 }

@@ -99,10 +99,10 @@ func TestPollStatusDiscovery(t *testing.T) {
 				},
 			}
 
-			createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+			createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 			assert.NoError(t, err)
 
-			streamState, err := instance.provider.GetStreamState(createdConfig.Id)
+			streamState, err := instance.GetStreamState(createdConfig.Id)
 			assert.NoError(t, err)
 			ps := instance.app.HandleReceiver(streamState)
 			assert.NotNil(t, ps)

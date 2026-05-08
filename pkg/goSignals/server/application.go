@@ -24,55 +24,11 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
-// serviceSource is satisfied by both *MongoProvider and *MemoryProvider —
-// they each embed *common.BaseProvider which exposes per-service accessors.
-type serviceSource interface {
-	GetStreamService() *services.StreamService
-	GetKeyService() *services.KeyService
-	GetEventService() *services.EventService
-	GetClientService() *services.ClientService
-	GetServerService() *services.ServerService
-	GetTokenService() *services.TokenService
-}
-
-// coordinatorSource is satisfied by both *mongo_provider.MongoProvider and
-// *memory_provider.MemoryProvider — they each expose Coordinator() returning
-// the cluster seam. Used by NewApplication to derive the coordinator without
-// importing the concrete provider packages.
-type coordinatorSource interface {
-	Coordinator() cluster.ClusterCoordinator
-}
-
-// storageSource is satisfied by both providers. The lifecycle methods used
-// here (Name, Check, Close, ResetDb, SetBaseUrl) live on the provider
-// directly; storageSource wraps that subset.
-type storageSource interface {
-	Name() string
-	Check() error
-	Close() error
-	ResetDb(initialize bool) error
-	SetBaseUrl(u *url.URL)
-}
-
-// providerStorageAdapter exposes a provider-via-Storage view without importing
-// the concrete provider packages.
-type providerStorageAdapter struct {
-	source storageSource
-}
-
-func (a providerStorageAdapter) Name() string                  { return a.source.Name() }
-func (a providerStorageAdapter) Check() error                  { return a.source.Check() }
-func (a providerStorageAdapter) Close() error                  { return a.source.Close() }
-func (a providerStorageAdapter) ResetDb(initialize bool) error { return a.source.ResetDb(initialize) }
-func (a providerStorageAdapter) SetBaseUrl(u *url.URL)         { a.source.SetBaseUrl(u) }
-
-
 // var sa *SignalsApplication
 
 var serverLog = logger.Sub("SERVER")
 
 type SsfApplicationInterface interface {
-	GetProvider() dbProviders.DbProviderInterface
 	GetEventRouter() eventRouter.EventRouter
 	GetAuth() *authUtil.AuthIssuer
 	GetBaseUrl() *url.URL
@@ -81,9 +37,7 @@ type SsfApplicationInterface interface {
 	CloseReceiver(sid string)
 	HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream
 
-	// Service accessors. Handlers should depend on these directly rather
-	// than on GetProvider().X — the latter is going away with the rest of
-	// DbProviderInterface in PRD #39 PR4 phase D.
+	// Service accessors. Handlers depend on these directly.
 	GetStreamService() *services.StreamService
 	GetKeyService() *services.KeyService
 	GetEventService() *services.EventService
@@ -95,7 +49,6 @@ type SsfApplicationInterface interface {
 }
 
 type SignalsApplication struct {
-	Provider       dbProviders.DbProviderInterface
 	Coordinator    cluster.ClusterCoordinator
 	Storage        storage.Storage
 	StreamService  *services.StreamService
@@ -130,22 +83,18 @@ func (sa *SignalsApplication) Name() string {
 	return "goSignals"
 }
 
-func (sa *SignalsApplication) GetProvider() dbProviders.DbProviderInterface {
-	return sa.Provider
-}
-
 func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
 }
 
-func (sa *SignalsApplication) GetStreamService() *services.StreamService { return sa.StreamService }
-func (sa *SignalsApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
-func (sa *SignalsApplication) GetEventService() *services.EventService   { return sa.EventService }
-func (sa *SignalsApplication) GetClientService() *services.ClientService { return sa.ClientService }
-func (sa *SignalsApplication) GetServerService() *services.ServerService { return sa.ServerService }
-func (sa *SignalsApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
+func (sa *SignalsApplication) GetStreamService() *services.StreamService  { return sa.StreamService }
+func (sa *SignalsApplication) GetKeyService() *services.KeyService        { return sa.KeyService }
+func (sa *SignalsApplication) GetEventService() *services.EventService    { return sa.EventService }
+func (sa *SignalsApplication) GetClientService() *services.ClientService  { return sa.ClientService }
+func (sa *SignalsApplication) GetServerService() *services.ServerService  { return sa.ServerService }
+func (sa *SignalsApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
 func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
-func (sa *SignalsApplication) GetStorage() storage.Storage               { return sa.Storage }
+func (sa *SignalsApplication) GetStorage() storage.Storage                { return sa.Storage }
 
 func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
 	if sa.KeyService == nil {
@@ -206,7 +155,7 @@ func (sa *SignalsApplication) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
+func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
 	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
 	tlsSupport.CheckCaInstalled(http.DefaultClient)
 
@@ -225,7 +174,14 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	}
 
 	sa := &SignalsApplication{
-		Provider:      provider,
+		Coordinator:   persistence.Coordinator,
+		Storage:       persistence.Storage,
+		StreamService: persistence.StreamService,
+		KeyService:    persistence.KeyService,
+		EventService:  persistence.EventService,
+		ClientService: persistence.ClientService,
+		ServerService: persistence.ServerService,
+		TokenService:  persistence.TokenService,
 		AdminRole:     role,
 		pollClients:   map[string]*ClientPollStream{},
 		pushClients:   map[string]*ReceiverPushStream{},
@@ -233,24 +189,6 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 		NodeID:        nodeID,
 		StartedAt:     time.Now().UTC(),
 		stopSync:      make(chan struct{}),
-	}
-
-	// Derive the cluster + storage seams from the concrete provider. After
-	// slice 4 deletes DbProviderInterface, callers will pass these in
-	// directly — for now the provider is the single source of truth.
-	if cs, ok := provider.(coordinatorSource); ok {
-		sa.Coordinator = cs.Coordinator()
-	}
-	if ss, ok := provider.(storageSource); ok {
-		sa.Storage = providerStorageAdapter{source: ss}
-	}
-	if svcs, ok := provider.(serviceSource); ok {
-		sa.StreamService = svcs.GetStreamService()
-		sa.KeyService = svcs.GetKeyService()
-		sa.EventService = svcs.GetEventService()
-		sa.ClientService = svcs.GetClientService()
-		sa.ServerService = svcs.GetServerService()
-		sa.TokenService = svcs.GetTokenService()
 	}
 
 	// Initialize Auth if available
@@ -264,7 +202,12 @@ func NewApplication(provider dbProviders.DbProviderInterface, baseUrlString stri
 	// expose the handler for external server usage (e.g., httptest.Server)
 	sa.Handler = httpRouter.router
 
-	sa.EventRouter = eventRouter.NewRouter(provider, nodeID)
+	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
+		StreamService: persistence.StreamService,
+		KeyService:    persistence.KeyService,
+		EventService:  persistence.EventService,
+		Coordinator:   persistence.Coordinator,
+	}, nodeID)
 
 	var baseUrl *url.URL
 	var err error
@@ -391,8 +334,8 @@ func (sa *SignalsApplication) registerNode() {
 
 // StartServer creates a real net/http server wrapping the application handler.
 // This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
-func StartServer(addr string, provider dbProviders.DbProviderInterface, baseUrlString string) *SignalsApplication {
-	sa := NewApplication(provider, baseUrlString)
+func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
+	sa := NewApplication(persistence, baseUrlString)
 	server := http.Server{
 		Addr:     addr,
 		Handler:  sa.Handler,

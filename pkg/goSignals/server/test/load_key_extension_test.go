@@ -83,7 +83,7 @@ func (suite *LoadKeyExtensionSuite) TestLoadKeyForceReplace() {
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
 
 	// Verify it replaced (only one key should exist)
-	summaries, err := suite.ssf.provider.ListSummaries()
+	summaries, err := suite.ssf.ListSummaries()
 	assert.NoError(suite.T(), err)
 	found := false
 	for _, s := range summaries {
@@ -120,7 +120,7 @@ func (suite *LoadKeyExtensionSuite) TestLoadKeyForceRotate() {
 	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode)
 
 	// Verify it rotated (two keys should exist for this issuer)
-	summaries, err := suite.ssf.provider.ListSummaries()
+	summaries, err := suite.ssf.ListSummaries()
 	assert.NoError(suite.T(), err)
 	found := false
 	for _, s := range summaries {

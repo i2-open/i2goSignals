@@ -4,10 +4,27 @@ import (
 	"os"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
 	"github.com/stretchr/testify/assert"
 )
+
+// persistenceFor returns a Persistence record built from a *MongoProvider so
+// these reconnect tests can drive ssef.NewApplication after PRD #39 PR4 phase
+// D (where DbProviderInterface was deleted).
+func persistenceFor(p *mongo_provider.MongoProvider) *dbProviders.Persistence {
+	return &dbProviders.Persistence{
+		StreamService: p.GetStreamService(),
+		KeyService:    p.GetKeyService(),
+		EventService:  p.GetEventService(),
+		ClientService: p.GetClientService(),
+		ServerService: p.GetServerService(),
+		TokenService:  p.GetTokenService(),
+		Coordinator:   p.Coordinator(),
+		Storage:       mongo_provider.NewMongoStorage(p),
+	}
+}
 
 // TestNewApplication_BackgroundReconnect verifies that the application can start
 // even if the initial MongoDB connection fails, and that it doesn't panic.
@@ -28,7 +45,7 @@ func TestNewApplication_BackgroundReconnect(t *testing.T) {
 	assert.Error(t, p.Check())
 
 	// Create application - this used to panic!
-	sa := ssef.NewApplication(p, "https://example.com/")
+	sa := ssef.NewApplication(persistenceFor(p), "https://example.com/")
 	assert.NotNil(t, sa)
 
 	// sa.GetAuth() should be non-nil but have no keys
@@ -64,7 +81,7 @@ func TestNewApplication_LazyAuthRefresh(t *testing.T) {
 	assert.NoError(t, p.Check())
 
 	// Create application
-	sa := ssef.NewApplication(p, "https://example.com/")
+	sa := ssef.NewApplication(persistenceFor(p), "https://example.com/")
 	assert.NotNil(t, sa)
 
 	// sa.Auth should have a private key

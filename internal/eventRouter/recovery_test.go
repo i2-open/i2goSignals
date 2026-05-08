@@ -79,8 +79,9 @@ func newRecoveryTestConfig(clock *fakeClock) RecoveryConfig {
 }
 
 func TestRecoveryLoop_ResumesWhenRemoteEnabled(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -90,13 +91,14 @@ func TestRecoveryLoop_ResumesWhenRemoteEnabled(t *testing.T) {
 
 	assert.Equal(t, RecoveryOutcomeResumed, outcome)
 	assert.Equal(t, model.StreamStateEnabled, stream.Status)
-	persisted, _ := provider.GetStreamState(stream.StreamConfiguration.Id)
+	persisted, _ := h.streamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
 	assert.Equal(t, model.StreamStateEnabled, persisted.Status)
 }
 
 func TestRecoveryLoop_DisablesWhenRemoteDisabled(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -113,8 +115,9 @@ func TestRecoveryLoop_DisablesWhenRemoteDisabled(t *testing.T) {
 }
 
 func TestRecoveryLoop_PausedByRemoteThenEnabled(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -133,8 +136,9 @@ func TestRecoveryLoop_PausedByRemoteThenEnabled(t *testing.T) {
 }
 
 func TestRecoveryLoop_TransportBackoffExceedsCapDisables(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -152,8 +156,9 @@ func TestRecoveryLoop_TransportBackoffExceedsCapDisables(t *testing.T) {
 }
 
 func TestRecoveryLoop_AuthBoundedExhaustsAttempts(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -169,8 +174,9 @@ func TestRecoveryLoop_AuthBoundedExhaustsAttempts(t *testing.T) {
 }
 
 func TestRecoveryLoop_TransportRecoversWhenStatusBecomesAvailable(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -190,8 +196,9 @@ func TestRecoveryLoop_TransportRecoversWhenStatusBecomesAvailable(t *testing.T) 
 }
 
 func TestRecoveryLoop_ContextCancelDuringSleep(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -216,8 +223,9 @@ func TestRecoveryLoop_ContextCancelDuringSleep(t *testing.T) {
 func TestRecoveryLoop_PausedSeenThenFetchErrorUsesPausedCadence(t *testing.T) {
 	// Once we observe paused, subsequent fetch errors must NOT trip the transport cap —
 	// we know the receiver is up.
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
@@ -237,7 +245,8 @@ func TestRecoveryLoop_PausedSeenThenFetchErrorUsesPausedCadence(t *testing.T) {
 }
 
 func TestRecoveryLoop_NilStreamSafe(t *testing.T) {
-	r, _ := newTestRouter(t)
+	h := newTestRouter(t)
+	r := h.router
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)
 
@@ -246,8 +255,9 @@ func TestRecoveryLoop_NilStreamSafe(t *testing.T) {
 }
 
 func TestRecoveryLoop_NilFetcherSafe(t *testing.T) {
-	r, provider := newTestRouter(t)
-	stream := mustCreateTestStream(t, provider, projectIdFromProvider(t, provider))
+	h := newTestRouter(t)
+	r := h.router
+	stream := mustCreateTestStream(t, h, projectIdFromHarness(t, h))
 
 	clock := newFakeClock(time.Now())
 	cfg := newRecoveryTestConfig(clock)

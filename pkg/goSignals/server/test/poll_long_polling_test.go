@@ -41,8 +41,8 @@ func (suite *LongPollSuite) SetupSuite() {
 		},
 	}
 
-	stream, _ := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
-	state, _ := instance.provider.GetStreamState(stream.Id)
+	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	state, _ := instance.GetStreamState(stream.Id)
 	instance.app.EventRouter.UpdateStreamState(state)
 
 	suite.stream = stream

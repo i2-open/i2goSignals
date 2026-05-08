@@ -42,12 +42,12 @@ func TestPollBackoffRetry(t *testing.T) {
 		ProjectId: instance.projectId,
 	}
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
+	createdConfig, err := instance.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
 	// Get the initial state from provider
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.NotNil(t, streamState)
 
@@ -60,7 +60,7 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check provider status - it should be "paused" with "retry being attempted"
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
@@ -70,7 +70,7 @@ func TestPollBackoffRetry(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	// Now it should be disabled
-	finalState, err := instance.provider.GetStreamState(streamID)
+	finalState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
@@ -103,7 +103,7 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, &atx)
+	createdConfig, err := instance.CreateStream(streamConfig, &atx)
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -111,7 +111,7 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Get the stream state - it should be disabled due to permanent JWKS error
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.NotNil(t, streamState)
 

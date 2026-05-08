@@ -47,7 +47,7 @@ func TestConcurrentStreamUpdates(t *testing.T) {
 		},
 	}
 
-	stream, _ := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 
 	// Concurrently update the stream from multiple goroutines
 	var wg sync.WaitGroup
@@ -80,7 +80,7 @@ func TestConcurrentStreamUpdates(t *testing.T) {
 	wg.Wait()
 
 	// Verify stream is still in valid state
-	finalStream, err := instance.provider.GetStream(stream.Id)
+	finalStream, err := instance.GetStream(stream.Id)
 	assert.NoError(t, err)
 	assert.NotNil(t, finalStream)
 }
@@ -103,8 +103,8 @@ func TestConcurrentEventHandling(t *testing.T) {
 		},
 	}
 
-	stream, _ := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
-	state, _ := instance.provider.GetStreamState(stream.Id)
+	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	state, _ := instance.GetStreamState(stream.Id)
 	instance.app.EventRouter.UpdateStreamState(state)
 
 	// Generate events concurrently

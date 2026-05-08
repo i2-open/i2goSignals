@@ -55,12 +55,12 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 
 	// Start receiver
@@ -74,7 +74,7 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's in Pause state
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized")
@@ -126,12 +126,12 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 
 	// Start receiver
@@ -145,7 +145,7 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's in Pause state after the first failure
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized")
@@ -153,7 +153,7 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	// Now wait for the second failure which should disable the stream
 	time.Sleep(200 * time.Millisecond)
 
-	updatedState, err = instance.provider.GetStreamState(streamID)
+	updatedState, err = instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized attempts")
@@ -205,12 +205,12 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 
 	// Start receiver
@@ -226,7 +226,7 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 	t.Logf("Poll count: %d", finalCount)
 
 	// Check that it's in Disable state
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status, "Should be disabled after 2 attempts")
 	assert.Contains(t, updatedState.ErrorMsg, "unauthorized attempts")
@@ -280,12 +280,12 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
 	// Get state
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 
 	// Start receiver
@@ -299,7 +299,7 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	t.Logf("Poll count after 100ms: %d", finalCount)
 
 	// Check that it's NOT disabled yet
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status, "Should still be in Pause state after 3+ attempts")
 

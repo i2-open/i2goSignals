@@ -38,11 +38,11 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 		},
 	}
 
-	createdConfig, err := instance.provider.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
-	streamState, err := instance.provider.GetStreamState(streamID)
+	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 
 	// Start the receiver
@@ -54,7 +54,7 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Check that it's in Pause state
-	updatedState, err := instance.provider.GetStreamState(streamID)
+	updatedState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, updatedState.Status)
 
