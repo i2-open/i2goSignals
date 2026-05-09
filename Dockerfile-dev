@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Dev image for debugging goSignalsServer inside Docker with Delve
-FROM golang:1.26.2-bookworm
+FROM golang:1.26.3-bookworm
 
 LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
 LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"

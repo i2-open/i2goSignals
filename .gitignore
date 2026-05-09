@@ -2,3 +2,4 @@
 /.mongo/mongo2/
 /.mongo/mongo3/
 /.mongo/
+.dev-image.stamp

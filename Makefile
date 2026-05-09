@@ -9,9 +9,11 @@ CONFIG_DIR=config
 SCIM_CONFIG=$(CONFIG_DIR)/scim
 BIN_DIR=bin
 SERVER_BIN=$(BIN_DIR)/goSignalsServer
+DEV_IMAGE=i2gosignals-dev:latest
+DEV_IMAGE_STAMP=.dev-image.stamp
 
 .PHONY: all build run console-build server-build docker-build build clean clean-scim dev-clean generate-certs check-certs \
-	dev-build-image dev-up dev-down dev-logs dev-rebuild run-spiffe-demo \
+	dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image run-spiffe-demo \
 	dev-reset-spiffe dev-rebuild-spiffe-goSignals
 
 all: build
@@ -49,9 +51,22 @@ clean: dev-clean
 # Build the dev image used by docker-compose-dev (installs Delve and mounts source)
 dev-build-image:
 	sh build.sh -n latest
+	@touch $(DEV_IMAGE_STAMP)
+
+# Stamp tracks the last successful dev image build against its source files.
+# If Dockerfile-dev / go.mod / go.sum change, the stamp is older and triggers a rebuild.
+$(DEV_IMAGE_STAMP): Dockerfile-dev go.mod go.sum
+	$(MAKE) dev-build-image
+
+# Ensure the dev image is present locally and up to date with its sources.
+ensure-dev-image: $(DEV_IMAGE_STAMP)
+	@if ! docker image inspect $(DEV_IMAGE) >/dev/null 2>&1; then \
+		echo ">> $(DEV_IMAGE) is missing; rebuilding..."; \
+		$(MAKE) dev-build-image; \
+	fi
 
 # Bring up the minimal dev stack with the debug-enabled goSignals1
-dev-up: check-certs
+dev-up: check-certs ensure-dev-image
 	docker compose -f docker-compose-dev.yml up -d
 
 # Rebuild the dev image and restart goSignals1
