@@ -61,6 +61,34 @@ distributed-lease and node-registry state. Two implementations:
 so health checks and shutdown paths don't drag the whole god-interface
 in. One implementation per adapter (`MemoryStorage`, `MongoStorage`).
 
+### PushDelivery
+
+`internal/eventRouter/delivery.PushDelivery` — the one-attempt push-side
+delivery seam consumed by the router's push loop. One method:
+`Deliver(ctx, PushRequest) PushOutcome` "given a stream config, an event
+record, a signing key, and a kid, sign-or-forward the SET, push it to
+the receiver, return the goSetPush.Classification + captured peer
+address + (possibly-rotated) key and kid."
+
+Two adapters, prior art `ClusterCoordinator` from PRD #39:
+
+- **`HTTPAdapter`** — production. Owns JWT signing, httptrace peer
+  capture, `goSetPush.PushSET`, `goSetPush.ClassifyResult`, the
+  stream's RemoteAddress persistence via `StreamService`, and the
+  RFC8935 §2.4 `jws_signature_failed` rotate-and-retry sub-policy
+  (one retry, via the injected `KeyReloader`). For forward-mode
+  streams the retry is skipped (no local signing material to rotate).
+- **`MemoryAdapter`** — tests. Returns scripted `PushOutcome`s
+  (single value or a sequence). Goroutine-safe. Used by router-level
+  tests that want deterministic classification outcomes without
+  standing up an HTTP receiver.
+
+Scope discipline: the seam covers one delivery attempt. Recovery
+cadence, lease heartbeats, retry policy, backfill, and cluster
+wake-ups stay in the router — the router consumes the classification
+and decides what to do next. `PollDelivery` (the symmetric poll-side
+seam) is deferred to a follow-up PRD.
+
 ### EventService.MatchesStream
 
 `(*EventService).MatchesStream(stream, event) bool` — the SET-to-stream

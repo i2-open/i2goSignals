@@ -40,6 +40,19 @@ func TestClusterMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	sa.InitializePrometheusWithRegisterer(registry)
 
+	// 2.2 Wait for backgroundSync's initial node registration so the metrics
+	// check below sees all 3 expected nodes (sa.NodeID + 2 test nodes). Without
+	// this, the test races against the goroutine started in NewApplication.
+	require.Eventually(t, func() bool {
+		nodes, _ := provider.GetActiveNodes()
+		for _, n := range nodes {
+			if n.Id == sa.NodeID {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "app's own node should self-register via backgroundSync")
+
 	// 3. Register a node (this node is already registered by backgroundSync, but we can overwrite or add more)
 	node := model.ClusterNode{
 		Id:         "test-node-1",

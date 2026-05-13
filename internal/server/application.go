@@ -14,6 +14,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
@@ -207,6 +208,10 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		// The HTTP push adapter is wired at the composition root. NewRouter
+		// late-binds itself as the KeyReloader so the adapter can drive the
+		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.
+		PushDelivery: delivery.NewHTTPAdapter(persistence.StreamService, nil),
 	}, nodeID)
 
 	var baseUrl *url.URL
