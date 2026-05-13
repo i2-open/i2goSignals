@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptrace"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +19,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -76,6 +75,7 @@ type router struct {
 	streamService       *services.StreamService
 	keyService          *services.KeyService
 	eventService        *services.EventService
+	pushDelivery        delivery.PushDelivery
 	eventsIn, eventsOut *prometheus.CounterVec
 	stats               statsTracker
 
@@ -138,6 +138,11 @@ type RouterDeps struct {
 	KeyService    *services.KeyService
 	EventService  *services.EventService
 	Coordinator   cluster.ClusterCoordinator
+	// PushDelivery is the seam for one-attempt SET delivery. Main.go injects the
+	// HTTP adapter (production); tests may inject delivery.NewMemoryAdapter for
+	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
+	// wired to the router as KeyReloader.
+	PushDelivery delivery.PushDelivery
 }
 
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
@@ -160,6 +165,19 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		httpClient:          &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
 		recentOutboundWakes: make(map[string]time.Time),
+	}
+
+	if deps.PushDelivery != nil {
+		router.pushDelivery = deps.PushDelivery
+		// Late-bind the KeyReloader for any adapter that needs it (HTTPAdapter
+		// does; MemoryAdapter doesn't implement the setter and is skipped).
+		if setter, ok := deps.PushDelivery.(interface {
+			SetKeyReloader(delivery.KeyReloader)
+		}); ok {
+			setter.SetKeyReloader(router)
+		}
+	} else {
+		router.pushDelivery = delivery.NewHTTPAdapter(deps.StreamService, router)
 	}
 
 	// When SPIFFE is configured, replace the plain HTTP client with one that
@@ -1124,13 +1142,13 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 	}
 }
 
-// prepareAndSendEvent fetches the event, signs+pushes once, and acks if the receiver returned 202.
-// Returns the final Classification along with the (possibly-updated) signing key and kid — the
-// jws_signature_failed sub-policy may invalidate the cached key and reload, so the caller's
-// subsequent pushes should reuse what we hand back.
+// prepareAndSendEvent fetches the event, hands it to the PushDelivery seam for a single
+// attempt (the seam owns RFC8935 §2.4 jws_signature_failed rotate-and-retry internally),
+// and acks if the receiver returned 202. Returns the final Classification along with the
+// (possibly-rotated) signing key and kid so the caller's subsequent pushes reuse them.
 //
-// Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled by
-// the next backfill iteration once the caller has resolved any required recovery.
+// Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled
+// by the next backfill iteration once the caller has resolved any required recovery.
 func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) (goSetPush.Classification, *rsa.PrivateKey, string) {
 	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
 	if eventRecord == nil {
@@ -1139,28 +1157,14 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
 	}
 
-	cls := r.pushEvent(config, eventRecord, rsaKey, kid)
-
-	// RFC8935 §2.4 jws_signature_failed sub-policy (4a-i++):
-	// invalidate the cached key, reload from the provider (handles key rotation race), re-sign and
-	// retry exactly once. Only applicable when we are signing locally (publish route). If the retry
-	// also fails, the second classification flows through and the normal disable path runs.
-	if cls.Class == goSetPush.ClassRFC8935Error &&
-		cls.RFC8935ErrCode == goSetPush.ErrJwsSignatureFailed &&
-		config.GetRouteMode() != model.RouteModeForward {
-		eventLogger.Warn("PUSH-SRV: jws_signature_failed; flushing key cache and retrying once",
-			"sid", config.StreamConfiguration.Id,
-			"jti", jti,
-			"issuer", config.StreamConfiguration.Iss,
-		)
-		r.invalidateIssuerKey(config.StreamConfiguration.Iss)
-		newKey, newKid := r.checkAndLoadKey(config.StreamConfiguration.Id, config.StreamConfiguration.Iss)
-		if newKey != nil {
-			cls = r.pushEvent(config, eventRecord, newKey, newKid)
-			rsaKey = newKey
-			kid = newKid
-		}
-	}
+	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
+		Stream: config,
+		Event:  eventRecord,
+		Key:    rsaKey,
+		Kid:    kid,
+	})
+	cls := outcome.Classification
+	rsaKey, kid = outcome.Key, outcome.Kid
 
 	sid := config.StreamConfiguration.Id
 	isVerifyPush := isOperationalVerify(eventRecord)
@@ -1208,79 +1212,15 @@ func isOperationalVerify(rec *model.AgEventRecord) bool {
 	return false
 }
 
-// pushEvent implements the server push side (http client) of RFC8935 Push Based Delivery of SET Events.
-// It signs (or forwards), pushes once, and returns the goSetPush.Classification of the receiver's
-// response. State transitions and retry decisions are the caller's responsibility — pushEvent itself
-// has no recovery side effects beyond capturing the peer's resolved address on a successful push.
-func (r *router) pushEvent(stream *model.StreamStateRecord, event *model.AgEventRecord, key *rsa.PrivateKey, kid string) goSetPush.Classification {
-	configuration := stream.StreamConfiguration
-	pushConfig := configuration.Delivery.PushTransmitMethod
-
-	// Prepare the token string (application-layer: signing or forwarding)
-	var tokenString string
-	if configuration.RouteMode == model.RouteModeForward {
-		tokenString = event.Original // In forward mode, we just pass on the raw event
-	} else {
-		token := &event.Event
-		token.Issuer = configuration.Iss
-		token.Audience = configuration.Aud
-		token.IssuedAt = jwt.NewNumericDate(time.Now())
-		token.Kid = kid
-		var err error
-		tokenString, err = token.JWS(jwt.SigningMethodRS256, key)
-		if err != nil {
-			eventLogger.Error("PUSH-SRV: Error signing event", "sid", configuration.Id, "error", err)
-		}
-	}
-
-	// Capture the TCP peer address via httptrace (GotConn fires for both new and reused connections)
-	var capturedAddr string
-	trace := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			capturedAddr = info.Conn.RemoteAddr().String()
-		},
-	}
-	ctx := httptrace.WithClientTrace(context.Background(), trace)
-
-	// Use goSetPush for the RFC8935 wire protocol
-	result := goSetPush.PushSET(ctx, tokenString, goSetPush.TransmitterConfig{
-		EndpointURL:   pushConfig.EndpointUrl,
-		Authorization: pushConfig.AuthorizationHeader,
-	})
-
-	cls := goSetPush.ClassifyResult(result)
-
-	// Persist the resolved peer address whenever the connection got far enough to give us one,
-	// regardless of the SET acceptance outcome. Useful for diagnosing recovery against the same peer.
-	if capturedAddr != "" {
-		endpointURL, _ := url.Parse(pushConfig.EndpointUrl)
-		scheme := "http"
-		if endpointURL != nil && endpointURL.Scheme != "" {
-			scheme = endpointURL.Scheme
-		}
-		remoteIP := model.BuildOutboundRemoteIP(scheme, capturedAddr)
-		if !remoteIP.Equals(stream.RemoteAddress) {
-			r.streamService.UpdateRemoteAddress(r.ctx, configuration.Id, remoteIP)
-			// Keep the loop's local stream pointer in sync so the next pushEvent's
-			// Equals check can short-circuit instead of triggering a redundant DB write.
-			stream.RemoteAddress = remoteIP
-		}
-	}
-
-	if cls.Class == goSetPush.ClassAccepted {
-		eventLogger.Info("PUSH-SRV: JTI delivered", "sid", configuration.Id, "jti", event.Jti)
-	}
-	return cls
-}
-
-// invalidateIssuerKey drops the cached private key + kid for the given issuer so the next
-// checkAndLoadKey call re-fetches from the provider. Used by the jws_signature_failed
-// single-shot retry path to recover from key rotation that happened after the cache was warmed.
-func (r *router) invalidateIssuerKey(issuer string) {
+// InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
+// on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
+// reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.
+func (r *router) InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.issuerKeys, issuer)
 	delete(r.issuerKids, issuer)
+	r.mu.Unlock()
+	return r.checkAndLoadKey(streamID, issuer)
 }
 
 func (r *router) RemoveStream(sid string) {

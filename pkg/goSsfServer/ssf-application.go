@@ -12,6 +12,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
@@ -286,6 +287,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		PushDelivery:  delivery.NewHTTPAdapter(persistence.StreamService, nil),
 	}, nodeID)
 
 	var baseUrl *url.URL
