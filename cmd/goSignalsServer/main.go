@@ -15,7 +15,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/constants"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )

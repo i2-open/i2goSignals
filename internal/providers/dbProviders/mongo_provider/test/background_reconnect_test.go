@@ -6,7 +6,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/stretchr/testify/assert"
 )
 

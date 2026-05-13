@@ -22,7 +22,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
-	ssef "github.com/i2-open/i2goSignals/pkg/goSignals/server"
+	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
