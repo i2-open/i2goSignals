@@ -10,7 +10,6 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,8 +39,9 @@ type EventRouter interface {
 	RemoveStream(sid string)
 	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
 	// SubmitOperationalEvent persists an operational event (Operational=true) and submits it directly
-	// to the target stream's pending list, bypassing StreamEventMatch. Operational events are point-to-point
-	// SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify, stream-updated).
+	// to the target stream's pending list, bypassing the MatchesStream predicate. Operational events
+	// are point-to-point SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify,
+	// stream-updated).
 	SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error)
 	// GenerateVerifyEvent creates an SSF verification SET scoped to the target stream's iss/aud,
 	// persists it as an operational event, and submits it to the target stream's pending list.
@@ -535,7 +535,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 
 	// Check to see if the event should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
-		if StreamEventMatch(&stream, event) {
+		if r.eventService.MatchesStream(&stream, event) {
 
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
 
@@ -563,7 +563,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	for k, pollStream := range r.pollStreams {
 		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
 
-		if StreamEventMatch(&pollStream, event) {
+		if r.eventService.MatchesStream(&pollStream, event) {
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
@@ -581,8 +581,8 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 }
 
 // SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to
-// the target stream's pending list. It bypasses StreamEventMatch (operational events are point-to-point), and
-// is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
+// the target stream's pending list. It bypasses the MatchesStream predicate (operational events are
+// point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
 	stream, err := r.streamService.GetStreamState(r.ctx, sid)
@@ -1281,53 +1281,6 @@ func (r *router) invalidateIssuerKey(issuer string) {
 	defer r.mu.Unlock()
 	delete(r.issuerKeys, issuer)
 	delete(r.issuerKids, issuer)
-}
-
-/*
-StreamEventMatch checks provided event to see if it should be routed to the selected stream. If the aud or iss value
-is not specified for the stream is will be considered a wildcard. If the event has no value for aud or iss, they too
-will be considered a wildcard leading to the event being a match.
-*/
-func StreamEventMatch(stream *model.StreamStateRecord, event *model.AgEventRecord) bool {
-	// First check that the direction of the stream matches the event InBound = true means local consumption
-	if stream.IsReceiver() && stream.GetRouteMode() == model.RouteModeImport {
-		return false
-	}
-
-	// Check for issuer match if stream has an issuer set
-	if stream.Iss != "" {
-		compIss := event.Event.Issuer
-
-		if compIss != "" && !strings.EqualFold(stream.Iss, compIss) {
-			return false
-		}
-	}
-
-	// Check for Aud match
-	if len(stream.Aud) > 0 {
-		audMatch := false
-		for _, value := range stream.Aud {
-			// fmt.Println("Trying value: " + value)
-			// test below returns true if the event has no aud value
-			if len(event.Event.Audience) == 0 || slices.Contains([]string(event.Event.Audience), value) {
-				audMatch = true
-				// fmt.Println("Stream Aud Matched!")
-				break
-			}
-		}
-		if !audMatch {
-			return false
-		}
-	}
-
-	for _, eventType := range event.Types {
-		for _, streamType := range stream.EventsDelivered {
-			if strings.EqualFold(eventType, streamType) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (r *router) RemoveStream(sid string) {

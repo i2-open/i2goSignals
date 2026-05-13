@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -39,11 +39,10 @@ func TestOperationalEventScopedToTargetStream(t *testing.T) {
 	assert.NotContains(t, jtisB, rec.Jti, "stream B must not receive an operational event scoped to stream A")
 }
 
-// TestStreamEventMatchNoLongerAutoMatchesVerifyOrStreamUpdated locks in the removal of the
-// always-match branches in StreamEventMatch. A verify event that flows through the matcher
-// (e.g. via HandleEvent for whatever reason) must NOT auto-match a stream that doesn't list
-// the verify event-type in its EventsDelivered.
-func TestStreamEventMatchNoLongerAutoMatchesVerifyOrStreamUpdated(t *testing.T) {
+// TestMatchesStreamRejectsUnsubscribedOperationalTypes locks in that verify and stream-updated events do
+// not auto-match a stream just because their direction or iss/aud line up — they must be listed in
+// EventsDelivered to flow through MatchesStream.
+func TestMatchesStreamRejectsUnsubscribedOperationalTypes(t *testing.T) {
 	stream := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss:             "DEFAULT",
@@ -59,9 +58,10 @@ func TestStreamEventMatchNoLongerAutoMatchesVerifyOrStreamUpdated(t *testing.T) 
 		Types: []string{"https://schemas.openid.net/secevent/ssf/event-type/stream-updated"},
 	}
 
-	assert.False(t, eventRouter.StreamEventMatch(stream, verifyEvent),
+	svc := services.NewEventService(nil)
+	assert.False(t, svc.MatchesStream(stream, verifyEvent),
 		"verify event must not auto-match a stream that doesn't subscribe to it")
-	assert.False(t, eventRouter.StreamEventMatch(stream, streamUpdatedEvent),
+	assert.False(t, svc.MatchesStream(stream, streamUpdatedEvent),
 		"stream-updated event must not auto-match a stream that doesn't subscribe to it")
 }
 
@@ -90,7 +90,7 @@ func TestResetEventStreamExcludesOperationalEvents(t *testing.T) {
 		if rec.Operational {
 			return false
 		}
-		return eventRouter.StreamEventMatch(streamState, rec)
+		return instance.eventSvc().MatchesStream(streamState, rec)
 	})
 	require.NoError(t, err)
 
