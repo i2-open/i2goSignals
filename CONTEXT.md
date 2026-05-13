@@ -61,6 +61,20 @@ distributed-lease and node-registry state. Two implementations:
 so health checks and shutdown paths don't drag the whole god-interface
 in. One implementation per adapter (`MemoryStorage`, `MongoStorage`).
 
+### EventService.MatchesStream
+
+`(*EventService).MatchesStream(stream, event) bool` — the SET-to-stream
+routing predicate. Owns the direction/iss/aud/event-type filter that
+decides whether a given `AgEventRecord` should be delivered to a given
+`StreamStateRecord`. Pure predicate: touches no DAO state.
+
+Previously a free function `eventRouter.StreamEventMatch` in the
+router package. Lifted into `EventService` so the predicate sits next
+to the rest of the event-routing surface and can be unit-tested
+without constructing a router. Same fat-services / thin-DAOs rule
+that brought the receiver-stream predicate together under
+`StreamService` in PRD #39.
+
 ### Fat services / thin DAOs
 
 The architectural principle: business logic, predicates, caching, and

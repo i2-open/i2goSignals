@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
@@ -151,6 +153,46 @@ func (s *EventService) WatchPending(ctx context.Context, callback func(jti strin
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
 	}
+}
+
+// MatchesStream reports whether event should be routed to stream based on
+// direction, issuer, audience, and event-type filters. Empty stream.Iss or
+// empty event.Event.Issuer is treated as a wildcard. A receiver stream in
+// RouteModeImport short-circuits to false (the event is consumed locally,
+// not re-delivered). The predicate is pure: it touches no DAO state.
+func (s *EventService) MatchesStream(stream *model.StreamStateRecord, event *model.AgEventRecord) bool {
+	if stream.IsReceiver() && stream.GetRouteMode() == model.RouteModeImport {
+		return false
+	}
+
+	if stream.Iss != "" {
+		compIss := event.Event.Issuer
+		if compIss != "" && !strings.EqualFold(stream.Iss, compIss) {
+			return false
+		}
+	}
+
+	if len(stream.Aud) > 0 {
+		audMatch := false
+		for _, value := range stream.Aud {
+			if len(event.Event.Audience) == 0 || slices.Contains([]string(event.Event.Audience), value) {
+				audMatch = true
+				break
+			}
+		}
+		if !audMatch {
+			return false
+		}
+	}
+
+	for _, eventType := range event.Types {
+		for _, streamType := range stream.EventsDelivered {
+			if strings.EqualFold(eventType, streamType) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {

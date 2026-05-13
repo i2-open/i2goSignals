@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
@@ -412,7 +411,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 				return false
 			}
 			// Because reset goes through all events, this function confirms the stream should get the event
-			return eventRouter.StreamEventMatch(streamState, eventRecord)
+			return sa.GetEventService().MatchesStream(streamState, eventRecord)
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

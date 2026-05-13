@@ -24,8 +24,8 @@ type AgEventRecord struct {
     Types []string `json:"types,omitempty" bson:"types,omitempty"`
 
     // Operational marks the event as a point-to-point operational event (e.g. SSF verify, stream-updated)
-    // scoped to a single SSF endpoint relationship. Operational events bypass StreamEventMatch routing,
-    // are persisted for audit, and are excluded from ResetDate/ResetJti replay queries.
+    // scoped to a single SSF endpoint relationship. Operational events bypass the MatchesStream
+    // predicate, are persisted for audit, and are excluded from ResetDate/ResetJti replay queries.
     Operational bool `json:"operational,omitempty" bson:"operational,omitempty"`
 
     /*
