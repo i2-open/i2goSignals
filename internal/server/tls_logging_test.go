@@ -33,11 +33,11 @@ func (s *safeBuffer) String() string {
 }
 
 func ensureTestCertificates(t *testing.T) {
-	certPath := "../../../config/certs/server-cert.pem"
+	certPath := "../../config/certs/server-cert.pem"
 	if _, err := os.Stat(certPath); os.IsNotExist(err) {
 		t.Log("Certs missing. Running genTlsKeys...")
 		cmd := exec.Command("go", "run", "./cmd/genTlsKeys")
-		cmd.Dir = "../../../"
+		cmd.Dir = "../../"
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("Failed to generate certificates: %v\nOutput: %s", err, string(output))
@@ -67,8 +67,8 @@ func TestTLSHandshakeErrorLogging(t *testing.T) {
 
 	errChan := make(chan error, 1)
 	go func() {
-		// Using relative paths to the certs from pkg/goSignals/server
-		errChan <- server.ServeTLS(ln, "../../../config/certs/server-cert.pem", "../../../config/certs/server-key.pem")
+		// Using relative paths to the certs from internal/server
+		errChan <- server.ServeTLS(ln, "../../config/certs/server-cert.pem", "../../config/certs/server-key.pem")
 	}()
 	defer func(server *http.Server) {
 		_ = server.Close()

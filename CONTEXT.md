@@ -123,6 +123,18 @@ methods.
 - **`OpenProvider`** — replaced by `OpenPersistence`. New callers
   should always reach for the latter.
 
+## Package boundaries
+
+The server handler tree (`application.go`, `routers.go`, `api_*.go`, and
+their tests) lives in `internal/server`. `pkg/goSignals/` retains only
+genuinely library-shaped contents: the OpenAPI client (`api/`), the
+swagger UI assets (`swagger-ui/`, `swagger.go`), and the `Dockerfile`.
+
+Known debt: `pkg/goSsfServer/ssf-application.go` (a demo receiver)
+imports `internal/server`, crossing the `pkg/` → `internal/` boundary.
+Reabsorbing `pkg/goSsfServer` into `internal/` (or `cmd/goSsfServer/`)
+is deferred — recorded in PRD #50 Out of Scope.
+
 ## Adding a new persistence method
 
 1. Add the method to the appropriate **DAO interface**
