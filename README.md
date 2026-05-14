@@ -66,6 +66,7 @@ docker exec spire-server sh /etc/spire/registration/register.sh
 * [Security Model](docs/security_model.md) - Authentication, authorization, and SPIFFE details.
 * [Clustering & High Availability](docs/Cluster.md) - Multi-node deployment and lease management.
 * [Metrics & Monitoring](docs/Metrics.md) - Prometheus and Grafana integration.
+* [Observability & Log Shipping](docs/observability.md) - Structured JSON logging, label schema, and cloud-specific shipper recipes (Loki, CloudWatch, Cloud Logging, Azure Monitor).
 * [OIDC Implementation](docs/OIDC_IMPLEMENTATION.md) - Keycloak integration and administrative authentication.
 * [SPIFFE/SPIRE Support](docs/spiffe_support.md) - SPIFFE integration support.
 
