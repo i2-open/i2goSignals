@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssf "github.com/i2-open/i2goSignals/pkg/goSsfServer"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/nodeid"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -42,7 +43,16 @@ func StartProvider(dbUrl string) (*dbProviders.Persistence, error) {
 }
 
 func main() {
-	logger.Init(os.Getenv("LOG_LEVEL"))
+	logger.Init(logger.Options{
+		Level:  os.Getenv("LOG_LEVEL"),
+		Format: os.Getenv("LOG_FORMAT"),
+		Attrs: logger.DefaultAttrs(
+			"gossfserver",
+			constants.GoSignalsVersion,
+			nodeid.Resolve(),
+			os.Getenv("I2SIG_CLUSTER_NAME"),
+		),
+	})
 	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSSF server starting...", "version", constants.GoSignalsVersion)

@@ -1,0 +1,68 @@
+// Grafana Alloy — dev demo configuration.
+//
+// Scrapes all Docker container stdout via the Docker socket, parses any line
+// that is valid JSON, and promotes a small, deliberate set of fields to Loki
+// labels. High-cardinality fields (stream_id, jti, audience, issuer,
+// remote_addr, trace_id) stay in the raw log line and are queryable with
+// LogQL's `| json` parser at query time.
+//
+// The label set is intentional: see docs/observability.md ("What labels
+// exist and why those") for the cardinality rationale.
+
+discovery.docker "containers" {
+    host             = "unix:///var/run/docker.sock"
+    refresh_interval = "5s"
+}
+
+discovery.relabel "containers" {
+    targets = discovery.docker.containers.targets
+
+    // Docker prefixes container names with "/" — strip it.
+    rule {
+        source_labels = ["__meta_docker_container_name"]
+        regex         = "/(.*)"
+        target_label  = "container"
+    }
+}
+
+loki.source.docker "containers" {
+    host             = "unix:///var/run/docker.sock"
+    targets          = discovery.relabel.containers.output
+    forward_to       = [loki.process.parse_json.receiver]
+    refresh_interval = "5s"
+}
+
+// JSON pipeline: extract the six approved label fields, promote them to
+// Loki labels. Non-JSON lines fail extraction silently and pass through
+// with only the `container` label.
+loki.process "parse_json" {
+    forward_to = [loki.write.local.receiver]
+
+    stage.json {
+        expressions = {
+            service      = "service",
+            node_id      = "node_id",
+            cluster_name = "cluster_name",
+            component    = "component",
+            level        = "level",
+            version      = "version",
+        }
+    }
+
+    stage.labels {
+        values = {
+            service      = "",
+            node_id      = "",
+            cluster_name = "",
+            component    = "",
+            level        = "",
+            version      = "",
+        }
+    }
+}
+
+loki.write "local" {
+    endpoint {
+        url = "http://loki:3100/loki/api/v1/push"
+    }
+}

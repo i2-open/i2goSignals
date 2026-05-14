@@ -50,6 +50,7 @@ volumes:
   mongo2_data: {}
   mongo3_data: {}
   mongo_config: {}
+  loki_data: {}
   # Caches for Go modules and build output to speed up dev container and reduce network needs
   go_mod_cache: {}
   go_build_cache: {}
@@ -151,6 +152,7 @@ services:
     container_name: prometheus
     networks:
       - backend
+      - frontend
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
       - prometheus_data:/prometheus
@@ -158,6 +160,52 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
     ports:
       - "9090:9090"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "3100:3100"
+    command:
+      - "-config.file=/etc/loki/loki-config.yml"
+    volumes:
+      - "./config/monitor/loki:/etc/loki"
+      - loki_data:/loki
+    restart: unless-stopped
+    # No container-level healthcheck: the grafana/loki image is distroless
+    # (no /bin/sh or wget). Alloy retries pushes on transient Loki errors,
+    # so a service_started dependency is sufficient.
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    # Run as root so the in-container alloy user can read /var/run/docker.sock.
+    # Production deployments should use a service account / DaemonSet pattern instead;
+    # see docs/observability.md.
+    user: root
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "3200:3200"
+    # Alloy's HTTP UI is clustered with the other observability ports:
+    # 3000 Grafana, 3100 Loki, 3200 Alloy. Port 12345 (Alloy's default) is
+    # intentionally avoided because internal/server/test/poll_*_test.go
+    # uses localhost:12345 as a "should be unreachable" endpoint.
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:3200"
+      - "/etc/alloy/config.alloy"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./config/monitor/alloy:/etc/alloy"
+    depends_on:
+      loki:
+        condition: service_started
     restart: unless-stopped
 
   grafana:
@@ -171,6 +219,7 @@ services:
     restart: unless-stopped
     depends_on:
       - prometheus
+      - loki
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
@@ -205,6 +254,9 @@ services:
       - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals1.env
+    environment:
+      - LOG_FORMAT=json
+      - I2SIG_CLUSTER_NAME=dev-local
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
       interval: 10s
@@ -238,6 +290,9 @@ services:
       - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSignals2.env
+    environment:
+      - LOG_FORMAT=json
+      - I2SIG_CLUSTER_NAME=dev-local
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
       interval: 10s
@@ -271,6 +326,9 @@ services:
       - go_build_cache:/root/.cache/go-build
     env_file:
       - ./config/goSsf1.env
+    environment:
+      - LOG_FORMAT=json
+      - I2SIG_CLUSTER_NAME=dev-local
     command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
