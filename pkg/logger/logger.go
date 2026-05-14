@@ -24,6 +24,7 @@
 package logger
 
 import (
+    "context"
     "io"
     "log/slog"
     "os"
@@ -90,8 +91,61 @@ func IsDebugEnabled() bool {
 }
 
 // Sub returns a logger with a "component" attribute.
+//
+// The returned logger defers to whatever handler slog.Default() exposes at
+// log-write time, so the very common pattern
+//
+//	var fooLog = logger.Sub("FOO")
+//
+// at package-init scope still picks up the format and default-attr changes
+// applied by Init() in main(). A naive `slog.Default().With(...)` here would
+// freeze the bootstrap handler into every package-level logger and Init()
+// would only affect call sites that resolve slog.Default() lazily.
 func Sub(component string) *slog.Logger {
-    return slog.Default().With("component", component)
+    return slog.New(&dynamicHandler{
+        attrs: []slog.Attr{slog.String("component", component)},
+    })
+}
+
+// dynamicHandler proxies Enabled/Handle to slog.Default()'s current handler,
+// layering any captured attrs and groups on top. Calls to WithAttrs/WithGroup
+// accumulate additional layers without freezing the underlying handler.
+type dynamicHandler struct {
+    attrs  []slog.Attr
+    groups []string
+}
+
+func (h *dynamicHandler) materialize() slog.Handler {
+    inner := slog.Default().Handler()
+    for _, g := range h.groups {
+        inner = inner.WithGroup(g)
+    }
+    if len(h.attrs) > 0 {
+        inner = inner.WithAttrs(h.attrs)
+    }
+    return inner
+}
+
+func (h *dynamicHandler) Enabled(ctx context.Context, level slog.Level) bool {
+    return h.materialize().Enabled(ctx, level)
+}
+
+func (h *dynamicHandler) Handle(ctx context.Context, r slog.Record) error {
+    return h.materialize().Handle(ctx, r)
+}
+
+func (h *dynamicHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+    return &dynamicHandler{
+        attrs:  append(append([]slog.Attr{}, h.attrs...), attrs...),
+        groups: append([]string{}, h.groups...),
+    }
+}
+
+func (h *dynamicHandler) WithGroup(name string) slog.Handler {
+    return &dynamicHandler{
+        attrs:  append([]slog.Attr{}, h.attrs...),
+        groups: append(append([]string{}, h.groups...), name),
+    }
 }
 
 // DefaultAttrs returns the standard service-identity attribute slice for a

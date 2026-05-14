@@ -34,8 +34,10 @@ func TestSubLoggerLevelUpdate(t *testing.T) {
 	}
 	buf.Reset()
 
-	// Now update to Debug level via Init (simulated)
-	Init(Options{Level: "debug"})
+	// Now update to Debug level via Init (simulated). Writer is supplied
+	// so the sub-logger keeps writing to the test buffer after Init replaces
+	// the global default.
+	Init(Options{Level: "debug", Writer: &buf})
 	subLogger.Debug("this debug message should now be shown")
 	if !strings.Contains(buf.String(), "this debug message should now be shown") {
 		t.Errorf("expected debug message to be shown after Init(debug), got: %s", buf.String())
@@ -131,6 +133,47 @@ func TestSub_AttachesComponentInJSONMode(t *testing.T) {
     }
     if m["component"] != "ROUTER" {
         t.Errorf("component = %v, want ROUTER", m["component"])
+    }
+}
+
+// A sub-logger captured at package-init time (the pattern used pervasively
+// in this codebase as `var fooLog = logger.Sub("FOO")`) must still pick up
+// the format and default attrs configured later by Init() in main(). Before
+// the dynamicHandler fix, Sub() captured slog.Default() as a one-shot
+// snapshot, so package-level loggers stayed on the bootstrap text handler
+// and never produced JSON or default attrs.
+func TestSub_PicksUpInitCalledAfterSubCreation(t *testing.T) {
+    // Simulate package-init scope: create the sub-logger BEFORE Init runs.
+    earlyLog := Sub("EARLY")
+
+    var buf bytes.Buffer
+    Init(Options{
+        Level:  "info",
+        Format: "json",
+        Writer: &buf,
+        Attrs: []slog.Attr{
+            slog.String("service", "gosignals"),
+            slog.String("node_id", "node-1"),
+        },
+    })
+
+    earlyLog.Info("event", "k", "v")
+
+    line := strings.TrimSpace(buf.String())
+    var m map[string]any
+    if err := json.Unmarshal([]byte(line), &m); err != nil {
+        t.Fatalf("output is not valid JSON: %v\nline: %s", err, line)
+    }
+    for k, want := range map[string]string{
+        "service":   "gosignals",
+        "node_id":   "node-1",
+        "component": "EARLY",
+        "msg":       "event",
+        "k":         "v",
+    } {
+        if m[k] != want {
+            t.Errorf("%s = %v, want %q", k, m[k], want)
+        }
     }
 }
 
