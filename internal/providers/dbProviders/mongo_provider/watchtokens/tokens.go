@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -92,7 +93,7 @@ func Load() *TokenData {
 }
 
 func storeFilename() string {
-	watchFile := os.Getenv("MONGO_WATCH_FILE")
+	watchFile := envcompat.Lookup("I2SIG_STORE_MONGO_RESUME_FILE", "MONGO_WATCH_FILE")
 	if watchFile != "" {
 		return watchFile
 	}

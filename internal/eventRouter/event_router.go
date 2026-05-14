@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -230,8 +231,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.enabled = true
 
 	// Start the background watcher if explicitly enabled
-	if os.Getenv("I2SIG_MONGO_WATCH_ENABLED") == "true" {
-		eventLogger.Info("Background watcher enabled via I2SIG_MONGO_WATCH_ENABLED")
+	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
+		eventLogger.Info("Background watcher enabled via I2SIG_STORE_MONGO_WATCH_ENABLED")
 		go router.eventService.WatchPending(ctx, func(jti string, streamId string) {
 			sid := streamId
 			router.mu.RLock()

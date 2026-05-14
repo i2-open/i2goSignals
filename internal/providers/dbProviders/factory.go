@@ -3,8 +3,7 @@ package dbProviders
 import (
 	"strings"
 
-	"os"
-
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
@@ -82,12 +81,12 @@ func OpenPersistence(mongoUrl string, dbName string) (*Persistence, error) {
 
 	mp, err := mongo_provider.Open(mongoUrl, dbName)
 	if err != nil {
-		if strings.ToUpper(os.Getenv("MONGO_BACKGROUND_RECONNECT")) == "TRUE" {
+		if strings.ToUpper(envcompat.Lookup("I2SIG_STORE_MONGO_BACKGROUND_RECONNECT", "MONGO_BACKGROUND_RECONNECT")) == "TRUE" {
 			factoryLog.Warn("Mongo connection failed. Background reconnect enabled.", "error", err)
 			return persistenceFromMongo(mp), nil
 		}
 
-		failToMem := strings.ToUpper(os.Getenv("MONGO_FAILTOMEM"))
+		failToMem := strings.ToUpper(envcompat.Lookup("I2SIG_STORE_MONGO_FALLBACK_MEM", "MONGO_FAILTOMEM"))
 		if failToMem == "FALSE" {
 			factoryLog.Error("Mongo Server connection failed. Exiting.", "error", err)
 			return nil, err

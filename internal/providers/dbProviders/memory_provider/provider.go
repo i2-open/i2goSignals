@@ -3,7 +3,6 @@ package memory_provider
 import (
     "context"
     "fmt"
-    "os"
     "path/filepath"
     "strconv"
     "strings"
@@ -22,12 +21,12 @@ const CDbName = "goSignalsMem"
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
 const CEnvIssuer = "I2SIG_ISSUER"
-const CEnvDbName = "I2SIG_DBNAME"
+const CEnvDbName = "I2SIG_STORE_MONGO_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CDefTokenIssuer = "DEFAULT"
 
-const CEnvMemDir = "MEM_DIRECTORY"
-const CEnvMemSaveRate = "MEM_SAVE_RATE"
+const CEnvMemDir = "I2SIG_STORE_MEM_DIRECTORY"
+const CEnvMemSaveRate = "I2SIG_STORE_MEM_SAVE_RATE"
 const CDefMemSaveRate = 30
 
 var pLog = logger.Sub("MEMORY_DB")
@@ -215,11 +214,10 @@ func Open(mongoUrl string, dbName string) (*MemoryProvider, error) {
     }
 
     if dbName == "" {
-        dbEnvName, dbDefined := os.LookupEnv(CEnvDbName)
-        if !dbDefined {
-            dbName = CDbName
-        } else {
+        if dbEnvName := envcompat.Lookup(CEnvDbName, "I2SIG_DBNAME"); dbEnvName != "" {
             dbName = dbEnvName
+        } else {
+            dbName = CDbName
         }
     }
 
@@ -233,13 +231,13 @@ func Open(mongoUrl string, dbName string) (*MemoryProvider, error) {
         pLog.Info("Defaulting Memory Database URL", "url", mongoUrl)
     }
 
-    memDir, _ := os.LookupEnv(CEnvMemDir)
+    memDir := envcompat.Lookup(CEnvMemDir, "MEM_DIRECTORY")
     if memDir == "" {
         memDir = filepath.Join("config", dbName)
     }
 
     saveRate := CDefMemSaveRate
-    if rateStr, ok := os.LookupEnv(CEnvMemSaveRate); ok {
+    if rateStr := envcompat.Lookup(CEnvMemSaveRate, "MEM_SAVE_RATE"); rateStr != "" {
         if r, err := strconv.Atoi(rateStr); err == nil {
             saveRate = r
         }

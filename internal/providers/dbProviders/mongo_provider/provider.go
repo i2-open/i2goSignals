@@ -38,14 +38,14 @@ const CDbTokens = "tokens"
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
 const CEnvIssuer = "I2SIG_ISSUER"
-const CEnvDbName = "I2SIG_DBNAME"
+const CEnvDbName = "I2SIG_STORE_MONGO_DBNAME"
 const CEnvTokenIssuer = "I2SIG_TOKEN_ISSUER"
 const CEnvBaseURL = "BASE_URL"
 const CEnvClusterInternalToken = "I2SIG_CLUSTER_INTERNAL_TOKEN"
 const CEnvClusterInternalPort = "I2SIG_CLUSTER_INTERNAL_PORT"
 const CEnvTransmitterBackfillInterval = "I2SIG_TRANSMITTER_BACKFILL_INTERVAL"
 const CEnvTransmitterBackfillBatch = "I2SIG_TRANSMITTER_BACKFILL_BATCH"
-const CEnvMongoWatchEnabled = "I2SIG_MONGO_WATCH_ENABLED"
+const CEnvMongoWatchEnabled = "I2SIG_STORE_MONGO_WATCH_ENABLED"
 const CDefTokenIssuer = "DEFAULT"
 const ErrorInvalidProject = "invalid project_id - invalid token"
 
@@ -472,11 +472,10 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 	}
 
 	if dbName == "" {
-		dbEnvName, dbDefined := os.LookupEnv(CEnvDbName)
-		if !dbDefined {
-			dbName = CDbName
-		} else {
+		if dbEnvName := envcompat.Lookup(CEnvDbName, "I2SIG_DBNAME"); dbEnvName != "" {
 			dbName = dbEnvName
+		} else {
+			dbName = CDbName
 		}
 	}
 
