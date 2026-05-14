@@ -189,7 +189,7 @@ func breakIntoArgs(command string) []string {
 }
 
 func main() {
-	logger.Init(os.Getenv("LOG_LEVEL"))
+	logger.Init(logger.Options{Level: os.Getenv("LOG_LEVEL")})
 	tlsSupport.CheckCaInstalled(nil)
 
 	if tlsSupport.SpiffeEnabled() {

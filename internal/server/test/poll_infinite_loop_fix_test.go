@@ -12,7 +12,7 @@ import (
 
 func TestPollInfiniteLoopFix(t *testing.T) {
 	// Enable debug logging to see what's happening
-	logger.Init("debug")
+	logger.Init(logger.Options{Level: "debug"})
 
 	// Set short backoff for testing to speed up failure/retry cycle
 	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")

@@ -17,9 +17,10 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
 	"github.com/i2-open/i2goSignals/internal/services"
-	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/nodeid"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -249,14 +250,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		role = "ADMIN"
 	}
 
-	nodeID := os.Getenv("NODE_ID")
-	if nodeID == "" {
-		nodeID = os.Getenv("POD_NAME")
-	}
-	if nodeID == "" {
-		hostname, _ := os.Hostname()
-		nodeID = fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
-	}
+	nodeID := nodeid.Resolve()
 
 	sa := &SsfApplication{
 		Coordinator:   persistence.Coordinator,

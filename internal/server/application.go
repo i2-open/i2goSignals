@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/nodeid"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
@@ -165,14 +165,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		role = "ADMIN"
 	}
 
-	nodeID := os.Getenv("NODE_ID")
-	if nodeID == "" {
-		nodeID = os.Getenv("POD_NAME")
-	}
-	if nodeID == "" {
-		hostname, _ := os.Hostname()
-		nodeID = fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
-	}
+	nodeID := nodeid.Resolve()
 
 	sa := &SignalsApplication{
 		Coordinator:   persistence.Coordinator,
