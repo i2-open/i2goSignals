@@ -11,6 +11,7 @@ import (
     "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/memory"
+    "github.com/i2-open/i2goSignals/internal/envcompat"
     "github.com/i2-open/i2goSignals/internal/providers/cluster"
     "github.com/i2-open/i2goSignals/internal/services"
     "github.com/i2-open/i2goSignals/pkg/logger"
@@ -208,8 +209,8 @@ func Open(mongoUrl string, dbName string) (*MemoryProvider, error) {
         return nil, fmt.Errorf("memory provider only supports 'memorydb:' URL prefix, got: %s", mongoUrl)
     }
 
-    defaultIssuer, issDefined := os.LookupEnv(CEnvIssuer)
-    if !issDefined {
+    defaultIssuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", CEnvIssuer)
+    if defaultIssuer == "" {
         defaultIssuer = CDefIssuer
     }
 
@@ -222,8 +223,8 @@ func Open(mongoUrl string, dbName string) (*MemoryProvider, error) {
         }
     }
 
-    tknIssuer, tknDefined := os.LookupEnv(CEnvTokenIssuer)
-    if !tknDefined {
+    tknIssuer := envcompat.Lookup("I2SIG_ISSUER_TOKEN", CEnvTokenIssuer)
+    if tknIssuer == "" {
         tknIssuer = CDefTokenIssuer
     }
 

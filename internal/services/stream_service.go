@@ -19,6 +19,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -66,20 +67,18 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 			ssLog.Error("Invalid BASE_URL value", "error", err.Error())
 		}
 	}
-	minVer, exist := os.LookupEnv("MIN_VERIFICATION_INTERVAL")
-	if exist {
+	if minVer := envcompat.Lookup("I2SIG_STREAM_MIN_VERIFICATION_INTERVAL", "MIN_VERIFICATION_INTERVAL"); minVer != "" {
 		minVerificationInterval, err = strconv.Atoi(minVer)
 		if err != nil {
 			minVerificationInterval = 300
-			ssLog.Error("Invalid MIN_VERIFICATION_INTERVAL value", "error", err.Error())
+			ssLog.Error("Invalid I2SIG_STREAM_MIN_VERIFICATION_INTERVAL value", "error", err.Error())
 		}
 	}
-	maxInactivityStr, exist := os.LookupEnv("MAX_INACTIVITY_TIMEOUT")
-	if exist {
+	if maxInactivityStr := envcompat.Lookup("I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT", "MAX_INACTIVITY_TIMEOUT"); maxInactivityStr != "" {
 		maxInactivityTimeout, err = strconv.Atoi(maxInactivityStr)
 		if err != nil {
 			maxInactivityTimeout = 3600
-			ssLog.Error("Invalid MAX_INACTIVITY_TIMEOUT value", "error", err.Error())
+			ssLog.Error("Invalid I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT value", "error", err.Error())
 		}
 	}
 	return &StreamService{

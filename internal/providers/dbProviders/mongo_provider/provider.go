@@ -9,6 +9,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
 	"github.com/i2-open/i2goSignals/internal/services"
@@ -461,10 +462,11 @@ func (m *MongoProvider) monitor() {
 }
 
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
-	defaultIssuer, issDefined := os.LookupEnv(CEnvIssuer)
-	if !issDefined {
-		defaultIssuer, issDefined = os.LookupEnv(CEnvBaseURL)
-		if !issDefined {
+	defaultIssuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", CEnvIssuer)
+	if defaultIssuer == "" {
+		if baseURL := os.Getenv(CEnvBaseURL); baseURL != "" {
+			defaultIssuer = baseURL
+		} else {
 			defaultIssuer = CDefIssuer
 		}
 	}
@@ -478,8 +480,8 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		}
 	}
 
-	tknIssuer, tknDefined := os.LookupEnv(CEnvTokenIssuer)
-	if !tknDefined {
+	tknIssuer := envcompat.Lookup("I2SIG_ISSUER_TOKEN", CEnvTokenIssuer)
+	if tknIssuer == "" {
 		tknIssuer = CDefTokenIssuer
 	}
 

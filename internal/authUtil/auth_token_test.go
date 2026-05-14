@@ -668,9 +668,9 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	// Point OAUTH_SERVERS to the discovery endpoint
+	// Point I2SIG_AUTH_OAUTH_SERVERS to the discovery endpoint
 
-	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -700,7 +700,7 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.OAuthPubKeys = nil
@@ -746,7 +746,7 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
 
-	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	auth.OAuthServer = nil
 	auth.mu.Lock()
@@ -814,7 +814,7 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	defer srv.Close()
 	jwksURL = srv.URL + "/jwks"
 
-	t.Setenv("OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.OAuthServer = nil
@@ -932,7 +932,7 @@ func TestValidateAuthorizationAny_PartialOAuthFailure(t *testing.T) {
 	defer srv2.Close()
 
 	// Configure both servers
-	t.Setenv("OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv1.URL+"/.well-known/openid-configuration,"+srv2.URL+"/.well-known/openid-configuration")
 
 	// Reset caches on issuer
 	auth.mu.Lock()
