@@ -57,8 +57,14 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 		buffer.addEvents(initialJtis)
 	}
 
+	// Capture buffer.in on the spawning goroutine so the read sequences
+	// before the `go` statement (program-order happens-before to the
+	// spawned goroutine). Close() later writes buffer.in = nil under the
+	// mutex; the spawned goroutine works against the captured channel
+	// rather than re-reading buffer.in without synchronisation.
+	inCh := buffer.in
+
 	go func() {
-		inCh := buffer.in
 		for {
 			buffer.mutex.Lock()
 			if inCh == nil && len(buffer.events) == 0 {
@@ -268,8 +274,11 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 		}
 	}
 
+	// Capture buffer.in on the spawning goroutine; see the matching note
+	// in CreateEventPollBuffer for the happens-before reasoning.
+	inCh := buffer.in
+
 	go func() {
-		inCh := buffer.in
 		for {
 			buffer.eventsMutex.Lock()
 			var outCh chan interface{}
