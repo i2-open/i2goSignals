@@ -55,7 +55,7 @@ func TestCreateEventPushBuffer(t *testing.T) {
 }
 
 func TestCreateEventPollBuffer(t *testing.T) {
-	buffer := CreateEventPollBuffer([]string{})
+	buffer := CreateEventPollBuffer([]string{}, 30, 300)
 	lastVal := "EMPTY"
 	var wg sync.WaitGroup
 
@@ -113,7 +113,7 @@ func TestCreateEventPollBuffer(t *testing.T) {
 }
 
 func TestCreateEventPollBufferAdvanced(t *testing.T) {
-	buffer := CreateEventPollBuffer([]string{})
+	buffer := CreateEventPollBuffer([]string{}, 30, 300)
 
 	var wg sync.WaitGroup
 	testSize := 100
@@ -202,7 +202,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 
 	initialJtis := testVals[0:4]
 
-	buffer := CreateEventPollBuffer(initialJtis)
+	buffer := CreateEventPollBuffer(initialJtis, 30, 300)
 
 	jtis, more := buffer.GetEvents(model.PollParameters{
 		ReturnImmediately: false,
@@ -258,7 +258,7 @@ func TestCreateEventPollBufferOptions(t *testing.T) {
 }
 
 func TestCreateEventPollBufferFast(t *testing.T) {
-	buffer := CreateEventPollBuffer([]string{})
+	buffer := CreateEventPollBuffer([]string{}, 30, 300)
 
 	var wg sync.WaitGroup
 	testSize := 1000
@@ -343,7 +343,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 }
 
 func TestEventPollBuffer_Wakeup(t *testing.T) {
-	buffer := CreateEventPollBuffer([]string{})
+	buffer := CreateEventPollBuffer([]string{}, 30, 300)
 
 	start := time.Now()
 
@@ -363,4 +363,157 @@ func TestEventPollBuffer_Wakeup(t *testing.T) {
 	assert.Nil(t, jtis)
 	assert.False(t, more)
 	assert.True(t, elapsed < 1*time.Second, "GetEvents should have returned early, took %v", elapsed)
+}
+
+// TestEventPollBuffer_DefaultTimeoutSecsAppliedWhenZero verifies that when a
+// receiver omits timeoutSecs (sends 0), the buffer uses the per-buffer
+// configured default rather than a package-internal constant.
+func TestEventPollBuffer_DefaultTimeoutSecsAppliedWhenZero(t *testing.T) {
+	// Configure a 1-second default. If the configured default is NOT being
+	// applied and the old 30s hard-coded fallback is still in force, the
+	// elapsed time will be ~30s rather than ~1s (test would also fail to
+	// compile against the old 1-arg signature, which is the point of the
+	// tracer bullet).
+	buffer := CreateEventPollBuffer([]string{}, 1, 300)
+	defer buffer.Close()
+
+	start := time.Now()
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       0, // receiver omitted timeoutSecs
+	})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis, "no events in buffer, should return nil")
+	assert.False(t, more)
+	assert.GreaterOrEqual(t, elapsed, 900*time.Millisecond,
+		"buffer should have waited approximately the configured default (1s), got %v", elapsed)
+	assert.Less(t, elapsed, 2*time.Second,
+		"buffer should not have waited longer than the configured default + slack, got %v", elapsed)
+}
+
+// TestEventPollBuffer_ReceiverTimeoutSecsInRangeHonouredExactly verifies that a
+// receiver-supplied timeoutSecs > 0 and <= max is honoured unchanged. The
+// configured default and max should not interfere.
+func TestEventPollBuffer_ReceiverTimeoutSecsInRangeHonouredExactly(t *testing.T) {
+	// default=30 (would be obviously visible if it leaked in), max=300.
+	buffer := CreateEventPollBuffer([]string{}, 30, 300)
+	defer buffer.Close()
+
+	start := time.Now()
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       1, // receiver-supplied, in-range
+	})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis)
+	assert.False(t, more)
+	assert.GreaterOrEqual(t, elapsed, 900*time.Millisecond,
+		"buffer should have waited approximately the receiver-supplied 1s, got %v", elapsed)
+	assert.Less(t, elapsed, 2*time.Second,
+		"buffer should not have waited the 30s default; receiver value was supplied, got %v", elapsed)
+}
+
+// TestEventPollBuffer_ReceiverTimeoutSecsExceedingMaxClampedSilently verifies
+// that a receiver-supplied timeoutSecs greater than the configured max is
+// silently clamped to max. RFC8936 §2.4 makes timeoutSecs a SHOULD, so the
+// clamp is spec-compliant; no error is returned, no per-request log emitted.
+func TestEventPollBuffer_ReceiverTimeoutSecsExceedingMaxClampedSilently(t *testing.T) {
+	// max=1 makes the clamped wait observable in a second-scale test.
+	buffer := CreateEventPollBuffer([]string{}, 30, 1)
+	defer buffer.Close()
+
+	start := time.Now()
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       60, // receiver-supplied, exceeds max
+	})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis)
+	assert.False(t, more)
+	assert.GreaterOrEqual(t, elapsed, 900*time.Millisecond,
+		"buffer should have waited approximately the clamped max (1s), got %v", elapsed)
+	assert.Less(t, elapsed, 2*time.Second,
+		"buffer should not have waited the un-clamped 60s, got %v", elapsed)
+}
+
+// TestEventPollBuffer_NotifierPreemptsClampedDeadline verifies that even when
+// timeoutSecs is clamped, an event arriving before the clamped deadline is
+// delivered. Confirms the clamp does not suppress wake-up notifications.
+func TestEventPollBuffer_NotifierPreemptsClampedDeadline(t *testing.T) {
+	buffer := CreateEventPollBuffer([]string{}, 30, 2) // clamp to 2s
+	defer buffer.Close()
+
+	jti := ids.NewObjectID()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		buffer.SubmitEvent(jti)
+	}()
+
+	start := time.Now()
+	jtis, _ := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       60, // will be clamped to 2
+	})
+	elapsed := time.Since(start)
+
+	assert.NotNil(t, jtis, "event submitted before clamped deadline should be delivered")
+	if jtis != nil {
+		assert.Equal(t, 1, len(*jtis))
+		assert.Equal(t, jti, (*jtis)[0])
+	}
+	assert.Less(t, elapsed, 1500*time.Millisecond,
+		"buffer should have returned on notifier well before the 2s clamped deadline, got %v", elapsed)
+}
+
+// TestEventPollBuffer_MaxTimeoutZeroDisablesClamp verifies that a max of 0
+// disables clamping entirely — the operator escape hatch documented in
+// POLL_MAX_TIMEOUT=0. Receiver-supplied timeoutSecs is honoured as given.
+func TestEventPollBuffer_MaxTimeoutZeroDisablesClamp(t *testing.T) {
+	buffer := CreateEventPollBuffer([]string{}, 30, 0) // cap disabled
+	defer buffer.Close()
+
+	// We don't want to actually wait 100s. Submit a Wakeup after 150ms and
+	// observe that no premature clamp fired in the meantime — the call
+	// returns on the Wakeup rather than on a clamp-imposed timer.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		buffer.Wakeup()
+	}()
+
+	start := time.Now()
+	jtis, _ := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       100, // way above any plausible clamp
+	})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis, "no events submitted, expected nil")
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond,
+		"buffer must have actually waited (not clamped to 0), got %v", elapsed)
+	assert.Less(t, elapsed, 1*time.Second,
+		"buffer returned on Wakeup well before any clamped deadline, got %v", elapsed)
+}
+
+// TestEventPollBuffer_DefaultZeroPlusReceiverZeroReturnsImmediately verifies
+// the operator escape hatch POLL_DEFAULT_TIMEOUT=0: when both the configured
+// default and the receiver-supplied timeoutSecs are zero, GetEvents returns
+// immediately even with ReturnImmediately=false (i.e. no implicit long-poll).
+func TestEventPollBuffer_DefaultZeroPlusReceiverZeroReturnsImmediately(t *testing.T) {
+	buffer := CreateEventPollBuffer([]string{}, 0, 300) // default disabled
+	defer buffer.Close()
+
+	start := time.Now()
+	jtis, more := buffer.GetEvents(model.PollParameters{
+		ReturnImmediately: false,
+		TimeoutSecs:       0,
+	})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, jtis)
+	assert.False(t, more)
+	assert.Less(t, elapsed, 100*time.Millisecond,
+		"buffer should have returned immediately, got %v", elapsed)
 }

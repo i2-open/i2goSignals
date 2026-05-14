@@ -85,6 +85,14 @@ type router struct {
 	outboundWakesMu     sync.Mutex
 	backfillInterval    time.Duration
 	backfillBatch       int
+	// pollDefaultTimeoutSecs is the resolved POLL_DEFAULT_TIMEOUT applied to
+	// every EventPollBuffer constructed for the lifetime of this router.
+	// 0 means "no implicit long-poll" — receiver omitting timeoutSecs gets
+	// an immediate return on an empty buffer.
+	pollDefaultTimeoutSecs int
+	// pollMaxTimeoutSecs is the resolved POLL_MAX_TIMEOUT cap on inbound
+	// receiver timeoutSecs values. 0 disables the cap.
+	pollMaxTimeoutSecs int
 	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
 	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
 	x509Source *workloadapi.X509Source
@@ -221,6 +229,11 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	router.backfillBatch = backfillBatch
 
+	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
+	eventLogger.Info("Poll long-poll timeouts resolved",
+		"POLL_DEFAULT_TIMEOUT", router.pollDefaultTimeoutSecs,
+		"POLL_MAX_TIMEOUT", router.pollMaxTimeoutSecs)
+
 	states := router.streamService.GetStateMap(ctx)
 
 	for k, state := range states {
@@ -253,6 +266,52 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 
 	return router
+}
+
+// Package-default long-poll timeouts applied when POLL_DEFAULT_TIMEOUT or
+// POLL_MAX_TIMEOUT are unset or malformed. See docs/configuration_properties.md.
+const (
+	pollDefaultTimeoutSecsDefault = 30
+	pollMaxTimeoutSecsDefault     = 300
+)
+
+// resolvePollTimeoutEnv reads POLL_DEFAULT_TIMEOUT and POLL_MAX_TIMEOUT from
+// the environment and applies the validation policy:
+//
+//   - Unset / empty: use code default.
+//   - Unparseable or negative: log WARN, fall back to code default.
+//     Server starts successfully.
+//   - default > max with max > 0: clamp default down to max, log WARN.
+//   - Returned values are pure ints in seconds; either may be 0
+//     (operator-requested escape hatch).
+func resolvePollTimeoutEnv() (defaultSecs, maxSecs int) {
+	defaultSecs = parsePollTimeoutEnv("POLL_DEFAULT_TIMEOUT", pollDefaultTimeoutSecsDefault)
+	maxSecs = parsePollTimeoutEnv("POLL_MAX_TIMEOUT", pollMaxTimeoutSecsDefault)
+	if maxSecs > 0 && defaultSecs > maxSecs {
+		eventLogger.Warn("POLL_DEFAULT_TIMEOUT exceeds POLL_MAX_TIMEOUT; clamping default to max",
+			"POLL_DEFAULT_TIMEOUT", defaultSecs, "POLL_MAX_TIMEOUT", maxSecs)
+		defaultSecs = maxSecs
+	}
+	return defaultSecs, maxSecs
+}
+
+func parsePollTimeoutEnv(name string, fallback int) int {
+	val := os.Getenv(name)
+	if val == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		eventLogger.Warn("Invalid integer; falling back to default",
+			"env", name, "value", val, "default", fallback)
+		return fallback
+	}
+	if parsed < 0 {
+		eventLogger.Warn("Negative value not permitted; falling back to default",
+			"env", name, "value", parsed, "default", fallback)
+		return fallback
+	}
+	return parsed
 }
 
 func (r *router) ResetStream(sid string) {
@@ -490,7 +549,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			})
 			r.mu.Lock()
 			// TODO:  might have to check for existing events!
-			r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis)
+			r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
 		}
 		return
 	}
