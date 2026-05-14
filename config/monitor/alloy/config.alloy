@@ -38,6 +38,18 @@ loki.source.docker "containers" {
 loki.process "parse_json" {
     forward_to = [loki.write.local.receiver]
 
+    // Drop docker-log backfill from before alloy started. Without this,
+    // alloy replays each long-running container's full stdout buffer on
+    // boot, and Loki rejects entries older than its per-stream creation
+    // grace period (~1h) with HTTP 400 "entry too far behind", producing
+    // a burst of error lines in alloy's own logs. Five minutes is plenty
+    // of headroom for the boot race between alloy and the goSignals
+    // services without keeping any actually stale entries.
+    stage.drop {
+        older_than          = "5m"
+        drop_counter_reason = "old_backfill"
+    }
+
     stage.json {
         expressions = {
             service      = "service",
