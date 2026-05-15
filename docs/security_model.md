@@ -61,7 +61,7 @@ HMAC and OAuth2 mechanisms; deployments without SPIRE continue to operate unchan
 |---|---|---|
 | Inter-cluster wake-up calls | HMAC shared secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) | X.509-SVID mutual TLS; HMAC retained as fallback |
 | SSF stream management (outbound) | OAuth2 CC or static token | SPIFFE mTLS (if `SpiffeConfig` set on server record) |
-| MongoDB connections | Username/password | X.509-SVID client certificate (opt-in via `SPIFFE_MONGO_ENABLED`) |
+| MongoDB connections | Username/password | X.509-SVID client certificate (opt-in via `I2SIG_STORE_MONGO_SPIFFE_ENABLED`) |
 
 ### How It Works
 
@@ -73,7 +73,7 @@ no restarts are required when SVIDs expire.
 When `SPIFFE_ENDPOINT_SOCKET` is set, the event router builds an mTLS HTTP transport for outbound
 wake-up calls using the node's SVID. The receiving `WakeTransmitter` handler checks whether the
 TLS connection carries a peer certificate. If the certificate is a valid SVID belonging to the
-cluster trust domain (`SPIFFE_TRUST_DOMAIN`), the request is accepted without an HMAC token. If
+cluster trust domain (`I2SIG_SPIFFE_TRUST_DOMAIN`), the request is accepted without an HMAC token. If
 no certificate is presented, the existing HMAC path is used. This allows a phased rollout.
 
 **SSF stream management (oauthClient):**
@@ -82,7 +82,7 @@ SPIFFE mTLS client. The remote server's SPIFFE ID or trust domain is used to aut
 If the SPIRE agent is unavailable, the function falls through to OAuth2 or static token auth.
 
 **MongoDB mTLS:**
-When `SPIFFE_MONGO_ENABLED=true` and `SPIFFE_ENDPOINT_SOCKET` is set, the MongoDB driver is
+When `I2SIG_STORE_MONGO_SPIFFE_ENABLED=true` and `SPIFFE_ENDPOINT_SOCKET` is set, the MongoDB driver is
 configured to use the node's SVID as the client certificate. MongoDB must be configured with the
 SPIRE CA bundle as the trusted root. Falls back to password auth if SPIRE is unavailable.
 
@@ -99,8 +99,8 @@ instructions.
 | Variable | Default | Description |
 |---|---|---|
 | `SPIFFE_ENDPOINT_SOCKET` | _(unset)_ | SPIRE agent socket path. Enables all SPIFFE features. |
-| `SPIFFE_TRUST_DOMAIN` | `cluster.i2gosignals.internal` | Trust domain for cluster peer verification. |
-| `SPIFFE_MONGO_ENABLED` | `false` | Enable SPIFFE mTLS for MongoDB. |
+| `I2SIG_SPIFFE_TRUST_DOMAIN` | `cluster.i2gosignals.internal` | Trust domain for cluster peer verification. |
+| `I2SIG_STORE_MONGO_SPIFFE_ENABLED` | `false` | Enable SPIFFE mTLS for MongoDB. |
 
 See [`docs/configuration_properties.md`](configuration_properties.md) for full details.
 
