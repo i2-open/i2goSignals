@@ -31,3 +31,13 @@ scrape_configs:
       - targets:
           - gosignals1:8888
           - gosignals2:8889
+  - job_name: i2scim
+    honor_timestamps: true
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /q/metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - scim_cluster1:8080
+          - scim_cluster2:8080

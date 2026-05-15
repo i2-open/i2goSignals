@@ -23,6 +23,7 @@ ok() { echo "  OK: $1"; }
 LOKI_URL=${LOKI_URL:-http://localhost:3100}
 GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
 GRAFANA_AUTH=${GRAFANA_AUTH:-admin:grafana}
+PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
 WAIT_SECS=${WAIT_SECS:-90}
 
 wait_for() {
@@ -106,6 +107,70 @@ for c in mongo1 mongo2 mongo3 gosignals1 gosignals2 gossfserver prometheus grafa
         || fail "container $c is in state '$state', expected running"
 done
 ok "all expected dev containers running"
+
+echo "9) i2scim peers visible in Loki labels (issue #73)..."
+# The SCIM peers run the i2scim-universal image which emits JSON logs with
+# service=i2scim once QUARKUS_LOG_CONSOLE_JSON=true is set. node_id and
+# cluster_name come from the env block on each container.
+for lbl_val in 'i2scim' 'scim_cluster1' 'scim_cluster2' 'dev-local'; do
+    echo "$labels_json" >/dev/null  # labels_json fetched in section 4
+done
+# Re-query label *values* rather than label *names* — names were checked
+# in section 4. Here we verify the SCIM peers produced lines with the
+# expected discriminators.
+service_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/service/values")
+echo "$service_values" | grep -q '"i2scim"' \
+    || fail "service=i2scim not seen in Loki label values: $service_values"
+node_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/node_id/values")
+for n in scim_cluster1 scim_cluster2; do
+    echo "$node_values" | grep -q "\"$n\"" \
+        || fail "node_id=$n not seen in Loki: $node_values"
+done
+cluster_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/cluster_name/values")
+echo "$cluster_values" | grep -q '"dev-local"' \
+    || fail "cluster_name=dev-local not seen in Loki: $cluster_values"
+ok "i2scim peers labelled with service/node_id/cluster_name"
+
+echo "10) LogQL filter by SCIM node_id returns only that peer..."
+end_ns=$(date +%s)000000000
+start_ns=$(( $(date +%s) - 600 ))000000000
+query='%7Bnode_id%3D%22scim_cluster1%22%7D'
+resp=$(curl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+echo "$resp" | grep -q '"status":"success"' \
+    || fail "LogQL query for scim_cluster1 did not return success: $resp"
+# Negative check: response must not surface scim_cluster2 stream labels.
+if echo "$resp" | grep -q '"node_id":"scim_cluster2"'; then
+    fail "LogQL query for scim_cluster1 leaked scim_cluster2 streams"
+fi
+ok "node_id=scim_cluster1 query returns only that peer"
+
+echo "11) Prometheus scrapes both i2scim peers (issue #73)..."
+wait_for "Prometheus /api/v1/targets" \
+    "curl -fsS ${PROMETHEUS_URL}/api/v1/targets"
+targets_json=$(curl -fsS "${PROMETHEUS_URL}/api/v1/targets")
+echo "$targets_json" | grep -q '"job":"i2scim"' \
+    || fail "Prometheus has no i2scim scrape job: $targets_json"
+for peer in scim_cluster1 scim_cluster2; do
+    echo "$targets_json" | grep -qE "\"scrapeUrl\":\"http://${peer}:8080/q/metrics\"" \
+        || fail "i2scim job missing target ${peer}:8080/q/metrics"
+done
+# At least one of the two should be up=1 after warm-up. The script intentionally
+# does not demand both up since a slow SCIM container should not fail the run.
+echo "$targets_json" | grep -qE '"job":"i2scim".*"health":"up"' \
+    || fail "no i2scim target is health=up in Prometheus"
+ok "i2scim job present with both peers, at least one healthy"
+
+echo "12) Existing {service=\"gosignals\"} query still returns rows..."
+end_ns=$(date +%s)000000000
+start_ns=$(( $(date +%s) - 600 ))000000000
+query='%7Bservice%3D%22gosignals%22%7D'
+resp=$(curl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+echo "$resp" | grep -q '"status":"success"' \
+    || fail "regression: gosignals LogQL query did not return success: $resp"
+# Expect at least one stream in the result so we know existing logs still flow.
+echo "$resp" | grep -q '"stream":' \
+    || fail "regression: gosignals query returned no streams"
+ok "no regression on goSignals log path"
 
 echo ""
 echo "All observability acceptance criteria passed."
