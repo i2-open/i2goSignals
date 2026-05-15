@@ -379,6 +379,10 @@ services:
       - ./config/scim/data1:/scim
     env_file:
       - ./config/scim/scripts/scim-server.env
+    environment:
+      - QUARKUS_LOG_CONSOLE_JSON=true
+      - NODE_ID=scim_cluster1
+      - CLUSTER_NAME=dev-local
   scim_cluster2:
     image: independentid/i2scim-universal:latest
     container_name: scim_cluster2
@@ -395,6 +399,10 @@ services:
       - ./config/scim/data2:/scim
     env_file:
       - ./config/scim/scripts/scim-server.env
+    environment:
+      - QUARKUS_LOG_CONSOLE_JSON=true
+      - NODE_ID=scim_cluster2
+      - CLUSTER_NAME=dev-local
   postgres:
     image: postgres:alpine
     volumes:

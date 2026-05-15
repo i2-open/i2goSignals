@@ -89,15 +89,23 @@ fast filtering and dashboards described later in this document.
 shipping pipeline so you can poke at it before committing to a cloud
 choice:
 
-| Container     | Role                       | URL                                |
-|---------------|----------------------------|------------------------------------|
-| `gosignals1`  | goSignals server (node 1)  | http://localhost:8888              |
-| `gosignals2`  | goSignals server (node 2)  | http://localhost:8889              |
-| `gossfserver` | Demo SSF receiver          | http://localhost:8881              |
-| `alloy`       | Log collector              | http://localhost:3200 (UI)         |
-| `loki`        | Log backend                | http://localhost:3100              |
-| `grafana`     | Query/visualization UI     | http://localhost:3000 (admin/grafana) |
-| `prometheus`  | Metrics backend            | http://localhost:9090              |
+| Container       | Role                       | URL                                |
+|-----------------|----------------------------|------------------------------------|
+| `gosignals1`    | goSignals server (node 1)  | http://localhost:8888              |
+| `gosignals2`    | goSignals server (node 2)  | http://localhost:8889              |
+| `gossfserver`   | Demo SSF receiver          | http://localhost:8881              |
+| `scim_cluster1` | i2scim peer (node 1)       | http://localhost:9000              |
+| `scim_cluster2` | i2scim peer (node 2)       | http://localhost:9001              |
+| `alloy`         | Log collector              | http://localhost:3200 (UI)         |
+| `loki`          | Log backend                | http://localhost:3100              |
+| `grafana`       | Query/visualization UI     | http://localhost:3000 (admin/grafana) |
+| `prometheus`    | Metrics backend            | http://localhost:9090              |
+
+The SCIM peers run the `independentid/i2scim-universal` image. They are
+wired into the same observability stack as the goSignals services: their
+stdout JSON is auto-discovered by Alloy via the Docker socket, and
+Prometheus scrapes their `/q/metrics` endpoint as the `i2scim` job. See
+§1 (label values) and §2 (Prometheus job) below for the contract.
 
 Run `make dev-up`, wait ~30 seconds, then:
 
@@ -263,6 +271,43 @@ parser, not the label index. See §8 for LogQL examples.
 > **Resist the temptation** to promote `stream_id` or `jti` to labels.
 > A single high-traffic stream + retention will produce millions of label
 > values and degrade the whole Loki tenant.
+
+### SCIM peers share the same label set
+
+The dev compose's `scim_cluster1` / `scim_cluster2` containers run the
+`independentid/i2scim-universal` image. With `QUARKUS_LOG_CONSOLE_JSON=true`
+and an identity-injecting environment block, they emit JSON log lines
+whose `service`, `node_id`, `cluster_name`, `component`, and `level`
+fields are extracted by the *same* Alloy `stage.json` pipeline that
+handles goSignals — no SCIM-specific Alloy stage. The label values that
+land in Loki are:
+
+| Label          | SCIM peer value(s)                  |
+|----------------|-------------------------------------|
+| `service`      | `i2scim`                            |
+| `node_id`      | `scim_cluster1`, `scim_cluster2`    |
+| `cluster_name` | `dev-local`                         |
+
+`{service="i2scim"}` returns both peers; `{node_id="scim_cluster1"}` narrows
+to one peer regardless of `service`. Sharing the schema is deliberate: the
+same dashboards and LogQL queries work across both code-bases. Operators
+running their own SCIM peers outside the dev compose should set the same
+three environment variables (`QUARKUS_LOG_CONSOLE_JSON=true`, `NODE_ID`,
+`CLUSTER_NAME`) on each container.
+
+### Prometheus scrape jobs
+
+| Job           | Targets                                   | Path          | Scheme |
+|---------------|-------------------------------------------|---------------|--------|
+| `prometheus`  | `localhost:9090`                          | `/metrics`    | http   |
+| `i2gosignals` | `gosignals1:8888`, `gosignals2:8889`      | `/metrics`    | https  |
+| `i2scim`      | `scim_cluster1:8080`, `scim_cluster2:8080`| `/q/metrics`  | http   |
+
+The `i2scim` job uses the Quarkus default metrics path (`/q/metrics`) and
+plain HTTP because the SCIM peers terminate TLS at the perimeter, not at
+the metrics endpoint inside the dev network. See
+[`config/monitor/prometheus/prometheus.yml`](../config/monitor/prometheus/prometheus.yml)
+for the full configuration.
 
 ---
 
@@ -529,6 +574,16 @@ JSON parser:
 
 ```logql
 {service="gosignals", node_id="gosignals1"}
+```
+
+### Tail a SCIM peer
+
+The SCIM peers share the label set described in §2:
+
+```logql
+{service="i2scim"}                       # both peers
+{service="i2scim", node_id="scim_cluster1"}   # one peer only
+{service="i2scim", level="ERROR"}        # SCIM errors only
 ```
 
 ### Find a specific JTI

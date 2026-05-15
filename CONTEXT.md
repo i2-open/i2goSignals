@@ -177,6 +177,47 @@ imports `internal/server`, crossing the `pkg/` → `internal/` boundary.
 Reabsorbing `pkg/goSsfServer` into `internal/` (or `cmd/goSsfServer/`)
 is deferred — recorded in PRD #50 Out of Scope.
 
+## Log-level policy
+
+The four slog levels (`DEBUG` / `INFO` / `WARN` / `ERROR`) are the same
+labels that flow through to Loki and any dashboards built on top. Pick the
+right one so operators can rely on `level=ERROR` as a real attention
+signal, not a noise floor:
+
+- **`DEBUG`** — Verbose internal state. Off in production.
+- **`INFO`** — Steady-state operational facts: stream registered, lease
+  acquired, push delivered.
+- **`WARN`** — Recoverable and *expected-as-part-of-normal-operation*
+  conditions. Examples:
+  - **Authentication and authorization failures** — bad token, expired
+    bearer, mismatched audience, missing scope. These are a normal part
+    of running an internet-facing server; clients re-auth, servers don't
+    need a human.
+  - **A stream that fails to connect on a single attempt.** Treat as
+    `WARN` until the retry budget is exhausted and it is declared a
+    permanent failure (then promote to `ERROR`).
+  - **A receiver returning 4xx that the RFC8935 retry policy already
+    covers.** The router handles it; the operator does not need to.
+- **`ERROR`** — Demands operations attention. Reserve for conditions that
+  will not resolve themselves without human intervention. Examples:
+  - A stream that has crossed its retry budget and is now declared
+    permanently offline.
+  - The persistence layer has lost its primary and exhausted reconnect
+    attempts.
+  - An internal invariant violation (e.g. lease ownership mismatch with
+    a fencing token in the past).
+
+The discipline is asymmetric. Promoting an item from `WARN` to `ERROR`
+because "it might matter" pollutes the signal that on-call uses to
+decide whether to wake up. Demoting an existing `ERROR` to `WARN`
+because the condition turned out to be normal-ops is welcome — leave a
+note at the call site so the next reader knows it was deliberate.
+
+If you find yourself wanting a fifth level ("this is serious but not
+quite ERROR"), the answer is almost always `WARN` plus an `error=` field
+on the record. Grafana / LogQL can already filter `{level="WARN"} | json
+| error="..."` for the subset that matters; a new level cannot.
+
 ## Adding a new persistence method
 
 1. Add the method to the appropriate **DAO interface**
