@@ -22,7 +22,7 @@ type testHarness struct {
 
 func newTestRouter(t *testing.T) *testHarness {
 	t.Helper()
-	t.Setenv("MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "push_state_test")
 	require.NoError(t, err)
 	t.Cleanup(func() {

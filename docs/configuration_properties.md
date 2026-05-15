@@ -35,7 +35,6 @@ in v0.12.0+**.
 | `MONGO_WATCH_FILE`                      | `I2SIG_STORE_MONGO_RESUME_FILE`             |
 | `MONGO_FAILTOMEM`                       | `I2SIG_STORE_MONGO_FALLBACK_MEM`            |
 | `MONGO_BACKGROUND_RECONNECT`            | `I2SIG_STORE_MONGO_BACKGROUND_RECONNECT`    |
-| `SPIFFE_MONGO_ENABLED`                  | `I2SIG_STORE_MONGO_SPIFFE_ENABLED`          |
 | `MEM_DIRECTORY`                         | `I2SIG_STORE_MEM_DIRECTORY`                 |
 | `MEM_SAVE_RATE`                         | `I2SIG_STORE_MEM_SAVE_RATE`                 |
 | `I2SIG_PUSH_STATUS_CHECK_INTERVAL`      | `I2SIG_PUSH_PROBE_INTERVAL`                 |
@@ -55,6 +54,7 @@ in v0.12.0+**.
 | `SERVER_CERT_PATH`                      | `I2SIG_TLS_CERT_PATH`                       |
 | `CA_CERT` (also `CERT_CA_PUB_KEY`)      | `I2SIG_TLS_CA_CERT`                         |
 | `SPIFFE_TRUST_DOMAIN`                   | `I2SIG_SPIFFE_TRUST_DOMAIN`                 |
+| `SPIFFE_MONGO_ENABLED`                  | `I2SIG_SPIFFE_MONGO_ENABLED`                |
 
 ### Value translation
 
@@ -140,7 +140,6 @@ understands. They are documented in their natural section below.
 | `I2SIG_STORE_MONGO_FALLBACK_MEM`          | If `false`, the server fails to start when it cannot connect to MongoDB. If `true`, it falls back to the in-memory provider.                 | `true`                                                 |
 | `I2SIG_STORE_MONGO_BACKGROUND_RECONNECT`  | If `true`, the server starts even when MongoDB is unreachable and retries the connection in the background. Used with `_FALLBACK_MEM=true`.  | `false`                                                |
 | `I2SIG_STORE_MONGO_WATCH_ENABLED`         | If `true`, the server uses MongoDB Change Streams to watch for new events. Deprecated in favour of cluster wake-ups + backfill.              | `false`                                                |
-| `I2SIG_STORE_MONGO_SPIFFE_ENABLED`        | If `true`, use SPIFFE X.509-SVID mTLS for MongoDB connections instead of username/password. Requires `SPIFFE_ENDPOINT_SOCKET`.               | `false`                                                |
 
 ## Store_Mem
 
@@ -197,9 +196,7 @@ as floating-point seconds.
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------|
 | `SPIFFE_ENDPOINT_SOCKET`       | Path to the SPIRE agent Unix socket. Setting this enables all SPIFFE features; unset, the server uses HMAC/OAuth mode.                       | _none_ (SPIFFE disabled)       |
 | `I2SIG_SPIFFE_TRUST_DOMAIN`    | SPIFFE trust domain for this cluster. Used to authorise peer SVIDs in inter-cluster calls and inbound WakeTransmitter requests.              | `cluster.i2gosignals.internal` |
-
-See also `I2SIG_STORE_MONGO_SPIFFE_ENABLED` under [Store_Mongo](#store_mongo)
-to opt MongoDB connections into SPIFFE mTLS.
+| `I2SIG_SPIFFE_MONGO_ENABLED`   | If `true`, use SPIFFE X.509-SVID mTLS for MongoDB connections instead of username/password. Requires `SPIFFE_ENDPOINT_SOCKET`.                | `false`                        |
 
 ## Dev-only flags
 
