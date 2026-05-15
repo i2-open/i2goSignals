@@ -34,10 +34,10 @@ func TestSNILogging(t *testing.T) {
 	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	slog.SetDefault(slog.New(handler))
 
-	// Mock environment variables for TLS
-	t.Setenv("TLS_ENABLED", "true")
-	t.Setenv("SERVER_CERT_PATH", "../../config/certs/server-cert.pem")
-	t.Setenv("SERVER_KEY_PATH", "../../config/certs/server-key.pem")
+	// Mock environment variables for TLS (v0.11.0 names)
+	t.Setenv("I2SIG_TLS_ENABLED", "true")
+	t.Setenv("I2SIG_TLS_CERT_PATH", "../../config/certs/server-cert.pem")
+	t.Setenv("I2SIG_TLS_KEY_PATH", "../../config/certs/server-key.pem")
 
 	server := &http.Server{
 		Addr: "127.0.0.1:0",

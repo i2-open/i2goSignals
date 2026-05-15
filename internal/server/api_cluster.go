@@ -100,19 +100,16 @@ func (sa *SignalsApplication) WakeTransmitter(w http.ResponseWriter, r *http.Req
 }
 
 // isPeerSpiffeAuthenticated returns true if the TLS connection's peer
-// certificate carries a SPIFFE ID that belongs to the cluster trust domain
-// configured in SPIFFE_TRUST_DOMAIN (default: cluster.i2gosignals.internal).
+// certificate carries a SPIFFE ID that belongs to the cluster trust
+// domain configured via I2SIG_SPIFFE_TRUST_DOMAIN (default:
+// cluster.i2gosignals.internal).
 //
 // This is called only when r.TLS.PeerCertificates is non-empty, i.e. after
 // the peer has already presented a certificate during the TLS handshake.
 func isPeerSpiffeAuthenticated(state *tls.ConnectionState) bool {
-	trustDomain := os.Getenv(tlsSupport.EnvSpiffeTrustDomain)
-	if trustDomain == "" {
-		trustDomain = tlsSupport.DefaultTrustDomain
-	}
-	td, err := spiffeid.TrustDomainFromString(trustDomain)
+	td, err := tlsSupport.ClusterTrustDomain()
 	if err != nil {
-		serverLog.Warn("CLUSTER: invalid SPIFFE_TRUST_DOMAIN", "value", trustDomain, "err", err)
+		serverLog.Warn("CLUSTER: invalid SPIFFE trust domain", "err", err)
 		return false
 	}
 	id, err := spiffetls.PeerIDFromConnectionState(*state)

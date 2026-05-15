@@ -10,11 +10,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 )
 
 func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
-	tlsEnabled := stripQuotes(os.Getenv("TLS_ENABLED")) == "true"
+	tlsEnabled := tlsEnabledFromEnv()
 	spiffeEnabled := SpiffeEnabled()
 
 	if !tlsEnabled && !spiffeEnabled {
@@ -125,12 +126,12 @@ func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
 }
 
 func GetCertKeyPaths() (certFile string, keyFile string) {
-	serverKeyPath := os.Getenv(EnvServerKey)
+	serverKeyPath := envcompat.Lookup(EnvServerKey, "SERVER_KEY_PATH")
 	if serverKeyPath == "" {
 		serverKeyPath = "config/certs/server-key.pem"
 	}
 
-	serverCertPath := os.Getenv(EnvServerCert)
+	serverCertPath := envcompat.Lookup(EnvServerCert, "SERVER_CERT_PATH")
 	if serverCertPath == "" {
 		serverCertPath = "config/certs/server-cert.pem"
 	}
@@ -138,11 +139,28 @@ func GetCertKeyPaths() (certFile string, keyFile string) {
 }
 
 const (
-	EnvServerKey    = "SERVER_KEY_PATH"
-	EnvServerCert   = "SERVER_CERT_PATH"
-	EnvCertCaPubKey = "CERT_CA_PUB_KEY"
-	EnvCaCert       = "CA_CERT"
+	EnvServerKey  = "I2SIG_TLS_KEY_PATH"
+	EnvServerCert = "I2SIG_TLS_CERT_PATH"
+	EnvCaCert     = "I2SIG_TLS_CA_CERT"
 )
+
+// caCertPathFromEnv returns the CA-certificate path configured via
+// I2SIG_TLS_CA_CERT (preferred) or the deprecated CA_CERT (with a
+// one-time WARN through envcompat). The historical CERT_CA_PUB_KEY
+// alias is intentionally not consulted: it has been removed in v0.11.0
+// because it duplicated CA_CERT.
+func caCertPathFromEnv() string {
+	return envcompat.Lookup(EnvCaCert, "CA_CERT")
+}
+
+// tlsEnabledFromEnv reads the TLS enablement flag through envcompat,
+// preferring I2SIG_TLS_ENABLED and falling back to the deprecated
+// TLS_ENABLED. Surrounding quotes are stripped so values written as
+// I2SIG_TLS_ENABLED='"true"' (the form some compose files use) are
+// honored.
+func tlsEnabledFromEnv() bool {
+	return stripQuotes(envcompat.Lookup("I2SIG_TLS_ENABLED", "TLS_ENABLED")) == "true"
+}
 
 // stripQuotes removes surrounding double or single quotes from a string
 func stripQuotes(s string) string {
@@ -154,18 +172,19 @@ func stripQuotes(s string) string {
 	return s
 }
 
-// GetGlobalCertPool returns a cert pool containing the CA certificate found via standard env vars
-// (CERT_CA_PUB_KEY, CA_CERT, then any extraEnvVars), falling back to "config/certs/ca-cert.pem".
-// Returns the system cert pool (augmented with the CA cert) if found.
+// GetGlobalCertPool returns a cert pool containing the CA certificate
+// found via I2SIG_TLS_CA_CERT (preferred), the deprecated CA_CERT, or
+// any caller-supplied extraEnvVars (consulted last), falling back to
+// "config/certs/ca-cert.pem". Returns the system cert pool augmented
+// with the CA cert if found.
 func GetGlobalCertPool(extraEnvVars ...string) *x509.CertPool {
-	envVars := []string{EnvCertCaPubKey, EnvCaCert}
-	envVars = append(envVars, extraEnvVars...)
-
-	caCertPath := ""
-	for _, env := range envVars {
-		if v := os.Getenv(env); v != "" {
-			caCertPath = v
-			break
+	caCertPath := caCertPathFromEnv()
+	if caCertPath == "" {
+		for _, env := range extraEnvVars {
+			if v := os.Getenv(env); v != "" {
+				caCertPath = v
+				break
+			}
 		}
 	}
 	if caCertPath == "" {
@@ -195,10 +214,7 @@ func GetGlobalCertPool(extraEnvVars ...string) *x509.CertPool {
 // CheckCaInstalled will check if a CA certificate has been installed in the http.Client or if nil, the system cert pool
 func CheckCaInstalled(client *http.Client) {
 	// Note; this is not tested because we don't want to install temporary test certs.
-	caCertPath := os.Getenv(EnvCertCaPubKey)
-	if caCertPath == "" {
-		caCertPath = os.Getenv(EnvCaCert)
-	}
+	caCertPath := caCertPathFromEnv()
 	if caCertPath == "" {
 		caCertPath = "config/certs/ca-cert.pem"
 	}

@@ -327,10 +327,19 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 }
 
 const (
-	// CEnvSpiffeMongoEnabled controls whether SPIFFE mTLS is used for MongoDB
-	// connections. Requires SPIFFE_ENDPOINT_SOCKET to also be set.
-	CEnvSpiffeMongoEnabled = "SPIFFE_MONGO_ENABLED"
+	// CEnvSpiffeMongoEnabled is the canonical (v0.11.0+) env var that
+	// controls whether SPIFFE mTLS is used for MongoDB connections.
+	// Requires SPIFFE_ENDPOINT_SOCKET to also be set. The deprecated
+	// SPIFFE_MONGO_ENABLED is still accepted at runtime via envcompat.
+	CEnvSpiffeMongoEnabled = "I2SIG_SPIFFE_MONGO_ENABLED"
 )
+
+// spiffeMongoEnabled returns true when SPIFFE mTLS should be used for
+// MongoDB. Reads I2SIG_SPIFFE_MONGO_ENABLED (preferred) or the
+// deprecated SPIFFE_MONGO_ENABLED through envcompat.
+func spiffeMongoEnabled() bool {
+	return envcompat.Lookup(CEnvSpiffeMongoEnabled, "SPIFFE_MONGO_ENABLED") == "true"
+}
 
 func (m *MongoProvider) connect() error {
 	m.mu.Lock()
@@ -355,7 +364,7 @@ func (m *MongoProvider) connect() error {
 	// and use it as the client certificate. This replaces username/password
 	// authentication with cryptographic workload identity, provided the MongoDB
 	// server is configured to accept mTLS with the SPIRE CA bundle.
-	if os.Getenv(CEnvSpiffeMongoEnabled) == "true" && tlsSupport.SpiffeEnabled() {
+	if spiffeMongoEnabled() && tlsSupport.SpiffeEnabled() {
 		// Close any existing X509Source before creating a new one on reconnection.
 		// Without this, the old source's background watcher goroutine leaks.
 		if m.x509Source != nil {

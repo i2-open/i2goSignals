@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
@@ -26,9 +27,11 @@ const (
 	// Unix socket path. Setting this variable enables all SPIFFE features.
 	EnvSpiffeSocket = "SPIFFE_ENDPOINT_SOCKET"
 
-	// EnvSpiffeTrustDomain is the environment variable that specifies the SPIFFE
-	// trust domain for this cluster.
-	EnvSpiffeTrustDomain = "SPIFFE_TRUST_DOMAIN"
+	// EnvSpiffeTrustDomain is the canonical (v0.11.0+) environment variable
+	// that specifies the SPIFFE trust domain for this cluster. The
+	// deprecated SPIFFE_TRUST_DOMAIN name is still accepted at runtime
+	// via envcompat.
+	EnvSpiffeTrustDomain = "I2SIG_SPIFFE_TRUST_DOMAIN"
 
 	// DefaultTrustDomain is the default SPIFFE trust domain used when
 	// SPIFFE_TRUST_DOMAIN is not set.
@@ -59,9 +62,10 @@ func NewX509Source(ctx context.Context) (*workloadapi.X509Source, error) {
 }
 
 // ClusterTrustDomain returns the trust domain for this cluster from
+// I2SIG_SPIFFE_TRUST_DOMAIN (preferred) or the deprecated
 // SPIFFE_TRUST_DOMAIN, falling back to DefaultTrustDomain.
 func ClusterTrustDomain() (spiffeid.TrustDomain, error) {
-	name := os.Getenv(EnvSpiffeTrustDomain)
+	name := envcompat.Lookup(EnvSpiffeTrustDomain, "SPIFFE_TRUST_DOMAIN")
 	if name == "" {
 		name = DefaultTrustDomain
 	}
