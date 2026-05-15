@@ -39,8 +39,8 @@ type EventPollBuffer struct {
 // retrieved via EventPollBuffer.GetEvents(). The two timeout parameters
 // govern long-poll behaviour for this buffer: defaultTimeoutSecs is applied
 // when a receiver omits timeoutSecs, and maxTimeoutSecs (>0) caps receiver
-// requests. See docs/configuration_properties.md (POLL_DEFAULT_TIMEOUT,
-// POLL_MAX_TIMEOUT) for the wired-up env vars.
+// requests. See docs/configuration_properties.md
+// (I2SIG_POLL_DEFAULT_TIMEOUT, I2SIG_POLL_MAX_TIMEOUT) for the wired-up env vars.
 func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutSecs int) *EventPollBuffer {
 
 	buffer := &EventPollBuffer{

@@ -49,6 +49,8 @@ in v0.12.0+**.
 | `POLL_UNAUTHORIZED_RETRY_DELAY`         | `I2SIG_POLL_AUTH_RETRY_DELAY`               |
 | `POLL_UNAUTHORIZED_RETRY_LIMIT`         | `I2SIG_POLL_AUTH_RETRY_LIMIT`               |
 | `POLL_SRV_BEHAVIOR` *(value change)*    | `I2SIG_POLL_RESPECT_STATUS`                 |
+| `POLL_DEFAULT_TIMEOUT`                  | `I2SIG_POLL_DEFAULT_TIMEOUT`                |
+| `POLL_MAX_TIMEOUT`                      | `I2SIG_POLL_MAX_TIMEOUT`                    |
 | `TLS_ENABLED`                           | `I2SIG_TLS_ENABLED`                         |
 | `SERVER_KEY_PATH`                       | `I2SIG_TLS_KEY_PATH`                        |
 | `SERVER_CERT_PATH`                      | `I2SIG_TLS_CERT_PATH`                       |
@@ -186,10 +188,10 @@ as floating-point seconds.
 Inbound poll requests served by this transmitter. Read once at server startup;
 must be set uniformly across cluster nodes to avoid receiver-visible variance.
 
-| Variable                | Description                                                                                                                                                                                                                                                              | Default |
-|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `POLL_DEFAULT_TIMEOUT`  | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                                  | `30`    |
-| `POLL_MAX_TIMEOUT`      | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                              | `300`   |
+| Variable                       | Description                                                                                                                                                                                                                                                       | Default |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `I2SIG_POLL_DEFAULT_TIMEOUT`   | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                          | `30`    |
+| `I2SIG_POLL_MAX_TIMEOUT`       | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                       | `300`   |
 
 ## TLS
 

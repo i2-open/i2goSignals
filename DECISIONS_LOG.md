@@ -84,14 +84,18 @@ Two env vars govern the per-stream `EventPollBuffer` long-poll behaviour, read
 once at `NewRouter` startup and plumbed positionally through
 `buffer.CreateEventPollBuffer(jtis, defaultTimeoutSecs, maxTimeoutSecs)`:
 
-- **`POLL_DEFAULT_TIMEOUT`** (default `30`) — replaces the previous hard-coded
-  30-second fallback applied when a receiver omits `timeoutSecs`.
-- **`POLL_MAX_TIMEOUT`** (default `300`) — caps inbound receiver-supplied
+- **`I2SIG_POLL_DEFAULT_TIMEOUT`** (default `30`) — replaces the previous
+  hard-coded 30-second fallback applied when a receiver omits `timeoutSecs`.
+- **`I2SIG_POLL_MAX_TIMEOUT`** (default `300`) — caps inbound receiver-supplied
   `timeoutSecs`; values above this are silently clamped.
 
-`0` is the documented escape hatch for each: `POLL_DEFAULT_TIMEOUT=0` disables
-implicit long-polling (omitted `timeoutSecs` → immediate return);
-`POLL_MAX_TIMEOUT=0` disables the cap (restores pre-change behaviour).
+Legacy `POLL_DEFAULT_TIMEOUT` / `POLL_MAX_TIMEOUT` (introduced on master
+alongside this feature, before merging the v0.11.0 rename branch) continue to
+work as deprecated fallbacks via `envcompat.Lookup`.
+
+`0` is the documented escape hatch for each: `I2SIG_POLL_DEFAULT_TIMEOUT=0`
+disables implicit long-polling (omitted `timeoutSecs` → immediate return);
+`I2SIG_POLL_MAX_TIMEOUT=0` disables the cap (restores pre-change behaviour).
 Negative / unparseable values WARN and fall back to the code default; a
 `default > max` misconfiguration clamps the default down to max with a WARN at
 startup. Server starts in all cases.
@@ -99,12 +103,12 @@ startup. Server starts in all cases.
 ### Why this carries weight
 - **Resource defence is now the default.** Before this change, a receiver could
   request an arbitrarily long `timeoutSecs` and tie up a goroutine + buffer
-  notifier on every poll stream. Shipping `POLL_MAX_TIMEOUT=300` as a default
-  closes that gap for every operator who doesn't override it.
+  notifier on every poll stream. Shipping `I2SIG_POLL_MAX_TIMEOUT=300` as a
+  default closes that gap for every operator who doesn't override it.
 - **Disclosed behaviour change.** Receivers that today send
   `timeoutSecs: 600` will be clamped to `300s`. Documented in
   `docs/configuration_properties.md` and in the implementing PR description;
-  `POLL_MAX_TIMEOUT=0` is the opt-out.
+  `I2SIG_POLL_MAX_TIMEOUT=0` is the opt-out.
 - **Silent clamp, not rejection.** RFC8936 §2.4 makes `timeoutSecs` a SHOULD,
   not a MUST — clamping is spec-compliant and avoids breaking existing
   receivers that ask for "too much". A per-request log or HTTP error would
