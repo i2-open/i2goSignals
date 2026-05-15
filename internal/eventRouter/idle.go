@@ -10,7 +10,11 @@ import (
 
 // idleVerifyEnvVar is the env var that controls T3 idle-keepalive cadence. Slice 8 documents
 // it in docs/configuration_properties.md alongside the other I2SIG_PUSH_* knobs.
-const idleVerifyEnvVar = "I2SIG_PUSH_IDLE_VERIFY_INTERVAL"
+const idleVerifyEnvVar = "I2SIG_PUSH_KEEPALIVE_INTERVAL"
+
+// idleVerifyEnvVarLegacy is the pre-0.11.0 name. envcompat issues a one-time deprecation
+// WARN when it's set; remove in a future release.
+const idleVerifyEnvVarLegacy = "I2SIG_PUSH_IDLE_VERIFY_INTERVAL"
 
 // defaultIdleVerifyInterval is the cadence used when the env var is unset or invalid. The
 // 5-minute default trades off:
@@ -25,7 +29,7 @@ const defaultIdleVerifyInterval = 5 * time.Minute
 // LoadIdleVerifyInterval returns the configured T3 idle-keepalive cadence. A non-positive
 // value (including the explicit "0" override) disables idle generation in runPushLoop.
 func LoadIdleVerifyInterval() time.Duration {
-    return parseDurationEnv(idleVerifyEnvVar, defaultIdleVerifyInterval)
+    return parseDurationEnv(idleVerifyEnvVar, idleVerifyEnvVarLegacy, defaultIdleVerifyInterval)
 }
 
 // GenerateVerifyEvent persists an SSF verification SET (per OpenID SSF §8.1.4.2) scoped to the

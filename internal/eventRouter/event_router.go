@@ -207,7 +207,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 
 	backfillInterval := 1 * time.Second
-	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_INTERVAL"); val != "" {
+	if val := envcompat.Lookup("I2SIG_PUSH_BACKFILL_INTERVAL", "I2SIG_TRANSMITTER_BACKFILL_INTERVAL"); val != "" {
 		if d, err := time.ParseDuration(val); err == nil {
 			backfillInterval = d
 		}
@@ -215,7 +215,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.backfillInterval = backfillInterval
 
 	backfillBatch := 100
-	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_BATCH"); val != "" {
+	if val := envcompat.Lookup("I2SIG_PUSH_BACKFILL_BATCH", "I2SIG_TRANSMITTER_BACKFILL_BATCH"); val != "" {
 		if i, err := strconv.Atoi(val); err == nil {
 			backfillBatch = i
 		}

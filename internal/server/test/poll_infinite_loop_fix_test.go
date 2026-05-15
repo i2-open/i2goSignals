@@ -15,8 +15,8 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	logger.Init(logger.Options{Level: "debug"})
 
 	// Set short backoff for testing to speed up failure/retry cycle
-	t.Setenv("POLL_RETRY_BASE_DELAY", "0.1")
-	t.Setenv("POLL_RETRY_MAX_DELAY", "0.5")
+	t.Setenv("I2SIG_POLL_RETRY_BASE_DELAY", "0.1")
+	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "0.5")
 
 	instance, err := createServer(t, "test_infinite_loop_fix", true)
 	assert.NoError(t, err)

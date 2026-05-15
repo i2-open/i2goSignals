@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -151,20 +151,22 @@ func defaultSleep(ctx context.Context, d time.Duration) bool {
 // for any unset values. Slice 8 will document these env vars in docs/configuration_properties.md.
 func LoadRecoveryConfig() RecoveryConfig {
 	cfg := RecoveryConfig{
-		StatusCheckInterval: parseDurationEnv("I2SIG_PUSH_STATUS_CHECK_INTERVAL", 30*time.Second),
-		BaseDelay:           parseDurationEnv("I2SIG_PUSH_RETRY_BASE_DELAY", 1*time.Second),
-		BackoffFactor:       parseFloatEnv("I2SIG_PUSH_RETRY_BACKOFF_FACTOR", 2.0),
-		MaxDelay:            parseDurationEnv("I2SIG_PUSH_RETRY_MAX_DELAY", 5*time.Minute),
-		TransportLimit:      parseDurationEnv("I2SIG_PUSH_RETRY_LIMIT", 6*time.Hour),
-		AuthRetryDelay:      parseDurationEnv("I2SIG_PUSH_UNAUTHORIZED_RETRY_DELAY", 15*time.Second),
-		AuthRetryLimit:      parseIntEnv("I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT", 10),
+		StatusCheckInterval: parseDurationEnv("I2SIG_PUSH_PROBE_INTERVAL", "I2SIG_PUSH_STATUS_CHECK_INTERVAL", 30*time.Second),
+		BaseDelay:           parseDurationEnv("I2SIG_PUSH_RETRY_BASE_DELAY", "", 1*time.Second),
+		BackoffFactor:       parseFloatEnv("I2SIG_PUSH_RETRY_BACKOFF_FACTOR", "", 2.0),
+		MaxDelay:            parseDurationEnv("I2SIG_PUSH_RETRY_MAX_DELAY", "", 5*time.Minute),
+		TransportLimit:      parseDurationEnv("I2SIG_PUSH_RETRY_LIMIT", "", 6*time.Hour),
+		AuthRetryDelay:      parseDurationEnv("I2SIG_PUSH_AUTH_RETRY_DELAY", "I2SIG_PUSH_UNAUTHORIZED_RETRY_DELAY", 15*time.Second),
+		AuthRetryLimit:      parseIntEnv("I2SIG_PUSH_AUTH_RETRY_LIMIT", "I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT", 10),
 	}
 	cfg.fillDefaults()
 	return cfg
 }
 
-func parseDurationEnv(name string, defaultVal time.Duration) time.Duration {
-	v := os.Getenv(name)
+// parseDurationEnv reads `name` first, then falls back to `oldName` (logged once
+// as deprecated by envcompat) when `oldName` is non-empty.
+func parseDurationEnv(name, oldName string, defaultVal time.Duration) time.Duration {
+	v := lookupEnv(name, oldName)
 	if v == "" {
 		return defaultVal
 	}
@@ -176,8 +178,8 @@ func parseDurationEnv(name string, defaultVal time.Duration) time.Duration {
 	return d
 }
 
-func parseFloatEnv(name string, defaultVal float64) float64 {
-	v := os.Getenv(name)
+func parseFloatEnv(name, oldName string, defaultVal float64) float64 {
+	v := lookupEnv(name, oldName)
 	if v == "" {
 		return defaultVal
 	}
@@ -189,8 +191,8 @@ func parseFloatEnv(name string, defaultVal float64) float64 {
 	return f
 }
 
-func parseIntEnv(name string, defaultVal int) int {
-	v := os.Getenv(name)
+func parseIntEnv(name, oldName string, defaultVal int) int {
+	v := lookupEnv(name, oldName)
 	if v == "" {
 		return defaultVal
 	}
@@ -200,6 +202,13 @@ func parseIntEnv(name string, defaultVal int) int {
 		return defaultVal
 	}
 	return i
+}
+
+func lookupEnv(name, oldName string) string {
+	if oldName == "" {
+		return envcompat.Lookup(name, "")
+	}
+	return envcompat.Lookup(name, oldName)
 }
 
 // recoveryLoop interrogates the receiver's /status endpoint until it can return a definite

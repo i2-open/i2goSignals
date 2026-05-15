@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -903,37 +901,14 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		}
 	}()
 
-	// Exponential backoff configuration
-	baseDelay := 1.0 // default 1 second
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_BASE_DELAY"), 64); err == nil {
-		baseDelay = v
-	}
-	maxDelay := 300.0 // default 5 minutes
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_MAX_DELAY"), 64); err == nil {
-		maxDelay = v
-	}
-	backoffFactor := 2.0 // default factor of 2
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_BACKOFF_FACTOR"), 64); err == nil {
-		backoffFactor = v
-	}
-	retryLimit := 6 * time.Hour
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_RETRY_LIMIT"), 64); err == nil {
-		retryLimit = time.Duration(v) * time.Second
-	}
-
-	statusCheckInterval := 30 * time.Second
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_STATUS_CHECK_INTERVAL"), 64); err == nil {
-		statusCheckInterval = time.Duration(v * float64(time.Second))
-	}
-
-	unauthorizedRetryDelay := 15 * time.Second
-	if v, err := strconv.ParseFloat(os.Getenv("POLL_UNAUTHORIZED_RETRY_DELAY"), 64); err == nil {
-		unauthorizedRetryDelay = time.Duration(v * float64(time.Second))
-	}
-	unauthorizedRetryLimit := 10
-	if v, err := strconv.Atoi(os.Getenv("POLL_UNAUTHORIZED_RETRY_LIMIT")); err == nil {
-		unauthorizedRetryLimit = v
-	}
+	pollCfg := loadPollConfig()
+	baseDelay := pollCfg.BaseDelay
+	maxDelay := pollCfg.MaxDelay
+	backoffFactor := pollCfg.BackoffFactor
+	retryLimit := pollCfg.RetryLimit
+	statusCheckInterval := pollCfg.StatusCheckInterval
+	unauthorizedRetryDelay := pollCfg.UnauthorizedRetryDelay
+	unauthorizedRetryLimit := pollCfg.UnauthorizedRetryLimit
 
 	// Initial status check upon lease acquisition - verify that the transmitter is active
 	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {

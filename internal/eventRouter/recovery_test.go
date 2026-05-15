@@ -305,8 +305,8 @@ func TestLoadRecoveryConfig_AppliesDefaults(t *testing.T) {
 func TestLoadRecoveryConfig_ParsesEnvVars(t *testing.T) {
 	t.Setenv("I2SIG_PUSH_RETRY_BASE_DELAY", "500ms")
 	t.Setenv("I2SIG_PUSH_RETRY_LIMIT", "1h")
-	t.Setenv("I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT", "5")
-	t.Setenv("I2SIG_PUSH_STATUS_CHECK_INTERVAL", "2s")
+	t.Setenv("I2SIG_PUSH_AUTH_RETRY_LIMIT", "5")
+	t.Setenv("I2SIG_PUSH_PROBE_INTERVAL", "2s")
 
 	cfg := LoadRecoveryConfig()
 	assert.Equal(t, 500*time.Millisecond, cfg.BaseDelay)

@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -56,10 +55,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		sa.GetStreamService().UpdateRemoteAddress(r.Context(), authCtx.StreamId, remoteIP)
 	}
 
-	behavior := os.Getenv("POLL_SRV_BEHAVIOR")
-	if behavior == "" {
-		behavior = "MODE"
-	}
+	respectStatus := loadPollRespectStatus()
 
 	// Parse the RFC8936 poll request
 	pollReq, err := goSetPoll.ParsePollRequest(r)
@@ -85,32 +81,31 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		}
 	}
 
-	// Determine effective status based on behavior
+	// Determine effective status. When respectStatus is false (legacy ALWAYSON),
+	// a disabled stream is treated as merely paused so a receiver can resume by
+	// acking outstanding events.
 	effectiveStatus := streamState.Status
-	if behavior == "ALWAYSON" && effectiveStatus == model.StreamStateDisable {
+	if !respectStatus && effectiveStatus == model.StreamStateDisable {
 		effectiveStatus = model.StreamStatePause
 	}
 
-	if behavior == "MODE" || behavior == "ALWAYSON" {
-		hasAcksOrErrs := len(request.Acks) > 0 || len(request.SetErrs) > 0
-
-		if effectiveStatus == model.StreamStateDisable {
-			if !hasAcksOrErrs {
-				w.WriteHeader(http.StatusForbidden)
-				return
-			}
-		} else if effectiveStatus == model.StreamStatePause {
-			if !hasAcksOrErrs {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
+	hasAcksOrErrs := len(request.Acks) > 0 || len(request.SetErrs) > 0
+	if effectiveStatus == model.StreamStateDisable {
+		if !hasAcksOrErrs {
+			w.WriteHeader(http.StatusForbidden)
+			return
 		}
-
-		if effectiveStatus != model.StreamStateEnabled {
-			request.ReturnImmediately = true
-			// backoff rate limiter to prevent repeated requests
-			time.Sleep(100 * time.Millisecond)
+	} else if effectiveStatus == model.StreamStatePause {
+		if !hasAcksOrErrs {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
+	}
+
+	if effectiveStatus != model.StreamStateEnabled {
+		request.ReturnImmediately = true
+		// backoff rate limiter to prevent repeated requests
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	wait := ""
