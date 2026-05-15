@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	ssf "github.com/i2-open/i2goSignals/pkg/goSsfServer"
@@ -34,7 +35,7 @@ func stripQuotes(s string) string {
 func StartProvider(dbUrl string) (*dbProviders.Persistence, error) {
 
 	name := "ssf"
-	if found := stripQuotes(os.Getenv("DBNAME")); found != "" {
+	if found := stripQuotes(envcompat.Lookup("I2SIG_STORE_MONGO_DBNAME", "DBNAME")); found != "" {
 		mLog.Info("Using dbname", "name", found)
 		name = found
 	}

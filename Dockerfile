@@ -18,6 +18,12 @@ ARG USER=1000:1000
 
 WORKDIR /app
 
+# /app/resources is where the mongo watchtokens code writes its resume-token file.
+# WORKDIR is owned by root, so we create the directory and hand it to the runtime
+# user before dropping privileges. tokens.go MkdirAll's nested paths at runtime,
+# but the parent must already be writable by the unprivileged process.
+RUN mkdir -p /app/resources && chown ${USER} /app/resources && chmod 0770 /app/resources
+
 # Numeric UID is required so k8s pod securityContext runAsNonRoot can resolve it
 # (named users don't work: https://github.com/kubernetes/kubernetes/issues/40958).
 USER ${USER}
@@ -28,7 +34,6 @@ COPY --chmod=0755 ./bin/linux/${TARGETARCH}/goSsfServer     ./goSsfServer
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/cluster-monitor ./cluster-monitor
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/genTlsKeys      ./genTlsKeys
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/healthcheck     ./healthcheck
-COPY --chmod=0766 --chown=${USER} ./cmd/goSignals/resources ./resources
 
 EXPOSE 8888
 

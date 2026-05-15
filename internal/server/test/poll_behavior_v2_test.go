@@ -61,7 +61,7 @@ func TestPollBehaviorSuite(t *testing.T) {
 
 func (suite *PollBehaviorSuite) TestPollDisabledMode() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to disabled
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
@@ -84,7 +84,7 @@ func (suite *PollBehaviorSuite) TestPollDisabledMode() {
 
 func (suite *PollBehaviorSuite) TestPollPausedModeNoAcks() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to paused
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
@@ -107,7 +107,7 @@ func (suite *PollBehaviorSuite) TestPollPausedModeNoAcks() {
 
 func (suite *PollBehaviorSuite) TestPollPausedModeWithAcks() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to paused
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
@@ -138,7 +138,7 @@ func (suite *PollBehaviorSuite) TestPollPausedModeWithAcks() {
 
 func (suite *PollBehaviorSuite) TestPollDisabledModeWithAcks() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to disabled
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
@@ -165,7 +165,7 @@ func (suite *PollBehaviorSuite) TestPollDisabledModeWithAcks() {
 
 func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Ensure stream is enabled
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateEnabled, "")
@@ -235,7 +235,7 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 
 func (suite *PollBehaviorSuite) TestPollPausedWithSetErrs() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to paused
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStatePause, "Testing pause")
@@ -263,7 +263,7 @@ func (suite *PollBehaviorSuite) TestPollPausedWithSetErrs() {
 
 func (suite *PollBehaviorSuite) TestPollDisabledWithSetErrs() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
 
 	// Set stream to disabled
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
@@ -291,7 +291,7 @@ func (suite *PollBehaviorSuite) TestPollDisabledWithSetErrs() {
 
 func (suite *PollBehaviorSuite) TestPollAlwaysOnDisabled() {
 	t := suite.T()
-	suite.T().Setenv("POLL_SRV_BEHAVIOR", "ALWAYSON")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "false")
 
 	// Set stream to disabled
 	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing disable")
@@ -311,6 +311,52 @@ func (suite *PollBehaviorSuite) TestPollAlwaysOnDisabled() {
 	assert.NoError(t, err)
 	// In ALWAYSON and DISABLED, it should behave like PAUSED -> return 503 if no acks
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// Slice #68 regression: confirms the legacy POLL_SRV_BEHAVIOR=MODE and
+// POLL_SRV_BEHAVIOR=ALWAYSON values translate to the same poll-transmitter
+// behavior as the new boolean I2SIG_POLL_RESPECT_STATUS=true / false. Both
+// configurations are exercised against the same disabled stream and must
+// produce identical HTTP status codes.
+func (suite *PollBehaviorSuite) TestPollSrvBehavior_LegacyTranslation() {
+	t := suite.T()
+
+	suite.instance.UpdateStreamStatus(suite.stream.Id, model.StreamStateDisable, "Testing legacy translation")
+	state, err := suite.instance.GetStreamState(suite.stream.Id)
+	assert.NoError(t, err)
+	suite.instance.app.EventRouter.UpdateStreamState(state)
+
+	doPoll := func() int {
+		pollParams := model.PollParameters{ReturnImmediately: true}
+		bodyBytes, _ := json.Marshal(pollParams)
+		pollUrl := suite.instance.GetPollUrl(suite.stream)
+		req, _ := http.NewRequest(http.MethodPost, pollUrl, bytes.NewReader(bodyBytes))
+		req.Header.Set("Authorization", suite.stream.Delivery.PollTransmitMethod.AuthorizationHeader)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := suite.instance.client.Do(req)
+		assert.NoError(t, err)
+		return resp.StatusCode
+	}
+
+	// MODE → respect status: a DISABLED stream returns 403.
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "MODE")
+	legacyMode := doPoll()
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "true")
+	newTrue := doPoll()
+	assert.Equal(t, legacyMode, newTrue, "POLL_SRV_BEHAVIOR=MODE must match I2SIG_POLL_RESPECT_STATUS=true")
+	assert.Equal(t, http.StatusForbidden, legacyMode)
+
+	// ALWAYSON → do not respect status: a DISABLED stream is treated as PAUSED → 503.
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "")
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "ALWAYSON")
+	legacyAlwayson := doPoll()
+	suite.T().Setenv("POLL_SRV_BEHAVIOR", "")
+	suite.T().Setenv("I2SIG_POLL_RESPECT_STATUS", "false")
+	newFalse := doPoll()
+	assert.Equal(t, legacyAlwayson, newFalse, "POLL_SRV_BEHAVIOR=ALWAYSON must match I2SIG_POLL_RESPECT_STATUS=false")
+	assert.Equal(t, http.StatusServiceUnavailable, legacyAlwayson)
 }
 
 func (suite *PollBehaviorSuite) TestReceiverHandles403() {

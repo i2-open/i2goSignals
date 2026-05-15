@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -160,7 +161,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
 	tlsSupport.CheckCaInstalled(http.DefaultClient)
 
-	role := os.Getenv("SSEF_ADMIN_ROLE")
+	role := envcompat.Lookup("I2SIG_AUTH_ADMIN_ROLE", "SSEF_ADMIN_ROLE")
 	if role == "" {
 		role = "ADMIN"
 	}
@@ -223,8 +224,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	sa.InitializePrometheus()
 
 	// Set defaults
-	defaultIssuer, issDefined := os.LookupEnv("I2SIG_ISSUER")
-	if !issDefined {
+	defaultIssuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", "I2SIG_ISSUER")
+	if defaultIssuer == "" {
 		if sa.BaseUrl != nil {
 			defaultIssuer = sa.BaseUrl.String()
 		} else {

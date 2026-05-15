@@ -17,6 +17,8 @@ import (
 func TestResolvePollTimeoutEnv_UnsetUsesDefaults(t *testing.T) {
     // t.Setenv guarantees both vars are explicitly unset (overrides any
     // environment leakage from the shell that started `go test`).
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "")
     t.Setenv("POLL_DEFAULT_TIMEOUT", "")
     t.Setenv("POLL_MAX_TIMEOUT", "")
 
@@ -27,6 +29,21 @@ func TestResolvePollTimeoutEnv_UnsetUsesDefaults(t *testing.T) {
 }
 
 func TestResolvePollTimeoutEnv_ValidIntegersParsed(t *testing.T) {
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "45")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "120")
+
+    defaultSecs, maxSecs := resolvePollTimeoutEnv()
+
+    assert.Equal(t, 45, defaultSecs)
+    assert.Equal(t, 120, maxSecs)
+}
+
+func TestResolvePollTimeoutEnv_LegacyNamesAccepted(t *testing.T) {
+    // Legacy POLL_DEFAULT_TIMEOUT / POLL_MAX_TIMEOUT names are accepted
+    // via envcompat and emit a deprecation WARN. Confirms the old names
+    // introduced before the v0.11.0 rename still work.
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "")
     t.Setenv("POLL_DEFAULT_TIMEOUT", "45")
     t.Setenv("POLL_MAX_TIMEOUT", "120")
 
@@ -38,8 +55,8 @@ func TestResolvePollTimeoutEnv_ValidIntegersParsed(t *testing.T) {
 
 func TestResolvePollTimeoutEnv_ZerosHonoured(t *testing.T) {
     // The 0 escape hatch must round-trip: 0 means "disable", not "use default".
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "0")
-    t.Setenv("POLL_MAX_TIMEOUT", "0")
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "0")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "0")
 
     defaultSecs, maxSecs := resolvePollTimeoutEnv()
 
@@ -48,20 +65,20 @@ func TestResolvePollTimeoutEnv_ZerosHonoured(t *testing.T) {
 }
 
 func TestResolvePollTimeoutEnv_InvalidStringFallsBack(t *testing.T) {
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "not-an-integer")
-    t.Setenv("POLL_MAX_TIMEOUT", "5m")
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "not-an-integer")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "5m")
 
     defaultSecs, maxSecs := resolvePollTimeoutEnv()
 
     assert.Equal(t, pollDefaultTimeoutSecsDefault, defaultSecs,
-        "unparseable POLL_DEFAULT_TIMEOUT should fall back to code default")
+        "unparseable I2SIG_POLL_DEFAULT_TIMEOUT should fall back to code default")
     assert.Equal(t, pollMaxTimeoutSecsDefault, maxSecs,
-        "unparseable POLL_MAX_TIMEOUT should fall back to code default")
+        "unparseable I2SIG_POLL_MAX_TIMEOUT should fall back to code default")
 }
 
 func TestResolvePollTimeoutEnv_NegativeFallsBack(t *testing.T) {
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "-5")
-    t.Setenv("POLL_MAX_TIMEOUT", "-1")
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "-5")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "-1")
 
     defaultSecs, maxSecs := resolvePollTimeoutEnv()
 
@@ -70,8 +87,8 @@ func TestResolvePollTimeoutEnv_NegativeFallsBack(t *testing.T) {
 }
 
 func TestResolvePollTimeoutEnv_DefaultExceedsMaxClamped(t *testing.T) {
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "600")
-    t.Setenv("POLL_MAX_TIMEOUT", "60")
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "600")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "60")
 
     defaultSecs, maxSecs := resolvePollTimeoutEnv()
 
@@ -80,10 +97,10 @@ func TestResolvePollTimeoutEnv_DefaultExceedsMaxClamped(t *testing.T) {
 }
 
 func TestResolvePollTimeoutEnv_DefaultExceedsMaxNotClampedWhenMaxZero(t *testing.T) {
-    // POLL_MAX_TIMEOUT=0 means "cap disabled"; the default-exceeds-max clamp
-    // only applies when the cap is active (max > 0).
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "600")
-    t.Setenv("POLL_MAX_TIMEOUT", "0")
+    // I2SIG_POLL_MAX_TIMEOUT=0 means "cap disabled"; the default-exceeds-max
+    // clamp only applies when the cap is active (max > 0).
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "600")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "0")
 
     defaultSecs, maxSecs := resolvePollTimeoutEnv()
 
@@ -94,13 +111,13 @@ func TestResolvePollTimeoutEnv_DefaultExceedsMaxNotClampedWhenMaxZero(t *testing
 // --- end-to-end: env values reach the per-stream EventPollBuffer ------------
 
 func TestNewRouter_PollBufferUsesEnvTimeoutValues(t *testing.T) {
-    // Set POLL_DEFAULT_TIMEOUT=1 so we can observe the resolved value
+    // Set I2SIG_POLL_DEFAULT_TIMEOUT=1 so we can observe the resolved value
     // applied at the per-stream buffer by timing a GetEvents call. This
     // proves the parsed values reach CreateEventPollBuffer end-to-end —
     // observed via buffer behaviour, not by reading internal fields.
-    t.Setenv("POLL_DEFAULT_TIMEOUT", "1")
-    t.Setenv("POLL_MAX_TIMEOUT", "300")
-    t.Setenv("MEM_DIRECTORY", t.TempDir())
+    t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "1")
+    t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "300")
+    t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 
     persistence, err := dbProviders.OpenPersistence("memorydb:", "poll_timeout_env_test")
     require.NoError(t, err)

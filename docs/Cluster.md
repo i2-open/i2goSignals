@@ -13,7 +13,7 @@ The following features are owned by a single node per stream:
 ## Node Identity
 
 Each node identifies itself using a `NodeID`, which is determined at startup:
-1.  `NODE_ID` environment variable.
+1.  `I2SIG_CLUSTER_NODE_ID` environment variable.
 2.  `POD_NAME` environment variable (for Kubernetes).
 3.  Fallback: `hostname` + process start timestamp.
 

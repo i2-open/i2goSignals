@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -85,13 +86,13 @@ type router struct {
 	outboundWakesMu     sync.Mutex
 	backfillInterval    time.Duration
 	backfillBatch       int
-	// pollDefaultTimeoutSecs is the resolved POLL_DEFAULT_TIMEOUT applied to
-	// every EventPollBuffer constructed for the lifetime of this router.
-	// 0 means "no implicit long-poll" — receiver omitting timeoutSecs gets
-	// an immediate return on an empty buffer.
+	// pollDefaultTimeoutSecs is the resolved I2SIG_POLL_DEFAULT_TIMEOUT
+	// applied to every EventPollBuffer constructed for the lifetime of this
+	// router. 0 means "no implicit long-poll" — receiver omitting timeoutSecs
+	// gets an immediate return on an empty buffer.
 	pollDefaultTimeoutSecs int
-	// pollMaxTimeoutSecs is the resolved POLL_MAX_TIMEOUT cap on inbound
-	// receiver timeoutSecs values. 0 disables the cap.
+	// pollMaxTimeoutSecs is the resolved I2SIG_POLL_MAX_TIMEOUT cap on
+	// inbound receiver timeoutSecs values. 0 disables the cap.
 	pollMaxTimeoutSecs int
 	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
 	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
@@ -214,7 +215,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 
 	backfillInterval := 1 * time.Second
-	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_INTERVAL"); val != "" {
+	if val := envcompat.Lookup("I2SIG_PUSH_BACKFILL_INTERVAL", "I2SIG_TRANSMITTER_BACKFILL_INTERVAL"); val != "" {
 		if d, err := time.ParseDuration(val); err == nil {
 			backfillInterval = d
 		}
@@ -222,7 +223,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.backfillInterval = backfillInterval
 
 	backfillBatch := 100
-	if val := os.Getenv("I2SIG_TRANSMITTER_BACKFILL_BATCH"); val != "" {
+	if val := envcompat.Lookup("I2SIG_PUSH_BACKFILL_BATCH", "I2SIG_TRANSMITTER_BACKFILL_BATCH"); val != "" {
 		if i, err := strconv.Atoi(val); err == nil {
 			backfillBatch = i
 		}
@@ -231,8 +232,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 
 	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
 	eventLogger.Info("Poll long-poll timeouts resolved",
-		"POLL_DEFAULT_TIMEOUT", router.pollDefaultTimeoutSecs,
-		"POLL_MAX_TIMEOUT", router.pollMaxTimeoutSecs)
+		"I2SIG_POLL_DEFAULT_TIMEOUT", router.pollDefaultTimeoutSecs,
+		"I2SIG_POLL_MAX_TIMEOUT", router.pollMaxTimeoutSecs)
 
 	states := router.streamService.GetStateMap(ctx)
 
@@ -243,8 +244,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.enabled = true
 
 	// Start the background watcher if explicitly enabled
-	if os.Getenv("I2SIG_MONGO_WATCH_ENABLED") == "true" {
-		eventLogger.Info("Background watcher enabled via I2SIG_MONGO_WATCH_ENABLED")
+	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
+		eventLogger.Info("Background watcher enabled via I2SIG_STORE_MONGO_WATCH_ENABLED")
 		go router.eventService.WatchPending(ctx, func(jti string, streamId string) {
 			sid := streamId
 			router.mu.RLock()
@@ -268,15 +269,14 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	return router
 }
 
-// Package-default long-poll timeouts applied when POLL_DEFAULT_TIMEOUT or
-// POLL_MAX_TIMEOUT are unset or malformed. See docs/configuration_properties.md.
 const (
 	pollDefaultTimeoutSecsDefault = 30
 	pollMaxTimeoutSecsDefault     = 300
 )
 
-// resolvePollTimeoutEnv reads POLL_DEFAULT_TIMEOUT and POLL_MAX_TIMEOUT from
-// the environment and applies the validation policy:
+// resolvePollTimeoutEnv reads I2SIG_POLL_DEFAULT_TIMEOUT and
+// I2SIG_POLL_MAX_TIMEOUT (with legacy POLL_DEFAULT_TIMEOUT / POLL_MAX_TIMEOUT
+// as fallbacks via envcompat) and applies the validation policy:
 //
 //   - Unset / empty: use code default.
 //   - Unparseable or negative: log WARN, fall back to code default.
@@ -285,30 +285,30 @@ const (
 //   - Returned values are pure ints in seconds; either may be 0
 //     (operator-requested escape hatch).
 func resolvePollTimeoutEnv() (defaultSecs, maxSecs int) {
-	defaultSecs = parsePollTimeoutEnv("POLL_DEFAULT_TIMEOUT", pollDefaultTimeoutSecsDefault)
-	maxSecs = parsePollTimeoutEnv("POLL_MAX_TIMEOUT", pollMaxTimeoutSecsDefault)
+	defaultSecs = parsePollTimeoutEnv("I2SIG_POLL_DEFAULT_TIMEOUT", "POLL_DEFAULT_TIMEOUT", pollDefaultTimeoutSecsDefault)
+	maxSecs = parsePollTimeoutEnv("I2SIG_POLL_MAX_TIMEOUT", "POLL_MAX_TIMEOUT", pollMaxTimeoutSecsDefault)
 	if maxSecs > 0 && defaultSecs > maxSecs {
-		eventLogger.Warn("POLL_DEFAULT_TIMEOUT exceeds POLL_MAX_TIMEOUT; clamping default to max",
-			"POLL_DEFAULT_TIMEOUT", defaultSecs, "POLL_MAX_TIMEOUT", maxSecs)
+		eventLogger.Warn("I2SIG_POLL_DEFAULT_TIMEOUT exceeds I2SIG_POLL_MAX_TIMEOUT; clamping default to max",
+			"I2SIG_POLL_DEFAULT_TIMEOUT", defaultSecs, "I2SIG_POLL_MAX_TIMEOUT", maxSecs)
 		defaultSecs = maxSecs
 	}
 	return defaultSecs, maxSecs
 }
 
-func parsePollTimeoutEnv(name string, fallback int) int {
-	val := os.Getenv(name)
+func parsePollTimeoutEnv(newName, oldName string, fallback int) int {
+	val := envcompat.Lookup(newName, oldName)
 	if val == "" {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(val)
 	if err != nil {
 		eventLogger.Warn("Invalid integer; falling back to default",
-			"env", name, "value", val, "default", fallback)
+			"env", newName, "value", val, "default", fallback)
 		return fallback
 	}
 	if parsed < 0 {
 		eventLogger.Warn("Negative value not permitted; falling back to default",
-			"env", name, "value", parsed, "default", fallback)
+			"env", newName, "value", parsed, "default", fallback)
 		return fallback
 	}
 	return parsed

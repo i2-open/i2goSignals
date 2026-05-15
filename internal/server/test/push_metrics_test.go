@@ -58,7 +58,7 @@ func TestPushMetrics_FailureAndStateTransitionCounters(t *testing.T) {
 // TestPushMetrics_IdleVerifyAcked drives the T3 idle keepalive against a happy receiver and
 // asserts push_idle_verify_total{outcome="acked"} increments for the stream.
 func TestPushMetrics_IdleVerifyAcked(t *testing.T) {
-    t.Setenv("I2SIG_PUSH_IDLE_VERIFY_INTERVAL", "300ms")
+    t.Setenv("I2SIG_PUSH_KEEPALIVE_INTERVAL", "300ms")
 
     events := func(w http.ResponseWriter, _ *http.Request) {
         w.WriteHeader(http.StatusAccepted)

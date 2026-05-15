@@ -122,7 +122,7 @@ func createServer(t *testing.T, dbName string) (*ssfInstance, error) {
 		dbUrl = TestDbUrl
 	} else {
 		t.Log("Tests running against Memory provider.")
-		t.Setenv("MEM_DIRECTORY", t.TempDir())
+		t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	}
 
 	persistence, err := dbProviders.OpenPersistence(dbUrl, dbName)

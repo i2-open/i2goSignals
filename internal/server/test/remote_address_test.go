@@ -284,8 +284,8 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 	}))
 	defer mockServer.Close()
 
-	t.Setenv("POLL_RETRY_BASE_DELAY", "0.05")
-	t.Setenv("POLL_RETRY_MAX_DELAY", "0.1")
+	t.Setenv("I2SIG_POLL_RETRY_BASE_DELAY", "0.05")
+	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "0.1")
 
 	streamConfig := model.StreamConfiguration{
 		Iss: "mock-transmitter",

@@ -8,6 +8,13 @@ LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
 
 WORKDIR /app
 
+# /app/resources is where the mongo watchtokens code persists its resume-token
+# file (internal/providers/dbProviders/mongo_provider/watchtokens/tokens.go).
+# docker-compose-dev.yml bind-mounts ./ over /app, so this directory is normally
+# overlaid by the host repo at runtime. Creating it here keeps the image
+# self-contained for ad-hoc `docker run` use without the mount.
+RUN mkdir -p /app/resources && chmod 0770 /app/resources
+
 # Install Delve debugger
 RUN go install github.com/go-delve/delve/cmd/dlv@latest
 

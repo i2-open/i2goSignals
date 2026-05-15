@@ -49,11 +49,11 @@ func readBodyString(t *testing.T, r *http.Request) string {
     return string(b)
 }
 
-// TestPushIdle_GeneratesVerifyAfterIdle: when no business events flow for I2SIG_PUSH_IDLE_VERIFY_INTERVAL,
+// TestPushIdle_GeneratesVerifyAfterIdle: when no business events flow for I2SIG_PUSH_KEEPALIVE_INTERVAL,
 // the push loop must generate a real SSF verify event (operational, persisted, signed, pushed,
 // acked). The verify arrives at the mock receiver via the normal RFC8935 path.
 func TestPushIdle_GeneratesVerifyAfterIdle(t *testing.T) {
-    t.Setenv("I2SIG_PUSH_IDLE_VERIFY_INTERVAL", "300ms")
+    t.Setenv("I2SIG_PUSH_KEEPALIVE_INTERVAL", "300ms")
 
     var verifyCount atomic.Int32
     var businessCount atomic.Int32
@@ -98,7 +98,7 @@ func TestPushIdle_GeneratesVerifyAfterIdle(t *testing.T) {
 // is the steady-state behavior we want — verify events should be a quiet-time signal, not a
 // constant load on a busy receiver.
 func TestPushIdle_ActivelyDeliveringStreamEmitsNoVerify(t *testing.T) {
-    t.Setenv("I2SIG_PUSH_IDLE_VERIFY_INTERVAL", "500ms")
+    t.Setenv("I2SIG_PUSH_KEEPALIVE_INTERVAL", "500ms")
 
     var verifyCount atomic.Int32
     var businessCount atomic.Int32
@@ -155,7 +155,7 @@ func TestPushIdle_ActivelyDeliveringStreamEmitsNoVerify(t *testing.T) {
 // rapid paused→enabled cycle (recovery exits immediately, push fails, recovery re-enters, ...);
 // that's a real-world misconfiguration scenario but it makes for a flaky observability target.
 func TestPushIdle_SuppressedDuringRecovery(t *testing.T) {
-    t.Setenv("I2SIG_PUSH_IDLE_VERIFY_INTERVAL", "200ms")
+    t.Setenv("I2SIG_PUSH_KEEPALIVE_INTERVAL", "200ms")
 
     var eventsCalled atomic.Int32
     var statusCalled atomic.Int32
@@ -203,7 +203,7 @@ func TestPushIdle_SuppressedDuringRecovery(t *testing.T) {
 // long enough for waitStreamStatus to observe it. The body of the failed push is asserted to be
 // a verify event, not a business event (we never call emitEvent in this test).
 func TestPushIdle_VerifyPushFailureTriggersRecovery(t *testing.T) {
-    t.Setenv("I2SIG_PUSH_IDLE_VERIFY_INTERVAL", "200ms")
+    t.Setenv("I2SIG_PUSH_KEEPALIVE_INTERVAL", "200ms")
 
     var firstPushBody atomic.Value // string
     var firstPushSeen atomic.Bool

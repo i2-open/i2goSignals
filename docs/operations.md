@@ -67,8 +67,8 @@ stream eventually exhausts its retry budget, it transitions to `disabled`.
 **The local stream is in `paused` only because the remote endpoint reported
 itself as `paused`** via its `/status` endpoint. The local side stops
 attempting delivery, persists the reason in `ErrorMsg`, and periodically
-re-checks the remote status (every `I2SIG_PUSH_STATUS_CHECK_INTERVAL` for push;
-the equivalent `POLL_STATUS_CHECK_INTERVAL` for poll). When the remote
+re-checks the remote status (every `I2SIG_PUSH_PROBE_INTERVAL` for push;
+the equivalent `I2SIG_POLL_PROBE_INTERVAL` for poll). When the remote
 re-enables, the local stream auto-resumes. **No operator action is required.**
 
 If the remote pause persists indefinitely, the local stream stays in `paused`
@@ -83,7 +83,7 @@ Terminal state for this side. Reached via one of:
 
 - **Retry cap exceeded.** Transport errors and 5xx responses retried for
   `I2SIG_PUSH_RETRY_LIMIT` (default 6h). 401 retried for
-  `I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT` attempts (default 10).
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` attempts (default 10).
 - **HTTP 403** — immediate disable. The receiver has revoked our authorization.
 - **HTTP 4xx other than 401/403/429** (404, 410, 422, etc.) — immediate disable.
   The endpoint is wrong, has been removed, or is rejecting our shape.
@@ -107,13 +107,13 @@ buckets below. The classification drives the response.
 | **HTTP 202 Accepted** | success | ack JTI; reset backoff and idle timer | — |
 | **Transport error** (DNS, refused, TLS, timeout) | network or cert problem | exp backoff; retry until cap; then `disabled` | `I2SIG_PUSH_RETRY_LIMIT` (6h default) |
 | **HTTP 5xx** (500/502/503/504) | server-side problem | same as transport error | 6h |
-| **HTTP 401 Unauthorized** | auth rejected | bounded retries with fixed delay; then `disabled` | `I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT` × `I2SIG_PUSH_UNAUTHORIZED_RETRY_DELAY` (10 × 15s default) |
+| **HTTP 401 Unauthorized** | auth rejected | bounded retries with fixed delay; then `disabled` | `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` (10 × 15s default) |
 | **HTTP 403 Forbidden** | auth forbidden | `disabled` immediately | — |
 | **HTTP 429 Too Many Requests** | rate-limited | honor `Retry-After`; if absent, exp backoff; **no cap** (peer back-pressure) | none |
 | **HTTP 4xx other** (404/410/422/...) | unexpected protocol | `disabled` + verbose log | — |
 | **RFC8935 §2.4 error** | receiver rejected the SET | see [RFC8935 protocol errors](#rfc8935-protocol-errors) | — |
 | **Remote `/status` = `enabled`** | healthy | resume normal operation | — |
-| **Remote `/status` = `paused`** | remote self-paused | local `paused`; re-check every `I2SIG_PUSH_STATUS_CHECK_INTERVAL` | — |
+| **Remote `/status` = `paused`** | remote self-paused | local `paused`; re-check every `I2SIG_PUSH_PROBE_INTERVAL` | — |
 | **Remote `/status` = `disabled`** | remote disabled | local `disabled` | — |
 
 ### Backoff curve
@@ -214,7 +214,7 @@ The status fetch reuses the same authorization the push uses.
 ## Idle keepalive (verify events)
 
 If a push stream goes idle — no successful push for
-`I2SIG_PUSH_IDLE_VERIFY_INTERVAL` (default 5 min) — the transmitter
+`I2SIG_PUSH_KEEPALIVE_INTERVAL` (default 5 min) — the transmitter
 generates a real SSF verify event as an end-to-end heartbeat:
 
 1. The verify event is created via the standard
@@ -382,12 +382,12 @@ poll-side analogues.
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR` | `2.0` | Multiplier per retry attempt |
 | `I2SIG_PUSH_RETRY_MAX_DELAY` | `5m` | Cap on individual sleep |
 | `I2SIG_PUSH_RETRY_LIMIT` | `6h` | Total elapsed time before transport recovery exits to `disabled` |
-| `I2SIG_PUSH_UNAUTHORIZED_RETRY_LIMIT` | `10` | Max 401 retry attempts before `disabled` |
-| `I2SIG_PUSH_UNAUTHORIZED_RETRY_DELAY` | `15s` | Sleep between 401 retries |
-| `I2SIG_PUSH_STATUS_CHECK_INTERVAL` | `30s` | Cadence of `/status` re-checks while in `paused` |
-| `I2SIG_PUSH_IDLE_VERIFY_INTERVAL` | `5m` | Idle threshold before generating a verify-event keepalive |
+| `I2SIG_PUSH_AUTH_RETRY_LIMIT` | `10` | Max 401 retry attempts before `disabled` |
+| `I2SIG_PUSH_AUTH_RETRY_DELAY` | `15s` | Sleep between 401 retries |
+| `I2SIG_PUSH_PROBE_INTERVAL` | `30s` | Cadence of `/status` re-checks while in `paused` |
+| `I2SIG_PUSH_KEEPALIVE_INTERVAL` | `5m` | Idle threshold before generating a verify-event keepalive |
 
-The existing `I2SIG_TRANSMITTER_BACKFILL_INTERVAL` and
-`I2SIG_TRANSMITTER_BACKFILL_BATCH` continue to govern active-mode buffer
+The existing `I2SIG_PUSH_BACKFILL_INTERVAL` and
+`I2SIG_PUSH_BACKFILL_BATCH` continue to govern active-mode buffer
 refilling — they are independent of the recovery state machine and remain at
 their previous defaults.

@@ -163,7 +163,7 @@ container deployments** so the collector can parse what it sees.
 | `msg`          | string | slog default                                    | Human-readable message; do not parse it.             |
 | `service`      | string | `logger.DefaultAttrs` set by `main.go`          | `"gosignals"` or `"gossfserver"`.                    |
 | `version`      | string | `constants.GoSignalsVersion`                    | Build-time version.                                  |
-| `node_id`      | string | `NODE_ID` → `POD_NAME` → `hostname-timestamp`   | Same identity used by the cluster lease model.       |
+| `node_id`      | string | `I2SIG_CLUSTER_NODE_ID` → `POD_NAME` → `hostname-timestamp` | Same identity used by the cluster lease model. |
 | `component`    | string | `logger.Sub("ROUTER")` etc.                     | Sub-system name attached by the producer.            |
 
 ### Conditionally-present fields

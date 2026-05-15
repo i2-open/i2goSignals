@@ -1,5 +1,82 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-14] v0.11.0 environment-variable taxonomy
+
+### Change
+PRD #64 rationalises every server-side environment variable under an
+`I2SIG_<AREA>_*` prefix taxonomy. Every old name continues to be read via
+the [`internal/envcompat`](internal/envcompat/envcompat.go) shim, which
+prefers the new name, falls back to the old, and emits a single WARN per
+process when an operator is still relying on a deprecated name. The full
+old→new mapping lives in
+[`docs/configuration_properties.md`](docs/configuration_properties.md)
+under "Migrating from pre-v0.11.0 names."
+
+### Areas (new prefixes)
+- `I2SIG_STREAM_*` — stream lifecycle defaults
+- `I2SIG_ISSUER_*` — issuer identity
+- `I2SIG_AUTH_*` — inbound bearer-token validation and outbound STS
+- `I2SIG_CLUSTER_*` — node identity, intra-cluster wake-up
+- `I2SIG_STORE_MONGO_*` — MongoDB persistence
+- `I2SIG_STORE_MEM_*` — memory provider persistence
+- `I2SIG_PUSH_*` — push transmitter loop, retry, keepalive, backfill
+- `I2SIG_POLL_*` — poll receiver loop, retry, status-respect behaviour
+- `I2SIG_TLS_*` — TLS material paths and enable flag
+- `I2SIG_SPIFFE_*` — SPIFFE trust domain (socket is exempt; see below)
+
+### Industry-standard exemptions
+Seven variables keep their bare names because they are external
+conventions external operators expect and tooling already understands.
+They will **not** be renamed:
+
+| Name                     | Why exempt                                                            |
+|--------------------------|-----------------------------------------------------------------------|
+| `PORT`                   | Universal HTTP container/service convention.                          |
+| `BASE_URL`               | Read by external clients and reverse-proxy tooling.                   |
+| `LOG_LEVEL`              | 12-factor logging convention.                                         |
+| `LOG_FORMAT`             | 12-factor logging convention; parsed by log shippers.                 |
+| `POD_NAME`               | Kubernetes Downward API field name; rename would break the binding.   |
+| `MONGO_URL`              | Standard Mongo driver convention.                                     |
+| `SPIFFE_ENDPOINT_SOCKET` | SPIFFE Workload API spec; consumed by `go-spiffe`.                    |
+
+### Value translation
+One rename also changes the value vocabulary: `POLL_SRV_BEHAVIOR` →
+`I2SIG_POLL_RESPECT_STATUS`. The old `MODE` maps to the new `true`;
+`ALWAYSON` maps to `false`. Translation happens inside
+`envcompat.LookupWithTranslate` so an operator with the old name set
+continues to get the same runtime behaviour.
+
+### Deprecation timeline
+- **v0.11.0 (this release)**: both old and new names accepted at runtime.
+  Each old name produces exactly one WARN per process on first use.
+- **v0.12.0+**: deprecated names are removed. `envcompat.Lookup` continues
+  to exist as the read seam, but its second (old-name) argument will be
+  empty for every renamed knob and the WARN path retires.
+
+### Why this carries weight
+- **Discoverability.** Every server-side knob is now greppable under one
+  prefix; the area name maps 1:1 to the doc section.
+- **No silent regressions for operators upgrading.** The shim guarantees a
+  running deployment continues to honour its existing config and gets a
+  loud WARN log line per deprecated name — there is no quiet failure mode.
+- **Verifiable on boot.** An end-to-end test
+  (`internal/server/test/env_old_names_e2e_test.go`) boots the full server
+  with ONLY pre-v0.11.0 names set and asserts both that the boot path
+  succeeds and that at least one deprecation WARN is emitted. Any future
+  call site that drops the old-name fallback is caught immediately.
+
+### Verification
+- `go test -race ./internal/envcompat/...` — green; deprecation WARN
+  emitted exactly once per old name, concurrent reads converge on one
+  warning.
+- `go test -race ./internal/server/test/... -run TestOldNamesOnlyE2E` —
+  green; full server boots and delivers a SET with only legacy env names.
+- Manual grep verification:
+  `grep -rE '<old-names>' docs/ README.md` returns hits only in the
+  migration table.
+
+---
+
 ## [2026-05-14] Configurable long-poll default and inbound max timeout (PRD #61, Issue #62, closes #49)
 
 ### Change
@@ -7,14 +84,18 @@ Two env vars govern the per-stream `EventPollBuffer` long-poll behaviour, read
 once at `NewRouter` startup and plumbed positionally through
 `buffer.CreateEventPollBuffer(jtis, defaultTimeoutSecs, maxTimeoutSecs)`:
 
-- **`POLL_DEFAULT_TIMEOUT`** (default `30`) — replaces the previous hard-coded
-  30-second fallback applied when a receiver omits `timeoutSecs`.
-- **`POLL_MAX_TIMEOUT`** (default `300`) — caps inbound receiver-supplied
+- **`I2SIG_POLL_DEFAULT_TIMEOUT`** (default `30`) — replaces the previous
+  hard-coded 30-second fallback applied when a receiver omits `timeoutSecs`.
+- **`I2SIG_POLL_MAX_TIMEOUT`** (default `300`) — caps inbound receiver-supplied
   `timeoutSecs`; values above this are silently clamped.
 
-`0` is the documented escape hatch for each: `POLL_DEFAULT_TIMEOUT=0` disables
-implicit long-polling (omitted `timeoutSecs` → immediate return);
-`POLL_MAX_TIMEOUT=0` disables the cap (restores pre-change behaviour).
+Legacy `POLL_DEFAULT_TIMEOUT` / `POLL_MAX_TIMEOUT` (introduced on master
+alongside this feature, before merging the v0.11.0 rename branch) continue to
+work as deprecated fallbacks via `envcompat.Lookup`.
+
+`0` is the documented escape hatch for each: `I2SIG_POLL_DEFAULT_TIMEOUT=0`
+disables implicit long-polling (omitted `timeoutSecs` → immediate return);
+`I2SIG_POLL_MAX_TIMEOUT=0` disables the cap (restores pre-change behaviour).
 Negative / unparseable values WARN and fall back to the code default; a
 `default > max` misconfiguration clamps the default down to max with a WARN at
 startup. Server starts in all cases.
@@ -22,12 +103,12 @@ startup. Server starts in all cases.
 ### Why this carries weight
 - **Resource defence is now the default.** Before this change, a receiver could
   request an arbitrarily long `timeoutSecs` and tie up a goroutine + buffer
-  notifier on every poll stream. Shipping `POLL_MAX_TIMEOUT=300` as a default
-  closes that gap for every operator who doesn't override it.
+  notifier on every poll stream. Shipping `I2SIG_POLL_MAX_TIMEOUT=300` as a
+  default closes that gap for every operator who doesn't override it.
 - **Disclosed behaviour change.** Receivers that today send
   `timeoutSecs: 600` will be clamped to `300s`. Documented in
   `docs/configuration_properties.md` and in the implementing PR description;
-  `POLL_MAX_TIMEOUT=0` is the opt-out.
+  `I2SIG_POLL_MAX_TIMEOUT=0` is the opt-out.
 - **Silent clamp, not rejection.** RFC8936 §2.4 makes `timeoutSecs` a SHOULD,
   not a MUST — clamping is spec-compliant and avoids breaking existing
   receivers that ask for "too much". A per-request log or HTTP error would
@@ -41,6 +122,8 @@ startup. Server starts in all cases.
   two timeouts as positional `int` parameters at construction. Per-buffer
   fields, not package globals — keeps unit tests in `event_buffer_test.go`
   free of `os.Setenv` and the buffer package free of an env-reading dependency.
+
+---
 
 ## [2026-05-07] DbProviderInterface and BaseProvider deleted; consumers depend on services directly
 

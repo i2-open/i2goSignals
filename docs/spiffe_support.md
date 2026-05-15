@@ -45,8 +45,8 @@ All SPIFFE features are **opt-in**. Deployments without `SPIFFE_ENDPOINT_SOCKET`
 | Variable | Description | Default |
 |---|---|---|
 | `SPIFFE_ENDPOINT_SOCKET` | Path to SPIRE agent Unix socket | (unset — disables SPIFFE) |
-| `SPIFFE_TRUST_DOMAIN` | Trust domain for this cluster | `cluster.i2gosignals.internal` |
-| `SPIFFE_MONGO_ENABLED` | Enable SPIFFE mTLS for MongoDB connections | `false` |
+| `I2SIG_SPIFFE_TRUST_DOMAIN` | Trust domain for this cluster | `cluster.i2gosignals.internal` |
+| `I2SIG_SPIFFE_MONGO_ENABLED` | Enable SPIFFE mTLS for MongoDB connections | `false` |
 | `MONITOR_INTERVAL` | Interval between cluster health checks | `5m` |
 
 ---
@@ -160,7 +160,7 @@ The public `ghcr.io/spiffe/spire-*` images do not include a shell, which is requ
 
 ### How It Works
 
-When `SPIFFE_MONGO_ENABLED=true` and `SPIFFE_ENDPOINT_SOCKET` is set:
+When `I2SIG_SPIFFE_MONGO_ENABLED=true` and `SPIFFE_ENDPOINT_SOCKET` is set:
 
 1. The Go driver (`internal/providers/dbProviders/mongo_provider/provider.go`) obtains the workload X.509-SVID from the SPIRE agent.
 2. The SVID is presented as the MongoDB TLS client certificate.
@@ -294,7 +294,7 @@ In the development environment, the monitor is configured via environment variab
 cluster-monitor:
   environment:
     - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-    - SPIFFE_MONGO_ENABLED=true
+    - I2SIG_SPIFFE_MONGO_ENABLED=true
     - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin
     - MONITOR_INTERVAL=1m
 ```
@@ -431,9 +431,9 @@ volumeMounts:
 env:
   - name: SPIFFE_ENDPOINT_SOCKET
     value: "unix:///run/spire/sockets/agent.sock"
-  - name: SPIFFE_TRUST_DOMAIN
+  - name: I2SIG_SPIFFE_TRUST_DOMAIN
     value: "cluster.i2gosignals.internal"
-  - name: SPIFFE_MONGO_ENABLED
+  - name: I2SIG_SPIFFE_MONGO_ENABLED
     value: "true"
 ```
 
@@ -615,7 +615,7 @@ After bootstrap, SPIRE refreshes bundles automatically. Workloads registered wit
 - **Short-lived SVIDs** (default 1 hour TTL) limit the blast radius of a compromised credential.
 - **No secret distribution** — attestation handles identity bootstrapping. Cluster nodes never share a long-lived secret for mTLS.
 - **Automatic rotation** — `go-spiffe`'s `X509Source` watches the workload API and updates certificates in-process. No restart required on rotation.
-- **MongoDB credentials eliminated** — with `SPIFFE_MONGO_ENABLED=true` the MONGO_URL contains no username or password. Credential rotation is not required.
+- **MongoDB credentials eliminated** — with `I2SIG_SPIFFE_MONGO_ENABLED=true` the MONGO_URL contains no username or password. Credential rotation is not required.
 - **Audit trail** — the SPIRE server logs all SVID issuances, providing a workload-level access log.
 - **Defence in depth** — SPIFFE augments, not replaces, existing auth mechanisms (HMAC, OAuth2, static tokens). Deployments can run without SPIFFE.
 

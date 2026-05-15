@@ -10,12 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -62,24 +62,34 @@ var (
 
 // DefaultManager returns a process-wide Manager initialized from environment variables:
 //
-//	STS_TOKEN_URL, STS_CLIENT_ID, STS_CLIENT_SECRET, optional STS_AUDIENCE, STS_RESOURCE.
+//	I2SIG_AUTH_STS_TOKEN_URL, I2SIG_AUTH_STS_CLIENT_ID, I2SIG_AUTH_STS_CLIENT_SECRET,
+//	optional I2SIG_AUTH_STS_AUDIENCE, I2SIG_AUTH_STS_RESOURCE, I2SIG_AUTH_STS_SCOPES.
 //
-// STS_RESOURCE acts only as a default; callers can override the resource per request.
+// The pre-v0.11.0 STS_* names continue to work via envcompat with a one-time
+// deprecation WARN. I2SIG_AUTH_STS_RESOURCE acts only as a default; callers
+// can override the resource per request.
 func DefaultManager() *Manager {
 	defaultOnce.Do(func() {
-		cfg := Config{
-			TokenURL:     strings.TrimSpace(os.Getenv("STS_TOKEN_URL")),
-			ClientID:     strings.TrimSpace(os.Getenv("STS_CLIENT_ID")),
-			ClientSecret: strings.TrimSpace(os.Getenv("STS_CLIENT_SECRET")),
-			Audience:     strings.TrimSpace(os.Getenv("STS_AUDIENCE")),
-			Resource:     strings.TrimSpace(os.Getenv("STS_RESOURCE")),
-		}
-		if scopes := os.Getenv("STS_SCOPES"); scopes != "" {
-			cfg.Scopes = strings.Split(scopes, " ")
-		}
-		defaultMgr = NewManager(cfg, nil)
+		defaultMgr = NewManager(configFromEnv(), nil)
 	})
 	return defaultMgr
+}
+
+// configFromEnv reads STS configuration from the environment. New
+// I2SIG_AUTH_STS_* names take precedence; legacy STS_* names are still
+// honored via envcompat for one release.
+func configFromEnv() Config {
+	cfg := Config{
+		TokenURL:     strings.TrimSpace(envcompat.Lookup("I2SIG_AUTH_STS_TOKEN_URL", "STS_TOKEN_URL")),
+		ClientID:     strings.TrimSpace(envcompat.Lookup("I2SIG_AUTH_STS_CLIENT_ID", "STS_CLIENT_ID")),
+		ClientSecret: strings.TrimSpace(envcompat.Lookup("I2SIG_AUTH_STS_CLIENT_SECRET", "STS_CLIENT_SECRET")),
+		Audience:     strings.TrimSpace(envcompat.Lookup("I2SIG_AUTH_STS_AUDIENCE", "STS_AUDIENCE")),
+		Resource:     strings.TrimSpace(envcompat.Lookup("I2SIG_AUTH_STS_RESOURCE", "STS_RESOURCE")),
+	}
+	if scopes := envcompat.Lookup("I2SIG_AUTH_STS_SCOPES", "STS_SCOPES"); scopes != "" {
+		cfg.Scopes = strings.Split(scopes, " ")
+	}
+	return cfg
 }
 
 // GetHTTPClient returns an http.Client that uses an oauth2.Transport with a TokenSource that

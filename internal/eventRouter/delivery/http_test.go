@@ -207,7 +207,7 @@ func TestHTTPAdapter_RemoteAddressPersistedToStreamService(t *testing.T) {
 	}))
 	defer receiver.Close()
 
-	t.Setenv("MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "delivery_remote_address_test")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = persistence.Storage.Close() })
@@ -252,7 +252,7 @@ func TestHTTPAdapter_SamePeerSecondPushDoesNotChangeRemoteAddress(t *testing.T) 
 	}))
 	defer receiver.Close()
 
-	t.Setenv("MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "delivery_same_peer_test")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = persistence.Storage.Close() })

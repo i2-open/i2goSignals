@@ -10,7 +10,7 @@ import (
 // adapter must produce a complete Persistence (services + Coordinator +
 // Storage) so callers can depend on the narrowest seam they need.
 func TestOpenPersistence_Memory(t *testing.T) {
-	t.Setenv("MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	p, err := OpenPersistence("memorydb:", "test_persist_mem")
 	assert.NoError(t, err)
 	assert.NotNil(t, p)
@@ -34,7 +34,7 @@ func TestOpenPersistence_Memory(t *testing.T) {
 // TestOpenPersistence_Fallback proves the Mongo→memory fallback returns a
 // complete Persistence record (the same shape as a direct memory open).
 func TestOpenPersistence_Fallback(t *testing.T) {
-	t.Setenv("MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=1000"
 
 	p, err := OpenPersistence(wrongUrl, "test_persist_fallback")
@@ -47,13 +47,15 @@ func TestOpenPersistence_Fallback(t *testing.T) {
 	_ = p.Storage.Close()
 }
 
-// TestOpenPersistence_FailToMemFalse confirms MONGO_FAILTOMEM=FALSE surfaces
-// the Mongo error instead of falling back.
-func TestOpenPersistence_FailToMemFalse(t *testing.T) {
+// TestOpenPersistence_FailToMemFalse_Legacy confirms the deprecated
+// MONGO_FAILTOMEM=FALSE name still surfaces the Mongo error instead of
+// falling back. Coverage of the new I2SIG_STORE_MONGO_FALLBACK_MEM name
+// lives in factory_envcompat_test.go.
+func TestOpenPersistence_FailToMemFalse_Legacy(t *testing.T) {
 	t.Setenv("MONGO_FAILTOMEM", "FALSE")
 
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=100"
 	p, err := OpenPersistence(wrongUrl, "test_fail")
-	assert.Error(t, err, "Should return error when MONGO_FAILTOMEM is FALSE")
+	assert.Error(t, err, "Deprecated MONGO_FAILTOMEM=FALSE must still surface the connection error")
 	assert.Nil(t, p, "Persistence should be nil on failure")
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	mathRand "math/rand"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -87,7 +87,7 @@ func (a *AuthIssuer) GetOAuthServers() []string {
 		return a.OAuthServer
 	}
 
-	as_env := os.Getenv("OAUTH_SERVERS")
+	as_env := envcompat.Lookup("I2SIG_AUTH_OAUTH_SERVERS", "OAUTH_SERVERS")
 	if as_env == "" {
 		return nil
 	}

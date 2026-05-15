@@ -163,7 +163,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	} else {
 		// When using memory provider, use a temporary directory for persistence
 		// to avoid leaving files in the source tree.
-		t.Setenv("MEM_DIRECTORY", t.TempDir())
+		t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	}
 	persistence, err := dbProviders.OpenPersistence(dbUrl, dbName)
 	if err != nil {
