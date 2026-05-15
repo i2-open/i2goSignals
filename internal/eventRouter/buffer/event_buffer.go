@@ -26,26 +26,45 @@ type EventPollBuffer struct {
 	closed    bool
 	notifier  chan struct{}
 	pollReady bool
+	// defaultTimeoutSecs is the long-poll timeout applied when a receiver
+	// omits timeoutSecs (sends 0). 0 means "no implicit long-poll" — return
+	// immediately on empty buffer when ReturnImmediately is false and
+	// TimeoutSecs is 0.
+	defaultTimeoutSecs int
+	// maxTimeoutSecs caps receiver-supplied timeoutSecs. 0 disables the cap.
+	maxTimeoutSecs int
 }
 
-// CreateEventPollBuffer is intended to queue up events via an in channel. Events can be subsequently retrieved
-// from the buffer using EventPollBuffer.GetEvents()
-func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
+// CreateEventPollBuffer queues up events via an in channel; subsequently
+// retrieved via EventPollBuffer.GetEvents(). The two timeout parameters
+// govern long-poll behaviour for this buffer: defaultTimeoutSecs is applied
+// when a receiver omits timeoutSecs, and maxTimeoutSecs (>0) caps receiver
+// requests. See docs/configuration_properties.md (POLL_DEFAULT_TIMEOUT,
+// POLL_MAX_TIMEOUT) for the wired-up env vars.
+func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutSecs int) *EventPollBuffer {
 
 	buffer := &EventPollBuffer{
-		in:        make(chan string, 100),
-		events:    []string{},
-		pollReady: false,
-		closed:    false,
-		notifier:  make(chan struct{}),
+		in:                 make(chan string, 100),
+		events:             []string{},
+		pollReady:          false,
+		closed:             false,
+		notifier:           make(chan struct{}),
+		defaultTimeoutSecs: defaultTimeoutSecs,
+		maxTimeoutSecs:     maxTimeoutSecs,
 	}
 
 	if len(initialJtis) > 0 {
 		buffer.addEvents(initialJtis)
 	}
 
+	// Capture buffer.in on the spawning goroutine so the read sequences
+	// before the `go` statement (program-order happens-before to the
+	// spawned goroutine). Close() later writes buffer.in = nil under the
+	// mutex; the spawned goroutine works against the captured channel
+	// rather than re-reading buffer.in without synchronisation.
+	inCh := buffer.in
+
 	go func() {
-		inCh := buffer.in
 		for {
 			buffer.mutex.Lock()
 			if inCh == nil && len(buffer.events) == 0 {
@@ -78,6 +97,27 @@ func CreateEventPollBuffer(initialJtis []string) *EventPollBuffer {
 	}()
 
 	return buffer
+}
+
+// resolveTimeoutSecs applies the per-buffer default+max policy to a
+// receiver-supplied timeoutSecs. Result <=0 means "return immediately".
+//
+//   - requested == 0: apply defaultTimeoutSecs (may itself be 0, meaning
+//     no implicit long-poll).
+//   - requested > 0 and maxTimeoutSecs > 0 and requested > maxTimeoutSecs:
+//     silently clamp to maxTimeoutSecs (RFC8936 §2.4 makes timeoutSecs a
+//     SHOULD, so clamping is spec-compliant).
+//   - maxTimeoutSecs == 0: cap disabled; honour receiver value as given.
+//   - requested < 0: treat as 0 (defensive; PollParameters typing makes
+//     this unreachable in practice).
+func (b *EventPollBuffer) resolveTimeoutSecs(requested int) int {
+	if requested <= 0 {
+		return b.defaultTimeoutSecs
+	}
+	if b.maxTimeoutSecs > 0 && requested > b.maxTimeoutSecs {
+		return b.maxTimeoutSecs
+	}
+	return requested
 }
 
 func (b *EventPollBuffer) Cnt() int {
@@ -173,9 +213,11 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 	b.mutex.Lock()
 	if len(b.events) == 0 {
 		if params.ReturnImmediately == false {
-			timeoutSecs := params.TimeoutSecs
-			if timeoutSecs == 0 {
-				timeoutSecs = 30
+			timeoutSecs := b.resolveTimeoutSecs(params.TimeoutSecs)
+			if timeoutSecs <= 0 {
+				// Empty buffer, no implicit long-poll: return immediately.
+				defer b.mutex.Unlock()
+				return nil, false
 			}
 			timeout := time.Duration(timeoutSecs) * time.Second
 			notifier := b.notifier
@@ -232,8 +274,11 @@ func CreateEventPushBuffer(initialJtis []string) *EventPushBuffer {
 		}
 	}
 
+	// Capture buffer.in on the spawning goroutine; see the matching note
+	// in CreateEventPollBuffer for the happens-before reasoning.
+	inCh := buffer.in
+
 	go func() {
-		inCh := buffer.in
 		for {
 			buffer.eventsMutex.Lock()
 			var outCh chan interface{}

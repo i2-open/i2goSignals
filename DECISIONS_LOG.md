@@ -77,6 +77,50 @@ continues to get the same runtime behaviour.
 
 ---
 
+## [2026-05-14] Configurable long-poll default and inbound max timeout (PRD #61, Issue #62, closes #49)
+
+### Change
+Two env vars govern the per-stream `EventPollBuffer` long-poll behaviour, read
+once at `NewRouter` startup and plumbed positionally through
+`buffer.CreateEventPollBuffer(jtis, defaultTimeoutSecs, maxTimeoutSecs)`:
+
+- **`POLL_DEFAULT_TIMEOUT`** (default `30`) — replaces the previous hard-coded
+  30-second fallback applied when a receiver omits `timeoutSecs`.
+- **`POLL_MAX_TIMEOUT`** (default `300`) — caps inbound receiver-supplied
+  `timeoutSecs`; values above this are silently clamped.
+
+`0` is the documented escape hatch for each: `POLL_DEFAULT_TIMEOUT=0` disables
+implicit long-polling (omitted `timeoutSecs` → immediate return);
+`POLL_MAX_TIMEOUT=0` disables the cap (restores pre-change behaviour).
+Negative / unparseable values WARN and fall back to the code default; a
+`default > max` misconfiguration clamps the default down to max with a WARN at
+startup. Server starts in all cases.
+
+### Why this carries weight
+- **Resource defence is now the default.** Before this change, a receiver could
+  request an arbitrarily long `timeoutSecs` and tie up a goroutine + buffer
+  notifier on every poll stream. Shipping `POLL_MAX_TIMEOUT=300` as a default
+  closes that gap for every operator who doesn't override it.
+- **Disclosed behaviour change.** Receivers that today send
+  `timeoutSecs: 600` will be clamped to `300s`. Documented in
+  `docs/configuration_properties.md` and in the implementing PR description;
+  `POLL_MAX_TIMEOUT=0` is the opt-out.
+- **Silent clamp, not rejection.** RFC8936 §2.4 makes `timeoutSecs` a SHOULD,
+  not a MUST — clamping is spec-compliant and avoids breaking existing
+  receivers that ask for "too much". A per-request log or HTTP error would
+  be the alternative, deferred as not load-bearing.
+- **Cluster hygiene is the operator's job, not a correctness bug.** Poll
+  transmitters do not take leases; every node reads these env vars at its own
+  startup. Inconsistent settings across nodes produce per-node-divergent
+  receiver-visible behaviour but no data loss or duplication. Operators are
+  instructed (`docs/configuration_properties.md`) to set both vars uniformly.
+- **Constructor signature, not a setter.** `CreateEventPollBuffer` takes the
+  two timeouts as positional `int` parameters at construction. Per-buffer
+  fields, not package globals — keeps unit tests in `event_buffer_test.go`
+  free of `os.Setenv` and the buffer package free of an env-reading dependency.
+
+---
+
 ## [2026-05-07] DbProviderInterface and BaseProvider deleted; consumers depend on services directly
 
 ### Change

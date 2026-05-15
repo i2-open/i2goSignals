@@ -181,6 +181,16 @@ as floating-point seconds.
 | `I2SIG_POLL_AUTH_RETRY_LIMIT`       | Max auth-rejection retry attempts before disabling the stream.                                                               | `10`           |
 | `I2SIG_POLL_RESPECT_STATUS`         | `true` (default) — pause polling when the transmitter reports `paused`/`disabled`. `false` — keep polling regardless.        | `true`         |
 
+### Poll transmitter — long-poll timeouts
+
+Inbound poll requests served by this transmitter. Read once at server startup;
+must be set uniformly across cluster nodes to avoid receiver-visible variance.
+
+| Variable                | Description                                                                                                                                                                                                                                                              | Default |
+|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `POLL_DEFAULT_TIMEOUT`  | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                                  | `30`    |
+| `POLL_MAX_TIMEOUT`      | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                              | `300`   |
+
 ## TLS
 
 | Variable               | Description                                                                                                       | Default                          |
