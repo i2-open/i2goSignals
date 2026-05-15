@@ -139,11 +139,11 @@ services:
     env_file:
       - ./config/goSignals1.env
     environment:
-      - NODE_ID=goSignals1
+      - I2SIG_CLUSTER_NODE_ID=goSignals1
       - BASE_URL=https://gosignals1:8888/
-      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
-      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals1b:
     image: i2gosignals:v0.8
@@ -157,11 +157,11 @@ services:
     env_file:
       - ./config/goSignals1.env
     environment:
-      - NODE_ID=goSignals1b
+      - I2SIG_CLUSTER_NODE_ID=goSignals1b
       - BASE_URL=https://gosignals1:8888/
-      - I2SIG_ISSUER=https://gosignals1:8888
+      - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
-      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals2:
     image: i2gosignals:v0.8
@@ -175,11 +175,11 @@ services:
     env_file:
       - ./config/goSignals2.env
     environment:
-      - NODE_ID=goSignals2
+      - I2SIG_CLUSTER_NODE_ID=goSignals2
       - BASE_URL=https://gosignals2:8888/
-      - I2SIG_ISSUER=https://gosignals2:8888
+      - I2SIG_ISSUER_DEFAULT=https://gosignals2:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
-      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSsfServer:
     image: i2gosignals:v0.8
@@ -193,11 +193,11 @@ services:
     env_file:
       - ./config/goSsf1.env
     environment:
-      - NODE_ID=goSsfServer
+      - I2SIG_CLUSTER_NODE_ID=goSsfServer
       - BASE_URL=https://gossfserver:8888/
-      - I2SIG_ISSUER=https://gossfserver:8888
+      - I2SIG_ISSUER_DEFAULT=https://gossfserver:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
-      - I2SIG_MONGO_WATCH_ENABLED=false
+      - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   scimSsfSetup:
     image: i2gosignals:v0.8

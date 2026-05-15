@@ -44,7 +44,7 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
       - MONGO_REPLICA_SET_NAME=dbrs
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     networks:
       - backend
     ports:
@@ -73,7 +73,7 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
       - MONGO_REPLICA_SET_NAME=dbrs
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     networks:
       - backend
     ports:
@@ -102,7 +102,7 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
       - MONGO_REPLICA_SET_NAME=dbrs
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     ports:
       - "30003:30003"
     restart: unless-stopped
@@ -343,7 +343,7 @@ services:
       com.i2gosignals.role: prometheus
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
     ports:
@@ -367,7 +367,7 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     volumes:
       - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
       - spire_sockets:/run/spire/sockets
@@ -402,8 +402,8 @@ services:
     environment:
       # SPIFFE configuration — enables mTLS for inter-cluster calls and MongoDB
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
-      - SPIFFE_MONGO_ENABLED=true
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_MONGO_ENABLED=true
     healthcheck:
       test: ["CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8888/health || /app/healthcheck http://localhost:8888/health"]
       interval: 10s
@@ -438,8 +438,8 @@ services:
       - ./config/goSignals2-spiffe.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
-      - SPIFFE_MONGO_ENABLED=true
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_MONGO_ENABLED=true
     healthcheck:
       test: ["CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8889/health || /app/healthcheck http://localhost:8889/health"]
       interval: 10s
@@ -479,8 +479,8 @@ services:
       - ./config/goSsf1-spiffe.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
-      - SPIFFE_MONGO_ENABLED=true
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_MONGO_ENABLED=true
     labels:
       com.i2gosignals.role: gossf-node
 
@@ -502,7 +502,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
-      SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
+      I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.4.7
@@ -529,7 +529,7 @@ services:
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       QUARKUS_HTTP_HOST: 0.0.0.0
       SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
-      SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
+      I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
     ports:
       - 9080:9080
     depends_on:
@@ -555,8 +555,8 @@ services:
       - backend
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
-      - SPIFFE_MONGO_ENABLED=true
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_MONGO_ENABLED=true
       - MONGO_URL=mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&tls=true&tlsAllowInvalidHostnames=true&tlsCAFile=/certs/ca.pem&tlsCertificateKeyFile=/certs/mongo.pem&authSource=admin
       - MONITOR_INTERVAL=1m
     volumes:
@@ -591,9 +591,9 @@ services:
     environment:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
-      - CA_CERT=/scim/certs/ca-cert.pem
+      - I2SIG_TLS_CA_CERT=/scim/certs/ca-cert.pem
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 
   scim_cluster1:
@@ -618,7 +618,7 @@ services:
       - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
 
   scim_cluster2:
     image: independentid/i2scim-universal:latest
@@ -642,7 +642,7 @@ services:
       - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
-      - SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
 
 networks:
   frontend:

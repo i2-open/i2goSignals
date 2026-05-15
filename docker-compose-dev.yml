@@ -359,7 +359,7 @@ services:
     environment:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
-      - CA_CERT=/scim/certs/ca-cert.pem
+      - I2SIG_TLS_CA_CERT=/scim/certs/ca-cert.pem
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 
