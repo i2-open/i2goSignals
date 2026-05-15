@@ -82,3 +82,10 @@ func resetWarnOnceForTest() {
         return true
     })
 }
+
+// ResetWarnedForTest clears the warn-once tracker so a test in another
+// package can drive a fresh observation of deprecation warnings on the
+// next read of an old name. Test-only — production code must not call.
+func ResetWarnedForTest() {
+    resetWarnOnceForTest()
+}
