@@ -35,6 +35,12 @@ COPY --chmod=0755 ./bin/linux/${TARGETARCH}/cluster-monitor ./cluster-monitor
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/genTlsKeys      ./genTlsKeys
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/healthcheck     ./healthcheck
 
+# The binaries above statically link third-party Go dependencies, so the image
+# is a binary redistribution. Ship the project license and the dependency
+# attributions to satisfy the Apache 2.0, BSD, MIT, and ISC license terms.
+COPY --chmod=0644 ./LICENSE.txt              ./LICENSE.txt
+COPY --chmod=0644 ./THIRD-PARTY-NOTICES.txt  ./THIRD-PARTY-NOTICES.txt
+
 EXPOSE 8888
 
 CMD ["/app/goSignalsServer"]
