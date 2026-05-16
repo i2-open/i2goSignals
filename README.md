@@ -89,11 +89,12 @@ The `docker-compose.yml` file provides a sample environment demonstrating Push a
 
 ### Grafana SSO
 
-Grafana is served at `https://localhost:3000` and accepts either the local
-break-glass login (`admin` / `grafana`) or single sign-on against the
-`gosignals` Keycloak realm. Demo users map to Grafana org roles via the
-`grafana` client roles: `admin` → Admin, `user` → Viewer; any authenticated
-realm user with no `grafana` client role falls back to Viewer.
+Grafana is served at `https://localhost:3000`. The local username/password
+login form is disabled — the only way in is **Sign in with GoSignals Realm**,
+which authenticates against the `gosignals` Keycloak realm. Demo users map to
+Grafana org roles via the `grafana` client roles: `admin` → Admin, `user` →
+Viewer; any authenticated realm user with no `grafana` client role falls back
+to Viewer.
 
 ## Developing and Debugging (GoLand/IntelliJ)
 

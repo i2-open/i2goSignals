@@ -22,6 +22,9 @@ ok() { echo "  OK: $1"; }
 
 LOKI_URL=${LOKI_URL:-https://localhost:3100}
 GRAFANA_URL=${GRAFANA_URL:-https://localhost:3000}
+# Grafana's interactive login form is disabled (SSO-only). API Basic Auth is a
+# separate setting and stays enabled — the sections below use it to inspect
+# Grafana's API without driving a full OIDC flow.
 GRAFANA_AUTH=${GRAFANA_AUTH:-admin:grafana}
 PROMETHEUS_URL=${PROMETHEUS_URL:-https://localhost:9090}
 CA_CERT=${CA_CERT:-config/certs/ca-cert.pem}
@@ -208,9 +211,19 @@ if curl -fsS "http://localhost:3000/api/health" >/dev/null 2>&1; then
 fi
 ok "Grafana serves HTTPS with a certificate signed by the dev CA"
 
-echo "14) Grafana OIDC login via Keycloak succeeds with role mapping (issue #78)..."
+echo "14) Grafana login is SSO-only and OIDC role mapping works (issue #78)..."
 wait_for "Grafana generic_oauth route" \
     "gcurl -fsS -o /dev/null ${GRAFANA_URL}/login/generic_oauth"
+
+# SSO-only: with GF_AUTH_DISABLE_LOGIN_FORM=true the interactive username/
+# password form is gone. POST /login with otherwise-valid admin credentials
+# must NOT yield a 200 — a successful form login means the form is still live.
+form_code=$(gcurl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"user":"admin","password":"grafana"}' "${GRAFANA_URL}/login")
+[ "$form_code" != "200" ] \
+    || fail "local password login form is still enabled (POST /login -> 200; expected SSO-only)"
+ok "local password login form is disabled — Keycloak SSO is the only interactive path"
 
 admin_jar=$(mktemp)
 oidc_login admin admin "$admin_jar" \

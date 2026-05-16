@@ -1,5 +1,57 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-16] Grafana login is SSO-only — local password form disabled
+
+### Change
+Issue #78 originally shipped Grafana with Keycloak SSO **and** kept the local
+`admin/grafana` username/password form enabled as a break-glass fallback.
+That fallback is now removed: every compose stack sets
+`GF_AUTH_DISABLE_LOGIN_FORM=true`, so Keycloak SSO is the only interactive
+login path. The generic-OAuth button is relabelled from `Keycloak` to
+**Sign in with GoSignals Realm** (`GF_AUTH_GENERIC_OAUTH_NAME=GoSignals Realm`).
+
+The TLS + SSO configuration is now applied uniformly to **all six** compose
+files — `docker-compose.yml`, `-dev.yml`, `-cluster.yml`, `-cluster-dev.yml`,
+`-spiffe.yml`, `-spiffe-dev.yml`. Issue #78 scoped SSO to only the first
+three; the other three carried a `grafana` service that still served plain
+HTTP. Because all six mount the shared `config/monitor/grafana/datasource.yml`
+(which now references `$__file{/etc/grafana/certs/ca-cert.pem}`), the three
+unconfigured stacks would have failed datasource provisioning. Each Grafana
+service now mounts `./config/certs:/etc/grafana/certs:ro` and carries the full
+HTTPS + generic-OAuth env block.
+
+### Why this carries weight
+- **One identity, no shadow path.** A local password form sitting alongside
+  SSO is a second, weaker credential the operator must remember exists. With
+  it disabled, Grafana access is governed entirely by the `gosignals` Keycloak
+  realm and the `grafana` client roles — the same identity used everywhere
+  else in the stack.
+- **API Basic Auth is deliberately *not* disabled.** `GF_AUTH_DISABLE_LOGIN_FORM`
+  only removes the interactive UI form; Grafana's API Basic Auth is a separate
+  setting and stays on. `scripts/verify-observability.sh` relies on it
+  (`-u admin:grafana`) to inspect `/api/datasources` without driving a full
+  OIDC flow. Disabling the form does not lock automation out of the API.
+- **Parity closes a real regression.** Extending the cert mount + HTTPS/SSO
+  config to all six stacks is not cosmetic — without the cert mount, the
+  shared `datasource.yml` breaks Grafana provisioning in `-cluster-dev`,
+  `-spiffe`, and `-spiffe-dev`.
+
+### Invariants
+- Every `grafana` service in every compose file mounts
+  `./config/certs:/etc/grafana/certs:ro` and sets `GF_AUTH_DISABLE_LOGIN_FORM=true`
+  alongside the `GF_AUTH_GENERIC_OAUTH_*` block.
+- A `POST /login` to Grafana with otherwise-valid credentials MUST NOT return
+  `200` — a successful form login means the form is still live.
+
+### Verification
+- `scripts/verify-observability.sh` section 14 asserts the local form is
+  disabled (`POST /login` does not yield `200`) in addition to the existing
+  OIDC admin/viewer role-mapping checks.
+- Issue #78 acceptance criteria updated to match (the break-glass criterion is
+  replaced by an SSO-only criterion).
+
+---
+
 ## [2026-05-14] v0.11.0 environment-variable taxonomy
 
 ### Change

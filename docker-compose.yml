@@ -173,8 +173,9 @@ services:
       - GF_SERVER_ROOT_URL=https://localhost:3000
       - GF_SERVER_CERT_FILE=/etc/grafana/certs/server-cert.pem
       - GF_SERVER_CERT_KEY=/etc/grafana/certs/server-key.pem
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_AUTH_GENERIC_OAUTH_ENABLED=true
-      - GF_AUTH_GENERIC_OAUTH_NAME=Keycloak
+      - GF_AUTH_GENERIC_OAUTH_NAME=GoSignals Realm
       - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=grafana
       - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=grafana-client-secret
       - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile roles

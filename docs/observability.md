@@ -98,7 +98,7 @@ choice:
 | `scim_cluster2` | i2scim peer (node 2)       | http://localhost:9001              |
 | `alloy`         | Log collector              | http://localhost:3200 (UI)         |
 | `loki`          | Log backend                | https://localhost:3100             |
-| `grafana`       | Query/visualization UI     | https://localhost:3000 (admin/grafana) |
+| `grafana`       | Query/visualization UI     | https://localhost:3000 (Keycloak SSO)  |
 | `prometheus`    | Metrics backend            | https://localhost:9090             |
 
 ### The observability tier runs over TLS by default
@@ -126,7 +126,8 @@ Prometheus scrapes their `/q/metrics` endpoint as the `i2scim` job. See
 
 Run `make dev-up`, wait ~30 seconds, then:
 
-1. Open Grafana at <http://localhost:3000> (log in as `admin` / `grafana`).
+1. Open Grafana at <https://localhost:3000> and choose **Sign in with
+   GoSignals Realm** (the local login form is disabled — auth is Keycloak SSO).
 2. Click **Explore** in the left rail.
 3. Select **Loki** from the datasource picker at the top.
 4. Paste `{service="gosignals"}` into the query box and run it.
@@ -570,9 +571,9 @@ goSignals uses internally (OAuth, HMAC, SPIFFE).
 ## 8. Querying examples
 
 All of the following work against the dev compose's Loki at
-`http://localhost:3100`. Open Grafana at `http://localhost:3000`
-(admin/grafana), select the Loki datasource, and paste any of the queries
-below.
+`https://localhost:3100`. Open Grafana at `https://localhost:3000`, sign in
+via **Sign in with GoSignals Realm** (Keycloak SSO), select the Loki
+datasource, and paste any of the queries below.
 
 ### All goSignals logs
 
