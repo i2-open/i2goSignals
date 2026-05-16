@@ -225,6 +225,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=grafana
     volumes:
       - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/monitor/grafana-dashboards:/etc/grafana/provisioning/dashboards"
 
   goSignals1:
     build:
