@@ -1,0 +1,265 @@
+================================================================================
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+================================================================================
+
+i2goSignals (github.com/i2-open/i2goSignals) is licensed under the Apache
+License, Version 2.0. See the LICENSE.txt file in the root of this repository.
+
+This product includes third-party software components. The components listed
+below are distributed under the terms of their respective licenses. The full
+text of each license referenced is reproduced at the end of this file.
+
+This file is generated from the module graph in go.mod. It is provided to
+satisfy the attribution requirements of the Apache License 2.0 (Section 4),
+the BSD, MIT, and ISC licenses.
+
+--------------------------------------------------------------------------------
+1. DEPENDENCIES
+--------------------------------------------------------------------------------
+
+Apache License 2.0
+------------------
+  github.com/MicahParks/jwkset                       v0.11.0
+  github.com/MicahParks/keyfunc/v2                   v2.1.0
+  github.com/go-jose/go-jose/v4                      v4.1.4
+  github.com/google/shlex                            v0.0.0-20191202100458-e7afc7fbc510
+  github.com/kylelemons/godebug                      v1.1.0
+  github.com/prometheus/client_golang                v1.23.2
+  github.com/prometheus/client_model                 v0.6.2
+  github.com/prometheus/common                       v0.67.5
+  github.com/prometheus/procfs                       v0.20.1
+  github.com/spiffe/go-spiffe/v2                     v2.6.0
+  github.com/xdg-go/pbkdf2                           v1.0.0
+  github.com/xdg-go/scram                            v1.2.0
+  github.com/xdg-go/stringprep                       v1.0.4
+  go.mongodb.org/mongo-driver/v2                     v2.6.0
+  go.yaml.in/yaml/v2                                 v2.4.4
+  google.golang.org/genproto/googleapis/rpc          v0.0.0-20260504160031-60b97b32f348
+  google.golang.org/grpc                             v1.81.0
+
+MIT License
+-----------
+  github.com/Microsoft/go-winio                      v0.6.2
+  github.com/alecthomas/kong                         v1.15.0
+  github.com/beorn7/perks                            v1.0.1
+  github.com/brianvoe/gofakeit/v6                    v6.28.0
+  github.com/cespare/xxhash/v2                        v2.3.0
+  github.com/chzyer/readline                         v1.5.1
+  github.com/fatih/structs                           v1.1.0
+  github.com/golang-jwt/jwt/v5                        v5.3.1
+  github.com/kelseyhightower/envconfig               v1.4.0
+  github.com/kr/text                                 v0.2.0
+  github.com/segmentio/ksuid                         v1.0.4
+  github.com/stretchr/testify                        v1.11.1
+  github.com/youmark/pkcs8                           v0.0.0-20240726163527-a2c0da244d78
+  gopkg.in/yaml.v3                                   v3.0.1   (dual MIT / Apache 2.0)
+
+BSD 3-Clause License
+--------------------
+  github.com/gofrs/flock                             v0.13.0
+  github.com/gorilla/mux                             v1.8.1
+  github.com/klauspost/compress                      v1.18.6
+  github.com/munnerz/goautoneg                       v0.0.0-20191010083416-a7dc8b61c822
+  github.com/pmezard/go-difflib                      v1.0.1-0.20181226105442-5d4384ee4fb2
+  golang.org/x/crypto                                v0.50.0
+  golang.org/x/exp                                   v0.0.0-20260410095643-746e56fc9e2f
+  golang.org/x/net                                   v0.53.0
+  golang.org/x/oauth2                                v0.36.0
+  golang.org/x/sync                                  v0.20.0
+  golang.org/x/sys                                   v0.43.0
+  golang.org/x/text                                  v0.36.0
+  golang.org/x/time                                  v0.15.0
+  google.golang.org/protobuf                         v1.36.11
+
+ISC License
+-----------
+  github.com/davecgh/go-spew                         v1.1.2-0.20180830191138-d8f796af33cc
+
+--------------------------------------------------------------------------------
+2. NOTICES REQUIRED BY BUNDLED DEPENDENCIES
+--------------------------------------------------------------------------------
+
+The following NOTICE texts are reproduced as required by Section 4(d) of the
+Apache License 2.0.
+
+>>> github.com/prometheus/client_golang
+
+  Prometheus instrumentation library for Go applications
+  Copyright 2012-2015 The Prometheus Authors
+
+  This product includes software developed at
+  SoundCloud Ltd. (http://soundcloud.com/).
+
+  The following components are included in this product:
+
+  perks - a fork of https://github.com/bmizerany/perks
+  https://github.com/beorn7/perks
+  Copyright 2013-2015 Blake Mizerany, Björn Rabenstein
+  See https://github.com/beorn7/perks/blob/master/README.md for license details.
+
+  Go support for Protocol Buffers - Google's data interchange format
+  http://github.com/golang/protobuf/
+  Copyright 2010 The Go Authors
+  See source code for license details.
+
+>>> github.com/prometheus/client_model
+
+  Data model artifacts for Prometheus.
+  Copyright 2012-2015 The Prometheus Authors
+
+  This product includes software developed at
+  SoundCloud Ltd. (http://soundcloud.com/).
+
+>>> github.com/prometheus/common
+
+  Common libraries shared by Prometheus Go components.
+  Copyright 2015 The Prometheus Authors
+
+  This product includes software developed at
+  SoundCloud Ltd. (http://soundcloud.com/).
+
+>>> github.com/prometheus/procfs
+
+  procfs provides functions to retrieve system, kernel and process
+  metrics from the pseudo-filesystem proc.
+
+  Copyright 2014-2015 The Prometheus Authors
+
+  This product includes software developed at
+  SoundCloud Ltd. (http://soundcloud.com/).
+
+>>> go.yaml.in/yaml/v2 and gopkg.in/yaml.v3
+
+  Copyright 2011-2016 Canonical Ltd.
+
+  Licensed under the Apache License, Version 2.0.
+
+>>> google.golang.org/grpc
+
+  Copyright 2014 gRPC authors.
+
+  Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+3. LICENSE TEXTS
+--------------------------------------------------------------------------------
+
+================================================================================
+Apache License 2.0
+================================================================================
+
+Components listed above as "Apache License 2.0" are licensed under the Apache
+License, Version 2.0. The full text of that license is identical to the text
+distributed with i2goSignals in the LICENSE.txt file at the root of this
+repository, and is also available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+================================================================================
+MIT License
+================================================================================
+
+Copyright notices for the MIT-licensed components above:
+
+  github.com/Microsoft/go-winio        Copyright (c) 2015 Microsoft
+  github.com/alecthomas/kong           Copyright (C) 2018 Alec Thomas
+  github.com/beorn7/perks              Copyright (C) 2013 Blake Mizerany
+  github.com/brianvoe/gofakeit/v6      Copyright (c) Brian Voe
+  github.com/cespare/xxhash/v2         Copyright (c) 2016 Caleb Spare
+  github.com/chzyer/readline           Copyright (c) 2015 Chzyer
+  github.com/fatih/structs             Copyright (c) 2014 Fatih Arslan
+  github.com/golang-jwt/jwt/v5         Copyright (c) 2012 Dave Grijalva,
+                                       Copyright (c) 2021 golang-jwt maintainers
+  github.com/kelseyhightower/envconfig Copyright (c) 2013 Kelsey Hightower
+  github.com/kr/text                   Copyright 2012 Keith Rarick
+  github.com/segmentio/ksuid           Copyright (c) 2017 Segment.io
+  github.com/stretchr/testify          Copyright (c) 2012-2020 Mat Ryer,
+                                       Tyler Bunnell and contributors
+  github.com/youmark/pkcs8             Copyright (c) 2014 youmark
+  gopkg.in/yaml.v3                     Copyright (c) 2011-2019 Canonical Ltd.,
+                                       Copyright (c) 2006-2010 Kirill Simonov
+
+The MIT License (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+BSD 3-Clause License
+================================================================================
+
+Copyright notices for the BSD-3-Clause-licensed components above:
+
+  github.com/gofrs/flock          Copyright (c) 2018-2025, The Gofrs;
+                                  Copyright (c) 2015-2020, Tim Heckman
+  github.com/gorilla/mux          Copyright (c) 2023 The Gorilla Authors
+  github.com/klauspost/compress   Copyright (c) 2012 The Go Authors;
+                                  Copyright (c) 2019 Klaus Post
+  github.com/munnerz/goautoneg    Copyright (c) 2011, Open Knowledge
+                                  Foundation Ltd.
+  github.com/pmezard/go-difflib   Copyright (c) 2013, Patrick Mezard
+  golang.org/x/* and
+  google.golang.org/protobuf      Copyright (c) 2009 / 2018 The Go Authors
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  3. Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+ISC License
+================================================================================
+
+github.com/davecgh/go-spew   Copyright (c) 2012-2016 Dave Collins
+                             <dave@davec.name>
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+================================================================================
+END OF THIRD-PARTY SOFTWARE NOTICES
+================================================================================

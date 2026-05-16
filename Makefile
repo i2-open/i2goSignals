@@ -14,7 +14,7 @@ DEV_IMAGE_STAMP=.dev-image.stamp
 
 .PHONY: all build run console-build server-build docker-build build clean clean-scim dev-clean generate-certs check-certs \
 	dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image run-spiffe-demo \
-	dev-reset-spiffe dev-rebuild-spiffe-goSignals
+	dev-reset-spiffe dev-rebuild-spiffe-goSignals licenses-check
 
 all: build
 
@@ -41,6 +41,17 @@ check-certs:
 # Generate TLS certificates
 generate-certs:
 	$(GO) run ./cmd/genTlsKeys
+
+# Verify every third-party dependency uses a permissive license (no copyleft or
+# unlicensed code). Run this after changing go.mod, and update
+# THIRD-PARTY-NOTICES.txt to match. Installs google/go-licenses on demand.
+licenses-check:
+	@command -v go-licenses >/dev/null 2>&1 || { \
+		echo ">> installing go-licenses..."; \
+		$(GO) install github.com/google/go-licenses@latest; \
+	}
+	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" go-licenses check ./... \
+		--disallowed_types=forbidden,restricted,unknown
 
 # Remove build artifacts
 clean: dev-clean
