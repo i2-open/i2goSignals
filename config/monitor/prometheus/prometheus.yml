@@ -15,7 +15,9 @@ scrape_configs:
     scrape_interval: 15s
     scrape_timeout: 10s
     metrics_path: /metrics
-    scheme: http
+    scheme: https
+    tls_config:
+      ca_file: /etc/prometheus/certs/ca-cert.pem
     static_configs:
       - targets:
           - localhost:9090
@@ -26,7 +28,7 @@ scrape_configs:
     metrics_path: /metrics
     scheme: https
     tls_config:
-      insecure_skip_verify: true
+      ca_file: /etc/prometheus/certs/ca-cert.pem
     static_configs:
       - targets:
           - gosignals1:8888
@@ -36,8 +38,15 @@ scrape_configs:
     scrape_interval: 15s
     scrape_timeout: 10s
     metrics_path: /q/metrics
-    scheme: http
+    scheme: https
+    tls_config:
+      ca_file: /etc/prometheus/certs/ca-cert.pem
+      # The SCIM peers run on a JDK that rejects a TLS SNI whose host_name
+      # contains an underscore (RFC 1123). The container names scim_cluster1 /
+      # scim_cluster2 do, so Prometheus must send a valid SNI: `localhost` is
+      # in the shared dev certificate's SANs and the JDK accepts it.
+      server_name: localhost
     static_configs:
       - targets:
-          - scim_cluster1:8080
-          - scim_cluster2:8080
+          - scim_cluster1:8443
+          - scim_cluster2:8443

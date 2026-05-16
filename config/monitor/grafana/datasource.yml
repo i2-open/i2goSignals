@@ -3,13 +3,26 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
-    url: http://prometheus:9090
+    url: https://prometheus:9090
     isDefault: true
     access: proxy
     editable: true
+    jsonData:
+      tlsAuthWithCACert: true
+    secureJsonData:
+      # Prometheus serves HTTPS with the shared dev certificate; verify it
+      # against the dev CA mounted into the Grafana container (see
+      # docker-compose-dev).
+      tlsCACert: $__file{/etc/grafana/certs/ca-cert.pem}
   - name: Loki
     type: loki
     uid: loki
-    url: http://loki:3100
+    url: https://loki:3100
     access: proxy
     editable: true
+    jsonData:
+      tlsAuthWithCACert: true
+    secureJsonData:
+      # Loki serves HTTPS with the shared dev certificate; verify it against
+      # the dev CA mounted into the Grafana container (see docker-compose-dev).
+      tlsCACert: $__file{/etc/grafana/certs/ca-cert.pem}

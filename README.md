@@ -75,13 +75,26 @@ docker exec spire-server sh /etc/spire/registration/register.sh
 The `docker-compose.yml` file provides a sample environment demonstrating Push and Poll scenarios between two i2goSignals servers, along with `i2scim.io` servers for multi-master replication.
 
 1. **Build the project**: `make build`
-2. **Configure local DNS**: Add `goSignals1` and `goSignals2` to your `/etc/hosts` pointing to `127.0.0.1`.
-3. **Start services**: `docker compose up -d`
-4. **Automated Configuration**: The `scimSsfSetup` service automatically configures the streams. To perform manual configuration or explore the tool:
+2. **Configure local DNS**: Add `goSignals1`, `goSignals2`, and `keycloak` to your `/etc/hosts` pointing to `127.0.0.1`. The `keycloak` entry is required so that browser-side SSO redirects (e.g. Grafana logging in via Keycloak) resolve to the local stack.
+3. **Trust the dev CA**: The stack serves TLS with a self-signed CA. Import `config/certs/ca-cert.pem` into your browser or OS trust store so that `https://localhost:3000` (Grafana) and `https://keycloak:9080` are accepted without certificate warnings.
+   - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain config/certs/ca-cert.pem`
+   - Linux: copy to `/usr/local/share/ca-certificates/` and run `sudo update-ca-certificates`
+   - Firefox keeps its own store — import the CA under Settings → Privacy & Security → Certificates.
+4. **Start services**: `docker compose up -d`
+5. **Automated Configuration**: The `scimSsfSetup` service automatically configures the streams. To perform manual configuration or explore the tool:
    ```bash
    ./goSignals
    goSignals> add server gs1 http://goSignals1:8888
    ```
+
+### Grafana SSO
+
+Grafana is served at `https://localhost:3000`. The local username/password
+login form is disabled — the only way in is **Sign in with GoSignals Realm**,
+which authenticates against the `gosignals` Keycloak realm. Demo users map to
+Grafana org roles via the `grafana` client roles: `admin` → Admin, `user` →
+Viewer; any authenticated realm user with no `grafana` client role falls back
+to Viewer.
 
 ## Developing and Debugging (GoLand/IntelliJ)
 

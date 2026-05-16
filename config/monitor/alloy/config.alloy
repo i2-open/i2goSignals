@@ -75,6 +75,11 @@ loki.process "parse_json" {
 
 loki.write "local" {
     endpoint {
-        url = "http://loki:3100/loki/api/v1/push"
+        // Loki serves HTTPS with the shared dev certificate; verify it
+        // against the local dev CA rather than skipping verification.
+        url = "https://loki:3100/loki/api/v1/push"
+        tls_config {
+            ca_file = "/etc/alloy/certs/ca-cert.pem"
+        }
     }
 }

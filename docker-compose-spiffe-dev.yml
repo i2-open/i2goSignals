@@ -337,6 +337,7 @@ services:
       - backend
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
+      - "./config/certs:/etc/prometheus/certs:ro"
       - prometheus_data:/prometheus
       - spire_sockets:/run/spire/sockets
     labels:
@@ -346,6 +347,7 @@ services:
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.config.file=/etc/prometheus/web-config.yml'
     ports:
       - "9090:9090"
     restart: unless-stopped
@@ -363,13 +365,33 @@ services:
     restart: unless-stopped
     depends_on:
       - prometheus
+      - keycloak
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
+      - GF_SERVER_PROTOCOL=https
+      - GF_SERVER_ROOT_URL=https://localhost:3000
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/server-cert.pem
+      - GF_SERVER_CERT_KEY=/etc/grafana/certs/server-key.pem
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_GENERIC_OAUTH_ENABLED=true
+      - GF_AUTH_GENERIC_OAUTH_NAME=GoSignals Realm
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=grafana
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=grafana-client-secret
+      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile roles
+      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/auth
+      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/token
+      - GF_AUTH_GENERIC_OAUTH_API_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/userinfo
+      - GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH=email
+      - "GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=contains(resource_access.grafana.roles[*], 'admin') && 'Admin' || contains(resource_access.grafana.roles[*], 'editor') && 'Editor' || 'Viewer'"
+      - GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT=false
+      - GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true
+      - GF_AUTH_GENERIC_OAUTH_TLS_CLIENT_CA=/etc/grafana/certs/ca-cert.pem
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     volumes:
       - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/certs:/etc/grafana/certs:ro"
       - spire_sockets:/run/spire/sockets
 
   # ---------------------------------------------------------------------------
@@ -641,12 +663,17 @@ services:
         condition: service_healthy
     volumes:
       - ./config/scim/data1:/scim
+      - "./config/certs:/scim-certs:ro"
       - spire_sockets:/run/spire/sockets
     env_file:
       - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      # Serve an HTTPS listener (Quarkus default :8443) for Prometheus to
+      # scrape /q/metrics over TLS, using the shared dev certificate.
+      - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
+      - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
 
   scim_cluster2:
     image: independentid/i2scim-universal:latest
@@ -665,12 +692,17 @@ services:
         condition: service_healthy
     volumes:
       - ./config/scim/data2:/scim
+      - "./config/certs:/scim-certs:ro"
       - spire_sockets:/run/spire/sockets
     env_file:
       - ./config/scim/scripts/scim-server.env
     environment:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      # Serve an HTTPS listener (Quarkus default :8443) for Prometheus to
+      # scrape /q/metrics over TLS, using the shared dev certificate.
+      - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
+      - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
 
 networks:
   frontend:

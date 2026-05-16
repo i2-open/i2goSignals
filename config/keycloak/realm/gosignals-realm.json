@@ -218,9 +218,56 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "description": "Grafana observability UI - operator SSO",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "grafana-client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "https://localhost:3000/login/generic_oauth"
+      ],
+      "webOrigins": [
+        "https://localhost:3000"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": []
     }
   ],
   "roles": {
+    "client": {
+      "grafana": [
+        {
+          "name": "admin",
+          "description": "Grafana Admin org role",
+          "clientRole": true
+        },
+        {
+          "name": "editor",
+          "description": "Grafana Editor org role",
+          "clientRole": true
+        },
+        {
+          "name": "viewer",
+          "description": "Grafana Viewer org role",
+          "clientRole": true
+        }
+      ]
+    },
     "realm": [
       {
         "name": "admin",
@@ -267,7 +314,12 @@
         "admin",
         "goSignalsRootRole",
         "goSignalsAdminRole"
-      ]
+      ],
+      "clientRoles": {
+        "grafana": [
+          "admin"
+        ]
+      }
     },
     {
       "username": "user",
@@ -286,7 +338,12 @@
       "realmRoles": [
         "user",
         "goSignalsAdminRole"
-      ]
+      ],
+      "clientRoles": {
+        "grafana": [
+          "viewer"
+        ]
+      }
     }
   ],
   "clientScopes": [
@@ -490,6 +547,21 @@
             "user.attribute": "foo",
             "access.token.claim": "true",
             "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "client roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "user.attribute": "foo",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "resource_access.${client_id}.roles",
             "jsonType.label": "String"
           }
         }

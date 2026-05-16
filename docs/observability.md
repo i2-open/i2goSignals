@@ -97,9 +97,26 @@ choice:
 | `scim_cluster1` | i2scim peer (node 1)       | http://localhost:9000              |
 | `scim_cluster2` | i2scim peer (node 2)       | http://localhost:9001              |
 | `alloy`         | Log collector              | http://localhost:3200 (UI)         |
-| `loki`          | Log backend                | http://localhost:3100              |
-| `grafana`       | Query/visualization UI     | http://localhost:3000 (admin/grafana) |
-| `prometheus`    | Metrics backend            | http://localhost:9090              |
+| `loki`          | Log backend                | https://localhost:3100             |
+| `grafana`       | Query/visualization UI     | https://localhost:3000 (Keycloak SSO)  |
+| `prometheus`    | Metrics backend            | https://localhost:9090             |
+
+### The observability tier runs over TLS by default
+
+In the dev stack the observability tier is encrypted in transit. For logs,
+Loki serves its HTTP endpoints over TLS, Alloy pushes log batches to
+`https://loki:3100`, and Grafana's provisioned Loki datasource queries Loki
+over HTTPS. For metrics, Prometheus serves its UI/API over TLS, scrapes every
+target (including its own self-scrape) over HTTPS, and Grafana's Prometheus
+datasource queries it over HTTPS. Every hop verifies the server against the
+local dev CA (`config/certs/ca-cert.pem`) rather than skipping verification.
+
+All three share one certificate — the shared dev certificate produced by
+`genTlsKeys`, whose SANs cover every container hostname (`loki`, `grafana`,
+`localhost`, …). `genTlsKeys` regenerates that certificate whenever the set
+of required hostnames changes, so adding a service does not silently reuse a
+stale cert. This is server-side TLS only; mutual TLS stays scoped to the
+SPIFFE inter-cluster path (see `docs/adr/0001-per-service-keycloak-clients.md`).
 
 The SCIM peers run the `independentid/i2scim-universal` image. They are
 wired into the same observability stack as the goSignals services: their
@@ -109,7 +126,8 @@ Prometheus scrapes their `/q/metrics` endpoint as the `i2scim` job. See
 
 Run `make dev-up`, wait ~30 seconds, then:
 
-1. Open Grafana at <http://localhost:3000> (log in as `admin` / `grafana`).
+1. Open Grafana at <https://localhost:3000> and choose **Sign in with
+   GoSignals Realm** (the local login form is disabled — auth is Keycloak SSO).
 2. Click **Explore** in the left rail.
 3. Select **Loki** from the datasource picker at the top.
 4. Paste `{service="gosignals"}` into the query box and run it.
@@ -299,13 +317,21 @@ three environment variables (`QUARKUS_LOG_CONSOLE_JSON=true`, `NODE_ID`,
 
 | Job           | Targets                                   | Path          | Scheme |
 |---------------|-------------------------------------------|---------------|--------|
-| `prometheus`  | `localhost:9090`                          | `/metrics`    | http   |
+| `prometheus`  | `localhost:9090`                          | `/metrics`    | https  |
 | `i2gosignals` | `gosignals1:8888`, `gosignals2:8889`      | `/metrics`    | https  |
-| `i2scim`      | `scim_cluster1:8080`, `scim_cluster2:8080`| `/q/metrics`  | http   |
+| `i2scim`      | `scim_cluster1:8443`, `scim_cluster2:8443`| `/q/metrics`  | https  |
 
-The `i2scim` job uses the Quarkus default metrics path (`/q/metrics`) and
-plain HTTP because the SCIM peers terminate TLS at the perimeter, not at
-the metrics endpoint inside the dev network. See
+Every scrape — including the Prometheus self-scrape — runs over HTTPS and
+verifies the target against the local dev CA. The SCIM peers serve an HTTPS
+listener on `:8443` (Quarkus default) alongside their plain `:8080` SCIM API,
+so `/q/metrics` is reachable over TLS.
+
+One caveat lives in the `i2scim` job's `tls_config`: it sets
+`server_name: localhost`. The SCIM peers run on a JDK that rejects a TLS SNI
+whose `host_name` contains an underscore (RFC 1123), and the container names
+`scim_cluster1` / `scim_cluster2` do — so Prometheus must send a valid SNI.
+`localhost` is in the shared dev certificate's SANs and the JDK accepts it.
+See
 [`config/monitor/prometheus/prometheus.yml`](../config/monitor/prometheus/prometheus.yml)
 for the full configuration.
 
@@ -353,7 +379,11 @@ loki.process "parse_json" {
 }
 
 loki.write "local" {
-    endpoint { url = "http://loki:3100/loki/api/v1/push" }
+    endpoint {
+        // Loki serves HTTPS; verify it against the local dev CA.
+        url = "https://loki:3100/loki/api/v1/push"
+        tls_config { ca_file = "/etc/alloy/certs/ca-cert.pem" }
+    }
 }
 ```
 
@@ -506,8 +536,10 @@ workspace_id = "00000000-0000-0000-0000-000000000000"
 The Loki shipped in the dev compose has `auth_enabled: false` because it
 is firewalled to the compose network. In production:
 
-1. **Terminate TLS at a reverse proxy** (Nginx, Caddy, Traefik). Loki
-   itself does not need a TLS-aware listener.
+1. **Serve Loki over TLS.** Loki has a native TLS-aware HTTP listener
+   (`server.http_tls_config`) — the dev compose already enables it with the
+   shared dev certificate. A reverse proxy (Nginx, Caddy, Traefik) is still
+   useful in front of it for the auth and rate-limiting Loki lacks natively.
 2. **Require HTTP Basic auth at the proxy**. Loki accepts a `X-Scope-OrgID`
    header for multi-tenancy but does not authenticate itself.
 3. **Restrict the push endpoint to internal networks** — the
@@ -539,9 +571,9 @@ goSignals uses internally (OAuth, HMAC, SPIFFE).
 ## 8. Querying examples
 
 All of the following work against the dev compose's Loki at
-`http://localhost:3100`. Open Grafana at `http://localhost:3000`
-(admin/grafana), select the Loki datasource, and paste any of the queries
-below.
+`https://localhost:3100`. Open Grafana at `https://localhost:3000`, sign in
+via **Sign in with GoSignals Realm** (Keycloak SSO), select the Loki
+datasource, and paste any of the queries below.
 
 ### All goSignals logs
 
