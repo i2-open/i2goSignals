@@ -10,6 +10,12 @@ server:
   http_listen_port: 3100
   grpc_listen_port: 9096
   log_level: info
+  # Server-side TLS on the HTTP listener using the shared dev certificate
+  # (SANs cover `loki` and `localhost`). No client_ca_file: this is
+  # server-side TLS only, not mutual TLS — see docs/adr/0001.
+  http_tls_config:
+    cert_file: /etc/loki/certs/server-cert.pem
+    key_file: /etc/loki/certs/server-key.pem
 
 common:
   instance_addr: 127.0.0.1

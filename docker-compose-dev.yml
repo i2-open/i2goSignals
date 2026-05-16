@@ -174,6 +174,7 @@ services:
       - "-config.file=/etc/loki/loki-config.yml"
     volumes:
       - "./config/monitor/loki:/etc/loki"
+      - "./config/certs:/etc/loki/certs:ro"
       - loki_data:/loki
     restart: unless-stopped
     # No container-level healthcheck: the grafana/loki image is distroless
@@ -203,6 +204,7 @@ services:
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./config/monitor/alloy:/etc/alloy"
+      - "./config/certs:/etc/alloy/certs:ro"
     depends_on:
       loki:
         condition: service_started

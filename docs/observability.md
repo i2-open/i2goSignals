@@ -97,9 +97,24 @@ choice:
 | `scim_cluster1` | i2scim peer (node 1)       | http://localhost:9000              |
 | `scim_cluster2` | i2scim peer (node 2)       | http://localhost:9001              |
 | `alloy`         | Log collector              | http://localhost:3200 (UI)         |
-| `loki`          | Log backend                | http://localhost:3100              |
-| `grafana`       | Query/visualization UI     | http://localhost:3000 (admin/grafana) |
+| `loki`          | Log backend                | https://localhost:3100             |
+| `grafana`       | Query/visualization UI     | https://localhost:3000 (admin/grafana) |
 | `prometheus`    | Metrics backend            | http://localhost:9090              |
+
+### The log pipeline runs over TLS by default
+
+In the dev stack the log-shipping pipeline is encrypted in transit. Loki
+serves its HTTP endpoints over TLS, Alloy pushes log batches to
+`https://loki:3100`, and Grafana's provisioned Loki datasource queries Loki
+over HTTPS. Every hop verifies the server against the local dev CA
+(`config/certs/ca-cert.pem`) rather than skipping verification.
+
+All three share one certificate — the shared dev certificate produced by
+`genTlsKeys`, whose SANs cover every container hostname (`loki`, `grafana`,
+`localhost`, …). `genTlsKeys` regenerates that certificate whenever the set
+of required hostnames changes, so adding a service does not silently reuse a
+stale cert. This is server-side TLS only; mutual TLS stays scoped to the
+SPIFFE inter-cluster path (see `docs/adr/0001-per-service-keycloak-clients.md`).
 
 The SCIM peers run the `independentid/i2scim-universal` image. They are
 wired into the same observability stack as the goSignals services: their
@@ -353,7 +368,11 @@ loki.process "parse_json" {
 }
 
 loki.write "local" {
-    endpoint { url = "http://loki:3100/loki/api/v1/push" }
+    endpoint {
+        // Loki serves HTTPS; verify it against the local dev CA.
+        url = "https://loki:3100/loki/api/v1/push"
+        tls_config { ca_file = "/etc/alloy/certs/ca-cert.pem" }
+    }
 }
 ```
 
@@ -506,8 +525,10 @@ workspace_id = "00000000-0000-0000-0000-000000000000"
 The Loki shipped in the dev compose has `auth_enabled: false` because it
 is firewalled to the compose network. In production:
 
-1. **Terminate TLS at a reverse proxy** (Nginx, Caddy, Traefik). Loki
-   itself does not need a TLS-aware listener.
+1. **Serve Loki over TLS.** Loki has a native TLS-aware HTTP listener
+   (`server.http_tls_config`) — the dev compose already enables it with the
+   shared dev certificate. A reverse proxy (Nginx, Caddy, Traefik) is still
+   useful in front of it for the auth and rate-limiting Loki lacks natively.
 2. **Require HTTP Basic auth at the proxy**. Loki accepts a `X-Scope-OrgID`
    header for multi-tenancy but does not authenticate itself.
 3. **Restrict the push endpoint to internal networks** — the

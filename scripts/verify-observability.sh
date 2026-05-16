@@ -20,7 +20,7 @@ fail() {
 
 ok() { echo "  OK: $1"; }
 
-LOKI_URL=${LOKI_URL:-http://localhost:3100}
+LOKI_URL=${LOKI_URL:-https://localhost:3100}
 GRAFANA_URL=${GRAFANA_URL:-https://localhost:3000}
 GRAFANA_AUTH=${GRAFANA_AUTH:-admin:grafana}
 PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
@@ -28,8 +28,9 @@ CA_CERT=${CA_CERT:-config/certs/ca-cert.pem}
 KEYCLOAK_HOST=${KEYCLOAK_HOST:-keycloak:9080}
 WAIT_SECS=${WAIT_SECS:-90}
 
-# Grafana is served over TLS with the shared dev certificate; every call to it
-# must verify against the dev CA rather than skip verification.
+# Grafana and Loki are both served over TLS with the shared dev certificate;
+# every call to them must verify against the dev CA rather than skip
+# verification.
 gcurl() { curl --cacert "${CA_CERT}" "$@"; }
 
 # Drive a full OIDC authorization-code login against Keycloak from the host.
@@ -72,7 +73,7 @@ wait_for() {
 }
 
 echo "1) Loki readiness..."
-wait_for "Loki /ready" "curl -fsS ${LOKI_URL}/ready"
+wait_for "Loki /ready" "gcurl -fsS ${LOKI_URL}/ready"
 ok "Loki ready"
 
 echo "2) Grafana datasource provisioning includes Loki..."
@@ -95,8 +96,8 @@ ok "gosignals1 stdout JSON includes service, node_id, cluster_name=dev-local, ve
 echo "4) Loki exposes the expected goSignals label set..."
 expected_labels=(service node_id cluster_name component level version)
 wait_for "Loki label 'service'" \
-    "curl -fsS ${LOKI_URL}/loki/api/v1/labels | grep -q '\"service\"'"
-labels_json=$(curl -fsS "${LOKI_URL}/loki/api/v1/labels")
+    "gcurl -fsS ${LOKI_URL}/loki/api/v1/labels | grep -q '\"service\"'"
+labels_json=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/labels")
 for lbl in "${expected_labels[@]}"; do
     echo "$labels_json" | grep -q "\"$lbl\"" \
         || fail "label '$lbl' not present in Loki labels: $labels_json"
@@ -115,7 +116,7 @@ echo "6) LogQL query for {service=\"gosignals\"} returns success..."
 end_ns=$(date +%s)000000000
 start_ns=$(( $(date +%s) - 600 ))000000000
 query='%7Bservice%3D%22gosignals%22%7D'
-resp=$(curl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+resp=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
 echo "$resp" | grep -q '"status":"success"' \
     || fail "LogQL query did not return success: $resp"
 ok "LogQL query returns success"
@@ -147,15 +148,15 @@ done
 # Re-query label *values* rather than label *names* — names were checked
 # in section 4. Here we verify the SCIM peers produced lines with the
 # expected discriminators.
-service_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/service/values")
+service_values=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/label/service/values")
 echo "$service_values" | grep -q '"i2scim"' \
     || fail "service=i2scim not seen in Loki label values: $service_values"
-node_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/node_id/values")
+node_values=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/label/node_id/values")
 for n in scim_cluster1 scim_cluster2; do
     echo "$node_values" | grep -q "\"$n\"" \
         || fail "node_id=$n not seen in Loki: $node_values"
 done
-cluster_values=$(curl -fsS "${LOKI_URL}/loki/api/v1/label/cluster_name/values")
+cluster_values=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/label/cluster_name/values")
 echo "$cluster_values" | grep -q '"dev-local"' \
     || fail "cluster_name=dev-local not seen in Loki: $cluster_values"
 ok "i2scim peers labelled with service/node_id/cluster_name"
@@ -164,7 +165,7 @@ echo "10) LogQL filter by SCIM node_id returns only that peer..."
 end_ns=$(date +%s)000000000
 start_ns=$(( $(date +%s) - 600 ))000000000
 query='%7Bnode_id%3D%22scim_cluster1%22%7D'
-resp=$(curl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+resp=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
 echo "$resp" | grep -q '"status":"success"' \
     || fail "LogQL query for scim_cluster1 did not return success: $resp"
 # Negative check: response must not surface scim_cluster2 stream labels.
@@ -193,7 +194,7 @@ echo "12) Existing {service=\"gosignals\"} query still returns rows..."
 end_ns=$(date +%s)000000000
 start_ns=$(( $(date +%s) - 600 ))000000000
 query='%7Bservice%3D%22gosignals%22%7D'
-resp=$(curl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+resp=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
 echo "$resp" | grep -q '"status":"success"' \
     || fail "regression: gosignals LogQL query did not return success: $resp"
 # Expect at least one stream in the result so we know existing logs still flow.
@@ -241,6 +242,28 @@ viewer_code=$(gcurl -s -o /dev/null -w '%{http_code}' -b "$user_jar" \
 ok "OIDC login as 'user' yields Grafana Viewer"
 
 rm -f "$admin_jar" "$user_jar"
+
+echo "15) Loki is served over TLS with a CA-verifiable certificate (issue #79)..."
+wait_for "Loki HTTPS" "gcurl -fsS ${LOKI_URL}/ready"
+gcurl -fsS "${LOKI_URL}/ready" >/dev/null \
+    || fail "Loki did not present a CA-verifiable certificate at ${LOKI_URL}"
+# Negative check: the TLS port must not also answer plaintext HTTP.
+if curl -fsS "http://localhost:3100/ready" >/dev/null 2>&1; then
+    fail "Loki still answers plaintext HTTP on :3100 (expected HTTPS only)"
+fi
+ok "Loki serves HTTPS with a certificate signed by the dev CA"
+
+echo "16) Logs still flow end to end over the TLS pipeline (issue #79)..."
+# Loki now listens HTTPS only, so any line queryable in Loki was pushed by
+# Alloy over the HTTPS loki.write hop. A fresh query returning streams proves
+# the Alloy -> Loki -> Grafana chain still works after the TLS switch.
+end_ns=$(date +%s)000000000
+start_ns=$(( $(date +%s) - 600 ))000000000
+query='%7Bservice%3D%22gosignals%22%7D'
+resp=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&start=${start_ns}&end=${end_ns}")
+echo "$resp" | grep -q '"stream":' \
+    || fail "no goSignals streams in Loki — Alloy HTTPS push to Loki may be failing"
+ok "Alloy ships logs to Loki over HTTPS; lines remain queryable"
 
 echo ""
 echo "All observability acceptance criteria passed."
