@@ -21,10 +21,39 @@ fail() {
 ok() { echo "  OK: $1"; }
 
 LOKI_URL=${LOKI_URL:-http://localhost:3100}
-GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
+GRAFANA_URL=${GRAFANA_URL:-https://localhost:3000}
 GRAFANA_AUTH=${GRAFANA_AUTH:-admin:grafana}
 PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+CA_CERT=${CA_CERT:-config/certs/ca-cert.pem}
+KEYCLOAK_HOST=${KEYCLOAK_HOST:-keycloak:9080}
 WAIT_SECS=${WAIT_SECS:-90}
+
+# Grafana is served over TLS with the shared dev certificate; every call to it
+# must verify against the dev CA rather than skip verification.
+gcurl() { curl --cacert "${CA_CERT}" "$@"; }
+
+# Drive a full OIDC authorization-code login against Keycloak from the host.
+# Keycloak issues redirects to https://keycloak:9080; --resolve maps that name
+# to the published port so the script needs no /etc/hosts entry. A single
+# cookie jar carries Grafana's oauth_state and Keycloak's session cookies
+# across the redirect chain. Returns non-zero if any step fails.
+oidc_login() {
+    local user="$1" pass="$2" jar="$3"
+    local kc=(curl -s --cacert "${CA_CERT}" --resolve "${KEYCLOAK_HOST}:127.0.0.1"
+              -c "$jar" -b "$jar")
+    local login_page action
+    login_page=$("${kc[@]}" -L "${GRAFANA_URL}/login/generic_oauth") || return 1
+    action=$(printf '%s' "$login_page" \
+        | grep -oE 'action="[^"]*login-actions/authenticate[^"]*"' \
+        | head -1 | sed -E 's/.*action="([^"]*)".*/\1/' | sed 's/&amp;/\&/g')
+    [ -n "$action" ] || return 2
+    "${kc[@]}" -L -o /dev/null \
+        --data-urlencode "username=${user}" \
+        --data-urlencode "password=${pass}" \
+        --data-urlencode "credentialId=" \
+        "$action" || return 3
+    return 0
+}
 
 wait_for() {
     local desc="$1"
@@ -47,8 +76,8 @@ wait_for "Loki /ready" "curl -fsS ${LOKI_URL}/ready"
 ok "Loki ready"
 
 echo "2) Grafana datasource provisioning includes Loki..."
-wait_for "Grafana API" "curl -fsS -u ${GRAFANA_AUTH} ${GRAFANA_URL}/api/datasources"
-ds_json=$(curl -fsS -u "${GRAFANA_AUTH}" "${GRAFANA_URL}/api/datasources")
+wait_for "Grafana API" "gcurl -fsS -u ${GRAFANA_AUTH} ${GRAFANA_URL}/api/datasources"
+ds_json=$(gcurl -fsS -u "${GRAFANA_AUTH}" "${GRAFANA_URL}/api/datasources")
 echo "$ds_json" | grep -q '"type":"loki"' \
     || fail "Grafana does not list Loki datasource: $ds_json"
 ok "Loki datasource present in Grafana"
@@ -171,6 +200,47 @@ echo "$resp" | grep -q '"status":"success"' \
 echo "$resp" | grep -q '"stream":' \
     || fail "regression: gosignals query returned no streams"
 ok "no regression on goSignals log path"
+
+echo "13) Grafana is served over TLS with a CA-verifiable certificate (issue #78)..."
+wait_for "Grafana HTTPS" "gcurl -fsS ${GRAFANA_URL}/api/health"
+gcurl -fsS "${GRAFANA_URL}/api/health" >/dev/null \
+    || fail "Grafana did not present a CA-verifiable certificate at ${GRAFANA_URL}"
+# Negative check: the TLS port must not also answer plaintext HTTP.
+if curl -fsS "http://localhost:3000/api/health" >/dev/null 2>&1; then
+    fail "Grafana still answers plaintext HTTP on :3000 (expected HTTPS only)"
+fi
+ok "Grafana serves HTTPS with a certificate signed by the dev CA"
+
+echo "14) Grafana OIDC login via Keycloak succeeds with role mapping (issue #78)..."
+wait_for "Grafana generic_oauth route" \
+    "gcurl -fsS -o /dev/null ${GRAFANA_URL}/login/generic_oauth"
+
+admin_jar=$(mktemp)
+oidc_login admin admin "$admin_jar" \
+    || fail "OIDC authorization-code login as 'admin' did not complete"
+admin_user=$(gcurl -s -b "$admin_jar" "${GRAFANA_URL}/api/user")
+echo "$admin_user" | grep -q '"email":"admin@gosignals.local"' \
+    || fail "Grafana /api/user after OIDC 'admin' login unexpected: $admin_user"
+# Only an Admin can list org users; this confirms grafana:admin -> Grafana Admin.
+admin_org=$(gcurl -s -b "$admin_jar" "${GRAFANA_URL}/api/org/users")
+echo "$admin_org" | grep -q '"role":"Admin"' \
+    || fail "OIDC 'admin' did not receive Grafana Admin: $admin_org"
+ok "OIDC login as 'admin' yields Grafana Admin"
+
+user_jar=$(mktemp)
+oidc_login user user "$user_jar" \
+    || fail "OIDC authorization-code login as 'user' did not complete"
+viewer_user=$(gcurl -s -b "$user_jar" "${GRAFANA_URL}/api/user")
+echo "$viewer_user" | grep -q '"email":"user@gosignals.local"' \
+    || fail "Grafana /api/user after OIDC 'user' login unexpected: $viewer_user"
+# A Viewer must be denied an Admin-only endpoint.
+viewer_code=$(gcurl -s -o /dev/null -w '%{http_code}' -b "$user_jar" \
+    "${GRAFANA_URL}/api/org/users")
+[ "$viewer_code" = "403" ] \
+    || fail "OIDC 'user' is not restricted to Viewer (/api/org/users -> $viewer_code)"
+ok "OIDC login as 'user' yields Grafana Viewer"
+
+rm -f "$admin_jar" "$user_jar"
 
 echo ""
 echo "All observability acceptance criteria passed."

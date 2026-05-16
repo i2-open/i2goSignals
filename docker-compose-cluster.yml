@@ -121,11 +121,31 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    depends_on:
+      - keycloak
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=grafana
+      - GF_SERVER_PROTOCOL=https
+      - GF_SERVER_ROOT_URL=https://localhost:3000
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/server-cert.pem
+      - GF_SERVER_CERT_KEY=/etc/grafana/certs/server-key.pem
+      - GF_AUTH_GENERIC_OAUTH_ENABLED=true
+      - GF_AUTH_GENERIC_OAUTH_NAME=Keycloak
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=grafana
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=grafana-client-secret
+      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile roles
+      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/auth
+      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/token
+      - GF_AUTH_GENERIC_OAUTH_API_URL=https://keycloak:9080/realms/gosignals/protocol/openid-connect/userinfo
+      - GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH=email
+      - "GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=contains(resource_access.grafana.roles[*], 'admin') && 'Admin' || contains(resource_access.grafana.roles[*], 'editor') && 'Editor' || 'Viewer'"
+      - GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT=false
+      - GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true
+      - GF_AUTH_GENERIC_OAUTH_TLS_CLIENT_CA=/etc/grafana/certs/ca-cert.pem
     volumes:
       - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/certs:/etc/grafana/certs:ro"
 
   goSignals1:
     image: i2gosignals:v0.8
