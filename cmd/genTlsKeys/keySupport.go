@@ -194,6 +194,41 @@ func (config *KeyConfig) InitializeCa() error {
 	return os.WriteFile(config.CaCertFile, caPEM.Bytes(), 0644)
 }
 
+// defaultServerDNSNames returns the DNS SAN hostnames the shared development
+// server certificate must cover when SERVER_DNS_NAME is not set.
+func defaultServerDNSNames() []string {
+	return []string{
+		"goSignals1", "goSignals2", "goSsfServer",
+		"scim_cluster1", "scim_cluster2", "keycloak",
+		"prometheus", "loki", "alloy", "grafana",
+		"mongo1", "mongo2", "mongo3", "postgres",
+		"localhost",
+	}
+}
+
+// certNeedsRegeneration is the pure regenerate-or-keep decision for the server
+// certificate. Given the parsed existing certificate (nil when absent) and the
+// desired set of DNS SAN hostnames, it reports whether the certificate must be
+// regenerated and a human-readable reason.
+func certNeedsRegeneration(cert *x509.Certificate, desiredDNSNames []string) (bool, string) {
+	if cert == nil {
+		return true, "no existing server certificate"
+	}
+	if len(cert.URIs) != 1 || !strings.HasPrefix(cert.URIs[0].String(), "spiffe://") {
+		return true, "missing or invalid SPIFFE URI SAN"
+	}
+	have := make(map[string]bool, len(cert.DNSNames))
+	for _, name := range cert.DNSNames {
+		have[name] = true
+	}
+	for _, want := range desiredDNSNames {
+		if !have[want] {
+			return true, fmt.Sprintf("missing required DNS SAN %q", want)
+		}
+	}
+	return false, "certificate satisfies desired SAN set"
+}
+
 /*
 InitializeKeys creates a set of self-signed keys and writes them out to the directory in KeyConfig.CertDir
 This includes:  Certificate Authority Certificate and Key (ca-cert/ca-key), Server certificate (server-cert.pem) and key
@@ -272,30 +307,25 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 	var dnsNames []string
 	domainName := os.Getenv(EnvServerDNS)
 	if domainName == "" {
-		dnsNames = []string{"goSignals1", "goSignals2", "goSsfServer", "scim_cluster1", "scim_cluster2", "keycloak", "localhost"}
+		dnsNames = defaultServerDNSNames()
 	} else {
 		dnsNames = strings.Split(domainName, ",")
 	}
 
 	if config.ServerCertExists() {
 		log.Info(fmt.Sprintf("Loading existing Server Certificate from %s ...", config.ServerCertPath))
-		certBytes, err := os.ReadFile(config.ServerCertPath)
-		if err == nil {
-			block, _ := pem.Decode(certBytes)
-			if block != nil {
-				cert, err := x509.ParseCertificate(block.Bytes)
-				if err == nil {
-					// Check if URI SANs are present and correct (exactly one)
-					if len(cert.URIs) == 1 && strings.HasPrefix(cert.URIs[0].String(), "spiffe://") {
-						log.Info("Existing Server Certificate has valid SPIFFE URI SAN. Skipping regeneration.")
-					} else {
-						log.Info("Existing Server Certificate missing or invalid SPIFFE URI SAN. Forcing regeneration.")
-						// Remove existing cert to force regeneration below
-						_ = os.Remove(config.ServerCertPath)
-						_ = os.Remove(config.ServerKeyPath)
-					}
-				}
+		var existingCert *x509.Certificate
+		if certBytes, err := os.ReadFile(config.ServerCertPath); err == nil {
+			if block, _ := pem.Decode(certBytes); block != nil {
+				existingCert, _ = x509.ParseCertificate(block.Bytes)
 			}
+		}
+		if regen, reason := certNeedsRegeneration(existingCert, dnsNames); regen {
+			log.Info("Regenerating Server Certificate: " + reason)
+			_ = os.Remove(config.ServerCertPath)
+			_ = os.Remove(config.ServerKeyPath)
+		} else {
+			log.Info("Existing Server Certificate satisfies desired SAN set. Skipping regeneration.")
 		}
 	}
 
