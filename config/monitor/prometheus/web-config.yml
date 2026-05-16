@@ -1,0 +1,6 @@
+# Prometheus web TLS — serves the UI/API over HTTPS with the shared dev
+# certificate (its SANs cover `prometheus` and `localhost`). Server-side TLS
+# only; no client_ca_file / client_auth_type — see docs/adr/0001.
+tls_server_config:
+  cert_file: /etc/prometheus/certs/server-cert.pem
+  key_file: /etc/prometheus/certs/server-key.pem

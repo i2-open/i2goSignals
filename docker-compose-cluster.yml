@@ -109,9 +109,11 @@ services:
     image: prom/prometheus:latest
     volumes:
       - "./config/monitor/prometheus:/etc/prometheus"
+      - "./config/certs:/etc/prometheus/certs:ro"
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.config.file=/etc/prometheus/web-config.yml'
     ports:
       - "9090:9090"
     restart: unless-stopped
@@ -244,8 +246,15 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./config/scim/data1:/scim
+      - "./config/certs:/scim-certs:ro"
     env_file:
       - ./config/scim/scripts/scim-server.env
+    environment:
+      # Serve an HTTPS listener (Quarkus default :8443) alongside the plain
+      # :8080 SCIM API, using the shared dev certificate, so Prometheus can
+      # scrape /q/metrics over TLS.
+      - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
+      - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
   scim_cluster2:
     image: independentid/i2scim-universal:0.8.0
     depends_on:
@@ -255,8 +264,15 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./config/scim/data2:/scim
+      - "./config/certs:/scim-certs:ro"
     env_file:
       - ./config/scim/scripts/scim-server.env
+    environment:
+      # Serve an HTTPS listener (Quarkus default :8443) alongside the plain
+      # :8080 SCIM API, using the shared dev certificate, so Prometheus can
+      # scrape /q/metrics over TLS.
+      - QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/scim-certs/server-cert.pem
+      - QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/scim-certs/server-key.pem
   postgres:
     image: postgres:alpine
     volumes:

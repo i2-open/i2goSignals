@@ -23,14 +23,14 @@ ok() { echo "  OK: $1"; }
 LOKI_URL=${LOKI_URL:-https://localhost:3100}
 GRAFANA_URL=${GRAFANA_URL:-https://localhost:3000}
 GRAFANA_AUTH=${GRAFANA_AUTH:-admin:grafana}
-PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+PROMETHEUS_URL=${PROMETHEUS_URL:-https://localhost:9090}
 CA_CERT=${CA_CERT:-config/certs/ca-cert.pem}
 KEYCLOAK_HOST=${KEYCLOAK_HOST:-keycloak:9080}
 WAIT_SECS=${WAIT_SECS:-90}
 
-# Grafana and Loki are both served over TLS with the shared dev certificate;
-# every call to them must verify against the dev CA rather than skip
-# verification.
+# Grafana, Loki and Prometheus are all served over TLS with the shared dev
+# certificate; every call to them must verify against the dev CA rather than
+# skip verification.
 gcurl() { curl --cacert "${CA_CERT}" "$@"; }
 
 # Drive a full OIDC authorization-code login against Keycloak from the host.
@@ -176,19 +176,15 @@ ok "node_id=scim_cluster1 query returns only that peer"
 
 echo "11) Prometheus scrapes both i2scim peers (issue #73)..."
 wait_for "Prometheus /api/v1/targets" \
-    "curl -fsS ${PROMETHEUS_URL}/api/v1/targets"
-targets_json=$(curl -fsS "${PROMETHEUS_URL}/api/v1/targets")
+    "gcurl -fsS ${PROMETHEUS_URL}/api/v1/targets"
+targets_json=$(gcurl -fsS "${PROMETHEUS_URL}/api/v1/targets")
 echo "$targets_json" | grep -q '"job":"i2scim"' \
     || fail "Prometheus has no i2scim scrape job: $targets_json"
 for peer in scim_cluster1 scim_cluster2; do
-    echo "$targets_json" | grep -qE "\"scrapeUrl\":\"http://${peer}:8080/q/metrics\"" \
-        || fail "i2scim job missing target ${peer}:8080/q/metrics"
+    echo "$targets_json" | grep -qE "\"scrapeUrl\":\"https://${peer}:8443/q/metrics\"" \
+        || fail "i2scim job missing HTTPS target ${peer}:8443/q/metrics"
 done
-# At least one of the two should be up=1 after warm-up. The script intentionally
-# does not demand both up since a slow SCIM container should not fail the run.
-echo "$targets_json" | grep -qE '"job":"i2scim".*"health":"up"' \
-    || fail "no i2scim target is health=up in Prometheus"
-ok "i2scim job present with both peers, at least one healthy"
+ok "i2scim job present with both peers scraped over HTTPS"
 
 echo "12) Existing {service=\"gosignals\"} query still returns rows..."
 end_ns=$(date +%s)000000000
@@ -264,6 +260,40 @@ resp=$(gcurl -fsS "${LOKI_URL}/loki/api/v1/query_range?query=${query}&limit=10&s
 echo "$resp" | grep -q '"stream":' \
     || fail "no goSignals streams in Loki — Alloy HTTPS push to Loki may be failing"
 ok "Alloy ships logs to Loki over HTTPS; lines remain queryable"
+
+echo "17) Prometheus is served over TLS with a CA-verifiable certificate (issue #80)..."
+wait_for "Prometheus HTTPS" "gcurl -fsS ${PROMETHEUS_URL}/-/ready"
+gcurl -fsS "${PROMETHEUS_URL}/-/ready" >/dev/null \
+    || fail "Prometheus did not present a CA-verifiable certificate at ${PROMETHEUS_URL}"
+# Negative check: the TLS port must not also answer plaintext HTTP.
+if curl -fsS "http://localhost:9090/-/ready" >/dev/null 2>&1; then
+    fail "Prometheus still answers plaintext HTTP on :9090 (expected HTTPS only)"
+fi
+ok "Prometheus serves HTTPS with a certificate signed by the dev CA"
+
+echo "18) Every Prometheus scrape target is up over HTTPS (issue #80)..."
+targets_json=$(gcurl -fsS "${PROMETHEUS_URL}/api/v1/targets")
+# Each active target must use the https scheme and report health=up. Parse the
+# JSON properly rather than grepping a single-line blob.
+python3 - "$targets_json" <<'PY' || fail "Prometheus scrape targets are not all up over HTTPS"
+import json, sys
+data = json.loads(sys.argv[1])
+targets = data["data"]["activeTargets"]
+bad = []
+for t in targets:
+    job = t["labels"].get("job", "?")
+    url = t.get("scrapeUrl", "")
+    health = t.get("health", "?")
+    if not url.startswith("https://"):
+        bad.append(f"{job} {url} is not HTTPS")
+    if health != "up":
+        bad.append(f"{job} {url} health={health} ({t.get('lastError','')})")
+if bad or not targets:
+    print("\n".join(bad) or "no active targets", file=sys.stderr)
+    sys.exit(1)
+print(f"  ({len(targets)} targets, all up over HTTPS)")
+PY
+ok "all Prometheus scrape jobs (self, i2gosignals, i2scim) up over HTTPS"
 
 echo ""
 echo "All observability acceptance criteria passed."
