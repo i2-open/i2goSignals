@@ -10,6 +10,7 @@ import (
 )
 
 func main() {
+	fmt.Println("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
 	insecure := flag.Bool("k", false, "Insecure: skip TLS verification")
 	timeout := flag.Duration("t", 5*time.Second, "Timeout for the request")
 	flag.Parse()

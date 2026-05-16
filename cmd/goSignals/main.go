@@ -189,6 +189,7 @@ func breakIntoArgs(command string) []string {
 }
 
 func main() {
+	fmt.Println("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
 	logger.Init(logger.Options{Level: os.Getenv("LOG_LEVEL")})
 	tlsSupport.CheckCaInstalled(nil)
 

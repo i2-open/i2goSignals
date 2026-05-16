@@ -56,6 +56,7 @@ func main() {
 			os.Getenv("I2SIG_CLUSTER_NAME"),
 		),
 	})
+	mLog.Info("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
 	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)

@@ -59,6 +59,7 @@ func NewMonitor() *Monitor {
 }
 
 func main() {
+	fmt.Println("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
 	log.Info("Starting Cluster Monitor")
 	fmt.Println()
 	fmt.Println("For development testing only.")

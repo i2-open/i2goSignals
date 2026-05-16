@@ -11,6 +11,7 @@ import (
 )
 
 func main() {
+    fmt.Println("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
     metricsURL := os.Getenv("GOSIGNALS_METRICS_URL")
     if metricsURL == "" {
         metricsURL = "http://localhost:8080/metrics"

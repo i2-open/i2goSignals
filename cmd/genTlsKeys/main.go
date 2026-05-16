@@ -89,5 +89,6 @@ genTlsKeys`)
 }
 
 func main() {
+	fmt.Println("(C)2026 Independent Identity Inc. Licensed Under APL 2.0")
 	start()
 }
