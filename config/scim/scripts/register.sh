@@ -1,4 +1,8 @@
 
+# Accept the v0.11.0 env name (I2SIG_TLS_CA_CERT) as well as the legacy CA_CERT.
+# The compose files were swept to the new name in #72; this script consumes it.
+CA_CERT="${CA_CERT:-$I2SIG_TLS_CA_CERT}"
+
 if [ -s /scim/iat1.txt ]; then
     echo "Registration IAT file already exists, skipping token generation"
     exit 0
