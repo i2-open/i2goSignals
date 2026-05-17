@@ -149,7 +149,7 @@ services:
       - GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true
       - GF_AUTH_GENERIC_OAUTH_TLS_CLIENT_CA=/etc/grafana/certs/ca-cert.pem
     volumes:
-      - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/monitor/grafana:/etc/grafana/provisioning"
       - "./config/certs:/etc/grafana/certs:ro"
 
   goSignals1:

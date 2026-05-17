@@ -390,7 +390,7 @@ services:
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
     volumes:
-      - "./config/monitor/grafana:/etc/grafana/provisioning/datasources"
+      - "./config/monitor/grafana:/etc/grafana/provisioning"
       - "./config/certs:/etc/grafana/certs:ro"
       - spire_sockets:/run/spire/sockets
 
