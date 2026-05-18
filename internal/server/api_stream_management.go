@@ -18,6 +18,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -35,6 +36,12 @@ func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request)
 
 func AddSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if !services.SubjectFilteringEnabled() {
+		// Subject filtering is disabled server-wide: the endpoint is not
+		// advertised in discovery, so it must not be reachable either.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -102,6 +109,12 @@ func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Reque
 
 func RemoveSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if !services.SubjectFilteringEnabled() {
+		// Subject filtering is disabled server-wide: the endpoint is not
+		// advertised in discovery, so it must not be reachable either.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -295,7 +308,11 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(status)
 		return
 	}
-	var jsonRequest model.StreamConfiguration
+	// Decode into a StreamStateRecord (not a bare StreamConfiguration) so the
+	// goSignals-specific subject-filtering operator knobs ride alongside the
+	// SSF wire-format fields. The embedded StreamConfiguration is flattened by
+	// encoding/json, so existing request bodies decode unchanged.
+	var jsonRequest model.StreamStateRecord
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -366,7 +383,9 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	var jsonRequest model.StreamConfiguration
+	// Decode into a StreamStateRecord so subject-filtering operator knobs can
+	// be patched alongside the SSF wire-format fields (see StreamCreateHandler).
+	var jsonRequest model.StreamStateRecord
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -374,7 +393,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
-	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
+	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.StreamConfiguration.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
@@ -550,8 +569,6 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 	jwksUri, _ := baseUrl.Parse("/jwks.json")
 	configUri, _ := baseUrl.Parse("/stream")
 	statusUri, _ := baseUrl.Parse("/status")
-	addSubUri, _ := baseUrl.Parse("/add-subject")
-	remSubUri, _ := baseUrl.Parse("/remove-subject")
 	verifyUri, _ := baseUrl.Parse("/verify")
 	regUri, _ := baseUrl.Parse("/register")
 
@@ -574,27 +591,25 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 		}
 	}
 
-	return &model.TransmitterConfiguration{
+	supportedScopes := map[string][]string{
+		"configuration_endpoint":       {authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
+		"status_endpoint":              {authSupport.ScopeStreamMgmt},
+		"events":                       {authSupport.ScopeEventDelivery},
+		"verification_endpoint":        {authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+		"poll":                         {authSupport.ScopeEventDelivery},
+		"client_registration_endpoint": {authSupport.ScopeRegister},
+	}
+
+	config := &model.TransmitterConfiguration{
 		Issuer:                     sa.GetDefIssuer(),
 		JwksUri:                    jwksUri.String(),
 		DeliveryMethodsSupported:   methods,
 		ConfigurationEndpoint:      configUri.String(),
 		StatusEndpoint:             statusUri.String(),
-		AddSubjectEndpoint:         addSubUri.String(),
-		RemoveSubjectEndpoint:      remSubUri.String(),
 		VerificationEndpoint:       verifyUri.String(),
 		CriticalSubjectMembers:     nil,
 		ClientRegistrationEndpoint: regUri.String(),
-		SupportedScopes: map[string][]string{
-			"configuration_endpoint":       {authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
-			"status_endpoint":              {authSupport.ScopeStreamMgmt},
-			"add_subject_endpoint":         {authSupport.ScopeStreamMgmt},
-			"remove_subject_endpoint":      {authSupport.ScopeStreamMgmt},
-			"events":                       {authSupport.ScopeEventDelivery},
-			"verification_endpoint":        {authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
-			"poll":                         {authSupport.ScopeEventDelivery},
-			"client_registration_endpoint": {authSupport.ScopeRegister},
-		},
+		SupportedScopes:            supportedScopes,
 		AuthorizationSchemes: []model.AuthScheme{
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
@@ -606,6 +621,20 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 		GoSignalsVersion: goVersion,
 		SpecVersion:      constants.SSF_VERSION,
 	}
+
+	// SSF subject filtering (§8.1.3): advertise the Add/Remove Subject
+	// endpoints only when the feature is enabled server-wide, so discovery
+	// never advertises a capability the server will not honor.
+	if services.SubjectFilteringEnabled() {
+		addSubUri, _ := baseUrl.Parse("/add-subject")
+		remSubUri, _ := baseUrl.Parse("/remove-subject")
+		config.AddSubjectEndpoint = addSubUri.String()
+		config.RemoveSubjectEndpoint = remSubUri.String()
+		supportedScopes["add_subject_endpoint"] = []string{authSupport.ScopeStreamMgmt}
+		supportedScopes["remove_subject_endpoint"] = []string{authSupport.ScopeStreamMgmt}
+	}
+
+	return config
 }
 
 // WellKnownSsfConfigurationGet returns the default SSF transmitter configuration.

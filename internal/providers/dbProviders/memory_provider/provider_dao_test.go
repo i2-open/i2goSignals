@@ -15,7 +15,7 @@ import (
 func createStreamHelper(p *MemoryProvider, cfg model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
 	authCtx := authUtil.ConvertProject(projectId)
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
-	return p.streamService.CreateStream(ctx, cfg, authCtx.ProjectId, nil)
+	return p.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, authCtx.ProjectId, nil)
 }
 
 func TestMemoryProviderDAOOpen(t *testing.T) {

@@ -82,6 +82,42 @@ type StreamStateRecord struct {
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty" json:"errorMsg,omitempty"`
 
 	RemoteAddress *RemoteIP `json:"remote_address,omitempty" bson:"remote_address,omitempty"`
+
+	// DefaultSubjects is the SSF subject-filtering baseline policy for a
+	// transmitter stream: DefaultSubjectsAll or DefaultSubjectsNone. It is a
+	// goSignals operator knob and is deliberately kept off the SSF wire-format
+	// StreamConfiguration. An empty value means the default (ALL).
+	DefaultSubjects string `json:"default_subjects,omitempty" bson:"default_subjects,omitempty"`
+
+	// SubjectFilterMode governs how a receiver stream relays subject changes to
+	// its upstream transmitter: SubjectFilterModePassthru, SubjectFilterModeLocal,
+	// or SubjectFilterModeHybrid.
+	SubjectFilterMode string `json:"subject_filter_mode,omitempty" bson:"subject_filter_mode,omitempty"`
+
+	// EventSource describes where a transmitter stream's events originate.
+	EventSource *EventSource `json:"event_source,omitempty" bson:"event_source,omitempty"`
+}
+
+// EventSource describes where a transmitter stream's events originate. This is
+// a distinct axis from RouteMode. Type is one of EventSourceDirect,
+// EventSourceAudience, or EventSourceExplicit; when EventSourceExplicit,
+// SourceStreamIds names the source stream SID(s).
+type EventSource struct {
+	Type            string   `json:"type,omitempty" bson:"type,omitempty"`
+	SourceStreamIds []string `json:"source_stream_ids,omitempty" bson:"source_stream_ids,omitempty"`
+}
+
+// DeepCopy returns an independent copy of the EventSource, or nil when es is nil.
+func (es *EventSource) DeepCopy() *EventSource {
+	if es == nil {
+		return nil
+	}
+	res := *es
+	if es.SourceStreamIds != nil {
+		res.SourceStreamIds = make([]string, len(es.SourceStreamIds))
+		copy(res.SourceStreamIds, es.SourceStreamIds)
+	}
+	return &res
 }
 
 func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
@@ -90,6 +126,7 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	}
 	res := *ss
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
+	res.EventSource = ss.EventSource.DeepCopy()
 	return &res
 }
 
@@ -105,6 +142,9 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.StartDate = mod.StartDate
 	ss.ModifiedAt = mod.ModifiedAt
 	ss.RemoteAddress = mod.RemoteAddress
+	ss.DefaultSubjects = mod.DefaultSubjects
+	ss.SubjectFilterMode = mod.SubjectFilterMode
+	ss.EventSource = mod.EventSource
 }
 
 // GetType returns the delivery method for the stream state record. Returns one of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll.
@@ -155,4 +195,18 @@ const (
 	RouteModeImport     = "IM" // Indicates the router will not further propagate the event and save to database for local use
 	RouteModeForward    = "FW" // Indicates the router will move events received to other eligable streams
 	RouteModePublish    = "PB" // Indicates the router will router to target streams and generate new JWS/JWE tokens
+
+	// DefaultSubjects baseline policy values for a transmitter stream (SSF §8.1.3).
+	DefaultSubjectsAll  = "ALL"  // Deliver every subject unless explicitly removed
+	DefaultSubjectsNone = "NONE" // Deliver no subject unless explicitly added
+
+	// SubjectFilterMode values for a receiver stream: how subject changes relay upstream.
+	SubjectFilterModePassthru = "PASSTHRU" // Relay Add/Remove 1:1 upstream, no local filtering
+	SubjectFilterModeLocal    = "LOCAL"    // Filter locally per stream, never relay upstream
+	SubjectFilterModeHybrid   = "HYBRID"   // Relay upstream and filter locally
+
+	// EventSource Type values: where a transmitter stream's events originate.
+	EventSourceDirect   = "DIRECT"   // Events arrive directly on this stream
+	EventSourceAudience = "AUDIENCE" // Events routed in by audience matching
+	EventSourceExplicit = "EXPLICIT" // Events sourced from explicitly named stream SID(s)
 )

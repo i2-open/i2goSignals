@@ -108,7 +108,11 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 	return u.String()
 }
 
-func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
+// CreateStream creates a stream from request. request is a StreamStateRecord
+// rather than a bare StreamConfiguration so that goSignals-specific operator
+// knobs (subject-filtering fields) can be supplied alongside the SSF
+// wire-format configuration without leaking into it.
+func (s *StreamService) CreateStream(ctx context.Context, request model.StreamStateRecord, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
     // Resolve tx_alias → Server when the caller didn't pre-resolve it. This
     // logic was previously in BaseProvider.CreateStream; it lives here now
     // so the provider façade can be a pass-through.
@@ -449,6 +453,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	now := time.Now()
 
+	// defaultSubjects is an operator knob that is inert until subject filtering
+	// is enabled server-wide; silently ignore it otherwise so an upgrade does
+	// not change delivery behavior for streams that set it.
+	defaultSubjects := request.DefaultSubjects
+	if !SubjectFilteringEnabled() {
+		defaultSubjects = ""
+	}
+
 	streamRec := &model.StreamStateRecord{
 		Id:                  mid,
 		ProjectId:           projectID,
@@ -457,6 +469,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		Status:              model.StreamStateEnabled,
 		CreatedAt:           now,
 		ModifiedAt:          now,
+		DefaultSubjects:     defaultSubjects,
+		SubjectFilterMode:   request.SubjectFilterMode,
+		EventSource:         request.EventSource,
 	}
 
 	err = s.streamDAO.Create(ctx, streamRec)
@@ -628,7 +643,11 @@ func (s *StreamService) calculateDeliveredEvents(requested []string, supported [
 	return delivered
 }
 
-func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+// UpdateStream patches an existing stream. configReq is a StreamStateRecord so
+// the goSignals-specific subject-filtering operator knobs can be updated
+// alongside the SSF wire-format configuration. Like the rest of this method,
+// only non-empty request fields are applied.
+func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		return nil, err
@@ -715,6 +734,19 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 
 	streamRec.StreamConfiguration = *config
 	streamRec.ModifiedAt = time.Now()
+
+	// Subject-filtering operator knobs. defaultSubjects is gated on the
+	// server-wide feature being enabled; when disabled the request value is
+	// silently ignored, consistent with CreateStream.
+	if SubjectFilteringEnabled() && configReq.DefaultSubjects != "" {
+		streamRec.DefaultSubjects = configReq.DefaultSubjects
+	}
+	if configReq.SubjectFilterMode != "" {
+		streamRec.SubjectFilterMode = configReq.SubjectFilterMode
+	}
+	if configReq.EventSource != nil {
+		streamRec.EventSource = configReq.EventSource
+	}
 
 	err = s.streamDAO.Update(ctx, streamRec)
 	if err != nil {

@@ -92,7 +92,7 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	}
 	authCtx := authUtil.ConvertProject(s.project)
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
-	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
+	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: req}, authCtx.ProjectId, nil)
 }
 
 func TestMongoProvider(t *testing.T) {
@@ -375,10 +375,10 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 		Format:          orig.Format,
 	}
 
-	_, err := s.provider.GetStreamService().UpdateStream(context.Background(), "1234", s.project, config)
+	_, err := s.provider.GetStreamService().UpdateStream(context.Background(), "1234", s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.Error(err, "not found")
 
-	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, config)
+	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.NoError(err, "Update should have no error")
 	s.Equal(orig.Aud, res.Aud, "Audience should not change")
 	s.Equal(orig.Iss, res.Iss, "Issuer should not change")
@@ -386,7 +386,7 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 	s.Equal(0, len(res.EventsDelivered), "Should be no delivered events")
 
 	res.EventsRequested = res.EventsSupported // request all events
-	res2, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, *res)
+	res2, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, model.StreamStateRecord{StreamConfiguration: *res})
 	s.NoError(err, "2nd Update should have no error")
 	s.Equal(res.EventsSupported, res2.EventsDelivered, "All events enabled")
 

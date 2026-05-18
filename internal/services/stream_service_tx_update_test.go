@@ -61,7 +61,7 @@ func TestUpdateStream_AllTxFieldsPersistence(t *testing.T) {
 	}
 
 	// Create stream (simulating discovery already happened)
-	created, err := svc.CreateStream(ctx, initialConfig, "test-project", nil)
+	created, err := svc.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: initialConfig}, "test-project", nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, created.TxAlias)
 	assert.Equal(t, txAlias, *created.TxAlias)
@@ -72,7 +72,7 @@ func TestUpdateStream_AllTxFieldsPersistence(t *testing.T) {
 	}
 
 	// Now update the stream, but don't include TxAlias in the update request (typical for SSF updates)
-	updateReq := created.DeepCopy()
+	updateReq := model.StreamStateRecord{StreamConfiguration: created.DeepCopy()}
 	updateReq.Description = "Updated description"
 	// Ensure TxAlias is still there in our "request" object
 	assert.NotNil(t, updateReq.TxAlias)
@@ -115,7 +115,7 @@ func TestCreateStream_NoDiscovery_TxAliasPreserved(t *testing.T) {
 		},
 	}
 
-	created, err := svc.CreateStream(ctx, config, "test-project", nil)
+	created, err := svc.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: config}, "test-project", nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, created.TxAlias)
 	assert.Equal(t, txAlias, *created.TxAlias)

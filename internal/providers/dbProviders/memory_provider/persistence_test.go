@@ -30,7 +30,7 @@ func TestPersistence(t *testing.T) {
 	}
 	authCtx := authUtil.ConvertProject("test-project")
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
-	createdStream, err := provider.streamService.CreateStream(ctx, streamReq, authCtx.ProjectId, nil)
+	createdStream, err := provider.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: streamReq}, authCtx.ProjectId, nil)
 	assert.NoError(t, err)
 	streamID := createdStream.Id
 
