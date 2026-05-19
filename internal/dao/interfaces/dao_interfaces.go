@@ -55,6 +55,16 @@ type EventDAO interface {
     WatchPending(ctx context.Context, callback func(jti string, streamID string)) error
 }
 
+// SubjectFilterDAO handles per-stream SSF §8.1.3 subject filter entries. The
+// store is keyed by (stream_id, canonical_key) so simple-subject membership is
+// an indexed point lookup, never a collection scan (ADR-0003).
+type SubjectFilterDAO interface {
+    // Add inserts or replaces the subject entry for its (stream, canonical key).
+    Add(ctx context.Context, entry *model.SubjectFilterEntry) error
+    // Get returns the entry for a stream + canonical key, or ErrNotFound.
+    Get(ctx context.Context, streamID, canonicalKey string) (*model.SubjectFilterEntry, error)
+}
+
 // KeyDAO handles cryptographic key data access
 type KeyDAO interface {
     Insert(ctx context.Context, keyRec *JwkKeyRec) error
