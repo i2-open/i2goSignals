@@ -1007,3 +1007,39 @@ Service clients `goSignalsAdminService` and `goSignalsClient` were not receiving
 1.  Verify `config/keycloak/realm/gosignals-realm.json` has `fullScopeAllowed: true` for the affected clients.
 2.  Verify `defaultClientScopes` includes `roles`, `profile`, and `email` for these clients.
 
+## [2026-05-19] PASSTHRU subject relay + event-source / relay-target validation (PRD #89, issue #95)
+
+### Problem
+goSignals is both a receiver and a transmitter. A downstream receiver that calls
+Add/Remove Subject on a goSignals transmitter stream may want that change relayed
+1:1 to the upstream transmitter (PASSTHRU) rather than filtered locally. Relaying
+needs an unambiguous upstream — the receiver stream that feeds the transmitter
+stream — and the upstream must actually support subject filtering.
+
+### Solution
+New pure module `internal/services/subject_relay.go`:
+- `ResolveRelayTarget` finds the feeding receiver stream. An explicitly named
+  Subject handler SID (`EventSource.SourceStreamIds`) wins; otherwise an
+  AUDIENCE-routed stream is matched by issuer equality. Several issuer matches
+  are `ErrRelayTargetAmbiguous`; none is `ErrRelayTargetNotFound`.
+- `ClassifyUpstreamSupport` reads add/remove-subject endpoints from upstream
+  discovery: an upstream advertising neither does not support subject filtering,
+  so PASSTHRU/HYBRID is rejected and LOCAL earns a WARN (it still runs).
+- `SubjectRelayService` composes resolution + classification: `ValidateConfig`
+  is called at config time by `CreateStream`/`UpdateStream`; `Relay` posts the
+  Add/Remove to the upstream at request time. The upstream connection is fetched
+  through an injected `UpstreamResolver` so the logic is testable without a live
+  upstream; the default resolver uses `oauthClient` + `wellKnownSupport`.
+- `handleSubjectChange` short-circuits a PASSTHRU stream: it relays and applies
+  no local filter.
+
+### Invariants
+*   `EventSource.SourceStreamIds` doubles as the explicit relay-target SID — no
+    separate model field; reused for both EXPLICIT sources and AUDIENCE
+    disambiguation.
+*   PASSTHRU/HYBRID config is rejected when the relay target is unresolved /
+    ambiguous, or the upstream advertises no subject endpoints. LOCAL is never
+    rejected at config time.
+*   A PASSTHRU subject change writes no local subject filter entry.
+*   HYBRID's refcounted upstream relay is issue #96; #95 only validates HYBRID.
+

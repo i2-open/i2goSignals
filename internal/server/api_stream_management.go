@@ -101,6 +101,29 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	// PRD #89 #95: in PASSTHRU mode the subject change is relayed 1:1 to the
+	// upstream transmitter and no local filter is applied — downstream streams
+	// share one upstream subscription.
+	if stream.SubjectFilterMode == model.SubjectFilterModePassthru {
+		relaySvc := sa.GetSubjectRelayService()
+		if relaySvc == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if relayErr := relaySvc.Relay(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
+			serverLog.Warn("PASSTHRU subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if add {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
+
 	filterSvc := sa.GetSubjectFilterService()
 	if filterSvc == nil {
 		w.WriteHeader(http.StatusNotFound)

@@ -47,6 +47,7 @@ type SsfApplicationInterface interface {
 	GetServerService() *services.ServerService
 	GetTokenService() *services.TokenService
 	GetSubjectFilterService() *services.SubjectFilterService
+	GetSubjectRelayService() *services.SubjectRelayService
 	GetCoordinator() cluster.ClusterCoordinator
 	GetStorage() storage.Storage
 }
@@ -61,6 +62,7 @@ type SignalsApplication struct {
 	ServerService        *services.ServerService
 	TokenService         *services.TokenService
 	SubjectFilterService *services.SubjectFilterService
+	SubjectRelayService  *services.SubjectRelayService
 	Server               *http.Server
 	Handler              http.Handler
 	EventRouter          eventRouter.EventRouter
@@ -99,6 +101,9 @@ func (sa *SignalsApplication) GetServerService() *services.ServerService { retur
 func (sa *SignalsApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
 func (sa *SignalsApplication) GetSubjectFilterService() *services.SubjectFilterService {
 	return sa.SubjectFilterService
+}
+func (sa *SignalsApplication) GetSubjectRelayService() *services.SubjectRelayService {
+	return sa.SubjectRelayService
 }
 func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
 func (sa *SignalsApplication) GetStorage() storage.Storage                { return sa.Storage }
@@ -183,6 +188,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		ServerService:        persistence.ServerService,
 		TokenService:         persistence.TokenService,
 		SubjectFilterService: persistence.SubjectFilterService,
+		SubjectRelayService:  persistence.SubjectRelayService,
 		AdminRole:            role,
 		pollClients:          map[string]*ClientPollStream{},
 		pushClients:          map[string]*ReceiverPushStream{},

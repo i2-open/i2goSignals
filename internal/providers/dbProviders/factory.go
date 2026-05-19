@@ -29,6 +29,7 @@ type Persistence struct {
 	ServerService        *services.ServerService
 	TokenService         *services.TokenService
 	SubjectFilterService *services.SubjectFilterService
+	SubjectRelayService  *services.SubjectRelayService
 
 	Coordinator cluster.ClusterCoordinator
 	Storage     storage.Storage
@@ -55,6 +56,7 @@ func (p *Persistence) Refresh() {
 	p.ServerService = p.src.GetServerService()
 	p.TokenService = p.src.GetTokenService()
 	p.SubjectFilterService = p.src.GetSubjectFilterService()
+	p.SubjectRelayService = p.src.GetSubjectRelayService()
 }
 
 // serviceSource is the accessor surface present on both *MemoryProvider and
@@ -69,6 +71,7 @@ type serviceSource interface {
 	GetServerService() *services.ServerService
 	GetTokenService() *services.TokenService
 	GetSubjectFilterService() *services.SubjectFilterService
+	GetSubjectRelayService() *services.SubjectRelayService
 }
 
 // OpenPersistence detects the database URL and returns the Persistence record
@@ -118,6 +121,7 @@ func persistenceFromMemory(mp *memory_provider.MemoryProvider) *Persistence {
 		ServerService:        mp.GetServerService(),
 		TokenService:         mp.GetTokenService(),
 		SubjectFilterService: mp.GetSubjectFilterService(),
+		SubjectRelayService:  mp.GetSubjectRelayService(),
 		Coordinator:          mp.Coordinator(),
 		Storage:              memory_provider.NewMemoryStorage(mp),
 		src:                  mp,
@@ -134,6 +138,7 @@ func persistenceFromMongo(mp *mongo_provider.MongoProvider) *Persistence {
 		ServerService:        svcSrc.GetServerService(),
 		TokenService:         svcSrc.GetTokenService(),
 		SubjectFilterService: svcSrc.GetSubjectFilterService(),
+		SubjectRelayService:  svcSrc.GetSubjectRelayService(),
 		Coordinator:          mp.Coordinator(),
 		Storage:              mongo_provider.NewMongoStorage(mp),
 		src:                  mp,

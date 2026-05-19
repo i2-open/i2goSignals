@@ -40,6 +40,7 @@ type StreamService struct {
 	keyService              *KeyService
 	serverService           *ServerService
 	subjectFilterService    *SubjectFilterService
+	subjectRelayService     *SubjectRelayService
 	defaultIssuer           string
 	receiverStreams         map[string]*model.StreamStateRecord
 	BaseUrl                 *url.URL
@@ -61,6 +62,32 @@ func (s *StreamService) SetSubjectFilterService(svc *SubjectFilterService) {
 // provider façade as part of PRD #39 PR 4.
 func (s *StreamService) SetServerService(svc *ServerService) {
     s.serverService = svc
+}
+
+// SetSubjectRelayService wires in the SubjectRelayService so that
+// CreateStream/UpdateStream validate a transmitter stream's subject-filter
+// mode against its upstream (PRD #89 #95). Optional: when unset, validation is
+// skipped.
+func (s *StreamService) SetSubjectRelayService(svc *SubjectRelayService) {
+    s.subjectRelayService = svc
+}
+
+// validateSubjectFilterMode rejects or warns on a transmitter stream's
+// subject-filter mode against its resolved upstream (PRD #89 #95). It is a
+// no-op when subject filtering is disabled server-wide, no mode is set, or the
+// relay service is unwired.
+func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *model.StreamStateRecord) error {
+    if !SubjectFilteringEnabled() || rec.SubjectFilterMode == "" || s.subjectRelayService == nil {
+        return nil
+    }
+    verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
+    if verdict.Err != nil {
+        return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
+    }
+    if verdict.Warn != "" {
+        ssLog.Warn(verdict.Warn, "stream_id", rec.StreamConfiguration.Id, "mode", rec.SubjectFilterMode)
+    }
+    return nil
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
@@ -482,6 +509,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		EventSource:         request.EventSource,
 	}
 
+	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
+	// incompatible with the stream's upstream before the stream is persisted.
+	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
 	err = s.streamDAO.Create(ctx, streamRec)
 	if err != nil {
 		return model.StreamConfiguration{}, err
@@ -758,6 +791,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 	if configReq.EventSource != nil {
 		streamRec.EventSource = configReq.EventSource
+	}
+
+	// PRD #89 #95: re-validate the subject-filter mode against the upstream
+	// whenever the mode or event source could have changed.
+	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
+		return nil, err
 	}
 
 	err = s.streamDAO.Update(ctx, streamRec)

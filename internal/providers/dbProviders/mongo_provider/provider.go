@@ -84,6 +84,7 @@ type MongoProvider struct {
 	serverService        *services.ServerService
 	tokenService         *services.TokenService
 	subjectFilterService *services.SubjectFilterService
+	subjectRelayService  *services.SubjectRelayService
 
 	// dbInit is a flag confirming a valid SSEF database is connected and initialized
 	dbInit bool
@@ -150,6 +151,14 @@ func (m *MongoProvider) initServices() {
 	// A defaultSubjects baseline change clears the stream's subject filter.
 	m.streamService.SetSubjectFilterService(m.subjectFilterService)
 
+	// PRD #89 #95: the relay service validates subject-filter modes at config
+	// time and relays PASSTHRU subject changes to the upstream transmitter.
+	m.subjectRelayService = services.NewSubjectRelayService(
+		m.streamService.ListReceiverStreams,
+		services.NewDefaultUpstreamResolver(m.serverService),
+	)
+	m.streamService.SetSubjectRelayService(m.subjectRelayService)
+
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator()
 	}
@@ -166,6 +175,9 @@ func (m *MongoProvider) GetServerService() *services.ServerService { return m.se
 func (m *MongoProvider) GetTokenService() *services.TokenService   { return m.tokenService }
 func (m *MongoProvider) GetSubjectFilterService() *services.SubjectFilterService {
 	return m.subjectFilterService
+}
+func (m *MongoProvider) GetSubjectRelayService() *services.SubjectRelayService {
+	return m.subjectRelayService
 }
 
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in

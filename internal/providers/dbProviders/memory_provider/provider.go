@@ -60,6 +60,7 @@ type MemoryProvider struct {
     serverService        *services.ServerService
     tokenService         *services.TokenService
     subjectFilterService *services.SubjectFilterService
+    subjectRelayService  *services.SubjectRelayService
 
     // Direct references to the raw memory DAOs. Services see notifyingDAO
     // wrappers around these for after-mutation persistence triggering (#44);
@@ -103,6 +104,9 @@ func (m *MemoryProvider) GetTokenService() *services.TokenService   { return m.t
 func (m *MemoryProvider) GetSubjectFilterService() *services.SubjectFilterService {
     return m.subjectFilterService
 }
+func (m *MemoryProvider) GetSubjectRelayService() *services.SubjectRelayService {
+    return m.subjectRelayService
+}
 
 func (m *MemoryProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
     // TODO implement me
@@ -136,6 +140,14 @@ func (m *MemoryProvider) buildServices() {
     m.streamService.SetServerService(m.serverService)
     // A defaultSubjects baseline change clears the stream's subject filter.
     m.streamService.SetSubjectFilterService(m.subjectFilterService)
+
+    // PRD #89 #95: the relay service validates subject-filter modes at config
+    // time and relays PASSTHRU subject changes to the upstream transmitter.
+    m.subjectRelayService = services.NewSubjectRelayService(
+        m.streamService.ListReceiverStreams,
+        services.NewDefaultUpstreamResolver(m.serverService),
+    )
+    m.streamService.SetSubjectRelayService(m.subjectRelayService)
 }
 
 func (m *MemoryProvider) initialize() {
