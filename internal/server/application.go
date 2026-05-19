@@ -46,36 +46,38 @@ type SsfApplicationInterface interface {
 	GetClientService() *services.ClientService
 	GetServerService() *services.ServerService
 	GetTokenService() *services.TokenService
+	GetSubjectFilterService() *services.SubjectFilterService
 	GetCoordinator() cluster.ClusterCoordinator
 	GetStorage() storage.Storage
 }
 
 type SignalsApplication struct {
-	Coordinator    cluster.ClusterCoordinator
-	Storage        storage.Storage
-	StreamService  *services.StreamService
-	KeyService     *services.KeyService
-	EventService   *services.EventService
-	ClientService  *services.ClientService
-	ServerService  *services.ServerService
-	TokenService   *services.TokenService
-	Server         *http.Server
-	Handler        http.Handler
-	EventRouter    eventRouter.EventRouter
-	BaseUrl        *url.URL
-	HostName       string
-	DefIssuer      string
-	AdminRole      string
-	Auth           *authUtil.AuthIssuer
-	pollClients    map[string]*ClientPollStream
-	pushClients    map[string]*ReceiverPushStream
-	pushReceivers  map[string]model.StreamStateRecord
-	mu             sync.RWMutex
-	Stats          *PrometheusHandler
-	NodeID         string
-	StartedAt      time.Time
-	stopSync       chan struct{}
-	InternalServer *http.Server
+	Coordinator          cluster.ClusterCoordinator
+	Storage              storage.Storage
+	StreamService        *services.StreamService
+	KeyService           *services.KeyService
+	EventService         *services.EventService
+	ClientService        *services.ClientService
+	ServerService        *services.ServerService
+	TokenService         *services.TokenService
+	SubjectFilterService *services.SubjectFilterService
+	Server               *http.Server
+	Handler              http.Handler
+	EventRouter          eventRouter.EventRouter
+	BaseUrl              *url.URL
+	HostName             string
+	DefIssuer            string
+	AdminRole            string
+	Auth                 *authUtil.AuthIssuer
+	pollClients          map[string]*ClientPollStream
+	pushClients          map[string]*ReceiverPushStream
+	pushReceivers        map[string]model.StreamStateRecord
+	mu                   sync.RWMutex
+	Stats                *PrometheusHandler
+	NodeID               string
+	StartedAt            time.Time
+	stopSync             chan struct{}
+	InternalServer       *http.Server
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -89,12 +91,15 @@ func (sa *SignalsApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
 }
 
-func (sa *SignalsApplication) GetStreamService() *services.StreamService  { return sa.StreamService }
-func (sa *SignalsApplication) GetKeyService() *services.KeyService        { return sa.KeyService }
-func (sa *SignalsApplication) GetEventService() *services.EventService    { return sa.EventService }
-func (sa *SignalsApplication) GetClientService() *services.ClientService  { return sa.ClientService }
-func (sa *SignalsApplication) GetServerService() *services.ServerService  { return sa.ServerService }
-func (sa *SignalsApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
+func (sa *SignalsApplication) GetStreamService() *services.StreamService { return sa.StreamService }
+func (sa *SignalsApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
+func (sa *SignalsApplication) GetEventService() *services.EventService   { return sa.EventService }
+func (sa *SignalsApplication) GetClientService() *services.ClientService { return sa.ClientService }
+func (sa *SignalsApplication) GetServerService() *services.ServerService { return sa.ServerService }
+func (sa *SignalsApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
+func (sa *SignalsApplication) GetSubjectFilterService() *services.SubjectFilterService {
+	return sa.SubjectFilterService
+}
 func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
 func (sa *SignalsApplication) GetStorage() storage.Storage                { return sa.Storage }
 
@@ -169,21 +174,22 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	nodeID := nodeid.Resolve()
 
 	sa := &SignalsApplication{
-		Coordinator:   persistence.Coordinator,
-		Storage:       persistence.Storage,
-		StreamService: persistence.StreamService,
-		KeyService:    persistence.KeyService,
-		EventService:  persistence.EventService,
-		ClientService: persistence.ClientService,
-		ServerService: persistence.ServerService,
-		TokenService:  persistence.TokenService,
-		AdminRole:     role,
-		pollClients:   map[string]*ClientPollStream{},
-		pushClients:   map[string]*ReceiverPushStream{},
-		pushReceivers: map[string]model.StreamStateRecord{},
-		NodeID:        nodeID,
-		StartedAt:     time.Now().UTC(),
-		stopSync:      make(chan struct{}),
+		Coordinator:          persistence.Coordinator,
+		Storage:              persistence.Storage,
+		StreamService:        persistence.StreamService,
+		KeyService:           persistence.KeyService,
+		EventService:         persistence.EventService,
+		ClientService:        persistence.ClientService,
+		ServerService:        persistence.ServerService,
+		TokenService:         persistence.TokenService,
+		SubjectFilterService: persistence.SubjectFilterService,
+		AdminRole:            role,
+		pollClients:          map[string]*ClientPollStream{},
+		pushClients:          map[string]*ReceiverPushStream{},
+		pushReceivers:        map[string]model.StreamStateRecord{},
+		NodeID:               nodeID,
+		StartedAt:            time.Now().UTC(),
+		stopSync:             make(chan struct{}),
 	}
 
 	// Initialize Auth if available
@@ -198,10 +204,11 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	sa.Handler = httpRouter.router
 
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
-		StreamService: persistence.StreamService,
-		KeyService:    persistence.KeyService,
-		EventService:  persistence.EventService,
-		Coordinator:   persistence.Coordinator,
+		StreamService:        persistence.StreamService,
+		KeyService:           persistence.KeyService,
+		EventService:         persistence.EventService,
+		Coordinator:          persistence.Coordinator,
+		SubjectFilterService: persistence.SubjectFilterService,
 		// The HTTP push adapter is wired at the composition root. NewRouter
 		// late-binds itself as the KeyReloader so the adapter can drive the
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.

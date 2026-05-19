@@ -63,6 +63,17 @@ type SubjectFilterDAO interface {
     Add(ctx context.Context, entry *model.SubjectFilterEntry) error
     // Get returns the entry for a stream + canonical key, or ErrNotFound.
     Get(ctx context.Context, streamID, canonicalKey string) (*model.SubjectFilterEntry, error)
+    // Remove deletes the entry for a stream + canonical key. Removing an entry
+    // that does not exist is not an error.
+    Remove(ctx context.Context, streamID, canonicalKey string) error
+    // ClearForStream deletes every subject filter entry for the given stream.
+    // It is the storage side of the defaultSubjects-flip filter clear.
+    ClearForStream(ctx context.Context, streamID string) error
+    // ListComplex returns the non-simple (complex and aliases) entries for a
+    // stream. Simple entries are deliberately excluded — they are reached by
+    // indexed Get; the complex/aliases entries need the field-wise scan path
+    // (ADR-0003).
+    ListComplex(ctx context.Context, streamID string) ([]*model.SubjectFilterEntry, error)
 }
 
 // KeyDAO handles cryptographic key data access

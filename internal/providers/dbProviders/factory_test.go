@@ -20,6 +20,7 @@ func TestOpenPersistence_Memory(t *testing.T) {
 	assert.NotNil(t, p.ClientService, "ClientService must be set")
 	assert.NotNil(t, p.ServerService, "ServerService must be set")
 	assert.NotNil(t, p.TokenService, "TokenService must be set")
+	assert.NotNil(t, p.SubjectFilterService, "SubjectFilterService must be set")
 	assert.NotNil(t, p.Coordinator, "Coordinator must be set")
 	assert.NotNil(t, p.Storage, "Storage must be set")
 

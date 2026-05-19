@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,8 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -82,4 +86,89 @@ func (suite *SubjectFilteringSuite) TestSubjectHandlersReturn404WhenDisabled() {
 		assert.NoError(suite.T(), err)
 		assert.Equal(suite.T(), http.StatusNotFound, resp.StatusCode, "handler %s must return 404 when filtering disabled", path)
 	}
+}
+
+// newFilterTestStream creates a transmitter stream with the given baseline and
+// returns its id together with a stream-scoped bearer token.
+func (suite *SubjectFilteringSuite) newFilterTestStream(defaultSubjects string) (string, string) {
+	t := suite.T()
+	instance := suite.instance
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
+		&authUtil.AuthContext{ProjectId: instance.projectId})
+
+	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Iss: "DEFAULT",
+			Aud: []string{"https://receiver.example.com"},
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+			},
+		},
+		DefaultSubjects: defaultSubjects,
+	}, instance.projectId, nil)
+	require.NoError(t, err)
+
+	token, err := instance.GetAuthIssuer().IssueStreamToken(created.Id, instance.projectId, nil)
+	require.NoError(t, err)
+	return created.Id, token
+}
+
+// postSubject sends an Add/Remove Subject request for the given stream token.
+func (suite *SubjectFilteringSuite) postSubject(path, token, body string) *http.Response {
+	req, _ := http.NewRequest(http.MethodPost, suite.instance.ts.URL+path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := suite.instance.client.Do(req)
+	require.NoError(suite.T(), err)
+	return resp
+}
+
+// TestAddSubjectReturns200 verifies Add Subject on the caller's authenticated
+// stream returns 200 and the subject becomes deliverable on a NONE stream
+// (#92 acceptance criteria 1, 3).
+func (suite *SubjectFilteringSuite) TestAddSubjectReturns200() {
+	_ = os.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+	defer func() { _ = os.Unsetenv("I2SIG_SUBJECT_FILTERING") }()
+	t := suite.T()
+	instance := suite.instance
+
+	sid, token := suite.newFilterTestStream(model.DefaultSubjectsNone)
+	body := `{"stream_id":"` + sid + `","subject":{"format":"email","email":"alice@example.com"}}`
+	resp := suite.postSubject("/add-subject", token, body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Add Subject must return 200")
+
+	state, err := instance.GetStreamState(sid)
+	require.NoError(t, err)
+	subject := &goSet.SubjectIdentifier{Format: "email"}
+	subject.AddEmail("alice@example.com")
+	event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+	assert.True(t, instance.persistence.SubjectFilterService.Allows(context.Background(), state, event),
+		"after Add Subject the NONE stream must deliver the added subject")
+}
+
+// TestRemoveSubjectReturns204 verifies Remove Subject on the caller's
+// authenticated stream returns 204 (#92 acceptance criterion 3).
+func (suite *SubjectFilteringSuite) TestRemoveSubjectReturns204() {
+	_ = os.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+	defer func() { _ = os.Unsetenv("I2SIG_SUBJECT_FILTERING") }()
+	t := suite.T()
+
+	sid, token := suite.newFilterTestStream(model.DefaultSubjectsAll)
+	body := `{"stream_id":"` + sid + `","subject":{"format":"email","email":"bob@example.com"}}`
+	resp := suite.postSubject("/remove-subject", token, body)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "Remove Subject must return 204")
+}
+
+// TestAddSubjectMalformedSubjectReturns400 verifies a subject that cannot be
+// canonicalized is rejected with 400 rather than silently stored.
+func (suite *SubjectFilteringSuite) TestAddSubjectMalformedSubjectReturns400() {
+	_ = os.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+	defer func() { _ = os.Unsetenv("I2SIG_SUBJECT_FILTERING") }()
+	t := suite.T()
+
+	sid, token := suite.newFilterTestStream(model.DefaultSubjectsNone)
+	body := `{"stream_id":"` + sid + `","subject":{"format":"email"}}`
+	resp := suite.postSubject("/add-subject", token, body)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+		"an uncanonicalizable subject must return 400")
 }

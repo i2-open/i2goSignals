@@ -34,6 +34,7 @@ const CDbLeases = "cluster_leases"
 const CDbNodes = "cluster_nodes"
 const CDbServers = "servers"
 const CDbTokens = "tokens"
+const CDbSubjectFilters = "subject_filters"
 
 const CSubjectFmt = "opaque"
 const CDefIssuer = "DEFAULT"
@@ -66,21 +67,23 @@ type MongoProvider struct {
 	// rebound in initialize() after each (re)connect via SetCollection. The
 	// concrete *mongodao.* types are needed for the rebind path; the
 	// interfaces.* references satisfy the service constructors.
-	streamDAO *mongodao.StreamDAOMongo
-	eventDAO  *mongodao.EventDAOMongo
-	keyDAO    *mongodao.KeyDAOMongo
-	clientDAO *mongodao.ClientDAOMongo
-	serverDAO *mongodao.ServerDAOMongo
-	tokenDAO  *mongodao.TokenDAOMongo
+	streamDAO        *mongodao.StreamDAOMongo
+	eventDAO         *mongodao.EventDAOMongo
+	keyDAO           *mongodao.KeyDAOMongo
+	clientDAO        *mongodao.ClientDAOMongo
+	serverDAO        *mongodao.ServerDAOMongo
+	tokenDAO         *mongodao.TokenDAOMongo
+	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
 
 	// Services — long-lived, never swapped after Open returns. Reconnects
 	// only rebind DAO collections in place (rebindable-collection pattern).
-	streamService *services.StreamService
-	keyService    *services.KeyService
-	eventService  *services.EventService
-	clientService *services.ClientService
-	serverService *services.ServerService
-	tokenService  *services.TokenService
+	streamService        *services.StreamService
+	keyService           *services.KeyService
+	eventService         *services.EventService
+	clientService        *services.ClientService
+	serverService        *services.ServerService
+	tokenService         *services.TokenService
+	subjectFilterService *services.SubjectFilterService
 
 	// dbInit is a flag confirming a valid SSEF database is connected and initialized
 	dbInit bool
@@ -95,8 +98,9 @@ type MongoProvider struct {
 	clientCol    *mongo.Collection
 	leaseCol     *mongo.Collection
 	nodeCol      *mongo.Collection
-	serverCol    *mongo.Collection
-	tokenCol     *mongo.Collection
+	serverCol        *mongo.Collection
+	tokenCol         *mongo.Collection
+	subjectFilterCol *mongo.Collection
 
 	DefaultIssuer string
 	TokenIssuer   string
@@ -131,6 +135,7 @@ func (m *MongoProvider) initServices() {
 	m.clientDAO = mongodao.NewClientDAO(nil).(*mongodao.ClientDAOMongo)
 	m.serverDAO = mongodao.NewServerDAO(nil).(*mongodao.ServerDAOMongo)
 	m.tokenDAO = mongodao.NewTokenDAO(nil).(*mongodao.TokenDAOMongo)
+	m.subjectFilterDAO = mongodao.NewSubjectFilterDAO(nil).(*mongodao.SubjectFilterDAOMongo)
 
 	m.tokenService = services.NewTokenService(m.tokenDAO)
 	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService)
@@ -138,9 +143,12 @@ func (m *MongoProvider) initServices() {
 	m.eventService = services.NewEventService(m.eventDAO)
 	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 	m.serverService = services.NewServerService(m.serverDAO)
+	m.subjectFilterService = services.NewSubjectFilterService(m.subjectFilterDAO)
 
 	// StreamService.CreateStream needs ServerService to resolve tx_alias.
 	m.streamService.SetServerService(m.serverService)
+	// A defaultSubjects baseline change clears the stream's subject filter.
+	m.streamService.SetSubjectFilterService(m.subjectFilterService)
 
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator()
@@ -156,6 +164,9 @@ func (m *MongoProvider) GetEventService() *services.EventService   { return m.ev
 func (m *MongoProvider) GetClientService() *services.ClientService { return m.clientService }
 func (m *MongoProvider) GetServerService() *services.ServerService { return m.serverService }
 func (m *MongoProvider) GetTokenService() *services.TokenService   { return m.tokenService }
+func (m *MongoProvider) GetSubjectFilterService() *services.SubjectFilterService {
+	return m.subjectFilterService
+}
 
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in
 // internal/providers/dbProviders/mongo_provider/test/rebind_test.go to assert
@@ -202,6 +213,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.leaseCol = m.ssefDb.Collection(CDbLeases)
 	m.nodeCol = m.ssefDb.Collection(CDbNodes)
 	m.tokenCol = m.ssefDb.Collection(CDbTokens)
+	m.subjectFilterCol = m.ssefDb.Collection(CDbSubjectFilters)
 
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator()
@@ -226,6 +238,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
     m.clientDAO.SetCollection(m.clientCol)
     m.serverDAO.SetCollection(m.serverCol)
     m.tokenDAO.SetCollection(m.tokenCol)
+    m.subjectFilterDAO.SetCollection(m.subjectFilterCol)
 
     // Initialize token keys against the existing keyService so a slow
     // reconnect doesn't leave the AuthIssuer with a nil PublicKey.

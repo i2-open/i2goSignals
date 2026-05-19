@@ -42,3 +42,23 @@ func (d *SubjectFilterDAOMemory) Get(_ context.Context, streamID, canonicalKey s
     }
     return nil, interfaces.ErrNotFound
 }
+
+func (d *SubjectFilterDAOMemory) Remove(_ context.Context, streamID, canonicalKey string) error {
+    d.store.Delete(sfKey(streamID, canonicalKey))
+    return nil
+}
+
+func (d *SubjectFilterDAOMemory) ClearForStream(_ context.Context, streamID string) error {
+    for _, e := range d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        return e.StreamId == streamID
+    }) {
+        d.store.Delete(sfKey(e.StreamId, e.CanonicalKey))
+    }
+    return nil
+}
+
+func (d *SubjectFilterDAOMemory) ListComplex(_ context.Context, streamID string) ([]*model.SubjectFilterEntry, error) {
+    return d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        return e.StreamId == streamID && e.Kind != model.SubjectKindSimple
+    }), nil
+}

@@ -39,12 +39,20 @@ type StreamService struct {
 	streamDAO               interfaces.StreamDAO
 	keyService              *KeyService
 	serverService           *ServerService
+	subjectFilterService    *SubjectFilterService
 	defaultIssuer           string
 	receiverStreams         map[string]*model.StreamStateRecord
 	BaseUrl                 *url.URL
 	mu                      sync.RWMutex
 	minVerificationInterval int
 	maxInactivityTimeout    int
+}
+
+// SetSubjectFilterService wires in the SubjectFilterService so that a
+// defaultSubjects baseline change on a live stream clears that stream's
+// subject filter. Optional: when unset, UpdateStream skips the filter clear.
+func (s *StreamService) SetSubjectFilterService(svc *SubjectFilterService) {
+	s.subjectFilterService = svc
 }
 
 // SetServerService wires in the ServerService that owns Server records. Once
@@ -737,8 +745,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 
 	// Subject-filtering operator knobs. defaultSubjects is gated on the
 	// server-wide feature being enabled; when disabled the request value is
-	// silently ignored, consistent with CreateStream.
+	// silently ignored, consistent with CreateStream. A baseline change clears
+	// the stream's subject filter so stale entries never carry the opposite
+	// meaning under the new baseline.
+	defaultSubjectsFlipped := false
 	if SubjectFilteringEnabled() && configReq.DefaultSubjects != "" {
+		defaultSubjectsFlipped = configReq.DefaultSubjects != streamRec.DefaultSubjects
 		streamRec.DefaultSubjects = configReq.DefaultSubjects
 	}
 	if configReq.SubjectFilterMode != "" {
@@ -751,6 +763,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	err = s.streamDAO.Update(ctx, streamRec)
 	if err != nil {
 		return nil, err
+	}
+
+	if defaultSubjectsFlipped && s.subjectFilterService != nil {
+		if clearErr := s.subjectFilterService.ClearFilter(ctx, streamID); clearErr != nil {
+			ssLog.Warn("Error clearing subject filter after defaultSubjects change", "sid", streamID, "error", clearErr)
+		}
 	}
 
 	return config, nil

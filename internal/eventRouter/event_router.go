@@ -61,24 +61,25 @@ type EventRouter interface {
 }
 
 type router struct {
-	mu                  sync.RWMutex
-	pushStreams         map[string]model.StreamStateRecord // These are transmitters
-	pollStreams         map[string]model.StreamStateRecord
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	enabled             bool
-	nodeId              string
-	issuerKeys          map[string]*rsa.PrivateKey
-	issuerKids          map[string]string
-	pollBuffers         map[string]*buffer.EventPollBuffer
-	pushBuffers         map[string]*buffer.EventPushBuffer
-	coordinator         cluster.ClusterCoordinator
-	streamService       *services.StreamService
-	keyService          *services.KeyService
-	eventService        *services.EventService
-	pushDelivery        delivery.PushDelivery
-	eventsIn, eventsOut *prometheus.CounterVec
-	stats               statsTracker
+	mu                   sync.RWMutex
+	pushStreams          map[string]model.StreamStateRecord // These are transmitters
+	pollStreams          map[string]model.StreamStateRecord
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	enabled              bool
+	nodeId               string
+	issuerKeys           map[string]*rsa.PrivateKey
+	issuerKids           map[string]string
+	pollBuffers          map[string]*buffer.EventPollBuffer
+	pushBuffers          map[string]*buffer.EventPushBuffer
+	coordinator          cluster.ClusterCoordinator
+	streamService        *services.StreamService
+	keyService           *services.KeyService
+	eventService         *services.EventService
+	subjectFilterService *services.SubjectFilterService
+	pushDelivery         delivery.PushDelivery
+	eventsIn, eventsOut  *prometheus.CounterVec
+	stats                statsTracker
 
 	httpClient          *http.Client
 	clusterSecret       string
@@ -152,28 +153,32 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
+	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
+	// time. When nil (or the feature is disabled) every event passes.
+	SubjectFilterService *services.SubjectFilterService
 }
 
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
-		coordinator:         deps.Coordinator,
-		streamService:       deps.StreamService,
-		keyService:          deps.KeyService,
-		eventService:        deps.EventService,
-		nodeId:              nodeId,
-		pushStreams:         map[string]model.StreamStateRecord{},
-		pollStreams:         map[string]model.StreamStateRecord{},
-		pushBuffers:         map[string]*buffer.EventPushBuffer{},
-		pollBuffers:         map[string]*buffer.EventPollBuffer{},
-		issuerKeys:          map[string]*rsa.PrivateKey{},
-		issuerKids:          map[string]string{},
-		enabled:             false,
-		ctx:                 ctx,
-		cancel:              cancel,
-		httpClient:          &http.Client{Timeout: 5 * time.Second},
-		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes: make(map[string]time.Time),
+		coordinator:          deps.Coordinator,
+		streamService:        deps.StreamService,
+		keyService:           deps.KeyService,
+		eventService:         deps.EventService,
+		subjectFilterService: deps.SubjectFilterService,
+		nodeId:               nodeId,
+		pushStreams:          map[string]model.StreamStateRecord{},
+		pollStreams:          map[string]model.StreamStateRecord{},
+		pushBuffers:          map[string]*buffer.EventPushBuffer{},
+		pollBuffers:          map[string]*buffer.EventPollBuffer{},
+		issuerKeys:           map[string]*rsa.PrivateKey{},
+		issuerKids:           map[string]string{},
+		enabled:              false,
+		ctx:                  ctx,
+		cancel:               cancel,
+		httpClient:           &http.Client{Timeout: 5 * time.Second},
+		clusterSecret:        os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
+		recentOutboundWakes:  make(map[string]time.Time),
 	}
 
 	if deps.PushDelivery != nil {
@@ -1216,6 +1221,21 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
 	}
 
+	sid := config.StreamConfiguration.Id
+
+	// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
+	// and discarded rather than pushed, so the pending buffer stays bounded
+	// (ADR-0002); the no-op success classification advances the push loop
+	// exactly as a stale/deleted JTI does. Operational events and a disabled
+	// feature always pass — Allows handles both internally.
+	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
+		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
+		}
+		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+	}
+
 	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
 		Stream: config,
 		Event:  eventRecord,
@@ -1225,7 +1245,6 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	cls := outcome.Classification
 	rsaKey, kid = outcome.Key, outcome.Kid
 
-	sid := config.StreamConfiguration.Id
 	isVerifyPush := isOperationalVerify(eventRecord)
 
 	if cls.Class == goSetPush.ClassAccepted {

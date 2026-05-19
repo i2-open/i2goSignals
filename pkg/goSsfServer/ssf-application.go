@@ -27,15 +27,16 @@ import (
 var serverLog = logger.Sub("SERVER")
 
 type SsfApplication struct {
-	Coordinator   cluster.ClusterCoordinator
-	Storage       storage.Storage
-	StreamService *services.StreamService
-	KeyService    *services.KeyService
-	EventService  *services.EventService
-	ClientService *services.ClientService
-	ServerService *services.ServerService
-	TokenService  *services.TokenService
-	Server        *http.Server
+	Coordinator          cluster.ClusterCoordinator
+	Storage              storage.Storage
+	StreamService        *services.StreamService
+	KeyService           *services.KeyService
+	EventService         *services.EventService
+	ClientService        *services.ClientService
+	ServerService        *services.ServerService
+	TokenService         *services.TokenService
+	SubjectFilterService *services.SubjectFilterService
+	Server               *http.Server
 	Handler       http.Handler
 	EventRouter   eventRouter.EventRouter
 	BaseUrl       *url.URL
@@ -54,6 +55,9 @@ func (sa *SsfApplication) GetEventService() *services.EventService    { return s
 func (sa *SsfApplication) GetClientService() *services.ClientService  { return sa.ClientService }
 func (sa *SsfApplication) GetServerService() *services.ServerService  { return sa.ServerService }
 func (sa *SsfApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
+func (sa *SsfApplication) GetSubjectFilterService() *services.SubjectFilterService {
+	return sa.SubjectFilterService
+}
 func (sa *SsfApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
 func (sa *SsfApplication) GetStorage() storage.Storage                { return sa.Storage }
 
@@ -253,17 +257,18 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	nodeID := nodeid.Resolve()
 
 	sa := &SsfApplication{
-		Coordinator:   persistence.Coordinator,
-		Storage:       persistence.Storage,
-		StreamService: persistence.StreamService,
-		KeyService:    persistence.KeyService,
-		EventService:  persistence.EventService,
-		ClientService: persistence.ClientService,
-		ServerService: persistence.ServerService,
-		TokenService:  persistence.TokenService,
-		AdminRole:     role,
-		NodeID:        nodeID,
-		StartedAt:     time.Now().UTC(),
+		Coordinator:          persistence.Coordinator,
+		Storage:              persistence.Storage,
+		StreamService:        persistence.StreamService,
+		KeyService:           persistence.KeyService,
+		EventService:         persistence.EventService,
+		ClientService:        persistence.ClientService,
+		ServerService:        persistence.ServerService,
+		TokenService:         persistence.TokenService,
+		SubjectFilterService: persistence.SubjectFilterService,
+		AdminRole:            role,
+		NodeID:               nodeID,
+		StartedAt:            time.Now().UTC(),
 	}
 
 	if sa.KeyService != nil {
@@ -277,11 +282,12 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	sa.Handler = httpRouter.router
 
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
-		StreamService: persistence.StreamService,
-		KeyService:    persistence.KeyService,
-		EventService:  persistence.EventService,
-		Coordinator:   persistence.Coordinator,
-		PushDelivery:  delivery.NewHTTPAdapter(persistence.StreamService, nil),
+		StreamService:        persistence.StreamService,
+		KeyService:           persistence.KeyService,
+		EventService:         persistence.EventService,
+		Coordinator:          persistence.Coordinator,
+		SubjectFilterService: persistence.SubjectFilterService,
+		PushDelivery:         delivery.NewHTTPAdapter(persistence.StreamService, nil),
 	}, nodeID)
 
 	var baseUrl *url.URL
