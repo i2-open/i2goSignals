@@ -414,3 +414,58 @@ func (s *MongoProviderSuite) TestI_UpdateRemoteAddress() {
 	s.Equal("10.0.1.5:443", state.RemoteAddress.IP)
 	s.Equal("203.0.113.42", state.RemoteAddress.Forwarded)
 }
+
+// TestZ_SubjectFilterFieldsRoundTrip verifies that the SSF subject-filtering
+// configuration fields (defaultSubjects, subjectFilterMode, and the event-source
+// descriptor) persist and read back intact through the MongoDB adapter on both
+// create and update. It mirrors the memory-adapter coverage in
+// internal/services/stream_service_subject_filter_test.go so #90 acceptance
+// criterion 4 ("on both the memory and mongo adapters") is exercised on Mongo.
+func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
+	s.T().Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+
+	authCtx := authUtil.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+
+	req := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"test.example.com"},
+			Iss:      "test.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll}},
+		},
+		DefaultSubjects: model.DefaultSubjectsNone,
+		EventSource: &model.EventSource{
+			Type:            model.EventSourceExplicit,
+			SourceStreamIds: []string{"src-1"},
+		},
+	}
+
+	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream should succeed")
+
+	state, err := s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after create should succeed")
+	s.Equal(model.DefaultSubjectsNone, state.DefaultSubjects, "defaultSubjects must round-trip through Mongo create")
+	s.Require().NotNil(state.EventSource, "event source must round-trip through Mongo create")
+	s.Equal(model.EventSourceExplicit, state.EventSource.Type)
+	s.Equal([]string{"src-1"}, state.EventSource.SourceStreamIds)
+
+	// Patch the subject-filtering fields and confirm they survive an update.
+	// LOCAL mode does no upstream relay, so it round-trips without requiring a
+	// resolvable relay target.
+	update := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+		DefaultSubjects:     model.DefaultSubjectsNone,
+		SubjectFilterMode:   model.SubjectFilterModeLocal,
+		EventSource:         &model.EventSource{Type: model.EventSourceAudience},
+	}
+	_, err = s.provider.GetStreamService().UpdateStream(ctx, created.Id, authCtx.ProjectId, update)
+	s.Require().NoError(err, "UpdateStream should succeed")
+
+	state, err = s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after update should succeed")
+	s.Equal(model.DefaultSubjectsNone, state.DefaultSubjects, "defaultSubjects must round-trip through Mongo update")
+	s.Equal(model.SubjectFilterModeLocal, state.SubjectFilterMode, "subjectFilterMode must round-trip through Mongo update")
+	s.Require().NotNil(state.EventSource, "event source must round-trip through Mongo update")
+	s.Equal(model.EventSourceAudience, state.EventSource.Type)
+}

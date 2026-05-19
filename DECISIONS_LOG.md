@@ -1079,3 +1079,36 @@ New pure module `internal/services/subject_relay.go`:
 *   A PASSTHRU subject change writes no local subject filter entry.
 *   HYBRID's refcounted upstream relay is issue #96; #95 only validates HYBRID.
 
+
+## [2026-05-19] ListComplex must not scan the whole filter (PRD #89, issue #92, QA)
+
+### Problem
+QA of PRD #89 found delivery-time subject filtering was O(total filter size)
+per event, not O(1) for a simple subject as ADR-0003 and #92 AC10 require. A
+scaling test measured a 200,000-entry filter ~220x slower than a 1,000-entry
+one — a linear scan.
+
+Root cause: `SubjectFilterService.computeMatch` calls `dao.ListComplex` on every
+cache miss (correct — a simple event can still match an `aliases` entry), but
+both DAOs implemented `ListComplex` by scanning every entry to find the
+non-simple subset: the memory DAO via `StateManager.FindAll`, the mongo DAO via
+a `kind: {$ne: simple}` query with no index covering `kind`.
+
+### Solution
+Make `ListComplex` O(non-simple count), so the indexed simple-subject `Get`
+governs the per-event cost:
+- Memory DAO keeps a secondary `nonSimple` index (stream_id -> set of canonical
+  keys for complex/aliases entries), maintained in lock-step by Add/Remove/
+  ClearForStream. `ListComplex` visits only that small subset.
+- Mongo DAO gains a `(stream_id, kind)` index; `ListComplex` queries
+  `kind: {$in: [complex, aliases]}` so it rides the index instead of scanning.
+
+`computeMatch` is unchanged — it is correct once `ListComplex` is cheap.
+
+### Invariants
+*   `ListComplex` must never cost O(total filter size); a stream may hold
+    millions of simple entries.
+*   The memory `nonSimple` index must stay consistent with `store` — Add is an
+    upsert, so a kind change on re-Add must update the index in both directions.
+*   Regression guard: `TestSubjectFilterService_SimpleMembershipScalesConstantly`
+    fails if the simple-subject path regresses to an O(N) scan.

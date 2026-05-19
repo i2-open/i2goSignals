@@ -38,15 +38,26 @@ func (d *SubjectFilterDAOMongo) SetCollection(c *mongo.Collection) {
     d.ensureIndex(c)
 }
 
-// ensureIndex creates the compound unique index on (stream_id, canonical_key).
-// It is idempotent and best-effort: a failure is logged, not fatal.
+// ensureIndex creates the subject_filters indexes. It is idempotent and
+// best-effort: a failure is logged, not fatal.
+//
+//   - (stream_id, canonical_key) unique — simple-subject membership is an
+//     indexed point lookup.
+//   - (stream_id, kind) — ListComplex selects only the small complex/aliases
+//     subset without scanning the stream's (potentially millions of) simple
+//     entries (ADR-0003).
 func (d *SubjectFilterDAOMongo) ensureIndex(c *mongo.Collection) {
     if c == nil {
         return
     }
-    _, err := c.Indexes().CreateOne(context.Background(), mongo.IndexModel{
-        Keys:    bson.D{{Key: "stream_id", Value: 1}, {Key: "canonical_key", Value: 1}},
-        Options: options.Index().SetUnique(true),
+    _, err := c.Indexes().CreateMany(context.Background(), []mongo.IndexModel{
+        {
+            Keys:    bson.D{{Key: "stream_id", Value: 1}, {Key: "canonical_key", Value: 1}},
+            Options: options.Index().SetUnique(true),
+        },
+        {
+            Keys: bson.D{{Key: "stream_id", Value: 1}, {Key: "kind", Value: 1}},
+        },
     })
     if err != nil {
         sfLog.Warn("Error creating subject_filters index", "error", err)
@@ -117,12 +128,15 @@ func (d *SubjectFilterDAOMongo) ClearForStream(ctx context.Context, streamID str
     return nil
 }
 
+// ListComplex returns the complex and aliases entries for streamID. The
+// kind: $in predicate rides the (stream_id, kind) index, so it selects only the
+// small non-simple subset and never scans the stream's simple entries (ADR-0003).
 func (d *SubjectFilterDAOMongo) ListComplex(ctx context.Context, streamID string) ([]*model.SubjectFilterEntry, error) {
     c, err := d.col()
     if err != nil {
         return nil, err
     }
-    filter := bson.M{"stream_id": streamID, "kind": bson.M{"$ne": model.SubjectKindSimple}}
+    filter := bson.M{"stream_id": streamID, "kind": bson.M{"$in": bson.A{model.SubjectKindComplex, model.SubjectKindAliases}}}
     cursor, err := c.Find(ctx, filter)
     if err != nil {
         sfLog.Error("Error listing complex subject filter entries", "sid", streamID, "error", err)
