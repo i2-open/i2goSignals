@@ -1,5 +1,41 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-18] SSF subject filtering — cluster cache invalidation (issue #94)
+
+### Change
+A subject filter change (Add/Remove Subject) can land on any cluster node, but
+the match-result cache that governs PUSH delivery lives on the node holding the
+`push-transmitter:<sid>` lease. Added a cluster reload notification so a change
+processed on a non-owner node invalidates the owner's cache:
+`SubjectFilterService.InvalidateCache`, `EventRouter.NotifySubjectFilterChange`,
+and a `reason` field on the existing cluster wake-up call.
+
+### Decisions
+*   **The notification reuses `/_cluster/wake-transmitter`, not a new endpoint.**
+    `WakeRequest` gains an optional `reason` field; `reason: "filter-change"`
+    invalidates the stream's match-result cache instead of waking a delivery
+    buffer. This reuses the existing route, HMAC/SPIFFE auth, and internal-server
+    wiring. The wire constant is `eventRouter.ReasonFilterChange`.
+*   **`handleSubjectChange` always calls `NotifySubjectFilterChange`.** The router
+    looks up the `push-transmitter:<sid>` lease: a local (or unowned) owner is
+    invalidated directly with no network hop; a remote owner is sent the
+    filter-change wake-up. The local invalidate in `applySubjectChange` is kept —
+    it keeps the originating node's own cache self-consistent.
+*   **The wake-up coalescing key includes the reason** (`sid:mode:reason`) on
+    both the inbound (`recentWakes`) and outbound (`recentOutboundWakes`) sides,
+    so a filter-change invalidation is never coalesced away by an ordinary
+    buffer wake-up for the same stream.
+
+### Invariants
+*   A filter change processed on any node must reach the PUSH lease owner's
+    match-result cache (invalidation), or be bounded by the short cache TTL.
+*   `reason: "filter-change"` carries `mode: "push"`; the owner lookup is always
+    the `push-transmitter:<sid>` lease.
+
+### Regression Verification
+*   `go test -race ./internal/services/ ./internal/eventRouter/ ./internal/server/...`
+*   `go test -run 'TestNotifySubjectFilterChange|TestWakeTransmitter_FilterChange|TestAddSubjectNotifiesRemoteLeaseOwner' ./internal/...`
+
 ## [2026-05-18] SSF subject filtering — delivery-time filter (issues #92, #93)
 
 ### Change
@@ -30,7 +66,7 @@ delivery-time filtering in `runPushLoop`/`prepareAndSendEvent` and
 *   **The match-result cache is invalidated per stream on any filter change.**
     `AddSubject`/`RemoveSubject`/`ClearFilter` drop all cached decisions for the
     stream; a short TTL bounds staleness on nodes that did not originate the
-    change (the cross-node invalidation notification is a later slice).
+    change (the cross-node invalidation notification was added in #94).
 
 ### Invariants
 *   A `SubjectFilterEntry` is only ever present for a subject whose delivery

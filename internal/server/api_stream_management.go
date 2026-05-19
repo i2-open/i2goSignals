@@ -118,6 +118,13 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
+	// The request may have landed on any cluster node; notify the stream's
+	// PUSH lease owner to invalidate its match-result cache so the change
+	// takes effect at delivery time (issue #94).
+	if router := sa.GetEventRouter(); router != nil {
+		router.NotifySubjectFilterChange(req.StreamId)
+	}
+
 	if add {
 		w.WriteHeader(http.StatusOK)
 	} else {

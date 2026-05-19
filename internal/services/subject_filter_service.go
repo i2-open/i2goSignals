@@ -86,6 +86,15 @@ func (s *SubjectFilterService) ClearFilter(ctx context.Context, streamID string)
     return err
 }
 
+// InvalidateCache drops every cached match decision for streamID on this node.
+// It is the cluster reload signal of PRD #89 (ADR-0003): when an Add/Remove
+// Subject is processed on a peer node, that node notifies this stream's
+// push-transmitter lease owner, which calls InvalidateCache so its next
+// delivery-time decision re-reads the updated filter.
+func (s *SubjectFilterService) InvalidateCache(streamID string) {
+    s.cache.invalidateStream(streamID)
+}
+
 // Allows reports whether event should be delivered to stream under its subject
 // filter. Operational events and a server-wide disabled feature always pass.
 // On a NONE stream an event delivers only when its subject is in the filter; on
