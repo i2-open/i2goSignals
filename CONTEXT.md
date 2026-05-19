@@ -151,6 +151,208 @@ Replaces the `WriteHook` / `SetWriteHook` / `afterWrite` /
 `notifyWrite` plumbing previously threaded through ~25 BaseProvider
 methods.
 
+## Subject filtering vocabulary
+
+Terms emerging from the `docs/subject_processing.md` design (SSF §8.1.3).
+
+### Subject
+
+The principal an event is about, identified per **RFC9493** Subject
+Identifiers — the same vocabulary SSF §8.1.3 and SCIM Events (RFC9967)
+use. Formats: `account`, `email`, `iss_sub`, `opaque`, `phone_number`,
+`did`, `uri`, `aliases`, plus **complex subjects** (user / group /
+device / session / tenant / org_unit). A Subject is not necessarily a
+person — it may be a device, session, or org unit.
+_Avoid_: treating "user" or "account" as synonyms for Subject.
+
+### Subject matching
+
+The SSF §8.1.3.1 predicate that decides whether two Subjects are "the
+same" for filtering purposes — distinct from `EventService.MatchesStream`
+(which is iss/aud/event-type routing). Rules:
+
+- **Simple Subjects** match iff they are exactly identical.
+- **Complex Subjects** match field-wise: for every field (user, group,
+  device, …) at least one side may leave it undefined (wildcard); a
+  match requires every field that *is* defined on both sides to be
+  identical.
+
+Consequence: a receiver can subscribe broadly (few fields specified)
+and still receive narrower, more-specific events. Because the two
+kinds match differently, the subject filter is stored *split* by
+kind — simple Subjects hash-indexed on their canonical key (O(1)
+membership), complex Subjects held in a small field-wise-scanned
+list. A filter may legitimately reach millions of entries; see
+`docs/adr/0003-split-subject-filter-storage.md`.
+
+### defaultSubjects
+
+A per-transmitter-stream setting (goSignals extension, not an SSF
+stream-config field) expressing the **default delivery policy** a
+receiver sees — not a guarantee:
+
+- **`ALL`** — Subjects are delivered by default; the receiver narrows
+  by *removing* Subjects.
+- **`NONE`** — no Subject is delivered by default; the receiver opts
+  in by *adding* Subjects.
+
+It is only a *default*. Per SSF a transmitter MAY ignore Add/Remove
+requests and MAY deliver a Subject out-of-band on its own policy (e.g.
+a user opt-in dialog at the transmitter). So a `NONE` upstream can
+still send Subjects goSignals never added, and an `ALL` upstream may
+withhold some.
+
+The stream's subject filter table holds only the non-default set.
+Changing `defaultSubjects` on a live stream is a deliberate reset: the
+filter table is cleared, because old entries carry the opposite
+meaning under the new baseline.
+
+### Provenance-independent downstream filtering
+
+Because upstream delivery is never guaranteed to track what goSignals
+subscribed for, goSignals must tolerate receiving events for Subjects
+it never added. The downstream transmitter filter is therefore applied
+to **whatever arrives**, judged purely on that downstream stream's own
+`defaultSubjects` + filter table — never on how or why the event
+arrived. Inbound subscription state and outbound delivery policy are
+decoupled.
+
+### Subject filtering mode
+
+A setting on a goSignals **receiver stream** giving the operator
+explicit control over how Add/Remove Subject requests arriving at the
+fed downstream transmitter streams are handled:
+
+- **`PASSTHRU`** — raw 1:1 relay of Add/Remove to the upstream
+  transmitter; no reference counting, no local filtering. Downstream
+  streams share one upstream subscription and share fate: one
+  downstream's Remove removes the Subject for all. That bluntness is
+  the feature.
+- **`LOCAL`** — filter locally, independently per downstream
+  transmitter stream; never touch the upstream.
+- **`HYBRID`** — reference-counted relay *and* local fan-out
+  filtering, so each downstream sees only the Subjects it asked for.
+  goSignals tracks, per Subject handler + Subject, the **set** of
+  interested downstream streams; it relays an `add` upstream when the
+  set goes 0→1 and a `remove` only when it goes 1→0. `HYBRID` relays
+  **only against a `defaultSubjects=NONE` upstream** — against an
+  `ALL` upstream everything already arrives, so it behaves as pure
+  local filtering (relaying a `remove` could starve a not-yet-created
+  downstream). `HYBRID` is mandatory for a `NONE` upstream fanning
+  out to multiple selective downstreams — such a stream cannot be
+  filtered `LOCAL`-only because the event never arrives.
+
+`PASSTHRU` and `HYBRID` require (a) the upstream to advertise
+`add_subject_endpoint` / `remove_subject_endpoint` in its SSF
+discovery metadata, and (b) an unambiguous relay target — see
+**Event source** and **Subject handler**.
+
+### Event source
+
+How a transmitter stream selects the events it sends. A new axis,
+distinct from `RouteMode` (IM/FW/PB):
+
+- **Direct** — no routed source; events arrive in Mongo by other
+  means (e.g. direct POST). Relay is impossible → `LOCAL` only.
+- **Audience-routed** — events matched in by `iss`/`aud`/event-type
+  (the current behavior). For relay, the feeding receiver stream is
+  found by matching the transmitter stream's `iss` to a receiver
+  stream's `iss`.
+- **Explicit (SID) source** — the transmitter stream names the
+  specific source stream SID(s) it forwards/republishes from.
+
+### Subject handler
+
+The single receiver stream designated to receive relayed Add/Remove
+Subject requests for a given issuer. When an Audience-routed
+transmitter stream's `iss` matches exactly one receiver stream, that
+receiver is the subject handler automatically. When several receiver
+streams share the issuer (e.g. a cluster of nodes all transmitting to
+goSignals on common audiences), the ambiguity MUST be resolved **at
+configuration time** by designating one explicitly via Explicit (SID)
+source — otherwise stream configuration is rejected.
+
+Publish-mode `iss`/`aud` rewriting is a deferred enhancement and is
+out of scope; it will later interact with subject filtering because
+rewriting `iss` changes the canonical key of `iss_sub` Subjects.
+
+### Add Subject / Remove Subject
+
+Receiver-initiated requests (SSF §8.1.3.2 / §8.1.3.3) telling a
+transmitter stream whether to deliver events for a given Subject. Add
+Subject POST returns 200; Remove Subject POST returns 204. Carry
+`stream_id`, `subject`, and (Add only) an optional `verified` boolean.
+A transmitter MAY silently ignore them. goSignals stores `verified`
+for audit and relays it verbatim upstream, but it does not influence
+filtering — goSignals is not an identity verifier.
+
+The endpoints are gated by a server-wide `I2SIG_SUBJECT_FILTERING`
+setting (`DISABLED` default / `ENABLED`). When `DISABLED` they are
+omitted from SSF discovery and return 404.
+
+Add/Remove take effect for **future events only** — they do not
+replay a Subject's event history. A receiver that wants history uses
+the existing `ResetDate` / `ResetJti` replay mechanism instead.
+
+goSignals applies the subject filter at **delivery time**, not at
+routing time. `MatchesStream` and `HandleEvent` are untouched — an
+event still enters the stream's pending buffer. The filter is
+consulted when the buffer is drained:
+
+- **PUSH** — in `runPushLoop` on the node holding the
+  `push-transmitter:<sid>` lease. A filtered-out JTI is **discarded
+  (acked), not pushed**, so the pending list still drains and stays
+  bounded. The filter is cached in that node's memory; an Add/Remove
+  arriving on any node looks up the lease owner and notifies it (the
+  same point-to-point pattern as the event wake-up) to reload.
+- **POLL** — at poll-response time on whichever node serves the poll;
+  the filter is read straight from Mongo (polls are cold and batched).
+
+This is why routing-time filtering was rejected: routing runs on an
+arbitrary ingest node, so it would force every node to hold every
+stream's filter, with no existing channel to keep them consistent.
+Delivery-time filtering pins the hot path (PUSH) to the single lease
+owner, which the wake-up scheme already addresses.
+
+Operational events (`Operational=true` — verify, stream-updated)
+carry no Subject and always pass the filter, just as they already
+bypass `MatchesStream`.
+
+### Removal grace period
+
+A configurable interval (SSF §9.3, "Malicious Subject Removal") during
+which a Subject whose delivery was just *stopped* continues to be
+delivered, so a malicious or coerced receiver cannot instantly blind a
+downstream by quietly removing a victim Subject.
+
+- It gates the **effect**, not the SSF verb: any operation that *stops*
+  delivery for a Subject is deferred by the grace period; any operation
+  that *starts or resumes* delivery takes effect immediately. A re-Add
+  during the window cancels the pending removal.
+- It is a per-transmitter-stream setting with a server-wide default;
+  `0` means immediate enforcement. It applies only where goSignals is
+  itself the filtering transmitter — **`LOCAL`** and **`HYBRID`** local
+  fan-out. Under **`PASSTHRU`** the upstream transmitter applies its own
+  §9.3, so goSignals adds no grace.
+- It covers receiver-issued stop-delivery requests on a *live* stream
+  only. A `defaultSubjects` flip is a deliberate operator action, not
+  the §9.3 threat, so the flip clears the filter table immediately and
+  bypasses grace.
+
+### Example dialogue
+
+> **Dev:** The SCIM demo cluster has several i2scim nodes, each
+> transmitting to goSignals on the *same* set of audiences. A
+> downstream receiver removes a Subject — where does the Remove go?
+> **Domain expert:** i2scim doesn't speak SSF, so there's no upstream
+> Add/Remove endpoint to relay to. goSignals filters `LOCAL`.
+> **Dev:** And if i2scim later supported SSF?
+> **Domain expert:** The cluster would synchronize Subjects internally,
+> so you'd relay to just one node. You'd pick one cluster stream as
+> the **Subject handler** via Explicit (SID) source — issuer matching
+> alone is ambiguous across the cluster, so config would reject it
+> otherwise.
+
 ## What got deleted
 
 - **`DbProviderInterface`** (`internal/providers/dbProviders/provider_interface.go`)
