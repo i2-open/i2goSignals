@@ -148,6 +148,18 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		router.NotifySubjectFilterChange(req.StreamId)
 	}
 
+	// PRD #89 #96: HYBRID also relays the change upstream, but only as the
+	// interested-set crosses the 0↔1 boundary. The local filter above is the
+	// primary outcome — an upstream relay failure is logged and tolerated, not
+	// surfaced to the caller.
+	if stream.SubjectFilterMode == model.SubjectFilterModeHybrid {
+		if relaySvc := sa.GetSubjectRelayService(); relaySvc != nil {
+			if relayErr := relaySvc.RelayHybrid(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
+				serverLog.Warn("HYBRID subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)
+			}
+		}
+	}
+
 	if add {
 		w.WriteHeader(http.StatusOK)
 	} else {

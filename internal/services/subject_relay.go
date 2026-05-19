@@ -158,20 +158,44 @@ func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 // relay can be exercised without a live upstream.
 type UpstreamResolver func(ctx context.Context, receiver *model.StreamStateRecord) (*UpstreamConn, error)
 
+// InterestPredicate reports whether a downstream transmitter stream's subject
+// filter currently selects subject — the HYBRID interested-set membership test
+// (issue #96). It is typically SubjectFilterService.Selects.
+type InterestPredicate func(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) bool
+
 // SubjectRelayService relays PASSTHRU/HYBRID subject changes to the upstream
 // transmitter and validates a transmitter stream's subject-filter mode against
 // its upstream at config time (issue #95).
+//
+// listTransmitters and interested are the HYBRID interested-set inputs (issue
+// #96): the set of downstream transmitter streams and the predicate reporting
+// which of them still select a given subject.
 type SubjectRelayService struct {
-    listReceivers func(ctx context.Context) ([]model.StreamStateRecord, error)
-    resolve       UpstreamResolver
+    listReceivers    func(ctx context.Context) ([]model.StreamStateRecord, error)
+    resolve          UpstreamResolver
+    listTransmitters func(ctx context.Context) ([]model.StreamStateRecord, error)
+    interested       InterestPredicate
 }
 
 // NewSubjectRelayService constructs a SubjectRelayService. listReceivers
 // supplies the receiver streams resolution searches (typically
-// StreamService.ListReceiverStreams); resolve fetches an upstream's discovery
-// and credential.
-func NewSubjectRelayService(listReceivers func(ctx context.Context) ([]model.StreamStateRecord, error), resolve UpstreamResolver) *SubjectRelayService {
-    return &SubjectRelayService{listReceivers: listReceivers, resolve: resolve}
+// StreamService.ListReceiverStreams); listTransmitters supplies the downstream
+// transmitter streams the HYBRID interested-set is computed over (typically
+// StreamService.ListTransmitterStreams); interested reports HYBRID
+// interested-set membership (typically SubjectFilterService.Selects); resolve
+// fetches an upstream's discovery and credential.
+func NewSubjectRelayService(
+    listReceivers func(ctx context.Context) ([]model.StreamStateRecord, error),
+    listTransmitters func(ctx context.Context) ([]model.StreamStateRecord, error),
+    interested InterestPredicate,
+    resolve UpstreamResolver,
+) *SubjectRelayService {
+    return &SubjectRelayService{
+        listReceivers:    listReceivers,
+        resolve:          resolve,
+        listTransmitters: listTransmitters,
+        interested:       interested,
+    }
 }
 
 // Relay relays a subject change for the downstream transmitter stream to its
@@ -186,6 +210,67 @@ func (s *SubjectRelayService) Relay(ctx context.Context, downstream *model.Strea
     target, err := ResolveRelayTarget(downstream, receivers)
     if err != nil {
         return err
+    }
+    conn, err := s.resolve(ctx, target)
+    if err != nil {
+        return err
+    }
+    defer conn.release()
+    remoteStreamID := ""
+    if target.RemoteStreamId != nil {
+        remoteStreamID = *target.RemoteStreamId
+    }
+    return RelaySubjectChange(ctx, conn.HttpClient, conn.Config, conn.AuthHeader, remoteStreamID, subject, verified, add)
+}
+
+// RelayHybrid relays a HYBRID downstream stream's subject change to the
+// upstream transmitter only when the change crosses the interested-set 0↔1
+// boundary (issue #96). The caller has already written downstream's own local
+// filter; RelayHybrid decides whether the shared upstream subscription must
+// follow.
+//
+// Relay is engaged only against a defaultSubjects=NONE upstream: against an ALL
+// upstream every subject is delivered by default, so relaying a remove could
+// starve a not-yet-created downstream — there HYBRID is pure local filtering.
+// When engaged, RelayHybrid counts the other HYBRID downstreams fed by the same
+// subject handler that still select the subject. Because downstream's own
+// change is already applied, a count of zero means this change moved the
+// interested-set across the boundary — an add as the first downstream appears
+// (0→1) or a remove as the last one drops (1→0) — and the relay fires. A
+// sibling still interested suppresses the relay, so one downstream's change
+// never starves another.
+func (s *SubjectRelayService) RelayHybrid(ctx context.Context, downstream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified, add bool) error {
+    receivers, err := s.listReceivers(ctx)
+    if err != nil {
+        return err
+    }
+    target, err := ResolveRelayTarget(downstream, receivers)
+    if err != nil {
+        return err
+    }
+    // HYBRID relays only against a NONE upstream (see the doc comment).
+    if target.DefaultSubjects != model.DefaultSubjectsNone {
+        return nil
+    }
+    transmitters, err := s.listTransmitters(ctx)
+    if err != nil {
+        return err
+    }
+    for i := range transmitters {
+        sibling := &transmitters[i]
+        if sibling.StreamConfiguration.Id == downstream.StreamConfiguration.Id {
+            continue // self — its change is already applied and not double-counted
+        }
+        if sibling.SubjectFilterMode != model.SubjectFilterModeHybrid {
+            continue
+        }
+        siblingTarget, err := ResolveRelayTarget(sibling, receivers)
+        if err != nil || siblingTarget.StreamConfiguration.Id != target.StreamConfiguration.Id {
+            continue // a sibling fed by a different subject handler
+        }
+        if s.interested(ctx, sibling, subject) {
+            return nil // a sibling still wants the subject — not a 0↔1 transition
+        }
     }
     conn, err := s.resolve(ctx, target)
     if err != nil {

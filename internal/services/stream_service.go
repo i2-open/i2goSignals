@@ -926,6 +926,24 @@ func (s *StreamService) ListReceiverStreams(ctx context.Context) ([]model.Stream
 	return out, nil
 }
 
+// ListTransmitterStreams returns the streams whose delivery method makes this server a
+// transmitter (DeliveryPush or DeliveryPoll) — the downstream-stream set the HYBRID
+// interested-set is computed over (issue #96). Like ListReceiverStreams it is a pure
+// query: no cache mutation, no JWKS loading.
+func (s *StreamService) ListTransmitterStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
+	recs, err := s.streamDAO.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.StreamStateRecord, 0, len(recs))
+	for _, rec := range recs {
+		if !rec.IsReceiver() {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
+}
+
 func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*model.StreamStateRecord {
 	recs, err := s.ListReceiverStreams(ctx)
 	if err != nil {

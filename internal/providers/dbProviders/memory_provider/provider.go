@@ -141,10 +141,13 @@ func (m *MemoryProvider) buildServices() {
     // A defaultSubjects baseline change clears the stream's subject filter.
     m.streamService.SetSubjectFilterService(m.subjectFilterService)
 
-    // PRD #89 #95: the relay service validates subject-filter modes at config
-    // time and relays PASSTHRU subject changes to the upstream transmitter.
+    // PRD #89 #95 #96: the relay service validates subject-filter modes at
+    // config time, relays PASSTHRU subject changes 1:1 to the upstream, and
+    // relays HYBRID changes on the interested-set 0↔1 boundary.
     m.subjectRelayService = services.NewSubjectRelayService(
         m.streamService.ListReceiverStreams,
+        m.streamService.ListTransmitterStreams,
+        m.subjectFilterService.Selects,
         services.NewDefaultUpstreamResolver(m.serverService),
     )
     m.streamService.SetSubjectRelayService(m.subjectRelayService)

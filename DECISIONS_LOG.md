@@ -1,5 +1,41 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-19] SSF subject filtering — HYBRID refcounted upstream relay (issue #96)
+
+### Change
+`HYBRID` subject-filtering mode: a downstream transmitter stream filters
+locally per-stream (the `LOCAL` path) *and* relays subject changes to the
+upstream transmitter. `SubjectRelayService.RelayHybrid` decides whether to
+relay; `handleSubjectChange` calls it after the local filter is written.
+
+### Decisions
+*   **The interested-set is derived, not stored.** The "set of downstream
+    streams interested in (subject handler, subject)" is not a new persisted
+    structure — it is computed from the existing per-stream subject filters:
+    the HYBRID downstreams fed by the same relay-target receiver whose filter
+    still `Selects` the subject. This is drift-free and cluster-correct with no
+    new DAO. The relay fires on the 0↔1 boundary: after the caller applies the
+    downstream's own change, `RelayHybrid` counts the *other* interested HYBRID
+    siblings — zero means an add went 0→1 or a remove went 1→0.
+*   **Relay engaged only against a `defaultSubjects=NONE` upstream.** Against an
+    `ALL` upstream `HYBRID` is pure local filtering — relaying a remove could
+    starve a not-yet-created downstream. The upstream baseline is read from the
+    relay-target receiver stream's `DefaultSubjects`.
+*   **A HYBRID upstream relay failure is tolerated, not surfaced.** The local
+    filter write is the primary outcome; a failed relay is logged at WARN and
+    the handler still returns 200/204. This differs from PASSTHRU (502 on relay
+    failure) because PASSTHRU has no local fallback.
+*   **`SubjectFilterService.Selects`** extracted from `Allows` — the
+    membership predicate (Allows minus the event/operational wrapper), reused
+    as the HYBRID interested-set test.
+
+### Invariants
+*   `RelayHybrid` is called only for `SubjectFilterModeHybrid` streams, only
+    after the local filter change is applied (self is excluded from the
+    sibling count by stream id).
+*   The asymmetric variant (relay adds but not removes, or vice-versa) is not
+    built.
+
 ## [2026-05-18] SSF subject filtering — cluster cache invalidation (issue #94)
 
 ### Change

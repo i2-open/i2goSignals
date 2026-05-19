@@ -96,14 +96,22 @@ func (s *SubjectFilterService) InvalidateCache(streamID string) {
 }
 
 // Allows reports whether event should be delivered to stream under its subject
-// filter. Operational events and a server-wide disabled feature always pass.
-// On a NONE stream an event delivers only when its subject is in the filter; on
-// an ALL stream it delivers unless its subject is in the filter.
+// filter. Operational events and a server-wide disabled feature always pass;
+// otherwise the decision is delegated to Selects.
 func (s *SubjectFilterService) Allows(ctx context.Context, stream *model.StreamStateRecord, event *model.AgEventRecord) bool {
     if !SubjectFilteringEnabled() || event == nil || event.Operational {
         return true
     }
-    matched := s.matches(ctx, stream.StreamConfiguration.Id, event.Event.SubjectId)
+    return s.Selects(ctx, stream, event.Event.SubjectId)
+}
+
+// Selects reports whether stream's subject filter currently delivers subject.
+// On a NONE stream the subject delivers only when it is in the filter; on an
+// ALL stream it delivers unless it is. It is Allows without the
+// event/operational wrapper and is the HYBRID interested-set membership test
+// (issue #96): whether a downstream transmitter stream still wants the subject.
+func (s *SubjectFilterService) Selects(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) bool {
+    matched := s.matches(ctx, stream.StreamConfiguration.Id, subject)
     if stream.DefaultSubjects == model.DefaultSubjectsNone {
         return matched
     }
