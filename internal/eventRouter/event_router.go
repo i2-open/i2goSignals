@@ -847,33 +847,49 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	var err error
 	if jtiSize > 0 {
 		sets := make(map[string]string, jtiSize)
-		if forwardMode {
-			jtis := *jtiSlice
-			for _, jti := range jtis {
-				eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-				if eventRecord == nil {
-					eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
-					continue
-				}
-				sets[jti] = eventRecord.Original
+		for _, jti := range *jtiSlice {
+			eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
+			if eventRecord == nil {
+				eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
+				continue
 			}
-		} else {
-			tokens := r.eventService.GetEvents(r.ctx, *jtiSlice)
-			for _, token := range tokens {
-				token.Issuer = state.StreamConfiguration.Iss
-				token.Audience = state.StreamConfiguration.Aud
-				token.IssuedAt = jwt.NewNumericDate(time.Now())
-				token.Kid = kid
+			// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
+			// serve a poll, so the filter is consulted here at poll-response
+			// time; a filtered-out event is discarded (acked) rather than
+			// returned, so the poll buffer stays bounded (ADR-0002).
+			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
+				r.discardPolledEvent(sid, jti, pollBuffer)
+				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+				continue
+			}
+			if forwardMode {
+				sets[jti] = eventRecord.Original
+				continue
+			}
+			token := &eventRecord.Event
+			token.Issuer = state.StreamConfiguration.Iss
+			token.Audience = state.StreamConfiguration.Aud
+			token.IssuedAt = jwt.NewNumericDate(time.Now())
+			token.Kid = kid
 
-				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
-				if err != nil {
-					eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
-				}
+			sets[jti], err = token.JWS(jwt.SigningMethodRS256, key)
+			if err != nil {
+				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 			}
 		}
 		return sets, more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
+}
+
+// discardPolledEvent drops a filtered-out event from a poll stream: it is acked
+// in the poll buffer and the provider so it is neither returned now nor on a
+// later poll, keeping the pending buffer bounded.
+func (r *router) discardPolledEvent(sid, jti string, pollBuffer *buffer.EventPollBuffer) {
+	pollBuffer.AckEvents([]string{jti})
+	if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
+		eventLogger.Error("POLL-SRV: Error discarding filtered-out event", "sid", sid, "jti", jti, "error", err)
+	}
 }
 
 // PushStreamHandler manages the lifecycle of a push stream, including lease handling and event transmission.

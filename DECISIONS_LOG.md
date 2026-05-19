@@ -1,5 +1,49 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-18] SSF subject filtering — delivery-time filter (issues #92, #93)
+
+### Change
+Implemented end-to-end SSF §8.1.3 subject filtering for `LOCAL` single-node PUSH
+streams (#92) and POLL streams (#93): a `SubjectFilterDAO` (memory + mongo), the
+`SubjectFilterService` (`Allows`/`AddSubject`/`RemoveSubject`/`ClearFilter`), the
+Add/Remove Subject handlers, the `defaultSubjects`-flip filter clear, and
+delivery-time filtering in `runPushLoop`/`prepareAndSendEvent` and
+`PollStreamHandler`.
+
+### Decisions
+*   **The filter stores only the non-default set, so Add/Remove are
+    baseline-aware.** A stored entry always means "the opposite of the stream
+    baseline" — an inclusion on a `NONE` stream, an exclusion on an `ALL`
+    stream. `SubjectFilterService.AddSubject`/`RemoveSubject` therefore take the
+    `*StreamStateRecord` and insert or delete the entry depending on the
+    baseline (NONE+Add and ALL+Remove insert; the other two delete).
+*   **`matches` does an indexed Get then a bounded complex/aliases scan on
+    miss**, rather than ADR-0003's strict dispatch-by-event-kind. A simple
+    subject that *is* in the filter still resolves in O(1) (early Get hit); only
+    a Get miss pays the O(complexCount) scan of the small complex/aliases list.
+    This keeps simple-subject membership indexed *and* lets a simple event still
+    match an aliases entry that contains it.
+*   **A filtered-out event is discarded (acked), not just skipped** — PUSH acks
+    it in `prepareAndSendEvent` and returns a no-op `Accepted` classification;
+    POLL acks it via `discardPolledEvent`. This keeps the pending buffer bounded
+    (ADR-0002) for a `NONE` stream with few/no subjects.
+*   **The match-result cache is invalidated per stream on any filter change.**
+    `AddSubject`/`RemoveSubject`/`ClearFilter` drop all cached decisions for the
+    stream; a short TTL bounds staleness on nodes that did not originate the
+    change (the cross-node invalidation notification is a later slice).
+
+### Invariants
+*   A `SubjectFilterEntry` is only ever present for a subject whose delivery
+    differs from the stream's `defaultSubjects` baseline.
+*   Operational events (`Operational=true`) and a server-wide disabled feature
+    always pass `Allows`.
+*   Filtered-out JTIs must be acked, never left pending, so buffers stay bounded.
+
+### Regression Verification
+*   `go test ./internal/services/ ./internal/dao/... ./internal/eventRouter/...`
+*   `go test -run TestSubjectFilteringSuite ./internal/server/test/`
+*   Mongo DAO parity: `go test -run TestSubjectFilterDAOMongoSuite ./internal/dao/mongo/`
+
 ## [2026-05-16] Grafana login is SSO-only — local password form disabled
 
 ### Change
