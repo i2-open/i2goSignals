@@ -45,7 +45,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 	// Create the stream via the StreamService.
 	atx := authUtil.ConvertProject("test-project")
 	createCtx := context.WithValue(context.Background(), authUtil.AuthContextKey, atx)
-	created, _ := persistence.StreamService.CreateStream(createCtx, streamConfig, atx.ProjectId, nil)
+	created, _ := persistence.StreamService.CreateStream(createCtx, model.StreamStateRecord{StreamConfiguration: streamConfig}, atx.ProjectId, nil)
 	sid = created.Id
 
 	streamState := &model.StreamStateRecord{

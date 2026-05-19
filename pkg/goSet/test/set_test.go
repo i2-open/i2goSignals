@@ -214,6 +214,32 @@ func TestSetJws(t *testing.T) {
 
 }
 
+// TestSubjectIdentifierAliasesFormat verifies goSet.SubjectIdentifier supports
+// the RFC9493 §3.2.8 "aliases" format through a JSON round-trip.
+func TestSubjectIdentifierAliasesFormat(t *testing.T) {
+	original := goSet.SubjectIdentifier{
+		Format: "aliases",
+		AliasesIdentifier: goSet.AliasesIdentifier{
+			Identifiers: []goSet.SubjectIdentifier{
+				{Format: "email", EmailIdentifier: goSet.EmailIdentifier{Email: "alice@example.com"}},
+				{Format: "phone_number", PhoneNumberIdentifier: goSet.PhoneNumberIdentifier{PhoneNumber: "+16045551212"}},
+			},
+		},
+	}
+
+	encoded, err := json.Marshal(original)
+	assert.NoError(t, err, "aliases subject marshals to JSON")
+	assert.Contains(t, string(encoded), `"identifiers"`, "JSON carries the identifiers member")
+
+	var decoded goSet.SubjectIdentifier
+	err = json.Unmarshal(encoded, &decoded)
+	assert.NoError(t, err, "aliases subject unmarshals from JSON")
+	assert.Equal(t, "aliases", decoded.Format)
+	assert.Len(t, decoded.Identifiers, 2)
+	assert.Equal(t, "alice@example.com", decoded.Identifiers[0].Email)
+	assert.Equal(t, "+16045551212", decoded.Identifiers[1].PhoneNumber)
+}
+
 /*
 func TestSetJws(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

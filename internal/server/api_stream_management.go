@@ -18,24 +18,153 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/subjectid"
 
 	"github.com/gorilla/mux"
 )
 
-// AddSubject adds a subject to a stream. (Currently not implemented)
+// subjectRequest is the SSF §8.1.3.2/§8.1.3.3 Add/Remove Subject request body.
+// stream_id is accepted for spec conformance but the handler always operates on
+// the caller's authenticated stream. verified is meaningful for Add only.
+type subjectRequest struct {
+	StreamId string                   `json:"stream_id"`
+	Subject  *goSet.SubjectIdentifier `json:"subject"`
+	Verified bool                     `json:"verified,omitempty"`
+}
+
+// AddSubject opts a subject into delivery on the caller's stream (SSF §8.1.3.2).
+//
+// Inputs:
+//   - Authorization (header): token with the same scope set as GetStatus.
+//   - Body: { stream_id, subject, verified? }
 //
 // Return values:
-//   - 501 Not Implemented
+//   - 200 OK: subject added.
+//
+// Errors:
+//   - 400 Bad Request: missing or uncanonicalizable subject.
+//   - 401/403: unauthorized, or the body names a different stream.
+//   - 404 Not Found: subject filtering disabled, or stream not found.
 func (sa *SignalsApplication) AddSubject(w http.ResponseWriter, r *http.Request) {
 	AddSubjectHandler(sa, w, r)
 }
 
-func AddSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
+func AddSubjectHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	handleSubjectChange(sa, w, r, true)
+}
+
+// handleSubjectChange implements the shared Add/Remove Subject flow. add selects
+// the SSF semantics and the success status (Add -> 200, Remove -> 204).
+func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, add bool) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
+	if !services.SubjectFilteringEnabled() {
+		// Subject filtering is disabled server-wide: the endpoint is not
+		// advertised in discovery, so it must not be reachable either.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Subject management is authorized with the same scope set as GetStatus.
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery, authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	var req subjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Subject == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if req.StreamId == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	// When the token is bound to a specific stream it must match the request;
+	// the handler always operates on that stream (same rule as VerificationRequest).
+	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if _, err := subjectid.CanonicalKey(req.Subject); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// PRD #89 #95: in PASSTHRU mode the subject change is relayed 1:1 to the
+	// upstream transmitter and no local filter is applied — downstream streams
+	// share one upstream subscription.
+	if stream.SubjectFilterMode == model.SubjectFilterModePassthru {
+		relaySvc := sa.GetSubjectRelayService()
+		if relaySvc == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if relayErr := relaySvc.Relay(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
+			serverLog.Warn("PASSTHRU subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if add {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
+
+	filterSvc := sa.GetSubjectFilterService()
+	if filterSvc == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if add {
+		err = filterSvc.AddSubject(r.Context(), stream, req.Subject, req.Verified)
+	} else {
+		err = filterSvc.RemoveSubject(r.Context(), stream, req.Subject)
+	}
+	if err != nil {
+		serverLog.Error("Subject filter change failed", "sid", req.StreamId, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// The request may have landed on any cluster node; notify the stream's
+	// PUSH lease owner to invalidate its match-result cache so the change
+	// takes effect at delivery time (issue #94).
+	if router := sa.GetEventRouter(); router != nil {
+		router.NotifySubjectFilterChange(req.StreamId)
+	}
+
+	// PRD #89 #96: HYBRID also relays the change upstream, but only as the
+	// interested-set crosses the 0↔1 boundary. The local filter above is the
+	// primary outcome — an upstream relay failure is logged and tolerated, not
+	// surfaced to the caller.
+	if stream.SubjectFilterMode == model.SubjectFilterModeHybrid {
+		if relaySvc := sa.GetSubjectRelayService(); relaySvc != nil {
+			if relayErr := relaySvc.RelayHybrid(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
+				serverLog.Warn("HYBRID subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)
+			}
+		}
+	}
+
+	if add {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // GetStatus retrieves the status of a stream.
@@ -92,17 +221,26 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	_, _ = w.Write(resp)
 }
 
-// RemoveSubject removes a subject from a stream. (Currently not implemented)
+// RemoveSubject opts a subject out of delivery on the caller's stream
+// (SSF §8.1.3.3).
+//
+// Inputs:
+//   - Authorization (header): token with the same scope set as GetStatus.
+//   - Body: { stream_id, subject }
 //
 // Return values:
-//   - 501 Not Implemented
+//   - 204 No Content: subject removed.
+//
+// Errors:
+//   - 400 Bad Request: missing or uncanonicalizable subject.
+//   - 401/403: unauthorized, or the body names a different stream.
+//   - 404 Not Found: subject filtering disabled, or stream not found.
 func (sa *SignalsApplication) RemoveSubject(w http.ResponseWriter, r *http.Request) {
 	RemoveSubjectHandler(sa, w, r)
 }
 
-func RemoveSubjectHandler(_ SsfApplicationInterface, w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusNotImplemented)
+func RemoveSubjectHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	handleSubjectChange(sa, w, r, false)
 }
 
 // StreamDelete deletes an existing event stream.
@@ -295,7 +433,11 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(status)
 		return
 	}
-	var jsonRequest model.StreamConfiguration
+	// Decode into a StreamStateRecord (not a bare StreamConfiguration) so the
+	// goSignals-specific subject-filtering operator knobs ride alongside the
+	// SSF wire-format fields. The embedded StreamConfiguration is flattened by
+	// encoding/json, so existing request bodies decode unchanged.
+	var jsonRequest model.StreamStateRecord
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -366,7 +508,9 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	var jsonRequest model.StreamConfiguration
+	// Decode into a StreamStateRecord so subject-filtering operator knobs can
+	// be patched alongside the SSF wire-format fields (see StreamCreateHandler).
+	var jsonRequest model.StreamStateRecord
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -374,7 +518,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
-	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
+	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.StreamConfiguration.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
@@ -550,8 +694,6 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 	jwksUri, _ := baseUrl.Parse("/jwks.json")
 	configUri, _ := baseUrl.Parse("/stream")
 	statusUri, _ := baseUrl.Parse("/status")
-	addSubUri, _ := baseUrl.Parse("/add-subject")
-	remSubUri, _ := baseUrl.Parse("/remove-subject")
 	verifyUri, _ := baseUrl.Parse("/verify")
 	regUri, _ := baseUrl.Parse("/register")
 
@@ -574,27 +716,25 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 		}
 	}
 
-	return &model.TransmitterConfiguration{
+	supportedScopes := map[string][]string{
+		"configuration_endpoint":       {authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
+		"status_endpoint":              {authSupport.ScopeStreamMgmt},
+		"events":                       {authSupport.ScopeEventDelivery},
+		"verification_endpoint":        {authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+		"poll":                         {authSupport.ScopeEventDelivery},
+		"client_registration_endpoint": {authSupport.ScopeRegister},
+	}
+
+	config := &model.TransmitterConfiguration{
 		Issuer:                     sa.GetDefIssuer(),
 		JwksUri:                    jwksUri.String(),
 		DeliveryMethodsSupported:   methods,
 		ConfigurationEndpoint:      configUri.String(),
 		StatusEndpoint:             statusUri.String(),
-		AddSubjectEndpoint:         addSubUri.String(),
-		RemoveSubjectEndpoint:      remSubUri.String(),
 		VerificationEndpoint:       verifyUri.String(),
 		CriticalSubjectMembers:     nil,
 		ClientRegistrationEndpoint: regUri.String(),
-		SupportedScopes: map[string][]string{
-			"configuration_endpoint":       {authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
-			"status_endpoint":              {authSupport.ScopeStreamMgmt},
-			"add_subject_endpoint":         {authSupport.ScopeStreamMgmt},
-			"remove_subject_endpoint":      {authSupport.ScopeStreamMgmt},
-			"events":                       {authSupport.ScopeEventDelivery},
-			"verification_endpoint":        {authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
-			"poll":                         {authSupport.ScopeEventDelivery},
-			"client_registration_endpoint": {authSupport.ScopeRegister},
-		},
+		SupportedScopes:            supportedScopes,
 		AuthorizationSchemes: []model.AuthScheme{
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
@@ -606,6 +746,20 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 		GoSignalsVersion: goVersion,
 		SpecVersion:      constants.SSF_VERSION,
 	}
+
+	// SSF subject filtering (§8.1.3): advertise the Add/Remove Subject
+	// endpoints only when the feature is enabled server-wide, so discovery
+	// never advertises a capability the server will not honor.
+	if services.SubjectFilteringEnabled() {
+		addSubUri, _ := baseUrl.Parse("/add-subject")
+		remSubUri, _ := baseUrl.Parse("/remove-subject")
+		config.AddSubjectEndpoint = addSubUri.String()
+		config.RemoveSubjectEndpoint = remSubUri.String()
+		supportedScopes["add_subject_endpoint"] = []string{authSupport.ScopeStreamMgmt}
+		supportedScopes["remove_subject_endpoint"] = []string{authSupport.ScopeStreamMgmt}
+	}
+
+	return config
 }
 
 // WellKnownSsfConfigurationGet returns the default SSF transmitter configuration.

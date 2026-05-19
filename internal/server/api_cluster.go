@@ -14,14 +14,18 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffetls"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
-// WakeRequest is the body of a cluster wake-up call from a peer node.
+// WakeRequest is the body of a cluster wake-up call from a peer node. An empty
+// Reason is an ordinary buffer wake-up; Reason "filter-change" instead
+// invalidates the stream's subject-filter match-result cache (issue #94).
 type WakeRequest struct {
-	Sid  string `json:"sid"`
-	Mode string `json:"mode"`
+	Sid    string `json:"sid"`
+	Mode   string `json:"mode"`
+	Reason string `json:"reason,omitempty"`
 }
 
 var (
@@ -75,7 +79,9 @@ func (sa *SignalsApplication) WakeTransmitter(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Rate limiting / Coalescing ---
-	key := req.Sid + ":" + req.Mode
+	// The reason is part of the key so a filter-change invalidation is never
+	// coalesced away by an ordinary buffer wake-up for the same stream.
+	key := req.Sid + ":" + req.Mode + ":" + req.Reason
 	recentWakesMu.Lock()
 	lastWake, exists := recentWakes[key]
 	if exists && time.Since(lastWake) < 250*time.Millisecond {
@@ -94,6 +100,16 @@ func (sa *SignalsApplication) WakeTransmitter(w http.ResponseWriter, r *http.Req
 		}
 		recentWakesMu.Unlock()
 	}()
+
+	// A filter-change notification invalidates the stream's subject-filter
+	// match-result cache rather than waking a delivery buffer (issue #94).
+	if req.Reason == eventRouter.ReasonFilterChange {
+		if sa.SubjectFilterService != nil {
+			sa.SubjectFilterService.InvalidateCache(req.Sid)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 
 	sa.EventRouter.WakeTransmitter(req.Sid, req.Mode)
 	w.WriteHeader(http.StatusAccepted)

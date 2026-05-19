@@ -22,12 +22,14 @@ var factoryLog = logger.Sub("dbProviders")
 // Callers that only need one concern should depend on the narrowest type
 // available (one service, or Coordinator, or Storage).
 type Persistence struct {
-	StreamService *services.StreamService
-	KeyService    *services.KeyService
-	EventService  *services.EventService
-	ClientService *services.ClientService
-	ServerService *services.ServerService
-	TokenService  *services.TokenService
+	StreamService        *services.StreamService
+	KeyService           *services.KeyService
+	EventService         *services.EventService
+	ClientService        *services.ClientService
+	ServerService        *services.ServerService
+	TokenService         *services.TokenService
+	SubjectFilterService *services.SubjectFilterService
+	SubjectRelayService  *services.SubjectRelayService
 
 	Coordinator cluster.ClusterCoordinator
 	Storage     storage.Storage
@@ -53,6 +55,8 @@ func (p *Persistence) Refresh() {
 	p.ClientService = p.src.GetClientService()
 	p.ServerService = p.src.GetServerService()
 	p.TokenService = p.src.GetTokenService()
+	p.SubjectFilterService = p.src.GetSubjectFilterService()
+	p.SubjectRelayService = p.src.GetSubjectRelayService()
 }
 
 // serviceSource is the accessor surface present on both *MemoryProvider and
@@ -66,6 +70,8 @@ type serviceSource interface {
 	GetClientService() *services.ClientService
 	GetServerService() *services.ServerService
 	GetTokenService() *services.TokenService
+	GetSubjectFilterService() *services.SubjectFilterService
+	GetSubjectRelayService() *services.SubjectRelayService
 }
 
 // OpenPersistence detects the database URL and returns the Persistence record
@@ -108,29 +114,33 @@ func OpenPersistence(mongoUrl string, dbName string) (*Persistence, error) {
 
 func persistenceFromMemory(mp *memory_provider.MemoryProvider) *Persistence {
 	return &Persistence{
-		StreamService: mp.GetStreamService(),
-		KeyService:    mp.GetKeyService(),
-		EventService:  mp.GetEventService(),
-		ClientService: mp.GetClientService(),
-		ServerService: mp.GetServerService(),
-		TokenService:  mp.GetTokenService(),
-		Coordinator:   mp.Coordinator(),
-		Storage:       memory_provider.NewMemoryStorage(mp),
-		src:           mp,
+		StreamService:        mp.GetStreamService(),
+		KeyService:           mp.GetKeyService(),
+		EventService:         mp.GetEventService(),
+		ClientService:        mp.GetClientService(),
+		ServerService:        mp.GetServerService(),
+		TokenService:         mp.GetTokenService(),
+		SubjectFilterService: mp.GetSubjectFilterService(),
+		SubjectRelayService:  mp.GetSubjectRelayService(),
+		Coordinator:          mp.Coordinator(),
+		Storage:              memory_provider.NewMemoryStorage(mp),
+		src:                  mp,
 	}
 }
 
 func persistenceFromMongo(mp *mongo_provider.MongoProvider) *Persistence {
 	var svcSrc serviceSource = mp
 	return &Persistence{
-		StreamService: svcSrc.GetStreamService(),
-		KeyService:    svcSrc.GetKeyService(),
-		EventService:  svcSrc.GetEventService(),
-		ClientService: svcSrc.GetClientService(),
-		ServerService: svcSrc.GetServerService(),
-		TokenService:  svcSrc.GetTokenService(),
-		Coordinator:   mp.Coordinator(),
-		Storage:       mongo_provider.NewMongoStorage(mp),
-		src:           mp,
+		StreamService:        svcSrc.GetStreamService(),
+		KeyService:           svcSrc.GetKeyService(),
+		EventService:         svcSrc.GetEventService(),
+		ClientService:        svcSrc.GetClientService(),
+		ServerService:        svcSrc.GetServerService(),
+		TokenService:         svcSrc.GetTokenService(),
+		SubjectFilterService: svcSrc.GetSubjectFilterService(),
+		SubjectRelayService:  svcSrc.GetSubjectRelayService(),
+		Coordinator:          mp.Coordinator(),
+		Storage:              mongo_provider.NewMongoStorage(mp),
+		src:                  mp,
 	}
 }

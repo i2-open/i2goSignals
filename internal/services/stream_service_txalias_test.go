@@ -45,7 +45,7 @@ func TestCreateStream_UnknownTxAliasErrorsAtServiceLayer(t *testing.T) {
         TxAlias: &bogus,
     }
 
-    _, err := svc.CreateStream(context.Background(), request, "test-project", nil)
+    _, err := svc.CreateStream(context.Background(), model.StreamStateRecord{StreamConfiguration: request}, "test-project", nil)
     assert.Error(t, err)
     assert.True(t, strings.Contains(err.Error(), "tx_alias"),
         "error should mention tx_alias, got: %v", err)
@@ -75,7 +75,7 @@ func TestCreateStream_KnownTxAliasIsResolvedBeforeFurtherProcessing(t *testing.T
         TxAlias: &alias,
     }
 
-    _, err = svc.CreateStream(context.Background(), request, "test-project", nil)
+    _, err = svc.CreateStream(context.Background(), model.StreamStateRecord{StreamConfiguration: request}, "test-project", nil)
     // The alias resolved (otherwise we'd see "unknown tx_alias provided").
     // Whatever error comes back must not be the alias-failure error.
     if err != nil {
@@ -100,7 +100,7 @@ func TestCreateStream_IssuerJWKSUrlNoneIsNormalised(t *testing.T) {
         IssuerJWKSUrl: "none",
     }
 
-    cfg, _ := svc.CreateStream(context.Background(), request, "test-project", nil)
+    cfg, _ := svc.CreateStream(context.Background(), model.StreamStateRecord{StreamConfiguration: request}, "test-project", nil)
     // Whether or not the deeper pipeline succeeded, the returned config (if
     // any) must reflect the normalised value.
     assert.Equal(t, "", cfg.IssuerJWKSUrl,

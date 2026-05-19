@@ -221,7 +221,7 @@ func TestHTTPAdapter_RemoteAddressPersistedToStreamService(t *testing.T) {
 
 	cfg := newForwardStream(receiver.URL + "/events").StreamConfiguration
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
-	created, err := persistence.StreamService.CreateStream(ctx, cfg, projectId, nil)
+	created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)
 	stream, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)
 	require.NoError(t, err)
@@ -265,7 +265,7 @@ func TestHTTPAdapter_SamePeerSecondPushDoesNotChangeRemoteAddress(t *testing.T) 
 
 	cfg := newForwardStream(receiver.URL + "/events").StreamConfiguration
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
-	created, err := persistence.StreamService.CreateStream(ctx, cfg, projectId, nil)
+	created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)
 	stream, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)
 	require.NoError(t, err)

@@ -39,6 +39,8 @@ type StreamService struct {
 	streamDAO               interfaces.StreamDAO
 	keyService              *KeyService
 	serverService           *ServerService
+	subjectFilterService    *SubjectFilterService
+	subjectRelayService     *SubjectRelayService
 	defaultIssuer           string
 	receiverStreams         map[string]*model.StreamStateRecord
 	BaseUrl                 *url.URL
@@ -47,12 +49,45 @@ type StreamService struct {
 	maxInactivityTimeout    int
 }
 
+// SetSubjectFilterService wires in the SubjectFilterService so that a
+// defaultSubjects baseline change on a live stream clears that stream's
+// subject filter. Optional: when unset, UpdateStream skips the filter clear.
+func (s *StreamService) SetSubjectFilterService(svc *SubjectFilterService) {
+	s.subjectFilterService = svc
+}
+
 // SetServerService wires in the ServerService that owns Server records. Once
 // set, CreateStream resolves a tx_alias request field to the corresponding
 // Server before delegating to the rest of the pipeline. Lifted out of the
 // provider façade as part of PRD #39 PR 4.
 func (s *StreamService) SetServerService(svc *ServerService) {
     s.serverService = svc
+}
+
+// SetSubjectRelayService wires in the SubjectRelayService so that
+// CreateStream/UpdateStream validate a transmitter stream's subject-filter
+// mode against its upstream (PRD #89 #95). Optional: when unset, validation is
+// skipped.
+func (s *StreamService) SetSubjectRelayService(svc *SubjectRelayService) {
+    s.subjectRelayService = svc
+}
+
+// validateSubjectFilterMode rejects or warns on a transmitter stream's
+// subject-filter mode against its resolved upstream (PRD #89 #95). It is a
+// no-op when subject filtering is disabled server-wide, no mode is set, or the
+// relay service is unwired.
+func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *model.StreamStateRecord) error {
+    if !SubjectFilteringEnabled() || rec.SubjectFilterMode == "" || s.subjectRelayService == nil {
+        return nil
+    }
+    verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
+    if verdict.Err != nil {
+        return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
+    }
+    if verdict.Warn != "" {
+        ssLog.Warn(verdict.Warn, "stream_id", rec.StreamConfiguration.Id, "mode", rec.SubjectFilterMode)
+    }
+    return nil
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
@@ -108,7 +143,11 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 	return u.String()
 }
 
-func (s *StreamService) CreateStream(ctx context.Context, request model.StreamConfiguration, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
+// CreateStream creates a stream from request. request is a StreamStateRecord
+// rather than a bare StreamConfiguration so that goSignals-specific operator
+// knobs (subject-filtering fields) can be supplied alongside the SSF
+// wire-format configuration without leaking into it.
+func (s *StreamService) CreateStream(ctx context.Context, request model.StreamStateRecord, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
     // Resolve tx_alias → Server when the caller didn't pre-resolve it. This
     // logic was previously in BaseProvider.CreateStream; it lives here now
     // so the provider façade can be a pass-through.
@@ -449,6 +488,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 
 	now := time.Now()
 
+	// defaultSubjects is an operator knob that is inert until subject filtering
+	// is enabled server-wide; silently ignore it otherwise so an upgrade does
+	// not change delivery behavior for streams that set it.
+	defaultSubjects := request.DefaultSubjects
+	if !SubjectFilteringEnabled() {
+		defaultSubjects = ""
+	}
+
 	streamRec := &model.StreamStateRecord{
 		Id:                  mid,
 		ProjectId:           projectID,
@@ -457,6 +504,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamCo
 		Status:              model.StreamStateEnabled,
 		CreatedAt:           now,
 		ModifiedAt:          now,
+		DefaultSubjects:     defaultSubjects,
+		SubjectFilterMode:   request.SubjectFilterMode,
+		EventSource:         request.EventSource,
+	}
+
+	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
+	// incompatible with the stream's upstream before the stream is persisted.
+	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
+		return model.StreamConfiguration{}, err
 	}
 
 	err = s.streamDAO.Create(ctx, streamRec)
@@ -628,7 +684,11 @@ func (s *StreamService) calculateDeliveredEvents(requested []string, supported [
 	return delivered
 }
 
-func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamConfiguration) (*model.StreamConfiguration, error) {
+// UpdateStream patches an existing stream. configReq is a StreamStateRecord so
+// the goSignals-specific subject-filtering operator knobs can be updated
+// alongside the SSF wire-format configuration. Like the rest of this method,
+// only non-empty request fields are applied.
+func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		return nil, err
@@ -716,9 +776,38 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	streamRec.StreamConfiguration = *config
 	streamRec.ModifiedAt = time.Now()
 
+	// Subject-filtering operator knobs. defaultSubjects is gated on the
+	// server-wide feature being enabled; when disabled the request value is
+	// silently ignored, consistent with CreateStream. A baseline change clears
+	// the stream's subject filter so stale entries never carry the opposite
+	// meaning under the new baseline.
+	defaultSubjectsFlipped := false
+	if SubjectFilteringEnabled() && configReq.DefaultSubjects != "" {
+		defaultSubjectsFlipped = configReq.DefaultSubjects != streamRec.DefaultSubjects
+		streamRec.DefaultSubjects = configReq.DefaultSubjects
+	}
+	if configReq.SubjectFilterMode != "" {
+		streamRec.SubjectFilterMode = configReq.SubjectFilterMode
+	}
+	if configReq.EventSource != nil {
+		streamRec.EventSource = configReq.EventSource
+	}
+
+	// PRD #89 #95: re-validate the subject-filter mode against the upstream
+	// whenever the mode or event source could have changed.
+	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
+		return nil, err
+	}
+
 	err = s.streamDAO.Update(ctx, streamRec)
 	if err != nil {
 		return nil, err
+	}
+
+	if defaultSubjectsFlipped && s.subjectFilterService != nil {
+		if clearErr := s.subjectFilterService.ClearFilter(ctx, streamID); clearErr != nil {
+			ssLog.Warn("Error clearing subject filter after defaultSubjects change", "sid", streamID, "error", clearErr)
+		}
 	}
 
 	return config, nil
@@ -831,6 +920,24 @@ func (s *StreamService) ListReceiverStreams(ctx context.Context) ([]model.Stream
 	out := make([]model.StreamStateRecord, 0, len(recs))
 	for _, rec := range recs {
 		if rec.IsReceiver() {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
+}
+
+// ListTransmitterStreams returns the streams whose delivery method makes this server a
+// transmitter (DeliveryPush or DeliveryPoll) — the downstream-stream set the HYBRID
+// interested-set is computed over (issue #96). Like ListReceiverStreams it is a pure
+// query: no cache mutation, no JWKS loading.
+func (s *StreamService) ListTransmitterStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
+	recs, err := s.streamDAO.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.StreamStateRecord, 0, len(recs))
+	for _, rec := range recs {
+		if !rec.IsReceiver() {
 			out = append(out, rec)
 		}
 	}

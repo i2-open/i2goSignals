@@ -154,7 +154,7 @@ func TestNewRouter_PollBufferUsesEnvTimeoutValues(t *testing.T) {
         },
     }
     ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
-    created, err := persistence.StreamService.CreateStream(ctx, cfg, projectId, nil)
+    created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
     require.NoError(t, err)
     state, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)
     require.NoError(t, err)

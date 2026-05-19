@@ -475,13 +475,33 @@ services:
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       QUARKUS_HTTP_HOST: 0.0.0.0
     ports:
-      - 9080:9080
+      - "9080:9080"
     depends_on:
       - postgres
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
       - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
       - "./config/certs:/opt/keycloak/certs"
+  goSignalsAdmin:
+    image: independentid/gosignalsadmin:latest
+    container_name: gosignalsadmin
+    hostname: gosignalsadmin
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+      goSignals1:
+        condition: service_healthy
+    env_file:
+      - ./config/admin/admin.env
+    volumes:
+      - "./config/certs:/app/certs"
+    ports:
+      - "8080:8080"
 
 networks:
   frontend:

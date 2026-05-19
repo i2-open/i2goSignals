@@ -58,7 +58,7 @@ func mustCreateTestStream(t *testing.T, h *testHarness, projectId string) *model
 		},
 	}
 	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
-	created, err := h.streamService.CreateStream(ctx, cfg, projectId, nil)
+	created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)
 	state, err := h.streamService.GetStreamState(context.Background(), created.Id)
 	require.NoError(t, err)

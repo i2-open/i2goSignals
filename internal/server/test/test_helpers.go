@@ -77,7 +77,7 @@ func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, aut
 	if authCtx != nil {
 		projectId = authCtx.ProjectId
 	}
-	return instance.streamSvc().CreateStream(ctx, request, projectId, nil)
+	return instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: request}, projectId, nil)
 }
 
 func (instance *ssfInstance) GetStream(id string) (*model.StreamConfiguration, error) {

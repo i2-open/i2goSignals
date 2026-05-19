@@ -81,7 +81,7 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	config, err := svc.CreateStream(ctx, request, "test-project", nil)
+	config, err := svc.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: request}, "test-project", nil)
 
 	// 4. Verify Results
 	assert.NoError(t, err)
@@ -165,7 +165,7 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	config, err := svc.CreateStream(ctx, request, "test-project", nil)
+	config, err := svc.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: request}, "test-project", nil)
 
 	// 4. Verify Results
 	assert.NoError(t, err)

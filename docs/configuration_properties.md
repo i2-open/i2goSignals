@@ -101,6 +101,7 @@ understands. They are documented in their natural section below.
 |-------------------------------------------|--------------------------------------------------------------------------------------------|---------|
 | `I2SIG_STREAM_MIN_VERIFICATION_INTERVAL`  | Minimum interval, in seconds, between verification requests a receiver may demand.         | `300`   |
 | `I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT`     | Maximum inactivity timeout, in seconds, before a stream connection is considered idle.     | `3600`  |
+| `I2SIG_SUBJECT_FILTERING`                 | Enables SSF subject filtering (Add/Remove Subject, §8.1.3) server-wide. `ENABLED` advertises the `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery and makes the per-stream `defaultSubjects` knob settable; `DISABLED` omits both endpoints, returns `404` from the Add/Remove Subject handlers, and silently ignores `defaultSubjects`. | `DISABLED` |
 
 ## Issuer
 

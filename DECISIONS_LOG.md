@@ -1,5 +1,121 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-19] SSF subject filtering — HYBRID refcounted upstream relay (issue #96)
+
+### Change
+`HYBRID` subject-filtering mode: a downstream transmitter stream filters
+locally per-stream (the `LOCAL` path) *and* relays subject changes to the
+upstream transmitter. `SubjectRelayService.RelayHybrid` decides whether to
+relay; `handleSubjectChange` calls it after the local filter is written.
+
+### Decisions
+*   **The interested-set is derived, not stored.** The "set of downstream
+    streams interested in (subject handler, subject)" is not a new persisted
+    structure — it is computed from the existing per-stream subject filters:
+    the HYBRID downstreams fed by the same relay-target receiver whose filter
+    still `Selects` the subject. This is drift-free and cluster-correct with no
+    new DAO. The relay fires on the 0↔1 boundary: after the caller applies the
+    downstream's own change, `RelayHybrid` counts the *other* interested HYBRID
+    siblings — zero means an add went 0→1 or a remove went 1→0.
+*   **Relay engaged only against a `defaultSubjects=NONE` upstream.** Against an
+    `ALL` upstream `HYBRID` is pure local filtering — relaying a remove could
+    starve a not-yet-created downstream. The upstream baseline is read from the
+    relay-target receiver stream's `DefaultSubjects`.
+*   **A HYBRID upstream relay failure is tolerated, not surfaced.** The local
+    filter write is the primary outcome; a failed relay is logged at WARN and
+    the handler still returns 200/204. This differs from PASSTHRU (502 on relay
+    failure) because PASSTHRU has no local fallback.
+*   **`SubjectFilterService.Selects`** extracted from `Allows` — the
+    membership predicate (Allows minus the event/operational wrapper), reused
+    as the HYBRID interested-set test.
+
+### Invariants
+*   `RelayHybrid` is called only for `SubjectFilterModeHybrid` streams, only
+    after the local filter change is applied (self is excluded from the
+    sibling count by stream id).
+*   The asymmetric variant (relay adds but not removes, or vice-versa) is not
+    built.
+
+## [2026-05-18] SSF subject filtering — cluster cache invalidation (issue #94)
+
+### Change
+A subject filter change (Add/Remove Subject) can land on any cluster node, but
+the match-result cache that governs PUSH delivery lives on the node holding the
+`push-transmitter:<sid>` lease. Added a cluster reload notification so a change
+processed on a non-owner node invalidates the owner's cache:
+`SubjectFilterService.InvalidateCache`, `EventRouter.NotifySubjectFilterChange`,
+and a `reason` field on the existing cluster wake-up call.
+
+### Decisions
+*   **The notification reuses `/_cluster/wake-transmitter`, not a new endpoint.**
+    `WakeRequest` gains an optional `reason` field; `reason: "filter-change"`
+    invalidates the stream's match-result cache instead of waking a delivery
+    buffer. This reuses the existing route, HMAC/SPIFFE auth, and internal-server
+    wiring. The wire constant is `eventRouter.ReasonFilterChange`.
+*   **`handleSubjectChange` always calls `NotifySubjectFilterChange`.** The router
+    looks up the `push-transmitter:<sid>` lease: a local (or unowned) owner is
+    invalidated directly with no network hop; a remote owner is sent the
+    filter-change wake-up. The local invalidate in `applySubjectChange` is kept —
+    it keeps the originating node's own cache self-consistent.
+*   **The wake-up coalescing key includes the reason** (`sid:mode:reason`) on
+    both the inbound (`recentWakes`) and outbound (`recentOutboundWakes`) sides,
+    so a filter-change invalidation is never coalesced away by an ordinary
+    buffer wake-up for the same stream.
+
+### Invariants
+*   A filter change processed on any node must reach the PUSH lease owner's
+    match-result cache (invalidation), or be bounded by the short cache TTL.
+*   `reason: "filter-change"` carries `mode: "push"`; the owner lookup is always
+    the `push-transmitter:<sid>` lease.
+
+### Regression Verification
+*   `go test -race ./internal/services/ ./internal/eventRouter/ ./internal/server/...`
+*   `go test -run 'TestNotifySubjectFilterChange|TestWakeTransmitter_FilterChange|TestAddSubjectNotifiesRemoteLeaseOwner' ./internal/...`
+
+## [2026-05-18] SSF subject filtering — delivery-time filter (issues #92, #93)
+
+### Change
+Implemented end-to-end SSF §8.1.3 subject filtering for `LOCAL` single-node PUSH
+streams (#92) and POLL streams (#93): a `SubjectFilterDAO` (memory + mongo), the
+`SubjectFilterService` (`Allows`/`AddSubject`/`RemoveSubject`/`ClearFilter`), the
+Add/Remove Subject handlers, the `defaultSubjects`-flip filter clear, and
+delivery-time filtering in `runPushLoop`/`prepareAndSendEvent` and
+`PollStreamHandler`.
+
+### Decisions
+*   **The filter stores only the non-default set, so Add/Remove are
+    baseline-aware.** A stored entry always means "the opposite of the stream
+    baseline" — an inclusion on a `NONE` stream, an exclusion on an `ALL`
+    stream. `SubjectFilterService.AddSubject`/`RemoveSubject` therefore take the
+    `*StreamStateRecord` and insert or delete the entry depending on the
+    baseline (NONE+Add and ALL+Remove insert; the other two delete).
+*   **`matches` does an indexed Get then a bounded complex/aliases scan on
+    miss**, rather than ADR-0003's strict dispatch-by-event-kind. A simple
+    subject that *is* in the filter still resolves in O(1) (early Get hit); only
+    a Get miss pays the O(complexCount) scan of the small complex/aliases list.
+    This keeps simple-subject membership indexed *and* lets a simple event still
+    match an aliases entry that contains it.
+*   **A filtered-out event is discarded (acked), not just skipped** — PUSH acks
+    it in `prepareAndSendEvent` and returns a no-op `Accepted` classification;
+    POLL acks it via `discardPolledEvent`. This keeps the pending buffer bounded
+    (ADR-0002) for a `NONE` stream with few/no subjects.
+*   **The match-result cache is invalidated per stream on any filter change.**
+    `AddSubject`/`RemoveSubject`/`ClearFilter` drop all cached decisions for the
+    stream; a short TTL bounds staleness on nodes that did not originate the
+    change (the cross-node invalidation notification was added in #94).
+
+### Invariants
+*   A `SubjectFilterEntry` is only ever present for a subject whose delivery
+    differs from the stream's `defaultSubjects` baseline.
+*   Operational events (`Operational=true`) and a server-wide disabled feature
+    always pass `Allows`.
+*   Filtered-out JTIs must be acked, never left pending, so buffers stay bounded.
+
+### Regression Verification
+*   `go test ./internal/services/ ./internal/dao/... ./internal/eventRouter/...`
+*   `go test -run TestSubjectFilteringSuite ./internal/server/test/`
+*   Mongo DAO parity: `go test -run TestSubjectFilterDAOMongoSuite ./internal/dao/mongo/`
+
 ## [2026-05-16] Grafana login is SSO-only — local password form disabled
 
 ### Change
@@ -927,3 +1043,72 @@ Service clients `goSignalsAdminService` and `goSignalsClient` were not receiving
 1.  Verify `config/keycloak/realm/gosignals-realm.json` has `fullScopeAllowed: true` for the affected clients.
 2.  Verify `defaultClientScopes` includes `roles`, `profile`, and `email` for these clients.
 
+## [2026-05-19] PASSTHRU subject relay + event-source / relay-target validation (PRD #89, issue #95)
+
+### Problem
+goSignals is both a receiver and a transmitter. A downstream receiver that calls
+Add/Remove Subject on a goSignals transmitter stream may want that change relayed
+1:1 to the upstream transmitter (PASSTHRU) rather than filtered locally. Relaying
+needs an unambiguous upstream — the receiver stream that feeds the transmitter
+stream — and the upstream must actually support subject filtering.
+
+### Solution
+New pure module `internal/services/subject_relay.go`:
+- `ResolveRelayTarget` finds the feeding receiver stream. An explicitly named
+  Subject handler SID (`EventSource.SourceStreamIds`) wins; otherwise an
+  AUDIENCE-routed stream is matched by issuer equality. Several issuer matches
+  are `ErrRelayTargetAmbiguous`; none is `ErrRelayTargetNotFound`.
+- `ClassifyUpstreamSupport` reads add/remove-subject endpoints from upstream
+  discovery: an upstream advertising neither does not support subject filtering,
+  so PASSTHRU/HYBRID is rejected and LOCAL earns a WARN (it still runs).
+- `SubjectRelayService` composes resolution + classification: `ValidateConfig`
+  is called at config time by `CreateStream`/`UpdateStream`; `Relay` posts the
+  Add/Remove to the upstream at request time. The upstream connection is fetched
+  through an injected `UpstreamResolver` so the logic is testable without a live
+  upstream; the default resolver uses `oauthClient` + `wellKnownSupport`.
+- `handleSubjectChange` short-circuits a PASSTHRU stream: it relays and applies
+  no local filter.
+
+### Invariants
+*   `EventSource.SourceStreamIds` doubles as the explicit relay-target SID — no
+    separate model field; reused for both EXPLICIT sources and AUDIENCE
+    disambiguation.
+*   PASSTHRU/HYBRID config is rejected when the relay target is unresolved /
+    ambiguous, or the upstream advertises no subject endpoints. LOCAL is never
+    rejected at config time.
+*   A PASSTHRU subject change writes no local subject filter entry.
+*   HYBRID's refcounted upstream relay is issue #96; #95 only validates HYBRID.
+
+
+## [2026-05-19] ListComplex must not scan the whole filter (PRD #89, issue #92, QA)
+
+### Problem
+QA of PRD #89 found delivery-time subject filtering was O(total filter size)
+per event, not O(1) for a simple subject as ADR-0003 and #92 AC10 require. A
+scaling test measured a 200,000-entry filter ~220x slower than a 1,000-entry
+one — a linear scan.
+
+Root cause: `SubjectFilterService.computeMatch` calls `dao.ListComplex` on every
+cache miss (correct — a simple event can still match an `aliases` entry), but
+both DAOs implemented `ListComplex` by scanning every entry to find the
+non-simple subset: the memory DAO via `StateManager.FindAll`, the mongo DAO via
+a `kind: {$ne: simple}` query with no index covering `kind`.
+
+### Solution
+Make `ListComplex` O(non-simple count), so the indexed simple-subject `Get`
+governs the per-event cost:
+- Memory DAO keeps a secondary `nonSimple` index (stream_id -> set of canonical
+  keys for complex/aliases entries), maintained in lock-step by Add/Remove/
+  ClearForStream. `ListComplex` visits only that small subset.
+- Mongo DAO gains a `(stream_id, kind)` index; `ListComplex` queries
+  `kind: {$in: [complex, aliases]}` so it rides the index instead of scanning.
+
+`computeMatch` is unchanged — it is correct once `ListComplex` is cheap.
+
+### Invariants
+*   `ListComplex` must never cost O(total filter size); a stream may hold
+    millions of simple entries.
+*   The memory `nonSimple` index must stay consistent with `store` — Add is an
+    upsert, so a kind change on re-Add must update the index in both directions.
+*   Regression guard: `TestSubjectFilterService_SimpleMembershipScalesConstantly`
+    fails if the simple-subject path regresses to an O(N) scan.

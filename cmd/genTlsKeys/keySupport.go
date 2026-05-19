@@ -198,7 +198,7 @@ func (config *KeyConfig) InitializeCa() error {
 // server certificate must cover when SERVER_DNS_NAME is not set.
 func defaultServerDNSNames() []string {
 	return []string{
-		"goSignals1", "goSignals2", "goSsfServer",
+		"goSignals1", "goSignals2", "goSsfServer", "goSignalsAdmin",
 		"scim_cluster1", "scim_cluster2", "keycloak",
 		"prometheus", "loki", "alloy", "grafana",
 		"mongo1", "mongo2", "mongo3", "postgres",

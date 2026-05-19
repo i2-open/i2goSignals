@@ -53,6 +53,24 @@ type SubIdentifier struct {
 	Sub string `json:"sub,omitempty"`
 }
 
+// AliasesIdentifier carries the RFC9493 §3.2.8 "aliases" format: a set of
+// subject identifiers that all refer to the same principal.
+type AliasesIdentifier struct {
+	Identifiers []SubjectIdentifier `json:"identifiers,omitempty"`
+}
+
+// ComplexIdentifier carries the SSF §8.1.3 complex-subject members. Each member
+// is itself a (simple) subject identifier; an absent member is a wildcard
+// during §8.1.3.1 matching.
+type ComplexIdentifier struct {
+	User    *SubjectIdentifier `json:"user,omitempty"`
+	Group   *SubjectIdentifier `json:"group,omitempty"`
+	Device  *SubjectIdentifier `json:"device,omitempty"`
+	Session *SubjectIdentifier `json:"session,omitempty"`
+	Tenant  *SubjectIdentifier `json:"tenant,omitempty"`
+	OrgUnit *SubjectIdentifier `json:"org_unit,omitempty"`
+}
+
 type EventSubject struct {
 	SubIdentifier     // Supports top-level sub claim
 	SubjectIdentifier // Used for draft-ietf-secevent-subject-identifier format
@@ -68,6 +86,8 @@ type SubjectIdentifier struct {
 	DecentralizedIdentifier
 	UniformResourceIdentifier
 	ExternalIdentifier
+	AliasesIdentifier
+	ComplexIdentifier
 }
 
 func (sid *SubjectIdentifier) AddUsername(username string) *SubjectIdentifier {

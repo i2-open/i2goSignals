@@ -58,27 +58,33 @@ type EventRouter interface {
 	SetStatsHandler(stats interface{})
 	ResetStream(sid string)
 	WakeTransmitter(sid string, mode string)
+	// NotifySubjectFilterChange propagates an Add/Remove Subject change to the
+	// node whose match-result cache governs delivery for the stream, so a
+	// subject filter change processed on any cluster node takes effect on the
+	// push-transmitter lease owner (issue #94).
+	NotifySubjectFilterChange(sid string)
 }
 
 type router struct {
-	mu                  sync.RWMutex
-	pushStreams         map[string]model.StreamStateRecord // These are transmitters
-	pollStreams         map[string]model.StreamStateRecord
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	enabled             bool
-	nodeId              string
-	issuerKeys          map[string]*rsa.PrivateKey
-	issuerKids          map[string]string
-	pollBuffers         map[string]*buffer.EventPollBuffer
-	pushBuffers         map[string]*buffer.EventPushBuffer
-	coordinator         cluster.ClusterCoordinator
-	streamService       *services.StreamService
-	keyService          *services.KeyService
-	eventService        *services.EventService
-	pushDelivery        delivery.PushDelivery
-	eventsIn, eventsOut *prometheus.CounterVec
-	stats               statsTracker
+	mu                   sync.RWMutex
+	pushStreams          map[string]model.StreamStateRecord // These are transmitters
+	pollStreams          map[string]model.StreamStateRecord
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	enabled              bool
+	nodeId               string
+	issuerKeys           map[string]*rsa.PrivateKey
+	issuerKids           map[string]string
+	pollBuffers          map[string]*buffer.EventPollBuffer
+	pushBuffers          map[string]*buffer.EventPushBuffer
+	coordinator          cluster.ClusterCoordinator
+	streamService        *services.StreamService
+	keyService           *services.KeyService
+	eventService         *services.EventService
+	subjectFilterService *services.SubjectFilterService
+	pushDelivery         delivery.PushDelivery
+	eventsIn, eventsOut  *prometheus.CounterVec
+	stats                statsTracker
 
 	httpClient          *http.Client
 	clusterSecret       string
@@ -152,28 +158,32 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
+	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
+	// time. When nil (or the feature is disabled) every event passes.
+	SubjectFilterService *services.SubjectFilterService
 }
 
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
-		coordinator:         deps.Coordinator,
-		streamService:       deps.StreamService,
-		keyService:          deps.KeyService,
-		eventService:        deps.EventService,
-		nodeId:              nodeId,
-		pushStreams:         map[string]model.StreamStateRecord{},
-		pollStreams:         map[string]model.StreamStateRecord{},
-		pushBuffers:         map[string]*buffer.EventPushBuffer{},
-		pollBuffers:         map[string]*buffer.EventPollBuffer{},
-		issuerKeys:          map[string]*rsa.PrivateKey{},
-		issuerKids:          map[string]string{},
-		enabled:             false,
-		ctx:                 ctx,
-		cancel:              cancel,
-		httpClient:          &http.Client{Timeout: 5 * time.Second},
-		clusterSecret:       os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes: make(map[string]time.Time),
+		coordinator:          deps.Coordinator,
+		streamService:        deps.StreamService,
+		keyService:           deps.KeyService,
+		eventService:         deps.EventService,
+		subjectFilterService: deps.SubjectFilterService,
+		nodeId:               nodeId,
+		pushStreams:          map[string]model.StreamStateRecord{},
+		pollStreams:          map[string]model.StreamStateRecord{},
+		pushBuffers:          map[string]*buffer.EventPushBuffer{},
+		pollBuffers:          map[string]*buffer.EventPollBuffer{},
+		issuerKeys:           map[string]*rsa.PrivateKey{},
+		issuerKids:           map[string]string{},
+		enabled:              false,
+		ctx:                  ctx,
+		cancel:               cancel,
+		httpClient:           &http.Client{Timeout: 5 * time.Second},
+		clusterSecret:        os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
+		recentOutboundWakes:  make(map[string]time.Time),
 	}
 
 	if deps.PushDelivery != nil {
@@ -631,7 +641,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 				r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 			} else {
 				// Remote owner, send wake-up
-				go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId)
+				go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId, "")
 			}
 		}
 	}
@@ -690,7 +700,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			pushBuf.SubmitEvent(rec.Jti)
 		} else {
-			go r.sendWakeup(sid, "push", ownerNodeId)
+			go r.sendWakeup(sid, "push", ownerNodeId, "")
 		}
 		eventLogger.Info("ROUTER: Operational event submitted (push)", "sid", sid, "jti", rec.Jti, "types", rec.Types)
 		return rec, nil
@@ -706,9 +716,34 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	return rec, nil
 }
 
-func (r *router) sendWakeup(sid, mode, ownerNodeId string) {
-	// Rate limiting / Coalescing
-	key := sid + ":" + mode
+// ReasonFilterChange is the WakeRequest reason that turns a cluster wake-up
+// call into a subject-filter match-result cache invalidation (issue #94).
+const ReasonFilterChange = "filter-change"
+
+// NotifySubjectFilterChange propagates an Add/Remove Subject change to the node
+// whose match-result cache governs PUSH delivery for sid. The
+// push-transmitter lease owner holds that cache; when the owner is the local
+// node (or the stream is unleased) the cache is invalidated directly with no
+// network hop, otherwise a cluster wake-up call carrying reason "filter-change"
+// is sent to the owner so it drops the affected entries (issue #94, ADR-0003).
+func (r *router) NotifySubjectFilterChange(sid string) {
+	if r.subjectFilterService == nil {
+		return
+	}
+	resource := fmt.Sprintf("push-transmitter:%s", sid)
+	ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+	if ownerNodeId == "" || ownerNodeId == r.nodeId {
+		r.subjectFilterService.InvalidateCache(sid)
+		return
+	}
+	go r.sendWakeup(sid, "push", ownerNodeId, ReasonFilterChange)
+}
+
+func (r *router) sendWakeup(sid, mode, ownerNodeId, reason string) {
+	// Rate limiting / Coalescing. The reason is part of the key so a
+	// filter-change notification is never coalesced away by a buffer wake-up
+	// (or vice versa) that happens to target the same stream.
+	key := sid + ":" + mode + ":" + reason
 	r.outboundWakesMu.Lock()
 	lastWake, exists := r.recentOutboundWakes[key]
 	if exists && time.Since(lastWake) < 250*time.Millisecond {
@@ -729,16 +764,20 @@ func (r *router) sendWakeup(sid, mode, ownerNodeId string) {
 		return
 	}
 
-	r.callWakeupAPI(node.Address, sid, mode)
+	r.callWakeupAPI(node.Address, sid, mode, reason)
 }
 
-func (r *router) callWakeupAPI(address, sid, mode string) {
+func (r *router) callWakeupAPI(address, sid, mode, reason string) {
 	url := strings.TrimSuffix(address, "/") + "/_cluster/wake-transmitter"
 
-	reqBody, _ := json.Marshal(map[string]string{
+	body := map[string]string{
 		"sid":  sid,
 		"mode": mode,
-	})
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	reqBody, _ := json.Marshal(body)
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
@@ -842,33 +881,49 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	var err error
 	if jtiSize > 0 {
 		sets := make(map[string]string, jtiSize)
-		if forwardMode {
-			jtis := *jtiSlice
-			for _, jti := range jtis {
-				eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-				if eventRecord == nil {
-					eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
-					continue
-				}
-				sets[jti] = eventRecord.Original
+		for _, jti := range *jtiSlice {
+			eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
+			if eventRecord == nil {
+				eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
+				continue
 			}
-		} else {
-			tokens := r.eventService.GetEvents(r.ctx, *jtiSlice)
-			for _, token := range tokens {
-				token.Issuer = state.StreamConfiguration.Iss
-				token.Audience = state.StreamConfiguration.Aud
-				token.IssuedAt = jwt.NewNumericDate(time.Now())
-				token.Kid = kid
+			// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
+			// serve a poll, so the filter is consulted here at poll-response
+			// time; a filtered-out event is discarded (acked) rather than
+			// returned, so the poll buffer stays bounded (ADR-0002).
+			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
+				r.discardPolledEvent(sid, jti, pollBuffer)
+				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+				continue
+			}
+			if forwardMode {
+				sets[jti] = eventRecord.Original
+				continue
+			}
+			token := &eventRecord.Event
+			token.Issuer = state.StreamConfiguration.Iss
+			token.Audience = state.StreamConfiguration.Aud
+			token.IssuedAt = jwt.NewNumericDate(time.Now())
+			token.Kid = kid
 
-				sets[token.ID], err = token.JWS(jwt.SigningMethodRS256, key)
-				if err != nil {
-					eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
-				}
+			sets[jti], err = token.JWS(jwt.SigningMethodRS256, key)
+			if err != nil {
+				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 			}
 		}
 		return sets, more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
+}
+
+// discardPolledEvent drops a filtered-out event from a poll stream: it is acked
+// in the poll buffer and the provider so it is neither returned now nor on a
+// later poll, keeping the pending buffer bounded.
+func (r *router) discardPolledEvent(sid, jti string, pollBuffer *buffer.EventPollBuffer) {
+	pollBuffer.AckEvents([]string{jti})
+	if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
+		eventLogger.Error("POLL-SRV: Error discarding filtered-out event", "sid", sid, "jti", jti, "error", err)
+	}
 }
 
 // PushStreamHandler manages the lifecycle of a push stream, including lease handling and event transmission.
@@ -1216,6 +1271,21 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
 	}
 
+	sid := config.StreamConfiguration.Id
+
+	// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
+	// and discarded rather than pushed, so the pending buffer stays bounded
+	// (ADR-0002); the no-op success classification advances the push loop
+	// exactly as a stale/deleted JTI does. Operational events and a disabled
+	// feature always pass — Allows handles both internally.
+	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
+		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
+		}
+		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+	}
+
 	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
 		Stream: config,
 		Event:  eventRecord,
@@ -1225,7 +1295,6 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	cls := outcome.Classification
 	rsaKey, kid = outcome.Key, outcome.Kid
 
-	sid := config.StreamConfiguration.Id
 	isVerifyPush := isOperationalVerify(eventRecord)
 
 	if cls.Class == goSetPush.ClassAccepted {

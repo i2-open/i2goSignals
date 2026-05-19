@@ -53,12 +53,14 @@ type MemoryProvider struct {
     // Services — the live business surface. Pointers so that ResetDb(true)
     // can swap them and the Persistence.Refresh() helper can rehydrate the
     // composition root without callers caching stale references.
-    streamService *services.StreamService
-    keyService    *services.KeyService
-    eventService  *services.EventService
-    clientService *services.ClientService
-    serverService *services.ServerService
-    tokenService  *services.TokenService
+    streamService        *services.StreamService
+    keyService           *services.KeyService
+    eventService         *services.EventService
+    clientService        *services.ClientService
+    serverService        *services.ServerService
+    tokenService         *services.TokenService
+    subjectFilterService *services.SubjectFilterService
+    subjectRelayService  *services.SubjectRelayService
 
     // Direct references to the raw memory DAOs. Services see notifyingDAO
     // wrappers around these for after-mutation persistence triggering (#44);
@@ -99,6 +101,12 @@ func (m *MemoryProvider) GetEventService() *services.EventService   { return m.e
 func (m *MemoryProvider) GetClientService() *services.ClientService { return m.clientService }
 func (m *MemoryProvider) GetServerService() *services.ServerService { return m.serverService }
 func (m *MemoryProvider) GetTokenService() *services.TokenService   { return m.tokenService }
+func (m *MemoryProvider) GetSubjectFilterService() *services.SubjectFilterService {
+    return m.subjectFilterService
+}
+func (m *MemoryProvider) GetSubjectRelayService() *services.SubjectRelayService {
+    return m.subjectRelayService
+}
 
 func (m *MemoryProvider) StoreExternalKey(keyName string, kids []string, streamID string, use string, jwksUri string) error {
     // TODO implement me
@@ -126,9 +134,23 @@ func (m *MemoryProvider) buildServices() {
     m.eventService = services.NewEventService(eventDAO)
     m.clientService = services.NewClientService(clientDAO, m.keyService)
     m.serverService = services.NewServerService(serverDAO)
+    m.subjectFilterService = services.NewSubjectFilterService(memory.NewSubjectFilterDAO())
 
     // StreamService.CreateStream needs ServerService to resolve tx_alias.
     m.streamService.SetServerService(m.serverService)
+    // A defaultSubjects baseline change clears the stream's subject filter.
+    m.streamService.SetSubjectFilterService(m.subjectFilterService)
+
+    // PRD #89 #95 #96: the relay service validates subject-filter modes at
+    // config time, relays PASSTHRU subject changes 1:1 to the upstream, and
+    // relays HYBRID changes on the interested-set 0↔1 boundary.
+    m.subjectRelayService = services.NewSubjectRelayService(
+        m.streamService.ListReceiverStreams,
+        m.streamService.ListTransmitterStreams,
+        m.subjectFilterService.Selects,
+        services.NewDefaultUpstreamResolver(m.serverService),
+    )
+    m.streamService.SetSubjectRelayService(m.subjectRelayService)
 }
 
 func (m *MemoryProvider) initialize() {
