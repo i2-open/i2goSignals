@@ -469,3 +469,42 @@ func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
 	s.Require().NotNil(state.EventSource, "event source must round-trip through Mongo update")
 	s.Equal(model.EventSourceAudience, state.EventSource.Type)
 }
+
+// TestZ_SubjectRemovalGraceRoundTrip verifies that the SSF §9.3 per-stream
+// removal-grace override (PRD #97 issue #98) is persisted on the
+// StreamStateRecord and round-trips through the MongoDB adapter on both
+// create and update. Mirrors the memory-adapter coverage in
+// internal/services/stream_service_subject_filter_test.go.
+func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
+	authCtx := authUtil.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+
+	req := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"grace.example.com"},
+			Iss:      "grace.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll}},
+		},
+		SubjectRemovalGraceSeconds: 45,
+	}
+
+	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream should succeed")
+
+	state, err := s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after create should succeed")
+	s.Equal(45, state.SubjectRemovalGraceSeconds,
+		"subject_removal_grace_seconds must round-trip through Mongo create")
+
+	update := model.StreamStateRecord{
+		StreamConfiguration:        model.StreamConfiguration{Id: created.Id},
+		SubjectRemovalGraceSeconds: 90,
+	}
+	_, err = s.provider.GetStreamService().UpdateStream(ctx, created.Id, authCtx.ProjectId, update)
+	s.Require().NoError(err, "UpdateStream should succeed")
+
+	state, err = s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after update should succeed")
+	s.Equal(90, state.SubjectRemovalGraceSeconds,
+		"subject_removal_grace_seconds must round-trip through Mongo update")
+}
