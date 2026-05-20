@@ -2,6 +2,8 @@ package services
 
 import (
     "context"
+    "errors"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     "github.com/i2-open/i2goSignals/pkg/goSet"
@@ -17,6 +19,7 @@ import (
 type SubjectFilterService struct {
     dao   interfaces.SubjectFilterDAO
     cache *matchCache
+    now   func() time.Time
 }
 
 // NewSubjectFilterService constructs a SubjectFilterService over the given DAO.
@@ -24,54 +27,102 @@ func NewSubjectFilterService(dao interfaces.SubjectFilterDAO) *SubjectFilterServ
     return &SubjectFilterService{
         dao:   dao,
         cache: newMatchCache(defaultMatchCacheTTL, defaultMatchCacheMaxKeys),
+        now:   time.Now,
     }
+}
+
+// SetNow overrides the clock used for SSF §9.3 grace evaluation. The default is
+// time.Now; tests inject a fake clock to exercise the EnforceAt boundary
+// without sleeping (PRD #97 issue #99).
+func (s *SubjectFilterService) SetNow(now func() time.Time) {
+    if now == nil {
+        s.now = time.Now
+        return
+    }
+    s.now = now
 }
 
 // AddSubject opts subject into delivery on stream. The filter stores only the
 // non-default set, so the effect depends on the stream's baseline: on a NONE
 // stream an inclusion entry is written; on an ALL stream any exclusion entry is
-// dropped. verified is stored for audit only and has no effect on filtering. It
-// returns an error when the subject cannot be canonicalized (missing or
-// unrecognized RFC9493 format).
+// dropped. A re-Add during the SSF §9.3 grace window revives a pending-removal
+// entry (clears EnforceAt) so there is no delivery gap (PRD #97 issue #99).
+// verified is stored for audit only and has no effect on filtering. Returns
+// an error when the subject cannot be canonicalized (missing or unrecognized
+// RFC9493 format).
 func (s *SubjectFilterService) AddSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified bool) error {
     return s.applySubjectChange(ctx, stream, subject, verified, true)
 }
 
-// RemoveSubject opts subject out of delivery on stream. On a NONE stream any
-// inclusion entry is dropped; on an ALL stream an exclusion entry is written.
-// It returns an error when the subject cannot be canonicalized.
+// RemoveSubject opts subject out of delivery on stream. With a non-zero SSF
+// §9.3 grace window the entry is upserted with EnforceAt = now + grace and
+// delivery continues until EnforceAt; with grace 0 the change is immediate
+// (NONE drops the inclusion, ALL inserts an active exclusion). A re-Remove on
+// an already-pending entry does not extend the grace window. Returns an
+// error when the subject cannot be canonicalized.
 func (s *SubjectFilterService) RemoveSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) error {
     return s.applySubjectChange(ctx, stream, subject, false, false)
 }
 
 // applySubjectChange writes or removes a filter entry for subject. add reports
-// whether the receiver wants the subject delivered; combined with the stream's
-// baseline it decides whether a non-default-set entry is inserted or deleted.
+// whether the receiver wants the subject delivered. The mutation is planned by
+// planGraceChange — pure on (baseline, existing entry, add, grace, now) — so
+// the §9.3 entry lifecycle (upsert / stamp / lazy-purge) is in one place and
+// the start-vs-stop "gate the effect, not the verb" rule holds independent of
+// baseline (PRD #97 issue #99).
 func (s *SubjectFilterService) applySubjectChange(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified, add bool) error {
     streamID := stream.StreamConfiguration.Id
     key, err := subjectid.CanonicalKey(subject)
     if err != nil {
         return err
     }
-    // An entry always means "the opposite of the baseline". A NONE stream
-    // stores inclusions, so Add inserts; an ALL stream stores exclusions, so
-    // Remove inserts. The other two combinations drop the entry.
-    insert := (stream.DefaultSubjects == model.DefaultSubjectsNone) == add
-    if insert {
-        err = s.dao.Add(ctx, &model.SubjectFilterEntry{
-            StreamId:     streamID,
-            CanonicalKey: key,
-            Kind:         kindString(subjectid.Kind(subject)),
-            Subject:      subject,
-            Verified:     verified,
-        })
-    } else {
-        err = s.dao.Remove(ctx, streamID, key)
+
+    existing, err := s.dao.Get(ctx, streamID, key)
+    if err != nil && !errors.Is(err, interfaces.ErrNotFound) {
+        return err
     }
-    if err == nil {
-        s.cache.invalidateStream(streamID)
+    if errors.Is(err, interfaces.ErrNotFound) {
+        existing = nil
     }
-    return err
+
+    template := model.SubjectFilterEntry{
+        StreamId:     streamID,
+        CanonicalKey: key,
+        Kind:         kindString(subjectid.Kind(subject)),
+        Subject:      subject,
+        Verified:     verified,
+    }
+    grace := s.resolveGrace(stream)
+    change := planGraceChange(stream.DefaultSubjects, existing, template, add, grace, s.now())
+
+    switch {
+    case change.upsert != nil:
+        if err := s.dao.Add(ctx, change.upsert); err != nil {
+            return err
+        }
+    case change.remove:
+        if err := s.dao.Remove(ctx, streamID, key); err != nil {
+            return err
+        }
+    }
+    s.cache.invalidateStream(streamID)
+    return nil
+}
+
+// resolveGrace picks the SSF §9.3 grace seconds for stream: a non-zero
+// per-transmitter-stream override wins; otherwise the server-wide default from
+// I2SIG_SUBJECT_REMOVAL_GRACE. Returns 0 (immediate enforcement) when neither
+// is set or when stream is nil. The grace is honored only on transmitter
+// streams; the receiver-stream WARN-and-drop is enforced in StreamService
+// CreateStream/UpdateStream (PRD #97 issue #98).
+func (s *SubjectFilterService) resolveGrace(stream *model.StreamStateRecord) int {
+    if stream == nil {
+        return 0
+    }
+    if stream.SubjectRemovalGraceSeconds > 0 {
+        return stream.SubjectRemovalGraceSeconds
+    }
+    return SubjectRemovalGraceDefaultSeconds()
 }
 
 // ClearFilter drops every subject filter entry for streamID, restoring the
@@ -106,53 +157,60 @@ func (s *SubjectFilterService) Allows(ctx context.Context, stream *model.StreamS
 }
 
 // Selects reports whether stream's subject filter currently delivers subject.
-// On a NONE stream the subject delivers only when it is in the filter; on an
-// ALL stream it delivers unless it is. It is Allows without the
-// event/operational wrapper and is the HYBRID interested-set membership test
-// (issue #96): whether a downstream transmitter stream still wants the subject.
+// The decision is delegated to entryDelivers, which gates the §9.3 effect on
+// the entry's EnforceAt: a pending-removal entry keeps delivering until
+// EnforceAt, after which it is treated as if it were absent (NONE) or active
+// (ALL). It is Allows without the event/operational wrapper and is the HYBRID
+// interested-set membership test (issue #96).
 func (s *SubjectFilterService) Selects(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) bool {
-    matched := s.matches(ctx, stream.StreamConfiguration.Id, subject)
-    if stream.DefaultSubjects == model.DefaultSubjectsNone {
-        return matched
-    }
-    return !matched
+    entry := s.lookupEntry(ctx, stream.StreamConfiguration.Id, subject)
+    return entryDelivers(stream.DefaultSubjects, entry, s.now())
 }
 
-// matches reports whether subject is present in the stream's filter. A live
-// match-result cache hit is returned directly; a miss is computed and cached.
-func (s *SubjectFilterService) matches(ctx context.Context, streamID string, subject *goSet.SubjectIdentifier) bool {
+// lookupEntry returns the filter entry for subject on streamID, or nil when no
+// entry exists or canonicalization fails. The match-result cache stores the
+// EnforceAt alongside the matched flag so the §9.3 predicate can re-evaluate
+// the clock boundary on every call without re-reading storage.
+func (s *SubjectFilterService) lookupEntry(ctx context.Context, streamID string, subject *goSet.SubjectIdentifier) *model.SubjectFilterEntry {
     key, err := subjectid.CanonicalKey(subject)
     if err != nil {
-        return false
+        return nil
     }
     if cached, hit := s.cache.get(streamID, key); hit {
-        return cached
+        if !cached.matched {
+            return nil
+        }
+        return &model.SubjectFilterEntry{StreamId: streamID, CanonicalKey: key, EnforceAt: cached.enforceAt}
     }
-    result := s.computeMatch(ctx, streamID, key, subject)
-    s.cache.put(streamID, key, result)
-    return result
+    entry := s.computeMatchEntry(ctx, streamID, key, subject)
+    if entry == nil {
+        s.cache.put(streamID, key, false, time.Time{})
+        return nil
+    }
+    s.cache.put(streamID, key, true, entry.EnforceAt)
+    return entry
 }
 
-// computeMatch evaluates subject against the stream's filter on a cache miss.
-// It takes the two ADR-0003 paths: an indexed canonical-key Get for
+// computeMatchEntry evaluates subject against the stream's filter on a cache
+// miss. It takes the two ADR-0003 paths: an indexed canonical-key Get for
 // simple-subject membership (O(1), the path that scales to millions of
 // entries), then a field-wise scan of the small complex/aliases list, which
 // lets a broad subscription match a narrower, more-specific event per SSF
-// §8.1.3.1.
-func (s *SubjectFilterService) computeMatch(ctx context.Context, streamID, key string, subject *goSet.SubjectIdentifier) bool {
-    if _, err := s.dao.Get(ctx, streamID, key); err == nil {
-        return true
+// §8.1.3.1. Returns the matched entry (with its EnforceAt) or nil.
+func (s *SubjectFilterService) computeMatchEntry(ctx context.Context, streamID, key string, subject *goSet.SubjectIdentifier) *model.SubjectFilterEntry {
+    if entry, err := s.dao.Get(ctx, streamID, key); err == nil {
+        return entry
     }
     complexEntries, err := s.dao.ListComplex(ctx, streamID)
     if err != nil {
-        return false
+        return nil
     }
     for _, entry := range complexEntries {
         if subjectid.Match(entry.Subject, subject) {
-            return true
+            return entry
         }
     }
-    return false
+    return nil
 }
 
 // kindString maps a subjectid.SubjectKind to its stored string form.

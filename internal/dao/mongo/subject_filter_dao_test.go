@@ -3,11 +3,15 @@ package mongo
 import (
     "context"
     "errors"
+    "fmt"
+    "strings"
     "testing"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/suite"
+    "go.mongodb.org/mongo-driver/v2/bson"
     "go.mongodb.org/mongo-driver/v2/mongo"
     "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -108,6 +112,75 @@ func (suite *SubjectFilterDAOMongoSuite) TestClearForStreamWipesOnlyThatStream()
     suite.True(errors.Is(err, interfaces.ErrNotFound), "stream-1 entry must be cleared")
     _, err = suite.dao.Get(ctx, "stream-2", "email:carol@example.com")
     suite.NoError(err, "stream-2 entry must survive ClearForStream(stream-1)")
+}
+
+// TestEnforceAtRoundTrips verifies the SSF §9.3 EnforceAt field survives
+// Add/Get round-trip on the Mongo adapter (PRD #97 issue #99). The field
+// must encode and decode at the second granularity expected by BSON time.
+func (suite *SubjectFilterDAOMongoSuite) TestEnforceAtRoundTrips() {
+    ctx := context.Background()
+    deadline := time.Date(2026, 5, 19, 12, 30, 0, 0, time.UTC)
+    entry := mSimpleEntry("stream-1", "email:alice@example.com")
+    entry.EnforceAt = deadline
+
+    suite.NoError(suite.dao.Add(ctx, entry))
+
+    got, err := suite.dao.Get(ctx, "stream-1", "email:alice@example.com")
+    suite.NoError(err)
+    suite.True(got.EnforceAt.Equal(deadline), "EnforceAt must round-trip: want %v, got %v", deadline, got.EnforceAt)
+}
+
+// TestEnforceAtReviveClearsField verifies that re-Adding an entry with a zero
+// EnforceAt (the §9.3 revive case) overwrites the previously-stamped
+// deadline, so the stored entry is fully active again.
+func (suite *SubjectFilterDAOMongoSuite) TestEnforceAtReviveClearsField() {
+    ctx := context.Background()
+    pending := mSimpleEntry("stream-1", "email:alice@example.com")
+    pending.EnforceAt = time.Date(2026, 5, 19, 12, 30, 0, 0, time.UTC)
+    suite.NoError(suite.dao.Add(ctx, pending))
+
+    revived := mSimpleEntry("stream-1", "email:alice@example.com")
+    suite.NoError(suite.dao.Add(ctx, revived))
+
+    got, err := suite.dao.Get(ctx, "stream-1", "email:alice@example.com")
+    suite.NoError(err)
+    suite.True(got.EnforceAt.IsZero(), "revive must clear EnforceAt, got %v", got.EnforceAt)
+}
+
+// TestEnforceAtSparsePartialIndexExists verifies the SSF §9.3 sparse partial
+// index on enforce_at — the index that lets future admin reviews enumerate
+// pending-removal entries without scanning the (potentially millions of) full
+// filter table (PRD #97 issue #99, ADR-0003).
+func (suite *SubjectFilterDAOMongoSuite) TestEnforceAtSparsePartialIndexExists() {
+    ctx := context.Background()
+    cursor, err := suite.collection.Indexes().List(ctx)
+    suite.NoError(err)
+    var idx []bson.M
+    suite.NoError(cursor.All(ctx, &idx))
+
+    found := false
+    for _, ix := range idx {
+        // Default index name encodes the keys as "<field>_<dir>_..."; the
+        // §9.3 index is created on (stream_id, enforce_at) so its name
+        // contains "enforce_at". This is robust against driver-version
+        // changes to the shape of the "key" sub-document.
+        name, _ := ix["name"].(string)
+        if !strings.Contains(name, "enforce_at") {
+            continue
+        }
+        found = true
+        // The index must be partial on enforce_at $exists so it only
+        // covers pending-removal entries.
+        pfe, hasPFE := ix["partialFilterExpression"]
+        suite.True(hasPFE, "the §9.3 enforce_at index must be a partial index, not a full one")
+        // The driver may decode the nested doc as bson.M or bson.D; render
+        // it as a string and look for the $exists constraint either way.
+        rendered := fmt.Sprintf("%v", pfe)
+        suite.Contains(rendered, "$exists", "partialFilterExpression must require enforce_at to exist; got %s", rendered)
+        suite.Contains(rendered, "enforce_at", "partialFilterExpression must target the enforce_at field; got %s", rendered)
+        break
+    }
+    suite.True(found, "an index on enforce_at must exist for SSF §9.3 pending-removal enumeration")
 }
 
 // TestListComplexReturnsOnlyNonSimpleForStream verifies ListComplex returns the

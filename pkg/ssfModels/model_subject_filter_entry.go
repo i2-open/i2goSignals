@@ -1,6 +1,10 @@
 package model
 
-import "github.com/i2-open/i2goSignals/pkg/goSet"
+import (
+    "time"
+
+    "github.com/i2-open/i2goSignals/pkg/goSet"
+)
 
 // Subject kinds for a SubjectFilterEntry, mirroring subjectid.SubjectKind. The
 // kind selects the ADR-0003 storage/match path: simple subjects are matched by
@@ -26,4 +30,12 @@ type SubjectFilterEntry struct {
     Kind         string                   `json:"kind" bson:"kind"`
     Subject      *goSet.SubjectIdentifier `json:"subject" bson:"subject"`
     Verified     bool                     `json:"verified,omitempty" bson:"verified,omitempty"`
+
+    // EnforceAt is the SSF §9.3 removal-grace deadline (PRD #97 issue #99).
+    // A zero value means the entry is fully active under its baseline. A
+    // non-zero value means the entry's delivery-stopping effect is deferred
+    // until now ≥ EnforceAt — until then the subject keeps delivering. Only
+    // pending-removal entries carry it, so the Mongo index on enforce_at is
+    // sparse/partial.
+    EnforceAt time.Time `json:"enforce_at,omitempty" bson:"enforce_at,omitempty"`
 }

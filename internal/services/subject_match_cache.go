@@ -14,10 +14,14 @@ const (
     defaultMatchCacheMaxKeys = 50000
 )
 
-// matchCacheEntry is one cached subject-match decision and its expiry.
+// matchCacheEntry is one cached subject-match decision and its expiry. For a
+// matched entry the SSF §9.3 EnforceAt is carried alongside so the
+// delivery-time predicate re-evaluates the grace boundary on every call
+// without re-reading the DAO (PRD #97 issue #99).
 type matchCacheEntry struct {
-    matched bool
-    expiry  time.Time
+    matched   bool
+    enforceAt time.Time
+    expiry    time.Time
 }
 
 // matchCache is a bounded, short-TTL per-node cache of subject match results,
@@ -44,29 +48,30 @@ func newMatchCache(ttl time.Duration, maxKeys int) *matchCache {
 
 // get returns the cached match decision for (streamID, key) and whether it was
 // a live cache hit. An expired entry is evicted and reported as a miss.
-func (c *matchCache) get(streamID, key string) (matched bool, hit bool) {
+func (c *matchCache) get(streamID, key string) (entry matchCacheEntry, hit bool) {
     c.mu.Lock()
     defer c.mu.Unlock()
     s, ok := c.streams[streamID]
     if !ok {
-        return false, false
+        return matchCacheEntry{}, false
     }
     e, ok := s[key]
     if !ok {
-        return false, false
+        return matchCacheEntry{}, false
     }
     if time.Now().After(e.expiry) {
         delete(s, key)
         c.size--
-        return false, false
+        return matchCacheEntry{}, false
     }
-    return e.matched, true
+    return e, true
 }
 
-// put records a match decision for (streamID, key). When the key cap is
-// reached the whole cache is dropped — coarse, but it keeps memory bounded
-// without per-entry bookkeeping.
-func (c *matchCache) put(streamID, key string, matched bool) {
+// put records a match decision for (streamID, key) along with the entry's
+// §9.3 EnforceAt (zero when matched is false or the entry is fully active).
+// When the key cap is reached the whole cache is dropped — coarse, but it
+// keeps memory bounded without per-entry bookkeeping.
+func (c *matchCache) put(streamID, key string, matched bool, enforceAt time.Time) {
     c.mu.Lock()
     defer c.mu.Unlock()
     if c.size >= c.maxKeys {
@@ -81,7 +86,7 @@ func (c *matchCache) put(streamID, key string, matched bool) {
     if _, existed := s[key]; !existed {
         c.size++
     }
-    s[key] = matchCacheEntry{matched: matched, expiry: time.Now().Add(c.ttl)}
+    s[key] = matchCacheEntry{matched: matched, enforceAt: enforceAt, expiry: time.Now().Add(c.ttl)}
 }
 
 // invalidateStream drops every cached decision for streamID. It is called

@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "testing"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -57,6 +58,59 @@ func TestSubjectFilterDAOMemory_ClearForStreamWipesOnlyThatStream(t *testing.T) 
     }
     if _, err := dao.Get(ctx, "stream-2", "email:carol@example.com"); err != nil {
         t.Fatalf("stream-2 entry must survive ClearForStream(stream-1), got %v", err)
+    }
+}
+
+// TestSubjectFilterDAOMemory_EnforceAtRoundTrips verifies the SSF §9.3
+// EnforceAt field survives Add/Get round-trip on the memory adapter (PRD #97
+// issue #99). The field is part of the persisted shape; matching parity on
+// the Mongo adapter is verified in its own test.
+func TestSubjectFilterDAOMemory_EnforceAtRoundTrips(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    deadline := time.Date(2026, 5, 19, 12, 30, 0, 0, time.UTC)
+    entry := simpleEntry("stream-1", "email:alice@example.com")
+    entry.EnforceAt = deadline
+
+    if err := dao.Add(ctx, entry); err != nil {
+        t.Fatalf("Add: %v", err)
+    }
+    got, err := dao.Get(ctx, "stream-1", "email:alice@example.com")
+    if err != nil {
+        t.Fatalf("Get: %v", err)
+    }
+    if !got.EnforceAt.Equal(deadline) {
+        t.Fatalf("EnforceAt did not round-trip: want %v, got %v", deadline, got.EnforceAt)
+    }
+}
+
+// TestSubjectFilterDAOMemory_EnforceAtReviveClearsField verifies that an Add
+// with EnforceAt zero overwrites an existing pending-removal entry — the
+// revive case from §9.3 — so the stored entry no longer carries a deadline.
+func TestSubjectFilterDAOMemory_EnforceAtReviveClearsField(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    deadline := time.Date(2026, 5, 19, 12, 30, 0, 0, time.UTC)
+    pending := simpleEntry("stream-1", "email:alice@example.com")
+    pending.EnforceAt = deadline
+    if err := dao.Add(ctx, pending); err != nil {
+        t.Fatalf("Add (pending): %v", err)
+    }
+
+    revived := simpleEntry("stream-1", "email:alice@example.com")
+    // revived.EnforceAt is the zero value (no deadline).
+    if err := dao.Add(ctx, revived); err != nil {
+        t.Fatalf("Add (revive): %v", err)
+    }
+
+    got, err := dao.Get(ctx, "stream-1", "email:alice@example.com")
+    if err != nil {
+        t.Fatalf("Get: %v", err)
+    }
+    if !got.EnforceAt.IsZero() {
+        t.Fatalf("revive must clear EnforceAt, got %v", got.EnforceAt)
     }
 }
 

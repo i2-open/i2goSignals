@@ -46,6 +46,11 @@ func (d *SubjectFilterDAOMongo) SetCollection(c *mongo.Collection) {
 //   - (stream_id, kind) — ListComplex selects only the small complex/aliases
 //     subset without scanning the stream's (potentially millions of) simple
 //     entries (ADR-0003).
+//   - (stream_id, enforce_at) PARTIAL on enforce_at $exists — the SSF §9.3
+//     pending-removal index (PRD #97 issue #99). Only pending entries carry
+//     enforce_at, so the partial index stays tiny even when the full filter
+//     holds millions of rows; future admin-review queries enumerate
+//     pending removals without scanning the table.
 func (d *SubjectFilterDAOMongo) ensureIndex(c *mongo.Collection) {
     if c == nil {
         return
@@ -57,6 +62,12 @@ func (d *SubjectFilterDAOMongo) ensureIndex(c *mongo.Collection) {
         },
         {
             Keys: bson.D{{Key: "stream_id", Value: 1}, {Key: "kind", Value: 1}},
+        },
+        {
+            Keys: bson.D{{Key: "stream_id", Value: 1}, {Key: "enforce_at", Value: 1}},
+            Options: options.Index().SetPartialFilterExpression(
+                bson.M{"enforce_at": bson.M{"$exists": true}},
+            ),
         },
     })
     if err != nil {
