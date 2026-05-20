@@ -1,5 +1,84 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-20] SSF subject filtering — §9.1/§9.2 posture and relay-error tolerance (issue #103)
+
+### Change
+SSF §9.1 (subject probing) and §9.2 (information harvesting) compliance for
+goSignals is documented in `docs/security_model.md`. The only behavioural
+change: `PASSTHRU` Add/Remove Subject no longer surfaces an upstream relay
+error to the downstream receiver. The handler logs the upstream status at
+`WARN` and returns `200`/`204`, matching the `HYBRID` tolerance already in
+place since issue #96.
+
+### Decisions
+*   **No oracle on the goSignals endpoints.** goSignals holds no subject
+    directory, so `Add Subject` cannot be a §9.1 probe. The only `404` from
+    the Add/Remove endpoints is feature-disabled (a capability statement, not
+    a per-subject answer). `Add Subject` is a statement of interest and
+    returns `200` regardless of whether the subject has been seen.
+*   **Relay errors are not surfaced.** Returning a `4xx`/`5xx` from the
+    upstream verbatim would re-create the §9.1 oracle goSignals itself does
+    not expose: an attacker would learn which subjects an upstream
+    transmitter refuses. The relay is best-effort; the local filter write
+    (under `HYBRID`) and the receiver's recorded statement of interest are
+    authoritative.
+*   **`PASSTHRU` and `HYBRID` now behave the same on upstream failure.**
+    The previous decision to return `502` from `PASSTHRU` on relay failure
+    (entry below, 2026-05-19) is superseded — it leaked the upstream's §9.1
+    posture to the downstream. Documentation-only mitigations under §9.2
+    remain.
+
+### Invariants
+*   The upstream relay status code is logged at `WARN` by the
+    `handleSubjectChange` handler and never propagated to the downstream.
+*   Active §9.1/§9.2 mitigations (rate-limiting Add Subject, anomaly
+    detection on filter growth) remain out of scope.
+
+## [2026-05-19] SSF subject filtering — CLI settings command group (issue #102)
+
+### Change
+`cmd/goSignals` gains a `subject-filter` (alias `sf`) command group with two
+sub-commands — `show <alias>` and `set <alias> [flags]` — that lets an
+operator view and change the four per-stream subject-filtering knobs in one
+place: `defaultSubjects`, `subject_filter_mode`, `event_source`, and the
+SSF §9.3 `subject_removal_grace_seconds` override.
+
+### Decisions
+*   **No new server endpoint.** The set path PUTs to the existing `/stream`
+    update endpoint with the operator knobs at the top level of a
+    StreamStateRecord-shaped body; `StreamUpdate` already reads them as a
+    partial update (empty/zero = no change). The show path reuses the existing
+    admin-scoped `/subject-filter/review` endpoint.
+*   **Review response carries policy, not just filter table state.** The
+    review response gains `event_source` and `subject_removal_grace_seconds`
+    so it now describes the full subject-filtering policy (it already carried
+    `mode` and `default_subjects`). Better than extending `/stream` GET to
+    return a full StreamStateRecord — keeps server-internal fields
+    (CreatedAt, RemoteAddress, …) off the wire, and the review endpoint is
+    already admin-scoped.
+*   **Post-update display surfaces server WARNs.** After a successful PUT the
+    set command re-reads via the review endpoint and prints the persisted
+    values. A `--grace-seconds` set on a receiver stream lands as 0 in the
+    display, surfacing the server's WARN-and-ignore (#98) without needing a
+    structured response field.
+*   **Partial-update on the wire.** Only knobs the operator named on the
+    command line are sent — untouched fields are omitted, so an operator can
+    change one knob without re-supplying the others. Matches the server's
+    existing partial-update semantics for these four fields.
+*   **Kong enum validation in the CLI.** `--default-subjects`, `--mode`, and
+    `--event-source` are kong enums so typos are caught at parse time. The
+    server's #89 cross-field validation remains the authoritative gate; the
+    CLI just surfaces 400 messages verbatim.
+
+### Invariants
+*   The CLI does not write a full StreamConfiguration on set — only the four
+    operator-knob fields plus `stream_id` / `id` (so the server's auth check
+    finds the configured stream id). The embedded StreamConfiguration in the
+    persisted record is not touched.
+*   The existing `review subject-filter` command remains focused on filter
+    table state (counts, pending, point lookup) and is unchanged on the wire
+    aside from the two new policy fields the response now carries.
+
 ## [2026-05-19] SSF subject filtering — HYBRID refcounted upstream relay (issue #96)
 
 ### Change
@@ -23,8 +102,9 @@ relay; `handleSubjectChange` calls it after the local filter is written.
     relay-target receiver stream's `DefaultSubjects`.
 *   **A HYBRID upstream relay failure is tolerated, not surfaced.** The local
     filter write is the primary outcome; a failed relay is logged at WARN and
-    the handler still returns 200/204. This differs from PASSTHRU (502 on relay
-    failure) because PASSTHRU has no local fallback.
+    the handler still returns 200/204. (At the time of this entry PASSTHRU
+    instead returned 502; the 2026-05-20 PRD #97 / slice #103 entry aligns
+    PASSTHRU with HYBRID for SSF §9.1 compliance.)
 *   **`SubjectFilterService.Selects`** extracted from `Allows` — the
     membership predicate (Allows minus the event/operational wrapper), reused
     as the HYBRID interested-set test.
@@ -1112,3 +1192,49 @@ governs the per-event cost:
     upsert, so a kind change on re-Add must update the index in both directions.
 *   Regression guard: `TestSubjectFilterService_SimpleMembershipScalesConstantly`
     fails if the simple-subject path regresses to an O(N) scan.
+
+## [2026-05-19] HYBRID upstream-relay tracks the enforced interest state, not the receiver's request (PRD #97, issue #100)
+
+### Problem
+SSF §9.3 grace defers a downstream Remove for the configured window — local
+delivery keeps going. But under `HYBRID` the downstream also drives an
+upstream subscription: if the upstream `remove` were relayed at the receiver's
+Remove request, the upstream tap would close immediately and the grace
+window would be hollow. The naïve "relay whenever a mutation happens"
+approach also breaks the re-Add case: a re-Add during the grace window
+revives the local entry, but if it also fires an upstream `add` we duplicate
+a subscription that was never dropped.
+
+### Solution
+The HYBRID upstream-relay decision tracks the *enforced* interest state, not
+the receiver's instantaneous request. A pure helper, `planHybridRelay(before,
+plannedChange, add, graceSeconds)`, returns one of three decisions:
+- `RelayDecisionDeferred` — a stop-delivery change that stamped a pending
+  entry. The push-transmitter lease owner's existing backfill sweep
+  enumerates pending-due entries (`SubjectFilterDAO.ListPendingDue`, riding
+  the existing sparse partial index on `enforce_at`) and fires
+  `RelayHybrid(add=false)` at enforceAt, then deletes the local entry.
+- `RelayDecisionNone` — a re-Add of a pending entry (upstream still
+  subscribed because the deferred `remove` was never sent) or an idempotent
+  re-stop.
+- `RelayDecisionImmediate` — a fresh Add (true 0→1 transition) or the
+  grace-zero fallback for any mutation; the API handler fires
+  `RelayHybrid` synchronously as before.
+
+`AddSubject`/`RemoveSubject` were widened to return
+`(RelayDecision, error)` so the one non-test call-site
+(`api_stream_management.go`) can branch on the decision.
+
+### Invariants
+*   Re-Add during the grace window must clear `EnforceAt` (planStart already
+    does this) AND must not fire an upstream `add` — the upstream
+    subscription was never dropped.
+*   A relay-callback error in the sweep must leave the local entry in place
+    so the next backfill tick retries.
+*   `PASSTHRU` adds no grace of its own; the upstream transmitter's §9.3
+    handling is authoritative. PASSTHRU never touches the local filter
+    table, so there is no `EnforceAt` to defer against — this property is
+    structural, not enforced by extra code.
+*   `ListPendingDue`'s clock boundary is inclusive (`enforce_at == now` is
+    elapsed), matching the slice #99 `entryDelivers` boundary, so the local
+    delivery decision and the sweep both flip on the same tick.

@@ -82,6 +82,7 @@ type router struct {
 	keyService           *services.KeyService
 	eventService         *services.EventService
 	subjectFilterService *services.SubjectFilterService
+	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
 	stats                statsTracker
@@ -161,6 +162,11 @@ type RouterDeps struct {
 	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
 	// time. When nil (or the feature is disabled) every event passes.
 	SubjectFilterService *services.SubjectFilterService
+	// SubjectRelayService is the HYBRID/PASSTHRU upstream relay. The
+	// push-transmitter lease owner uses it to fire the SSF §9.3 deferred
+	// HYBRID upstream removes on the backfill tick (PRD #97 issue #100).
+	// When nil the deferred-relay sweep is a no-op.
+	SubjectRelayService *services.SubjectRelayService
 }
 
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
@@ -171,6 +177,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		keyService:           deps.KeyService,
 		eventService:         deps.EventService,
 		subjectFilterService: deps.SubjectFilterService,
+		subjectRelayService:  deps.SubjectRelayService,
 		nodeId:               nodeId,
 		pushStreams:          map[string]model.StreamStateRecord{},
 		pollStreams:          map[string]model.StreamStateRecord{},
@@ -1083,6 +1090,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			}
 		case <-backfillTicker.C:
 			r.backfillPushBuffer(sid, eventBuf)
+			r.sweepDeferredHybridRelays(heartbeatCtx, stream)
 		case <-wakeup:
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
@@ -1237,6 +1245,29 @@ func (r *router) dispatchPushFailure(
 		return outcome, true
 	default: // ContextDone
 		return outcome, true
+	}
+}
+
+// sweepDeferredHybridRelays fires the SSF §9.3 deferred HYBRID upstream
+// removes whose enforceAt has elapsed for this stream (PRD #97 issue #100).
+// It runs on the push-transmitter lease owner's backfill tick — the same
+// scheduler used by the recovery sweep, so no new goroutine is introduced.
+// A nil filter or relay service, a non-HYBRID stream, or a relay-target
+// resolution failure short-circuits the call as a no-op.
+func (r *router) sweepDeferredHybridRelays(ctx context.Context, stream *model.StreamStateRecord) {
+	if r.subjectFilterService == nil || r.subjectRelayService == nil || stream == nil {
+		return
+	}
+	if stream.SubjectFilterMode != model.SubjectFilterModeHybrid {
+		return
+	}
+	relay := func(rctx context.Context, st *model.StreamStateRecord, entry *model.SubjectFilterEntry) error {
+		return r.subjectRelayService.RelayHybrid(rctx, st, entry.Subject, entry.Verified, false)
+	}
+	if n, err := r.subjectFilterService.SweepDeferredHybridRelays(ctx, stream, relay); err != nil {
+		eventLogger.Warn("PUSH-SRV: HYBRID grace sweep failed", "sid", stream.StreamConfiguration.Id, "error", err)
+	} else if n > 0 {
+		eventLogger.Debug("PUSH-SRV: HYBRID grace sweep relayed deferred upstream removes", "sid", stream.StreamConfiguration.Id, "count", n)
 	}
 }
 

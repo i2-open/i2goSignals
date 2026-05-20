@@ -104,7 +104,10 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	// PRD #89 #95: in PASSTHRU mode the subject change is relayed 1:1 to the
 	// upstream transmitter and no local filter is applied — downstream streams
-	// share one upstream subscription.
+	// share one upstream subscription. PRD #97 #103: a 404 or other error from
+	// the upstream — possibly its own SSF §9.1 subject-probing mitigation — is
+	// logged at WARN and tolerated; surfacing it would let an upstream's §9.1
+	// posture break the downstream receiver's request.
 	if stream.SubjectFilterMode == model.SubjectFilterModePassthru {
 		relaySvc := sa.GetSubjectRelayService()
 		if relaySvc == nil {
@@ -113,8 +116,6 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		}
 		if relayErr := relaySvc.Relay(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
 			serverLog.Warn("PASSTHRU subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)
-			w.WriteHeader(http.StatusBadGateway)
-			return
 		}
 		if add {
 			w.WriteHeader(http.StatusOK)
@@ -130,10 +131,11 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
+	var decision services.RelayDecision
 	if add {
-		err = filterSvc.AddSubject(r.Context(), stream, req.Subject, req.Verified)
+		decision, err = filterSvc.AddSubject(r.Context(), stream, req.Subject, req.Verified)
 	} else {
-		err = filterSvc.RemoveSubject(r.Context(), stream, req.Subject)
+		decision, err = filterSvc.RemoveSubject(r.Context(), stream, req.Subject)
 	}
 	if err != nil {
 		serverLog.Error("Subject filter change failed", "sid", req.StreamId, "error", err)
@@ -148,11 +150,15 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		router.NotifySubjectFilterChange(req.StreamId)
 	}
 
-	// PRD #89 #96: HYBRID also relays the change upstream, but only as the
-	// interested-set crosses the 0↔1 boundary. The local filter above is the
-	// primary outcome — an upstream relay failure is logged and tolerated, not
-	// surfaced to the caller.
-	if stream.SubjectFilterMode == model.SubjectFilterModeHybrid {
+	// PRD #89 #96 / PRD #97 #100: HYBRID also relays the change upstream, but
+	// only as the *enforced* interested-set crosses the 0↔1 boundary. With
+	// SSF §9.3 grace the service returns RelayDecisionDeferred for a Remove
+	// that stamps a pending entry — the upstream relay is held back and the
+	// push-transmitter lease owner's sweep fires it at enforceAt — and
+	// RelayDecisionNone for a revive (upstream still subscribed). The local
+	// filter above is the primary outcome; an upstream relay failure is
+	// logged and tolerated, not surfaced to the caller.
+	if stream.SubjectFilterMode == model.SubjectFilterModeHybrid && decision == services.RelayDecisionImmediate {
 		if relaySvc := sa.GetSubjectRelayService(); relaySvc != nil {
 			if relayErr := relaySvc.RelayHybrid(r.Context(), stream, req.Subject, req.Verified, add); relayErr != nil {
 				serverLog.Warn("HYBRID subject relay to upstream failed", "sid", req.StreamId, "error", relayErr)

@@ -90,6 +90,35 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
     return nil
 }
 
+// validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
+// the request before any state is mutated (PRD #97 issue #98). Sits alongside
+// validateSubjectFilterMode in the create/update pipeline. Only the request
+// value is checked here — the WARN-and-drop for a receiver stream is the
+// caller's responsibility, since the rejection must be field-shape only.
+func validateSubjectRemovalGrace(grace int) error {
+    if grace < 0 {
+        return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
+    }
+    return nil
+}
+
+// applyRemovalGraceOverride copies a non-zero SSF §9.3 grace override from the
+// request onto streamRec. On a receiver stream the value has no meaning and is
+// dropped with a WARN (PRD #97 issue #98). The request value has already been
+// shape-checked by validateSubjectRemovalGrace.
+func applyRemovalGraceOverride(streamRec *model.StreamStateRecord, requested int) {
+    if requested == 0 {
+        return
+    }
+    if streamRec.IsReceiver() {
+        ssLog.Warn("subject_removal_grace_seconds ignored on a receiver stream",
+            "stream_id", streamRec.StreamConfiguration.Id,
+            "value", requested)
+        return
+    }
+    streamRec.SubjectRemovalGraceSeconds = requested
+}
+
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
 	minVerificationInterval := 300
 	maxInactivityTimeout := 3600
@@ -164,6 +193,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
     // code expects an empty value.
     if strings.EqualFold(request.IssuerJWKSUrl, "NONE") {
         request.IssuerJWKSUrl = ""
+    }
+
+    // Validate goSignals-specific knobs before any state is mutated. The SSF
+    // §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
+    // event-source pipeline a few lines below.
+    if err := validateSubjectRemovalGrace(request.SubjectRemovalGraceSeconds); err != nil {
+        return model.StreamConfiguration{}, err
     }
 
     mid := bson.NewObjectID()
@@ -509,6 +545,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		EventSource:         request.EventSource,
 	}
 
+	// SSF §9.3 grace override (PRD #97 #98). Dropped on receiver streams with
+	// a WARN; honored on transmitter streams. Request value is already shape-
+	// checked above by validateSubjectRemovalGrace.
+	applyRemovalGraceOverride(streamRec, request.SubjectRemovalGraceSeconds)
+
 	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
 	// incompatible with the stream's upstream before the stream is persisted.
 	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
@@ -697,6 +738,13 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		return nil, errors.New(ErrorInvalidProject)
 	}
 
+	// Validate goSignals-specific knobs against the request before mutating
+	// the persisted record. PRD #97 #98 — alongside the mode/event-source
+	// validation performed below by validateSubjectFilterMode.
+	if err := validateSubjectRemovalGrace(configReq.SubjectRemovalGraceSeconds); err != nil {
+		return nil, err
+	}
+
 	config := &streamRec.StreamConfiguration
 
 	if len(configReq.EventsRequested) > 0 {
@@ -792,6 +840,10 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	if configReq.EventSource != nil {
 		streamRec.EventSource = configReq.EventSource
 	}
+
+	// SSF §9.3 grace override (PRD #97 #98). Request value is already shape-
+	// checked above by validateSubjectRemovalGrace.
+	applyRemovalGraceOverride(streamRec, configReq.SubjectRemovalGraceSeconds)
 
 	// PRD #89 #95: re-validate the subject-filter mode against the upstream
 	// whenever the mode or event source could have changed.

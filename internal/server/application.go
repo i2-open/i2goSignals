@@ -215,6 +215,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
 		SubjectFilterService: persistence.SubjectFilterService,
+		SubjectRelayService:  persistence.SubjectRelayService,
 		// The HTTP push adapter is wired at the composition root. NewRouter
 		// late-binds itself as the KeyReloader so the adapter can drive the
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.

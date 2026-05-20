@@ -77,7 +77,8 @@ func TestPollFilter_NoneStreamReturnsOnlyAddedSubjects(t *testing.T) {
     stream := h.createPollStream(t, model.DefaultSubjectsNone)
     sid := stream.StreamConfiguration.Id
 
-    require.NoError(t, h.subjectFilter.AddSubject(context.Background(), stream, emailSubjectFor("alice@example.com"), false))
+    _, addErr := h.subjectFilter.AddSubject(context.Background(), stream, emailSubjectFor("alice@example.com"), false)
+    require.NoError(t, addErr)
 
     addedJti := h.addPendingEvent(t, sid, emailSubjectFor("alice@example.com"), false)
     omittedJti := h.addPendingEvent(t, sid, emailSubjectFor("bob@example.com"), false)
@@ -97,7 +98,8 @@ func TestPollFilter_AllStreamOmitsRemovedSubjects(t *testing.T) {
     stream := h.createPollStream(t, model.DefaultSubjectsAll)
     sid := stream.StreamConfiguration.Id
 
-    require.NoError(t, h.subjectFilter.RemoveSubject(context.Background(), stream, emailSubjectFor("bob@example.com")))
+    _, remErr := h.subjectFilter.RemoveSubject(context.Background(), stream, emailSubjectFor("bob@example.com"))
+    require.NoError(t, remErr)
 
     keptJti := h.addPendingEvent(t, sid, emailSubjectFor("alice@example.com"), false)
     removedJti := h.addPendingEvent(t, sid, emailSubjectFor("bob@example.com"), false)

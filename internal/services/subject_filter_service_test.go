@@ -52,7 +52,7 @@ func TestSubjectFilterService_NoneStream_DeliversAfterAdd(t *testing.T) {
 		t.Fatal("NONE stream with an empty filter must not deliver")
 	}
 
-	if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+	if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
 		t.Fatalf("AddSubject: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestSubjectFilterService_AllStream_StopsAfterRemove(t *testing.T) {
 		t.Fatal("ALL stream with an empty filter must deliver every subject")
 	}
 
-	if err := svc.RemoveSubject(ctx, stream, subject); err != nil {
+	if _, err := svc.RemoveSubject(ctx, stream, subject); err != nil {
 		t.Fatalf("RemoveSubject: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestSubjectFilterService_ClearFilterEmptiesTheFilter(t *testing.T) {
 	subject := emailSubject("alice@example.com")
 	event := eventFor(subject)
 
-	if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+	if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
 		t.Fatalf("AddSubject: %v", err)
 	}
 	if !svc.Allows(ctx, stream, event) {
@@ -147,7 +147,7 @@ func TestSubjectFilterService_ComplexAddMatchesNarrowerEvent(t *testing.T) {
 		t.Fatal("precondition: NONE stream with empty filter must not deliver")
 	}
 
-	if err := svc.AddSubject(ctx, stream, subscription, false); err != nil {
+	if _, err := svc.AddSubject(ctx, stream, subscription, false); err != nil {
 		t.Fatalf("AddSubject: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestSubjectFilterService_VerifiedFlagStoredNoFilteringEffect(t *testing.T) 
 	stream := noneStream("stream-1")
 	subject := emailSubject("alice@example.com")
 
-	if err := svc.AddSubject(ctx, stream, subject, true); err != nil {
+	if _, err := svc.AddSubject(ctx, stream, subject, true); err != nil {
 		t.Fatalf("AddSubject: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestSubjectFilterService_SimpleMembershipScalesConstantly(t *testing.T) {
 		stream := noneStream("stream-scale")
 		for i := 0; i < n; i++ {
 			subj := emailSubject(fmt.Sprintf("member-%d@example.com", i))
-			if err := svc.AddSubject(ctx, stream, subj, false); err != nil {
+			if _, err := svc.AddSubject(ctx, stream, subj, false); err != nil {
 				t.Fatalf("AddSubject: %v", err)
 			}
 		}

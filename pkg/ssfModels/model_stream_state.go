@@ -96,6 +96,15 @@ type StreamStateRecord struct {
 
 	// EventSource describes where a transmitter stream's events originate.
 	EventSource *EventSource `json:"event_source,omitempty" bson:"event_source,omitempty"`
+
+	// SubjectRemovalGraceSeconds is the per-transmitter-stream override of the
+	// SSF §9.3 removal grace period (PRD #97 issue #98). `0` (or unset) means
+	// immediate enforcement and falls back to the server-wide
+	// `I2SIG_SUBJECT_REMOVAL_GRACE` default. The override is honored only on
+	// transmitter streams; an override set on a receiver stream is ignored at
+	// CreateStream/UpdateStream with a WARN. No enforcement is wired up in this
+	// slice — it is settable, persisted, and round-trippable.
+	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitempty" bson:"subject_removal_grace_seconds,omitempty"`
 }
 
 // EventSource describes where a transmitter stream's events originate. This is
@@ -145,6 +154,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.DefaultSubjects = mod.DefaultSubjects
 	ss.SubjectFilterMode = mod.SubjectFilterMode
 	ss.EventSource = mod.EventSource
+	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
 }
 
 // GetType returns the delivery method for the stream state record. Returns one of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll.

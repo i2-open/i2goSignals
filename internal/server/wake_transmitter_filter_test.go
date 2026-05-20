@@ -43,7 +43,8 @@ func TestWakeTransmitter_FilterChangeInvalidatesCache(t *testing.T) {
     require.False(t, ownerSvc.Allows(ctx, stream, event))
 
     // A peer node processes the Add Subject; the owner's cache is now stale.
-    require.NoError(t, peerSvc.AddSubject(ctx, stream, subject, false))
+    _, addErr := peerSvc.AddSubject(ctx, stream, subject, false)
+    require.NoError(t, addErr)
     require.False(t, ownerSvc.Allows(ctx, stream, event),
         "precondition: the owner's cached decision is expected to be stale")
 

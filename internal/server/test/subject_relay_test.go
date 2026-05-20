@@ -192,3 +192,147 @@ func TestHybridRelaysAndFiltersLocally(t *testing.T) {
     assert.True(t, instance.app.SubjectFilterService.Selects(context.Background(), state, subject),
         "a HYBRID Add Subject must also be written to the local per-stream filter")
 }
+
+// TestPassthruToleratesUpstreamErrorOnAddSubject verifies SSF §9.1/§9.2
+// compliance on the relay path (PRD #97 / slice #103): when the upstream
+// transmitter rejects a relayed Add Subject — possibly its own §9.1
+// subject-probing mitigation — goSignals must not surface that as a failure to
+// the downstream receiver. The downstream Add Subject still returns 200.
+func TestPassthruToleratesUpstreamErrorOnAddSubject(t *testing.T) {
+    _ = os.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+    defer func() { _ = os.Unsetenv("I2SIG_SUBJECT_FILTERING") }()
+
+    instance, err := createServer(t, "passthru_relay_err_add_test", true)
+    require.NoError(t, err)
+    defer func() {
+        instance.app.Shutdown()
+        instance.ts.Close()
+    }()
+
+    const upstreamIss = "https://upstream.example"
+
+    // Fake upstream that rejects the relayed Add — emulating an upstream's own
+    // §9.1 subject-probing mitigation or a transient 4xx.
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusNotFound)
+    }))
+    defer upstream.Close()
+    upstreamCfg := &model.TransmitterConfiguration{
+        Issuer:                upstreamIss,
+        AddSubjectEndpoint:    upstream.URL + "/add-subject",
+        RemoveSubjectEndpoint: upstream.URL + "/remove-subject",
+    }
+
+    var rxStream model.StreamStateRecord
+    rxStream.StreamConfiguration.Id = "rx-upstream"
+    rxStream.StreamConfiguration.Iss = upstreamIss
+    fakeRelay := services.NewSubjectRelayService(
+        func(context.Context) ([]model.StreamStateRecord, error) {
+            return []model.StreamStateRecord{rxStream}, nil
+        },
+        instance.streamSvc().ListTransmitterStreams,
+        func(context.Context, *model.StreamStateRecord, *goSet.SubjectIdentifier) bool { return false },
+        func(context.Context, *model.StreamStateRecord) (*services.UpstreamConn, error) {
+            return &services.UpstreamConn{Config: upstreamCfg, HttpClient: upstream.Client()}, nil
+        },
+    )
+    instance.streamSvc().SetSubjectRelayService(fakeRelay)
+    instance.app.SubjectRelayService = fakeRelay
+
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
+        &authUtil.AuthContext{ProjectId: instance.projectId})
+    created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{
+            Iss: upstreamIss,
+            Aud: []string{"https://receiver.example.com"},
+            Delivery: &model.OneOfStreamConfigurationDelivery{
+                PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+            },
+        },
+        SubjectFilterMode: model.SubjectFilterModePassthru,
+        EventSource:       &model.EventSource{Type: model.EventSourceAudience},
+    }, instance.projectId, nil)
+    require.NoError(t, err)
+
+    token, err := instance.GetAuthIssuer().IssueStreamToken(created.Id, instance.projectId, nil)
+    require.NoError(t, err)
+
+    body := `{"stream_id":"` + created.Id + `","subject":{"format":"email","email":"alice@example.com"}}`
+    req, _ := http.NewRequest(http.MethodPost, instance.ts.URL+"/add-subject", strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+token)
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := instance.client.Do(req)
+    require.NoError(t, err)
+    assert.Equal(t, http.StatusOK, resp.StatusCode,
+        "an upstream error on a PASSTHRU relay must not fail the downstream Add Subject (SSF §9.1)")
+}
+
+// TestPassthruToleratesUpstreamErrorOnRemoveSubject is the Remove-verb pair of
+// TestPassthruToleratesUpstreamErrorOnAddSubject: a non-2xx upstream response
+// to a relayed Remove must still return 204 to the downstream receiver.
+func TestPassthruToleratesUpstreamErrorOnRemoveSubject(t *testing.T) {
+    _ = os.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+    defer func() { _ = os.Unsetenv("I2SIG_SUBJECT_FILTERING") }()
+
+    instance, err := createServer(t, "passthru_relay_err_remove_test", true)
+    require.NoError(t, err)
+    defer func() {
+        instance.app.Shutdown()
+        instance.ts.Close()
+    }()
+
+    const upstreamIss = "https://upstream.example"
+
+    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusNotFound)
+    }))
+    defer upstream.Close()
+    upstreamCfg := &model.TransmitterConfiguration{
+        Issuer:                upstreamIss,
+        AddSubjectEndpoint:    upstream.URL + "/add-subject",
+        RemoveSubjectEndpoint: upstream.URL + "/remove-subject",
+    }
+
+    var rxStream model.StreamStateRecord
+    rxStream.StreamConfiguration.Id = "rx-upstream"
+    rxStream.StreamConfiguration.Iss = upstreamIss
+    fakeRelay := services.NewSubjectRelayService(
+        func(context.Context) ([]model.StreamStateRecord, error) {
+            return []model.StreamStateRecord{rxStream}, nil
+        },
+        instance.streamSvc().ListTransmitterStreams,
+        func(context.Context, *model.StreamStateRecord, *goSet.SubjectIdentifier) bool { return false },
+        func(context.Context, *model.StreamStateRecord) (*services.UpstreamConn, error) {
+            return &services.UpstreamConn{Config: upstreamCfg, HttpClient: upstream.Client()}, nil
+        },
+    )
+    instance.streamSvc().SetSubjectRelayService(fakeRelay)
+    instance.app.SubjectRelayService = fakeRelay
+
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
+        &authUtil.AuthContext{ProjectId: instance.projectId})
+    created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{
+            Iss: upstreamIss,
+            Aud: []string{"https://receiver.example.com"},
+            Delivery: &model.OneOfStreamConfigurationDelivery{
+                PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+            },
+        },
+        SubjectFilterMode: model.SubjectFilterModePassthru,
+        EventSource:       &model.EventSource{Type: model.EventSourceAudience},
+    }, instance.projectId, nil)
+    require.NoError(t, err)
+
+    token, err := instance.GetAuthIssuer().IssueStreamToken(created.Id, instance.projectId, nil)
+    require.NoError(t, err)
+
+    body := `{"stream_id":"` + created.Id + `","subject":{"format":"email","email":"alice@example.com"}}`
+    req, _ := http.NewRequest(http.MethodPost, instance.ts.URL+"/remove-subject", strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+token)
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := instance.client.Do(req)
+    require.NoError(t, err)
+    assert.Equal(t, http.StatusNoContent, resp.StatusCode,
+        "an upstream error on a PASSTHRU relay must not fail the downstream Remove Subject (SSF §9.1)")
+}

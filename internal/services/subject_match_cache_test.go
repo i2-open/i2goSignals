@@ -8,13 +8,13 @@ import (
 // TestMatchCache_HitAfterPut verifies a stored decision is returned as a hit.
 func TestMatchCache_HitAfterPut(t *testing.T) {
     c := newMatchCache(time.Minute, 100)
-    c.put("stream-1", "email:alice@example.com", true)
+    c.put("stream-1", "email:alice@example.com", true, time.Time{})
 
-    matched, hit := c.get("stream-1", "email:alice@example.com")
+    entry, hit := c.get("stream-1", "email:alice@example.com")
     if !hit {
         t.Fatal("a stored decision must be a cache hit")
     }
-    if !matched {
+    if !entry.matched {
         t.Fatal("the cached match decision must be returned intact")
     }
 }
@@ -23,8 +23,8 @@ func TestMatchCache_HitAfterPut(t *testing.T) {
 // a stream's cached decisions while leaving other streams untouched.
 func TestMatchCache_InvalidateStreamDropsEntries(t *testing.T) {
     c := newMatchCache(time.Minute, 100)
-    c.put("stream-1", "email:alice@example.com", true)
-    c.put("stream-2", "email:bob@example.com", true)
+    c.put("stream-1", "email:alice@example.com", true, time.Time{})
+    c.put("stream-2", "email:bob@example.com", true, time.Time{})
 
     c.invalidateStream("stream-1")
 
@@ -40,7 +40,7 @@ func TestMatchCache_InvalidateStreamDropsEntries(t *testing.T) {
 // once its TTL elapses — the short TTL that bounds cross-node staleness.
 func TestMatchCache_EntryExpiresAfterTTL(t *testing.T) {
     c := newMatchCache(10*time.Millisecond, 100)
-    c.put("stream-1", "email:alice@example.com", true)
+    c.put("stream-1", "email:alice@example.com", true, time.Time{})
 
     time.Sleep(25 * time.Millisecond)
 

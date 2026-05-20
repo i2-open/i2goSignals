@@ -153,7 +153,8 @@ methods.
 
 ## Subject filtering vocabulary
 
-Terms emerging from the `docs/subject_processing.md` design (SSF §8.1.3).
+Terms used by SSF §8.1.3 subject filtering. The implementation guide is
+`docs/subject_processing.md`.
 
 ### Subject
 

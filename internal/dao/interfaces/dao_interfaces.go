@@ -74,6 +74,26 @@ type SubjectFilterDAO interface {
     // indexed Get; the complex/aliases entries need the field-wise scan path
     // (ADR-0003).
     ListComplex(ctx context.Context, streamID string) ([]*model.SubjectFilterEntry, error)
+    // ListPendingDue returns every entry for streamID whose EnforceAt is set
+    // and has elapsed at now — the SSF §9.3 sweep enumerator (PRD #97 issue
+    // #100). It is the lookup that lets the push-transmitter lease owner
+    // discover deferred HYBRID upstream removes due to be relayed. The mongo
+    // adapter rides the sparse partial index on enforce_at so the call stays
+    // cheap even when the full filter table holds millions of active entries.
+    ListPendingDue(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error)
+    // ListPending returns every entry for streamID currently inside its SSF
+    // §9.3 grace window — EnforceAt set and strictly in the future at now.
+    // It is the admin-review enumerator (PRD #97 issue #101): the bounded list
+    // of subjects mid-removal. The boundary is exclusive, the complement of
+    // ListPendingDue's inclusive boundary, so an entry exactly at EnforceAt is
+    // considered elapsed (sweep-eligible), not pending.
+    ListPending(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error)
+    // Count returns the total entry count for streamID and the count of
+    // entries currently inside their §9.3 grace window (PRD #97 issue #101).
+    // The pending count uses the same predicate as ListPending — EnforceAt
+    // strictly after now — so the admin review's counts and pending list
+    // agree.
+    Count(ctx context.Context, streamID string, now time.Time) (total, pending int64, err error)
 }
 
 // KeyDAO handles cryptographic key data access

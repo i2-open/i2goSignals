@@ -3,6 +3,7 @@ package mongo
 import (
     "context"
     "errors"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     "github.com/i2-open/i2goSignals/pkg/logger"
@@ -46,6 +47,11 @@ func (d *SubjectFilterDAOMongo) SetCollection(c *mongo.Collection) {
 //   - (stream_id, kind) — ListComplex selects only the small complex/aliases
 //     subset without scanning the stream's (potentially millions of) simple
 //     entries (ADR-0003).
+//   - (stream_id, enforce_at) PARTIAL on enforce_at $exists — the SSF §9.3
+//     pending-removal index (PRD #97 issue #99). Only pending entries carry
+//     enforce_at, so the partial index stays tiny even when the full filter
+//     holds millions of rows; future admin-review queries enumerate
+//     pending removals without scanning the table.
 func (d *SubjectFilterDAOMongo) ensureIndex(c *mongo.Collection) {
     if c == nil {
         return
@@ -57,6 +63,12 @@ func (d *SubjectFilterDAOMongo) ensureIndex(c *mongo.Collection) {
         },
         {
             Keys: bson.D{{Key: "stream_id", Value: 1}, {Key: "kind", Value: 1}},
+        },
+        {
+            Keys: bson.D{{Key: "stream_id", Value: 1}, {Key: "enforce_at", Value: 1}},
+            Options: options.Index().SetPartialFilterExpression(
+                bson.M{"enforce_at": bson.M{"$exists": true}},
+            ),
         },
     })
     if err != nil {
@@ -126,6 +138,87 @@ func (d *SubjectFilterDAOMongo) ClearForStream(ctx context.Context, streamID str
         return err
     }
     return nil
+}
+
+// ListPendingDue returns every entry for streamID whose enforce_at is set and
+// has elapsed at now (PRD #97 issue #100). The (stream_id, enforce_at)
+// sparse partial index already covers only the pending-removal entries, so
+// the query stays cheap even when the full filter table holds millions of
+// active rows. The boundary is inclusive — enforce_at == now is elapsed,
+// matching the slice #99 entryDelivers clock-boundary rule.
+func (d *SubjectFilterDAOMongo) ListPendingDue(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$lte": now},
+    }
+    cursor, err := c.Find(ctx, filter)
+    if err != nil {
+        sfLog.Error("Error listing pending-due subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    var entries []*model.SubjectFilterEntry
+    if err = cursor.All(ctx, &entries); err != nil {
+        sfLog.Error("Error decoding pending-due subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    return entries, nil
+}
+
+// ListPending returns every entry for streamID currently inside its SSF §9.3
+// grace window — enforce_at strictly after now (PRD #97 issue #101). The
+// (stream_id, enforce_at) sparse partial index covers only pending entries,
+// so the range query stays cheap even when the filter table holds millions of
+// active rows. The boundary is exclusive, the complement of ListPendingDue:
+// an entry whose enforce_at == now has elapsed and is sweep-eligible, not
+// pending.
+func (d *SubjectFilterDAOMongo) ListPending(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$gt": now},
+    }
+    cursor, err := c.Find(ctx, filter)
+    if err != nil {
+        sfLog.Error("Error listing pending subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    var entries []*model.SubjectFilterEntry
+    if err = cursor.All(ctx, &entries); err != nil {
+        sfLog.Error("Error decoding pending subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    return entries, nil
+}
+
+// Count returns total entries for streamID and the subset currently inside
+// their §9.3 grace window (PRD #97 issue #101). Two CountDocuments calls; the
+// pending count rides the (stream_id, enforce_at) partial index.
+func (d *SubjectFilterDAOMongo) Count(ctx context.Context, streamID string, now time.Time) (int64, int64, error) {
+    c, err := d.col()
+    if err != nil {
+        return 0, 0, err
+    }
+    total, err := c.CountDocuments(ctx, bson.M{"stream_id": streamID})
+    if err != nil {
+        sfLog.Error("Error counting subject filter entries", "sid", streamID, "error", err)
+        return 0, 0, err
+    }
+    pending, err := c.CountDocuments(ctx, bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$gt": now},
+    })
+    if err != nil {
+        sfLog.Error("Error counting pending subject filter entries", "sid", streamID, "error", err)
+        return 0, 0, err
+    }
+    return total, pending, nil
 }
 
 // ListComplex returns the complex and aliases entries for streamID. The

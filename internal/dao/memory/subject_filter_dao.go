@@ -3,6 +3,7 @@ package memory
 import (
     "context"
     "sync"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -97,6 +98,65 @@ func (d *SubjectFilterDAOMemory) ClearForStream(_ context.Context, streamID stri
     delete(d.nonSimple, streamID)
     d.mu.Unlock()
     return nil
+}
+
+// ListPendingDue returns every entry for streamID whose EnforceAt is set and
+// has elapsed at now (PRD #97 issue #100). The boundary is inclusive —
+// EnforceAt == now is "elapsed", matching the slice #99 entryDelivers clock
+// rule, so the sweep relays at the tick that crosses the boundary rather
+// than one tick later.
+//
+// The memory adapter does a linear scan; the mongo adapter rides the sparse
+// partial index on enforce_at so the call stays cheap at scale.
+func (d *SubjectFilterDAOMemory) ListPendingDue(_ context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    matches := d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        if e.StreamId != streamID {
+            return false
+        }
+        if e.EnforceAt.IsZero() {
+            return false
+        }
+        return !e.EnforceAt.After(now)
+    })
+    return matches, nil
+}
+
+// ListPending returns every entry for streamID currently inside its SSF §9.3
+// grace window — EnforceAt set and strictly after now (PRD #97 issue #101).
+// The boundary is exclusive, the complement of ListPendingDue's inclusive
+// boundary: an entry at exactly EnforceAt has elapsed and is sweep-eligible,
+// not pending. The memory adapter scans the store; the mongo adapter rides
+// the sparse partial index on enforce_at so the call stays cheap at scale.
+func (d *SubjectFilterDAOMemory) ListPending(_ context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    matches := d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        if e.StreamId != streamID {
+            return false
+        }
+        if e.EnforceAt.IsZero() {
+            return false
+        }
+        return e.EnforceAt.After(now)
+    })
+    return matches, nil
+}
+
+// Count returns total entries for streamID and the subset currently inside
+// their §9.3 grace window (PRD #97 issue #101). Pending uses the same
+// predicate as ListPending. The memory adapter scans the store; the mongo
+// adapter issues two CountDocuments calls.
+func (d *SubjectFilterDAOMemory) Count(_ context.Context, streamID string, now time.Time) (int64, int64, error) {
+    var total, pending int64
+    d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        if e.StreamId != streamID {
+            return false
+        }
+        total++
+        if !e.EnforceAt.IsZero() && e.EnforceAt.After(now) {
+            pending++
+        }
+        return false
+    })
+    return total, pending, nil
 }
 
 // ListComplex returns the complex and aliases entries for streamID. It visits
