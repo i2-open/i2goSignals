@@ -123,7 +123,8 @@ func TestNotifySubjectFilterChange_LocalOwnerInvalidatesWithoutHop(t *testing.T)
 
     // A peer node processes the Add Subject: the shared filter changes but the
     // owner's cache is left stale.
-    require.NoError(t, h.peerFilter.AddSubject(ctx, stream, subject, false))
+    _, addErr := h.peerFilter.AddSubject(ctx, stream, subject, false)
+    require.NoError(t, addErr)
     require.False(t, h.routerFilter.Allows(ctx, stream, event),
         "precondition: the owner's cached decision is expected to be stale")
 

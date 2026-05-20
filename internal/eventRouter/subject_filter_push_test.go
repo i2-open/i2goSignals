@@ -175,7 +175,8 @@ func TestPushFilter_NoneStreamDeliversAfterAddSubject(t *testing.T) {
     stream := h.createPushStream(t, model.DefaultSubjectsNone)
 
     subject := emailSubjectFor("alice@example.com")
-    require.NoError(t, h.subjectFilter.AddSubject(context.Background(), stream, subject, false))
+    _, addErr := h.subjectFilter.AddSubject(context.Background(), stream, subject, false)
+    require.NoError(t, addErr)
 
     jti := h.addPendingEvent(t, stream.StreamConfiguration.Id, emailSubjectFor("alice@example.com"), false)
 

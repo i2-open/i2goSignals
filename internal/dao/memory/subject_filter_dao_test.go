@@ -114,6 +114,68 @@ func TestSubjectFilterDAOMemory_EnforceAtReviveClearsField(t *testing.T) {
     }
 }
 
+// TestSubjectFilterDAOMemory_ListPendingDueReturnsOnlyElapsedForStream verifies
+// the SSF §9.3 sweep enumerator (PRD #97 issue #100): ListPendingDue returns
+// every entry for the named stream whose EnforceAt is set and has elapsed at
+// the supplied now, and never returns active entries (EnforceAt zero) or
+// entries belonging to other streams.
+func TestSubjectFilterDAOMemory_ListPendingDueReturnsOnlyElapsedForStream(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    elapsed := simpleEntry("stream-1", "email:elapsed@example.com")
+    elapsed.EnforceAt = now.Add(-time.Second)
+    _ = dao.Add(ctx, elapsed)
+
+    pending := simpleEntry("stream-1", "email:pending@example.com")
+    pending.EnforceAt = now.Add(30 * time.Second)
+    _ = dao.Add(ctx, pending)
+
+    active := simpleEntry("stream-1", "email:active@example.com")
+    // EnforceAt is zero — fully active, not pending.
+    _ = dao.Add(ctx, active)
+
+    otherStream := simpleEntry("stream-2", "email:elapsed-other@example.com")
+    otherStream.EnforceAt = now.Add(-time.Second)
+    _ = dao.Add(ctx, otherStream)
+
+    got, err := dao.ListPendingDue(ctx, "stream-1", now)
+    if err != nil {
+        t.Fatalf("ListPendingDue: %v", err)
+    }
+    if len(got) != 1 {
+        t.Fatalf("ListPendingDue must return only the elapsed stream-1 entry, got %d entries", len(got))
+    }
+    if got[0].CanonicalKey != "email:elapsed@example.com" {
+        t.Fatalf("expected the elapsed entry, got canonical_key %q", got[0].CanonicalKey)
+    }
+}
+
+// TestSubjectFilterDAOMemory_ListPendingDueBoundaryIsInclusive verifies the
+// clock-boundary behavior: an entry whose EnforceAt equals now is treated as
+// elapsed (consistent with entryDelivers's clock-boundary rule from slice
+// #99), so the sweep relays it on the tick that crosses the boundary.
+func TestSubjectFilterDAOMemory_ListPendingDueBoundaryIsInclusive(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    boundary := simpleEntry("stream-1", "email:boundary@example.com")
+    boundary.EnforceAt = now
+    _ = dao.Add(ctx, boundary)
+
+    got, err := dao.ListPendingDue(ctx, "stream-1", now)
+    if err != nil {
+        t.Fatalf("ListPendingDue: %v", err)
+    }
+    if len(got) != 1 {
+        t.Fatalf("an entry whose EnforceAt equals now must be elapsed, got %d entries", len(got))
+    }
+}
+
 // TestSubjectFilterDAOMemory_ListComplexReturnsOnlyNonSimpleForStream verifies
 // ListComplex returns the complex and aliases entries for one stream and never
 // the simple entries (which are reached by indexed Get, per ADR-0003).

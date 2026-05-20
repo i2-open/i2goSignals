@@ -3,6 +3,7 @@ package mongo
 import (
     "context"
     "errors"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     "github.com/i2-open/i2goSignals/pkg/logger"
@@ -137,6 +138,34 @@ func (d *SubjectFilterDAOMongo) ClearForStream(ctx context.Context, streamID str
         return err
     }
     return nil
+}
+
+// ListPendingDue returns every entry for streamID whose enforce_at is set and
+// has elapsed at now (PRD #97 issue #100). The (stream_id, enforce_at)
+// sparse partial index already covers only the pending-removal entries, so
+// the query stays cheap even when the full filter table holds millions of
+// active rows. The boundary is inclusive — enforce_at == now is elapsed,
+// matching the slice #99 entryDelivers clock-boundary rule.
+func (d *SubjectFilterDAOMongo) ListPendingDue(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$lte": now},
+    }
+    cursor, err := c.Find(ctx, filter)
+    if err != nil {
+        sfLog.Error("Error listing pending-due subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    var entries []*model.SubjectFilterEntry
+    if err = cursor.All(ctx, &entries); err != nil {
+        sfLog.Error("Error decoding pending-due subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    return entries, nil
 }
 
 // ListComplex returns the complex and aliases entries for streamID. The

@@ -47,10 +47,15 @@ func (s *SubjectFilterService) SetNow(now func() time.Time) {
 // stream an inclusion entry is written; on an ALL stream any exclusion entry is
 // dropped. A re-Add during the SSF §9.3 grace window revives a pending-removal
 // entry (clears EnforceAt) so there is no delivery gap (PRD #97 issue #99).
-// verified is stored for audit only and has no effect on filtering. Returns
-// an error when the subject cannot be canonicalized (missing or unrecognized
-// RFC9493 format).
-func (s *SubjectFilterService) AddSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified bool) error {
+// verified is stored for audit only and has no effect on filtering.
+//
+// The returned RelayDecision tells a HYBRID caller what to do with the
+// upstream relay (PRD #97 issue #100): RelayDecisionImmediate for a fresh Add
+// that crosses 0→1, RelayDecisionNone for a revive of a pending entry or an
+// idempotent re-Add (upstream already subscribed). LOCAL callers ignore it.
+// Returns an error when the subject cannot be canonicalized (missing or
+// unrecognized RFC9493 format).
+func (s *SubjectFilterService) AddSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified bool) (RelayDecision, error) {
     return s.applySubjectChange(ctx, stream, subject, verified, true)
 }
 
@@ -58,9 +63,16 @@ func (s *SubjectFilterService) AddSubject(ctx context.Context, stream *model.Str
 // §9.3 grace window the entry is upserted with EnforceAt = now + grace and
 // delivery continues until EnforceAt; with grace 0 the change is immediate
 // (NONE drops the inclusion, ALL inserts an active exclusion). A re-Remove on
-// an already-pending entry does not extend the grace window. Returns an
-// error when the subject cannot be canonicalized.
-func (s *SubjectFilterService) RemoveSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) error {
+// an already-pending entry does not extend the grace window.
+//
+// The returned RelayDecision tells a HYBRID caller what to do with the
+// upstream relay (PRD #97 issue #100): RelayDecisionDeferred when a pending
+// entry was stamped (the push-transmitter lease owner's sweep will fire the
+// upstream remove at enforceAt), RelayDecisionImmediate for the grace-zero
+// fallback that mutated state, RelayDecisionNone for an idempotent re-Remove.
+// LOCAL callers ignore it. Returns an error when the subject cannot be
+// canonicalized.
+func (s *SubjectFilterService) RemoveSubject(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier) (RelayDecision, error) {
     return s.applySubjectChange(ctx, stream, subject, false, false)
 }
 
@@ -69,17 +81,18 @@ func (s *SubjectFilterService) RemoveSubject(ctx context.Context, stream *model.
 // planGraceChange — pure on (baseline, existing entry, add, grace, now) — so
 // the §9.3 entry lifecycle (upsert / stamp / lazy-purge) is in one place and
 // the start-vs-stop "gate the effect, not the verb" rule holds independent of
-// baseline (PRD #97 issue #99).
-func (s *SubjectFilterService) applySubjectChange(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified, add bool) error {
+// baseline (PRD #97 issue #99). The upstream-relay decision is the pure
+// planHybridRelay over the same inputs (issue #100).
+func (s *SubjectFilterService) applySubjectChange(ctx context.Context, stream *model.StreamStateRecord, subject *goSet.SubjectIdentifier, verified, add bool) (RelayDecision, error) {
     streamID := stream.StreamConfiguration.Id
     key, err := subjectid.CanonicalKey(subject)
     if err != nil {
-        return err
+        return RelayDecisionNone, err
     }
 
     existing, err := s.dao.Get(ctx, streamID, key)
     if err != nil && !errors.Is(err, interfaces.ErrNotFound) {
-        return err
+        return RelayDecisionNone, err
     }
     if errors.Is(err, interfaces.ErrNotFound) {
         existing = nil
@@ -94,19 +107,20 @@ func (s *SubjectFilterService) applySubjectChange(ctx context.Context, stream *m
     }
     grace := s.resolveGrace(stream)
     change := planGraceChange(stream.DefaultSubjects, existing, template, add, grace, s.now())
+    decision := planHybridRelay(existing, change, add, grace)
 
     switch {
     case change.upsert != nil:
         if err := s.dao.Add(ctx, change.upsert); err != nil {
-            return err
+            return RelayDecisionNone, err
         }
     case change.remove:
         if err := s.dao.Remove(ctx, streamID, key); err != nil {
-            return err
+            return RelayDecisionNone, err
         }
     }
     s.cache.invalidateStream(streamID)
-    return nil
+    return decision, nil
 }
 
 // resolveGrace picks the SSF §9.3 grace seconds for stream: a non-zero
@@ -135,6 +149,51 @@ func (s *SubjectFilterService) ClearFilter(ctx context.Context, streamID string)
         s.cache.invalidateStream(streamID)
     }
     return err
+}
+
+// DeferredHybridRelayFn is the per-entry callback the SSF §9.3 sweep invokes
+// for each elapsed pending entry on a HYBRID stream (PRD #97 issue #100). It
+// is typically a closure that calls SubjectRelayService.RelayHybrid with
+// add=false; returning a non-nil error leaves the local entry in place so
+// the next sweep retries.
+type DeferredHybridRelayFn func(ctx context.Context, stream *model.StreamStateRecord, entry *model.SubjectFilterEntry) error
+
+// SweepDeferredHybridRelays enumerates every pending-removal entry for
+// stream whose EnforceAt has elapsed at the service clock, invokes relay for
+// each, and removes the local entry on success (PRD #97 issue #100). It is
+// called from the push-transmitter lease owner's existing backfill ticker,
+// so no new scheduler is introduced. Returns the number of entries whose
+// relay succeeded.
+//
+// A relay-callback error is not propagated to the caller — failures are
+// per-entry and the unsuccessful entries are left in place so the next
+// sweep retries.
+func (s *SubjectFilterService) SweepDeferredHybridRelays(ctx context.Context, stream *model.StreamStateRecord, relay DeferredHybridRelayFn) (int, error) {
+    if stream == nil || relay == nil {
+        return 0, nil
+    }
+    streamID := stream.StreamConfiguration.Id
+    entries, err := s.dao.ListPendingDue(ctx, streamID, s.now())
+    if err != nil {
+        return 0, err
+    }
+    relayed := 0
+    for _, entry := range entries {
+        if err := relay(ctx, stream, entry); err != nil {
+            // Leave the entry; the next sweep retries.
+            continue
+        }
+        if err := s.dao.Remove(ctx, entry.StreamId, entry.CanonicalKey); err != nil {
+            // The entry will be picked up again next sweep and the relay
+            // re-fired — the upstream Remove Subject is idempotent.
+            continue
+        }
+        relayed++
+    }
+    if relayed > 0 {
+        s.cache.invalidateStream(streamID)
+    }
+    return relayed, nil
 }
 
 // InvalidateCache drops every cached match decision for streamID on this node.

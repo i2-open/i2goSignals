@@ -28,14 +28,14 @@ func TestSubjectFilterService_NoneRemoveKeepsDeliveringDuringGrace(t *testing.T)
     subject := emailSubject("alice@example.com")
     event := eventFor(subject)
 
-    if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
         t.Fatalf("AddSubject: %v", err)
     }
     if !svc.Allows(ctx, stream, event) {
         t.Fatal("precondition: a NONE stream must deliver an added subject")
     }
 
-    if err := svc.RemoveSubject(ctx, stream, subject); err != nil {
+    if _, err := svc.RemoveSubject(ctx, stream, subject); err != nil {
         t.Fatalf("RemoveSubject: %v", err)
     }
 
@@ -76,7 +76,7 @@ func TestSubjectFilterService_AllRemoveKeepsDeliveringDuringGrace(t *testing.T) 
         t.Fatal("precondition: an ALL stream with an empty filter must deliver every subject")
     }
 
-    if err := svc.RemoveSubject(ctx, stream, subject); err != nil {
+    if _, err := svc.RemoveSubject(ctx, stream, subject); err != nil {
         t.Fatalf("RemoveSubject: %v", err)
     }
 
@@ -107,13 +107,13 @@ func TestSubjectFilterService_ReAddDuringGraceRevives(t *testing.T) {
     subject := emailSubject("alice@example.com")
     event := eventFor(subject)
 
-    if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
         t.Fatalf("AddSubject: %v", err)
     }
-    if err := svc.RemoveSubject(ctx, stream, subject); err != nil {
+    if _, err := svc.RemoveSubject(ctx, stream, subject); err != nil {
         t.Fatalf("RemoveSubject: %v", err)
     }
-    if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
         t.Fatalf("re-AddSubject (revive): %v", err)
     }
 
@@ -145,13 +145,13 @@ func TestSubjectFilterService_DefaultSubjectsFlipClearsAndBypassesGrace(t *testi
     keep := emailSubject("keep@example.com")
     pending := emailSubject("pending@example.com")
 
-    if err := svc.AddSubject(ctx, stream, keep, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, keep, false); err != nil {
         t.Fatalf("AddSubject keep: %v", err)
     }
-    if err := svc.AddSubject(ctx, stream, pending, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, pending, false); err != nil {
         t.Fatalf("AddSubject pending: %v", err)
     }
-    if err := svc.RemoveSubject(ctx, stream, pending); err != nil {
+    if _, err := svc.RemoveSubject(ctx, stream, pending); err != nil {
         t.Fatalf("RemoveSubject pending (sets up pending-removal entry): %v", err)
     }
 
@@ -195,7 +195,7 @@ func TestSubjectFilterService_StartDeliveryIsImmediate(t *testing.T) {
 
     // NONE: nothing delivers until Add; the Add must take effect immediately
     // even with a long grace configured.
-    if err := svc.AddSubject(ctx, stream, subject, false); err != nil {
+    if _, err := svc.AddSubject(ctx, stream, subject, false); err != nil {
         t.Fatalf("AddSubject: %v", err)
     }
     if !svc.Allows(ctx, stream, event) {

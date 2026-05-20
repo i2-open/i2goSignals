@@ -3,6 +3,7 @@ package memory
 import (
     "context"
     "sync"
+    "time"
 
     "github.com/i2-open/i2goSignals/internal/dao/interfaces"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -97,6 +98,27 @@ func (d *SubjectFilterDAOMemory) ClearForStream(_ context.Context, streamID stri
     delete(d.nonSimple, streamID)
     d.mu.Unlock()
     return nil
+}
+
+// ListPendingDue returns every entry for streamID whose EnforceAt is set and
+// has elapsed at now (PRD #97 issue #100). The boundary is inclusive —
+// EnforceAt == now is "elapsed", matching the slice #99 entryDelivers clock
+// rule, so the sweep relays at the tick that crosses the boundary rather
+// than one tick later.
+//
+// The memory adapter does a linear scan; the mongo adapter rides the sparse
+// partial index on enforce_at so the call stays cheap at scale.
+func (d *SubjectFilterDAOMemory) ListPendingDue(_ context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    matches := d.store.FindAll(func(e *model.SubjectFilterEntry) bool {
+        if e.StreamId != streamID {
+            return false
+        }
+        if e.EnforceAt.IsZero() {
+            return false
+        }
+        return !e.EnforceAt.After(now)
+    })
+    return matches, nil
 }
 
 // ListComplex returns the complex and aliases entries for streamID. It visits

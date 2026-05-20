@@ -183,6 +183,53 @@ func (suite *SubjectFilterDAOMongoSuite) TestEnforceAtSparsePartialIndexExists()
     suite.True(found, "an index on enforce_at must exist for SSF §9.3 pending-removal enumeration")
 }
 
+// TestListPendingDueReturnsOnlyElapsedForStream verifies the SSF §9.3 sweep
+// enumerator (PRD #97 issue #100): ListPendingDue returns every entry for the
+// named stream whose enforce_at is set and has elapsed at now, and never
+// returns active entries or entries from other streams. The mongo adapter
+// rides the sparse partial index on enforce_at — only pending entries are
+// indexed, so the query stays cheap at scale.
+func (suite *SubjectFilterDAOMongoSuite) TestListPendingDueReturnsOnlyElapsedForStream() {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    elapsed := mSimpleEntry("stream-1", "email:elapsed@example.com")
+    elapsed.EnforceAt = now.Add(-time.Second)
+    suite.NoError(suite.dao.Add(ctx, elapsed))
+
+    pending := mSimpleEntry("stream-1", "email:pending@example.com")
+    pending.EnforceAt = now.Add(30 * time.Second)
+    suite.NoError(suite.dao.Add(ctx, pending))
+
+    active := mSimpleEntry("stream-1", "email:active@example.com")
+    suite.NoError(suite.dao.Add(ctx, active))
+
+    otherStream := mSimpleEntry("stream-2", "email:elapsed-other@example.com")
+    otherStream.EnforceAt = now.Add(-time.Second)
+    suite.NoError(suite.dao.Add(ctx, otherStream))
+
+    got, err := suite.dao.ListPendingDue(ctx, "stream-1", now)
+    suite.NoError(err)
+    suite.Len(got, 1, "ListPendingDue must return only the elapsed stream-1 entry")
+    suite.Equal("email:elapsed@example.com", got[0].CanonicalKey)
+}
+
+// TestListPendingDueBoundaryIsInclusive verifies the clock-boundary behavior:
+// an entry whose enforce_at equals now is treated as elapsed (consistent with
+// entryDelivers's clock-boundary rule from slice #99).
+func (suite *SubjectFilterDAOMongoSuite) TestListPendingDueBoundaryIsInclusive() {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    boundary := mSimpleEntry("stream-1", "email:boundary@example.com")
+    boundary.EnforceAt = now
+    suite.NoError(suite.dao.Add(ctx, boundary))
+
+    got, err := suite.dao.ListPendingDue(ctx, "stream-1", now)
+    suite.NoError(err)
+    suite.Len(got, 1, "an entry whose enforce_at equals now must be elapsed")
+}
+
 // TestListComplexReturnsOnlyNonSimpleForStream verifies ListComplex returns the
 // complex and aliases entries for one stream and never the simple entries.
 func (suite *SubjectFilterDAOMongoSuite) TestListComplexReturnsOnlyNonSimpleForStream() {

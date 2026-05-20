@@ -74,6 +74,13 @@ type SubjectFilterDAO interface {
     // indexed Get; the complex/aliases entries need the field-wise scan path
     // (ADR-0003).
     ListComplex(ctx context.Context, streamID string) ([]*model.SubjectFilterEntry, error)
+    // ListPendingDue returns every entry for streamID whose EnforceAt is set
+    // and has elapsed at now — the SSF §9.3 sweep enumerator (PRD #97 issue
+    // #100). It is the lookup that lets the push-transmitter lease owner
+    // discover deferred HYBRID upstream removes due to be relayed. The mongo
+    // adapter rides the sparse partial index on enforce_at so the call stays
+    // cheap even when the full filter table holds millions of active entries.
+    ListPendingDue(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error)
 }
 
 // KeyDAO handles cryptographic key data access

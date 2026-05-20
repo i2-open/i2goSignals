@@ -31,7 +31,7 @@ func TestSubjectFilterService_InvalidateCache_ReflectsRemoteNodeChange(t *testin
     }
 
     // The Add Subject lands on the peer node; only the peer's cache is cleared.
-    if err := peer.AddSubject(ctx, stream, subject, false); err != nil {
+    if _, err := peer.AddSubject(ctx, stream, subject, false); err != nil {
         t.Fatalf("AddSubject: %v", err)
     }
 

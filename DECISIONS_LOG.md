@@ -1112,3 +1112,49 @@ governs the per-event cost:
     upsert, so a kind change on re-Add must update the index in both directions.
 *   Regression guard: `TestSubjectFilterService_SimpleMembershipScalesConstantly`
     fails if the simple-subject path regresses to an O(N) scan.
+
+## [2026-05-19] HYBRID upstream-relay tracks the enforced interest state, not the receiver's request (PRD #97, issue #100)
+
+### Problem
+SSF §9.3 grace defers a downstream Remove for the configured window — local
+delivery keeps going. But under `HYBRID` the downstream also drives an
+upstream subscription: if the upstream `remove` were relayed at the receiver's
+Remove request, the upstream tap would close immediately and the grace
+window would be hollow. The naïve "relay whenever a mutation happens"
+approach also breaks the re-Add case: a re-Add during the grace window
+revives the local entry, but if it also fires an upstream `add` we duplicate
+a subscription that was never dropped.
+
+### Solution
+The HYBRID upstream-relay decision tracks the *enforced* interest state, not
+the receiver's instantaneous request. A pure helper, `planHybridRelay(before,
+plannedChange, add, graceSeconds)`, returns one of three decisions:
+- `RelayDecisionDeferred` — a stop-delivery change that stamped a pending
+  entry. The push-transmitter lease owner's existing backfill sweep
+  enumerates pending-due entries (`SubjectFilterDAO.ListPendingDue`, riding
+  the existing sparse partial index on `enforce_at`) and fires
+  `RelayHybrid(add=false)` at enforceAt, then deletes the local entry.
+- `RelayDecisionNone` — a re-Add of a pending entry (upstream still
+  subscribed because the deferred `remove` was never sent) or an idempotent
+  re-stop.
+- `RelayDecisionImmediate` — a fresh Add (true 0→1 transition) or the
+  grace-zero fallback for any mutation; the API handler fires
+  `RelayHybrid` synchronously as before.
+
+`AddSubject`/`RemoveSubject` were widened to return
+`(RelayDecision, error)` so the one non-test call-site
+(`api_stream_management.go`) can branch on the decision.
+
+### Invariants
+*   Re-Add during the grace window must clear `EnforceAt` (planStart already
+    does this) AND must not fire an upstream `add` — the upstream
+    subscription was never dropped.
+*   A relay-callback error in the sweep must leave the local entry in place
+    so the next backfill tick retries.
+*   `PASSTHRU` adds no grace of its own; the upstream transmitter's §9.3
+    handling is authoritative. PASSTHRU never touches the local filter
+    table, so there is no `EnforceAt` to defer against — this property is
+    structural, not enforced by extra code.
+*   `ListPendingDue`'s clock boundary is inclusive (`enforce_at == now` is
+    elapsed), matching the slice #99 `entryDelivers` boundary, so the local
+    delivery decision and the sweep both flip on the same tick.
