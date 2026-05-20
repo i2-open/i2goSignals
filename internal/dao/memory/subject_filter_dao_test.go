@@ -176,6 +176,84 @@ func TestSubjectFilterDAOMemory_ListPendingDueBoundaryIsInclusive(t *testing.T) 
     }
 }
 
+// TestSubjectFilterDAOMemory_ListPendingReturnsOnlyInGraceForStream verifies
+// the admin-review pending enumerator (PRD #97 issue #101): ListPending
+// returns entries with EnforceAt strictly after now (still in §9.3 grace
+// window), excludes due-but-not-swept entries (EnforceAt <= now), excludes
+// active entries (EnforceAt zero), and ignores other streams.
+func TestSubjectFilterDAOMemory_ListPendingReturnsOnlyInGraceForStream(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    inGrace := simpleEntry("stream-1", "email:in-grace@example.com")
+    inGrace.EnforceAt = now.Add(30 * time.Second)
+    _ = dao.Add(ctx, inGrace)
+
+    due := simpleEntry("stream-1", "email:due@example.com")
+    due.EnforceAt = now.Add(-time.Second)
+    _ = dao.Add(ctx, due)
+
+    boundary := simpleEntry("stream-1", "email:boundary@example.com")
+    boundary.EnforceAt = now
+    _ = dao.Add(ctx, boundary)
+
+    active := simpleEntry("stream-1", "email:active@example.com")
+    _ = dao.Add(ctx, active)
+
+    other := simpleEntry("stream-2", "email:in-grace-other@example.com")
+    other.EnforceAt = now.Add(30 * time.Second)
+    _ = dao.Add(ctx, other)
+
+    got, err := dao.ListPending(ctx, "stream-1", now)
+    if err != nil {
+        t.Fatalf("ListPending: %v", err)
+    }
+    if len(got) != 1 {
+        t.Fatalf("ListPending must return only the in-grace stream-1 entry, got %d entries", len(got))
+    }
+    if got[0].CanonicalKey != "email:in-grace@example.com" {
+        t.Fatalf("expected the in-grace entry, got canonical_key %q", got[0].CanonicalKey)
+    }
+}
+
+// TestSubjectFilterDAOMemory_CountReturnsTotalAndPending verifies Count
+// reports the total entry count for a stream and the subset currently inside
+// the §9.3 grace window (PRD #97 issue #101). Active entries count toward
+// total but not pending; due-or-elapsed entries also count toward total but
+// not pending (they have already crossed the grace boundary).
+func TestSubjectFilterDAOMemory_CountReturnsTotalAndPending(t *testing.T) {
+    ctx := context.Background()
+    dao := NewSubjectFilterDAO()
+
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    inGrace := simpleEntry("stream-1", "email:in-grace@example.com")
+    inGrace.EnforceAt = now.Add(30 * time.Second)
+    _ = dao.Add(ctx, inGrace)
+
+    due := simpleEntry("stream-1", "email:due@example.com")
+    due.EnforceAt = now.Add(-time.Second)
+    _ = dao.Add(ctx, due)
+
+    active := simpleEntry("stream-1", "email:active@example.com")
+    _ = dao.Add(ctx, active)
+
+    _ = dao.Add(ctx, simpleEntry("stream-2", "email:other@example.com"))
+
+    total, pending, err := dao.Count(ctx, "stream-1", now)
+    if err != nil {
+        t.Fatalf("Count: %v", err)
+    }
+    if total != 3 {
+        t.Fatalf("total must count every stream-1 entry (active + due + in-grace), got %d", total)
+    }
+    if pending != 1 {
+        t.Fatalf("pending must count only the in-grace entry, got %d", pending)
+    }
+}
+
 // TestSubjectFilterDAOMemory_ListComplexReturnsOnlyNonSimpleForStream verifies
 // ListComplex returns the complex and aliases entries for one stream and never
 // the simple entries (which are reached by indexed Get, per ADR-0003).

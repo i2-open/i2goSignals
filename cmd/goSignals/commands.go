@@ -1972,3 +1972,77 @@ type TokenCmd struct {
 	Revoke     TokenRevokeCmd     `cmd:"" help:"Revoke a token by JTI"`
 	Introspect TokenIntrospectCmd `cmd:"" help:"Introspect a token (RFC7662)"`
 }
+
+// ReviewSubjectFilterCmd is the operator-facing CLI for PRD #97 issue #101: a
+// read-only view of a transmitter stream's locally managed SSF §8.1.3 subject
+// filter. The summary (counts + pending-removal list) is the default; an
+// optional --subject JSON literal opts a point-lookup result into the output.
+// The CLI never dumps the full filter table — the server endpoint is
+// point-lookup + counts by design (ADR-0003).
+type ReviewSubjectFilterCmd struct {
+	Alias   string `arg:"" optional:"" help:"Stream alias to review (defaults to the selected stream)."`
+	Subject string `optional:"" short:"s" help:"SubjectIdentifier JSON for a point lookup, e.g. '{\"format\":\"email\",\"email\":\"alice@example.com\"}'."`
+}
+
+func (r *ReviewSubjectFilterCmd) Run(cli *CLI) error {
+	alias := r.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	body := map[string]any{"stream_id": stream.Id}
+	if r.Subject != "" {
+		var subject goSet.SubjectIdentifier
+		if err := json.Unmarshal([]byte(r.Subject), &subject); err != nil {
+			return fmt.Errorf("--subject must be a SubjectIdentifier JSON literal: %w", err)
+		}
+		body["subject"] = subject
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	reviewUrl, err := url.JoinPath(server.Host, "/subject-filter/review")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, reviewUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("review request failed: %s: %s", resp.Status, string(respBody))
+	}
+
+	// Pretty-print the JSON if it parses; otherwise pass it through raw.
+	var pretty bytes.Buffer
+	if jerr := json.Indent(&pretty, respBody, "", "  "); jerr == nil {
+		fmt.Println("Subject filter review for " + alias + ":")
+		fmt.Println(pretty.String())
+		cli.GetOutputWriter().WriteBytes(pretty.Bytes(), true)
+	} else {
+		fmt.Println(string(respBody))
+		cli.GetOutputWriter().WriteBytes(respBody, true)
+	}
+	return nil
+}
+
+type ReviewCmd struct {
+	SubjectFilter ReviewSubjectFilterCmd `cmd:"" aliases:"sf" help:"Review a stream's locally managed SSF subject filter (admin-scoped)."`
+}

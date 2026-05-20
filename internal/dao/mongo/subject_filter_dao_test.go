@@ -230,6 +230,67 @@ func (suite *SubjectFilterDAOMongoSuite) TestListPendingDueBoundaryIsInclusive()
     suite.Len(got, 1, "an entry whose enforce_at equals now must be elapsed")
 }
 
+// TestListPendingReturnsOnlyInGraceForStream verifies the admin-review pending
+// enumerator (PRD #97 issue #101): ListPending returns entries whose
+// enforce_at is strictly after now (still in §9.3 grace window), excludes
+// due-or-boundary entries (the complement of ListPendingDue), excludes
+// active entries (no enforce_at), and ignores other streams.
+func (suite *SubjectFilterDAOMongoSuite) TestListPendingReturnsOnlyInGraceForStream() {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    inGrace := mSimpleEntry("stream-1", "email:in-grace@example.com")
+    inGrace.EnforceAt = now.Add(30 * time.Second)
+    suite.NoError(suite.dao.Add(ctx, inGrace))
+
+    due := mSimpleEntry("stream-1", "email:due@example.com")
+    due.EnforceAt = now.Add(-time.Second)
+    suite.NoError(suite.dao.Add(ctx, due))
+
+    boundary := mSimpleEntry("stream-1", "email:boundary@example.com")
+    boundary.EnforceAt = now
+    suite.NoError(suite.dao.Add(ctx, boundary))
+
+    active := mSimpleEntry("stream-1", "email:active@example.com")
+    suite.NoError(suite.dao.Add(ctx, active))
+
+    other := mSimpleEntry("stream-2", "email:in-grace-other@example.com")
+    other.EnforceAt = now.Add(30 * time.Second)
+    suite.NoError(suite.dao.Add(ctx, other))
+
+    got, err := suite.dao.ListPending(ctx, "stream-1", now)
+    suite.NoError(err)
+    suite.Len(got, 1, "ListPending must return only the in-grace stream-1 entry")
+    suite.Equal("email:in-grace@example.com", got[0].CanonicalKey)
+}
+
+// TestCountReturnsTotalAndPending verifies the admin-review count pair (PRD
+// #97 issue #101): total covers every stream entry; pending uses the same
+// strictly-after-now predicate as ListPending, so review counts and the
+// pending list always agree.
+func (suite *SubjectFilterDAOMongoSuite) TestCountReturnsTotalAndPending() {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+    inGrace := mSimpleEntry("stream-1", "email:in-grace@example.com")
+    inGrace.EnforceAt = now.Add(30 * time.Second)
+    suite.NoError(suite.dao.Add(ctx, inGrace))
+
+    due := mSimpleEntry("stream-1", "email:due@example.com")
+    due.EnforceAt = now.Add(-time.Second)
+    suite.NoError(suite.dao.Add(ctx, due))
+
+    active := mSimpleEntry("stream-1", "email:active@example.com")
+    suite.NoError(suite.dao.Add(ctx, active))
+
+    suite.NoError(suite.dao.Add(ctx, mSimpleEntry("stream-2", "email:other@example.com")))
+
+    total, pending, err := suite.dao.Count(ctx, "stream-1", now)
+    suite.NoError(err)
+    suite.Equal(int64(3), total, "total must count every stream-1 entry")
+    suite.Equal(int64(1), pending, "pending must count only the in-grace entry")
+}
+
 // TestListComplexReturnsOnlyNonSimpleForStream verifies ListComplex returns the
 // complex and aliases entries for one stream and never the simple entries.
 func (suite *SubjectFilterDAOMongoSuite) TestListComplexReturnsOnlyNonSimpleForStream() {

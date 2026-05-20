@@ -156,6 +156,14 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
+			"ReviewSubjectFilter",
+			http.MethodPost,
+			"/subject-filter/review",
+			h.sa.ReviewSubjectFilter,
+			false,
+		},
+
+		Route{
 			"StreamDelete",
 			http.MethodDelete,
 			"/stream",

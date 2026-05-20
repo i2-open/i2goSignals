@@ -168,6 +168,59 @@ func (d *SubjectFilterDAOMongo) ListPendingDue(ctx context.Context, streamID str
     return entries, nil
 }
 
+// ListPending returns every entry for streamID currently inside its SSF §9.3
+// grace window — enforce_at strictly after now (PRD #97 issue #101). The
+// (stream_id, enforce_at) sparse partial index covers only pending entries,
+// so the range query stays cheap even when the filter table holds millions of
+// active rows. The boundary is exclusive, the complement of ListPendingDue:
+// an entry whose enforce_at == now has elapsed and is sweep-eligible, not
+// pending.
+func (d *SubjectFilterDAOMongo) ListPending(ctx context.Context, streamID string, now time.Time) ([]*model.SubjectFilterEntry, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$gt": now},
+    }
+    cursor, err := c.Find(ctx, filter)
+    if err != nil {
+        sfLog.Error("Error listing pending subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    var entries []*model.SubjectFilterEntry
+    if err = cursor.All(ctx, &entries); err != nil {
+        sfLog.Error("Error decoding pending subject filter entries", "sid", streamID, "error", err)
+        return nil, err
+    }
+    return entries, nil
+}
+
+// Count returns total entries for streamID and the subset currently inside
+// their §9.3 grace window (PRD #97 issue #101). Two CountDocuments calls; the
+// pending count rides the (stream_id, enforce_at) partial index.
+func (d *SubjectFilterDAOMongo) Count(ctx context.Context, streamID string, now time.Time) (int64, int64, error) {
+    c, err := d.col()
+    if err != nil {
+        return 0, 0, err
+    }
+    total, err := c.CountDocuments(ctx, bson.M{"stream_id": streamID})
+    if err != nil {
+        sfLog.Error("Error counting subject filter entries", "sid", streamID, "error", err)
+        return 0, 0, err
+    }
+    pending, err := c.CountDocuments(ctx, bson.M{
+        "stream_id":  streamID,
+        "enforce_at": bson.M{"$gt": now},
+    })
+    if err != nil {
+        sfLog.Error("Error counting pending subject filter entries", "sid", streamID, "error", err)
+        return 0, 0, err
+    }
+    return total, pending, nil
+}
+
 // ListComplex returns the complex and aliases entries for streamID. The
 // kind: $in predicate rides the (stream_id, kind) index, so it selects only the
 // small non-simple subset and never scans the stream's simple entries (ADR-0003).

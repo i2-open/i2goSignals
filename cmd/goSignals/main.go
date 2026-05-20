@@ -47,6 +47,7 @@ type CLI struct {
 	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
 	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`
 	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
+	Review   ReviewCmd   `cmd:"" help:"Review server state (subject filters, ...)"`
 	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
 	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
 	Token    TokenCmd    `cmd:"" help:"Manage issued tokens"`
