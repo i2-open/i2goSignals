@@ -109,7 +109,10 @@ See [`docs/configuration_properties.md`](configuration_properties.md) for full d
 The OpenID Shared Signals Framework §9 raises three security concerns about the
 subject-filtering endpoints. goSignals' posture is summarised below; the
 removal-grace mitigation that addresses §9.3 is implemented by the PRD #97
-work and is documented under `docs/subject_processing.md`.
+work and is described in [`CONTEXT.md`](../CONTEXT.md) ("Removal grace
+period"), with the env var and per-stream override in
+[`configuration_properties.md`](configuration_properties.md) and the storage
+shape in [`adr/0003-split-subject-filter-storage.md`](adr/0003-split-subject-filter-storage.md).
 
 ### §9.1 Subject Probing
 
@@ -164,10 +167,14 @@ growth) are out of scope.
 
 §9.3 — instant blinding by a malicious or coerced subject removal — is
 addressed by the removal-grace mechanism described in
-`docs/subject_processing.md`. A removal stamps the affected filter entry with
-`enforceAt = now + grace`; delivery continues for the grace window so a
-hostile removal cannot blind a receiver instantly. The grace defaults to zero
-(no behaviour change unless the operator opts in).
+[`CONTEXT.md`](../CONTEXT.md) ("Removal grace period"). A removal stamps the
+affected filter entry with `enforceAt = now + grace`; delivery continues for
+the grace window so a hostile removal cannot blind a receiver instantly. The
+grace defaults to zero (no behaviour change unless the operator opts in); the
+`I2SIG_SUBJECT_REMOVAL_GRACE` server-wide default and per-stream override are
+documented in [`configuration_properties.md`](configuration_properties.md),
+and the storage shape (sparse `enforce_at` index, lazy-purge lifecycle) is in
+[`adr/0003-split-subject-filter-storage.md`](adr/0003-split-subject-filter-storage.md).
 
 ## Admin UI Issues
 
