@@ -1,5 +1,50 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-19] SSF subject filtering — CLI settings command group (issue #102)
+
+### Change
+`cmd/goSignals` gains a `subject-filter` (alias `sf`) command group with two
+sub-commands — `show <alias>` and `set <alias> [flags]` — that lets an
+operator view and change the four per-stream subject-filtering knobs in one
+place: `defaultSubjects`, `subject_filter_mode`, `event_source`, and the
+SSF §9.3 `subject_removal_grace_seconds` override.
+
+### Decisions
+*   **No new server endpoint.** The set path PUTs to the existing `/stream`
+    update endpoint with the operator knobs at the top level of a
+    StreamStateRecord-shaped body; `StreamUpdate` already reads them as a
+    partial update (empty/zero = no change). The show path reuses the existing
+    admin-scoped `/subject-filter/review` endpoint.
+*   **Review response carries policy, not just filter table state.** The
+    review response gains `event_source` and `subject_removal_grace_seconds`
+    so it now describes the full subject-filtering policy (it already carried
+    `mode` and `default_subjects`). Better than extending `/stream` GET to
+    return a full StreamStateRecord — keeps server-internal fields
+    (CreatedAt, RemoteAddress, …) off the wire, and the review endpoint is
+    already admin-scoped.
+*   **Post-update display surfaces server WARNs.** After a successful PUT the
+    set command re-reads via the review endpoint and prints the persisted
+    values. A `--grace-seconds` set on a receiver stream lands as 0 in the
+    display, surfacing the server's WARN-and-ignore (#98) without needing a
+    structured response field.
+*   **Partial-update on the wire.** Only knobs the operator named on the
+    command line are sent — untouched fields are omitted, so an operator can
+    change one knob without re-supplying the others. Matches the server's
+    existing partial-update semantics for these four fields.
+*   **Kong enum validation in the CLI.** `--default-subjects`, `--mode`, and
+    `--event-source` are kong enums so typos are caught at parse time. The
+    server's #89 cross-field validation remains the authoritative gate; the
+    CLI just surfaces 400 messages verbatim.
+
+### Invariants
+*   The CLI does not write a full StreamConfiguration on set — only the four
+    operator-knob fields plus `stream_id` / `id` (so the server's auth check
+    finds the configured stream id). The embedded StreamConfiguration in the
+    persisted record is not touched.
+*   The existing `review subject-filter` command remains focused on filter
+    table state (counts, pending, point lookup) and is unchanged on the wire
+    aside from the two new policy fields the response now carries.
+
 ## [2026-05-19] SSF subject filtering — HYBRID refcounted upstream relay (issue #96)
 
 ### Change

@@ -25,13 +25,15 @@ type subjectFilterReviewRequest struct {
 // types in pkg/services are translated to this shape so the wire format does
 // not move when internal types refactor.
 type subjectFilterReviewResponse struct {
-    StreamId              string                           `json:"stream_id"`
-    Mode                  string                           `json:"mode,omitempty"`
-    DefaultSubjects       string                           `json:"default_subjects,omitempty"`
-    PassthruNoLocalFilter bool                             `json:"passthru_no_local_filter,omitempty"`
-    Counts                *subjectFilterReviewCounts       `json:"counts,omitempty"`
-    Pending               []subjectFilterReviewEntry       `json:"pending,omitempty"`
-    Lookup                *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
+    StreamId                   string                           `json:"stream_id"`
+    Mode                       string                           `json:"mode,omitempty"`
+    DefaultSubjects            string                           `json:"default_subjects,omitempty"`
+    EventSource                *model.EventSource               `json:"event_source,omitempty"`
+    SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds,omitempty"`
+    PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
+    Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
+    Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
+    Lookup                     *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
 }
 
 type subjectFilterReviewCounts struct {
@@ -152,10 +154,12 @@ func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWrite
 // adapter and the service stays free of HTTP concerns.
 func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview) subjectFilterReviewResponse {
     out := subjectFilterReviewResponse{
-        StreamId:              stream.StreamConfiguration.Id,
-        Mode:                  stream.SubjectFilterMode,
-        DefaultSubjects:       stream.DefaultSubjects,
-        PassthruNoLocalFilter: review.NoLocalFilter,
+        StreamId:                   stream.StreamConfiguration.Id,
+        Mode:                       stream.SubjectFilterMode,
+        DefaultSubjects:            stream.DefaultSubjects,
+        EventSource:                stream.EventSource,
+        SubjectRemovalGraceSeconds: stream.SubjectRemovalGraceSeconds,
+        PassthruNoLocalFilter:      review.NoLocalFilter,
     }
     if review.Counts != nil {
         out.Counts = &subjectFilterReviewCounts{

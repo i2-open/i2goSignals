@@ -40,19 +40,20 @@ type Globals struct {
 
 type CLI struct {
 	Globals
-	Add      AddCmd      `cmd:"" help:"Define a new server to be managed"`
-	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM"`
-	Delete   DeleteCmd   `cmd:"" help:"Delete a stream"`
-	Select   SelectCmd   `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
-	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
-	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`
-	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
-	Review   ReviewCmd   `cmd:"" help:"Review server state (subject filters, ...)"`
-	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
-	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
-	Token    TokenCmd    `cmd:"" help:"Manage issued tokens"`
-	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
-	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
+	Add           AddCmd           `cmd:"" help:"Define a new server to be managed"`
+	Create        CreateCmd        `cmd:"" help:"Create an issuer KEY, or STREAM"`
+	Delete        DeleteCmd        `cmd:"" help:"Delete a stream"`
+	Select        SelectCmd        `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
+	Get           GetCmd           `cmd:"" help:"Get information from SSF servers"`
+	Generate      GenerateCmd      `cmd:"" help:"Generate an event for testing"`
+	Poll          PollCmd          `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
+	Review        ReviewCmd        `cmd:"" help:"Review server state (subject filters, ...)"`
+	Set           SetCmd           `cmd:"" help:"Set configuration items on server"`
+	Show          ShowCmd          `cmd:"" help:"Show locally configured information"`
+	SubjectFilter SubjectFilterCmd `cmd:"" name:"subject-filter" aliases:"sf" help:"Manage a stream's SSF subject-filtering settings (admin-scoped)."`
+	Token         TokenCmd         `cmd:"" help:"Manage issued tokens"`
+	Exit          ExitCmd          `cmd:"" help:"Exit the shell"`
+	Help          HelpCmd          `cmd:"" help:"Show help on a command"`
 }
 
 var SessionGlobals Globals

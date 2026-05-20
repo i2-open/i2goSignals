@@ -2046,3 +2046,205 @@ func (r *ReviewSubjectFilterCmd) Run(cli *CLI) error {
 type ReviewCmd struct {
 	SubjectFilter ReviewSubjectFilterCmd `cmd:"" aliases:"sf" help:"Review a stream's locally managed SSF subject filter (admin-scoped)."`
 }
+
+// SubjectFilterShowCmd reads the four subject-filtering operator knobs for a
+// stream — defaultSubjects, subject-filter mode, event source, and the SSF §9.3
+// removal grace override — and prints them (PRD #97 issue #102). It hits the
+// existing admin-scoped /subject-filter/review endpoint, which already returns
+// the policy fields alongside the filter-table summary; this command formats
+// only the policy bits for an operator who wants the settings without the
+// counts/pending list.
+type SubjectFilterShowCmd struct {
+	Alias string `arg:"" optional:"" help:"Stream alias to show (defaults to the selected stream)."`
+}
+
+// subjectFilterReviewWire mirrors the wire shape of the admin review endpoint
+// (api_subject_filter_review.go) — just the policy fields the CLI prints. Kept
+// local so the CLI is decoupled from the server's internal types.
+type subjectFilterReviewWire struct {
+	StreamId                   string             `json:"stream_id"`
+	Mode                       string             `json:"mode,omitempty"`
+	DefaultSubjects            string             `json:"default_subjects,omitempty"`
+	EventSource                *model.EventSource `json:"event_source,omitempty"`
+	SubjectRemovalGraceSeconds int                `json:"subject_removal_grace_seconds,omitempty"`
+	PassthruNoLocalFilter      bool               `json:"passthru_no_local_filter,omitempty"`
+}
+
+// fetchSubjectFilterSettings issues a settings-only POST to the admin review
+// endpoint (no subject body field) and decodes the policy bits.
+func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
+	reqBody, err := json.Marshal(map[string]any{"stream_id": streamId})
+	if err != nil {
+		return nil, err
+	}
+	reviewUrl, err := url.JoinPath(server.Host, "/subject-filter/review")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, reviewUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subject-filter review request failed: %s: %s", resp.Status, string(respBody))
+	}
+	var wire subjectFilterReviewWire
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return nil, fmt.Errorf("could not parse subject-filter review response: %w", err)
+	}
+	return &wire, nil
+}
+
+// formatSubjectFilterSettings renders the four subject-filter operator knobs.
+// Defaults are shown as empty so an operator sees what is explicitly set
+// versus what falls through to the server-wide default (matches the wire
+// `omitempty` semantics — an empty field means "use the server default").
+func formatSubjectFilterSettings(alias string, wire *subjectFilterReviewWire) string {
+	es := "(unset)"
+	if wire.EventSource != nil {
+		es = wire.EventSource.Type
+		if len(wire.EventSource.SourceStreamIds) > 0 {
+			es = fmt.Sprintf("%s %v", es, wire.EventSource.SourceStreamIds)
+		}
+	}
+	mode := wire.Mode
+	if mode == "" {
+		mode = "(unset)"
+	}
+	defaults := wire.DefaultSubjects
+	if defaults == "" {
+		defaults = "(unset)"
+	}
+	return fmt.Sprintf("Subject-filter settings for [%s]:\n  stream_id:                     %s\n  default_subjects:              %s\n  mode:                          %s\n  event_source:                  %s\n  subject_removal_grace_seconds: %d\n",
+		alias, wire.StreamId, defaults, mode, es, wire.SubjectRemovalGraceSeconds)
+}
+
+func (s *SubjectFilterShowCmd) Run(cli *CLI) error {
+	alias := s.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	if err != nil {
+		return err
+	}
+	out := formatSubjectFilterSettings(alias, wire)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// SubjectFilterSetCmd writes the four subject-filtering operator knobs through
+// PRD #89's existing stream-update path (PRD #97 issue #102). No new server
+// endpoint is added: the JSON body PUT to /stream is a StreamStateRecord shape
+// — the four knobs ride at the top level alongside the embedded
+// StreamConfiguration — and the server's StreamUpdate treats them as a partial
+// update (empty/zero means "do not change"). Setting `--grace-seconds` on a
+// receiver stream is ignored server-side with a WARN; the post-update display
+// surfaces that ignore by re-reading the persisted value via the review
+// endpoint, so the operator sees what actually landed.
+type SubjectFilterSetCmd struct {
+	Alias           string `arg:"" optional:"" help:"Stream alias to update (defaults to the selected stream)."`
+	DefaultSubjects string `optional:"" default:"" enum:"ALL,NONE," help:"Baseline policy (ALL or NONE). Omit to leave unchanged."`
+	Mode            string `optional:"" default:"" enum:"PASSTHRU,LOCAL,HYBRID," help:"Subject-filter mode for a receiver stream. Omit to leave unchanged."`
+	EventSource     string `optional:"" default:"" enum:"DIRECT,AUDIENCE,EXPLICIT," help:"Event source type for a transmitter stream. Omit to leave unchanged."`
+	GraceSeconds    *int   `optional:"" help:"Per-transmitter-stream removal grace period override in seconds (SSF §9.3). 0 means immediate; omit to leave unchanged."`
+}
+
+func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
+	alias := s.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	// Build a partial-update body. The server's StreamUpdate reads it into a
+	// StreamStateRecord and treats empty/zero fields as "no change". The
+	// embedded StreamConfiguration is left untouched — only the operator-knob
+	// fields are populated.
+	body := map[string]any{
+		"stream_id": stream.Id,
+		// Echo the stream_id on the embedded configuration too so the server's
+		// StreamUpdate authorization check finds it via configReq.Id.
+		"id": stream.Id,
+	}
+	if s.DefaultSubjects != "" {
+		body["default_subjects"] = s.DefaultSubjects
+	}
+	if s.Mode != "" {
+		body["subject_filter_mode"] = s.Mode
+	}
+	if s.EventSource != "" {
+		body["event_source"] = map[string]any{"type": s.EventSource}
+	}
+	if s.GraceSeconds != nil {
+		body["subject_removal_grace_seconds"] = *s.GraceSeconds
+	}
+
+	reqBytes, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPut,
+		server.ServerConfiguration.ConfigurationEndpoint+"?stream_id="+stream.Id,
+		bytes.NewReader(reqBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		// PRD #89 / #98 validation failures surface here with the server's
+		// error message — e.g. an invalid LOCAL/HYBRID combination or a
+		// negative grace value.
+		return fmt.Errorf("stream update failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	cli.Data.ResetStreamConfig(alias)
+
+	// Read back the post-update settings so the operator sees what actually
+	// landed. This surfaces the server's WARN/ignore behavior for a grace
+	// override set on a receiver stream — the persisted value comes back as 0.
+	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	if err != nil {
+		return err
+	}
+	out := formatSubjectFilterSettings(alias, wire)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// SubjectFilterCmd is the operator-facing command group for managing a stream's
+// SSF subject-filtering settings (PRD #97 issue #102): one coherent place to
+// view and change defaultSubjects, mode, event source, and the SSF §9.3
+// removal grace override. The existing `review subject-filter` command remains
+// focused on filter-table state (counts, pending list, point lookup).
+type SubjectFilterCmd struct {
+	Show SubjectFilterShowCmd `cmd:"" help:"Show a stream's subject-filtering settings (defaultSubjects, mode, event source, grace override)."`
+	Set  SubjectFilterSetCmd  `cmd:"" help:"Set a stream's subject-filtering settings via the existing stream-update path."`
+}

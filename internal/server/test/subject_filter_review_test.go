@@ -319,17 +319,57 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturns404WhenFilteringDisabled
         "review endpoint must 404 when subject filtering is disabled")
 }
 
+// TestReviewReturnsEventSourceAndGraceOverride verifies the admin review
+// response carries the stream's full subject-filtering policy — not just the
+// matcher-relevant Mode/DefaultSubjects but also the EventSource descriptor
+// and the SSF §9.3 grace override (PRD #97 issue #102). The CLI's
+// `show subject-filter` consumes this response, so all four operator knobs
+// must round-trip through the wire contract.
+func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverride() {
+    t := suite.T()
+    instance := suite.instance
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
+        &authUtil.AuthContext{ProjectId: instance.projectId})
+    created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{
+            Iss: "DEFAULT",
+            Aud: []string{"https://receiver.example.com"},
+            Delivery: &model.OneOfStreamConfigurationDelivery{
+                PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+            },
+        },
+        DefaultSubjects:            model.DefaultSubjectsNone,
+        SubjectFilterMode:          model.SubjectFilterModeLocal,
+        EventSource:                &model.EventSource{Type: model.EventSourceAudience},
+        SubjectRemovalGraceSeconds: 600,
+    }, instance.projectId, nil)
+    require.NoError(t, err)
+
+    body := `{"stream_id":"` + created.Id + `"}`
+    resp := suite.postReview(suite.instance.streamMgmtToken, body)
+    require.Equal(t, http.StatusOK, resp.StatusCode)
+
+    var review reviewResponse
+    raw, _ := io.ReadAll(resp.Body)
+    require.NoError(t, json.Unmarshal(raw, &review), "response must be JSON: %s", string(raw))
+    require.NotNil(t, review.EventSource, "review must include the stream's event_source")
+    assert.Equal(t, model.EventSourceAudience, review.EventSource.Type, "event_source.type round-trips")
+    assert.Equal(t, 600, review.SubjectRemovalGraceSeconds, "subject_removal_grace_seconds round-trips")
+}
+
 // reviewResponse mirrors the wire shape of the admin review endpoint. It is
 // kept inside the test package so the test pins the JSON contract independently
 // of the server's internal types.
 type reviewResponse struct {
-    StreamId              string             `json:"stream_id"`
-    Mode                  string             `json:"mode"`
-    DefaultSubjects       string             `json:"default_subjects"`
-    PassthruNoLocalFilter bool               `json:"passthru_no_local_filter"`
-    Counts                *reviewCounts      `json:"counts,omitempty"`
-    Pending               []reviewEntry      `json:"pending,omitempty"`
-    Lookup                *reviewLookup      `json:"lookup,omitempty"`
+    StreamId                   string              `json:"stream_id"`
+    Mode                       string              `json:"mode"`
+    DefaultSubjects            string              `json:"default_subjects"`
+    EventSource                *model.EventSource  `json:"event_source,omitempty"`
+    SubjectRemovalGraceSeconds int                 `json:"subject_removal_grace_seconds,omitempty"`
+    PassthruNoLocalFilter      bool                `json:"passthru_no_local_filter"`
+    Counts                     *reviewCounts       `json:"counts,omitempty"`
+    Pending                    []reviewEntry       `json:"pending,omitempty"`
+    Lookup                     *reviewLookup       `json:"lookup,omitempty"`
 }
 
 type reviewCounts struct {
