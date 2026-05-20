@@ -104,6 +104,71 @@ instructions.
 
 See [`docs/configuration_properties.md`](configuration_properties.md) for full details.
 
+## SSF §9 Subject Filtering Security Posture
+
+The OpenID Shared Signals Framework §9 raises three security concerns about the
+subject-filtering endpoints. goSignals' posture is summarised below; the
+removal-grace mitigation that addresses §9.3 is implemented by the PRD #97
+work and is documented under `docs/subject_processing.md`.
+
+### §9.1 Subject Probing
+
+§9.1 warns that a receiver can use Add Subject as an oracle to test whether a
+subject is known to the transmitter — a `404 subject not found` response is the
+attacker's signal. goSignals offers no such oracle:
+
+- It maintains **no subject directory** to probe. The local per-stream filter
+  table is opt-in delivery state, not a record of "subjects known to the
+  transmitter"; populating it is the receiver's own act.
+- `Add Subject` is treated as a **statement of interest**, not a directory
+  lookup. The server records the subject and returns `200` regardless of
+  whether the subject has ever been seen on the wire (`defaultSubjects` is
+  policy, not a delivery guarantee — see PRD #89).
+- The endpoints' only `404` is **feature-disabled** (subject filtering is not
+  enabled server-wide, the endpoints are not advertised in discovery, and the
+  router refuses to honour them). It is a capability statement, not a
+  per-subject answer, and so is not a probing oracle.
+
+### §9.1 on the Relay Path
+
+When a downstream receiver Adds or Removes a subject on a `PASSTHRU` or
+`HYBRID` stream, goSignals relays the change to the upstream transmitter.
+That upstream may have its own §9.1 mitigation and may answer `404` (or any
+other 4xx/5xx). goSignals **logs the upstream response at `WARN` and returns
+success to the downstream receiver** — surfacing the upstream status verbatim
+would re-create the §9.1 oracle goSignals itself does not expose. The local
+filter write (for `HYBRID`) and the receiver's expression of interest are
+authoritative; the upstream subscription is best-effort. The receiver's
+request is never failed by an upstream's §9.1 posture.
+
+### §9.2 Information Harvesting
+
+§9.2 warns that an attacker who has compromised a receiver can harvest events
+by registering subjects of interest and waiting for delivery. goSignals does
+not solve this — it is a property of the receiver's authorization model — but
+its design contains the blast radius:
+
+- A receiver token is scoped to a single stream; a compromised receiver cannot
+  enumerate or harvest from another stream's filter.
+- Subject filtering is **opt-in server-wide** (`I2SIG_SUBJECT_FILTERING`), so
+  deployments that do not want the harvesting surface can disable it
+  entirely.
+- The review endpoint that exposes filter state is bound to the goSignals
+  **admin scope**, distinct from the per-stream receiver scope used by the
+  SSF Add/Remove endpoints. A compromised receiver cannot read the filter.
+
+Active mitigations (rate-limiting Add Subject, anomaly detection on filter
+growth) are out of scope.
+
+### §9.3 Malicious Subject Removal
+
+§9.3 — instant blinding by a malicious or coerced subject removal — is
+addressed by the removal-grace mechanism described in
+`docs/subject_processing.md`. A removal stamps the affected filter entry with
+`enforceAt = now + grace`; delivery continues for the grace window so a
+hostile removal cannot blind a receiver instantly. The grace defaults to zero
+(no behaviour change unless the operator opts in).
+
 ## Admin UI Issues
 
 The current command line stores local state and tokens in a local configuration file. The use of tokens for stream management 

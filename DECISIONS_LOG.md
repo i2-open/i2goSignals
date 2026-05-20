@@ -1,5 +1,39 @@
 # Architectural Decision & Regression Log
 
+## [2026-05-20] SSF subject filtering — §9.1/§9.2 posture and relay-error tolerance (issue #103)
+
+### Change
+SSF §9.1 (subject probing) and §9.2 (information harvesting) compliance for
+goSignals is documented in `docs/security_model.md`. The only behavioural
+change: `PASSTHRU` Add/Remove Subject no longer surfaces an upstream relay
+error to the downstream receiver. The handler logs the upstream status at
+`WARN` and returns `200`/`204`, matching the `HYBRID` tolerance already in
+place since issue #96.
+
+### Decisions
+*   **No oracle on the goSignals endpoints.** goSignals holds no subject
+    directory, so `Add Subject` cannot be a §9.1 probe. The only `404` from
+    the Add/Remove endpoints is feature-disabled (a capability statement, not
+    a per-subject answer). `Add Subject` is a statement of interest and
+    returns `200` regardless of whether the subject has been seen.
+*   **Relay errors are not surfaced.** Returning a `4xx`/`5xx` from the
+    upstream verbatim would re-create the §9.1 oracle goSignals itself does
+    not expose: an attacker would learn which subjects an upstream
+    transmitter refuses. The relay is best-effort; the local filter write
+    (under `HYBRID`) and the receiver's recorded statement of interest are
+    authoritative.
+*   **`PASSTHRU` and `HYBRID` now behave the same on upstream failure.**
+    The previous decision to return `502` from `PASSTHRU` on relay failure
+    (entry below, 2026-05-19) is superseded — it leaked the upstream's §9.1
+    posture to the downstream. Documentation-only mitigations under §9.2
+    remain.
+
+### Invariants
+*   The upstream relay status code is logged at `WARN` by the
+    `handleSubjectChange` handler and never propagated to the downstream.
+*   Active §9.1/§9.2 mitigations (rate-limiting Add Subject, anomaly
+    detection on filter growth) remain out of scope.
+
 ## [2026-05-19] SSF subject filtering — CLI settings command group (issue #102)
 
 ### Change
@@ -68,8 +102,9 @@ relay; `handleSubjectChange` calls it after the local filter is written.
     relay-target receiver stream's `DefaultSubjects`.
 *   **A HYBRID upstream relay failure is tolerated, not surfaced.** The local
     filter write is the primary outcome; a failed relay is logged at WARN and
-    the handler still returns 200/204. This differs from PASSTHRU (502 on relay
-    failure) because PASSTHRU has no local fallback.
+    the handler still returns 200/204. (At the time of this entry PASSTHRU
+    instead returned 502; the 2026-05-20 PRD #97 / slice #103 entry aligns
+    PASSTHRU with HYBRID for SSF §9.1 compliance.)
 *   **`SubjectFilterService.Selects`** extracted from `Allows` — the
     membership predicate (Allows minus the event/operational wrapper), reused
     as the HYBRID interested-set test.
