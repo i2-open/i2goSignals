@@ -1273,8 +1273,9 @@ func (g *GetKeyCmd) Run(c *CLI) error {
 }
 
 type GetCmd struct {
-	Stream GetStreamCmd `cmd:"" aliases:"s" help:"Get stream configurations or stream status"`
-	Key    GetKeyCmd    `cmd:"" help:"Retrieves the issuer public key"`
+	Stream        GetStreamCmd        `cmd:"" aliases:"s" help:"Get stream configurations or stream status"`
+	Key           GetKeyCmd           `cmd:"" help:"Retrieves the issuer public key"`
+	SubjectFilter GetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Get a stream's subject-filter config (operator-tunable knobs)."`
 }
 
 type DeleteStreamCmd struct {
@@ -2070,6 +2071,11 @@ type subjectFilterReviewWire struct {
 	PassthruNoLocalFilter      bool               `json:"passthru_no_local_filter,omitempty"`
 }
 
+// errSubjectFilteringDisabled is the sentinel returned when the admin review
+// endpoint answers 404 — subject filtering is switched off server-wide. The
+// CLI surfaces this as a plain operator message rather than a raw HTTP status.
+var errSubjectFilteringDisabled = errors.New("subject filtering is disabled on this server")
+
 // fetchSubjectFilterSettings issues a settings-only POST to the admin review
 // endpoint (no subject body field) and decodes the policy bits.
 func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
@@ -2095,6 +2101,11 @@ func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFil
 	}
 	defer httpSupport.HandleRespClose(resp)
 	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — surface the sentinel so
+		// callers can render a plain operator message.
+		return nil, errSubjectFilteringDisabled
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("subject-filter review request failed: %s: %s", resp.Status, string(respBody))
 	}
@@ -2247,4 +2258,55 @@ func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
 type SubjectFilterCmd struct {
 	Show SubjectFilterShowCmd `cmd:"" help:"Show a stream's subject-filtering settings (defaultSubjects, mode, event source, grace override)."`
 	Set  SubjectFilterSetCmd  `cmd:"" help:"Set a stream's subject-filtering settings via the existing stream-update path."`
+}
+
+// GetSubjectFilterConfigCmd retrieves a stream's four subject-filter operator
+// knobs — defaultSubjects, subject-filter mode, event source, and the SSF §9.3
+// removal grace seconds — and prints them (PRD #106 issue #107).
+//
+// `config` is the operator-tunable settings view: the knobs an operator sets.
+// It is deliberately distinct from a future `status` sub-command, which
+// surfaces runtime-derived filter-table state (counts, pending removals, point
+// lookups). `config` answers "what policy is configured?"; `status` answers
+// "what is the filter table doing right now?".
+//
+// It calls the existing PRD #97 /subject-filter/review endpoint settings-only
+// (no subject in the body) and reuses the PRD #97 settings formatter — this is
+// a CLI-only restructure, no server, wire, or authorization change.
+type GetSubjectFilterConfigCmd struct {
+	Alias string `arg:"" optional:"" help:"Stream alias whose subject-filter config to get (defaults to the selected stream)."`
+}
+
+func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
+	alias := g.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
+		return err
+	}
+	out := formatSubjectFilterSettings(alias, wire)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// GetSubjectFilterCmd is the `get subject-filter` command group hung off the
+// existing `get` verb (PRD #106). This slice ships the `config` sub-command
+// only — the operator-tunable settings view. A `status` sub-command
+// (runtime-derived filter-table state) is added in a later slice. The
+// distinction is intentional: `config` = settings an operator sets; `status` =
+// state the filter table derives at runtime.
+type GetSubjectFilterCmd struct {
+	Config GetSubjectFilterConfigCmd `cmd:"" help:"Get a stream's subject-filter config: the operator-tunable knobs (defaultSubjects, mode, event source, removal grace)."`
 }
