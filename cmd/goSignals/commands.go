@@ -1485,7 +1485,8 @@ type SetStreamCmd struct {
 }
 
 type SetCmd struct {
-	Stream SetStreamCmd `cmd:"" help:"Change settings on a stream"`
+	Stream        SetStreamCmd        `cmd:"" help:"Change settings on a stream"`
+	SubjectFilter SetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Change a stream's subject-filter configuration."`
 }
 
 func ConfirmProceed(msg string) bool {
@@ -2309,4 +2310,134 @@ func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
 // state the filter table derives at runtime.
 type GetSubjectFilterCmd struct {
 	Config GetSubjectFilterConfigCmd `cmd:"" help:"Get a stream's subject-filter config: the operator-tunable knobs (defaultSubjects, mode, event source, removal grace)."`
+}
+
+// SetSubjectFilterConfigCmd changes a stream's subject-filter operator knobs
+// through PRD #89's existing stream-update PUT path (PRD #106 issue #109). No
+// new server endpoint is added: the JSON body PUT to /stream is a
+// StreamStateRecord shape — the operator knobs ride at the top level alongside
+// the embedded StreamConfiguration — and the server's StreamUpdate treats them
+// as a partial update (empty/zero/omitted means "do not change").
+//
+// Each knob is individually optional; one call may change one knob or many.
+// `--source-stream-ids` closes the gap that left EXPLICIT event sources
+// unconfigurable from the CLI — it accepts raw stream SIDs, comma-separated or
+// repeated, and is sent as the EXPLICIT event source's source stream IDs. The
+// CLI rejects `--source-stream-ids` combined with a non-EXPLICIT event source
+// and rejects `--event-source EXPLICIT` without `--source-stream-ids`;
+// server-side mode/event-source validation is unchanged and still applies.
+//
+// After a successful update the command re-reads and displays the persisted
+// settings so the operator sees what actually landed — in particular the
+// server's WARN-and-ignore behaviour for a grace override set on a receiver
+// stream (the persisted value comes back as 0). This reuses the slice #107
+// `config` settings formatter.
+type SetSubjectFilterConfigCmd struct {
+	Alias           string   `arg:"" optional:"" help:"Stream alias to update (defaults to the selected stream)."`
+	DefaultSubjects string   `optional:"" default:"" enum:"ALL,NONE," help:"Baseline policy (ALL or NONE). Omit to leave unchanged."`
+	Mode            string   `optional:"" default:"" enum:"PASSTHRU,LOCAL,HYBRID," help:"Subject-filter mode for a receiver stream. Omit to leave unchanged."`
+	EventSource     string   `optional:"" default:"" enum:"DIRECT,AUDIENCE,EXPLICIT," help:"Event source type for a transmitter stream. Omit to leave unchanged."`
+	SourceStreamIds []string `optional:"" sep:"," help:"Source stream SIDs for an EXPLICIT event source (comma-separated or repeated)."`
+	GraceSeconds    *int     `optional:"" help:"Per-transmitter-stream removal grace period override in seconds (SSF §9.3). 0 means immediate; omit to leave unchanged."`
+}
+
+func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
+	alias := s.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	// CLI-side validation of the EXPLICIT / --source-stream-ids pairing,
+	// performed before any HTTP request. Server-side mode/event-source
+	// validation is unchanged and still applies.
+	if len(s.SourceStreamIds) > 0 && s.EventSource != "" && s.EventSource != model.EventSourceExplicit {
+		return errors.New("--source-stream-ids is only valid with --event-source EXPLICIT")
+	}
+	if s.EventSource == model.EventSourceExplicit && len(s.SourceStreamIds) == 0 {
+		return errors.New("--event-source EXPLICIT requires --source-stream-ids")
+	}
+
+	// Build a partial-update body. The server's StreamUpdate reads it into a
+	// StreamStateRecord and treats empty/zero/omitted fields as "no change".
+	// The embedded StreamConfiguration is left untouched — only the
+	// operator-knob fields are populated.
+	body := map[string]any{
+		"stream_id": stream.Id,
+		// Echo the stream_id on the embedded configuration too so the server's
+		// StreamUpdate authorization check finds it via configReq.Id.
+		"id": stream.Id,
+	}
+	if s.DefaultSubjects != "" {
+		body["default_subjects"] = s.DefaultSubjects
+	}
+	if s.Mode != "" {
+		body["subject_filter_mode"] = s.Mode
+	}
+	if s.EventSource != "" {
+		es := map[string]any{"type": s.EventSource}
+		if len(s.SourceStreamIds) > 0 {
+			es["source_stream_ids"] = s.SourceStreamIds
+		}
+		body["event_source"] = es
+	}
+	if s.GraceSeconds != nil {
+		body["subject_removal_grace_seconds"] = *s.GraceSeconds
+	}
+
+	reqBytes, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPut,
+		server.ServerConfiguration.ConfigurationEndpoint+"?stream_id="+stream.Id,
+		bytes.NewReader(reqBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		// PRD #89 / #98 validation failures surface here with the server's
+		// error message — e.g. an invalid LOCAL/HYBRID combination or a
+		// negative grace value.
+		return fmt.Errorf("stream update failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	cli.Data.ResetStreamConfig(alias)
+
+	// Read back the post-update settings so the operator sees what actually
+	// landed. This surfaces the server's WARN/ignore behavior for a grace
+	// override set on a receiver stream — the persisted value comes back as 0.
+	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
+		return err
+	}
+	out := formatSubjectFilterSettings(alias, wire)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// SetSubjectFilterCmd is the `set subject-filter` command group hung off the
+// existing `set` verb (PRD #106 issue #109). This slice ships the `config`
+// sub-command only — it changes the operator-tunable knobs. The `add` /
+// `remove` sub-commands (filter-table mutation) are added in later slices.
+type SetSubjectFilterCmd struct {
+	Config SetSubjectFilterConfigCmd `cmd:"" help:"Change a stream's subject-filter config knobs (defaultSubjects, mode, event source, source stream IDs, removal grace) via the existing stream-update path."`
 }
