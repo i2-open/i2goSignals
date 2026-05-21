@@ -1,10 +1,23 @@
 # SSF Subject Filtering in goSignals
 
-This document describes how the OpenID Shared Signals Framework §8.1.3 subject
-filtering is implemented in goSignals, and what choices an operator has when
-configuring it. It is the implementation companion to:
+goSignals can sit between SSF transmitters and receivers as a router. A
+receiver often wants only a *subset* of the subjects an upstream transmitter
+sends. The OpenID Shared Signals Framework §8.1.3 Add Subject / Remove Subject
+endpoints are how a receiver expresses that, and **subject filtering** is the
+goSignals layer that implements them: it tracks which subjects each stream
+cares about and drops events for the rest at delivery time.
 
-- `CONTEXT.md` — the "Subject filtering vocabulary" section (terms used here).
+This document is written for two readers. The **operator section** below is
+what you need to enable, configure, and inspect subject filtering. The
+**implementation notes** further down are for developers and for anyone
+debugging the internals — storage shape, the match-result cache, and the
+deferred-relay sweep.
+
+It is the implementation companion to:
+
+- `CONTEXT.md` — the "Subject filtering vocabulary" section (the terms used
+  here: subject, subject matching, `defaultSubjects`, subject filtering mode,
+  subject handler, Add/Remove Subject).
 - `docs/adr/0002-subject-filtering-at-delivery-time.md` — why filtering is
   applied at delivery time, not at routing time.
 - `docs/adr/0003-split-subject-filter-storage.md` — the storage shape, the
@@ -13,163 +26,356 @@ configuring it. It is the implementation companion to:
 - `docs/configuration_properties.md` — the environment variables referenced
   below.
 
-It is a deliberate replacement for the file's earlier design-question notes:
-those questions are now answered by PRD #89 (subject filtering) and PRD #97
-(admin review + §9.3 removal grace).
+---
 
-## What goSignals does
+# Operator section
 
-goSignals can sit between SSF transmitters and receivers as a router. A
-receiver may want only a *subset* of subjects that the upstream transmitter
-sends, and the SSF Add Subject / Remove Subject endpoints (§8.1.3.2 / §8.1.3.3)
-are how it expresses that. goSignals' subject-filtering layer is the local
-machinery that implements those endpoints:
+## What subject filtering does for you
 
-- It accepts Add Subject / Remove Subject requests from downstream receivers.
-- It maintains a per-stream filter table of the non-default subject set.
-- It drops events that the filter says should not be delivered, at the moment
-  the stream's pending buffer is drained.
-- For receiver streams whose downstream transmitter shares an upstream, it can
-  relay Add/Remove upstream — directly (`PASSTHRU`) or reference-counted
-  (`HYBRID`).
-- It defers a delivery-stopping change by a configurable grace period (SSF §9.3,
+When subject filtering is on, goSignals:
+
+- Accepts Add Subject / Remove Subject requests from downstream receivers.
+- Keeps a per-stream **filter table** of the non-default subject set.
+- Drops events a stream should not receive, at the moment its pending buffer
+  is drained.
+- Can relay Add/Remove **upstream** to the transmitter source when the relay
+  mode says to (`PASSTHRU` or `HYBRID`).
+- Defers a delivery-*stopping* change by a configurable grace period, so a
+  compromised receiver cannot instantly blind a downstream (SSF §9.3,
   "Malicious Subject Removal").
-- It exposes a read-only admin review endpoint so an operator can see the
-  filter's current state without inspecting the database.
+- Exposes a read-only admin review endpoint so you can inspect a stream's
+  filter state without touching the database.
 
-It is **disabled by default**. Operators opt in by setting
-`I2SIG_SUBJECT_FILTERING=ENABLED`. When disabled the Add/Remove Subject
-endpoints return 404 and are absent from SSF discovery metadata; the §9.3 grace
-mechanism and the admin review endpoint are inert.
+Subject filtering is **disabled by default**. While disabled, the Add/Remove
+Subject endpoints return 404, are absent from SSF discovery metadata, and the
+§9.3 grace mechanism and admin review endpoint are inert.
 
-## Enabling subject filtering
+## How a subject flows through a router
 
-| Env var                       | Effect                                                                                                                                                                            |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `I2SIG_SUBJECT_FILTERING`     | `ENABLED` advertises `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery and makes `defaultSubjects` settable. `DISABLED` (default) hides the endpoints and returns 404.   |
-| `I2SIG_SUBJECT_REMOVAL_GRACE` | Server-wide default for the SSF §9.3 grace window, in seconds. `0` (default) = immediate enforcement. Per-stream overrides on transmitter streams.                                |
+A receiver subscribes to a goSignals router; the router in turn pulls from an
+upstream transmitter source. Each stream carries its own filter table, and the
+**relay mode** decides whether an Add/Remove also travels upstream. The three
+relay topologies:
 
-When subject filtering is `ENABLED`:
+```mermaid
+flowchart LR
+    subgraph DR["Downstream receivers"]
+        R1["Receiver A"]
+        R2["Receiver B"]
+    end
 
-- The endpoints `add_subject_endpoint` and `remove_subject_endpoint` appear in
-  the well-known SSF Transmitter Configuration metadata.
-- The per-stream `defaultSubjects` field becomes a settable policy knob.
-- The admin review endpoint `POST /subject-filter/review` is registered.
-- A non-zero `I2SIG_SUBJECT_REMOVAL_GRACE` (or per-stream override) starts
-  honouring §9.3 grace behaviour for `LOCAL` and `HYBRID` streams.
+    subgraph GR["goSignals router"]
+        FT["Per-stream filter table<br/>(defaultSubjects + non-default set)"]
+        M{"Relay mode"}
+    end
 
-Disabling subject filtering after streams have been created leaves any existing
-filter rows in the database but stops consulting them — delivery reverts to
-"send everything that routes here."
+    UP["Upstream transmitter source<br/>(SSF transmitter)"]
 
-## The two policy axes
+    R1 -->|"Add / Remove Subject"| FT
+    R2 -->|"Add / Remove Subject"| FT
+    FT --> M
 
-A stream has two independent subject-filtering knobs. Together they say what
-gets delivered and how Add/Remove requests are honoured.
+    M -->|"PASSTHRU<br/>raw 1:1 relay, no local table"| UP
+    M -->|"LOCAL<br/>filter locally, never touch upstream"| FT
+    M -->|"HYBRID<br/>refcounted relay + local fan-out"| UP
 
-### `defaultSubjects` (transmitter side, baseline policy)
+    UP -->|"events"| FT
+    FT -->|"delivers matching events"| R1
+    FT -->|"delivers matching events"| R2
+```
 
-A goSignals extension — *not* an SSF stream-config field. Two values:
+- **`PASSTHRU`** — the router relays each Add/Remove straight to the upstream
+  and keeps **no local filter table**. Downstream streams share one upstream
+  subscription and share fate: one receiver's Remove removes the subject for
+  everyone. The upstream's own §9.3 handling is authoritative.
+- **`LOCAL`** — the router filters locally and **never touches the upstream**.
+  Required when the upstream advertises no Add/Remove endpoints, or when
+  events arrive by means other than an SSF stream (e.g. a direct POST).
+- **`HYBRID`** — the router both reference-counts the upstream relay *and*
+  fans out locally, so each downstream sees only the subjects it asked for.
+  It relays an `add` upstream when the interested-set goes 0→1 and a `remove`
+  only when it goes 1→0.
 
-- **`ALL`** — every subject that routes to this stream is delivered by default.
-  The filter table holds the subjects that have been *removed*.
-- **`NONE`** — no subject is delivered by default. The filter table holds the
+## Enabling and configuring
+
+Two environment variables gate and tune the feature server-wide
+(full reference in `docs/configuration_properties.md`):
+
+| Variable                      | Default     | What it does                                                                                                  |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------- |
+| `I2SIG_SUBJECT_FILTERING`     | `DISABLED`  | `ENABLED` advertises `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery, makes `defaultSubjects` settable, and registers `POST /subject-filter/review`. `DISABLED` hides the endpoints and returns 404. |
+| `I2SIG_SUBJECT_REMOVAL_GRACE` | `0`         | Server-wide default for the SSF §9.3 grace window, in **seconds**. `0` means immediate enforcement. Per-stream override via the management API. Negative or non-integer values fall back to `0`. |
+
+Disabling subject filtering after streams exist leaves the filter rows in the
+database but stops consulting them — delivery reverts to "send everything that
+routes here."
+
+Beyond the server-wide gate, each stream carries four operator-tunable knobs.
+These are the **config** view (what you set), distinct from the **status**
+view (what the filter table is doing right now).
+
+| Field                            | Side           | Effect                                                                  |
+| -------------------------------- | -------------- | ----------------------------------------------------------------------- |
+| `default_subjects`               | Transmitter    | `ALL` or `NONE` baseline delivery policy.                               |
+| `subject_filter_mode`            | Receiver       | `PASSTHRU` / `LOCAL` / `HYBRID` relay strategy.                         |
+| `event_source.type`              | Transmitter    | `DIRECT` / `AUDIENCE` / `EXPLICIT` — constrains relay-mode validity.    |
+| `subject_removal_grace_seconds`  | Transmitter    | §9.3 grace override (seconds). `0` = immediate. Receiver-side: WARN.    |
+
+### `defaultSubjects` — the baseline policy
+
+A goSignals extension (*not* an SSF stream-config field). Two values:
+
+- **`ALL`** — every subject that routes here is delivered by default; the
+  filter table holds the subjects that have been *removed*.
+- **`NONE`** — nothing is delivered by default; the filter table holds the
   subjects the receiver has explicitly *added*.
 
-It is a *default*, not a delivery guarantee. Per SSF a transmitter MAY ignore
+It is a *default*, not a guarantee. Per SSF, a transmitter MAY ignore
 Add/Remove requests and MAY deliver subjects out-of-band on its own policy. So
-a `NONE` upstream can still send subjects goSignals never added; an `ALL`
+a `NONE` upstream may still send subjects goSignals never added, and an `ALL`
 upstream may withhold some. goSignals therefore applies the downstream filter
-to **whatever arrives**, judged purely on the downstream stream's own
-`defaultSubjects` + filter table, never on how or why the event arrived.
+to **whatever arrives**, judged purely on that stream's own `defaultSubjects`
+plus filter table — never on how or why the event arrived.
 
 Changing `defaultSubjects` on a live stream is a deliberate reset: the filter
 table is cleared, because old entries carry the opposite meaning under the new
-baseline. The reset bypasses the §9.3 grace period (it is an operator action,
-not the §9.3 threat).
+baseline. The reset bypasses the §9.3 grace period — it is an operator action,
+not the §9.3 threat.
 
-### `subjectFilterMode` (receiver side, relay strategy)
+### `subjectFilterMode` — the relay strategy
 
-A setting on a **receiver stream** giving the operator explicit control over
-how Add/Remove Subject requests arriving at the fed downstream transmitter
-streams are handled:
+Set on a **receiver stream**; it picks one of the three topologies in the
+diagram above. `PASSTHRU` and `HYBRID` further require the upstream to
+advertise `add_subject_endpoint` / `remove_subject_endpoint`, and an
+unambiguous **subject handler** — when several receiver streams share an
+issuer, you MUST nominate the relay target at configuration time via an
+Explicit (SID) event source. `HYBRID` is meaningful only against a
+`defaultSubjects=NONE` upstream; against an `ALL` upstream everything already
+arrives, so it behaves as pure local filtering.
 
-- **`PASSTHRU`** — raw 1:1 relay of Add/Remove to the upstream transmitter.
-  No reference counting, no local filtering. Downstream transmitter streams
-  share one upstream subscription and share fate: one downstream's Remove
-  removes the subject for all. goSignals keeps **no local filter table** for a
-  `PASSTHRU` stream. The upstream transmitter's own §9.3 handling is
-  authoritative.
-- **`LOCAL`** — filter locally, independently per downstream transmitter
-  stream. The upstream is never touched. Mandatory when the upstream does not
-  advertise Add/Remove endpoints, or when events arrive by means other than an
-  SSF stream (e.g. direct POST).
-- **`HYBRID`** — reference-counted relay *and* local fan-out filtering, so each
-  downstream sees only the subjects it asked for. goSignals tracks, per subject
-  handler + subject, the set of interested downstream streams; it relays an
-  `add` upstream when the set goes 0→1 and a `remove` only when it goes 1→0.
-  `HYBRID` is meaningful **only against a `defaultSubjects=NONE` upstream** —
-  against an `ALL` upstream everything already arrives, so it behaves as pure
-  local filtering. It is **required** for a `NONE` upstream that fans out to
-  multiple selective downstreams, because a `LOCAL`-only stream would never
-  see events for subjects the upstream had not been asked about.
-
-`PASSTHRU` and `HYBRID` further require:
-
-- The upstream to advertise `add_subject_endpoint` / `remove_subject_endpoint`
-  in its SSF Transmitter Configuration metadata.
-- An unambiguous **subject handler** — when several receiver streams share an
-  issuer, the operator MUST nominate the relay target at configuration time via
-  Explicit (SID) event source. The configuration is rejected otherwise.
-
-The associated **event source** axis (`DIRECT` / `AUDIENCE` / `EXPLICIT`)
-further constrains mode validity; `validateSubjectRemovalGrace` and the other
-config validators reject inconsistent combinations at stream-update time, not
-at runtime.
+The **event source** axis (`DIRECT` / `AUDIENCE` / `EXPLICIT`) constrains
+which modes are valid; config validators reject inconsistent combinations at
+stream-update time, not at runtime.
 
 ## Add Subject / Remove Subject
 
-The standard SSF §8.1.3.2 / §8.1.3.3 endpoints. goSignals' behaviour:
+The standard SSF §8.1.3.2 / §8.1.3.3 endpoints, as goSignals implements them:
 
-- `Add Subject` POST returns **200** regardless of whether the subject has ever
-  been seen on the wire. `defaultSubjects` is policy, not a delivery guarantee;
-  the endpoint is therefore a *statement of interest*, not a directory lookup.
-  This is deliberate §9.1 posture — goSignals does not expose a probing oracle
-  (see `docs/security_model.md` §9.1).
-- `Remove Subject` POST returns **204**.
-- Both carry `stream_id`, `subject`, and (Add only) an optional `verified`
-  flag. `verified` is stored for audit and relayed upstream verbatim but does
-  not influence delivery — goSignals is not an identity verifier.
+- **Add Subject** POST returns **200** regardless of whether the subject has
+  ever been seen on the wire — the endpoint is a *statement of interest*, not
+  a directory lookup. This is deliberate §9.1 posture: goSignals does not
+  expose a probing oracle.
+- **Remove Subject** POST returns **204**.
+- Both carry `stream_id` and `subject`; Add also carries an optional
+  `verified` flag, stored for audit and relayed upstream verbatim but with no
+  effect on delivery — goSignals is not an identity verifier.
 - A receiver token authorizes only its own stream. An admin-scoped caller may
-  target any stream by supplying `stream_id` — no separate administrative
-  mutation API exists.
+  target any stream by supplying `stream_id`.
 - Add/Remove take effect for **future events only** — there is no replay. A
   receiver that wants history uses `ResetDate` / `ResetJti` instead.
 
 **Relay errors are tolerated.** When goSignals relays an Add or Remove
 upstream on a `PASSTHRU` or `HYBRID` stream and the upstream returns 404, any
-other 4xx, 5xx, or a transport error, goSignals logs the upstream response at
-`WARN` and **returns success to the downstream receiver**. Surfacing the
-upstream status verbatim would re-create the §9.1 oracle goSignals does not
-expose for itself; the local filter write (for `HYBRID`) and the receiver's
-expression of interest are authoritative; the upstream subscription is
-best-effort.
+other 4xx, a 5xx, or a transport error, goSignals logs the upstream response
+at `WARN` and **still returns success to the downstream receiver**. Surfacing
+the upstream status verbatim would re-create the §9.1 oracle goSignals does
+not expose for itself; the local filter write (for `HYBRID`) and the
+receiver's expression of interest are authoritative — the upstream
+subscription is best-effort.
+
+The relay decision and the WARN-and-tolerate behaviour, end to end:
+
+```mermaid
+sequenceDiagram
+    participant RX as Downstream receiver
+    participant GS as goSignals router
+    participant US as Upstream transmitter
+
+    Note over RX,US: Add Subject
+    RX->>GS: POST /add-subject { stream_id, subject, verified? }
+    GS->>GS: Write subject to local filter table (LOCAL / HYBRID)
+    alt HYBRID interested-set 0 -> 1
+        GS->>US: relay Add Subject
+        alt upstream OK
+            US-->>GS: 200
+        else upstream 4xx / 5xx / transport error
+            US-->>GS: error
+            GS->>GS: log upstream response at WARN
+        end
+    else PASSTHRU
+        GS->>US: relay Add Subject (no local table)
+    else LOCAL
+        Note over GS: no upstream relay
+    end
+    GS-->>RX: 200 (success regardless of upstream result)
+
+    Note over RX,US: Remove Subject
+    RX->>GS: POST /remove-subject { stream_id, subject }
+    GS->>GS: Stamp filter entry enforce_at = now + grace (LOCAL / HYBRID)
+    alt HYBRID interested-set 1 -> 0
+        Note over GS: upstream remove deferred to enforce_at,<br/>fired later by the lease-owner sweep
+    else PASSTHRU
+        GS->>US: relay Remove Subject (no local table, no grace)
+        opt upstream error
+            US-->>GS: error
+            GS->>GS: log at WARN
+        end
+    else LOCAL
+        Note over GS: no upstream relay
+    end
+    GS-->>RX: 204 (success regardless of upstream result)
+```
+
+## SSF §9.3: the removal grace period
+
+A configurable interval during which a subject whose delivery was just
+*stopped* keeps being delivered, so a malicious or coerced receiver cannot
+instantly blind a downstream by quietly removing a victim subject. The rules:
+
+- **Gate the effect, not the verb.** Any operation that *stops* delivery for a
+  subject — Add or Remove, `ALL` or `NONE` — is deferred by the grace period.
+  Any operation that *starts or resumes* delivery takes effect immediately.
+- **Re-Add cancels.** A re-Add during the grace window revives the entry and
+  clears its deadline.
+- **`LOCAL` and `HYBRID` only.** `PASSTHRU` adds no grace of its own — the
+  upstream transmitter's §9.3 handling is authoritative.
+- **A `defaultSubjects` flip bypasses grace.** A flip is a deliberate operator
+  action, not the §9.3 receiver-initiated threat; it clears the filter table
+  immediately.
+- **Events delivered during the grace window are normal deliveries** (per SSF
+  §9.3) — the receiver must not treat them as errors.
+
+Configure it with the server-wide `I2SIG_SUBJECT_REMOVAL_GRACE` default, or a
+per-transmitter-stream `subject_removal_grace_seconds` override set via the
+management API (or the CLI, below). A grace value on a *receiver* stream is
+ignored with a `WARN`.
+
+## CLI tooling
+
+`cmd/goSignals` exposes subject filtering on the standard `get` and `set`
+verbs. The command group has the alias `sf`, so `get sf` / `set sf` also work.
+Every command takes an optional `<alias>` positional that defaults to the
+selected stream.
+
+```text
+goSignals> get subject-filter config <alias>
+goSignals> get subject-filter status <alias> [<subject-json>] [field flags]
+
+goSignals> set subject-filter config <alias>
+                                  [--default-subjects ALL|NONE]
+                                  [--mode PASSTHRU|LOCAL|HYBRID]
+                                  [--event-source DIRECT|AUDIENCE|EXPLICIT]
+                                  [--source-stream-ids <sid,sid,...>]
+                                  [--grace-seconds <n>]
+goSignals> set subject-filter add    <alias> [<subject-json>] [field flags] [--verified]
+goSignals> set subject-filter remove <alias> [<subject-json>] [field flags]
+```
+
+### Reading: `get subject-filter`
+
+- **`get subject-filter config`** prints the four operator-tunable knobs alone
+  — `defaultSubjects`, mode, event source, removal grace — the policy view of
+  "what is configured?".
+- **`get subject-filter status`** prints the runtime filter-table view: the
+  aggregate `counts` and the pending-removal list. Supply a subject (either as
+  a positional JSON literal or via the format field flags, below) to also get
+  a point-lookup result — found, kind, pending, delivers, enforce-at. A
+  `PASSTHRU` stream keeps no local table; that is reported plainly, not as an
+  error. The CLI never dumps the full filter table — the server endpoint is
+  point-lookup + counts by design (ADR-0003).
+
+### Writing: `set subject-filter`
+
+- **`set subject-filter config`** writes the four knobs through the existing
+  PRD #89 stream-update path — no new server endpoint. Each knob is
+  individually optional; omitted knobs mean "do not change". `--source-stream-ids`
+  accepts raw stream SIDs (comma-separated or repeated) for an `EXPLICIT`
+  event source; the CLI rejects it combined with a non-`EXPLICIT` source and
+  rejects `--event-source EXPLICIT` without it. After the update the command
+  re-reads the persisted settings, so the display surfaces the server's
+  WARN-and-ignore behaviour for a grace override set on a receiver stream (the
+  value comes back as `0`).
+- **`set subject-filter add`** performs an administrative SSF Add Subject
+  (`POST /add-subject`) with the operator's admin token. `--verified` sets the
+  SSF Add Subject `verified` flag and is omitted by default.
+- **`set subject-filter remove`** performs an administrative SSF Remove
+  Subject (`POST /remove-subject`). There is no `--verified` flag — `verified`
+  is meaningful for Add only.
+
+`set subject-filter add` / `remove` are the administrative add/remove verbs:
+they reuse the SSF Add/Remove Subject endpoints, which already accept the
+admin scope, so an operator can mutate any stream's filter by alias without a
+receiver token.
+
+### Supplying a subject
+
+`get subject-filter status` and the `set subject-filter add` / `remove`
+commands take a subject either as a positional `<subject-json>` SubjectIdentifier
+JSON literal **or** via format field flags — the two are mutually exclusive.
+Each field flag pins the subject format; there is deliberately no `--format`
+flag:
+
+| Flag                  | Format         |
+| --------------------- | -------------- |
+| `--email`             | `email`        |
+| `--phone-number`      | `phone_number` |
+| `--iss` + `--sub`     | `iss_sub`      |
+| `--id`                | `opaque`       |
+| `--url`               | `did`          |
+| `--username`          | `username`     |
+| `--external-id`       | `externalId`   |
+| `--account`           | `account`      |
+| `--uri`               | `uri`          |
+
+Complex subjects, the `aliases` array, the `scim` format, and any
+unrecognised format are supplied as positional JSON. Because the positionals
+fill left-to-right, `<alias>` must be given explicitly whenever a positional
+`<subject-json>` is supplied.
+
+> **Naming note.** The server endpoint behind the status/config views is
+> `POST /subject-filter/review`, but the CLI no longer uses the word "review"
+> — `get subject-filter status|config` replaced it. This wire-vs-CLI
+> divergence is deliberate and accepted.
+
+## SSF §9 security posture
+
+goSignals' full §9 posture is in `docs/security_model.md` ("SSF §9 Subject
+Filtering Security Posture"). The short version:
+
+- **§9.1 Subject Probing.** goSignals keeps no subject directory and never
+  returns 404 for "subject unknown" — its only 404 is feature-disabled. Add
+  Subject is a statement of interest, not a lookup. Upstream relay errors are
+  absorbed and not surfaced downstream, so an upstream's §9.1 oracle is not
+  transitively exposed.
+- **§9.2 Information Harvesting.** Not solved (it is a property of the
+  receiver's authorization model), but the blast radius is contained: a
+  receiver token is scoped to a single stream; subject filtering is opt-in
+  server-wide; the review endpoint requires the admin scope, distinct from the
+  per-stream receiver scope.
+- **§9.3 Malicious Subject Removal.** Addressed by the removal grace period.
+
+---
+
+# Implementation notes
+
+This section is for developers and for anyone debugging the internals. The
+operator section above is self-sufficient for running goSignals; nothing below
+changes how you configure it.
 
 ## When the filter is applied
 
-The filter is consulted at **delivery time**, not at routing time. The decision
-is `Allows(stream, event) → deliver | drop`. See
+The filter is consulted at **delivery time**, not at routing time. The
+decision is `Allows(stream, event) → deliver | drop`. See
 `docs/adr/0002-subject-filtering-at-delivery-time.md` for the rationale; the
 short version is that routing runs on whichever node ingests an event, so a
 routing-time filter would force every node to hold every stream's filter with
 no existing cluster channel to keep them consistent.
 
-- **PUSH** — in `runPushLoop` on the node holding the
-  `push-transmitter:<sid>` lease. A filtered-out JTI is **discarded (acked),
-  not pushed** — the pending list still drains and stays bounded. The filter
-  is read from Mongo through a per-node match-result cache (see ADR-0003);
-  Add/Remove on any node triggers a cluster wake-up to the lease owner so the
-  cache stays correct.
+- **PUSH** — in `runPushLoop` on the node holding the `push-transmitter:<sid>`
+  lease. A filtered-out JTI is **discarded (acked), not pushed** — the pending
+  list still drains and stays bounded. The filter is read from Mongo through a
+  per-node match-result cache; Add/Remove on any node triggers a cluster
+  wake-up to the lease owner so the cache stays correct.
 - **POLL** — at poll-response time on whichever node serves the poll. The
   filter is read straight from Mongo (polls are cold and batched).
 - **Operational events** (`Operational=true` — `verify`, `stream-updated`)
@@ -179,23 +385,22 @@ no existing cluster channel to keep them consistent.
 
 A subject filter may legitimately reach **millions of entries** (a watchlist
 of every account or email a receiver cares about), so the storage is split by
-subject kind. See `docs/adr/0003-split-subject-filter-storage.md` for the
-amendment; the highlights:
+subject kind. See `docs/adr/0003-split-subject-filter-storage.md`; the
+highlights:
 
 - **Simple subjects** (the §8.1.3.1 "exactly identical" match) canonicalize
   per RFC9493 per-format rules to one stable key and live in a hash-indexed
   set: O(1) membership.
 - **Complex subjects** (field-wise with undefined-as-wildcard) cannot collapse
   to a single key, so they sit in a small linear-scanned list. Complex
-  subjects are the rare device/session composites; the list stays short in
-  practice.
+  subjects are the rare device/session composites; the list stays short.
 - A per-node, bounded-size, short-TTL **match-result cache** absorbs the hot
   re-lookups when many events arrive about the same subject in a short window.
   PUSH and POLL both go through it.
 - A **sparse partial index on `enforce_at`** (the §9.3 grace timestamp) makes
   pending removals enumerable for the admin review endpoint and the
-  push-transmitter sweep without scanning the whole table. The index is
-  sparse: only entries currently inside their grace window carry the field.
+  push-transmitter sweep without scanning the whole table. Only entries
+  currently inside their grace window carry the field.
 
 Cache accuracy is deliberately soft. A stale **"deliver"** merely
 over-delivers for a few seconds — harmless, and consistent with §9.3's
@@ -208,33 +413,13 @@ Both the Mongo and in-memory DAOs implement the storage shape mechanically the
 same way (`internal/dao/mongo/subject_filter_dao.go`,
 `internal/dao/memory/subject_filter_dao.go`).
 
-## SSF §9.3: removal grace period
+## §9.3 grace as a timestamp, not a scheduler
 
-A configurable interval during which a subject whose delivery was just
-*stopped* continues to be delivered, so a malicious or coerced receiver cannot
-instantly blind a downstream by quietly removing a victim subject.
-
-### Rules
-
-- **Gate the effect, not the verb.** Any operation that *stops* delivery for a
-  subject — regardless of whether it was Add or Remove, regardless of `ALL`/
-  `NONE` — is deferred by the grace period. Any operation that *starts or
-  resumes* delivery takes effect immediately.
-- **Re-Add cancels.** A re-Add during the grace window revives the entry and
-  clears `enforce_at`. The entry lifecycle is upsert / stamp / lazy-purge —
-  never a mid-grace hard delete.
-- **`LOCAL` and `HYBRID` local fan-out only.** `PASSTHRU` adds no grace of its
-  own — the upstream transmitter's §9.3 handling is authoritative.
-- **`defaultSubjects` flip bypasses grace.** A flip is a deliberate operator
-  action, not the §9.3 receiver-initiated threat. The flip clears the filter
-  table immediately and discards any pending removals.
-- **Implemented as a timestamp, not a scheduler.** Stopping delivery stamps
-  the entry with `enforce_at = now + grace`. The delivery-time filter treats
-  a pending-removal entry as **still active until `now ≥ enforce_at`**. Pure
-  lazy comparison: restart-safe, cluster-safe, no scheduled job.
-- **Events delivered during the grace window are normal deliveries** (per
-  SSF §9.3); they flow through the unmodified delivery path and the receiver
-  must not treat them as errors.
+Stopping delivery stamps the entry with `enforce_at = now + grace`. The
+delivery-time filter treats a pending-removal entry as **still active until
+`now ≥ enforce_at`**. Pure lazy comparison: restart-safe, cluster-safe, no
+scheduled job. The entry lifecycle is upsert / stamp / lazy-purge — never a
+mid-grace hard delete, so a re-Add can revive it.
 
 ### HYBRID deferred upstream `remove`
 
@@ -247,28 +432,21 @@ recovery/backfill ticker (`internal/eventRouter/event_router.go`
 `sweepDeferredHybridRelays`) — no new scheduler is introduced. A re-Add (set
 0→1) before `enforce_at` cancels the pending upstream `remove`.
 
-### Configuring the grace
+### Config validation
 
-- **Server-wide default**: `I2SIG_SUBJECT_REMOVAL_GRACE`, in seconds.
-  `0` (default, or unset) = immediate enforcement, no behavior change.
-  Negative or non-integer values fall back to `0`.
-- **Per-transmitter-stream override**: `subject_removal_grace_seconds` on the
-  stream's `StreamStateRecord`, set via the management API. `0` means
-  immediate. Streams with different risk profiles can carry different
-  windows.
-- **Receiver-stream values are ignored with a `WARN`**, mirroring how
-  `defaultSubjects` is treated on a receiver stream — the knob lives on the
-  same record but is only honoured on the side where it has meaning.
-- The override is validated alongside the other PRD #89 mode/event-source
-  config rules at stream-update time, so a misconfiguration is caught before
-  it can change runtime behaviour.
+The `subject_removal_grace_seconds` override is validated alongside the other
+PRD #89 mode / event-source rules at stream-update time
+(`validateSubjectRemovalGrace`, `applyRemovalGraceOverride` in
+`internal/services/stream_service.go`), so a misconfiguration is caught before
+it can change runtime behaviour.
 
 ## Admin review endpoint
 
-`POST /subject-filter/review` (PRD #97 issue #101): a read-only view of a
-stream's locally managed subject filter. Authorized with the goSignals admin
-scope (`ScopeStreamAdmin`, `ScopeStreamMgmt`, or `ScopeRoot`) — distinct from
-the per-stream receiver scope used by the SSF Add/Remove endpoints. A
+`POST /subject-filter/review` (PRD #97 issue #101) — a read-only view of a
+stream's locally managed subject filter, and the wire endpoint behind the
+`get subject-filter config|status` CLI commands. Authorized with the goSignals
+admin scope (`ScopeStreamAdmin`, `ScopeStreamMgmt`, or `ScopeRoot`) — distinct
+from the per-stream receiver scope used by the SSF Add/Remove endpoints. A
 receiver-scoped token is rejected.
 
 **Request body:**
@@ -280,11 +458,11 @@ receiver-scoped token is rejected.
 }
 ```
 
-`stream_id` is required. `subject` is optional; supplying it adds a point-
-lookup result to the response. The endpoint is deliberately not paginated and
-does not enumerate the filter table — the hash index makes "is subject X
-filtered here?" O(1), and millions of rows are never streamed to an operator
-(ADR-0003).
+`stream_id` is required. `subject` is optional; supplying it adds a
+point-lookup result to the response. The endpoint is deliberately not
+paginated and does not enumerate the filter table — the hash index makes "is
+subject X filtered here?" O(1), and millions of rows are never streamed to an
+operator (ADR-0003).
 
 **Response body:**
 
@@ -318,87 +496,16 @@ behaviour is explicit, not an error.
 
 **Status codes:**
 
-| Status | Meaning                                                                                  |
-| ------ | ---------------------------------------------------------------------------------------- |
-| 200    | Review returned.                                                                         |
-| 400    | Malformed body or missing `stream_id`.                                                   |
-| 401    | Unauthenticated.                                                                         |
-| 403    | A stream-bound token names a different stream than `stream_id`.                          |
-| 404    | Subject filtering disabled server-wide, or the stream does not exist.                    |
-| 500    | DAO error.                                                                               |
+| Status | Meaning                                                               |
+| ------ | --------------------------------------------------------------------- |
+| 200    | Review returned.                                                      |
+| 400    | Malformed body or missing `stream_id`.                                |
+| 401    | Unauthenticated.                                                      |
+| 403    | A stream-bound token names a different stream than `stream_id`.       |
+| 404    | Subject filtering disabled server-wide, or the stream does not exist. |
+| 500    | DAO error.                                                            |
 
-## CLI tooling
-
-`cmd/goSignals` exposes the operator surface against the same endpoint and the
-existing PRD #89 stream-update path:
-
-```text
-goSignals> review subject-filter [<alias>] [--subject '<SubjectIdentifier JSON>']
-goSignals> subject-filter show [<alias>]
-goSignals> subject-filter set  [<alias>]
-                                  [--default-subjects ALL|NONE]
-                                  [--mode PASSTHRU|LOCAL|HYBRID]
-                                  [--event-source DIRECT|AUDIENCE|EXPLICIT]
-                                  [--grace-seconds <n>]
-```
-
-- **`review subject-filter`** prints the summary (counts + pending list) by
-  default; `--subject '<SubjectIdentifier JSON>'` opts in a point-lookup
-  result. The CLI never dumps the full filter table — the server endpoint is
-  point-lookup + counts by design.
-- **`subject-filter show`** prints the four operator knobs alone
-  (`defaultSubjects`, mode, event source, grace override) — the policy
-  fields without the filter-table summary.
-- **`subject-filter set`** writes the same four knobs through the existing
-  stream-update path (no new server endpoint). Empty/omitted fields mean "do
-  not change". After the update it re-reads the persisted settings via the
-  review endpoint, so the post-update display surfaces the server's
-  WARN-and-ignore behaviour for a grace override set on a receiver stream
-  (the persisted value comes back as 0).
-
-Administrative subject mutation reuses the SSF endpoints — there is no
-"admin add" / "admin remove" verb. An admin-scoped caller targets any stream
-by supplying its `stream_id` on the existing Add/Remove Subject endpoints.
-
-## SSF §9 security posture
-
-goSignals' full §9 posture is documented in `docs/security_model.md` ("SSF §9
-Subject Filtering Security Posture"). The short version:
-
-- **§9.1 Subject Probing.** goSignals maintains no subject directory and never
-  returns 404 for "subject unknown" — its only 404 is feature-disabled
-  (capability statement). Add Subject is treated as a statement of interest,
-  not a directory lookup. Upstream relay errors are absorbed and not surfaced
-  to the downstream receiver, so an upstream's §9.1 oracle is not transitively
-  exposed.
-- **§9.2 Information Harvesting.** Not solved (it is a property of the
-  receiver's authorization model), but the blast radius is contained: a
-  receiver token is scoped to a single stream; subject filtering is opt-in
-  server-wide; the review endpoint that exposes filter state requires the
-  admin scope, distinct from the per-stream receiver scope.
-- **§9.3 Malicious Subject Removal.** Addressed by the removal grace period
-  described above.
-
-## Quick reference
-
-**Environment variables** (full reference in
-`docs/configuration_properties.md`):
-
-| Variable                      | Default     | What it does                                                                                  |
-| ----------------------------- | ----------- | --------------------------------------------------------------------------------------------- |
-| `I2SIG_SUBJECT_FILTERING`     | `DISABLED`  | Server-wide gate for the SSF subject-filtering endpoints, advertisement, and §9 layer.        |
-| `I2SIG_SUBJECT_REMOVAL_GRACE` | `0`         | Server-wide default §9.3 grace in seconds. Per-stream override via the management API.        |
-
-**Per-stream fields** (`StreamStateRecord`, set via the management API):
-
-| Field                            | Side           | Effect                                                                  |
-| -------------------------------- | -------------- | ----------------------------------------------------------------------- |
-| `default_subjects`               | Transmitter    | `ALL` or `NONE` baseline delivery policy.                               |
-| `subject_filter_mode`            | Receiver       | `PASSTHRU` / `LOCAL` / `HYBRID` relay strategy.                         |
-| `event_source.type`              | Transmitter    | `DIRECT` / `AUDIENCE` / `EXPLICIT` — constrains mode validity.          |
-| `subject_removal_grace_seconds`  | Transmitter    | §9.3 grace override (seconds). `0` = immediate. Receiver-side: WARN.    |
-
-**Key files** (for future readers):
+## Key files
 
 - `internal/services/subject_filter_service.go` — Add/Remove, RelayDecision,
   grace plumbing, deferred-relay sweep entry point.
@@ -411,11 +518,13 @@ Subject Filtering Security Posture"). The short version:
 - `internal/services/stream_service.go` — config validation
   (`validateSubjectRemovalGrace`, `applyRemovalGraceOverride`).
 - `internal/server/api_subject_filter_review.go` — the admin endpoint.
-- `internal/server/api_stream_management.go` — Add/Remove handler with WARN-
-  and-tolerate on upstream relay errors.
+- `internal/server/api_stream_management.go` — Add/Remove handler with
+  WARN-and-tolerate on upstream relay errors.
 - `internal/eventRouter/event_router.go` — `sweepDeferredHybridRelays`,
   called from the existing push-transmitter backfill ticker.
-- `internal/dao/{mongo,memory}/subject_filter_dao.go` — storage adapters
-  with the sparse `enforce_at` partial index.
-- `cmd/goSignals/commands.go` — `ReviewSubjectFilterCmd`,
-  `SubjectFilterShowCmd`, `SubjectFilterSetCmd`, `SubjectFilterCmd`.
+- `internal/dao/{mongo,memory}/subject_filter_dao.go` — storage adapters with
+  the sparse `enforce_at` partial index.
+- `cmd/goSignals/commands.go` — `GetSubjectFilterCmd` (`config`, `status`),
+  `SetSubjectFilterCmd` (`config`, `add`, `remove`).
+- `cmd/goSignals/subject_arg.go` — the shared subject-input parser for the
+  positional JSON literal and the format field flags.
