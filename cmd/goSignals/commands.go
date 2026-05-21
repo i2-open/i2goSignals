@@ -2260,6 +2260,129 @@ type SubjectFilterCmd struct {
 	Set  SubjectFilterSetCmd  `cmd:"" help:"Set a stream's subject-filtering settings via the existing stream-update path."`
 }
 
+// subjectFilterStatusWire mirrors the runtime-state portion of the admin
+// review endpoint response (api_subject_filter_review.go) — the filter-table
+// view a `get subject-filter status` operator sees. Kept local so the CLI is
+// decoupled from the server's internal types; the JSON tags match the wire
+// contract exactly.
+type subjectFilterStatusWire struct {
+	StreamId              string                     `json:"stream_id"`
+	PassthruNoLocalFilter bool                       `json:"passthru_no_local_filter,omitempty"`
+	Counts                *subjectFilterStatusCounts `json:"counts,omitempty"`
+	Pending               []subjectFilterStatusEntry `json:"pending,omitempty"`
+	Lookup                *subjectFilterStatusLookup `json:"lookup,omitempty"`
+}
+
+type subjectFilterStatusCounts struct {
+	Total   int64 `json:"total"`
+	Pending int64 `json:"pending"`
+}
+
+type subjectFilterStatusEntry struct {
+	Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	CanonicalKey string                   `json:"canonical_key"`
+	Kind         string                   `json:"kind"`
+	EnforceAt    time.Time                `json:"enforce_at"`
+}
+
+type subjectFilterStatusLookup struct {
+	Subject      *goSet.SubjectIdentifier `json:"subject"`
+	Found        bool                     `json:"found"`
+	Kind         string                   `json:"kind,omitempty"`
+	CanonicalKey string                   `json:"canonical_key,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	Pending      bool                     `json:"pending,omitempty"`
+	Delivers     bool                     `json:"delivers"`
+}
+
+// fetchSubjectFilterStatus issues a POST to the admin review endpoint and
+// decodes the filter-table state. When subject is non-nil it rides in the body
+// so the response carries a point-lookup result; otherwise the request is
+// summary-only (counts + pending list).
+func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
+	body := map[string]any{"stream_id": streamId}
+	if subject != nil {
+		body["subject"] = subject
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	reviewUrl, err := url.JoinPath(server.Host, "/subject-filter/review")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, reviewUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — reuse the slice #107
+		// sentinel so callers render a plain operator message.
+		return nil, errSubjectFilteringDisabled
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subject-filter review request failed: %s: %s", resp.Status, string(respBody))
+	}
+	var wire subjectFilterStatusWire
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return nil, fmt.Errorf("could not parse subject-filter review response: %w", err)
+	}
+	return &wire, nil
+}
+
+// formatSubjectFilterStatus renders the runtime filter-table state for an
+// operator: the aggregate counts, the pending-removal list, and an optional
+// point-lookup result. A PASSTHRU stream keeps no local filter table — that is
+// stated plainly rather than surfaced as an error or as empty counts.
+func formatSubjectFilterStatus(alias string, wire *subjectFilterStatusWire) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Subject-filter status for [%s]:\n", alias)
+	if wire.PassthruNoLocalFilter {
+		b.WriteString("  This stream is PASSTHRU and keeps no local subject-filter table.\n")
+	} else {
+		total, pending := int64(0), int64(0)
+		if wire.Counts != nil {
+			total, pending = wire.Counts.Total, wire.Counts.Pending
+		}
+		fmt.Fprintf(&b, "  filter-table entries:  %d\n", total)
+		fmt.Fprintf(&b, "  pending removals:      %d\n", pending)
+		if len(wire.Pending) == 0 {
+			b.WriteString("  pending-removal list:  (none)\n")
+		} else {
+			b.WriteString("  pending-removal list:\n")
+			for _, e := range wire.Pending {
+				fmt.Fprintf(&b, "    - %s  kind=%s  enforce-at=%s\n",
+					e.CanonicalKey, e.Kind, e.EnforceAt.Format(time.RFC3339))
+			}
+		}
+	}
+	if wire.Lookup != nil {
+		l := wire.Lookup
+		b.WriteString("  point lookup:\n")
+		fmt.Fprintf(&b, "    found:      %t\n", l.Found)
+		if l.Found {
+			fmt.Fprintf(&b, "    kind:       %s\n", l.Kind)
+			fmt.Fprintf(&b, "    pending:    %t\n", l.Pending)
+			if l.Pending {
+				fmt.Fprintf(&b, "    enforce-at: %s\n", l.EnforceAt.Format(time.RFC3339))
+			}
+		}
+		fmt.Fprintf(&b, "    delivers:   %t\n", l.Delivers)
+	}
+	return b.String()
+}
+
 // GetSubjectFilterConfigCmd retrieves a stream's four subject-filter operator
 // knobs — defaultSubjects, subject-filter mode, event source, and the SSF §9.3
 // removal grace seconds — and prints them (PRD #106 issue #107).
@@ -2301,6 +2424,86 @@ func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	return nil
 }
 
+// GetSubjectFilterStatusCmd retrieves a stream's runtime-derived subject-filter
+// state — the filter-table view — and prints it (PRD #106 issue #108). With no
+// subject it shows the summary: aggregate counts plus the pending-removal list.
+// With a subject (positional JSON or format field flags) it adds a point-lookup
+// result (found, kind, pending, delivers, enforce-at).
+//
+// `status` answers "what is the filter table doing right now?" — distinct from
+// `config`, which shows the operator-tunable knobs. It calls the existing PRD
+// #97 /subject-filter/review endpoint: settings-only when no subject, with the
+// subject in the body for a point lookup.
+//
+// A PASSTHRU stream keeps no local filter table; that is reported plainly as a
+// statement, not an error. A 404 (subject filtering disabled server-wide) is
+// surfaced as the plain disabled message.
+//
+// The two positionals fill left-to-right under kong, so <alias> must be given
+// explicitly whenever a positional subject is supplied.
+type GetSubjectFilterStatusCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias whose subject-filter status to get (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"Optional SubjectIdentifier JSON literal for a point lookup. Mutually exclusive with the format field flags."`
+	Email       string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format point-lookup subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format point-lookup subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Point-lookup subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the uri format."`
+}
+
+// subjectArgs collects the format field flags into the pure subjectArgFlags
+// struct so the shared subject-argument parser can be used without a kong
+// dependency.
+func (g *GetSubjectFilterStatusCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       g.Email,
+		PhoneNumber: g.PhoneNumber,
+		Iss:         g.Iss,
+		Sub:         g.Sub,
+		Id:          g.Id,
+		Url:         g.Url,
+		Username:    g.Username,
+		ExternalId:  g.ExternalId,
+		Account:     g.Account,
+		Uri:         g.Uri,
+	}
+}
+
+func (g *GetSubjectFilterStatusCmd) Run(cli *CLI) error {
+	alias := g.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	subject, err := parseSubjectArg(g.SubjectJson, g.subjectArgs())
+	if err != nil {
+		return err
+	}
+
+	review, err := fetchSubjectFilterStatus(server, stream.Id, subject)
+	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
+		return err
+	}
+	out := formatSubjectFilterStatus(alias, review)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
 // GetSubjectFilterCmd is the `get subject-filter` command group hung off the
 // existing `get` verb (PRD #106). This slice ships the `config` sub-command
 // only — the operator-tunable settings view. A `status` sub-command
@@ -2309,4 +2512,5 @@ func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
 // state the filter table derives at runtime.
 type GetSubjectFilterCmd struct {
 	Config GetSubjectFilterConfigCmd `cmd:"" help:"Get a stream's subject-filter config: the operator-tunable knobs (defaultSubjects, mode, event source, removal grace)."`
+	Status GetSubjectFilterStatusCmd `cmd:"" help:"Get a stream's subject-filter status: filter-table counts, the pending-removal list, and an optional point lookup."`
 }
