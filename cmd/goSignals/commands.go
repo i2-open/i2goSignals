@@ -2638,10 +2638,169 @@ func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	return nil
 }
 
+// changeSubjectFilter performs an administrative SSF Add/Remove Subject from
+// the CLI (PRD #106 issue #110). It is the shared body of `set subject-filter
+// add` and `set subject-filter remove`: both resolve the alias, parse the
+// subject through the shared subject-argument parser, and POST a
+// { stream_id, subject, verified? } body to the SSF endpoint at endpointPath
+// using the operator's admin token.
+//
+// The Add/Remove endpoints already accept ScopeStreamAdmin, so no new server
+// API is involved. verified is only meaningful for Add — remove passes false
+// and the `verified,omitempty` JSON tag keeps it off the wire. A 404 means
+// subject filtering is disabled server-wide; it is surfaced as the plain
+// errSubjectFilteringDisabled message.
+func changeSubjectFilter(cli *CLI, alias, jsonArg string, flags subjectArgFlags, verified bool, endpointPath, verb string) error {
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	subject, err := parseSubjectArg(jsonArg, flags)
+	if err != nil {
+		return err
+	}
+	if subject == nil {
+		return errors.New("a subject is required: supply a SubjectIdentifier JSON literal or the format field flags")
+	}
+
+	body := map[string]any{
+		"stream_id": stream.Id,
+		"subject":   subject,
+	}
+	if verified {
+		body["verified"] = true
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	endpointUrl, err := url.JoinPath(server.Host, endpointPath)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpointUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — reuse the slice #107
+		// sentinel so the operator sees a plain message, not a raw HTTP status.
+		return errSubjectFilteringDisabled
+	}
+	// SSF Add returns 200; Remove returns 204 No Content.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("subject %s request failed: %s: %s", verb, resp.Status, strings.TrimSpace(string(respBody)))
+	}
+
+	out := fmt.Sprintf("Subject %s on stream [%s].\n", verb, alias)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// SetSubjectFilterAddCmd performs an administrative SSF Add Subject from the
+// CLI (PRD #106 issue #110): it opts a subject into delivery on a stream by
+// POSTing to the existing /add-subject endpoint with the operator's admin
+// token. The subject is supplied as positional JSON or via the format field
+// flags through the shared subject-argument parser. `--verified` sets the SSF
+// Add Subject `verified` flag and is omitted by default.
+type SetSubjectFilterAddCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias to add the subject to (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"SubjectIdentifier JSON literal. Mutually exclusive with the format field flags."`
+	Verified    bool   `optional:"" help:"Set the SSF Add Subject verified flag (omitted by default)."`
+	Email       string `optional:"" group:"Subject format flags" help:"Subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Subject in the uri format."`
+}
+
+func (s *SetSubjectFilterAddCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       s.Email,
+		PhoneNumber: s.PhoneNumber,
+		Iss:         s.Iss,
+		Sub:         s.Sub,
+		Id:          s.Id,
+		Url:         s.Url,
+		Username:    s.Username,
+		ExternalId:  s.ExternalId,
+		Account:     s.Account,
+		Uri:         s.Uri,
+	}
+}
+
+func (s *SetSubjectFilterAddCmd) Run(cli *CLI) error {
+	return changeSubjectFilter(cli, s.Alias, s.SubjectJson, s.subjectArgs(), s.Verified, "/add-subject", "added")
+}
+
+// SetSubjectFilterRemoveCmd performs an administrative SSF Remove Subject from
+// the CLI (PRD #106 issue #110): it opts a subject out of delivery on a stream
+// by POSTing to the existing /remove-subject endpoint with the operator's
+// admin token. The subject is supplied as positional JSON or via the format
+// field flags through the shared subject-argument parser. There is no
+// `--verified` flag — verified is meaningful for Add only.
+type SetSubjectFilterRemoveCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias to remove the subject from (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"SubjectIdentifier JSON literal. Mutually exclusive with the format field flags."`
+	Email       string `optional:"" group:"Subject format flags" help:"Subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Subject in the uri format."`
+}
+
+func (s *SetSubjectFilterRemoveCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       s.Email,
+		PhoneNumber: s.PhoneNumber,
+		Iss:         s.Iss,
+		Sub:         s.Sub,
+		Id:          s.Id,
+		Url:         s.Url,
+		Username:    s.Username,
+		ExternalId:  s.ExternalId,
+		Account:     s.Account,
+		Uri:         s.Uri,
+	}
+}
+
+func (s *SetSubjectFilterRemoveCmd) Run(cli *CLI) error {
+	return changeSubjectFilter(cli, s.Alias, s.SubjectJson, s.subjectArgs(), false, "/remove-subject", "removed")
+}
+
 // SetSubjectFilterCmd is the `set subject-filter` command group hung off the
-// existing `set` verb (PRD #106 issue #109). This slice ships the `config`
-// sub-command only — it changes the operator-tunable knobs. The `add` /
-// `remove` sub-commands (filter-table mutation) are added in later slices.
+// existing `set` verb (PRD #106). `config` changes the operator-tunable knobs;
+// `add` / `remove` perform administrative SSF Add/Remove Subject — all
+// subject-filter writes share one parent group.
 type SetSubjectFilterCmd struct {
 	Config SetSubjectFilterConfigCmd `cmd:"" help:"Change a stream's subject-filter config knobs (defaultSubjects, mode, event source, source stream IDs, removal grace) via the existing stream-update path."`
+	Add    SetSubjectFilterAddCmd    `cmd:"" help:"Add a subject to a stream's subject filter (administrative SSF Add Subject)."`
+	Remove SetSubjectFilterRemoveCmd `cmd:"" help:"Remove a subject from a stream's subject filter (administrative SSF Remove Subject)."`
 }
