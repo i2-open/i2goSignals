@@ -847,6 +847,90 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	}
 }
 
+// TestValidateAuthorizationAny_WaitsForJWKSRefresh is a regression test for issue #115.
+// When keyfunc reports an unknown kid, validateOAuthToken must briefly wait for the
+// in-flight background JWKS refresh to land before returning 503. The kid becomes
+// available mid-grace; validation must observe it and return 200.
+func TestValidateAuthorizationAny_WaitsForJWKSRefresh(t *testing.T) {
+	priv1, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa: %v", err)
+	}
+	priv2, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa: %v", err)
+	}
+
+	encodeKey := func(pub *rsa.PublicKey, kid string) map[string]string {
+		n := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+		eBytes := []byte{0x01, 0x00, 0x01}
+		e := base64.RawURLEncoding.EncodeToString(eBytes)
+		return map[string]string{
+			"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256", "n": n, "e": e,
+		}
+	}
+
+	const oldKid = "old-kid"
+	const newKid = "new-kid"
+
+	var mu sync.Mutex
+	includeNew := false
+	var jwksURL string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": jwksURL})
+		case "/jwks":
+			mu.Lock()
+			showNew := includeNew
+			mu.Unlock()
+			keys := []map[string]string{encodeKey(&priv1.PublicKey, oldKid)}
+			if showNew {
+				keys = append(keys, encodeKey(&priv2.PublicKey, newKid))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	jwksURL = srv.URL + "/jwks"
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	// The new kid lands on the JWKS endpoint partway through the grace window,
+	// mimicking a Keycloak that finishes coming up shortly after the request arrives.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		mu.Lock()
+		includeNew = true
+		mu.Unlock()
+	}()
+
+	tok := mintOAuthToken(t, priv2, newKid, []string{authSupport.ScopeEventDelivery})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	start := time.Now()
+	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	elapsed := time.Since(start)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 after JWKS refresh grace, got %d (elapsed %v)", code, elapsed)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("expected validation to wait for refresh, returned in %v", elapsed)
+	}
+}
+
 func TestAuthIssuer_TokenKid(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	assert.NoError(t, err)

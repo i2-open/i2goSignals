@@ -378,43 +378,75 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 	}
 
 	tokenString = strings.TrimSpace(tokenString)
-	isAuthorized := false
 
 	a.mu.RLock()
 	pubKeys = a.OAuthPubKeys
 	a.mu.RUnlock()
 
-	isMissingKID := false
-	for _, jwks := range pubKeys {
-		token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc)
-		if err != nil {
-			if strings.Contains(err.Error(), "key ID was not found") {
-				isMissingKID = true
+	// Try the token against every cached JWKS. Returns (matchedCtx, scopeOK, missingKID).
+	// matchedCtx is non-nil iff a key validated the signature AND scopes were satisfied.
+	// scopeOK is true iff a key validated the signature (regardless of scope match).
+	tryValidate := func() (*AuthContext, bool, bool) {
+		var scopeOK bool
+		var missingKID bool
+		for _, jwks := range pubKeys {
+			token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc)
+			if err != nil {
+				if strings.Contains(err.Error(), "key ID was not found") {
+					missingKID = true
+				}
+				authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
+				continue
 			}
-			authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
-			continue
+			if claims, ok := token.Claims.(*authSupport.OidcClaims); ok && token.Valid {
+				scopeOK = true
+				// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
+				var hasScopes []string
+				if claims.RealmAccess.Roles != nil {
+					hasScopes = claims.RealmAccess.Roles
+				}
+				if claims.Scope != "" {
+					hasScopes = append(hasScopes, strings.Fields(claims.Scope)...)
+				}
+				if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
+					// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
+					return &AuthContext{
+						StreamId:      streamRequested,
+						ProjectId:     "",
+						Eat:           nil,
+						IsOAuthClient: true,
+					}, true, false
+				}
+			}
 		}
-		if claims, ok := token.Claims.(*authSupport.OidcClaims); ok && token.Valid {
-			isAuthorized = true
-			// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
-			var hasScopes []string
-			if claims.RealmAccess.Roles != nil {
-				hasScopes = claims.RealmAccess.Roles
+		return nil, scopeOK, missingKID
+	}
+
+	ctx, isAuthorized, isMissingKID := tryValidate()
+	if ctx != nil {
+		return ctx, http.StatusOK
+	}
+
+	// Cold-cache / key-rotation grace: keyfunc's RefreshUnknownKID kicks off a
+	// background refresh but may return ErrKIDNotFound before that refresh has
+	// landed — either via the rate-limited queue (which waits up to RefreshRateLimit
+	// = 1s before running) or the refreshRequests channel filling under concurrent
+	// unknown-kid requests. Poll past the rate-limit window and re-attempt validation
+	// before failing. Genuinely-unavailable JWKS still surface 503 after the grace.
+	if isMissingKID && !isAuthorized {
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			ctx, isAuthorized, isMissingKID = tryValidate()
+			if ctx != nil {
+				return ctx, http.StatusOK
 			}
-			if claims.Scope != "" {
-				hasScopes = append(hasScopes, strings.Fields(claims.Scope)...)
-			}
-			if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
-				// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
-				return &AuthContext{
-					StreamId:      streamRequested,
-					ProjectId:     "",
-					Eat:           nil,
-					IsOAuthClient: true,
-				}, http.StatusOK
+			if isAuthorized || !isMissingKID {
+				break
 			}
 		}
 	}
+
 	if isAuthorized {
 		return nil, http.StatusForbidden
 	}
@@ -423,7 +455,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		if loadErr != nil {
 			reason += " while some JWKS failed to load"
 		} else {
-			reason += " because Key ID was not found in JWKS (refresh may be in progress)"
+			reason += " because Key ID was not found in JWKS after refresh grace"
 		}
 		authLog.Warn(reason, "error", loadErr)
 		return nil, http.StatusServiceUnavailable
