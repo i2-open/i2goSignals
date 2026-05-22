@@ -729,12 +729,17 @@ func (s *StreamService) calculateDeliveredEvents(requested []string, supported [
 // the goSignals-specific subject-filtering operator knobs can be updated
 // alongside the SSF wire-format configuration. Like the rest of this method,
 // only non-empty request fields are applied.
+//
+// projectID confines a project-scoped token to streams it owns. An empty
+// projectID means the caller is not project-bound (e.g. an external OAuth/STS
+// admin token authorized purely by scope, as goSignalsAdmin uses); such a
+// caller addresses the stream by stream_id and is not project-confined.
 func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		return nil, err
 	}
-	if streamRec.ProjectId != projectID {
+	if projectID != "" && streamRec.ProjectId != projectID {
 		return nil, errors.New(ErrorInvalidProject)
 	}
 
