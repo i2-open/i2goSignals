@@ -1273,8 +1273,9 @@ func (g *GetKeyCmd) Run(c *CLI) error {
 }
 
 type GetCmd struct {
-	Stream GetStreamCmd `cmd:"" aliases:"s" help:"Get stream configurations or stream status"`
-	Key    GetKeyCmd    `cmd:"" help:"Retrieves the issuer public key"`
+	Stream        GetStreamCmd        `cmd:"" aliases:"s" help:"Get stream configurations or stream status"`
+	Key           GetKeyCmd           `cmd:"" help:"Retrieves the issuer public key"`
+	SubjectFilter GetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Get a stream's subject-filter config (operator-tunable knobs)."`
 }
 
 type DeleteStreamCmd struct {
@@ -1484,7 +1485,8 @@ type SetStreamCmd struct {
 }
 
 type SetCmd struct {
-	Stream SetStreamCmd `cmd:"" help:"Change settings on a stream"`
+	Stream        SetStreamCmd        `cmd:"" help:"Change settings on a stream"`
+	SubjectFilter SetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Change a stream's subject-filter configuration."`
 }
 
 func ConfirmProceed(msg string) bool {
@@ -1973,91 +1975,6 @@ type TokenCmd struct {
 	Introspect TokenIntrospectCmd `cmd:"" help:"Introspect a token (RFC7662)"`
 }
 
-// ReviewSubjectFilterCmd is the operator-facing CLI for PRD #97 issue #101: a
-// read-only view of a transmitter stream's locally managed SSF §8.1.3 subject
-// filter. The summary (counts + pending-removal list) is the default; an
-// optional --subject JSON literal opts a point-lookup result into the output.
-// The CLI never dumps the full filter table — the server endpoint is
-// point-lookup + counts by design (ADR-0003).
-type ReviewSubjectFilterCmd struct {
-	Alias   string `arg:"" optional:"" help:"Stream alias to review (defaults to the selected stream)."`
-	Subject string `optional:"" short:"s" help:"SubjectIdentifier JSON for a point lookup, e.g. '{\"format\":\"email\",\"email\":\"alice@example.com\"}'."`
-}
-
-func (r *ReviewSubjectFilterCmd) Run(cli *CLI) error {
-	alias := r.Alias
-	if alias == "" {
-		alias = cli.Data.Selected
-	}
-	stream, server := cli.Data.GetStreamAndServer(alias)
-	if stream == nil {
-		return errors.New("Could not locate locally defined stream alias: " + alias)
-	}
-
-	body := map[string]any{"stream_id": stream.Id}
-	if r.Subject != "" {
-		var subject goSet.SubjectIdentifier
-		if err := json.Unmarshal([]byte(r.Subject), &subject); err != nil {
-			return fmt.Errorf("--subject must be a SubjectIdentifier JSON literal: %w", err)
-		}
-		body["subject"] = subject
-	}
-	reqBody, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-
-	reviewUrl, err := url.JoinPath(server.Host, "/subject-filter/review")
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPost, reviewUrl, bytes.NewReader(reqBody))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := getHttpClient(0)
-	defer client.CloseIdleConnections()
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer httpSupport.HandleRespClose(resp)
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("review request failed: %s: %s", resp.Status, string(respBody))
-	}
-
-	// Pretty-print the JSON if it parses; otherwise pass it through raw.
-	var pretty bytes.Buffer
-	if jerr := json.Indent(&pretty, respBody, "", "  "); jerr == nil {
-		fmt.Println("Subject filter review for " + alias + ":")
-		fmt.Println(pretty.String())
-		cli.GetOutputWriter().WriteBytes(pretty.Bytes(), true)
-	} else {
-		fmt.Println(string(respBody))
-		cli.GetOutputWriter().WriteBytes(respBody, true)
-	}
-	return nil
-}
-
-type ReviewCmd struct {
-	SubjectFilter ReviewSubjectFilterCmd `cmd:"" aliases:"sf" help:"Review a stream's locally managed SSF subject filter (admin-scoped)."`
-}
-
-// SubjectFilterShowCmd reads the four subject-filtering operator knobs for a
-// stream — defaultSubjects, subject-filter mode, event source, and the SSF §9.3
-// removal grace override — and prints them (PRD #97 issue #102). It hits the
-// existing admin-scoped /subject-filter/review endpoint, which already returns
-// the policy fields alongside the filter-table summary; this command formats
-// only the policy bits for an operator who wants the settings without the
-// counts/pending list.
-type SubjectFilterShowCmd struct {
-	Alias string `arg:"" optional:"" help:"Stream alias to show (defaults to the selected stream)."`
-}
-
 // subjectFilterReviewWire mirrors the wire shape of the admin review endpoint
 // (api_subject_filter_review.go) — just the policy fields the CLI prints. Kept
 // local so the CLI is decoupled from the server's internal types.
@@ -2069,6 +1986,11 @@ type subjectFilterReviewWire struct {
 	SubjectRemovalGraceSeconds int                `json:"subject_removal_grace_seconds,omitempty"`
 	PassthruNoLocalFilter      bool               `json:"passthru_no_local_filter,omitempty"`
 }
+
+// errSubjectFilteringDisabled is the sentinel returned when the admin review
+// endpoint answers 404 — subject filtering is switched off server-wide. The
+// CLI surfaces this as a plain operator message rather than a raw HTTP status.
+var errSubjectFilteringDisabled = errors.New("subject filtering is disabled on this server")
 
 // fetchSubjectFilterSettings issues a settings-only POST to the admin review
 // endpoint (no subject body field) and decodes the policy bits.
@@ -2095,6 +2017,11 @@ func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFil
 	}
 	defer httpSupport.HandleRespClose(resp)
 	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — surface the sentinel so
+		// callers can render a plain operator message.
+		return nil, errSubjectFilteringDisabled
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("subject-filter review request failed: %s: %s", resp.Status, string(respBody))
 	}
@@ -2129,8 +2056,148 @@ func formatSubjectFilterSettings(alias string, wire *subjectFilterReviewWire) st
 		alias, wire.StreamId, defaults, mode, es, wire.SubjectRemovalGraceSeconds)
 }
 
-func (s *SubjectFilterShowCmd) Run(cli *CLI) error {
-	alias := s.Alias
+// subjectFilterStatusWire mirrors the runtime-state portion of the admin
+// review endpoint response (api_subject_filter_review.go) — the filter-table
+// view a `get subject-filter status` operator sees. Kept local so the CLI is
+// decoupled from the server's internal types; the JSON tags match the wire
+// contract exactly.
+type subjectFilterStatusWire struct {
+	StreamId              string                     `json:"stream_id"`
+	PassthruNoLocalFilter bool                       `json:"passthru_no_local_filter,omitempty"`
+	Counts                *subjectFilterStatusCounts `json:"counts,omitempty"`
+	Pending               []subjectFilterStatusEntry `json:"pending,omitempty"`
+	Lookup                *subjectFilterStatusLookup `json:"lookup,omitempty"`
+}
+
+type subjectFilterStatusCounts struct {
+	Total   int64 `json:"total"`
+	Pending int64 `json:"pending"`
+}
+
+type subjectFilterStatusEntry struct {
+	Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	CanonicalKey string                   `json:"canonical_key"`
+	Kind         string                   `json:"kind"`
+	EnforceAt    time.Time                `json:"enforce_at"`
+}
+
+type subjectFilterStatusLookup struct {
+	Subject      *goSet.SubjectIdentifier `json:"subject"`
+	Found        bool                     `json:"found"`
+	Kind         string                   `json:"kind,omitempty"`
+	CanonicalKey string                   `json:"canonical_key,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	Pending      bool                     `json:"pending,omitempty"`
+	Delivers     bool                     `json:"delivers"`
+}
+
+// fetchSubjectFilterStatus issues a POST to the admin review endpoint and
+// decodes the filter-table state. When subject is non-nil it rides in the body
+// so the response carries a point-lookup result; otherwise the request is
+// summary-only (counts + pending list).
+func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
+	body := map[string]any{"stream_id": streamId}
+	if subject != nil {
+		body["subject"] = subject
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	reviewUrl, err := url.JoinPath(server.Host, "/subject-filter/review")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, reviewUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — reuse the slice #107
+		// sentinel so callers render a plain operator message.
+		return nil, errSubjectFilteringDisabled
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subject-filter review request failed: %s: %s", resp.Status, string(respBody))
+	}
+	var wire subjectFilterStatusWire
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return nil, fmt.Errorf("could not parse subject-filter review response: %w", err)
+	}
+	return &wire, nil
+}
+
+// formatSubjectFilterStatus renders the runtime filter-table state for an
+// operator: the aggregate counts, the pending-removal list, and an optional
+// point-lookup result. A PASSTHRU stream keeps no local filter table — that is
+// stated plainly rather than surfaced as an error or as empty counts.
+func formatSubjectFilterStatus(alias string, wire *subjectFilterStatusWire) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Subject-filter status for [%s]:\n", alias)
+	if wire.PassthruNoLocalFilter {
+		b.WriteString("  This stream is PASSTHRU and keeps no local subject-filter table.\n")
+	} else {
+		total, pending := int64(0), int64(0)
+		if wire.Counts != nil {
+			total, pending = wire.Counts.Total, wire.Counts.Pending
+		}
+		fmt.Fprintf(&b, "  filter-table entries:  %d\n", total)
+		fmt.Fprintf(&b, "  pending removals:      %d\n", pending)
+		if len(wire.Pending) == 0 {
+			b.WriteString("  pending-removal list:  (none)\n")
+		} else {
+			b.WriteString("  pending-removal list:\n")
+			for _, e := range wire.Pending {
+				fmt.Fprintf(&b, "    - %s  kind=%s  enforce-at=%s\n",
+					e.CanonicalKey, e.Kind, e.EnforceAt.Format(time.RFC3339))
+			}
+		}
+	}
+	if wire.Lookup != nil {
+		l := wire.Lookup
+		b.WriteString("  point lookup:\n")
+		fmt.Fprintf(&b, "    found:      %t\n", l.Found)
+		if l.Found {
+			fmt.Fprintf(&b, "    kind:       %s\n", l.Kind)
+			fmt.Fprintf(&b, "    pending:    %t\n", l.Pending)
+			if l.Pending {
+				fmt.Fprintf(&b, "    enforce-at: %s\n", l.EnforceAt.Format(time.RFC3339))
+			}
+		}
+		fmt.Fprintf(&b, "    delivers:   %t\n", l.Delivers)
+	}
+	return b.String()
+}
+
+// GetSubjectFilterConfigCmd retrieves a stream's four subject-filter operator
+// knobs — defaultSubjects, subject-filter mode, event source, and the SSF §9.3
+// removal grace seconds — and prints them (PRD #106 issue #107).
+//
+// `config` is the operator-tunable settings view: the knobs an operator sets.
+// It is deliberately distinct from a future `status` sub-command, which
+// surfaces runtime-derived filter-table state (counts, pending removals, point
+// lookups). `config` answers "what policy is configured?"; `status` answers
+// "what is the filter table doing right now?".
+//
+// It calls the existing PRD #97 /subject-filter/review endpoint settings-only
+// (no subject in the body) and reuses the PRD #97 settings formatter — this is
+// a CLI-only restructure, no server, wire, or authorization change.
+type GetSubjectFilterConfigCmd struct {
+	Alias string `arg:"" optional:"" help:"Stream alias whose subject-filter config to get (defaults to the selected stream)."`
+}
+
+func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
+	alias := g.Alias
 	if alias == "" {
 		alias = cli.Data.Selected
 	}
@@ -2140,6 +2207,11 @@ func (s *SubjectFilterShowCmd) Run(cli *CLI) error {
 	}
 	wire, err := fetchSubjectFilterSettings(server, stream.Id)
 	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
 		return err
 	}
 	out := formatSubjectFilterSettings(alias, wire)
@@ -2148,24 +2220,127 @@ func (s *SubjectFilterShowCmd) Run(cli *CLI) error {
 	return nil
 }
 
-// SubjectFilterSetCmd writes the four subject-filtering operator knobs through
-// PRD #89's existing stream-update path (PRD #97 issue #102). No new server
-// endpoint is added: the JSON body PUT to /stream is a StreamStateRecord shape
-// — the four knobs ride at the top level alongside the embedded
-// StreamConfiguration — and the server's StreamUpdate treats them as a partial
-// update (empty/zero means "do not change"). Setting `--grace-seconds` on a
-// receiver stream is ignored server-side with a WARN; the post-update display
-// surfaces that ignore by re-reading the persisted value via the review
-// endpoint, so the operator sees what actually landed.
-type SubjectFilterSetCmd struct {
-	Alias           string `arg:"" optional:"" help:"Stream alias to update (defaults to the selected stream)."`
-	DefaultSubjects string `optional:"" default:"" enum:"ALL,NONE," help:"Baseline policy (ALL or NONE). Omit to leave unchanged."`
-	Mode            string `optional:"" default:"" enum:"PASSTHRU,LOCAL,HYBRID," help:"Subject-filter mode for a receiver stream. Omit to leave unchanged."`
-	EventSource     string `optional:"" default:"" enum:"DIRECT,AUDIENCE,EXPLICIT," help:"Event source type for a transmitter stream. Omit to leave unchanged."`
-	GraceSeconds    *int   `optional:"" help:"Per-transmitter-stream removal grace period override in seconds (SSF §9.3). 0 means immediate; omit to leave unchanged."`
+// GetSubjectFilterStatusCmd retrieves a stream's runtime-derived subject-filter
+// state — the filter-table view — and prints it (PRD #106 issue #108). With no
+// subject it shows the summary: aggregate counts plus the pending-removal list.
+// With a subject (positional JSON or format field flags) it adds a point-lookup
+// result (found, kind, pending, delivers, enforce-at).
+//
+// `status` answers "what is the filter table doing right now?" — distinct from
+// `config`, which shows the operator-tunable knobs. It calls the existing PRD
+// #97 /subject-filter/review endpoint: settings-only when no subject, with the
+// subject in the body for a point lookup.
+//
+// A PASSTHRU stream keeps no local filter table; that is reported plainly as a
+// statement, not an error. A 404 (subject filtering disabled server-wide) is
+// surfaced as the plain disabled message.
+//
+// The two positionals fill left-to-right under kong, so <alias> must be given
+// explicitly whenever a positional subject is supplied.
+type GetSubjectFilterStatusCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias whose subject-filter status to get (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"Optional SubjectIdentifier JSON literal for a point lookup. Mutually exclusive with the format field flags."`
+	Email       string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format point-lookup subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format point-lookup subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Point-lookup subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Point-lookup subject in the uri format."`
 }
 
-func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
+// subjectArgs collects the format field flags into the pure subjectArgFlags
+// struct so the shared subject-argument parser can be used without a kong
+// dependency.
+func (g *GetSubjectFilterStatusCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       g.Email,
+		PhoneNumber: g.PhoneNumber,
+		Iss:         g.Iss,
+		Sub:         g.Sub,
+		Id:          g.Id,
+		Url:         g.Url,
+		Username:    g.Username,
+		ExternalId:  g.ExternalId,
+		Account:     g.Account,
+		Uri:         g.Uri,
+	}
+}
+
+func (g *GetSubjectFilterStatusCmd) Run(cli *CLI) error {
+	alias := g.Alias
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	subject, err := parseSubjectArg(g.SubjectJson, g.subjectArgs())
+	if err != nil {
+		return err
+	}
+
+	review, err := fetchSubjectFilterStatus(server, stream.Id, subject)
+	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
+		return err
+	}
+	out := formatSubjectFilterStatus(alias, review)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// GetSubjectFilterCmd is the `get subject-filter` command group hung off the
+// existing `get` verb (PRD #106). This slice ships the `config` sub-command
+// only — the operator-tunable settings view. A `status` sub-command
+// (runtime-derived filter-table state) is added in a later slice. The
+// distinction is intentional: `config` = settings an operator sets; `status` =
+// state the filter table derives at runtime.
+type GetSubjectFilterCmd struct {
+	Config GetSubjectFilterConfigCmd `cmd:"" help:"Get a stream's subject-filter config: the operator-tunable knobs (defaultSubjects, mode, event source, removal grace)."`
+	Status GetSubjectFilterStatusCmd `cmd:"" help:"Get a stream's subject-filter status: filter-table counts, the pending-removal list, and an optional point lookup."`
+}
+
+// SetSubjectFilterConfigCmd changes a stream's subject-filter operator knobs
+// through PRD #89's existing stream-update PUT path (PRD #106 issue #109). No
+// new server endpoint is added: the JSON body PUT to /stream is a
+// StreamStateRecord shape — the operator knobs ride at the top level alongside
+// the embedded StreamConfiguration — and the server's StreamUpdate treats them
+// as a partial update (empty/zero/omitted means "do not change").
+//
+// Each knob is individually optional; one call may change one knob or many.
+// `--source-stream-ids` closes the gap that left EXPLICIT event sources
+// unconfigurable from the CLI — it accepts raw stream SIDs, comma-separated or
+// repeated, and is sent as the EXPLICIT event source's source stream IDs. The
+// CLI rejects `--source-stream-ids` combined with a non-EXPLICIT event source
+// and rejects `--event-source EXPLICIT` without `--source-stream-ids`;
+// server-side mode/event-source validation is unchanged and still applies.
+//
+// After a successful update the command re-reads and displays the persisted
+// settings so the operator sees what actually landed — in particular the
+// server's WARN-and-ignore behaviour for a grace override set on a receiver
+// stream (the persisted value comes back as 0). This reuses the slice #107
+// `config` settings formatter.
+type SetSubjectFilterConfigCmd struct {
+	Alias           string   `arg:"" optional:"" help:"Stream alias to update (defaults to the selected stream)."`
+	DefaultSubjects string   `optional:"" default:"" enum:"ALL,NONE," help:"Baseline policy (ALL or NONE). Omit to leave unchanged."`
+	Mode            string   `optional:"" default:"" enum:"PASSTHRU,LOCAL,HYBRID," help:"Subject-filter mode for a receiver stream. Omit to leave unchanged."`
+	EventSource     string   `optional:"" default:"" enum:"DIRECT,AUDIENCE,EXPLICIT," help:"Event source type for a transmitter stream. Omit to leave unchanged."`
+	SourceStreamIds []string `optional:"" sep:"," help:"Source stream SIDs for an EXPLICIT event source (comma-separated or repeated)."`
+	GraceSeconds    *int     `optional:"" help:"Per-transmitter-stream removal grace period override in seconds (SSF §9.3). 0 means immediate; omit to leave unchanged."`
+}
+
+func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	alias := s.Alias
 	if alias == "" {
 		alias = cli.Data.Selected
@@ -2175,10 +2350,20 @@ func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
 		return errors.New("Could not locate locally defined stream alias: " + alias)
 	}
 
+	// CLI-side validation of the EXPLICIT / --source-stream-ids pairing,
+	// performed before any HTTP request. Server-side mode/event-source
+	// validation is unchanged and still applies.
+	if len(s.SourceStreamIds) > 0 && s.EventSource != "" && s.EventSource != model.EventSourceExplicit {
+		return errors.New("--source-stream-ids is only valid with --event-source EXPLICIT")
+	}
+	if s.EventSource == model.EventSourceExplicit && len(s.SourceStreamIds) == 0 {
+		return errors.New("--event-source EXPLICIT requires --source-stream-ids")
+	}
+
 	// Build a partial-update body. The server's StreamUpdate reads it into a
-	// StreamStateRecord and treats empty/zero fields as "no change". The
-	// embedded StreamConfiguration is left untouched — only the operator-knob
-	// fields are populated.
+	// StreamStateRecord and treats empty/zero/omitted fields as "no change".
+	// The embedded StreamConfiguration is left untouched — only the
+	// operator-knob fields are populated.
 	body := map[string]any{
 		"stream_id": stream.Id,
 		// Echo the stream_id on the embedded configuration too so the server's
@@ -2192,7 +2377,11 @@ func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
 		body["subject_filter_mode"] = s.Mode
 	}
 	if s.EventSource != "" {
-		body["event_source"] = map[string]any{"type": s.EventSource}
+		es := map[string]any{"type": s.EventSource}
+		if len(s.SourceStreamIds) > 0 {
+			es["source_stream_ids"] = s.SourceStreamIds
+		}
+		body["event_source"] = es
 	}
 	if s.GraceSeconds != nil {
 		body["subject_removal_grace_seconds"] = *s.GraceSeconds
@@ -2231,6 +2420,11 @@ func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
 	// override set on a receiver stream — the persisted value comes back as 0.
 	wire, err := fetchSubjectFilterSettings(server, stream.Id)
 	if err != nil {
+		// A 404 means subject filtering is switched off server-wide; surface a
+		// plain operator message rather than a raw HTTP status.
+		if errors.Is(err, errSubjectFilteringDisabled) {
+			return errSubjectFilteringDisabled
+		}
 		return err
 	}
 	out := formatSubjectFilterSettings(alias, wire)
@@ -2239,12 +2433,169 @@ func (s *SubjectFilterSetCmd) Run(cli *CLI) error {
 	return nil
 }
 
-// SubjectFilterCmd is the operator-facing command group for managing a stream's
-// SSF subject-filtering settings (PRD #97 issue #102): one coherent place to
-// view and change defaultSubjects, mode, event source, and the SSF §9.3
-// removal grace override. The existing `review subject-filter` command remains
-// focused on filter-table state (counts, pending list, point lookup).
-type SubjectFilterCmd struct {
-	Show SubjectFilterShowCmd `cmd:"" help:"Show a stream's subject-filtering settings (defaultSubjects, mode, event source, grace override)."`
-	Set  SubjectFilterSetCmd  `cmd:"" help:"Set a stream's subject-filtering settings via the existing stream-update path."`
+// changeSubjectFilter performs an administrative SSF Add/Remove Subject from
+// the CLI (PRD #106 issue #110). It is the shared body of `set subject-filter
+// add` and `set subject-filter remove`: both resolve the alias, parse the
+// subject through the shared subject-argument parser, and POST a
+// { stream_id, subject, verified? } body to the SSF endpoint at endpointPath
+// using the operator's admin token.
+//
+// The Add/Remove endpoints already accept ScopeStreamAdmin, so no new server
+// API is involved. verified is only meaningful for Add — remove passes false
+// and the `verified,omitempty` JSON tag keeps it off the wire. A 404 means
+// subject filtering is disabled server-wide; it is surfaced as the plain
+// errSubjectFilteringDisabled message.
+func changeSubjectFilter(cli *CLI, alias, jsonArg string, flags subjectArgFlags, verified bool, endpointPath, verb string) error {
+	if alias == "" {
+		alias = cli.Data.Selected
+	}
+	stream, server := cli.Data.GetStreamAndServer(alias)
+	if stream == nil {
+		return errors.New("Could not locate locally defined stream alias: " + alias)
+	}
+
+	subject, err := parseSubjectArg(jsonArg, flags)
+	if err != nil {
+		return err
+	}
+	if subject == nil {
+		return errors.New("a subject is required: supply a SubjectIdentifier JSON literal or the format field flags")
+	}
+
+	body := map[string]any{
+		"stream_id": stream.Id,
+		"subject":   subject,
+	}
+	if verified {
+		body["verified"] = true
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	endpointUrl, err := url.JoinPath(server.Host, endpointPath)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpointUrl, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Subject filtering is disabled server-wide — reuse the slice #107
+		// sentinel so the operator sees a plain message, not a raw HTTP status.
+		return errSubjectFilteringDisabled
+	}
+	// SSF Add returns 200; Remove returns 204 No Content.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("subject %s request failed: %s: %s", verb, resp.Status, strings.TrimSpace(string(respBody)))
+	}
+
+	out := fmt.Sprintf("Subject %s on stream [%s].\n", verb, alias)
+	fmt.Print(out)
+	cli.GetOutputWriter().WriteString(out, true)
+	return nil
+}
+
+// SetSubjectFilterAddCmd performs an administrative SSF Add Subject from the
+// CLI (PRD #106 issue #110): it opts a subject into delivery on a stream by
+// POSTing to the existing /add-subject endpoint with the operator's admin
+// token. The subject is supplied as positional JSON or via the format field
+// flags through the shared subject-argument parser. `--verified` sets the SSF
+// Add Subject `verified` flag and is omitted by default.
+type SetSubjectFilterAddCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias to add the subject to (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"SubjectIdentifier JSON literal. Mutually exclusive with the format field flags."`
+	Verified    bool   `optional:"" help:"Set the SSF Add Subject verified flag (omitted by default)."`
+	Email       string `optional:"" group:"Subject format flags" help:"Subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Subject in the uri format."`
+}
+
+func (s *SetSubjectFilterAddCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       s.Email,
+		PhoneNumber: s.PhoneNumber,
+		Iss:         s.Iss,
+		Sub:         s.Sub,
+		Id:          s.Id,
+		Url:         s.Url,
+		Username:    s.Username,
+		ExternalId:  s.ExternalId,
+		Account:     s.Account,
+		Uri:         s.Uri,
+	}
+}
+
+func (s *SetSubjectFilterAddCmd) Run(cli *CLI) error {
+	return changeSubjectFilter(cli, s.Alias, s.SubjectJson, s.subjectArgs(), s.Verified, "/add-subject", "added")
+}
+
+// SetSubjectFilterRemoveCmd performs an administrative SSF Remove Subject from
+// the CLI (PRD #106 issue #110): it opts a subject out of delivery on a stream
+// by POSTing to the existing /remove-subject endpoint with the operator's
+// admin token. The subject is supplied as positional JSON or via the format
+// field flags through the shared subject-argument parser. There is no
+// `--verified` flag — verified is meaningful for Add only.
+type SetSubjectFilterRemoveCmd struct {
+	Alias       string `arg:"" optional:"" name:"alias" help:"Stream alias to remove the subject from (defaults to the selected stream)."`
+	SubjectJson string `arg:"" optional:"" name:"subject-json" help:"SubjectIdentifier JSON literal. Mutually exclusive with the format field flags."`
+	Email       string `optional:"" group:"Subject format flags" help:"Subject in the email format."`
+	PhoneNumber string `optional:"" group:"Subject format flags" help:"Subject in the phone_number format."`
+	Iss         string `optional:"" group:"Subject format flags" help:"Issuer half of an iss_sub-format subject (requires --sub)."`
+	Sub         string `optional:"" group:"Subject format flags" help:"Subject half of an iss_sub-format subject (requires --iss)."`
+	Id          string `optional:"" group:"Subject format flags" help:"Subject in the opaque format."`
+	Url         string `optional:"" group:"Subject format flags" help:"Subject in the did format."`
+	Username    string `optional:"" group:"Subject format flags" help:"Subject in the username format."`
+	ExternalId  string `optional:"" group:"Subject format flags" name:"external-id" help:"Subject in the externalId format."`
+	Account     string `optional:"" group:"Subject format flags" help:"Subject in the account format."`
+	Uri         string `optional:"" group:"Subject format flags" help:"Subject in the uri format."`
+}
+
+func (s *SetSubjectFilterRemoveCmd) subjectArgs() subjectArgFlags {
+	return subjectArgFlags{
+		Email:       s.Email,
+		PhoneNumber: s.PhoneNumber,
+		Iss:         s.Iss,
+		Sub:         s.Sub,
+		Id:          s.Id,
+		Url:         s.Url,
+		Username:    s.Username,
+		ExternalId:  s.ExternalId,
+		Account:     s.Account,
+		Uri:         s.Uri,
+	}
+}
+
+func (s *SetSubjectFilterRemoveCmd) Run(cli *CLI) error {
+	return changeSubjectFilter(cli, s.Alias, s.SubjectJson, s.subjectArgs(), false, "/remove-subject", "removed")
+}
+
+// SetSubjectFilterCmd is the `set subject-filter` command group hung off the
+// existing `set` verb (PRD #106). `config` changes the operator-tunable knobs;
+// `add` / `remove` perform administrative SSF Add/Remove Subject — all
+// subject-filter writes share one parent group.
+type SetSubjectFilterCmd struct {
+	Config SetSubjectFilterConfigCmd `cmd:"" help:"Change a stream's subject-filter config knobs (defaultSubjects, mode, event source, source stream IDs, removal grace) via the existing stream-update path."`
+	Add    SetSubjectFilterAddCmd    `cmd:"" help:"Add a subject to a stream's subject filter (administrative SSF Add Subject)."`
+	Remove SetSubjectFilterRemoveCmd `cmd:"" help:"Remove a subject from a stream's subject filter (administrative SSF Remove Subject)."`
 }
