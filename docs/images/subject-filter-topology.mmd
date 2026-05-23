@@ -1,0 +1,24 @@
+flowchart LR
+    subgraph DR["Downstream receivers"]
+        R1["Receiver A"]
+        R2["Receiver B"]
+    end
+
+    subgraph GR["goSignals router"]
+        FT["Per-stream filter table<br/>(defaultSubjects + non-default set)"]
+        M{"Relay mode"}
+    end
+
+    UP["Upstream transmitter source<br/>(SSF transmitter)"]
+
+    R1 -->|"Add / Remove Subject"| FT
+    R2 -->|"Add / Remove Subject"| FT
+    FT --> M
+
+    M -->|"PASSTHRU<br/>raw 1:1 relay, no local table"| UP
+    M -->|"LOCAL<br/>filter locally, never touch upstream"| FT
+    M -->|"HYBRID<br/>refcounted relay + local fan-out"| UP
+
+    UP -->|"events"| FT
+    FT -->|"delivers matching events"| R1
+    FT -->|"delivers matching events"| R2

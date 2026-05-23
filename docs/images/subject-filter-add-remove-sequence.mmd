@@ -1,0 +1,38 @@
+sequenceDiagram
+    participant RX as Downstream receiver
+    participant GS as goSignals router
+    participant US as Upstream transmitter
+
+    Note over RX,US: Add Subject
+    RX->>GS: POST /add-subject { stream_id, subject, verified? }
+    GS->>GS: Write subject to local filter table (LOCAL / HYBRID)
+    alt HYBRID interested-set 0 -> 1
+        GS->>US: relay Add Subject
+        alt upstream OK
+            US-->>GS: 200
+        else upstream 4xx / 5xx / transport error
+            US-->>GS: error
+            GS->>GS: log upstream response at WARN
+        end
+    else PASSTHRU
+        GS->>US: relay Add Subject (no local table)
+    else LOCAL
+        Note over GS: no upstream relay
+    end
+    GS-->>RX: 200 (success regardless of upstream result)
+
+    Note over RX,US: Remove Subject
+    RX->>GS: POST /remove-subject { stream_id, subject }
+    GS->>GS: Stamp filter entry enforce_at = now + grace (LOCAL / HYBRID)
+    alt HYBRID interested-set 1 -> 0
+        Note over GS: upstream remove deferred to enforce_at,<br/>fired later by the lease-owner sweep
+    else PASSTHRU
+        GS->>US: relay Remove Subject (no local table, no grace)
+        opt upstream error
+            US-->>GS: error
+            GS->>GS: log at WARN
+        end
+    else LOCAL
+        Note over GS: no upstream relay
+    end
+    GS-->>RX: 204 (success regardless of upstream result)
