@@ -3,7 +3,7 @@
   "displayName": "OAuth2 Demo Realm",
   "enabled": true,
   "sslRequired": "none",
-  "loginTheme": "gosignals-mui",
+  "loginTheme": "gosignals-console",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,

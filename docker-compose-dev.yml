@@ -281,6 +281,7 @@ services:
     environment:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
+      - I2SIG_SUBJECT_FILTERING=ENABLED
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
       interval: 10s
@@ -317,6 +318,7 @@ services:
     environment:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
+      - I2SIG_SUBJECT_FILTERING=ENABLED
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
       interval: 10s
@@ -353,6 +355,7 @@ services:
     environment:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
+      - I2SIG_SUBJECT_FILTERING=ENABLED
     command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
