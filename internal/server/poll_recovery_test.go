@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,9 +19,10 @@ func TestClientPollStream_Recovery(t *testing.T) {
 	persistence, _ := dbProviders.OpenPersistence("", "test_poll_recovery")
 	sid := "recovery-poll-stream"
 
-	serverShouldFail := true
+	var serverShouldFail atomic.Bool
+	serverShouldFail.Store(true)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if serverShouldFail {
+		if serverShouldFail.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -78,7 +80,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 	assert.Equal(t, model.StreamStatePause, st.Status)
 
 	// 2. Make it succeed
-	serverShouldFail = false
+	serverShouldFail.Store(false)
 
 	// Wait for recovery
 	assert.Eventually(t, func() bool {
