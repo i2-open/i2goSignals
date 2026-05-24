@@ -1,6 +1,6 @@
 {
   "realm": "gosignals",
-  "displayName": "GoSignals OAuth Realm",
+  "displayName": "OAuth2 Demo Realm",
   "enabled": true,
   "sslRequired": "none",
   "loginTheme": "gosignals-mui",

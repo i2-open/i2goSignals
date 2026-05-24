@@ -1,0 +1,662 @@
+/* JetBrains Mono — the console skin's only typeface. Bundled locally
+   so the login page renders identically regardless of whether the
+   user has network access to Google Fonts. The file is the latin-
+   subset variable woff2 served by Google's gstatic CDN (v24); it
+   contains every supported weight, so three @font-face declarations
+   (400 / 500 / 600) all point at the same file and the browser picks
+   the right weight at render time.
+
+   `font-display: block` (not swap) blocks text rendering for ~3s
+   waiting for the font to load. We pick block over swap because the
+   visual identity of the page IS the typeface — a flash of system
+   monospace would defeat the bundling effort and reintroduce exactly
+   the "Helvetica-like" feel we just fixed. The first-paint cost is
+   trivial (~31 KB woff2 from same origin as the CSS). */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url('../fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url('../fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ GoSignals Console — Keycloak login theme styles.
+
+ Tracks the phosphor-CRT "console" skin shipped in the goSignals admin SPA
+ (src/variables.console.json — PRD #67). Tokens here mirror the four roles
+ the admin theme exposes through its CSS-variable seam so a sign-in page
+ framed by Keycloak reads as the same surface as the app:
+
+   --con-bg          surface (page)               #04060a
+   --con-bg-alt      surface-container (card)     #080c10
+   --con-text        on-surface (phosphor)        #e8f0e6
+   --con-text-muted  on-surface-variant (sage)    #a4c69d
+   --con-primary     accent / brand-accent        #6BE49A  (phosphor green)
+   --con-outline     outline (dim phosphor)       #7a9874
+   --con-outline-v   outline-variant (border)     #2a3826
+   --con-glow        phosphor halo (box-shadow)   rgba(127, 160, 122, .12)
+
+ Stylistic invariants ported from the console skin:
+   - JetBrains Mono everywhere; no proportional fallback.
+   - All radii 0 — square corners; no rounded affordances.
+   - Card chrome is a 1 px outline + a phosphor-coloured halo, not a drop
+     shadow. The halo is what gives the CRT impression on dark surfaces;
+     it degrades to a soft outline in light mode.
+   - Labels/section headers are UPPERCASE with extra tracking — matches
+     the admin's panel titles and reinforces the console reading.
+*/
+
+:root {
+  /* Light / "console-day" tokens (warm paper, deep phosphor accent). */
+  --con-bg:           #efece1;
+  --con-bg-alt:       #e8e5d6;
+  --con-text:         #1c241a;
+  --con-text-muted:   #3f5239;
+  /* "primary" here = the admin SPA's MUI-secondary amber. The admin
+     reserves phosphor green (--con-accent) for status indicators
+     (active tab underline, status badges, wordmark suffix); action
+     buttons use this amber. */
+  --con-primary:      #b8830a;
+  --con-primary-600:  #9e6e00;
+  --con-primary-700:  #845b00;
+  --con-accent:       #0d6d36;
+  --con-danger:       #a1331a;
+  --con-outline:      #8a9180;
+  --con-outline-v:    #c8ccb9;
+  --con-input-bg:     #f5f2e8;
+  --con-input-text:   #1c241a;
+  --con-focus:        #0d6d36;
+  --con-glow:         0 0 0 1px rgba(13, 109, 54, .18);
+  --con-glow-elev:    0 0 0 1px rgba(13, 109, 54, .28), 0 0 24px rgba(13, 109, 54, .12);
+  --con-btn-text:     #efece1;
+  --con-mono:         "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* Brand seam mirrors admin SPA's --brand-fg / --brand-accent (PRD #95). */
+  --brand-fg:         #1A1A1A;
+  --brand-accent:     #0D6D36;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Dark / "console-night" tokens — canonical phosphor-CRT. */
+    --con-bg:           #04060a;
+    --con-bg-alt:       #080c10;
+    --con-text:         #e8f0e6;
+    --con-text-muted:   #a4c69d;
+    /* Primary = amber (MUI secondary in admin); accent = phosphor green
+       reserved for status, tab indicators, badges. */
+    --con-primary:      #FFC039;
+    --con-primary-600:  #f0b022;
+    --con-primary-700:  #e0a010;
+    --con-accent:       #6BE49A;
+    --con-danger:       #e07060;
+    --con-outline:      #7a9874;
+    --con-outline-v:    #2a3826;
+    --con-input-bg:     #02030a;
+    --con-input-text:   #e8f0e6;
+    --con-focus:        #FFC039;
+    --con-glow:         0 0 0 1px rgba(127, 160, 122, .18);
+    --con-glow-elev:    0 0 0 1px rgba(127, 160, 122, .28), 0 0 24px rgba(127, 160, 122, .12);
+    --con-btn-text:     rgba(0, 0, 0, 0.87);
+    --brand-fg:         #FFFFFF;
+    --brand-accent:     #6BE49A;
+  }
+}
+
+/* Explicit PatternFly dark-mode class (set by template.ftl's darkMode JS
+   handler) gets the same overrides — covers the case where the system
+   media query and the explicit class disagree. */
+.pf-v5-theme-dark, .pf-theme-dark {
+  --con-bg:           #04060a;
+  --con-bg-alt:       #080c10;
+  --con-text:         #e8f0e6;
+  --con-text-muted:   #a4c69d;
+  --con-primary:      #FFC039;
+  --con-primary-600:  #f0b022;
+  --con-primary-700:  #e0a010;
+  --con-accent:       #6BE49A;
+  --con-danger:       #e07060;
+  --con-outline:      #7a9874;
+  --con-outline-v:    #2a3826;
+  --con-input-bg:     #02030a;
+  --con-input-text:   #e8f0e6;
+  --con-focus:        #FFC039;
+  --con-glow:         0 0 0 1px rgba(127, 160, 122, .18);
+  --con-glow-elev:    0 0 0 1px rgba(127, 160, 122, .28), 0 0 24px rgba(127, 160, 122, .12);
+  --con-btn-text:     rgba(0, 0, 0, 0.87);
+  --brand-fg:         #FFFFFF;
+  --brand-accent:     #6BE49A;
+}
+
+/* Bridge our tokens into PatternFly's published surface vars so any
+   chrome we don't restyle directly still tints correctly. */
+.pf-v5-c-login, .login-pf-page {
+  --pf-v5-global--BackgroundColor--100: var(--con-bg);
+  --pf-v5-c-login__main--BackgroundColor: var(--con-bg-alt);
+  --pf-v5-c-login__main--Color: var(--con-text);
+}
+
+/* Page background + font baseline. */
+html, body {
+  background-color: var(--con-bg) !important;
+  color: var(--con-text) !important;
+  font-family: var(--con-mono) !important;
+}
+
+#kc-container-wrapper, #kc-container {
+  background: transparent !important;
+}
+
+/* Header */
+#kc-header {
+  background: transparent !important;
+  border: 0 !important;
+}
+
+#kc-header-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  color: var(--con-text) !important;
+  font-weight: 600;
+  font-family: var(--con-mono) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Brand lockup: badge on the left, two-tone wordmark on the right.
+   Sized to read at ~56 px badge / ~1.75 rem wordmark — the proportion
+   that lets the routing-fork mark and the wordmark's x-height match
+   visually. The realm name renders underneath as a quieter caption. */
+#kc-brand-lockup {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 8px 0 4px 0;
+}
+
+#kc-logo-above {
+  display: block;
+}
+
+#kc-wordmark {
+  font-family: var(--con-mono) !important;
+  font-weight: 600;
+  font-size: 1.75rem;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+#kc-wordmark .kc-wordmark-prefix {
+  color: var(--brand-fg);
+}
+
+#kc-wordmark .kc-wordmark-suffix {
+  color: var(--brand-accent);
+}
+
+/* Realm display name — quieter caption under the lockup. Renders the
+   value verbatim (no uppercasing) so admins can set "OAuth Demo Realm"
+   in Keycloak and have it appear with that exact casing. */
+#kc-realm-name {
+  color: var(--con-text-muted) !important;
+  font-family: var(--con-mono) !important;
+  font-weight: 400;
+  font-size: 0.875rem;
+  line-height: 1.3;
+  margin: 4px 0 16px 0;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+#kc-header-wrapper .kc-logo, #kc-header-wrapper img {
+  height: 28px;
+  width: auto;
+}
+
+/* Card chrome — 1 px outline + phosphor halo (NO rounding).
+   Match the console skin's "panel" treatment. */
+.card-pf, .login-pf-page .card-pf, #kc-page-content .card-pf,
+.pf-v5-c-login__main {
+  background-color: var(--con-bg-alt) !important;
+  color: var(--con-text) !important;
+  border: 1px solid var(--con-outline-v) !important;
+  box-shadow: var(--con-glow-elev) !important;
+  border-radius: 0 !important;
+}
+
+#kc-page-title {
+  color: var(--con-text) !important;
+  font-family: var(--con-mono) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Labels & help text — match the admin's section-label treatment:
+   11 px JBM uppercase, ~0.16em tracking, muted phosphor color. The
+   tighter tracking and smaller size keeps the label from competing
+   with the input value below it. */
+label, .pf-c-form__label, .control-label, .instruction, .subtitle,
+.pf-c-form__helper-text, .pf-v5-c-form__label {
+  color: var(--con-text-muted) !important;
+  font-family: var(--con-mono) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Inputs — square, monospace, phosphor focus halo.
+
+   PF v5 wraps every bare <input> in a <span class="pf-v5-c-form-control">
+   that carries the visible chrome (background + border + radius), and the
+   bare <input> inside sits transparent. We have to style the wrapper to
+   get the right outer chrome AND zero out the bare input inside it so
+   we don't paint a second border on top.
+
+   The textarea / select / standalone-input rule handles legacy Keycloak
+   pages that don't use the PF v5 wrapper. */
+.pf-c-form-control, .pf-v5-c-form-control,
+textarea, select,
+input[type="text"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input),
+input[type="password"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input),
+input[type="email"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input),
+input[type="tel"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input),
+input[type="url"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input),
+input[type="number"]:not(.pf-v5-c-form-control > input):not(.pf-v5-c-form-control input):not(.pf-c-form-control input) {
+  background-color: var(--con-input-bg) !important;
+  color: var(--con-input-text) !important;
+  border: 1px solid var(--con-outline-v) !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  font-family: var(--con-mono) !important;
+  caret-color: var(--con-primary) !important;
+}
+
+/* Bare input inside a PF v5 form-control wrapper — strip the chrome
+   so the wrapper's border + bg is the single visible frame. Keep the
+   monospace typeface, color, caret, and transparent background so the
+   wrapper paints through. Font size 14 px reads tighter and more
+   terminal-like than PF's default 16 px while remaining accessible. */
+.pf-v5-c-form-control input,
+.pf-v5-c-form-control > input,
+.pf-c-form-control input {
+  background: transparent !important;
+  border: 0 !important;
+  outline: none !important;
+  color: var(--con-input-text) !important;
+  font-family: var(--con-mono) !important;
+  font-size: 14px !important;
+  caret-color: var(--con-accent) !important;
+  box-shadow: none !important;
+}
+
+/* Focus halo — applied to the wrapper when its child input is focused,
+   and to bare inputs that aren't wrapped. */
+input:focus, textarea:focus, select:focus,
+.pf-c-form-control:focus-within,
+.pf-v5-c-form-control:focus-within {
+  border-color: var(--con-focus) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--con-focus) 35%, transparent),
+              0 0 12px color-mix(in srgb, var(--con-focus) 25%, transparent) !important;
+}
+
+/* Inner input must not get its own focus ring on top of the wrapper's. */
+.pf-v5-c-form-control input:focus,
+.pf-v5-c-form-control > input:focus,
+.pf-c-form-control input:focus {
+  box-shadow: none !important;
+  border: 0 !important;
+}
+
+/* Placeholder text — keep it monospace and dimmer than entered text. */
+input::placeholder, textarea::placeholder {
+  color: var(--con-text-muted) !important;
+  opacity: 0.6;
+  font-family: var(--con-mono) !important;
+}
+
+/* Primary button — matches the admin SPA's MUI `containedSecondary`
+   action button (filled amber, dark text, no border, no glow). We
+   scope this tightly to bare submit elements and PF v5's pf-m-primary
+   class; do NOT use a generic .pf-v5-c-button selector or every PF
+   button (password-show toggle, "try another way", social provider
+   icons, locale chevron, etc.) ends up styled as a giant amber pill,
+   which dominates the input area visually.
+
+   Type spec is taken from the admin's runtime computed style:
+   12 px JBM, weight 500, letter-spacing 0.18em, padding 5px 15px,
+   ~33 px height. We deliberately don't add a glow — the admin's
+   action button is flat. */
+input[type="submit"], button[type="submit"],
+.btn.btn-primary, .pf-c-button.pf-m-primary, .pf-v5-c-button.pf-m-primary {
+  background-color: var(--con-primary) !important;
+  color: var(--con-btn-text) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  text-transform: uppercase !important;
+  font-weight: 500 !important;
+  font-size: 12px !important;
+  letter-spacing: 0.18em !important;
+  font-family: var(--con-mono) !important;
+  padding: 6px 16px !important;
+  min-height: 33px;
+  box-shadow: none !important;
+}
+
+input[type="submit"]:disabled, button[type="submit"]:disabled,
+.btn.btn-primary:disabled, .pf-c-button.pf-m-primary:disabled,
+.pf-v5-c-button.pf-m-primary:disabled {
+  opacity: 0.5;
+  box-shadow: none !important;
+}
+
+input[type="submit"]:hover, button[type="submit"]:hover,
+.btn.btn-primary:hover, .pf-c-button.pf-m-primary:hover,
+.pf-v5-c-button.pf-m-primary:hover {
+  background-color: var(--con-primary-600) !important;
+  border-color: var(--con-primary-600) !important;
+}
+
+input[type="submit"]:active, button[type="submit"]:active,
+.btn.btn-primary:active, .pf-c-button.pf-m-primary:active,
+.pf-v5-c-button.pf-m-primary:active {
+  background-color: var(--con-primary-700) !important;
+  border-color: var(--con-primary-700) !important;
+}
+
+/* Control buttons (e.g. the password-visibility eye toggle next to the
+   password input — PF v5 marks it pf-m-control). Render as a square
+   ghost button that visually attaches to the input chrome instead of
+   competing with it. */
+.pf-c-button.pf-m-control, .pf-v5-c-button.pf-m-control {
+  background: var(--con-input-bg) !important;
+  color: var(--con-text-muted) !important;
+  border: 1px solid var(--con-outline-v) !important;
+  border-left: 0 !important;
+  border-radius: 0 !important;
+  text-transform: none !important;
+  font-weight: 400 !important;
+  letter-spacing: normal !important;
+  box-shadow: none !important;
+  font-family: var(--con-mono) !important;
+}
+
+.pf-c-button.pf-m-control:hover, .pf-v5-c-button.pf-m-control:hover {
+  color: var(--con-text) !important;
+  background: var(--con-bg-alt) !important;
+}
+
+/* Secondary buttons — match the admin SPA's MUI `outlinedSecondary`
+   variant: transparent background, amber text, 50%-amber border, same
+   compact 12 px / weight 500 / 0.18em type spec as the primary action.
+   "Try another way" and similar secondary CTAs land here. */
+.pf-c-button.pf-m-secondary, .pf-v5-c-button.pf-m-secondary {
+  background: transparent !important;
+  color: var(--con-primary) !important;
+  border: 1px solid color-mix(in srgb, var(--con-primary) 50%, transparent) !important;
+  border-radius: 0 !important;
+  text-transform: uppercase !important;
+  font-weight: 500 !important;
+  font-size: 12px !important;
+  letter-spacing: 0.18em !important;
+  font-family: var(--con-mono) !important;
+  padding: 6px 16px !important;
+  min-height: 33px;
+  box-shadow: none !important;
+}
+
+.pf-c-button.pf-m-secondary:hover, .pf-v5-c-button.pf-m-secondary:hover {
+  border-color: var(--con-primary) !important;
+  background: color-mix(in srgb, var(--con-primary) 8%, transparent) !important;
+}
+
+/* Link-style buttons + bare anchors inside the form — no caps tracking,
+   just a phosphor-accent text link. The admin uses --brand-accent (the
+   green) for inline links like "Forgot Password?" / "Register". */
+.pf-c-button.pf-m-link, .pf-v5-c-button.pf-m-link {
+  background: transparent !important;
+  color: var(--con-accent) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  font-weight: 400 !important;
+  font-family: var(--con-mono) !important;
+  box-shadow: none !important;
+}
+
+/* Links — admin reserves --con-accent (phosphor) for inline links
+   so it visually pairs with the wordmark "Signals" suffix; the amber
+   primary stays exclusive to action buttons. */
+a, .kc-feedback-text a {
+  color: var(--con-accent) !important;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:hover { opacity: 0.85; }
+
+/* Social provider icons — tint to phosphor in dark mode, deep phos in light. */
+#kc-social-providers svg:not(.google) {
+  filter: invert(45%) sepia(64%) saturate(577%) hue-rotate(96deg) brightness(88%) contrast(89%);
+  height: var(--pf-v5-global--FontSize--xl);
+}
+
+@media (prefers-color-scheme: dark) {
+  #kc-social-providers svg:not(.google) {
+    filter: invert(86%) sepia(28%) saturate(617%) hue-rotate(78deg) brightness(95%) contrast(91%);
+  }
+}
+
+.pf-v5-theme-dark #kc-social-providers svg:not(.google),
+.pf-theme-dark #kc-social-providers svg:not(.google) {
+  filter: invert(86%) sepia(28%) saturate(617%) hue-rotate(78deg) brightness(95%) contrast(91%);
+}
+
+/* Alerts — phosphor red, tinted backdrop, square corners. */
+.alert-error, .pf-c-alert.pf-m-danger, .pf-v5-c-alert.pf-m-danger,
+.kc-feedback-text-error {
+  background: color-mix(in srgb, var(--con-danger) 18%, transparent) !important;
+  border: 1px solid var(--con-danger) !important;
+  color: var(--con-text) !important;
+  border-radius: 0 !important;
+  font-family: var(--con-mono) !important;
+}
+
+.pf-c-alert.pf-m-warning, .pf-v5-c-alert.pf-m-warning {
+  background: color-mix(in srgb, var(--con-primary) 12%, transparent) !important;
+  border: 1px solid var(--con-outline) !important;
+  color: var(--con-text) !important;
+  border-radius: 0 !important;
+}
+
+/* Footer / info area */
+#kc-info, #kc-form-options, #kc-registration {
+  color: var(--con-text-muted) !important;
+  font-family: var(--con-mono) !important;
+}
+
+/* Wide-screen spacing tweaks. */
+.login-pf-page .login-pf-page-header { margin-top: 24px; }
+.login-pf-page .card-pf { margin-top: 12px; }
+
+/* Suppress the duplicate in-form #kc-header that PF v5 renders inside the
+   main card (it visually duplicates the realm name + logo we render above
+   the form via login.ftl). Same scoping as the gosignals-mui theme. */
+#kc-content header#kc-header,
+#kc-page-content header#kc-header,
+#kc-content-wrapper .card-pf header#kc-header {
+  display: none !important;
+}
+
+.login-pf #kc-page-content :where(.pf-v5-c-login__main, .pf-c-login__main) header#kc-header,
+.login-pf #kc-content-wrapper :where(.pf-v5-c-login__main, .pf-c-login__main) header#kc-header,
+.login-pf #kc-page-content :where(.pf-v5-c-login__main, .pf-c-login__main) #kc-header-wrapper,
+.login-pf #kc-content-wrapper :where(.pf-v5-c-login__main, .pf-c-login__main) #kc-header-wrapper,
+.login-pf #kc-page-content .card-pf header#kc-header,
+.login-pf #kc-content-wrapper .card-pf header#kc-header {
+  display: none !important;
+}
+
+body > header#kc-header { display: revert !important; }
+
+.pf-v5-c-login > .pf-v5-c-login__container > header#kc-header.pf-v5-c-login__header {
+  display: none !important;
+}
+
+.pf-c-login > .pf-c-login__container > header#kc-header.pf-c-login__header {
+  display: none !important;
+}
+
+/* Allow the in-main title area to host realm-name + logo. */
+#kc-page-title {
+  display: block;
+  text-align: center;
+  margin: 0 0 8px 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+/* ------------------------------
+   Single-column layout override
+   ------------------------------
+   Same approach as gosignals-mui — Keycloak 26 / PF v5 splits the login
+   container into a side-by-side grid on wide screens, which gives an
+   asymmetric reading. Force a single centred column. */
+
+body[data-page-id^="login-"] .pf-v5-c-login > .pf-v5-c-login__container {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  grid-template-columns: none !important;
+  grid-template-areas: none !important;
+}
+
+body[data-page-id^="login-"] .pf-v5-c-login__main {
+  grid-column: 1 / -1 !important;
+  width: 100%;
+  max-width: 520px;
+  align-self: center;
+}
+
+body[data-page-id^="login-"] .pf-v5-c-login > .pf-v5-c-login__container > header#kc-header.pf-v5-c-login__header {
+  display: none !important;
+}
+
+body[data-page-id^="login-"] .pf-v5-c-login__main-header,
+body[data-page-id^="login-"] .pf-v5-c-login__main-body,
+body[data-page-id^="login-"] #kc-form,
+body[data-page-id^="login-"] #kc-form-wrapper,
+body[data-page-id^="login-"] .pf-v5-c-form {
+  width: 100%;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+body[data-page-id^="login-"] .pf-c-login > .pf-c-login__container {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  grid-template-columns: none !important;
+  grid-template-areas: none !important;
+}
+
+body[data-page-id^="login-"] .pf-c-login__main {
+  grid-column: 1 / -1 !important;
+  width: 100%;
+  max-width: 520px;
+}
+
+body[data-page-id^="login-"] .pf-c-login > .pf-c-login__container > header#kc-header.pf-c-login__header {
+  display: none !important;
+}
+
+body[data-page-id^="login-"] .pf-c-login__main-header,
+body[data-page-id^="login-"] .pf-c-login__main-body,
+body[data-page-id^="login-"] #kc-form,
+body[data-page-id^="login-"] #kc-form-wrapper,
+body[data-page-id^="login-"] .pf-c-form {
+  width: 100%;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+@media (max-width: 480px) {
+  body[data-page-id^="login-"] .pf-v5-c-login__main,
+  body[data-page-id^="login-"] .pf-v5-c-login__main-header,
+  body[data-page-id^="login-"] .pf-v5-c-login__main-body,
+  body[data-page-id^="login-"] #kc-form,
+  body[data-page-id^="login-"] #kc-form-wrapper,
+  body[data-page-id^="login-"] .pf-v5-c-form,
+  body[data-page-id^="login-"] .pf-c-login__main,
+  body[data-page-id^="login-"] .pf-c-login__main-header,
+  body[data-page-id^="login-"] .pf-c-login__main-body,
+  body[data-page-id^="login-"] .pf-c-form {
+    max-width: 100%;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* Subtle scan-line texture across the page in dark mode — gives the CRT
+   feel without obscuring text. Light mode suppresses it (paper surface
+   shouldn't read as a screen). */
+@media (prefers-color-scheme: dark) {
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      rgba(127, 160, 122, 0.04) 0px,
+      rgba(127, 160, 122, 0.04) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    z-index: 0;
+  }
+  /* Make sure interactive chrome sits above the scan-line overlay. */
+  #kc-container-wrapper, #kc-container, .pf-v5-c-login,
+  .login-pf-page, header#kc-header { position: relative; z-index: 1; }
+}
+
+.pf-v5-theme-dark body::before, .pf-theme-dark body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(127, 160, 122, 0.04) 0px,
+    rgba(127, 160, 122, 0.04) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 0;
+}

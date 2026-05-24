@@ -480,7 +480,7 @@ services:
       - postgres
     volumes:
       - "./config/keycloak/realm:/opt/keycloak/data/import"
-      - "./config/keycloak/themes/gosignals-mui:/opt/keycloak/themes/gosignals-mui"
+      - "./config/keycloak/themes:/opt/keycloak/themes"
       - "./config/certs:/opt/keycloak/certs"
   goSignalsAdmin:
     image: independentid/gosignalsadmin:latest
