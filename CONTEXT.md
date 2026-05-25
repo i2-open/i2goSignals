@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="./brand/logo/gosignals-hero-primary.svg"><img src="./brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # i2goSignals — Architecture Glossary
 
 This file captures the vocabulary that emerged from the PRD #39 provider-chain
@@ -445,3 +448,8 @@ Implement the three small seams:
 Then wire `dbProviders.OpenPersistence` to dispatch based on URL
 prefix. The interfaces are free of `bson.ObjectID` and other
 Mongo-specific types — string IDs only.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="./brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

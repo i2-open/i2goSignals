@@ -1,6 +1,6 @@
-# i2goSignals
+<picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo/gosignals-hero-primary.svg"><img src="brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
 
-<div style="text-align: right"><img src="media/GoSignals-msgs.png" title="GoSignals-Msgs" width=300  alt="i2GoSignals!"/></div>
+# i2goSignals
 
 **_i2goSignals_** is a high-performance security event router and processor designed to facilitate the secure exchange of Security Event Tokens (SETs) between systems. It acts as a bridge, gateway, or store-and-forward server, connecting security event generators (transmitters) to receivers across different domains.
 
@@ -110,3 +110,8 @@ Use `make dev-logs` to follow logs and `make dev-down` to stop the stack.
 
 ---
 *Production image builds use `sh ./build.sh` and the standard `docker-compose.yml`.*
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="./brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

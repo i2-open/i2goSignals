@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../../../brand/logo/gosignals-hero-primary.svg"><img src="../../../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Memory Database Provider
 
 ## Overview
@@ -137,3 +140,8 @@ The memory provider can be configured to periodically save its state to disk. Wh
 - Using MongoDB-specific features
 - Performance testing with realistic data sizes
 - Multi-node clustering is required
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

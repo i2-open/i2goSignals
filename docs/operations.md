@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Operations Guide
 
 This guide explains how SET delivery streams behave at runtime, how the system
@@ -391,3 +394,8 @@ The existing `I2SIG_PUSH_BACKFILL_INTERVAL` and
 `I2SIG_PUSH_BACKFILL_BATCH` continue to govern active-mode buffer
 refilling — they are independent of the recovery state machine and remain at
 their previous defaults.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

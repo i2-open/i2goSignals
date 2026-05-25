@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>goSignals — Brand Assets</title>
+<link rel="icon" type="image/svg+xml" href="logo/gosignals-favicon.svg">
+<link rel="stylesheet" href="tokens.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #050807;
+    color: var(--gs-text);
+    font-family: var(--gs-font-body);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  body { padding: 56px 64px 96px; }
+  h1, h2, h3 {
+    font-family: var(--gs-font-display);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--gs-white);
+    margin: 0;
+  }
+  h1 { font-size: 34px; }
+  h2 {
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    color: var(--gs-phos-dim);
+    margin: 64px 0 22px;
+    text-transform: uppercase;
+  }
+  h3 {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--gs-phos);
+    margin-bottom: 14px;
+    text-transform: uppercase;
+  }
+  .subtitle {
+    color: var(--gs-caption);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    margin-top: 8px;
+  }
+  .scan {
+    position: relative;
+  }
+  .scan::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(107,228,154,0.018) 0px,
+      rgba(107,228,154,0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+  }
+  .panel {
+    background: #000;
+    border: 1px solid var(--gs-phos-dim);
+    padding: 28px;
+    margin-bottom: 18px;
+  }
+  .panel.light {
+    background: var(--gs-cream);
+    border-color: var(--gs-cream-border);
+    color: #1a1a1a;
+  }
+  .row { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 18px;
+  }
+  .tile {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 14px;
+    padding: 26px 18px;
+    background: #000;
+    border: 1px solid var(--gs-phos-dim);
+    font-family: var(--gs-font-display);
+    font-size: 9.5px;
+    letter-spacing: 0.18em;
+    color: var(--gs-phos);
+    text-align: center;
+    min-height: 200px;
+    justify-content: space-between;
+  }
+  .tile .dim {
+    color: var(--gs-text-dim);
+    font-size: 8.5px;
+    letter-spacing: 0.16em;
+    margin-top: 4px;
+    display: block;
+  }
+  .tile .filename {
+    color: var(--gs-phos-dim);
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    word-break: break-all;
+    margin-top: 4px;
+  }
+  .tile.light {
+    background: var(--gs-cream);
+    border-color: var(--gs-cream-border);
+    color: var(--gs-phos-deep);
+  }
+  .tile.light .dim { color: #666; }
+  .tile.light .filename { color: #999; }
+
+  .sizes { display: flex; align-items: flex-end; gap: 28px; flex-wrap: wrap; }
+  .size-col {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+  }
+  .size-col .label {
+    color: var(--gs-phos-dim);
+    font-family: var(--gs-font-display);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+  }
+
+  .swatches {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .swatch {
+    background: #000;
+    border: 1px solid var(--gs-phos-dim);
+    padding: 14px;
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--gs-font-display);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+  }
+  .swatch .chip {
+    width: 32px; height: 32px;
+    border: 1px solid #1f3a26;
+    flex-shrink: 0;
+  }
+  .swatch .meta { display: flex; flex-direction: column; gap: 2px; }
+  .swatch .name { color: var(--gs-text); }
+  .swatch .hex { color: var(--gs-phos-dim); font-size: 10px; }
+
+  .lockup-row {
+    display: flex; align-items: center; gap: 28px;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--gs-phos-dim);
+  }
+  .lockup-row:last-child { border-bottom: none; }
+  .lockup-row .label {
+    width: 180px;
+    color: var(--gs-phos-dim);
+    font-family: var(--gs-font-display);
+    font-size: 9.5px;
+    letter-spacing: 0.18em;
+  }
+  .wordmark {
+    font-family: var(--gs-font-display);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .wordmark .go { color: var(--gs-white); }
+  .wordmark .sig { color: var(--gs-phos); }
+
+  .hero {
+    padding: 64px;
+    background: #000;
+    border: 1px solid var(--gs-phos-dim);
+    display: flex; align-items: center; gap: 36px;
+  }
+
+  code {
+    font-family: var(--gs-font-display);
+    font-size: 12px;
+    color: var(--gs-mint);
+    background: rgba(107, 228, 154, 0.08);
+    padding: 2px 6px;
+  }
+  pre {
+    background: #000;
+    border: 1px solid var(--gs-phos-dim);
+    padding: 20px 24px;
+    color: var(--gs-text);
+    font-family: var(--gs-font-display);
+    font-size: 12px;
+    line-height: 1.65;
+    overflow-x: auto;
+  }
+  pre .c { color: var(--gs-phos-dim); }
+  pre .k { color: var(--gs-phos); }
+  pre .s { color: var(--gs-mint); }
+
+  .filelist {
+    font-family: var(--gs-font-display);
+    font-size: 11px;
+    color: var(--gs-text);
+    line-height: 1.85;
+  }
+  .filelist a {
+    color: var(--gs-phos);
+    text-decoration: none;
+  }
+  .filelist a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>goSignals — Brand Assets</h1>
+  <div class="subtitle">
+    Stream-badge identity · phosphor scan-line aesthetic · drop-in for Claude Code or any project
+  </div>
+</header>
+
+<!-- ─── Primary lockup ────────────────────────────────────── -->
+<h2>Primary lockup</h2>
+<div class="hero scan">
+  <img src="logo/gosignals-badge-primary.svg" alt="goSignals badge" width="120" height="120">
+  <span class="wordmark" style="font-size: 56px;">
+    <span class="go">go</span><span class="sig">Signals</span>
+  </span>
+</div>
+
+<!-- ─── Lockups ───────────────────────────────────────────── -->
+<h2>Lockups</h2>
+
+<div class="panel scan">
+  <h3>Standard — dark</h3>
+  <div class="lockup-row">
+    <div class="label">PRIMARY · 64</div>
+    <img src="logo/gosignals-lockup-primary.svg" alt="" height="64">
+  </div>
+  <div class="lockup-row">
+    <div class="label">PRIMARY · 48</div>
+    <img src="logo/gosignals-lockup-primary.svg" alt="" height="48">
+  </div>
+  <div class="lockup-row">
+    <div class="label">PRIMARY · 32</div>
+    <img src="logo/gosignals-lockup-primary.svg" alt="" height="32">
+  </div>
+  <div class="lockup-row">
+    <div class="label">PRIMARY · 24</div>
+    <img src="logo/gosignals-lockup-primary.svg" alt="" height="24">
+  </div>
+  <div class="lockup-row">
+    <div class="label">MONO PHOS · 48</div>
+    <img src="logo/gosignals-lockup-mono-phos.svg" alt="" height="48">
+  </div>
+</div>
+
+<div class="panel light">
+  <h3 style="color:#0d6d36">Standard — light</h3>
+  <div class="lockup-row" style="border-color:#c9c3b3">
+    <div class="label" style="color:#666">ON LIGHT · 64</div>
+    <img src="logo/gosignals-lockup-on-light.svg" alt="" height="64">
+  </div>
+  <div class="lockup-row" style="border-color:#c9c3b3">
+    <div class="label" style="color:#666">ON LIGHT · 48</div>
+    <img src="logo/gosignals-lockup-on-light.svg" alt="" height="48">
+  </div>
+  <div class="lockup-row" style="border-color:#c9c3b3">
+    <div class="label" style="color:#666">ON LIGHT · 32</div>
+    <img src="logo/gosignals-lockup-on-light.svg" alt="" height="32">
+  </div>
+</div>
+
+<!-- ─── Badge variants ────────────────────────────────────── -->
+<h2>Badge variants</h2>
+<div class="grid">
+  <div class="tile">
+    <img src="logo/gosignals-badge-primary.svg" alt="" width="120" height="120">
+    <div>
+      PRIMARY ★<span class="dim">white · phos border</span>
+      <div class="filename">gosignals-badge-primary.svg</div>
+    </div>
+  </div>
+  <div class="tile">
+    <img src="logo/gosignals-badge-no-border.svg" alt="" width="120" height="120">
+    <div>
+      NO BORDER<span class="dim">primary minus frame</span>
+      <div class="filename">gosignals-badge-no-border.svg</div>
+    </div>
+  </div>
+  <div class="tile">
+    <img src="logo/gosignals-badge-mono-phos.svg" alt="" width="120" height="120">
+    <div>
+      MONO PHOSPHOR<span class="dim">single-color</span>
+      <div class="filename">gosignals-badge-mono-phos.svg</div>
+    </div>
+  </div>
+  <div class="tile">
+    <img src="logo/gosignals-badge-mono-white.svg" alt="" width="120" height="120">
+    <div>
+      MONO WHITE<span class="dim">two-color print</span>
+      <div class="filename">gosignals-badge-mono-white.svg</div>
+    </div>
+  </div>
+  <div class="tile">
+    <img src="logo/gosignals-badge-mint-accent.svg" alt="" width="120" height="120">
+    <div>
+      MINT ACCENT<span class="dim">B8FFC4 mark</span>
+      <div class="filename">gosignals-badge-mint-accent.svg</div>
+    </div>
+  </div>
+  <div class="tile light">
+    <img src="logo/gosignals-badge-on-light.svg" alt="" width="120" height="120">
+    <div>
+      ON LIGHT<span class="dim">white fill</span>
+      <div class="filename">gosignals-badge-on-light.svg</div>
+    </div>
+  </div>
+  <div class="tile light" style="background:var(--gs-cream)">
+    <img src="logo/gosignals-badge-on-cream.svg" alt="" width="120" height="120">
+    <div>
+      ON CREAM<span class="dim">f6f4ef fill</span>
+      <div class="filename">gosignals-badge-on-cream.svg</div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Size study ────────────────────────────────────────── -->
+<h2>Size study — primary badge</h2>
+<div class="panel scan">
+  <div class="sizes">
+    <div class="size-col">
+      <img src="logo/gosignals-badge-primary.svg" alt="" width="128" height="128">
+      <div class="label">128 PX</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-badge-primary.svg" alt="" width="80" height="80">
+      <div class="label">80 PX</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-badge-primary.svg" alt="" width="56" height="56">
+      <div class="label">56 PX</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-badge-primary.svg" alt="" width="40" height="40">
+      <div class="label">40 PX</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-badge-primary.svg" alt="" width="32" height="32">
+      <div class="label">32 PX</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-favicon-simple.svg" alt="" width="32" height="32">
+      <div class="label">32 · SIMPLE</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-favicon-simple.svg" alt="" width="16" height="16">
+      <div class="label">16 · SIMPLE</div>
+    </div>
+  </div>
+  <div style="color: var(--gs-caption); font-family: var(--gs-font-display); font-size: 10px; letter-spacing: 0.14em; margin-top: 22px;">
+    Below ~28 px the waves vanish under aliasing — switch to the simple favicon SVG (no waves).
+  </div>
+</div>
+
+<!-- ─── Mark only ─────────────────────────────────────────── -->
+<h2>Routing mark — no badge</h2>
+<div class="panel scan">
+  <div class="sizes">
+    <div class="size-col">
+      <img src="logo/gosignals-mark-white.svg" alt="" width="96" height="96">
+      <div class="label">WHITE</div>
+    </div>
+    <div class="size-col">
+      <img src="logo/gosignals-mark-phos.svg" alt="" width="96" height="96">
+      <div class="label">PHOSPHOR</div>
+    </div>
+    <div class="size-col" style="background:var(--gs-cream); padding:8px;">
+      <img src="logo/gosignals-mark-ink.svg" alt="" width="96" height="96">
+      <div class="label" style="color:#666">INK · ON LIGHT</div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Color tokens ──────────────────────────────────────── -->
+<h2>Color tokens</h2>
+<div class="panel">
+  <div class="swatches">
+    <div class="swatch">
+      <div class="chip" style="background:#000000"></div>
+      <div class="meta"><div class="name">--gs-bg</div><div class="hex">#000000</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#6BE49A; border-color:#6BE49A"></div>
+      <div class="meta"><div class="name">--gs-phos</div><div class="hex">#6BE49A</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#2E7C4A; border-color:#2E7C4A"></div>
+      <div class="meta"><div class="name">--gs-phos-dim</div><div class="hex">#2E7C4A</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#B8FFC4; border-color:#B8FFC4"></div>
+      <div class="meta"><div class="name">--gs-mint</div><div class="hex">#B8FFC4</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#F5B544; border-color:#F5B544"></div>
+      <div class="meta"><div class="name">--gs-amber</div><div class="hex">#F5B544</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#6DB4FF; border-color:#6DB4FF"></div>
+      <div class="meta"><div class="name">--gs-cyan</div><div class="hex">#6DB4FF</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#FFFFFF; border-color:#FFFFFF"></div>
+      <div class="meta"><div class="name">--gs-white</div><div class="hex">#FFFFFF</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#0d6d36; border-color:#0d6d36"></div>
+      <div class="meta"><div class="name">--gs-phos-deep</div><div class="hex">#0d6d36</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#7DBA8C; border-color:#7DBA8C"></div>
+      <div class="meta"><div class="name">--gs-sage</div><div class="hex">#7DBA8C</div></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background:#f6f4ef; border-color:#c9c3b3"></div>
+      <div class="meta"><div class="name">--gs-cream</div><div class="hex">#f6f4ef</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Usage / code ─────────────────────────────────────── -->
+<h2>Code — React</h2>
+<pre><span class="c">// In your top-level layout:</span>
+<span class="k">import</span> <span class="s">"./brand/tokens.css"</span>;
+<span class="k">import</span> { GoSignalsLockup, GoSignalsBadge } <span class="k">from</span> <span class="s">"./brand/components/GoSignalsLogo"</span>;
+
+<span class="c">// App header</span>
+&lt;GoSignalsLockup size={48} /&gt;
+
+<span class="c">// On a light page</span>
+&lt;GoSignalsLockup size={48} variant=<span class="s">"on-light"</span> /&gt;
+
+<span class="c">// Tiny — drop the waves for sharpness</span>
+&lt;GoSignalsBadge size={20} simplified /&gt;</pre>
+
+<h2>Code — vanilla HTML</h2>
+<pre>&lt;<span class="k">link</span> rel=<span class="s">"icon"</span> type=<span class="s">"image/svg+xml"</span>
+      href=<span class="s">"brand/logo/gosignals-favicon.svg"</span>&gt;
+
+&lt;<span class="k">link</span> rel=<span class="s">"stylesheet"</span> href=<span class="s">"brand/tokens.css"</span>&gt;
+
+&lt;<span class="k">img</span> src=<span class="s">"brand/logo/gosignals-lockup-primary.svg"</span>
+     height=<span class="s">"48"</span> alt=<span class="s">"goSignals"</span>&gt;</pre>
+
+<!-- ─── File index ───────────────────────────────────────── -->
+<h2>All files</h2>
+<div class="panel">
+  <div class="filelist">
+    <div>brand/</div>
+    <div>├── <a href="tokens.css">tokens.css</a></div>
+    <div>├── <a href="README.md">README.md</a></div>
+    <div>├── components/</div>
+    <div>│   └── <a href="components/GoSignalsLogo.jsx">GoSignalsLogo.jsx</a></div>
+    <div>└── logo/</div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-primary.svg">gosignals-badge-primary.svg</a> ★</div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-no-border.svg">gosignals-badge-no-border.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-mono-phos.svg">gosignals-badge-mono-phos.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-mono-white.svg">gosignals-badge-mono-white.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-mint-accent.svg">gosignals-badge-mint-accent.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-on-light.svg">gosignals-badge-on-light.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-badge-on-cream.svg">gosignals-badge-on-cream.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-lockup-primary.svg">gosignals-lockup-primary.svg</a> ★</div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-lockup-mono-phos.svg">gosignals-lockup-mono-phos.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-lockup-on-light.svg">gosignals-lockup-on-light.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-mark-phos.svg">gosignals-mark-phos.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-mark-white.svg">gosignals-mark-white.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-mark-ink.svg">gosignals-mark-ink.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;├── <a href="logo/gosignals-favicon.svg">gosignals-favicon.svg</a></div>
+    <div>&nbsp;&nbsp;&nbsp;&nbsp;└── <a href="logo/gosignals-favicon-simple.svg">gosignals-favicon-simple.svg</a></div>
+  </div>
+</div>
+
+</body>
+</html>

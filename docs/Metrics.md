@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # goSignalsServer Metrics
 
 This document describes the Prometheus metrics exposed by `goSignalsServer` at the `/metrics` endpoint.
@@ -47,3 +50,8 @@ These metrics provide observability into the clustering and lease management.
 | `goSignals_cluster_leases_held_total` | Gauge | None | Number of time-bounded leases currently held by this node. |
 | `goSignals_cluster_lease_acquisition_total` | Counter | `resource`, `status` | Total number of lease acquisition and renewal attempts. `status` is either `success` or `failure`. |
 | `goSignals_cluster_nodes_count` | Gauge | None | Number of active nodes in the cluster (nodes that have heartbeated within the last 60 seconds). |
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Go API Server for swagger
 
 [OpenID Spec](https://openid.net/specs/openid-sse-framework-1_0.html#management)  HTTP API to be implemented by Event Transmitters. This API can be used by Event Receivers to query and update the Event Stream configuration and status, to add and remove subjects, and to trigger verification. 
@@ -23,3 +26,7 @@ To run the server, follow these simple steps:
 go run main.go
 ```
 
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

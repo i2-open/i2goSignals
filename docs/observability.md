@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # goSignals Observability
 
 > **Audience:** operators, SREs, and developers running goSignals in any
@@ -668,3 +671,8 @@ upgrade.
 
 This section will be expanded in the v2 PRD; treat it as a stability
 contract for the field-name prefix only, not a feature plan.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

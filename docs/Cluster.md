@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # goSignalsServer Clustering Design
 
 This document describes the clustering approach implemented in `goSignalsServer` to support running multiple instances in a cluster.
@@ -98,3 +101,8 @@ In this setup, you can observe that:
 1. Both `goSignals1a` and `goSignals1b` connect to the same MongoDB database (`goSignals1`).
 2. They will compete for leases for any stream defined in that database.
 3. If you stop the container holding a lease, the other node will automatically take over after the lease expires (approx. 30 seconds).
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

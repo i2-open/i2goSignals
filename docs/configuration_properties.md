@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # i2goSignals Server Configuration Properties
 
 All server configuration is environment-variable driven; there is no config
@@ -241,3 +244,8 @@ Run it via `make generate-certs`.
 | `CERT_COUNTRY`    | Country code (e.g. `CA`).                                                | `CA`                       |
 | `CERT_PROV`       | Province/State (e.g. `BC`).                                              | `BC`                       |
 | `CERT_LOCALITY`   | Locality/City (e.g. `Vancouver`).                                        | `Vancouver`                |
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

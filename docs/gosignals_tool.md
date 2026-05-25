@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # GoSignals Administration Tool
 
 i2goSignals includes a command-line administration tool called `goSignals` which can be used to administer and configure
@@ -462,6 +465,7 @@ the stream as of the specified date or jti value.
 
 When the update is accepted, goSignals will show the updated configuration provided by the SSF or i2goSignals server.
 
+---
 
-
-
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

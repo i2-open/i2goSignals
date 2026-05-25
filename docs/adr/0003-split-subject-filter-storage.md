@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Subject filter storage and matching at scale
 
 A stream's subject filter is **not one undifferentiated set scanned per event**.
@@ -59,3 +62,8 @@ are already softened by the §9.3 removal grace period. Short TTL bounds the res
 - The admin review endpoint is a **point lookup + aggregate counts**, never a
   paginated enumeration — the hash index makes "is subject X filtered here?"
   O(1), and millions of rows are never streamed to an operator.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

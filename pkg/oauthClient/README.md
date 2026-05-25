@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # STS Token Handling
 
 This package provides a small client helper that performs RFC 8693 token exchange to obtain an access token for downstream APIs and returns an `http.Client` that automatically refreshes tokens when they expire.
@@ -24,3 +27,8 @@ if err != nil {
 ```
 
 Caching: the manager caches `http.Client` instances per (subject access token + scopes + resource) tuple to avoid repeat exchanges across requests and to isolate tokens for different resources.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

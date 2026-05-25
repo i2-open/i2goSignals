@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Event-source Type as a transmitter declaration
 
 A transmitter stream's `event_source.type` is one of `DIRECT`, `AUDIENCE`, or
@@ -73,3 +76,8 @@ the Type tag genuinely optional for the common case.
 - An operator-facing summary of all four knobs lives in
   `docs/subject_processing.md`; this ADR is the design record behind why
   Type is shaped this way.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="./brand/logo/gosignals-hero-primary.svg"><img src="./brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Architectural Decision & Regression Log
 
 ## [2026-05-20] SSF subject filtering — §9.1/§9.2 posture and relay-error tolerance (issue #103)
@@ -1238,3 +1241,8 @@ plannedChange, add, graceSeconds)`, returns one of three decisions:
 *   `ListPendingDue`'s clock boundary is inclusive (`enforce_at == now` is
     elapsed), matching the slice #99 `entryDelivers` boundary, so the local
     delivery decision and the sweep both flip on the same tick.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="./brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

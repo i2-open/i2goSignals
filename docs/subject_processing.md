@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # SSF Subject Filtering — Operator Runbook
 
 goSignals can sit between SSF transmitters and receivers as a router. A
@@ -328,3 +331,8 @@ A `PASSTHRU` stream returns `passthru_no_local_filter=true` and omits
 | 403    | A stream-bound token names a different stream than `stream_id`.       |
 | 404    | Subject filtering disabled server-wide, or the stream does not exist. |
 | 500    | DAO error.                                                            |
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

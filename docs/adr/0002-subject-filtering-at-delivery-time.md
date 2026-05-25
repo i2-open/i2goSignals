@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Subject filtering applied at delivery time, not routing time
 
 The SSF §8.1.3 subject filter is consulted when a stream's pending buffer is
@@ -34,3 +37,8 @@ list still drains and stays bounded.
   and batched, so no cache or cross-node notification is needed).
 - Operational events (`Operational=true`) carry no Subject and always pass the
   filter, consistent with their existing bypass of `MatchesStream`.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

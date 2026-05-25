@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64" role="img" aria-label="goSignals mark">
+  <title>goSignals mark</title>
+  <g stroke="#0A1A0E" stroke-width="2.8" fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M2 32 L24 32"></path>
+    <path d="M24 32 L42 12 L58 12"></path>
+    <path d="M24 32 L58 32"></path>
+    <path d="M24 32 L42 52 L58 52"></path>
+  </g>
+  <circle cx="24" cy="32" r="3.5" fill="#0A1A0E"></circle>
+  <rect x="55" y="9" width="6" height="6" fill="#0A1A0E"></rect>
+  <rect x="55" y="29" width="6" height="6" fill="#0A1A0E"></rect>
+  <rect x="55" y="49" width="6" height="6" fill="#0A1A0E"></rect>
+</svg>

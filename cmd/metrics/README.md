@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 ### goSignals Metrics
 
 The `goSignalsServer` exposes a `/metrics` endpoint that provides Prometheus-formatted metrics about the server's operation and event routing.
@@ -34,3 +37,8 @@ curl https://keycloak:9080/metrics
 #### Sample Client
 
 A sample Go client that fetches and prints these metrics is available in `cmd/metrics/main.go`.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

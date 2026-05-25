@@ -1,0 +1,30 @@
+/* goSignals — design tokens */
+
+:root {
+  /* ── Brand palette ──────────────────────────────────────── */
+  --gs-bg:            #000000;  /* canvas / badge fill */
+  --gs-phos:          #6BE49A;  /* primary phosphor — accent */
+  --gs-phos-dim:      #2E7C4A;  /* dim phosphor — waves, borders, eyebrow */
+  --gs-mint:          #B8FFC4;  /* highlight phosphor */
+  --gs-amber:         #F5B544;  /* warning / alt accent */
+  --gs-cyan:          #6DB4FF;  /* info / alt accent */
+  --gs-white:         #FFFFFF;  /* mark / text */
+  --gs-text:          #d9e6dc;  /* body text on dark */
+  --gs-text-dim:      #7a8a7c;  /* secondary text on dark */
+  --gs-caption:       #7DECC7;  /* captions on dark */
+
+  /* On-light counterparts (use on cream / white) */
+  --gs-ink:           #0A1A0E;  /* mark on light bg */
+  --gs-phos-deep:     #0d6d36;  /* phosphor on light bg, AA contrast */
+  --gs-sage:          #7DBA8C;  /* waves on light bg */
+  --gs-cream:         #f6f4ef;
+  --gs-cream-border:  #c9c3b3;
+
+  /* ── Typography ─────────────────────────────────────────── */
+  --gs-font-display:  'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --gs-font-body:     'Inter', system-ui, -apple-system, Segoe UI, sans-serif;
+
+  /* ── Logo geometry ──────────────────────────────────────── */
+  --gs-logo-radius:   0;        /* badge corner radius */
+  --gs-logo-border:   1.5px;    /* hairline border thickness */
+}

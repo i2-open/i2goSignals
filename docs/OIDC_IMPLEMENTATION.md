@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../brand/logo/gosignals-hero-primary.svg"><img src="../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # OIDC/OAuth Implementation Summary
 
 This document summarizes the OIDC/OAuth authentication integration implemented for the GoSignals administrative interface.
@@ -227,3 +230,8 @@ For production deployment:
 ## Support
 
 For detailed setup instructions and troubleshooting, see `adminUI/OIDC_SETUP.md`.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>

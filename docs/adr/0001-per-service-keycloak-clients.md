@@ -1,3 +1,6 @@
+<!-- gosignals-brand-hero -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../brand/logo/gosignals-hero-primary.svg"><img src="../../brand/logo/gosignals-hero-on-light.svg" alt="goSignals" height="77"></picture>
+
 # Per-service Keycloak clients with client roles
 
 When adding Grafana SSO to the `gosignals` Keycloak realm, we gave Grafana its
@@ -31,3 +34,8 @@ reserved for genuinely cross-cutting identity.
   Mutual TLS remains scoped to the existing SPIFFE inter-cluster path; it was
   not extended to the observability/web tier because, on a single-host bridge
   network, it adds fiddly client-cert configuration for little gain.
+
+---
+
+<!-- gosignals-brand-footer -->
+<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>
