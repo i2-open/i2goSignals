@@ -80,4 +80,4 @@ the Type tag genuinely optional for the common case.
 ---
 
 <!-- gosignals-brand-footer -->
-<p align="center"><sub><img src="../../brand/logo/gosignals-favicon-simple.svg" width="12" height="12" alt="goSignals"> (C)2026 Independent Identity Inc.</sub></p>
+<p align="center"><sub>(C)2026 Independent Identity Inc.</sub></p>

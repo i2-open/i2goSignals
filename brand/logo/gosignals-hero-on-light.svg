@@ -50,8 +50,8 @@
     <rect x="0.75" y="0.75" width="62.5" height="62.5" fill="none" stroke="#0d6d36" stroke-width="1.2"/>
   </g>
 
-  <!-- Wordmark — ink "go" + dim phosphor "Signals" for stronger two-tone contrast on light bg -->
-  <text x="88" y="36" class="gs-word" dominant-baseline="central">
+  <!-- Wordmark — baseline positioned explicitly (y=55) so Safari/WebKit and Chromium render identically; dominant-baseline="central" is unreliable when SVG is loaded via <img>. -->
+  <text x="88" y="55" class="gs-word">
     <tspan fill="#0A1A0E">go</tspan><tspan fill="#2E7C4A">Signals</tspan>
   </text>
 </svg>
