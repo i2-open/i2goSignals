@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +160,16 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 
 	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
-		dbUrl = TestDbUrl
+		// MONGO_URL is set by CI (single-node mongo:7); local devs running the
+		// docker-compose cluster fall back to TestDbUrl.
+		if u := os.Getenv("MONGO_URL"); u != "" {
+			dbUrl = u
+		} else {
+			dbUrl = TestDbUrl
+		}
+		// Route the watchtokens resume file into a per-test tempdir so
+		// mongo_provider.Open does not leak resources/mongo_token.json.
+		t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
 	} else {
 		// When using memory provider, use a temporary directory for persistence
 		// to avoid leaving files in the source tree.

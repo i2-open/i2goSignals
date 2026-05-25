@@ -1,6 +1,7 @@
 package dbProviders
 
 import (
+    "path/filepath"
     "testing"
 
     "github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 // of MONGO_FAILTOMEM=FALSE.
 func TestOpenPersistence_NewFailToMemFalse(t *testing.T) {
     t.Setenv("I2SIG_STORE_MONGO_FALLBACK_MEM", "FALSE")
+    t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
 
     wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=100"
     p, err := OpenPersistence(wrongUrl, "test_fail_new")
@@ -29,6 +31,7 @@ func TestOpenPersistence_NewFailToMemFalse(t *testing.T) {
 // background reconnect loop can take over.
 func TestOpenPersistence_NewBackgroundReconnect(t *testing.T) {
     t.Setenv("I2SIG_STORE_MONGO_BACKGROUND_RECONNECT", "TRUE")
+    t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
 
     wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=100"
     p, err := OpenPersistence(wrongUrl, "test_bg_new")

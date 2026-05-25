@@ -81,6 +81,7 @@ func TestClientPushStream_Verification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, _ := dbProviders.OpenPersistence("", "test_verification")
 	pcs := &ReceiverPushStream{
 		sa:          newTestApplication(persistence),
@@ -156,6 +157,7 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 	// Manually set statusUrl to avoid discovery
 	statusUrl := mockTx.URL + "/status"
 
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, _ := dbProviders.OpenPersistence("", "test_fallback")
 	pcs := &ReceiverPushStream{
 		sa:        newTestApplication(persistence),
@@ -173,6 +175,7 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 }
 
 func TestReceiverPushStream_Recovery(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, _ := dbProviders.OpenPersistence("", "test_recovery")
 	sid := "recovery-stream"
 

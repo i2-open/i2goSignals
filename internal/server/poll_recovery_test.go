@@ -16,6 +16,7 @@ import (
 )
 
 func TestClientPollStream_Recovery(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, _ := dbProviders.OpenPersistence("", "test_poll_recovery")
 	sid := "recovery-poll-stream"
 

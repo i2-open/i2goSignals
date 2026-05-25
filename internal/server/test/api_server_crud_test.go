@@ -23,6 +23,7 @@ type ApiServerCrudTestSuite struct {
 }
 
 func (s *ApiServerCrudTestSuite) SetupSuite() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	provider, err := memory_provider.Open("memorydb:", "api_server_crud_test")
 	s.NoError(err)
 	persistence := &dbProviders.Persistence{

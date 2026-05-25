@@ -14,9 +14,9 @@ type LeaseTestSuite struct {
 }
 
 func (s *LeaseTestSuite) SetupSuite() {
-	dbUrl := "mongodb://root:dockTest@localhost:30001,localhost:30002,localhost:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
+	setMongoResumeFileTempDir(s.T())
 	dbName := "ssef_test_lease"
-	p, err := mongo_provider.Open(dbUrl, dbName)
+	p, err := mongo_provider.Open(mongoURL(), dbName)
 	if err != nil {
 		s.T().Skip("MongoDB client error: " + err.Error())
 		return

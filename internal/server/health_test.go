@@ -10,6 +10,7 @@ import (
 )
 
 func TestHealthEndpointMemoryProvider(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "test_health_signals")
 	require.NoError(t, err)
 

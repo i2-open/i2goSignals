@@ -18,6 +18,7 @@ import (
 
 func TestClusterMetrics(t *testing.T) {
 	// 1. Setup Memory Provider
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	provider, err := memory_provider.Open("memorydb://localhost", "test_metrics")
 	require.NoError(t, err)
 

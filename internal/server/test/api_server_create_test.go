@@ -22,6 +22,7 @@ type ApiServerTestSuite struct {
 }
 
 func (s *ApiServerTestSuite) SetupSuite() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	provider, err := memory_provider.Open("memorydb:", "api_server_test")
 	s.NoError(err)
 	persistence := &dbProviders.Persistence{

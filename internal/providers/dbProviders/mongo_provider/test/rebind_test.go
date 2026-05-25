@@ -25,7 +25,8 @@ type RebindTestSuite struct {
 }
 
 func (s *RebindTestSuite) SetupSuite() {
-    p, err := mongo_provider.Open(TestDbUrl, "ssef_test_rebind")
+    setMongoResumeFileTempDir(s.T())
+    p, err := mongo_provider.Open(mongoURL(), "ssef_test_rebind")
     if err != nil {
         s.T().Skip("MongoDB not available: " + err.Error())
         return

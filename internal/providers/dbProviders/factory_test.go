@@ -1,6 +1,7 @@
 package dbProviders
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,6 +38,7 @@ func TestOpenPersistence_Memory(t *testing.T) {
 // complete Persistence record (the same shape as a direct memory open).
 func TestOpenPersistence_Fallback(t *testing.T) {
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=1000"
 
 	p, err := OpenPersistence(wrongUrl, "test_persist_fallback")
@@ -55,6 +57,7 @@ func TestOpenPersistence_Fallback(t *testing.T) {
 // lives in factory_envcompat_test.go.
 func TestOpenPersistence_FailToMemFalse_Legacy(t *testing.T) {
 	t.Setenv("MONGO_FAILTOMEM", "FALSE")
+	t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
 
 	wrongUrl := "mongodb://nonexistent:27017/?serverSelectionTimeoutMS=100"
 	p, err := OpenPersistence(wrongUrl, "test_fail")

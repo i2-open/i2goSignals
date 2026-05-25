@@ -30,7 +30,8 @@ type MongoProviderSuite struct {
 
 func (s *MongoProviderSuite) SetupSuite() {
 	s.T().Helper()
-	provider, err := mongo_provider.Open(TestDbUrl, "")
+	setMongoResumeFileTempDir(s.T())
+	provider, err := mongo_provider.Open(mongoURL(), "")
 	if err != nil {
 		s.T().Skip("Mongo client error: " + err.Error())
 		return
@@ -98,8 +99,6 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 func TestMongoProvider(t *testing.T) {
 	suite.Run(t, new(MongoProviderSuite))
 }
-
-var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
 
 func (s *MongoProviderSuite) TestA_ClientReg() {
 	// Get an initial registration token

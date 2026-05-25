@@ -1,7 +1,6 @@
 package test
 
 import (
-	"os"
 	"testing"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
@@ -29,6 +28,7 @@ func persistenceFor(p *mongo_provider.MongoProvider) *dbProviders.Persistence {
 // TestNewApplication_BackgroundReconnect verifies that the application can start
 // even if the initial MongoDB connection fails, and that it doesn't panic.
 func TestNewApplication_BackgroundReconnect(t *testing.T) {
+	setMongoResumeFileTempDir(t)
 	// Use a non-existent Mongo URL to force a connection failure.
 	// serverSelectionTimeoutMS=3000 caps the driver's retry loop so the test fails fast.
 	mongoUrl := "mongodb://localhost:27019/nonexistent?serverSelectionTimeoutMS=3000"
@@ -64,14 +64,11 @@ func TestNewApplication_BackgroundReconnect(t *testing.T) {
 // UpdateTokenKey. The behaviour that matters is "post-reset signing keys
 // are fresh", not object identity.
 func TestNewApplication_LazyAuthRefresh(t *testing.T) {
-	mongoUrl := os.Getenv("MONGO_URL")
-	if mongoUrl == "" {
-		mongoUrl = TestDbUrl
-	}
+	setMongoResumeFileTempDir(t)
 	dbName := "test_db_lazy_refresh"
 
 	// Create provider (should connect successfully)
-	p, err := mongo_provider.Open(mongoUrl, dbName)
+	p, err := mongo_provider.Open(mongoURL(), dbName)
 	if err != nil {
 		t.Skip("Mongo not available for this test")
 	}
