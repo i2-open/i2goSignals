@@ -1,0 +1,2 @@
+# Placeholder so Grafana provisioning finds an (empty) plugins directory.
+# Grafana logs an error if /etc/grafana/provisioning/plugins is absent.

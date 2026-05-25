@@ -1,0 +1,2 @@
+# Placeholder so Grafana provisioning finds an (empty) alerting directory.
+# Grafana logs an error if /etc/grafana/provisioning/alerting is absent.
