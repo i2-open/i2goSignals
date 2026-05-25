@@ -3,3 +3,35 @@
 /.mongo/mongo3/
 /.mongo/
 .dev-image.stamp
+/config/scim/data1/logs/
+/config/scim/data2/logs/
+/config/scim/ca-bundle.pem
+/config/scim/cluster-scim-issuer.pem
+/config/scim/config.json
+/config/scim/iat-gosignals1.jwt
+/bin/linux/arm64/cluster-monitor
+/bin/linux/arm64/genTlsKeys
+/bin/linux/arm64/goSignals
+/bin/linux/arm64/goSignalsServer
+/bin/linux/arm64/goSsfServer
+/bin/linux/arm64/healthcheck
+/bin/
+/cluster-monitor
+/genTlsKeys
+/goSignals
+/goSignalsServer
+/goSsfServer
+/healthcheck
+/resources/
+# Mongo change-stream resume tokens are a runtime artifact written by
+# watchtokens.Store(); they must never be committed.
+**/resources/mongo_token*.json
+/.sandcastle/.env.example
+/.sandcastle/.gitignore
+/.sandcastle/Dockerfile
+/.sandcastle/implement-prompt.md
+/.sandcastle/main.mts
+/.sandcastle/merge-prompt.md
+/.sandcastle/plan-prompt.md
+/.idea/go.imports.xml
+/.idea/vcs.xml
