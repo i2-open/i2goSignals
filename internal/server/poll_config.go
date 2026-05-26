@@ -19,6 +19,8 @@ type pollConfig struct {
     StatusCheckInterval    time.Duration
     UnauthorizedRetryDelay time.Duration
     UnauthorizedRetryLimit int
+    ForbiddenRetryDelay    time.Duration
+    ForbiddenRetryLimit    int
 }
 
 func loadPollConfig() pollConfig {
@@ -30,6 +32,8 @@ func loadPollConfig() pollConfig {
         StatusCheckInterval:    30 * time.Second,
         UnauthorizedRetryDelay: 15 * time.Second,
         UnauthorizedRetryLimit: 10,
+        ForbiddenRetryDelay:    30 * time.Second,
+        ForbiddenRetryLimit:    3,
     }
 
     if v, err := strconv.ParseFloat(envcompat.Lookup("I2SIG_POLL_RETRY_BASE_DELAY", "POLL_RETRY_BASE_DELAY"), 64); err == nil {
@@ -52,6 +56,12 @@ func loadPollConfig() pollConfig {
     }
     if v, err := strconv.Atoi(envcompat.Lookup("I2SIG_POLL_AUTH_RETRY_LIMIT", "POLL_UNAUTHORIZED_RETRY_LIMIT")); err == nil {
         cfg.UnauthorizedRetryLimit = v
+    }
+    if v, err := strconv.ParseFloat(envcompat.Lookup("I2SIG_POLL_FORBIDDEN_RETRY_DELAY", "POLL_FORBIDDEN_RETRY_DELAY"), 64); err == nil {
+        cfg.ForbiddenRetryDelay = time.Duration(v * float64(time.Second))
+    }
+    if v, err := strconv.Atoi(envcompat.Lookup("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "POLL_FORBIDDEN_RETRY_LIMIT")); err == nil {
+        cfg.ForbiddenRetryLimit = v
     }
 
     return cfg

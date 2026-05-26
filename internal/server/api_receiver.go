@@ -32,7 +32,8 @@ type ClientPollStream struct {
 	stream    *model.StreamStateRecord
 	ctx       context.Context
 	cancel    context.CancelFunc
-	active    bool
+	active    bool // false once Close() or a terminal error asked the receiver to stop
+	running   bool // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
 	statusUrl string
 }
 
@@ -242,11 +243,12 @@ func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.Stream
 		ctx, cancel := context.WithCancel(context.Background())
 
 		ps = &ClientPollStream{
-			sa:     sa,
-			stream: streamState,
-			active: true,
-			ctx:    ctx,
-			cancel: cancel,
+			sa:      sa,
+			stream:  streamState,
+			active:  true,
+			running: true,
+			ctx:     ctx,
+			cancel:  cancel,
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
 		pollUrl := streamState.Delivery.PollReceiveMethod.EndpointUrl
@@ -254,9 +256,32 @@ func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.Stream
 		go ps.pollEventsReceiver()
 		return ps
 	}
+
 	ps.mu.Lock()
 	ps.stream = streamState
+	// Revive whenever the goroutine isn't alive and the caller wants the stream to run.
+	// Two paths reach here with a dead goroutine: (a) a prior terminal error set active=false
+	// and the goroutine returned, (b) the goroutine exited via pollEventsReceiver's outer-loop
+	// status check because the stream was Disabled at the time, leaving active=true but
+	// running=false. The status flip back to non-Disable is what re-arms the receiver.
+	needsRevive := !ps.running && streamState.Status != model.StreamStateDisable
+	if needsRevive {
+		// Cancel any lingering context from the previous goroutine before replacing.
+		if ps.cancel != nil {
+			ps.cancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		ps.ctx = ctx
+		ps.cancel = cancel
+		ps.active = true
+		ps.running = true
+	}
 	ps.mu.Unlock()
+
+	if needsRevive {
+		serverLog.Info("POLL-RCV: Reviving inactive poll receiver", "sid", streamState.StreamConfiguration.Id, "status", streamState.Status)
+		go ps.pollEventsReceiver()
+	}
 	return ps
 }
 
@@ -807,6 +832,12 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.stream.StreamConfiguration.Id
 	resource := fmt.Sprintf("poll-receiver:%s", sid)
 
+	defer func() {
+		ps.mu.Lock()
+		ps.running = false
+		ps.mu.Unlock()
+	}()
+
 	for {
 		ps.mu.RLock()
 		stream := ps.stream
@@ -909,6 +940,8 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	statusCheckInterval := pollCfg.StatusCheckInterval
 	unauthorizedRetryDelay := pollCfg.UnauthorizedRetryDelay
 	unauthorizedRetryLimit := pollCfg.UnauthorizedRetryLimit
+	forbiddenRetryDelay := pollCfg.ForbiddenRetryDelay
+	forbiddenRetryLimit := pollCfg.ForbiddenRetryLimit
 
 	// Initial status check upon lease acquisition - verify that the transmitter is active
 	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
@@ -917,6 +950,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 	retryCount := 0
 	unauthorizedCount := 0
+	forbiddenCount := 0
 	var firstErrorTime time.Time
 
 	for {
@@ -1011,12 +1045,53 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			}
 
 			if httpStatus == http.StatusForbidden {
-				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled by transmitter: %d %s", sid, httpStatus, http.StatusText(httpStatus))
-				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
-				ps.mu.Lock()
-				ps.active = false
-				ps.mu.Unlock()
-				return
+				forbiddenCount++
+				if forbiddenCount >= forbiddenRetryLimit {
+					scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.stream)
+					errMsg := fmt.Sprintf(
+						"POLL-RCV[%s] Stream disabled after %d forbidden (403) attempts. "+
+							"Transmitter rejected the token. Likely cause: OAuth client_credentials scope mismatch. "+
+							"Requested scopes: %s. Required scope: '%s'.",
+						sid, forbiddenCount, scopesDesc, authSupport.ScopeEventDelivery)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+					ps.mu.Lock()
+					ps.active = false
+					ps.mu.Unlock()
+					return
+				}
+
+				delaySeconds := float64(forbiddenRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(forbiddenCount-1))
+				if delaySeconds > maxDelay {
+					delaySeconds = maxDelay
+				}
+				delay := time.Duration(delaySeconds * float64(time.Second))
+
+				scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.stream)
+				serverLog.Warn("POLL-RCV: Forbidden response, retrying after delay",
+					"sid", sid, "delay", delay, "attempt", forbiddenCount, "limit", forbiddenRetryLimit,
+					"requested_scopes", scopesDesc, "required_scope", authSupport.ScopeEventDelivery)
+				ps.sa.pauseStreamOnError(sid,
+					fmt.Sprintf("forbidden response (403), retrying after %v (attempt %d/%d). "+
+						"Requested scopes: %s. Required scope: '%s'.",
+						delay, forbiddenCount, forbiddenRetryLimit, scopesDesc, authSupport.ScopeEventDelivery))
+
+				select {
+				case <-time.After(delay):
+					updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), sid)
+					if updatedStream != nil {
+						ps.mu.Lock()
+						ps.stream = updatedStream
+						ps.mu.Unlock()
+					}
+					closeClient()
+					client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+					if err != nil {
+						serverLog.Error("POLL-RCV: Failed to refresh client/auth after 403", "sid", sid, "error", err)
+					}
+					continue
+				case <-heartbeatCtx.Done():
+					return
+				}
 			}
 
 			if isConnectionError(err) || httpStatus == http.StatusServiceUnavailable {
@@ -1257,4 +1332,24 @@ func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode strin
 func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
 	sa.StreamService.UpdateStreamStatus(context.Background(), streamId, model.StreamStatePause, errMsg)
 	// TODO:  Update event router with stream state change??
+}
+
+// describeRequestedScopes returns a human-readable list of the OAuth scopes the
+// stream's TxAlias server is configured to request via client_credentials. Used
+// to surface scope-mismatch hints in stream error messages.
+func (sa *SignalsApplication) describeRequestedScopes(ctx context.Context, stream *model.StreamStateRecord) string {
+	if stream == nil || stream.StreamConfiguration.TxAlias == nil || *stream.StreamConfiguration.TxAlias == "" {
+		return "(no TxAlias)"
+	}
+	server, err := sa.ServerService.GetServerByAlias(ctx, *stream.StreamConfiguration.TxAlias)
+	if err != nil || server == nil {
+		return "(server lookup failed)"
+	}
+	if server.OAuthClientConfig == nil {
+		return "(not using OAuth client_credentials)"
+	}
+	if len(server.OAuthClientConfig.Scopes) == 0 {
+		return "(none)"
+	}
+	return "[" + strings.Join(server.OAuthClientConfig.Scopes, ", ") + "]"
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,6 +363,11 @@ func (suite *PollBehaviorSuite) TestPollSrvBehavior_LegacyTranslation() {
 func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 	t := suite.T()
 
+	// With the bounded-403-retry behavior the first 403 no longer disables the
+	// stream. Pin the retry limit to 1 so this test still exercises the
+	// terminal-disable path.
+	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "1")
+
 	// Mock a transmitter that returns 403
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/jwks" {
@@ -401,5 +407,77 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 	// Check if stream is now DISABLED in provider
 	updatedState, _ := suite.instance.GetStreamState(createdConfig.Id)
 	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
-	assert.Contains(t, updatedState.ErrorMsg, "Stream disabled by transmitter")
+	assert.Contains(t, updatedState.ErrorMsg, "Stream disabled after")
+	assert.Contains(t, updatedState.ErrorMsg, "forbidden (403)")
 }
+
+func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
+	t := suite.T()
+
+	// Allow up to 3 forbidden attempts before disabling. With a short delay
+	// and backoff factor, the test should observe at least one paused state
+	// before the stream is ultimately disabled.
+	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_DELAY", "0.05") // 50ms base
+	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "3")
+	t.Setenv("I2SIG_POLL_RETRY_BACKOFF_FACTOR", "1.0") // disable exponential growth for predictability
+	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "1.0")     // cap
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/jwks" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"keys":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer ts.Close()
+
+	streamConfig := model.StreamConfiguration{
+		Id:            "transmitter-403-retry",
+		Iss:           "transmitter-403-retry.example.com",
+		IssuerJWKSUrl: ts.URL + "/jwks",
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			PollReceiveMethod: &model.PollReceiveMethod{
+				Method:      model.ReceivePoll,
+				EndpointUrl: ts.URL + "/poll",
+				PollConfig:  &model.PollParameters{},
+			},
+		},
+	}
+
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	assert.NoError(t, err)
+	state, _ := suite.instance.GetStreamState(createdConfig.Id)
+
+	ps := suite.instance.app.HandleReceiver(state)
+	assert.NotNil(t, ps)
+
+	// Within the first ~100ms we should see at least one retry (status paused
+	// with a retry-attempt message), well before the limit of 3 is reached.
+	sawPause := false
+	for i := 0; i < 20; i++ {
+		time.Sleep(25 * time.Millisecond)
+		updatedState, _ := suite.instance.GetStreamState(createdConfig.Id)
+		if updatedState != nil && updatedState.Status == model.StreamStatePause &&
+			strings.Contains(updatedState.ErrorMsg, "forbidden response (403), retrying") {
+			sawPause = true
+			break
+		}
+	}
+	assert.True(t, sawPause, "expected to observe a paused state with a 403 retry message during retries")
+
+	// Eventually the stream must end up DISABLED with the diagnostic message.
+	var finalState *model.StreamStateRecord
+	for i := 0; i < 40; i++ {
+		time.Sleep(50 * time.Millisecond)
+		finalState, _ = suite.instance.GetStreamState(createdConfig.Id)
+		if finalState != nil && finalState.Status == model.StreamStateDisable {
+			break
+		}
+	}
+	assert.NotNil(t, finalState)
+	assert.Equal(t, model.StreamStateDisable, finalState.Status)
+	assert.Contains(t, finalState.ErrorMsg, "Stream disabled after 3 forbidden (403)")
+	assert.Contains(t, finalState.ErrorMsg, "scope")
+}
+
