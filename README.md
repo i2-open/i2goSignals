@@ -98,8 +98,12 @@ The i2goSignals project is currently under active development. This preview code
 ```bash
 git clone https://github.com/i2-open/i2gosignals.git
 cd i2gosignals
-make build
+make build           # builds the CLI and server binaries only
+make build-docker    # also build (and load) the i2gosignals container image
 ```
+
+See [Building Container Images](#building-container-images) for multi-arch
+and registry-push targets.
 
 ### SPIFFE Registration
 When using SPIFFE-enabled setups, register workloads once the services are healthy:
@@ -169,8 +173,32 @@ to Viewer.
 
 Use `make dev-logs` to follow logs and `make dev-down` to stop the stack.
 
----
-*Production image builds use `sh ./build.sh` and the standard `docker-compose.yml`.*
+## Building Container Images
+
+All container image builds go through the `Makefile`. `pkg/constants/version.txt`
+is the single source of truth for the project version — it is embedded into
+every Go binary via `//go:embed` and read by the Makefile to tag images and
+inject `-ldflags`, so a one-line bump there keeps the binary, the image tag,
+and the OCI labels in lockstep.
+
+| Target | What it does |
+| :--- | :--- |
+| `make build` | Builds the Go CLI and server (`bin/goSignalsServer`). No Docker. |
+| `make build-docker` | Cross-compiles for the host arch and loads `i2gosignals:<version>` and `:latest` into the local Docker daemon. |
+| `make build-docker-multiarch` | Builds a multi-arch (`linux/amd64,linux/arm64` by default) manifest and pushes both `:<version>` and `:latest` to `independentid/i2gosignals`. Override `PUSH_REPO=…` to publish elsewhere; override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder on first run. |
+| `make docker-sbom` | Builds the host-arch image and extracts its SBOM (SPDX 2.3 in-toto attestation) to `bin/sbom-<version>.json`. |
+| `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
+
+Override the version for a one-off branded build without editing `version.txt`:
+
+```bash
+make build-docker VERSION=1.2.3-rc1
+make build-docker-multiarch VERSION=1.2.3 PUSH_REPO=ghcr.io/i2-open/i2gosignals
+```
+
+> `build.sh` is preserved as a thin shim that forwards its legacy flags
+> (`-n`, `-m`, `-p`, `-a`, `-t`, `-c`) to the equivalent `make` invocations,
+> so existing CI scripts keep working. New work should call `make` directly.
 
 ---
 
