@@ -318,6 +318,17 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 
 // ValidateAuthorizationAny validates the Authorization header against either a locally issued token
 // or any configured OAuth/OIDC servers defined in OAUTH_SERVERS. It returns 200 OK when authorized.
+//
+// Two distinct token sources are supported:
+//  1. Locally issued event-authorization tokens, signed by the AuthIssuer's PrivateKey
+//     (kid lives in PublicKey.KIDs()). Issued by the goSignals CLI / registration paths.
+//  2. OAuth/OIDC access tokens issued by configured OAUTH_SERVERS (e.g. Keycloak),
+//     used by service-to-service callers that use client_credentials.
+//
+// We route by token kid so the wrong validator never runs (and never emits noisy
+// "validation failed" logs). If the kid cannot be classified (cached JWKS doesn't
+// yet contain it), we fall back to try-local-then-OAuth — keyfunc's RefreshUnknownKID
+// will pull a fresh JWKS in the OAuth path.
 func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) (*AuthContext, int) {
 	authorization := r.Header.Get("Authorization")
 
@@ -348,17 +359,121 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 	if len(parts) < 2 || strings.ToLower(parts[0]) != "bearer" {
 		return nil, http.StatusUnauthorized
 	}
+	tokenString := parts[1]
 
-	// Try local token first
-	if tkn, err := a.ParseAuthTokenVerbose(parts[1], false); err == nil {
-		if tkn.IsAuthorized(streamRequested, scopes) {
-			return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
+	route := a.classifyToken(tokenString)
+	authLog.Debug("Authorization routing", "streamId", streamRequested, "route", route.name, "tokenKid", route.tokenKid, "localKids", route.localKids, "oauthConfigured", route.oauthConfigured)
+
+	switch route.name {
+	case routeLocal:
+		return a.validateLocalToken(tokenString, streamRequested, scopes)
+	case routeOAuth:
+		return a.validateOAuthToken(tokenString, streamRequested, scopes)
+	default:
+		// Unclassified (no kid in token header, or kid not yet in any cached JWKS).
+		// Fall back to try-local-then-OAuth; keyfunc will refresh the OAuth JWKS on
+		// unknown kid if Keycloak rotated.
+		if ctx, status := a.validateLocalToken(tokenString, streamRequested, scopes); status != http.StatusUnauthorized || ctx != nil {
+			return ctx, status
 		}
-		return nil, http.StatusForbidden
+		return a.validateOAuthToken(tokenString, streamRequested, scopes)
+	}
+}
+
+const (
+	routeLocal        = "local"
+	routeOAuth        = "oauth"
+	routeUnclassified = "unclassified"
+)
+
+type tokenRoute struct {
+	name            string
+	tokenKid        string
+	localKids       []string
+	oauthConfigured bool
+}
+
+// classifyToken peeks at the JWT header's kid and decides which validator to run.
+// Local wins when the kid is in the local JWKS. OAuth wins when the kid is in any
+// cached OAuth JWKS or when OAuth servers are configured and the local JWKS does
+// not contain the kid. Returns routeUnclassified when the kid cannot be read or
+// no cached JWKS knows it — caller falls back to try-both.
+func (a *AuthIssuer) classifyToken(tokenString string) tokenRoute {
+	out := tokenRoute{name: routeUnclassified}
+
+	out.tokenKid = peekKid(tokenString)
+
+	a.mu.RLock()
+	if a.PublicKey != nil {
+		out.localKids = a.PublicKey.KIDs()
+	}
+	oauthCache := a.OAuthPubKeys
+	a.mu.RUnlock()
+	out.oauthConfigured = len(a.GetOAuthServers()) > 0
+
+	if out.tokenKid == "" {
+		return out
 	}
 
-	// Try OAuth servers
-	return a.validateOAuthToken(parts[1], streamRequested, scopes)
+	for _, k := range out.localKids {
+		if k == out.tokenKid {
+			out.name = routeLocal
+			return out
+		}
+	}
+
+	for _, jwks := range oauthCache {
+		for _, k := range jwks.KIDs() {
+			if k == out.tokenKid {
+				out.name = routeOAuth
+				return out
+			}
+		}
+	}
+
+	// Kid is not in the local JWKS. If OAuth is configured we route to OAuth so
+	// keyfunc can refresh and try; otherwise leave unclassified so caller fails fast.
+	if out.oauthConfigured {
+		out.name = routeOAuth
+	}
+	return out
+}
+
+// peekKid parses only the JWT header to extract the kid. No signature check.
+// Returns "" when the token is malformed or has no kid.
+func peekKid(tokenString string) string {
+	parts := strings.Split(strings.TrimSpace(tokenString), ".")
+	if len(parts) < 1 {
+		return ""
+	}
+	hdrBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return ""
+	}
+	var hdr map[string]interface{}
+	if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
+		return ""
+	}
+	if k, ok := hdr["kid"].(string); ok {
+		return k
+	}
+	return ""
+}
+
+// validateLocalToken runs the local-issuer validation path and produces a single
+// terminal log on failure. It does not fall through to OAuth — kid routing has
+// already decided this is a local token.
+func (a *AuthIssuer) validateLocalToken(tokenString, streamRequested string, scopes []string) (*AuthContext, int) {
+	tkn, err := a.parseAuthTokenInternal(tokenString, false, streamRequested)
+	if err != nil || tkn == nil {
+		authLog.Warn("Local token validation failed", "streamId", streamRequested, "error", err)
+		return nil, http.StatusUnauthorized
+	}
+	if tkn.IsAuthorized(streamRequested, scopes) {
+		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
+	}
+	authLog.Warn("Local token authorization scope/stream mismatch", "streamId", streamRequested, "tokenStreams", tkn.StreamIds, "tokenRoles", tkn.Roles, "requiredScopes", scopes)
+	return nil, http.StatusForbidden
 }
 
 // validateOAuthToken attempts to validate the token using configured OAuth/OIDC servers.
@@ -457,9 +572,10 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		} else {
 			reason += " because Key ID was not found in JWKS after refresh grace"
 		}
-		authLog.Warn(reason, "error", loadErr)
+		authLog.Warn(reason, "streamId", streamRequested, "error", loadErr)
 		return nil, http.StatusServiceUnavailable
 	}
+	authLog.Warn("Authorization rejected: no local or OAuth key validated the token", "streamId", streamRequested, "requiredScopes", scopesAccepted)
 	return nil, http.StatusUnauthorized
 }
 
@@ -479,12 +595,20 @@ func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 
 // ParseAuthToken parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
 func (a *AuthIssuer) ParseAuthToken(tokenString string) (*authSupport.EventAuthToken, error) {
-	return a.ParseAuthTokenVerbose(tokenString, true)
+	return a.parseAuthTokenInternal(tokenString, true, "")
 }
 
 // ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
 // When verbose is false, it does not log "Error validating token"
 func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*authSupport.EventAuthToken, error) {
+	return a.parseAuthTokenInternal(tokenString, verbose, "")
+}
+
+// parseAuthTokenInternal is the implementation used by both ParseAuthToken and
+// ParseAuthTokenVerbose. The streamId argument is included in diagnostic logs so
+// validation failures can be tied to the stream the caller was trying to reach.
+// Pass an empty string when no stream context is available.
+func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, streamId string) (*authSupport.EventAuthToken, error) {
 	// If the public key is not yet loaded (server still starting up or in the middle
 	// of a MongoDB reconnect), wait up to 1 second for it to become available before
 	// giving up. This avoids 503 responses during the brief window between service
@@ -511,27 +635,12 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 	// In case of cut/paste error, trim extra spaces
 	tokenString = strings.TrimSpace(tokenString)
 
-	// Extract kid from token header for debug logging (parse header only, no sig check)
-	var tokenKid string
-	if parts := strings.Split(tokenString, "."); len(parts) >= 1 {
-		if hdrBytes, err2 := base64.RawURLEncoding.DecodeString(parts[0]); err2 == nil {
-			var hdr map[string]interface{}
-			if err2 = json.Unmarshal(hdrBytes, &hdr); err2 == nil {
-				if k, ok := hdr["kid"].(string); ok {
-					tokenKid = k
-				}
-			}
-		}
-	}
-	authLog.Debug("ParseAuthTokenVerbose", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs())
-
+	tokenKid := peekKid(tokenString)
 	valid := true
 	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, pubKey.Keyfunc)
 	if err != nil {
 		if verbose {
-			authLog.Error("Error validating token", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
-		} else {
-			authLog.Debug("Local token validation failed", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "error", err)
+			authLog.Error("Error validating token", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "streamId", streamId, "error", err)
 		}
 		valid = false
 	}
