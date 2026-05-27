@@ -185,7 +185,7 @@ and the OCI labels in lockstep.
 | :--- | :--- |
 | `make build` | Builds the Go CLI and server (`bin/goSignalsServer`). No Docker. |
 | `make build-docker` | Cross-compiles for the host arch and loads `i2gosignals:<version>` and `:latest` into the local Docker daemon. |
-| `make build-docker-multiarch` | Builds a multi-arch (`linux/amd64,linux/arm64` by default) manifest and pushes both `:<version>` and `:latest` to `independentid/i2gosignals`. Override `PUSH_REPO=…` to publish elsewhere; override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder on first run. |
+| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is published. Add `PUSH=1` to push `:<version>` and `:latest` to `independentid/i2gosignals`. Override `PUSH_REPO=…` to publish elsewhere; override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder on first run. |
 | `make docker-sbom` | Builds the host-arch image and extracts its SBOM (SPDX 2.3 in-toto attestation) to `bin/sbom-<version>.json`. |
 | `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
 
@@ -193,7 +193,7 @@ Override the version for a one-off branded build without editing `version.txt`:
 
 ```bash
 make build-docker VERSION=1.2.3-rc1
-make build-docker-multiarch VERSION=1.2.3 PUSH_REPO=ghcr.io/i2-open/i2gosignals
+make build-docker-multiarch VERSION=1.2.3 PUSH=1 PUSH_REPO=ghcr.io/i2-open/i2gosignals
 ```
 
 > `build.sh` is preserved as a thin shim that forwards its legacy flags

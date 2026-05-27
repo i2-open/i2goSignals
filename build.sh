@@ -73,11 +73,9 @@ while getopts ${optString} OPTION; do
     esac
 done
 
-if [ "$multi" = "Y" ] && [ "$doPush" = "N" ]; then
-    echo "ERROR: -m (multi-arch) requires -p (push)."
-    echo "       Multi-arch manifests cannot be loaded into the local docker daemon."
-    exit 1
-fi
+# Multi-arch without push used to be disallowed because there was nowhere to
+# put the manifest. The Makefile now treats no-push multi-arch as a validate-
+# only build (layers stay in the buildx cache), so let that case through.
 
 if [ "$test" = "Y" ]; then
     echo "* Running go test ./..."
@@ -103,6 +101,9 @@ if [ "$multi" = "Y" ]; then
         fi
     done
     make_args+=("PLATFORMS=$platforms")
+    if [ "$doPush" = "Y" ]; then
+        make_args+=("PUSH=1")
+    fi
     exec make build-docker-multiarch "${make_args[@]}"
 elif [ "$doPush" = "Y" ]; then
     # Single-arch push: build locally first, then docker push both tags.

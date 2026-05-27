@@ -55,7 +55,7 @@ help:
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - build & push $(PUSH_REPO):$(VERSION) + :latest ($(PLATFORMS))"
+	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; add PUSH=1 to publish $(PUSH_REPO):$(VERSION) + :latest"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
@@ -139,10 +139,23 @@ build-docker: cross-compile-linux
 		.
 	@echo ">> built $(LOCAL_IMAGE):$(VERSION) and $(LOCAL_IMAGE):latest"
 
-# Build a multi-arch image ($(PLATFORMS)) and push it as a single manifest
-# list to $(PUSH_REPO). A multi-arch manifest cannot be loaded into the local
-# Docker daemon, so this target pushes directly. Needs a buildx builder with
-# the docker-container driver — created on demand if missing.
+# Build a multi-arch image ($(PLATFORMS)) as a single manifest list. A multi-arch
+# manifest cannot be loaded into the local Docker daemon, so by default this
+# target just validates the build (layers stay in the buildx cache). Set PUSH=1
+# to publish to $(PUSH_REPO) with both :$(VERSION) and :latest tags. Needs a
+# buildx builder with the docker-container driver — created on demand if missing.
+#
+#   make build-docker-multiarch                # build only, no push
+#   make build-docker-multiarch PUSH=1         # build + push to $(PUSH_REPO)
+#   make build-docker-multiarch PUSH=1 PUSH_REPO=ghcr.io/i2-open/i2gosignals
+ifdef PUSH
+DOCKER_MULTIARCH_OUTPUT := --push --tag $(PUSH_REPO):$(VERSION) --tag $(PUSH_REPO):latest --metadata-file $(BIN_DIR)/build-meta.json
+DOCKER_MULTIARCH_BANNER := pushed $(PUSH_REPO):$(VERSION) and :latest for $(PLATFORMS) (metadata at $(BIN_DIR)/build-meta.json)
+else
+DOCKER_MULTIARCH_OUTPUT :=
+DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 to publish to $(PUSH_REPO))
+endif
+
 build-docker-multiarch: cross-compile-linux
 	@current_driver=$$($(DOCKER) buildx inspect 2>/dev/null | awk '/^Driver:/ {print $$2}'); \
 	if [ "$$current_driver" != "docker-container" ]; then \
@@ -157,15 +170,11 @@ build-docker-multiarch: cross-compile-linux
 		--build-arg VERSION=$(VERSION) \
 		--build-arg VCS_REF=$(VCS_REF) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		--tag $(PUSH_REPO):$(VERSION) \
-		--tag $(PUSH_REPO):latest \
 		--provenance=mode=max \
 		--sbom=true \
-		--metadata-file $(BIN_DIR)/build-meta.json \
-		--push \
+		$(DOCKER_MULTIARCH_OUTPUT) \
 		.
-	@echo ">> pushed $(PUSH_REPO):$(VERSION) and :latest for $(PLATFORMS)"
-	@echo ">> manifest metadata at $(BIN_DIR)/build-meta.json"
+	@echo ">> $(DOCKER_MULTIARCH_BANNER)"
 
 # Export the image SBOM to a local file. BuildKit's tar exporter writes the
 # SBOM as sbom.spdx.json at the archive root; stream the archive and extract
