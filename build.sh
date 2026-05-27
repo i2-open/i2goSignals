@@ -1,36 +1,30 @@
- #!/usr/bin/env bash
+#!/usr/bin/env bash
 #
-# Go Signals docker image builder.
-#
-# Single buildx invocation produces one manifest list across all requested
-# platforms. Push tags both :$tag and :latest at the same digest. Local
-# (no-push) builds load a single host-arch image into the docker daemon.
+# Thin shim around the Makefile, preserved for muscle memory and any external
+# automation that still invokes build.sh directly. New work should call
+# `make build-docker` / `make build-docker-multiarch` directly.
 #
 # Usage:
-#   ./build.sh                    # local single-arch (host) image -> i2gosignals:$tag
+#   ./build.sh                    # local single-arch image -> i2gosignals:<version>
 #   ./build.sh -t                 # also run go test ./... first
-#   ./build.sh -n 1.2.3           # override the tag
-#   ./build.sh -p                 # push single host-arch image with :tag and :latest
+#   ./build.sh -n 1.2.3           # override the version tag (overrides version.txt)
+#   ./build.sh -p                 # push single host-arch image with :<tag> and :latest
 #   ./build.sh -m -p              # push multi-arch manifest (linux/amd64,linux/arm64)
 #   ./build.sh -m -p -a amd64     # push manifest restricted to one arch
 #   ./build.sh -c                 # install goSignals CLI from upstream and exit
 #
-# Image references:
-#   local:  i2gosignals:$tag                 (loaded into local docker daemon)
-#   push:   independentid/i2gosignals:$tag   (Docker Hub) plus :latest at same digest
+# The canonical version comes from pkg/constants/version.txt (also embedded
+# into every Go binary via //go:embed). `-n <tag>` here forwards as
+# `VERSION=<tag>` to make, which overrides the file at build time only.
 #
 set -euo pipefail
 
 echo ""
-echo "Go Signals builder utility"
-echo "(meant for building docker images only — use Make for normal development)"
+echo "Go Signals build.sh — shim that delegates to the Makefile."
+echo "(prefer 'make build-docker' or 'make build-docker-multiarch' going forward)"
 echo ""
 
-BIN_DIR=bin
-PUSH_REPO="independentid/i2gosignals"
-LOCAL_IMAGE="i2gosignals"
-
-tag="0.11.0-beta.1"
+tag=""
 test="N"
 doPush="N"
 aIn="amd64,arm64"
@@ -70,8 +64,8 @@ while getopts ${optString} OPTION; do
             echo "Usage: ./build.sh [-t] [-m] [-p] [-n <tag>] [-a <arch1,arch2,...>] [-c]"
             echo "  -t           Run go test ./... before building"
             echo "  -m           Multi-arch image (default: amd64,arm64). Requires -p."
-            echo "  -p           Push to Docker Hub. Tags both :\$tag and :latest at the same digest."
-            echo "  -n <tag>     Tag version (default: $tag)"
+            echo "  -p           Push to the configured registry."
+            echo "  -n <tag>     Override version tag (default: pkg/constants/version.txt)"
             echo "  -a <archs>   Comma-separated arches when -m is set (default: $aIn)"
             echo "  -c           Install goSignals CLI from upstream and exit"
             exit 1
@@ -79,98 +73,49 @@ while getopts ${optString} OPTION; do
     esac
 done
 
-echo ""
-
-# --- Validate flag combinations ---
-# Multi-arch images are OCI manifest lists. The local docker daemon's image
-# store can't load a manifest list, so -m only makes sense with -p.
 if [ "$multi" = "Y" ] && [ "$doPush" = "N" ]; then
     echo "ERROR: -m (multi-arch) requires -p (push)."
     echo "       Multi-arch manifests cannot be loaded into the local docker daemon."
     exit 1
 fi
 
-# --- Optional test pass ---
 if [ "$test" = "Y" ]; then
-    echo "* Building and running tests ..."
+    echo "* Running go test ./..."
     go build ./...
     go test ./...
     echo ""
 fi
 
-# --- Resolve target architectures ---
+# Build the PLATFORMS list (multi-arch) or leave default (single host arch).
+make_args=()
+if [ -n "$tag" ]; then
+    make_args+=("VERSION=$tag")
+fi
+
 if [ "$multi" = "Y" ]; then
+    platforms=""
     IFS=',' read -ra archs <<< "$aIn"
-else
-    archs=("$(go env GOARCH)")
-fi
-
-# --- Cross-compile Go binaries into bin/linux/<arch>/ ---
-mkdir -p "${BIN_DIR}"
-
-echo "* Cross-compiling Go binaries for: ${archs[*]}"
-for arch in "${archs[@]}"; do
-    outdir="${BIN_DIR}/linux/${arch}"
-    mkdir -p "${outdir}"
-    echo "  - building ${arch} -> ${outdir}"
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/goSignals"       ./cmd/goSignals/...
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/goSignalsServer" ./cmd/goSignalsServer/...
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/goSsfServer"     ./cmd/goSsfServer/...
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/cluster-monitor" ./cmd/cluster-monitor/...
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/genTlsKeys"      ./cmd/genTlsKeys/...
-    CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -o "${outdir}/healthcheck"     ./cmd/healthcheck/...
-done
-echo ""
-
-# --- Compose buildx --platform list (linux/amd64,linux/arm64) ---
-platforms=""
-for arch in "${archs[@]}"; do
-    if [ -z "$platforms" ]; then
-        platforms="linux/${arch}"
-    else
-        platforms="${platforms},linux/${arch}"
-    fi
-done
-
-# --- Ensure a buildx builder exists that can produce manifest lists ---
-# The default buildx builder uses the `docker` driver, which only supports
-# a single platform. Multi-arch builds need a `docker-container` builder.
-if [ "$multi" = "Y" ]; then
-    current_driver=$(docker buildx inspect 2>/dev/null | awk '/^Driver:/ {print $2}')
-    if [ "${current_driver:-}" != "docker-container" ]; then
-        if ! docker buildx inspect i2sig >/dev/null 2>&1; then
-            echo "* Creating docker-container buildx builder 'i2sig' (one-time)"
-            docker buildx create --name i2sig --driver docker-container --bootstrap
+    for arch in "${archs[@]}"; do
+        if [ -z "$platforms" ]; then
+            platforms="linux/${arch}"
+        else
+            platforms="${platforms},linux/${arch}"
         fi
-        docker buildx use i2sig
-    fi
-fi
-
-echo "* Building docker image (tag: ${tag}, platforms: ${platforms})"
-
-if [ "$doPush" = "Y" ]; then
-    echo "  - pushing tags: ${PUSH_REPO}:${tag}, ${PUSH_REPO}:latest"
-    docker buildx build \
-        --platform "${platforms}" \
-        --provenance=mode=max \
-        --sbom=true \
-        --tag "${PUSH_REPO}:${tag}" \
-        --tag "${PUSH_REPO}:latest" \
-        --metadata-file "${BIN_DIR}/build-meta.json" \
-        --push \
-        .
-    echo ""
-    echo "  - manifest metadata captured at: ${BIN_DIR}/build-meta.json"
+    done
+    make_args+=("PLATFORMS=$platforms")
+    exec make build-docker-multiarch "${make_args[@]}"
+elif [ "$doPush" = "Y" ]; then
+    # Single-arch push: build locally first, then docker push both tags.
+    make build-docker "${make_args[@]}"
+    # Resolve the effective version for the push tags (mirrors Make's logic).
+    push_version="${tag:-$(tr -d '[:space:]' < pkg/constants/version.txt)}"
+    push_repo="${PUSH_REPO:-independentid/i2gosignals}"
+    local_image="${LOCAL_IMAGE:-i2gosignals}"
+    docker tag "${local_image}:${push_version}" "${push_repo}:${push_version}"
+    docker tag "${local_image}:${push_version}" "${push_repo}:latest"
+    docker push "${push_repo}:${push_version}"
+    docker push "${push_repo}:latest"
+    echo ">> pushed ${push_repo}:${push_version} and :latest"
 else
-    # Local single-arch path. Skip SBOM/provenance (those produce OCI indexes
-    # that the local daemon can't --load without containerd image store).
-    echo "  - loading into local docker daemon as ${LOCAL_IMAGE}:${tag}"
-    docker buildx build \
-        --platform "${platforms}" \
-        --tag "${LOCAL_IMAGE}:${tag}" \
-        --load \
-        .
+    exec make build-docker "${make_args[@]}"
 fi
-
-echo ""
-echo "  Build complete."

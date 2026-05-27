@@ -5,12 +5,21 @@
 # builds reproducible; bump deliberately when refreshing the base image.
 FROM cgr.dev/chainguard/bash:latest@sha256:b434d0c46e9daebb872eb5cd1579cfa4a71a76cfece9b6b8750513c61de39edd
 
+# Build-time metadata, populated by the Makefile from pkg/constants/version.txt,
+# `git rev-parse --short HEAD`, and the build host's UTC clock.
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
 LABEL org.opencontainers.image.authors="phil.hunt@independentid.com"
 LABEL org.opencontainers.image.source="https://github.com/i2-open/i2gosignals"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
 
 # Set automatically by buildx (amd64, arm64, ...) per --platform target.
-# Selects the per-arch binaries staged by build.sh under bin/linux/<arch>/.
-# Always invoke this Dockerfile through build.sh — plain `docker build`
+# Selects the per-arch binaries staged by the Makefile under bin/linux/<arch>/.
+# Always invoke this Dockerfile through `make build-docker` — plain `docker build`
 # without buildx will leave TARGETARCH unset and the COPY paths won't resolve.
 ARG TARGETARCH
 
