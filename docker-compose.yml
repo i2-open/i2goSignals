@@ -284,6 +284,10 @@ services:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
       - I2SIG_TLS_CA_CERT=/scim/certs/ca-cert.pem
+      # Present the bootstrap secret on `create key` / `create iat` instead of
+      # the now-removed anonymous /iat path (PRD #120 / slice #121, generalized
+      # in #123). Must match the value configured on the goSignals nodes.
+      - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
     entrypoint: [ "sh", "/scim/scripts/register.sh"]
 
