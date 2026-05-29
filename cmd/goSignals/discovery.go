@@ -55,6 +55,9 @@ type oidcEndpoints struct {
     Authorization string
     Token         string
     Issuer        string
+    // DeviceAuthorization is the RFC 8628 device authorization endpoint, when
+    // advertised. Empty if the issuer does not support the device-code grant.
+    DeviceAuthorization string
 }
 
 // discoverEndpoints fetches the issuer's OpenID Provider configuration to learn
@@ -71,8 +74,9 @@ func discoverEndpoints(issuer string) (*oidcEndpoints, error) {
         return nil, fmt.Errorf("issuer %s did not advertise authorization/token endpoints", issuer)
     }
     return &oidcEndpoints{
-        Authorization: cfg.AuthorizationEndpoint,
-        Token:         cfg.TokenEndpoint,
-        Issuer:        cfg.Issuer,
+        Authorization:       cfg.AuthorizationEndpoint,
+        Token:               cfg.TokenEndpoint,
+        Issuer:              cfg.Issuer,
+        DeviceAuthorization: cfg.DeviceAuthEndpoint,
     }, nil
 }
