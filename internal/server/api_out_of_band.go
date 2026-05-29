@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 
@@ -731,18 +732,40 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	if baseUrl != nil {
 		baseURl = baseUrl.String()
 	}
-	name := "GoSignals"
-	prMeta := model.ProtectedResourceMetadata{
-		Resource:               &baseURl,
-		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery, authSupport.ScopeRegister},
-		BearerMethodsSupported: []string{"header"},
-		ResourceName:           &name,
-	}
+	prMeta := buildProtectedResourceMetadata(baseURl, sa.GetAuth().GetOAuthServers(), cliClientId())
 
 	resp, _ := json.MarshalIndent(prMeta, "", "  ")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// cliClientId resolves the recommended public OAuth client_id advertised to
+// interactive clients (the goSignals CLI). Sourced from I2SIG_CLI_CLIENT_ID,
+// defaulting to "gosignals-cli".
+func cliClientId() string {
+	if v := os.Getenv("I2SIG_CLI_CLIENT_ID"); v != "" {
+		return v
+	}
+	return "gosignals-cli"
+}
+
+// buildProtectedResourceMetadata assembles RFC9728 metadata. It advertises the
+// configured authorization_servers, the recommended public CLI client_id, and
+// the scopes supported by the server (including the narrow "key" scope).
+func buildProtectedResourceMetadata(baseUrl string, authServers []string, cliClient string) model.ProtectedResourceMetadata {
+	name := "GoSignals"
+	res := baseUrl
+	meta := model.ProtectedResourceMetadata{
+		Resource:               &res,
+		AuthorizationServers:   authServers,
+		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeRegister, authSupport.ScopeKey},
+		BearerMethodsSupported: []string{"header"},
+		ResourceName:           &name,
+	}
+	if cliClient != "" {
+		meta.ClientID = &cliClient
+	}
+	return meta
 }
 
 // ListStreamStates lists all stream states associated with the current project.

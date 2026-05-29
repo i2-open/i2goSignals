@@ -12,7 +12,6 @@ import (
 	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -51,12 +50,14 @@ func getHttpClient(timeout time.Duration) *http.Client {
 }
 
 type AddServerCmd struct {
-	Alias string `arg:"" help:"A unique name to identify the server"`
-	Host  string `arg:"" required:"" help:"Http URL for a goSignals server"`
-	Desc  string `help:"Description of project"`
-	Email string `help:"Contact email for project"`
-	Iat   string `help:"Registration Initial Access Auth if provided"`
-	Token string `help:"Administration authorization token"`
+	Alias        string `arg:"" help:"A unique name to identify the server"`
+	Host         string `arg:"" required:"" help:"Http URL for a goSignals server"`
+	Desc         string `help:"Description of project"`
+	Email        string `help:"Contact email for project"`
+	Iat          string `help:"Registration Initial Access Auth if provided (non-interactive)"`
+	Token        string `help:"Administration authorization token (non-interactive)"`
+	ClientSecret string `help:"OAuth client secret for non-interactive client-credentials use"`
+	Bootstrap    bool   `help:"Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)"`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -114,22 +115,25 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	}
 	server.ServerConfiguration = &transmitterConfiguration
 
-	// bootstrapOnly is set when the IAT was obtained via the shared bootstrap
-	// secret rather than an existing client token. In that case we do NOT
-	// auto-register an admin client (the privilege ceiling caps registration
-	// below stream_admin); instead we leave ClientToken empty so subsequent
-	// bootstrap-capable commands (create key / create iat) fall back to the
-	// bootstrap secret, which the server resolves to the narrow "key" scope.
-	bootstrapOnly := false
-
-	if as.Iat != "" {
+	// `add server` is connect-only: it performs SSF discovery and records the
+	// server without minting any credential. Interactive auth happens later via
+	// `login <alias>` (PKCE). The --iat/--token/--client-secret/--bootstrap
+	// flags remain for non-interactive (CI/bootstrap) use.
+	switch {
+	case as.Iat != "":
 		server.IatToken = cleanQuotes(as.Iat)
-	} else if as.Token == "" {
-		// The anonymous /iat path is closed. Obtain an IAT using the bootstrap
-		// secret (I2SIG_BOOTSTRAP_TOKEN) when no client token is configured.
+	case as.Token != "":
+		server.ClientToken = cleanQuotes(as.Token)
+	case as.ClientSecret != "":
+		// Stored for non-interactive client-credentials flows. Treated as a
+		// client token surrogate; the server validates it on use.
+		server.ClientToken = cleanQuotes(as.ClientSecret)
+	case as.Bootstrap:
+		// Explicit opt-in: mint an IAT using the shared bootstrap secret
+		// (I2SIG_BOOTSTRAP_TOKEN). The anonymous /iat path is closed.
 		boot := os.Getenv("I2SIG_BOOTSTRAP_TOKEN")
 		if boot == "" {
-			return errors.New("no client token and no I2SIG_BOOTSTRAP_TOKEN set; cannot obtain an IAT (anonymous /iat is disabled)")
+			return errors.New("--bootstrap requires I2SIG_BOOTSTRAP_TOKEN to be set")
 		}
 		iatUrl, _ := serverUrl.Parse("/iat")
 		fmt.Println("Obtaining authorization via bootstrap secret...")
@@ -145,44 +149,31 @@ func (as *AddServerCmd) Run(c *CLI) error {
 			return errors.New("unexpected status obtaining IAT: " + resp.Status)
 		}
 		regBytes, err := io.ReadAll(resp.Body)
-		var registration model.RegisterResponse
-		err = json.Unmarshal(regBytes, &registration)
 		if err != nil {
+			return err
+		}
+		var registration model.RegisterResponse
+		if err = json.Unmarshal(regBytes, &registration); err != nil {
 			return err
 		}
 		server.IatToken = registration.Token
-		bootstrapOnly = true
-	}
-
-	if as.Token != "" {
-		server.ClientToken = as.Token
-	} else if bootstrapOnly {
-		// Skip auto-registration: the bootstrap identity is key-scoped and may
-		// only mint keys/IATs, not a stream-admin client. ClientToken stays empty.
-		fmt.Println("Bootstrap mode: skipping client auto-registration for " + as.Alias)
-	} else {
-		as.Desc = cleanQuotes(as.Desc)
-		regUrl, _ := serverUrl.Parse("/register")
-		clientReg := model.RegisterParameters{
-			Scopes:      []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
-			Email:       as.Email,
-			Description: as.Desc,
+		fmt.Println("Bootstrap mode: IAT recorded; client auto-registration skipped for " + as.Alias)
+	default:
+		// Connect-only. Attempt PRM discovery to cache the advertised
+		// authorization_servers so a subsequent `login` can proceed without
+		// re-discovery. Discovery failure is non-fatal (the server may simply
+		// not advertise OAuth; bootstrap-secret flows still work).
+		if prm, derr := discoverProtectedResource(server.Host); derr == nil && prm != nil {
+			server.AuthorizationServers = prm.AuthorizationServers
+			if len(prm.AuthorizationServers) > 0 {
+				fmt.Printf("Discovered authorization server(s): %v\n", prm.AuthorizationServers)
+				fmt.Printf("Run 'login %s' to authenticate.\n", as.Alias)
+			} else {
+				fmt.Println("Server does not advertise OAuth authorization_servers; use --bootstrap or --token for non-interactive auth.")
+			}
+		} else {
+			fmt.Println("Server recorded (no protected-resource metadata advertised).")
 		}
-		regBytes, _ := json.Marshal(&clientReg)
-		req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(regBytes))
-		req.Header.Set("Authorization", "Bearer "+server.IatToken)
-		resp, err = client.Do(req)
-		defer httpSupport.HandleRespClose(resp)
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return errors.New("Unexpected status response: " + resp.Status)
-		}
-		var clientResponse model.RegisterResponse
-		regBytes, err = io.ReadAll(resp.Body)
-		err = json.Unmarshal(regBytes, &clientResponse)
-		server.ClientToken = clientResponse.Token
 	}
 
 	c.Data.Servers[as.Alias] = server
@@ -762,10 +753,14 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	if err != nil {
 		return nil, err
 	}
-	if server.ClientToken != "" {
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	} else {
-		fmt.Println("No server client token detected. Attempting anonymous request...")
+		fmt.Println("No server credential detected. Run 'login " + server.Alias + "' or attempt anonymous request...")
 	}
 
 	client := getHttpClient(0)
@@ -1185,7 +1180,13 @@ func (s *GetStreamStatusCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	client := getHttpClient(0)
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)

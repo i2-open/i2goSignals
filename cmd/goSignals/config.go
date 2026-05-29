@@ -22,12 +22,19 @@ import (
 var ConfigFile = "config.json"
 
 type SsfServer struct {
-	Alias               string
-	Host                string
-	ClientToken         string // Used to administer streams (scope admin) within a project
-	IatToken            string // Used to register new client in the same project
-	ProjectId           string
-	Streams             map[string]Stream
+	Alias       string
+	Host        string
+	ClientToken string // Used to administer streams (scope admin) within a project
+	IatToken    string // Used to register new client in the same project
+	ProjectId   string
+	Streams     map[string]Stream
+	// AuthorizationServers caches the OAuth authorization_servers advertised by
+	// the server's Protected Resource Metadata. Non-secret; safe for config.json.
+	AuthorizationServers []string `json:",omitempty"`
+	// ActiveIssuer is the issuer the CLI is currently logged in against for this
+	// server. The actual session (tokens) lives in credentials.json keyed by
+	// issuer; only this pointer is cached here.
+	ActiveIssuer        string `json:",omitempty"`
 	ServerConfiguration *model.TransmitterConfiguration
 }
 
