@@ -55,6 +55,9 @@ type oidcEndpoints struct {
     Authorization string
     Token         string
     Issuer        string
+    // Revocation is the RFC 7009 token revocation endpoint, when advertised.
+    // Empty if the issuer does not support revocation.
+    Revocation string
     // DeviceAuthorization is the RFC 8628 device authorization endpoint, when
     // advertised. Empty if the issuer does not support the device-code grant.
     DeviceAuthorization string
@@ -77,6 +80,7 @@ func discoverEndpoints(issuer string) (*oidcEndpoints, error) {
         Authorization:       cfg.AuthorizationEndpoint,
         Token:               cfg.TokenEndpoint,
         Issuer:              cfg.Issuer,
+        Revocation:          cfg.RevocationEndpoint,
         DeviceAuthorization: cfg.DeviceAuthEndpoint,
     }, nil
 }

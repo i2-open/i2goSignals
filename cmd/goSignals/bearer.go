@@ -104,6 +104,29 @@ func refreshSession(tokenEndpoint string, prior *Session) (*Session, error) {
     return updated, nil
 }
 
+// revokeRefreshToken makes a best-effort RFC 7009 token revocation request for
+// a session's refresh token. It is intentionally side-effect-only: any error
+// (missing endpoint, no refresh token, transport failure, non-2xx response) is
+// swallowed so that logout always succeeds locally even when the IdP is
+// unreachable or does not support revocation.
+func revokeRefreshToken(revocationEndpoint string, sess *Session) {
+    if revocationEndpoint == "" || sess == nil || sess.RefreshToken == "" {
+        return
+    }
+    form := url.Values{}
+    form.Set("token", sess.RefreshToken)
+    form.Set("token_type_hint", "refresh_token")
+    if sess.ClientId != "" {
+        form.Set("client_id", sess.ClientId)
+    }
+    client := getHttpClient(15 * time.Second)
+    resp, err := client.PostForm(revocationEndpoint, form)
+    if err != nil {
+        return
+    }
+    _ = resp.Body.Close()
+}
+
 // serverBearer resolves the Authorization bearer to present on a management
 // call for the given server. It prefers a logged-in IdP session (with silent
 // refresh) keyed by the server's active issuer; absent a session it falls back
@@ -111,24 +134,26 @@ func refreshSession(tokenEndpoint string, prior *Session) (*Session, error) {
 // refresh is dead, the errReloginRequired sentinel is wrapped so callers can
 // surface a clear re-login instruction.
 func serverBearer(g *Globals, server *SsfServer) (string, error) {
-    if server.ActiveIssuer != "" {
-        store, err := LoadCredentialStore(g)
-        if err != nil {
-            return "", err
+    store, err := LoadCredentialStore(g)
+    if err != nil {
+        return "", err
+    }
+    // Resolve which realm session authorizes this call: the server's active
+    // issuer wins when it has a live session, else the most-recently-logged-in
+    // trusted realm (last-login-wins).
+    issuer := selectIssuerForServer(store, server)
+    if issuer != "" {
+        br := &bearerResolver{
+            store: store,
+            tokenEndpoint: func(issuer string) (string, error) {
+                ep, derr := discoverEndpoints(issuer)
+                if derr != nil {
+                    return "", derr
+                }
+                return ep.Token, nil
+            },
         }
-        if store.Get(server.ActiveIssuer) != nil {
-            br := &bearerResolver{
-                store: store,
-                tokenEndpoint: func(issuer string) (string, error) {
-                    ep, derr := discoverEndpoints(issuer)
-                    if derr != nil {
-                        return "", derr
-                    }
-                    return ep.Token, nil
-                },
-            }
-            return br.resolve(server.ActiveIssuer)
-        }
+        return br.resolve(issuer)
     }
     if server.ClientToken != "" {
         return server.ClientToken, nil

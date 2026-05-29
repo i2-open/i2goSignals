@@ -452,6 +452,8 @@ func (l *LoginCmd) Run(c *CLI) error {
         return err
     }
 
+    sess.LoggedInAt = time.Now().UTC()
+
     store, err := LoadCredentialStore(&c.Globals)
     if err != nil {
         return err
@@ -481,6 +483,19 @@ type WhoamiCmd struct {
 }
 
 func (cmd *WhoamiCmd) Run(c *CLI) error {
+    // No alias: list every realm session (gcloud `auth list` style), showing
+    // which configured server aliases trust each realm.
+    if cmd.Alias == "" {
+        store, err := LoadCredentialStore(&c.Globals)
+        if err != nil {
+            return err
+        }
+        out := renderWhoami(store, c.Data.Servers)
+        fmt.Print(out)
+        c.GetOutputWriter().WriteString(out, true)
+        return nil
+    }
+
     server, err := c.Data.GetServer(cmd.Alias)
     if err != nil {
         return err
@@ -507,34 +522,90 @@ func (cmd *WhoamiCmd) Run(c *CLI) error {
     return nil
 }
 
-// LogoutCmd clears the stored session for a server's active issuer.
+// LogoutCmd drops one or more realm sessions. A realm logout affects every
+// server using that realm: its credential-store session is removed (with a
+// best-effort IdP refresh-token revocation) and every server's ActiveIssuer
+// pointer that referenced it is cleared. Targeting is one of: <alias> (the
+// server's active issuer), --issuer <url> (one realm), or --all (every realm).
 type LogoutCmd struct {
-    Alias string `arg:"" optional:"" help:"The alias of the server (defaults to the selected server)."`
+    Alias  string `arg:"" optional:"" help:"The alias of the server whose active issuer to log out."`
+    Issuer string `optional:"" help:"Log out a specific realm (issuer URL), affecting every server using it."`
+    All    bool   `optional:"" help:"Log out of every realm session."`
 }
 
 func (cmd *LogoutCmd) Run(c *CLI) error {
+    store, err := LoadCredentialStore(&c.Globals)
+    if err != nil {
+        return err
+    }
+    issuers, err := resolveLogoutIssuers(store, c.Data.Servers, cmd.Alias, cmd.Issuer, cmd.All)
+    if err != nil {
+        return err
+    }
+    if len(issuers) == 0 {
+        fmt.Println("No matching realm sessions to log out.")
+        return nil
+    }
+
+    for _, issuer := range issuers {
+        // Best-effort RFC 7009 revocation before dropping the local session.
+        if sess := store.Get(issuer); sess != nil && sess.RefreshToken != "" {
+            if ep, derr := discoverEndpoints(issuer); derr == nil {
+                revokeRefreshToken(ep.Revocation, sess)
+            }
+        }
+        store.Delete(issuer)
+        // Clear the ActiveIssuer pointer on every server that referenced this
+        // realm — a realm logout affects every server using it.
+        for alias, server := range c.Data.Servers {
+            if server.ActiveIssuer == issuer {
+                server.ActiveIssuer = ""
+                c.Data.Servers[alias] = server
+            }
+        }
+        fmt.Printf("Logged out of realm %s.\n", issuer)
+    }
+
+    if err := store.Save(); err != nil {
+        return err
+    }
+    return c.Data.Save(&c.Globals)
+}
+
+// UseServerCmd sets the active issuer (realm) for a server so subsequent
+// management calls authorize against that realm's session. The issuer should be
+// one the server advertises (AuthorizationServers); a non-advertised issuer is
+// accepted with a warning so manual overrides remain possible.
+type UseServerCmd struct {
+    Alias  string `arg:"" help:"The alias of the server to set the active issuer for."`
+    Issuer string `required:"" help:"The realm issuer URL to make active for this server."`
+}
+
+func (cmd *UseServerCmd) Run(c *CLI) error {
     server, err := c.Data.GetServer(cmd.Alias)
     if err != nil {
         return err
     }
-    if server.ActiveIssuer == "" {
-        fmt.Printf("Not logged in to %s.\n", server.Alias)
-        return nil
+    if !serverTrustsIssuer(*server, cmd.Issuer) {
+        fmt.Printf("Warning: %s does not advertise issuer %s; setting it anyway.\n", server.Alias, cmd.Issuer)
     }
     store, err := LoadCredentialStore(&c.Globals)
     if err != nil {
         return err
     }
-    issuer := server.ActiveIssuer
-    store.Delete(issuer)
-    if err := store.Save(); err != nil {
-        return err
+    if store.Get(cmd.Issuer) == nil {
+        fmt.Printf("Note: no stored session for %s yet; run 'login %s --issuer %s'.\n", cmd.Issuer, server.Alias, cmd.Issuer)
     }
-    server.ActiveIssuer = ""
+    server.ActiveIssuer = cmd.Issuer
     c.Data.Servers[server.Alias] = *server
     if err := c.Data.Save(&c.Globals); err != nil {
         return err
     }
-    fmt.Printf("Logged out of %s (issuer %s).\n", server.Alias, issuer)
+    fmt.Printf("Active issuer for %s set to %s.\n", server.Alias, cmd.Issuer)
     return nil
+}
+
+// UseCmd groups the `use` subcommands.
+type UseCmd struct {
+    Server UseServerCmd `cmd:"" help:"Set the active issuer (realm) for a server."`
 }
