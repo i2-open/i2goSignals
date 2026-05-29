@@ -18,8 +18,12 @@ const (
 	ScopeEventDelivery = "event"
 	ScopeStreamAdmin   = "admin"
 	ScopeRegister      = "reg"
-	ScopeRoot          = "root"
-	StreamAny          = "any"
+	// ScopeKey is a narrow capability sitting between reg and admin. A key-scoped
+	// caller may create a NEW issuer signing key (bootstrap) but is denied key
+	// takeover (force=replace/rotate/delete) and any stream/event capability.
+	ScopeKey  = "key"
+	ScopeRoot = "root"
+	StreamAny = "any"
 )
 
 // EventAuthToken is a token used for stream management and event delivery.

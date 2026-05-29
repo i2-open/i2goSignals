@@ -114,17 +114,35 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	}
 	server.ServerConfiguration = &transmitterConfiguration
 
+	// bootstrapOnly is set when the IAT was obtained via the shared bootstrap
+	// secret rather than an existing client token. In that case we do NOT
+	// auto-register an admin client (the privilege ceiling caps registration
+	// below stream_admin); instead we leave ClientToken empty so subsequent
+	// bootstrap-capable commands (create key / create iat) fall back to the
+	// bootstrap secret, which the server resolves to the narrow "key" scope.
+	bootstrapOnly := false
+
 	if as.Iat != "" {
 		server.IatToken = cleanQuotes(as.Iat)
 	} else if as.Token == "" {
-		// Load tokens and register client
+		// The anonymous /iat path is closed. Obtain an IAT using the bootstrap
+		// secret (I2SIG_BOOTSTRAP_TOKEN) when no client token is configured.
+		boot := os.Getenv("I2SIG_BOOTSTRAP_TOKEN")
+		if boot == "" {
+			return errors.New("no client token and no I2SIG_BOOTSTRAP_TOKEN set; cannot obtain an IAT (anonymous /iat is disabled)")
+		}
 		iatUrl, _ := serverUrl.Parse("/iat")
-		fmt.Println("Obtaining authorization...")
-		resp, err = client.Get(iatUrl.String())
+		fmt.Println("Obtaining authorization via bootstrap secret...")
+		iatReq, _ := http.NewRequest(http.MethodGet, iatUrl.String(), nil)
+		iatReq.Header.Set("Authorization", "Bearer "+boot)
+		resp, err = client.Do(iatReq)
 		defer httpSupport.HandleRespClose(resp)
+		if err != nil {
+			return err
+		}
 		if resp.StatusCode != http.StatusOK {
 			fmt.Println("Error: unable to obtain registration IAT token")
-			return err
+			return errors.New("unexpected status obtaining IAT: " + resp.Status)
 		}
 		regBytes, err := io.ReadAll(resp.Body)
 		var registration model.RegisterResponse
@@ -133,10 +151,15 @@ func (as *AddServerCmd) Run(c *CLI) error {
 			return err
 		}
 		server.IatToken = registration.Token
+		bootstrapOnly = true
 	}
 
 	if as.Token != "" {
 		server.ClientToken = as.Token
+	} else if bootstrapOnly {
+		// Skip auto-registration: the bootstrap identity is key-scoped and may
+		// only mint keys/IATs, not a stream-admin client. ClientToken stays empty.
+		fmt.Println("Bootstrap mode: skipping client auto-registration for " + as.Alias)
 	} else {
 		as.Desc = cleanQuotes(as.Desc)
 		regUrl, _ := serverUrl.Parse("/register")
@@ -826,6 +849,18 @@ type CreateStreamCmd struct {
 	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
 }
 
+// bootstrapBearer returns the bearer to present on bootstrap-capable calls
+// (create key / create iat). A configured client token wins; otherwise the
+// shared bootstrap secret (I2SIG_BOOTSTRAP_TOKEN) is used. Returns "" when
+// neither is available, in which case the now-non-anonymous server rejects the
+// request.
+func bootstrapBearer(clientToken string) string {
+	if clientToken != "" {
+		return clientToken
+	}
+	return os.Getenv("I2SIG_BOOTSTRAP_TOKEN")
+}
+
 type CreateKeyCmd struct {
 	Alias    string `arg:"" required:"" help:"The alias of the server to issue the key (default is selected server)"`
 	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
@@ -846,10 +881,10 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		certUrl.RawQuery = q.Encode()
 	}
 	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
-	if server.ClientToken != "" {
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	if bearer := bootstrapBearer(server.ClientToken); bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	} else {
-		fmt.Println(fmt.Sprintf("No authorization information for %s, attempting anonymous request.", server.Alias))
+		fmt.Println(fmt.Sprintf("No authorization information for %s and no I2SIG_BOOTSTRAP_TOKEN set; request will be rejected.", server.Alias))
 	}
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -898,11 +933,14 @@ func (g *CreateIatCmd) Run(c *CLI) error {
 	}
 	iatUrl := hostUrl.JoinPath("/iat")
 	req, _ := http.NewRequest(http.MethodGet, iatUrl.String(), nil)
-	if !g.New {
-		// This will cause the IAT to be associated with the current client token (same project id)
-		if server.ClientToken != "" {
-			req.Header.Set("Authorization", "Bearer "+server.ClientToken)
-		}
+	// The anonymous /iat door is gone: /iat now requires a key/admin/root bearer.
+	// When a client token is present and --new is not set, reuse it so the IAT is
+	// associated with the current project; otherwise fall back to the bootstrap
+	// secret (I2SIG_BOOTSTRAP_TOKEN), which the server resolves to key scope.
+	if !g.New && server.ClientToken != "" {
+		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	} else if boot := os.Getenv("I2SIG_BOOTSTRAP_TOKEN"); boot != "" {
+		req.Header.Set("Authorization", "Bearer "+boot)
 	}
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
