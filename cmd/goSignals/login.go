@@ -11,6 +11,7 @@ import (
     "net"
     "net/http"
     "net/url"
+    "os"
     "os/exec"
     "runtime"
     "strings"
@@ -140,6 +141,13 @@ func exchangeCodeForSession(req exchangeRequest) (*Session, error) {
         return nil, fmt.Errorf("token endpoint returned %s: %s", resp.Status, string(body))
     }
 
+    return sessionFromTokenBody(body, req.ClientId)
+}
+
+// sessionFromTokenBody parses a successful token endpoint response body into a
+// Session, validating that an access_token is present. Shared by the PKCE
+// authorization_code exchange and the device-code polling loop.
+func sessionFromTokenBody(body []byte, clientId string) (*Session, error) {
     var tr tokenResponse
     if err := json.Unmarshal(body, &tr); err != nil {
         return nil, fmt.Errorf("could not parse token response: %w", err)
@@ -147,9 +155,7 @@ func exchangeCodeForSession(req exchangeRequest) (*Session, error) {
     if tr.AccessToken == "" {
         return nil, fmt.Errorf("token response did not include an access_token")
     }
-
-    sess := sessionFromTokenResponse(&tr, req.ClientId)
-    return sess, nil
+    return sessionFromTokenResponse(&tr, clientId), nil
 }
 
 // sessionFromTokenResponse converts a token endpoint response into a Session.
@@ -228,6 +234,39 @@ var openBrowser = func(target string) error {
     return exec.Command(cmd, args...).Start()
 }
 
+// browserAvailable reports whether a system browser can plausibly be launched.
+// On a headless host (no DISPLAY/WAYLAND on Linux, or no browser launcher on
+// PATH) this returns false so the engine auto-falls back to the device-code
+// flow. It is a package var so tests can override it.
+var browserAvailable = func() bool {
+    switch runtime.GOOS {
+    case "darwin", "windows":
+        // The OS-provided launcher (open / rundll32) is always present.
+        return true
+    default:
+        // On Linux/Unix a GUI requires a display server; xdg-open is useless
+        // without one (typical of SSH sessions and containers).
+        if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+            return false
+        }
+        _, err := exec.LookPath("xdg-open")
+        return err == nil
+    }
+}
+
+// canBindLoopback reports whether an ephemeral 127.0.0.1 listener can be bound.
+// Sandboxed containers and locked-down hosts may forbid this; in that case the
+// engine auto-falls back to the device-code flow. It is a package var so tests
+// can override it.
+var canBindLoopback = func() bool {
+    l, err := net.Listen("tcp", "127.0.0.1:0")
+    if err != nil {
+        return false
+    }
+    _ = l.Close()
+    return true
+}
+
 // loginOptions parameterize the interactive PKCE login flow.
 type loginOptions struct {
     Issuer    string
@@ -236,17 +275,44 @@ type loginOptions struct {
     Endpoints *oidcEndpoints
     // Timeout bounds how long we wait for the browser round-trip.
     Timeout time.Duration
+    // ForceDevice forces the RFC 8628 device-code flow even when a browser and
+    // loopback listener are available (the --device flag).
+    ForceDevice bool
+    // sleep is a test seam for the device-code polling loop; nil means
+    // time.Sleep.
+    sleep func(time.Duration)
 }
 
-// runLogin performs the docker-login-style PKCE loopback flow: it generates a
-// PKCE pair + CSRF state, starts an ephemeral 127.0.0.1 listener, opens the
-// browser at the authorization endpoint, awaits the redirect, then exchanges the
-// code for a session. The flow is structured so a device-code path (#124) can be
-// slotted in as an alternative without touching the token-exchange/session code.
+// runLogin selects and runs the appropriate login flow. With both a browser and
+// a loopback listener available (and no --device override) it runs the
+// docker-login-style PKCE loopback flow. On a headless host — no browser, no
+// bindable loopback listener — or when --device is given, it runs the RFC 8628
+// device-code flow instead. Both paths yield an identically-shaped Session.
 func runLogin(opts loginOptions) (*Session, error) {
     if opts.Endpoints == nil {
         return nil, fmt.Errorf("login requires discovered OIDC endpoints")
     }
+
+    method := selectLoginMethod(loginCapabilities{
+        ForceDevice:     opts.ForceDevice,
+        CanBindLoopback: canBindLoopback(),
+        CanOpenBrowser:  browserAvailable(),
+    })
+
+    if method == loginMethodDevice {
+        if opts.Endpoints.DeviceAuthorization == "" {
+            return nil, fmt.Errorf("device-code login required (no browser/loopback available or --device given) but issuer %s does not advertise a device_authorization_endpoint", opts.Endpoints.Issuer)
+        }
+        return runDeviceLogin(opts)
+    }
+    return runLoopbackLogin(opts)
+}
+
+// runLoopbackLogin performs the docker-login-style PKCE loopback flow: it
+// generates a PKCE pair + CSRF state, starts an ephemeral 127.0.0.1 listener,
+// opens the browser at the authorization endpoint, awaits the redirect, then
+// exchanges the code for a session.
+func runLoopbackLogin(opts loginOptions) (*Session, error) {
     pkce, err := generatePKCE()
     if err != nil {
         return nil, err
@@ -342,6 +408,7 @@ type LoginCmd struct {
     Issuer   string `optional:"" help:"Override the OAuth issuer (when multiple are advertised)."`
     ClientId string `optional:"" name:"client-id" help:"Override the advertised public OAuth client_id."`
     Scopes   string `optional:"" help:"Space-separated OAuth scopes to request (default: openid email profile)."`
+    Device   bool   `optional:"" help:"Force the OAuth device-code flow (headless: prints a URL + code to complete on another device)."`
 }
 
 func (l *LoginCmd) Run(c *CLI) error {
@@ -375,10 +442,11 @@ func (l *LoginCmd) Run(c *CLI) error {
     }
 
     sess, err := runLogin(loginOptions{
-        Issuer:    issuer,
-        ClientId:  clientId,
-        Scopes:    scopes,
-        Endpoints: endpoints,
+        Issuer:      issuer,
+        ClientId:    clientId,
+        Scopes:      scopes,
+        Endpoints:   endpoints,
+        ForceDevice: l.Device,
     })
     if err != nil {
         return err

@@ -1,6 +1,8 @@
 package main
 
 import (
+    "net/http"
+    "net/http/httptest"
     "testing"
 
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -61,5 +63,26 @@ func TestResolveClientId_OverrideWins(t *testing.T) {
     meta := &model.ProtectedResourceMetadata{ClientID: strp("gosignals-cli")}
     if got := resolveClientId(meta, "my-client"); got != "my-client" {
         t.Errorf("expected override client_id, got %q", got)
+    }
+}
+
+func TestDiscoverEndpoints_CapturesDeviceAuthorizationEndpoint(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        _, _ = w.Write([]byte(`{
+            "issuer":"https://idp.example.com",
+            "authorization_endpoint":"https://idp.example.com/auth",
+            "token_endpoint":"https://idp.example.com/token",
+            "device_authorization_endpoint":"https://idp.example.com/device"
+        }`))
+    }))
+    defer srv.Close()
+
+    ep, err := discoverEndpoints(srv.URL)
+    if err != nil {
+        t.Fatalf("discoverEndpoints failed: %v", err)
+    }
+    if ep.DeviceAuthorization != "https://idp.example.com/device" {
+        t.Errorf("expected device_authorization_endpoint to be discovered, got %q", ep.DeviceAuthorization)
     }
 }
