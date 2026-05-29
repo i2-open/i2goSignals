@@ -9,6 +9,7 @@ import (
 	"fmt"
 	mathRand "math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -175,11 +176,35 @@ func (a *AuthIssuer) loadOAuthJWKS() error {
 
 // IssueProjectIat issues a new registration token. If authCtx is nil, a new project is generated. If an authCtx is asserted,
 // then a new iat is issued for the identified project (AuthContext.ProjectId).
+// defaultIatLifetime is the fallback IAT validity when I2SIG_IAT_LIFETIME is
+// unset. IATs are short-lived bootstrap credentials, so the default is 24h
+// (previously a hard-coded 90 days).
+const defaultIatLifetime = 24 * time.Hour
+
+// iatLifetime resolves the IAT validity duration from I2SIG_IAT_LIFETIME
+// (a Go duration string such as "24h" or "30m"). An unset or unparseable value
+// falls back to defaultIatLifetime.
+func iatLifetime() time.Duration {
+	v := os.Getenv("I2SIG_IAT_LIFETIME")
+	if v == "" {
+		return defaultIatLifetime
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		authLog.Warn("Invalid I2SIG_IAT_LIFETIME; using default", "value", v, "default", defaultIatLifetime)
+		return defaultIatLifetime
+	}
+	return d
+}
+
 func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
-	exp := time.Now().AddDate(0, 0, 90)
+	exp := time.Now().Add(iatLifetime())
 
 	projectId := generateAlias(4)
-	if authCtx != nil {
+	if authCtx != nil && authCtx.ProjectId != "" {
+		// Reuse the caller's project (e.g. an admin minting another IAT in the
+		// same project). A bootstrap (key-scope) caller carries no ProjectId, so
+		// a fresh project is generated above.
 		projectId = authCtx.ProjectId
 	}
 
@@ -360,6 +385,17 @@ func (a *AuthIssuer) ValidateAuthorizationAny(r *http.Request, scopes []string) 
 		return nil, http.StatusUnauthorized
 	}
 	tokenString := parts[1]
+
+	// Bootstrap-secret resolver: before any JWT/kid classification, a bearer that
+	// constant-time-equals I2SIG_BOOTSTRAP_TOKEN is synthesized into a key-scope
+	// AuthContext. When the secret is unset, no bootstrap bearer is ever accepted
+	// (the anonymous /iat door is gone — fail closed).
+	if bootCtx := a.resolveBootstrapBearer(tokenString); bootCtx != nil {
+		if bootCtx.Eat.IsAuthorized(streamRequested, scopes) {
+			return bootCtx, http.StatusOK
+		}
+		return nil, http.StatusForbidden
+	}
 
 	route := a.classifyToken(tokenString)
 	authLog.Debug("Authorization routing", "streamId", streamRequested, "route", route.name, "tokenKid", route.tokenKid, "localKids", route.localKids, "oauthConfigured", route.oauthConfigured)

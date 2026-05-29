@@ -282,6 +282,11 @@ services:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
       - I2SIG_SUBJECT_FILTERING=ENABLED
+      # Authenticated bootstrap (PRD #120 / slice #121): the anonymous /iat door
+      # is closed. A bearer equal to I2SIG_BOOTSTRAP_TOKEN resolves to the narrow
+      # "key" scope so scimSsfSetup can mint an issuer key + IAT unattended.
+      - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
+      - I2SIG_CLI_CLIENT_ID=gosignals-cli
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8888/health || curl -sf http://localhost:8888/health"]
       interval: 10s
@@ -319,6 +324,9 @@ services:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
       - I2SIG_SUBJECT_FILTERING=ENABLED
+      # Same authenticated-bootstrap secret as goSignals1 (PRD #120 / slice #121).
+      - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
+      - I2SIG_CLI_CLIENT_ID=gosignals-cli
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -skf https://localhost:8889/health || curl -sf http://localhost:8889/health"]
       interval: 10s
@@ -387,6 +395,10 @@ services:
       - ISSUER=cluster.scim.example.com
       - GOSIGNALS_HOME=/scim/config.json
       - I2SIG_TLS_CA_CERT=/scim/certs/ca-cert.pem
+      # Present the bootstrap secret on `create key` / `create iat` instead of
+      # the now-removed anonymous /iat path (PRD #120 / slice #121). Must match
+      # the value configured on the goSignals nodes.
+      - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
    #   - GOSIGNALS_SCRIPT=/scim/auto-reg.gosignals
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 

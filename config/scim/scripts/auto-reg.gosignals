@@ -1,3 +1,9 @@
+# Dev bootstrap script for the goSignals CLI.
+# The anonymous /iat path is closed (PRD #120 / slice #121). `create iat` and
+# `create key` below authenticate with the shared bootstrap secret, which the
+# CLI reads from the I2SIG_BOOTSTRAP_TOKEN environment variable (injected by
+# docker-compose-dev.yml and re-exported by register-dev.sh). The secret
+# resolves to the narrow "key" scope on the server: create-only key, reg-only IAT.
 add server gosignals1 https://goSignals1:8888
 add server gosignals2 https://goSignals2:8889
 create iat gosignals1 --output=/scim/iat-gosignals1.jwt
