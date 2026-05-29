@@ -25,6 +25,10 @@ type Session struct {
     Email        string    `json:"email,omitempty"`
     Scopes       []string  `json:"scopes,omitempty"`
     ClientId     string    `json:"clientId,omitempty"`
+    // LoggedInAt records when this session was established. It drives
+    // last-login-wins active-issuer defaulting when a server trusts several
+    // logged-in realms.
+    LoggedInAt time.Time `json:"loggedInAt,omitempty"`
 }
 
 // Expired reports whether the access token is at/after its expiry (with a small
@@ -127,6 +131,18 @@ func (c *CredentialStore) Set(issuer string, sess *Session) {
         c.Sessions = map[string]*Session{}
     }
     c.Sessions[issuer] = sess
+}
+
+// Issuers returns the set of issuers (realms) with a stored session.
+func (c *CredentialStore) Issuers() []string {
+    if c.Sessions == nil {
+        return nil
+    }
+    out := make([]string, 0, len(c.Sessions))
+    for iss := range c.Sessions {
+        out = append(out, iss)
+    }
+    return out
 }
 
 // Delete removes the session for an issuer (single-realm logout).
