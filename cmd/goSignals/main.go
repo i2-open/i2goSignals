@@ -41,6 +41,9 @@ type Globals struct {
 type CLI struct {
 	Globals
 	Add           AddCmd           `cmd:"" help:"Define a new server to be managed"`
+	Login         LoginCmd         `cmd:"" help:"Interactively log in to a server's advertised IdP (PKCE)."`
+	Whoami        WhoamiCmd        `cmd:"" help:"Show the current logged-in session for a server."`
+	Logout        LogoutCmd        `cmd:"" help:"Clear the stored session for a server."`
 	Create        CreateCmd        `cmd:"" help:"Create an issuer KEY, or STREAM"`
 	Delete        DeleteCmd        `cmd:"" help:"Delete a stream"`
 	Select        SelectCmd        `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
