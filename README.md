@@ -113,6 +113,7 @@ docker exec spire-server sh /etc/spire/registration/register.sh
 
 ## Documentation
 * [GoSignals Administration Tool](docs/gosignals_tool.md) - CLI usage and commands.
+* [CLI Login &amp; Bootstrap Guide](docs/cli_login.md) - Delegated-OAuth `login` (browser PKCE / device-code), unattended `I2SIG_BOOTSTRAP_TOKEN` bootstrap, and the docker-compose variant matrix.
 * [Configuration Properties](docs/configuration_properties.md) - Environment variables and settings.
 * [Security Model](docs/security_model.md) - Authentication, authorization, and SPIFFE details.
 * [Clustering & High Availability](docs/Cluster.md) - Multi-node deployment and lease management.

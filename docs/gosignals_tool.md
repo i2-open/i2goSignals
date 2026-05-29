@@ -11,8 +11,13 @@ The following table lists currently available commands in the goSignals tool.  N
 | Command                                        | Works with<BR>SSF Servers | Description                                                                                                                    |
 |------------------------------------------------|---------------------------|--------------------------------------------------------------------------------------------------------------------------------|
 | <BR>**Defining Servers**                       |                           | <BR>Commands which are used to define i2goSignals and SSF servers to be administered                                           |
-| [add server](#adding-a-server)                 | Yes                       | Add an SSF or i2goSignals server to be administered. Calls and queries the SSF well-known endpoint and generates a local alias |
+| [add server](#adding-a-server)                 | Yes                       | Connect-only: add an SSF or i2goSignals server to be administered. Calls the SSF well-known endpoint, caches advertised OAuth servers, generates a local alias. Mints no credential. |
 | show server                                    | Yes                       | Shows a currently defined server and any known associated streams                                                              |
+| <BR>**Login &amp; Sessions**                   |                           | <BR>Delegated-OAuth login and per-realm session management (see [CLI Login Guide](cli_login.md))                              |
+| [login](#login)                                | Yes                       | Interactively log in to a server's advertised IdP (browser PKCE, or device-code fallback)                                     |
+| [whoami](#whoami)                              | Yes                       | Show the active session for a server, or list every stored realm session                                                      |
+| [logout](#logout)                              | Yes                       | Clear stored realm session(s): `<alias>`, `--issuer <url>`, or `--all`                                                        |
+| [use server](#use-server)                      | Yes                       | Set the active issuer (realm) for a server                                                                                     |
 | <BR>**Key and Token Management**               |                           | <BR>Generating and obtaining signing keys and initial access tokens                                                            |
 | create key                                     | No                        | Generate a key pair which can be used by a transmitter. i2goSignals provides a JWKS_URL endpoint for the public key            |
 | get key                                        | N/A                       | Returns a public key from a specified URL or i2goSignals server                                                                |
@@ -65,19 +70,30 @@ information is stored in the local session store.
 > <alias>   A unique name to identify the server
 > <host>    Http URL for a goSignals server
 > Flags:
-> --server-url=STRING          The URL of an i2goServer or use an environment variable GOSIGNALS_URL ($GOSIGNALS_URL)
 > -o, --output=STRING          To redirect output to a file
 > -a, --append-output          When true, output to file (--output) will be appended
-> 
+>
 >       --desc=STRING          Description of project
 >       --email=STRING         Contact email for project
->       --iat=STRING           Registration Initial Access Auth if provided
->       --token=STRING         Administration authorization token
+>       --iat=STRING           Registration Initial Access Token (non-interactive)
+>       --token=STRING         Administration authorization token (non-interactive)
+>       --client-secret=STRING OAuth client secret for non-interactive client-credentials use
+>       --bootstrap            Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)
 > ```
 
-Example:
+`add server` is **connect-only** by default. Provide an interactive session
+later with [`login`](#login); the `--iat` / `--token` / `--client-secret` /
+`--bootstrap` flags remain for non-interactive (CI/bootstrap) use.
+
+Example (connect-only):
 ```shell
-goSignals> add server go1 http://goSignals1:8888 --iat=eyJhbGciOiJSUzI1...p9aw6935efcgEKmA
+goSignals> add server gs1 https://goSignals1:8888
+```
+
+Example (non-interactive bootstrap):
+```shell
+export I2SIG_BOOTSTRAP_TOKEN=dev-bootstrap-secret
+goSignals> add server gs1 https://goSignals1:8888 --bootstrap
 ```
 
 If successful the response will be similar to:
@@ -124,23 +140,31 @@ ServerUrl configured:
 
 ### What Add Server Does
 
-`add Server` connects with server URL provided and interrogates the `/.well-known/ssf-configuration` data to determine
-endpoints and capabilities. In the case of **i2goSignals** servers, the command will register the **gosignals** as a
-an administrative client enabling management of streams.
+`add server` connects to the server URL provided and interrogates the
+`/.well-known/ssf-configuration` data to determine endpoints and capabilities.
+By default it is **connect-only**: it also fetches the server's RFC 9728
+Protected Resource Metadata, caches the advertised OAuth `authorization_servers`
+on the local server record, and records the alias. It mints **no** credential —
+authenticate later with [`login`](#login).
 
-When a request is made with an alias and URL (e.g. `add server goserver1 http://gosignals1.example.com`), the **gosignals**  
-administration tool connects to the SSF or i2goSignals server and retrieves the `/.well-known/ssf-configuration` information. 
+If the server advertises `authorization_servers`, the tool prints them and
+suggests `login <alias>`. If it advertises none, the tool suggests `--bootstrap`
+or `--token` for non-interactive auth.
 
-If neither `--iat` nor `--token` parameters are provided, the goSignals tool will attempt to obtain an Initial Access Token from
-the server at the endpoint `/iat` (for i2goSignals servers only). 
+The non-interactive flags select an alternative, exactly one applying:
 
-> [!Note]
-> For SSF servers, you would need to obtain a token
-> from the SSF server's token provider and provide it with the `--token` parameter.
+- `--iat=<token>` — record a supplied Initial Access Token on the server entry
+  (used to register a stream client).
+- `--token=<token>` / `--client-secret=<secret>` — record an administration /
+  client-credentials token used directly as the management bearer (typical for
+  SSF servers where the token is obtained out of band).
+- `--bootstrap` — present `Bearer $I2SIG_BOOTSTRAP_TOKEN` to `/iat` and record
+  the returned `reg`-only IAT. Errors if `I2SIG_BOOTSTRAP_TOKEN` is unset. Client
+  auto-registration is skipped.
 
-If the `--iat` parameter is provided, the **gosignals** tool will use that token to attempt to register to obtain a client token using 
-the endpoint identified in the server configuration as `client_registration_endpoint` (e.g. `/registration`). In response
-i2goSignals server will return an administration token (client authorization token) to be used in subsequent requests.
+> [!IMPORTANT]
+> The anonymous `/iat` path is **closed**. `add server` no longer auto-fetches an
+> IAT without a credential. Use `login` (delegated OAuth) or `--bootstrap`.
 
 > [!Note]
 > While an IAT is not needed, IATs may be used to bootstrap multiple servers in a project to obtain unique client tokens. 
@@ -154,6 +178,83 @@ The token parameter is typically used with SSF servers where the authorization t
 the SSF service provider.
 
 When registering with an i2goSignals server, the `--desc` and `--email` parameters can be used to provide additional contact or use data.
+
+## Login
+
+`login <alias>` runs a `docker login`-style delegated-OAuth flow against the
+IdP advertised by the server's RFC 9728 Protected Resource Metadata. With a
+browser and a bindable loopback listener it runs the OAuth authorization-code
+flow with PKCE (RFC 7636); on a headless host, or when `--device` is given, it
+falls back to the RFC 8628 device-code flow. The resulting session is stored in
+`credentials.json` (mode `0600`) keyed by issuer. See the
+[CLI Login Guide](cli_login.md) for the full walk-through.
+
+> ```
+> Arguments:
+> <alias>   The alias of the server to log in to.
+> Flags:
+>       --issuer=STRING        Override the OAuth issuer (when multiple are advertised).
+>       --client-id=STRING     Override the advertised public OAuth client_id.
+>       --scopes=STRING        Space-separated OAuth scopes to request (default: openid email profile).
+>       --device               Force the OAuth device-code flow (headless).
+> ```
+
+```shell
+goSignals> login gs1
+goSignals> login gs1 --issuer https://keycloak:9080/realms/gosignals
+goSignals> login gs1 --device
+```
+
+## whoami
+
+`whoami [<alias>]` shows session state. With an alias it prints the active realm
+session for that server. With no alias it lists every stored realm session
+(gcloud `auth list`-style), including which configured server aliases trust each
+realm.
+
+```shell
+goSignals> whoami            # list all realm sessions
+goSignals> whoami gs1        # active session for gs1
+```
+
+## logout
+
+`logout` clears stored realm session(s). Exactly one targeting mode applies, in
+precedence order `--all` &gt; `--issuer` &gt; `<alias>`. An empty `logout` with no
+target is an error. A realm logout makes a best-effort RFC 7009 refresh-token
+revocation, deletes the local session, and clears the `ActiveIssuer` pointer on
+every server that referenced that realm.
+
+> ```
+> Arguments:
+> <alias>   (optional) The alias of the server whose active issuer to log out.
+> Flags:
+>       --issuer=STRING        Log out a specific realm (issuer URL), affecting every server using it.
+>       --all                  Log out of every realm session.
+> ```
+
+```shell
+goSignals> logout gs1
+goSignals> logout --issuer https://keycloak:9080/realms/gosignals
+goSignals> logout --all
+```
+
+## use server
+
+`use server <alias> --issuer <url>` sets the active issuer (realm) for a server
+so subsequent management calls authorize against that realm's session. A
+non-advertised issuer is accepted with a warning.
+
+> ```
+> Arguments:
+> <alias>   The alias of the server to set the active issuer for.
+> Flags:
+>       --issuer=STRING        (required) The realm issuer URL to make active for this server.
+> ```
+
+```shell
+goSignals> use server gs1 --issuer https://keycloak:9080/realms/gosignals
+```
 
 ## Show Server
 

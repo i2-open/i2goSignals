@@ -19,6 +19,51 @@ depends on the narrowest seam it actually uses.
 
 ## Vocabulary
 
+### Management-plane vs data-plane auth
+
+Two independent authorization planes:
+
+- **Management plane** — administering a server (define streams, create issuer
+  keys, mint IATs, register clients). Authorized by a delegated-OAuth user
+  session (`login`) or the bootstrap secret / admin token (automation).
+- **Data plane** — moving events (transmitter push, receiver poll). Authorized
+  by per-stream/per-client tokens carrying `stream`/`event` scopes within a
+  project.
+
+A management session never grants event delivery; a delivery token never
+administers the server. See [`docs/security_model.md`](docs/security_model.md).
+
+### `key` scope
+
+`authSupport.ScopeKey` (`"key"`) — a narrow capability between `reg` and
+`admin`. A `key`-scoped caller may create a **new** issuer signing key
+(`POST /key/<issuer>`) and obtain a **`reg`-only** IAT (`GET /iat`), but is
+denied key takeover (`force=replace`/`rotate`/`?rotate` → `keyScopeOnly` guard in
+`api_out_of_band.go`) and has no stream/event capability. It seeds the machine
+tier ladder for unattended bootstrap.
+
+### Bootstrap secret
+
+`I2SIG_BOOTSTRAP_TOKEN` — a shared secret read by `authUtil.resolveBootstrapBearer`.
+A presented bearer that **constant-time-equals** the configured value is
+synthesized into a `key`-scope `AuthContext` before any JWT validation. When the
+variable is unset, the path is closed and no bootstrap bearer is accepted (fail
+closed). It is an app-layer authorization mechanism, orthogonal to and coexisting
+with transport-layer SPIFFE/TLS identity. **There is no anonymous `/iat`
+endpoint** — closing it is the reason the secret exists.
+
+### PRM-driven login
+
+The CLI's `login` flow is driven by the server's RFC 9728 **Protected Resource
+Metadata** (`/.well-known/oauth-protected-resource`), which advertises the OAuth
+`authorization_servers` and the recommended public `client_id`
+(`I2SIG_CLI_CLIENT_ID`, default `gosignals-cli`). `add server` caches the PRM's
+`authorization_servers`; `login` resolves the issuer from it, discovers the
+issuer's OpenID configuration, then runs OAuth authorization-code + PKCE
+(RFC 7636) via a loopback listener — or RFC 8628 device-code on headless hosts.
+Sessions are stored per-issuer in `credentials.json`; see
+[`docs/cli_login.md`](docs/cli_login.md).
+
 ### Persistence record
 
 `*dbProviders.Persistence` — the composition root returned by
