@@ -131,6 +131,7 @@ func (c *ConfigData) ResetStreamConfig(streamAlias string) {
 		c.streamConfigs[streamAlias] = nil
 	}
 }
+
 func (c *ConfigData) GetStreamConfig(streamAlias string) (*model.StreamConfiguration, error) {
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
@@ -201,6 +202,19 @@ func (c *ConfigData) GetServer(alias string) (*SsfServer, error) {
 
 	server := c.Servers[c.Selected]
 	return &server, nil
+}
+
+// DeleteServer removes a server definition from the configuration
+func (c *ConfigData) DeleteServer(alias string, g *Globals) error {
+	if alias != "" {
+		if _, exists := c.Servers[alias]; !exists {
+			return fmt.Errorf("specified alias '%s' is not defined", alias)
+		}
+		delete(c.Servers, alias)
+		return c.Save(g)
+	}
+
+	return nil
 }
 
 func (c *ConfigData) checkConfigPath(g *Globals) error {

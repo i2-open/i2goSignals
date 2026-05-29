@@ -40,22 +40,22 @@ type Globals struct {
 
 type CLI struct {
 	Globals
-	Add           AddCmd           `cmd:"" help:"Define a new server to be managed"`
-	Login         LoginCmd         `cmd:"" help:"Interactively log in to a server's advertised IdP (PKCE)."`
-	Whoami        WhoamiCmd        `cmd:"" help:"Show the current logged-in session for a server."`
-	Logout        LogoutCmd        `cmd:"" help:"Clear stored realm session(s): <alias>, --issuer <url>, or --all."`
-	Use           UseCmd           `cmd:"" help:"Set the active issuer (realm) for a server."`
-	Create        CreateCmd        `cmd:"" help:"Create an issuer KEY, or STREAM"`
-	Delete        DeleteCmd        `cmd:"" help:"Delete a stream"`
-	Select        SelectCmd        `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
-	Get           GetCmd           `cmd:"" help:"Get information from SSF servers"`
-	Generate      GenerateCmd      `cmd:"" help:"Generate an event for testing"`
-	Poll          PollCmd          `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
-	Set           SetCmd           `cmd:"" help:"Set configuration items on server"`
-	Show          ShowCmd          `cmd:"" help:"Show locally configured information"`
-	Token         TokenCmd         `cmd:"" help:"Manage issued tokens"`
-	Exit          ExitCmd          `cmd:"" help:"Exit the shell"`
-	Help          HelpCmd          `cmd:"" help:"Show help on a command"`
+	Add      AddCmd      `cmd:"" help:"Define a new server to be managed"`
+	Login    LoginCmd    `cmd:"" help:"Interactively log in to a server's advertised IdP (PKCE)."`
+	Whoami   WhoamiCmd   `cmd:"" help:"Show the current logged-in session for a server."`
+	Logout   LogoutCmd   `cmd:"" help:"Clear stored realm session(s): <alias>, --issuer <url>, or --all."`
+	Use      UseCmd      `cmd:"" help:"Set the active issuer (realm) for a server."`
+	Create   CreateCmd   `cmd:"" help:"Create an issuer KEY, or STREAM"`
+	Delete   DeleteCmd   `cmd:"" help:"Delete a stream or server"`
+	Select   SelectCmd   `cmd:"" help:"Select a defined server or stream/server to perform operations against"`
+	Get      GetCmd      `cmd:"" help:"Get information from SSF servers"`
+	Generate GenerateCmd `cmd:"" help:"Generate an event for testing"`
+	Poll     PollCmd     `cmd:"" help:"Activate a polling client stream with a server identified by <alias>."`
+	Set      SetCmd      `cmd:"" help:"Set configuration items on server"`
+	Show     ShowCmd     `cmd:"" help:"Show locally configured information"`
+	Token    TokenCmd    `cmd:"" help:"Manage issued tokens"`
+	Exit     ExitCmd     `cmd:"" help:"Exit the shell"`
+	Help     HelpCmd     `cmd:"" help:"Show help on a command"`
 }
 
 var SessionGlobals Globals

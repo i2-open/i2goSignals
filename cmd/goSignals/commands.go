@@ -1317,6 +1317,18 @@ type GetCmd struct {
 	SubjectFilter GetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Get a stream's subject-filter config (operator-tunable knobs)."`
 }
 
+type DeleteServerCmd struct {
+	Alias string `arg:"" help:"The alias of a server to delete"`
+}
+
+func (d *DeleteServerCmd) Run(cli *CLI) error {
+	if err := cli.Data.DeleteServer(d.Alias, &cli.Globals); err != nil {
+		return err
+	}
+	fmt.Println(d.Alias + " deleted.")
+	return nil
+}
+
 type DeleteStreamCmd struct {
 	Alias string `arg:"" help:"The alias of a stream to delete"`
 }
@@ -1357,6 +1369,7 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 
 type DeleteCmd struct {
 	Stream DeleteStreamCmd `cmd:"" aliases:"s" help:"Delete a stream"`
+	Server DeleteServerCmd `cmd:"" aliases:"r" help:"Delete local server definition"`
 }
 
 type SetStreamConfigCmd struct {
