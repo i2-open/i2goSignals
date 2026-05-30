@@ -13,6 +13,19 @@ import (
 // loopback callback with a code, and a fake token endpoint. This exercises the
 // listener + callback + exchange seam without a real browser.
 func TestRunLogin_EndToEndLoopback(t *testing.T) {
+    // Pin the capability detection so this test deterministically exercises the
+    // PKCE loopback path on any host. Without this it passes on a desktop (where
+    // browserAvailable() is true) but on a headless CI runner the engine
+    // auto-falls back to device-code and the loopback seam is never tested.
+    origBrowser := browserAvailable
+    origBind := canBindLoopback
+    defer func() {
+        browserAvailable = origBrowser
+        canBindLoopback = origBind
+    }()
+    browserAvailable = func() bool { return true }
+    canBindLoopback = func() bool { return true }
+
     idToken := makeUnsignedIDToken(map[string]any{"sub": "alice", "email": "alice@example.com"})
 
     token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
