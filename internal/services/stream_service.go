@@ -119,6 +119,56 @@ func applyRemovalGraceOverride(streamRec *model.StreamStateRecord, requested int
     streamRec.SubjectRemovalGraceSeconds = requested
 }
 
+// validateEventSource enforces the ADR 0004 event_source.type rules against a
+// transmitter stream's resolved configuration (issue #117). It is a pure shape
+// check that mutates no state, and is a no-op for a nil descriptor or for the
+// silent-AUDIENCE default (empty type with no source_stream_ids), so pre-
+// existing streams keep working with no error and no warning. R4's WARN-and-
+// drop for receiver streams is handled by applyEventSource before this runs, so
+// a receiver stream never reaches this validation with a non-nil EventSource.
+func validateEventSource(es *model.EventSource, mode string) error {
+    if es == nil {
+        return nil
+    }
+    if es.Type == model.EventSourceExplicit {
+        // R2: EXPLICIT must name at least one upstream stream.
+        if len(es.SourceStreamIds) == 0 {
+            return fmt.Errorf("invalid event_source: type EXPLICIT requires a non-empty source_stream_ids")
+        }
+        return nil
+    }
+    // R3: source_stream_ids is only meaningful for EXPLICIT. Every non-EXPLICIT
+    // type — DIRECT, AUDIENCE, and the unset/empty silent-AUDIENCE default —
+    // must leave it empty.
+    if len(es.SourceStreamIds) > 0 {
+        return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
+    }
+    // R1: a DIRECT stream has no SSF upstream to relay Add/Remove to.
+    if es.Type == model.EventSourceDirect &&
+        (mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid) {
+        return fmt.Errorf("invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", mode)
+    }
+    return nil
+}
+
+// applyEventSource copies the requested event_source descriptor onto streamRec.
+// On a receiver stream the descriptor has no meaning — there is no routing to
+// govern — so it is dropped with a WARN and the request still succeeds (R4,
+// ADR 0004 issue #117). Mirrors applyRemovalGraceOverride. A nil request is a
+// no-op so an UpdateStream that does not touch event_source leaves it intact.
+func applyEventSource(streamRec *model.StreamStateRecord, requested *model.EventSource) {
+    if requested == nil {
+        return
+    }
+    if streamRec.IsReceiver() {
+        ssLog.Warn("event_source ignored on a receiver stream",
+            "stream_id", streamRec.StreamConfiguration.Id)
+        streamRec.EventSource = nil
+        return
+    }
+    streamRec.EventSource = requested
+}
+
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
 	minVerificationInterval := 300
 	maxInactivityTimeout := 3600
@@ -542,7 +592,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		ModifiedAt:          now,
 		DefaultSubjects:     defaultSubjects,
 		SubjectFilterMode:   request.SubjectFilterMode,
-		EventSource:         request.EventSource,
+	}
+
+	// ADR 0004 (issue #117): apply event_source, dropping it with a WARN on
+	// receiver streams, then validate the type rules for transmitter streams.
+	// The drop happens first so a receiver never fails event_source validation.
+	applyEventSource(streamRec, request.EventSource)
+	if err = validateEventSource(streamRec.EventSource, streamRec.SubjectFilterMode); err != nil {
+		return model.StreamConfiguration{}, err
 	}
 
 	// SSF §9.3 grace override (PRD #97 #98). Dropped on receiver streams with
@@ -842,8 +899,11 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	if configReq.SubjectFilterMode != "" {
 		streamRec.SubjectFilterMode = configReq.SubjectFilterMode
 	}
-	if configReq.EventSource != nil {
-		streamRec.EventSource = configReq.EventSource
+	// ADR 0004 (issue #117): apply event_source, dropping it with a WARN on
+	// receiver streams, then validate the type rules for transmitter streams.
+	applyEventSource(streamRec, configReq.EventSource)
+	if err = validateEventSource(streamRec.EventSource, streamRec.SubjectFilterMode); err != nil {
+		return nil, err
 	}
 
 	// SSF §9.3 grace override (PRD #97 #98). Request value is already shape-

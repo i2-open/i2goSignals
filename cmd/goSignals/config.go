@@ -36,6 +36,11 @@ type SsfServer struct {
 	// issuer; only this pointer is cached here.
 	ActiveIssuer        string `json:",omitempty"`
 	ServerConfiguration *model.TransmitterConfiguration
+	// OAuthClientConfig caches the NON-SECRET OAuth client-credentials fields
+	// (client-id, token-url, scopes) for a foreign SSF transmitter. The CLIent
+	// secret is NEVER stored here or in config.json; it is staged in
+	// ConfigData.oauthSecrets (in-memory only) or supplied at use time.
+	OAuthClientConfig *model.OAuthClientConfig `json:",omitempty"`
 }
 
 type Stream struct {
@@ -56,6 +61,70 @@ type ConfigData struct {
 	Pems          map[string][]byte
 	keys          map[string]*rsa.PrivateKey            // parsed keys - don't persist
 	streamConfigs map[string]*model.StreamConfiguration // don't store (cached)
+	// oauthSecrets stages OAuth client secrets per server alias in memory only.
+	// It mirrors the keys/streamConfigs caches above and is NEVER persisted to
+	// config.json — the client secret must not live on disk (PRD #83 / #85).
+	oauthSecrets map[string]string
+}
+
+// stageSecret records an OAuth client secret for the given server alias in the
+// in-memory (never-persisted) cache.
+func (c *ConfigData) stageSecret(alias, secret string) {
+	if c.oauthSecrets == nil {
+		c.oauthSecrets = map[string]string{}
+	}
+	c.oauthSecrets[alias] = secret
+}
+
+// stagedSecret returns the in-memory staged OAuth client secret for the alias,
+// or "" if none was staged in this process.
+func (c *ConfigData) stagedSecret(alias string) string {
+	if c.oauthSecrets == nil {
+		return ""
+	}
+	return c.oauthSecrets[alias]
+}
+
+// ResolveOAuthSecret resolves the OAuth client secret for a server alias in
+// priority order: in-memory staged secret -> flag value -> the named
+// environment variable. Scenario (i) (single process) works with no env. A
+// blank envVar name skips the env lookup.
+func (c *ConfigData) ResolveOAuthSecret(alias, flagSecret, envVar string) string {
+	if s := c.stagedSecret(alias); s != "" {
+		return s
+	}
+	if flagSecret != "" {
+		return flagSecret
+	}
+	if envVar != "" {
+		return os.Getenv(envVar)
+	}
+	return ""
+}
+
+// BuildServerRegistration assembles the server-side *model.Server body the CLI
+// POSTs to a receiver node's /server endpoint to register a foreign SSF
+// transmitter. Type is left EMPTY so the receiver node infers it from the auth
+// mode (OAuthClientConfig present => ssf). The resolved client secret is placed
+// on the returned OAuthClientConfig (it never lived in config.json). This helper
+// is consumed by `create stream poll receive --tx-alias` (slice #86).
+func (c *ConfigData) BuildServerRegistration(alias, flagSecret, envVar string) (*model.Server, error) {
+	srv, exists := c.Servers[alias]
+	if !exists {
+		return nil, fmt.Errorf("specified alias '%s' is not defined", alias)
+	}
+	if srv.OAuthClientConfig == nil {
+		return nil, fmt.Errorf("server '%s' has no OAuth client configuration", alias)
+	}
+
+	oauth := srv.OAuthClientConfig.DeepCopy()
+	oauth.ClientSecret = c.ResolveOAuthSecret(alias, flagSecret, envVar)
+
+	return &model.Server{
+		Alias:             srv.Alias,
+		Host:              srv.Host,
+		OAuthClientConfig: oauth,
+	}, nil
 }
 
 func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {

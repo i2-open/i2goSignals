@@ -57,6 +57,19 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 		// TODO: Validate IAT token based config? Issue is that validation of an IAT may cause IAT to expire
 	}
 
+	// Infer the server Type from the resolved auth mode when the caller leaves
+	// it empty. A foreign SSF transmitter authenticated via OAuth client
+	// credentials is ServerTypeSsf; everything else defaults to
+	// ServerTypeGosignals. The CLI deliberately leaves Type unset (PRD #83 /
+	// #85: no --type flag).
+	if server.Type == "" {
+		if server.GetAuthMode() == model.AuthModeClient {
+			server.Type = model.ServerTypeSsf
+		} else {
+			server.Type = model.ServerTypeGosignals
+		}
+	}
+
 	// We are assuming the client previously validated the server. We may still need to deal with connectivity issues where the admin server can reach the SSF server but this server cannot.
 
 	return s.serverDAO.Create(ctx, server)
