@@ -327,6 +327,8 @@ type CreatePollReceiverCmd struct {
 	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
 	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
 	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
+	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). The transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
+	Secret   string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
 	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
 
@@ -337,7 +339,22 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	var eventAuthorization string
 	var reg model.StreamConfiguration
 
-	if p.Connect != "" {
+	if p.TxAlias != "" {
+		// Foreign SSF transmitter auto-registration (PRD #83 / slice #86). The
+		// node owns the POST /server registration so its server-side TxAlias
+		// auto-registration path can discover the transmitter's
+		// ssf-configuration, register a stream, and wire the returned poll
+		// endpoint. No EventUrl/Auth is supplied here — the server resolves them.
+		reg = model.StreamConfiguration{
+			Aud:             c.Aud,
+			Iss:             c.Iss,
+			Delivery:        &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: &model.PollReceiveMethod{Method: model.ReceivePoll}},
+			EventsRequested: c.Events,
+			IssuerJWKSUrl:   c.IssJwksUrl,
+			RouteMode:       parseMode(p.Mode),
+			TxAlias:         &p.TxAlias,
+		}
+	} else if p.Connect != "" {
 		stream, _ := cli.Data.GetStreamAndServer(p.Connect)
 		if stream == nil {
 			return errors.New("Could not find a stream identified by " + p.Connect)
@@ -388,6 +405,18 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 	if !ConfirmProceed("") {
 		return nil
 	}
+
+	// When auto-registering against a foreign SSF transmitter, register the
+	// transmitter on the node (POST /server) before creating the stream so the
+	// server-side TxAlias auto-registration path can resolve it. A 409 Conflict
+	// is benign (already registered). The client secret rides on the request
+	// body only and is never persisted to config.json.
+	if p.TxAlias != "" {
+		if err = cli.registerTxAliasServer(server, p.TxAlias, p.Secret, ""); err != nil {
+			return err
+		}
+	}
+
 	_, err = cli.executeCreateRequest(c.Name, reg, server, "Poll Receiver", "")
 	return err
 }
@@ -756,6 +785,67 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 	}
 	fmt.Printf("... %s created.", pubName)
 	return nil
+}
+
+// registerTxAliasServer POSTs a foreign SSF transmitter registration (built by
+// the #85 helper ConfigData.BuildServerRegistration) to the target receiver
+// node's /server endpoint so the server-side TxAlias auto-registration path can
+// later resolve the alias. The call is authenticated with the node's bearer
+// credential (reg/admin scoped — the caller's responsibility). A 409 Conflict
+// means the transmitter is already registered on the node and is treated as
+// success (idempotent). The resolved client secret rides on the request body
+// only; it is never persisted to config.json.
+func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar string) error {
+    reg, err := cli.Data.BuildServerRegistration(alias, flagSecret, envVar)
+    if err != nil {
+        return err
+    }
+
+    serverUrl, err := url.Parse(node.Host)
+    if err != nil {
+        return err
+    }
+    regUrl, err := serverUrl.Parse("/server")
+    if err != nil {
+        return err
+    }
+
+    bodyBytes, err := json.Marshal(reg)
+    if err != nil {
+        return err
+    }
+
+    req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bodyBytes))
+    if err != nil {
+        return err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    bearer, err := serverBearer(&cli.Globals, node)
+    if err != nil {
+        return err
+    }
+    if bearer != "" {
+        req.Header.Set("Authorization", "Bearer "+bearer)
+    }
+
+    client := getHttpClient(0)
+    resp, err := client.Do(req)
+    if err != nil {
+        return err
+    }
+    defer httpSupport.HandleRespClose(resp)
+
+    switch resp.StatusCode {
+    case http.StatusOK, http.StatusCreated:
+        return nil
+    case http.StatusConflict:
+        // Transmitter already registered on this node — proceed.
+        fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
+        return nil
+    default:
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
+    }
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
