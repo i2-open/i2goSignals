@@ -19,6 +19,10 @@ type ProtectedResourceMetadata struct {
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
 	ResourceName           *string  `json:"resource_name,omitempty"`
+	// ClientID is a recommended public OAuth client_id that interactive
+	// clients (e.g. the goSignals CLI) may use to authenticate against the
+	// advertised authorization_servers. Sourced from I2SIG_CLI_CLIENT_ID.
+	ClientID *string `json:"client_id,omitempty"`
 }
 
 type AuthScheme struct {

@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"slices"
 
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -29,9 +31,14 @@ func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClie
 		return nil
 	}
 
-	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, true)
+	// Issue a token reflecting only the scopes the client was actually granted.
+	// A self-registered client is capped below stream_admin by the registration
+	// handler's privilege ceiling, so admin is granted only when the client's
+	// AllowedScopes explicitly carry stream_admin (out-of-band provisioning).
+	admin := slices.Contains(client.AllowedScopes, authSupport.ScopeStreamAdmin)
+	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin)
 	if err != nil {
-		csLog.Error("Error issuing stream admin token", "error", err)
+		csLog.Error("Error issuing stream client token", "error", err)
 		return nil
 	}
 

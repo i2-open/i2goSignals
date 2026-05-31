@@ -68,6 +68,8 @@ type OIDCConfiguration struct {
 	Issuer                 string   `json:"issuer"`
 	AuthorizationEndpoint  string   `json:"authorization_endpoint,omitempty"`
 	TokenEndpoint          string   `json:"token_endpoint,omitempty"`
+	RevocationEndpoint     string   `json:"revocation_endpoint,omitempty"`
+	DeviceAuthEndpoint     string   `json:"device_authorization_endpoint,omitempty"`
 	JWKSURI                string   `json:"jwks_uri,omitempty"`
 	RegistrationEndpoint   string   `json:"registration_endpoint,omitempty"`
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`

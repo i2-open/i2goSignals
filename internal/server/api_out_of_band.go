@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 
@@ -102,9 +103,19 @@ func (sa *SignalsApplication) CreateKey(w http.ResponseWriter, r *http.Request) 
 }
 
 func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	// Key creation accepts the narrow "key" scope in addition to stream_admin/root.
+	// The "key" scope is CREATE-ONLY: a key-scoped caller may mint a NEW issuer
+	// signing key but is denied takeover operations (force=replace/rotate). That
+	// guard is enforced below once the requested operation is known.
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
+		return
+	}
+
+	// A key-scope-only caller (no admin/root) may not perform a takeover.
+	if keyScopeOnly(authCtx) && requestIsKeyTakeover(r) {
+		http.Error(w, "key scope is create-only; force=replace/rotate is not permitted", http.StatusForbidden)
 		return
 	}
 
@@ -120,6 +131,35 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	} else {
 		createKeyByNameHandler(sa, w, r, authCtx)
 	}
+}
+
+// keyScopeOnly reports whether the AuthContext carries the narrow "key" scope
+// but NOT a broader stream_admin/root capability. Such a caller is a bootstrap
+// identity and is restricted to create-only key operations.
+func keyScopeOnly(authCtx *authUtil.AuthContext) bool {
+	if authCtx == nil || authCtx.Eat == nil {
+		return false
+	}
+	if authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin}) ||
+		authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeRoot}) {
+		return false
+	}
+	return authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeKey})
+}
+
+// requestIsKeyTakeover reports whether the key request asks to replace or rotate
+// an existing key (force=replace / force=rotate / ?rotate). These are denied for
+// key-scope-only callers to prevent key takeover and event forgery.
+func requestIsKeyTakeover(r *http.Request) bool {
+	q := r.URL.Query()
+	force := q.Get("force")
+	if force == "replace" || force == "rotate" {
+		return true
+	}
+	if _, rotate := q["rotate"]; rotate {
+		return true
+	}
+	return false
 }
 
 func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
@@ -526,7 +566,15 @@ func (sa *SignalsApplication) IssuerProjectIat(w http.ResponseWriter, r *http.Re
 
 func IssuerProjectIatHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	serverLog.Debug("IssuerProjectIatHandler called", "remoteAddr", r.RemoteAddr)
-	authCtx, _ := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
+	// Honor the validation status. /iat accepts {key, stream_admin, root}. A
+	// missing/invalid bearer (including the now-removed anonymous path) is
+	// rejected, so an unset bootstrap secret fails closed. The minted IAT is
+	// always reg-only — the key/admin capability does not propagate.
+	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	if stat != http.StatusOK || authCtx == nil {
+		http.Error(w, "Invalid bootstrap or administrative token", stat)
+		return
+	}
 	projectIat, err := sa.GetAuth().IssueProjectIat(authCtx)
 	if err != nil {
 		serverLog.Error("Error generating IAT", "error", err.Error())
@@ -571,15 +619,20 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		return
 	}
 
+	// Privilege ceiling: a reg (IAT) caller may not self-grant stream_admin at
+	// /register. A self-registration caps at stream_mgmt + event_delivery; an
+	// admin client is provisioned out of band, not via the registration door.
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
 		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
 	} else {
 		for _, v := range jsonRequest.Scopes {
 			switch v {
-			case authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery:
+			case authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery:
 				scopes = append(scopes, v)
 			default:
+				// stream_admin and any unknown scope are silently dropped — a reg
+				// token cannot escalate its own privilege.
 			}
 		}
 	}
@@ -679,18 +732,40 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	if baseUrl != nil {
 		baseURl = baseUrl.String()
 	}
-	name := "GoSignals"
-	prMeta := model.ProtectedResourceMetadata{
-		Resource:               &baseURl,
-		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery, authSupport.ScopeRegister},
-		BearerMethodsSupported: []string{"header"},
-		ResourceName:           &name,
-	}
+	prMeta := buildProtectedResourceMetadata(baseURl, sa.GetAuth().GetOAuthServers(), cliClientId())
 
 	resp, _ := json.MarshalIndent(prMeta, "", "  ")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// cliClientId resolves the recommended public OAuth client_id advertised to
+// interactive clients (the goSignals CLI). Sourced from I2SIG_CLI_CLIENT_ID,
+// defaulting to "gosignals-cli".
+func cliClientId() string {
+	if v := os.Getenv("I2SIG_CLI_CLIENT_ID"); v != "" {
+		return v
+	}
+	return "gosignals-cli"
+}
+
+// buildProtectedResourceMetadata assembles RFC9728 metadata. It advertises the
+// configured authorization_servers, the recommended public CLI client_id, and
+// the scopes supported by the server (including the narrow "key" scope).
+func buildProtectedResourceMetadata(baseUrl string, authServers []string, cliClient string) model.ProtectedResourceMetadata {
+	name := "GoSignals"
+	res := baseUrl
+	meta := model.ProtectedResourceMetadata{
+		Resource:               &res,
+		AuthorizationServers:   authServers,
+		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeRegister, authSupport.ScopeKey},
+		BearerMethodsSupported: []string{"header"},
+		ResourceName:           &name,
+	}
+	if cliClient != "" {
+		meta.ClientID = &cliClient
+	}
+	return meta
 }
 
 // ListStreamStates lists all stream states associated with the current project.

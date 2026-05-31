@@ -75,6 +75,12 @@ func (suite *toolSuite) initialize(t *testing.T) error {
 	configName := fmt.Sprintf("%s/toolconfig.json", suite.testDir)
 	err = os.Setenv("GOSIGNALS_HOME", configName)
 
+	// The anonymous /iat path is closed (slice #121). Provide the shared
+	// bootstrap secret so bootstrap-capable CLI calls (create key / create iat /
+	// add server without a token) authenticate to the key scope. The in-process
+	// server reads the same env var via the bootstrap-secret resolver.
+	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "tool-test-bootstrap")
+
 	cli := &CLI{}
 	cli.Globals.Config = configName
 
@@ -272,8 +278,11 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 }
 func (suite *toolSuite) Test1_AddServers() {
 	testLog.Println("Test 1 - Add Server Test")
+	// Admin clients are provisioned out of band (slice #121: self-registration is
+	// capped below stream_admin). Supply the pre-issued admin token via --token so
+	// the saved client retains full stream management (including delete).
 	serverName := suite.servers[0].Name()
-	cmd := fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com", serverName, suite.servers[0].server.Addr)
+	cmd := fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com --token=%s", serverName, suite.servers[0].server.Addr, suite.servers[0].streamMgmtToken)
 
 	res, err := suite.executeCommand(cmd, false)
 	assert.NoError(suite.T(), err, "Add server successful")
@@ -283,7 +292,7 @@ func (suite *toolSuite) Test1_AddServers() {
 	assert.Equal(suite.T(), serverName, server.Alias, "Found server and matched")
 
 	serverName = suite.servers[1].Name()
-	cmd = fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com", serverName, suite.servers[1].server.Addr)
+	cmd = fmt.Sprintf("add server %s http://%s/ --desc=\"Add server test\" --email=test@example.com --token=%s", serverName, suite.servers[1].server.Addr, suite.servers[1].streamMgmtToken)
 	res, err = suite.executeCommand(cmd, false)
 	assert.NoError(suite.T(), err, "Add server successful")
 	testLog.Printf("%s", res)

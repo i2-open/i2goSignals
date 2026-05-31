@@ -434,7 +434,13 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 }
 
 func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	// Creating a stream is a stream-management operation: a self-registered
+	// receiver (capped at stream_mgmt by the /register privilege ceiling, never
+	// stream_admin) must be able to create its own stream. This mirrors the
+	// sibling stream operations (get/update/delete) which already accept
+	// stream_mgmt; stream_admin remains required only for elevated key/stream
+	// lifecycle actions. reg is retained for the legacy direct-IAT path.
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return

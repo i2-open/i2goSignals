@@ -126,6 +126,9 @@ understands. They are documented in their natural section below.
 | `I2SIG_AUTH_STS_AUDIENCE`         | `audience` parameter requested from the STS (RFC 8693).                                                      | _none_  |
 | `I2SIG_AUTH_STS_RESOURCE`         | `resource` parameter requested from the STS (RFC 8707).                                                      | _none_  |
 | `I2SIG_AUTH_STS_SCOPES`           | Space-separated scopes requested from the STS.                                                               | _none_  |
+| `I2SIG_BOOTSTRAP_TOKEN`           | Shared bootstrap secret. A bearer that constant-time-equals this value resolves to the narrow `key` scope (create a new issuer key + obtain a `reg`-only IAT). When unset, the anonymous `/iat` path is closed and no bootstrap bearer is accepted (fail closed). | _none_  |
+| `I2SIG_CLI_CLIENT_ID`             | Public OAuth `client_id` advertised in the server's RFC 9728 Protected Resource Metadata as the recommended client for the interactive `goSignals login` flow. | `gosignals-cli` |
+| `I2SIG_IAT_LIFETIME`              | Validity of minted Initial Access Tokens (IATs), as a Go duration (e.g. `24h`, `30m`). Invalid/empty falls back to the default. | `24h`   |
 
 ## Cluster
 

@@ -616,6 +616,10 @@ services:
       - I2SIG_TLS_CA_CERT=/scim/certs/ca-cert.pem
       - SPIFFE_ENDPOINT_SOCKET=unix:///run/spire/sockets/agent.sock
       - I2SIG_SPIFFE_TRUST_DOMAIN=cluster.i2gosignals.internal
+      # App-layer bootstrap secret (PRD #120 / slice #121, generalized in #123)
+      # coexists with transport-layer SPIFFE mTLS above. Presented on
+      # `create key` / `create iat`; must match the goSignals nodes.
+      - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
     entrypoint: [ "sh", "/scim/scripts/register-dev.sh"]
 
   scim_cluster1:

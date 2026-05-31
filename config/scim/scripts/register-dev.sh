@@ -3,6 +3,16 @@
 # The compose files were swept to the new name in #72; this script consumes it.
 CA_CERT="${CA_CERT:-$I2SIG_TLS_CA_CERT}"
 
+# Authenticated bootstrap (PRD #120 / slice #121): the anonymous /iat path is
+# gone. The goSignals CLI reads I2SIG_BOOTSTRAP_TOKEN from the environment and
+# presents it as the bearer on `create key` / `create iat` (see auto-reg.gosignals).
+# compose injects I2SIG_BOOTSTRAP_TOKEN into this container; fail fast if missing.
+if [ -z "$I2SIG_BOOTSTRAP_TOKEN" ]; then
+    echo "ERROR: I2SIG_BOOTSTRAP_TOKEN is not set; cannot bootstrap without the anonymous /iat path."
+    exit 1
+fi
+export I2SIG_BOOTSTRAP_TOKEN
+
 if [ -s /scim/iat1.txt ]; then
     echo "Registration IAT file already exists, skipping token generation"
     exit 0

@@ -9,38 +9,119 @@ The client may be given an Initial Access Token (IAT) which permits registration
 a permanent token used to retrieve events and manage its stream. Of particular note, the SSF endpoints
 use a common endpoint with no direct stream identifier; instead, the stream identifier is typically encoded in the access token.
 
-## GoSignals Command Line 
-At present, GoSignals only has a command line utility.  It accepts IATs, but if not, it will try to get an IAT.  From
-the goSignalsServer perspective, each IAT starts a new project under which one or more streams can be created. 
+## Management plane vs data plane
+
+goSignals authorization splits into two planes:
+
+- **Management plane** — administering a server: defining streams, creating
+  issuer keys, minting IATs, registering clients. Authorized by either a
+  delegated-OAuth user session (interactive humans) or the shared bootstrap
+  secret / configured admin token (automation).
+- **Data plane** — moving events: a transmitter pushing SETs, a receiver polling
+  for them. Authorized by per-stream/per-client tokens carrying the
+  `stream`/`event` scopes, scoped to a project.
+
+The two are independent. Logging in (management plane) never grants event
+delivery, and a stream's delivery token cannot administer the server.
+
+## Authorization scopes
+
+The server recognises a small set of scopes (roles claim or OAuth `scope`
+claim; `root` matches everything):
+
+| Scope    | Constant            | Capability |
+| :------- | :------------------ | :--------- |
+| `event`  | `ScopeEventDelivery`| Deliver / receive events on a stream (data plane). |
+| `stream` | `ScopeStreamMgmt`   | Manage a stream's own configuration (data plane / self-service). |
+| `reg`    | `ScopeRegister`     | Register a client using an IAT. Capped at `stream`+`event` — a `reg` caller cannot self-grant `admin`. |
+| `key`    | `ScopeKey`          | **Create a new issuer signing key, and obtain a `reg`-only IAT.** Create-only: denied key takeover. No stream/event capability. |
+| `admin`  | `ScopeStreamAdmin`  | Full project administration (management plane). |
+| `root`   | `ScopeRoot`         | Superset; matches every scope check. |
+
+### The `key` scope and machine tiers
+
+`key` is a narrow capability sitting between `reg` and `admin`, intended for an
+unattended deployment that must bootstrap itself without a human:
+
+- A `key`-scoped caller may `POST /key/<issuer>` to mint a **new** issuer signing
+  key, but a key **takeover** (`force=replace`, `force=rotate`, or `?rotate`) is
+  rejected for a key-scope-only caller — preventing key substitution / event
+  forgery.
+- A `key`-scoped caller may `GET /iat` to obtain an IAT, but the minted IAT is
+  always **`reg`-only**: the `key`/admin capability does not propagate into it.
+
+This is the machine tier ladder: a bootstrap identity (`key`) seeds an issuer key
+and a `reg` IAT; the `reg` IAT registers a client that caps at `stream`+`event`;
+`admin` clients are provisioned out of band, not through the registration door.
+
+### The bootstrap secret
+
+`I2SIG_BOOTSTRAP_TOKEN` is a shared secret. On the server, a bearer that
+**constant-time-equals** the configured value is synthesized into a `key`-scope
+context before any JWT validation runs. When the variable is **unset**, the
+bootstrap path is closed and no bootstrap bearer is ever accepted (fail closed).
+The bootstrap secret is an app-layer authorization mechanism: it is orthogonal to
+transport-layer identity (TLS / SPIFFE mTLS) and coexists with it.
+
+> [!IMPORTANT]
+> **The anonymous `/iat` endpoint is removed.** `GET /iat` now requires a
+> `{key, admin, root}` bearer; a missing/invalid bearer is rejected. With
+> `I2SIG_BOOTSTRAP_TOKEN` unset there is no door at all — the endpoint fails
+> closed. `POST /key` likewise requires `{key, admin, root}`.
+
+The advertised public client for the interactive CLI login is named by
+`I2SIG_CLI_CLIENT_ID` (default `gosignals-cli`) in the server's RFC 9728
+Protected Resource Metadata, which also advertises the supported scopes
+(including `key`).
+
+## GoSignals Command Line
+
+The `goSignals` CLI authorizes management calls one of two ways, detailed in the
+[CLI Login Guide](cli_login.md):
+
+1. **Delegated OAuth login** — `add server <alias>` connects to a server
+   (connect-only, no credential minted) and caches its advertised OAuth
+   authorization servers; `login <alias>` then runs a browser PKCE (or
+   device-code) flow and stores a per-realm session in `credentials.json`.
+   Subsequent management calls present that session's access token, silently
+   refreshing it as needed.
+2. **Non-interactive bootstrap** — for CI/automation, `I2SIG_BOOTSTRAP_TOKEN`
+   (or a configured `--token`/`--client-secret`/`--iat`) authorizes
+   `create key` / `create iat` directly.
 
 ```shell
-goSignals> add server go1 http://localhost:8888
+goSignals> add server gs1 https://goSignals1:8888
+goSignals> login gs1
 ```
-
-To start the process the gosignals command `add server` command is used with the optional parameter --iat which is used to specify a
-previously issued access token.  The command line utility will register the client with the goSignals server and in return
-will receive an administrative access token.  The command line utility will store the server and token information in 
-its local configuration file. If an alias is specified, that alias can be used to refer to the server in the future.  If
-an alias is not specified, an alias is automatically generated.
 
 ## Docker Compose Set Up
 
-In the demo scenario, there are 2 SCIM servers configured to run as replicas with synchronization being carried out via
-goSignals. In the scenario, both SCIM servers in the cluster use goSignals1:8888 as the common events server. 
-This is so that when one server issues an event, the replica SCIM server can receive it and synchronize.
+In the demo scenario, there are 2 SCIM servers configured to run as replicas with
+synchronization carried out via goSignals. Both SCIM servers in the cluster use
+goSignals1:8888 as the common events server, so an event issued by one is
+received by the replica for synchronization.
 
-In order for the SCIM servers to auto-register, they need an IAT token.  To do this, the service `scimSsfSetup` runs the
-goSignals command line utility and does the following goSignals commands:
+The SCIM servers need an issuer key and an IAT to auto-register. The
+`scimSsfSetup` service runs the goSignals CLI **unattended** using the bootstrap
+secret (`I2SIG_BOOTSTRAP_TOKEN`, injected by compose). The `key`-scope secret
+authorizes `create key` + `create iat` without any anonymous endpoint
+(`config/scim/scripts/auto-reg.gosignals`):
+
 ```shell
-add server gosignals1 http://goSignals1:8888
-add server gosignals2 http://goSignals2:8889
-create iat gosignals1 --output=/scim/iat1.txt
-create iat gosignals2 --output=/scim/iat2.txt
+add server gosignals1 https://goSignals1:8888
+add server gosignals2 https://goSignals2:8889
+create iat gosignals1 --output=/scim/iat-gosignals1.jwt
+create bundle --output=/scim/spire-bundle.pem
+create key gosignals1 cluster.scim.example.com --file=/scim/cluster-scim-issuer.pem
 exit
 ```
 
-When complete, the shell script takes iat1.txt and creates the file registration-iat.env which is picked up by services
-`scim_cluster1` and `scim_cluster2`.  When these services start they will auto-register with goSignals1.
+When complete, the setup script distributes the minted issuer key and IAT to the
+`scim_cluster1` / `scim_cluster2` data directories; on startup those services
+auto-register with goSignals1. The six compose variants (base / dev / cluster /
+cluster-dev / spiffe / spiffe-dev) all wire the bootstrap secret the same way;
+see the [CLI Login Guide](cli_login.md#3-docker-compose-variant-matrix) for the
+full matrix.
 
 ## Limitations
 
