@@ -50,14 +50,17 @@ func getHttpClient(timeout time.Duration) *http.Client {
 }
 
 type AddServerCmd struct {
-	Alias        string `arg:"" help:"A unique name to identify the server"`
-	Host         string `arg:"" required:"" help:"Http URL for a goSignals server"`
-	Desc         string `help:"Description of project"`
-	Email        string `help:"Contact email for project"`
-	Iat          string `help:"Registration Initial Access Auth if provided (non-interactive)"`
-	Token        string `help:"Administration authorization token (non-interactive)"`
-	ClientSecret string `help:"OAuth client secret for non-interactive client-credentials use"`
-	Bootstrap    bool   `help:"Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)"`
+	Alias        string   `arg:"" help:"A unique name to identify the server"`
+	Host         string   `arg:"" required:"" help:"Http URL for a goSignals server"`
+	Desc         string   `help:"Description of project"`
+	Email        string   `help:"Contact email for project"`
+	Iat          string   `help:"Registration Initial Access Auth if provided (non-interactive)"`
+	Token        string   `help:"Administration authorization token (non-interactive)"`
+	ClientId     string   `help:"OAuth client_id for a foreign SSF transmitter (client-credentials grant)"`
+	ClientSecret string   `help:"OAuth client secret for non-interactive client-credentials use"`
+	TokenUrl     string   `help:"OAuth token endpoint for the transmitter (optional; discovered if omitted)"`
+	Scopes       []string `sep:"," help:"Comma-separated OAuth scopes for the client-credentials grant"`
+	Bootstrap    bool     `help:"Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)"`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -119,14 +122,35 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	// server without minting any credential. Interactive auth happens later via
 	// `login <alias>` (PKCE). The --iat/--token/--client-secret/--bootstrap
 	// flags remain for non-interactive (CI/bootstrap) use.
+	// oauthStaged tracks whether this is a foreign SSF transmitter registered
+	// via OAuth client credentials. Such a server is a polling target, not the
+	// active management server, so it must NOT become Selected.
+	oauthStaged := false
 	switch {
+	case as.ClientId != "":
+		// Foreign SSF transmitter via OAuth client-credentials. Stage only the
+		// NON-SECRET fields into config.json; the client secret is held in
+		// memory (consumed in-process) and never persisted. No POST /server is
+		// made here — registration happens at `create stream poll receive
+		// --tx-alias` time (slice #86) against the receiver node.
+		server.OAuthClientConfig = &model.OAuthClientConfig{
+			ClientID: cleanQuotes(as.ClientId),
+			TokenURL: cleanQuotes(as.TokenUrl),
+			Scopes:   as.Scopes,
+		}
+		if as.ClientSecret != "" {
+			c.Data.stageSecret(as.Alias, cleanQuotes(as.ClientSecret))
+		}
+		oauthStaged = true
+		fmt.Printf("Staged OAuth client credentials for transmitter '%s' (secret kept in memory, not written to config).\n", as.Alias)
 	case as.Iat != "":
 		server.IatToken = cleanQuotes(as.Iat)
 	case as.Token != "":
 		server.ClientToken = cleanQuotes(as.Token)
 	case as.ClientSecret != "":
-		// Stored for non-interactive client-credentials flows. Treated as a
-		// client token surrogate; the server validates it on use.
+		// #127 surrogate: --client-secret WITHOUT --client-id. Stored for
+		// non-interactive flows as a client token surrogate; the server
+		// validates it on use.
 		server.ClientToken = cleanQuotes(as.ClientSecret)
 	case as.Bootstrap:
 		// Explicit opt-in: mint an IAT using the shared bootstrap secret
@@ -177,7 +201,9 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	}
 
 	c.Data.Servers[as.Alias] = server
-	c.Data.Selected = as.Alias
+	if !oauthStaged {
+		c.Data.Selected = as.Alias
+	}
 	cmd := ShowServerCmd{Alias: as.Alias}
 	_ = cmd.Run(c)
 	return c.Data.Save(&c.Globals)
