@@ -307,6 +307,188 @@ func TestStreamService_DefaultSubjectsFlipClearsFilter(t *testing.T) {
         "flipping defaultSubjects must clear the stream's subject filter")
 }
 
+// ----------------------------------------------------------------------------
+// ADR 0004 — event_source.type validation (issue #117)
+// ----------------------------------------------------------------------------
+
+// R1: DIRECT + PASSTHRU/HYBRID is rejected; DIRECT + LOCAL or no mode is OK.
+func TestStreamService_EventSourceDirectWithRelayModeRejectedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    for _, mode := range []string{model.SubjectFilterModePassthru, model.SubjectFilterModeHybrid} {
+        req := pushTransmitterRequest()
+        req.SubjectFilterMode = mode
+        req.EventSource = &model.EventSource{Type: model.EventSourceDirect}
+
+        _, err := svc.CreateStream(ctx, req, "test-project", nil)
+        require.Error(t, err, "DIRECT + %s must be rejected", mode)
+        assert.Contains(t, err.Error(), "event_source",
+            "the error must name the offending field")
+    }
+}
+
+func TestStreamService_EventSourceDirectWithLocalModeAcceptedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    req := pushTransmitterRequest()
+    req.SubjectFilterMode = model.SubjectFilterModeLocal
+    req.EventSource = &model.EventSource{Type: model.EventSourceDirect}
+
+    _, err := svc.CreateStream(ctx, req, "test-project", nil)
+    require.NoError(t, err, "DIRECT + LOCAL must be accepted")
+}
+
+func TestStreamService_EventSourceDirectWithNoModeAcceptedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    req := pushTransmitterRequest()
+    req.EventSource = &model.EventSource{Type: model.EventSourceDirect}
+
+    _, err := svc.CreateStream(ctx, req, "test-project", nil)
+    require.NoError(t, err, "DIRECT + no mode must be accepted")
+}
+
+func TestStreamService_EventSourceDirectWithRelayModeRejectedOnUpdate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err)
+
+    update := model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+        SubjectFilterMode:   model.SubjectFilterModePassthru,
+        EventSource:         &model.EventSource{Type: model.EventSourceDirect},
+    }
+    _, err = svc.UpdateStream(ctx, created.Id, "test-project", update)
+    require.Error(t, err, "DIRECT + PASSTHRU must be rejected on update")
+    assert.Contains(t, err.Error(), "event_source")
+}
+
+// R2: EXPLICIT with empty source_stream_ids is rejected; non-empty is OK.
+func TestStreamService_EventSourceExplicitEmptyIdsRejectedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    req := pushTransmitterRequest()
+    req.EventSource = &model.EventSource{Type: model.EventSourceExplicit}
+
+    _, err := svc.CreateStream(ctx, req, "test-project", nil)
+    require.Error(t, err, "EXPLICIT with empty source_stream_ids must be rejected")
+    assert.Contains(t, err.Error(), "source_stream_ids")
+}
+
+func TestStreamService_EventSourceExplicitWithIdsAcceptedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    req := pushTransmitterRequest()
+    req.EventSource = &model.EventSource{Type: model.EventSourceExplicit, SourceStreamIds: []string{"src-1"}}
+
+    _, err := svc.CreateStream(ctx, req, "test-project", nil)
+    require.NoError(t, err, "EXPLICIT with source_stream_ids must be accepted")
+}
+
+func TestStreamService_EventSourceExplicitEmptyIdsRejectedOnUpdate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err)
+
+    update := model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+        EventSource:         &model.EventSource{Type: model.EventSourceExplicit},
+    }
+    _, err = svc.UpdateStream(ctx, created.Id, "test-project", update)
+    require.Error(t, err, "EXPLICIT with empty source_stream_ids must be rejected on update")
+    assert.Contains(t, err.Error(), "source_stream_ids")
+}
+
+// R3: non-EXPLICIT type (incl. unset) with non-empty source_stream_ids rejected.
+func TestStreamService_EventSourceNonExplicitWithIdsRejectedOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    for _, typ := range []string{model.EventSourceDirect, model.EventSourceAudience, ""} {
+        req := pushTransmitterRequest()
+        req.EventSource = &model.EventSource{Type: typ, SourceStreamIds: []string{"src-1"}}
+
+        _, err := svc.CreateStream(ctx, req, "test-project", nil)
+        require.Error(t, err, "type=%q with source_stream_ids must be rejected", typ)
+        assert.Contains(t, err.Error(), "source_stream_ids")
+    }
+}
+
+func TestStreamService_EventSourceNonExplicitWithIdsRejectedOnUpdate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err)
+
+    update := model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+        EventSource:         &model.EventSource{Type: model.EventSourceAudience, SourceStreamIds: []string{"src-1"}},
+    }
+    _, err = svc.UpdateStream(ctx, created.Id, "test-project", update)
+    require.Error(t, err, "AUDIENCE with source_stream_ids must be rejected on update")
+    assert.Contains(t, err.Error(), "source_stream_ids")
+}
+
+// R4: event_source set on a receiver stream is dropped with a WARN and the
+// request succeeds.
+func TestStreamService_EventSourceDroppedOnReceiverStream(t *testing.T) {
+    logs := captureLogs(t)
+    streamDAO := memory.NewStreamDAO()
+    keyDAO := memory.NewKeyDAO()
+    keyService := NewKeyService(keyDAO, "http://test", nil)
+    svc := NewStreamService(streamDAO, keyService, "http://test")
+    ctx := context.Background()
+
+    sid := seedReceiverStream(t, ctx, streamDAO)
+
+    // DIRECT + PASSTHRU would be rejected (R1) on a transmitter; on a receiver
+    // the field must be dropped and the request must succeed regardless.
+    update := model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{Id: sid},
+        SubjectFilterMode:   model.SubjectFilterModePassthru,
+        EventSource:         &model.EventSource{Type: model.EventSourceDirect},
+    }
+    _, err := svc.UpdateStream(ctx, sid, "test-project", update)
+    require.NoError(t, err, "event_source on a receiver stream must succeed with the field dropped")
+
+    state, err := svc.GetStreamState(ctx, sid)
+    require.NoError(t, err)
+    assert.Nil(t, state.EventSource,
+        "event_source on a receiver stream must be dropped (left nil)")
+
+    assert.Contains(t, logs.String(), "event_source ignored on a receiver stream",
+        "a WARN must be emitted when event_source is set on a receiver stream")
+    assert.True(t, strings.Contains(logs.String(), "level=WARN"),
+        "the ignored-event_source log must be at WARN level")
+}
+
+// Regression: a plain AUDIENCE-default transmitter (unset type, no
+// source_stream_ids) must be accepted with no error.
+func TestStreamService_EventSourceUnsetDefaultsSilentlyOnCreate(t *testing.T) {
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    req := pushTransmitterRequest()
+    req.EventSource = &model.EventSource{} // empty type, empty ids
+
+    _, err := svc.CreateStream(ctx, req, "test-project", nil)
+    require.NoError(t, err, "empty event_source must default to AUDIENCE silently")
+
+    // And with no event_source at all.
+    _, err = svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err, "absent event_source must be accepted")
+}
+
 // TestStreamService_DefaultSubjectsUnchangedKeepsFilter verifies an UpdateStream
 // that does not change defaultSubjects leaves the filter intact.
 func TestStreamService_DefaultSubjectsUnchangedKeepsFilter(t *testing.T) {
