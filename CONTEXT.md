@@ -469,6 +469,47 @@ quite ERROR"), the answer is almost always `WARN` plus an `error=` field
 on the record. Grafana / LogQL can already filter `{level="WARN"} | json
 | error="..."` for the subset that matters; a new level cannot.
 
+## Token administration vocabulary
+
+Terms for the management-plane view of issued tokens (the `tokens`
+collection / `TokenRecord`). These are about *administering* IATs and
+stream tokens, not validating them on the data plane.
+
+The guiding insight: an issued token is a bearer credential that an
+administrator typically **copies and pastes** to wherever it will be
+used. The IP a token was *minted from* is therefore near-noise; the
+audit-valuable signal is **where it was redeemed/used**. So the model
+tracks redemption, not issuance.
+
+### Redemption
+
+The act of *using* a token, distinct from minting it.
+
+- For an **IAT**, redemption is a `/register` call presenting the IAT.
+  `/register` is a cold path (not the hot event-delivery path), so
+  capturing the redemption IP there is cheap.
+- For a **stream token**, redemption is the ongoing push/poll
+  connection.
+
+### Last-redemption IP
+
+For an **IAT**: the remote address of the most recent `/register` call
+that presented it, with `last_redemption_at` and a `redemption_count`.
+Last-only (not a full trail) — deep per-event forensics live in the SET
+event journal. `redemption_count` is also the data primitive a future
+max-uses / redeem-once policy would consume; a future IAT-IP-mask
+restriction would consume the redemption IP. Neither policy is built
+today.
+
+### Last-seen IP
+
+For a **stream** token: the most recent address the peer actually
+connected from — already tracked per stream as `RemoteIP` on
+`StreamStateRecord` and refreshed as the peer reconnects (no extra
+write on the hot path). The management-plane token table *joins* this
+onto stream-typed tokens. This is the stream-token analogue of an IAT's
+Last-redemption IP. Undefined for IATs (they are not bound to a stream).
+
 ## Adding a new persistence method
 
 1. Add the method to the appropriate **DAO interface**
