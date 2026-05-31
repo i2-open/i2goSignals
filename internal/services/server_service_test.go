@@ -246,6 +246,57 @@ func (s *ServerServiceTestSuite) TestCreateServer_SelfSignedCertDiscovery() {
 	s.Equal("https://"+mockServer.Listener.Addr().String()+"/token", server.OAuthClientConfig.TokenURL)
 }
 
+// TestCreateServer_InfersSsfTypeFromOAuth proves that when the caller leaves
+// Type empty but supplies an OAuthClientConfig, CreateServer infers and
+// persists Type == ssf (the foreign SSF transmitter case for PRD #83 / #85).
+func (s *ServerServiceTestSuite) TestCreateServer_InfersSsfTypeFromOAuth() {
+	asServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "test-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer asServer.Close()
+
+	server := &model.Server{
+		Alias: "ssf-tx",
+		Host:  s.ssfServer.URL,
+		OAuthClientConfig: &model.OAuthClientConfig{
+			TokenURL:     asServer.URL,
+			ClientID:     "client",
+			ClientSecret: "secret",
+		},
+	}
+
+	err := s.service.CreateServer(s.T().Context(), server)
+	s.NoError(err)
+
+	retrieved, err := s.service.GetServerByAlias(s.T().Context(), "ssf-tx")
+	s.NoError(err)
+	s.Equal(model.ServerTypeSsf, retrieved.Type)
+}
+
+// TestCreateServer_InfersGosignalsTypeFromToken proves that when the caller
+// leaves Type empty and supplies only a ClientToken (no OAuthClientConfig),
+// CreateServer infers and persists Type == gosignals.
+func (s *ServerServiceTestSuite) TestCreateServer_InfersGosignalsTypeFromToken() {
+	token := "valid-token"
+	server := &model.Server{
+		Alias:       "gs-server",
+		Host:        s.ssfServer.URL,
+		ClientToken: &token,
+	}
+
+	err := s.service.CreateServer(s.T().Context(), server)
+	s.NoError(err)
+
+	retrieved, err := s.service.GetServerByAlias(s.T().Context(), "gs-server")
+	s.NoError(err)
+	s.Equal(model.ServerTypeGosignals, retrieved.Type)
+}
+
 func TestServerServiceSuite(t *testing.T) {
 	suite.Run(t, new(ServerServiceTestSuite))
 }
