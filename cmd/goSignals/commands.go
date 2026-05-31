@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -2020,9 +2021,71 @@ func parseMode(param string) string {
 	return mode
 }
 
+// applyServerBearer resolves the active-session bearer for server (with silent
+// refresh / fallback to a configured client token) and sets it on req. This is
+// the standard CLI auth path used by every management call.
+func applyServerBearer(cli *CLI, server *SsfServer, req *http.Request) error {
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	return nil
+}
+
+// tokenState derives the human-readable lifecycle state of a token record:
+// revoked (RevokedAt set), expired (ExpiresAt past), else active.
+func tokenState(rec model.TokenRecord) string {
+	if !rec.RevokedAt.IsZero() {
+		return "revoked"
+	}
+	if !rec.ExpiresAt.IsZero() && rec.ExpiresAt.Before(time.Now()) {
+		return "expired"
+	}
+	return "active"
+}
+
+// tokenListEntry decodes the management /token list response. It embeds the
+// server's TokenRecord and additively decodes a usage_ip field that a later
+// slice (#132) will populate; until then the column renders blank. Keeping the
+// extra field local avoids touching the shared server model in this CLI slice.
+type tokenListEntry struct {
+	model.TokenRecord
+	UsageIP string `json:"usage_ip,omitempty"`
+}
+
+// renderTokenTable formats token records as a tab-aligned table an operator can
+// read. Columns: JTI, client, subject, type, scopes, issued, expires, state,
+// usage IP. The usage-IP column is rendered blank until the server populates it
+// (a later slice); the column always exists so scripts and humans see a stable
+// shape.
+func renderTokenTable(records []tokenListEntry) string {
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "JTI\tCLIENT\tSUBJECT\tTYPE\tSCOPES\tISSUED\tEXPIRES\tSTATE\tUSAGE IP")
+	for _, rec := range records {
+		issued := ""
+		if !rec.IssuedAt.IsZero() {
+			issued = rec.IssuedAt.UTC().Format(time.RFC3339)
+		}
+		expires := ""
+		if !rec.ExpiresAt.IsZero() {
+			expires = rec.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			rec.JTI, rec.ClientID, rec.Subject, rec.Type,
+			strings.Join(rec.Scopes, ","), issued, expires, tokenState(rec.TokenRecord), rec.UsageIP)
+	}
+	_ = w.Flush()
+	return buf.String()
+}
+
 type TokenListCmd struct {
 	Project string `help:"Filter by project ID"`
 	Client  string `help:"Filter by client ID"`
+	Json    bool   `help:"Emit the raw JSON response instead of a table"`
 }
 
 func (t *TokenListCmd) Run(cli *CLI) error {
@@ -2049,7 +2112,9 @@ func (t *TokenListCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	if err = applyServerBearer(cli, server, req); err != nil {
+		return err
+	}
 
 	client := getHttpClient(10 * time.Second)
 	resp, err := client.Do(req)
@@ -2063,12 +2128,22 @@ func (t *TokenListCmd) Run(cli *CLI) error {
 		return fmt.Errorf("error listing tokens: %s - %s", resp.Status, string(body))
 	}
 
-	fmt.Println(string(body))
+	if t.Json {
+		fmt.Println(string(body))
+		return nil
+	}
+
+	var records []tokenListEntry
+	if err = json.Unmarshal(body, &records); err != nil {
+		return fmt.Errorf("error parsing token list response: %w", err)
+	}
+	fmt.Print(renderTokenTable(records))
 	return nil
 }
 
 type TokenRevokeCmd struct {
-	Jti string `arg:"" help:"The JTI of the token to revoke"`
+	Jti  string `arg:"" help:"The JTI of the token to revoke"`
+	Json bool   `help:"Emit the raw JSON response instead of a confirmation message"`
 }
 
 func (t *TokenRevokeCmd) Run(cli *CLI) error {
@@ -2082,7 +2157,9 @@ func (t *TokenRevokeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	if err = applyServerBearer(cli, server, req); err != nil {
+		return err
+	}
 
 	client := getHttpClient(10 * time.Second)
 	resp, err := client.Do(req)
@@ -2091,9 +2168,18 @@ func (t *TokenRevokeCmd) Run(cli *CLI) error {
 		return err
 	}
 
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("error revoking token: %s - %s", resp.Status, string(body))
+	}
+
+	if t.Json {
+		if len(bytes.TrimSpace(body)) > 0 {
+			fmt.Println(string(body))
+		} else {
+			fmt.Printf("{\"jti\":%q,\"revoked\":true}\n", t.Jti)
+		}
+		return nil
 	}
 
 	fmt.Printf("Token %s revoked.\n", t.Jti)
@@ -2102,6 +2188,7 @@ func (t *TokenRevokeCmd) Run(cli *CLI) error {
 
 type TokenIntrospectCmd struct {
 	Token string `arg:"" help:"The token string to introspect"`
+	Json  bool   `help:"Emit the raw JSON response instead of a table"`
 }
 
 func (t *TokenIntrospectCmd) Run(cli *CLI) error {
@@ -2119,7 +2206,9 @@ func (t *TokenIntrospectCmd) Run(cli *CLI) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	if err = applyServerBearer(cli, server, req); err != nil {
+		return err
+	}
 
 	client := getHttpClient(10 * time.Second)
 	resp, err := client.Do(req)
