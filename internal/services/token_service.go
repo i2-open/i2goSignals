@@ -115,6 +115,22 @@ func (s *TokenService) RevokeToken(ctx context.Context, jti string) error {
 	return s.dao.Revoke(ctx, jti)
 }
 
+// FindByJTI returns the tracked token record for a JTI, or (nil, nil) when no
+// record is tracked. It is used by the single-token project guard to read the
+// target token's project before authorizing a revoke/introspect. A
+// not-found-by-JTI is a non-error (nil record) so callers can apply RFC 7009
+// always-200 semantics without leaking existence.
+func (s *TokenService) FindByJTI(ctx context.Context, jti string) (*model.TokenRecord, error) {
+	record, err := s.dao.FindByJTI(ctx, jti)
+	if err != nil {
+		if err.Error() == "token not found" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return record, nil
+}
+
 func (s *TokenService) IntrospectToken(ctx context.Context, jti string) (*model.IntrospectionResponse, error) {
 	record, err := s.dao.FindByJTI(ctx, jti)
 	if err != nil {

@@ -485,6 +485,30 @@ func (a *AuthIssuer) classifyToken(tokenString string) tokenRoute {
 
 // peekKid parses only the JWT header to extract the kid. No signature check.
 // Returns "" when the token is malformed or has no kid.
+// PeekJti extracts the "jti" claim from a JWT payload WITHOUT verifying the
+// signature, expiry, or revocation state. It is used by the RFC 7009 /revoke
+// path, which must extract a JTI from a token that may already be expired or
+// revoked (and which RFC 7009 §2.2 must still answer with HTTP 200). Returns ""
+// when the token is not a parseable JWT.
+func PeekJti(tokenString string) string {
+	parts := strings.Split(strings.TrimSpace(tokenString), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return ""
+	}
+	if jti, ok := payload["jti"].(string); ok {
+		return jti
+	}
+	return ""
+}
+
 func peekKid(tokenString string) string {
 	parts := strings.Split(strings.TrimSpace(tokenString), ".")
 	if len(parts) < 1 {

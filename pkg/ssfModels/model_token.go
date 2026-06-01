@@ -33,7 +33,7 @@ type TokenRecord struct {
 // IntrospectionResponse implements RFC7662 response format.
 type IntrospectionResponse struct {
 	Active    bool   `json:"active"`
-	Type      string `json:"type"` // one of TokenTypeIAT or TokenTypeStream
+	Type      string `json:"token_type,omitzero"` // RFC 7662 token_type; one of TokenTypeIAT or TokenTypeStream
 	ProjectID string `json:"project_id,omitzero"`
 	ClientID  string `json:"client_id,omitzero"`
 	Subject   string `json:"subject,omitzero"`
