@@ -129,6 +129,17 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	}
 
 	if len(body) > 0 {
+		// The "key" scope is create-only and server-generated. A key-scope-only
+		// (bootstrap) caller may NOT upload caller-supplied key material: a
+		// non-empty body routes to loadKeyHandler, which would install an issuer
+		// signing key of the caller's choosing (private PEM or external jwks_uri)
+		// for a brand-new issuer with no force/rotate required — enabling SET
+		// forgery under that issuer. Uploading requires stream_admin/root, the
+		// same scope LoadKeyHandler enforces.
+		if keyScopeOnly(authCtx) {
+			http.Error(w, "key scope is create-only; uploading key material requires stream_admin/root", http.StatusForbidden)
+			return
+		}
 		loadKeyHandler(sa, w, r, authCtx, body)
 	} else {
 		createKeyByNameHandler(sa, w, r, authCtx)
@@ -624,6 +635,14 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Privilege ceiling: a reg (IAT) caller may not self-grant stream_admin at
 	// /register. A self-registration caps at stream_mgmt + event_delivery; an
 	// admin client is provisioned out of band, not via the registration door.
+	//
+	// event_delivery granted here is persisted in the client's AllowedScopes as a
+	// capability, but is intentionally NOT minted into the stream-client
+	// (management) token (see services.ClientService.RegisterClient and
+	// authUtil.IssueStreamClientToken). Event delivery is authorized by a separate
+	// per-stream delivery token (authUtil.IssueStreamToken), issued at stream
+	// creation. The stored-capability vs minted-token-role divergence is by design
+	// (#140); do not reconcile it by adding event to the management token.
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
 		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
@@ -636,6 +655,15 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 				// stream_admin and any unknown scope are silently dropped — a reg
 				// token cannot escalate its own privilege.
 			}
+		}
+		// An explicit, non-empty scope list that filters entirely to empty (every
+		// entry above the ceiling or unknown) is refused rather than silently
+		// falling back to the default — a caller asking only for above-ceiling
+		// scopes may be attempting privilege escalation (WARN-worthy).
+		if len(scopes) == 0 {
+			serverLog.Warn("RegisterClient: refusing registration; all requested scopes were dropped", "requestedScopes", jsonRequest.Scopes)
+			http.Error(w, "None of the requested scopes can be granted", http.StatusBadRequest)
+			return
 		}
 	}
 
@@ -918,7 +946,7 @@ func (sa *SignalsApplication) CreateServer(w http.ResponseWriter, r *http.Reques
 }
 
 func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -967,7 +995,7 @@ func (sa *SignalsApplication) ServerGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1018,7 +1046,7 @@ func (sa *SignalsApplication) ServerUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1089,7 +1117,7 @@ func (sa *SignalsApplication) ServerDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1140,7 +1168,7 @@ func (sa *SignalsApplication) ServerList(w http.ResponseWriter, r *http.Request)
 }
 
 func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return

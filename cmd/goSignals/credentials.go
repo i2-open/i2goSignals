@@ -33,12 +33,19 @@ type Session struct {
 
 // Expired reports whether the access token is at/after its expiry (with a small
 // skew so we refresh slightly early rather than racing the edge).
+//
+// A zero Expiry means the expiry is unknown (e.g. the IdP omitted expires_in and
+// the token carried no usable exp claim). We treat unknown as "needs refresh"
+// (true) rather than "never expires" (false) so the resolver attempts a
+// refresh_token grant. A session that can't refresh (no refresh token) falls
+// through to the existing relogin-required path in bearerResolver.resolve, so
+// this does not loop.
 func (s *Session) Expired() bool {
     if s == nil {
         return true
     }
     if s.Expiry.IsZero() {
-        return false
+        return true
     }
     return time.Now().Add(30 * time.Second).After(s.Expiry)
 }

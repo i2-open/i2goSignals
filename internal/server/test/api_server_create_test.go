@@ -12,6 +12,7 @@ import (
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ApiServerTestSuite struct {
@@ -53,8 +54,9 @@ func (s *ApiServerTestSuite) TearDownSuite() {
 }
 
 func (s *ApiServerTestSuite) TestServerCreate() {
-	// 1. Generate an IAT token (has ScopeRegister)
-	iat, err := s.sa.Auth.IssueProjectIat(nil)
+	// 1. Mint an admin token: /server provisioning is admin-only (issue #139).
+	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	iat, err := s.sa.Auth.IssueStreamClientToken(client, "proj-A", true, "")
 	s.NoError(err)
 
 	token := "valid-token"

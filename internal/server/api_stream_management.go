@@ -456,6 +456,19 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
+	// Provisioning a stream against a FOREIGN transmitter (tx_alias set) is a
+	// privileged operation: it resolves a stored foreign-server credential and
+	// remotely manages a stream on another node's behalf. It therefore requires
+	// admin (root rides free); the base stream/reg gate above is not enough. A
+	// plain create (no tx_alias) — the SCIM-receiver / unattended-IAT-bootstrap
+	// path — is unaffected. See ADR 0009.
+	if jsonRequest.TxAlias != nil && *jsonRequest.TxAlias != "" &&
+		!(authCtx.Eat != nil && authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})) {
+		serverLog.Warn("StreamCreate: denied tx_alias provisioning; admin scope required", "tx_alias", *jsonRequest.TxAlias, "projectId", authCtx.ProjectId)
+		http.Error(w, "creating a stream with tx_alias (foreign-server provisioning) requires admin scope; use an admin session or an admin client token", http.StatusForbidden)
+		return
+	}
+
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 

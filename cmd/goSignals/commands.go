@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -328,7 +329,7 @@ type CreatePollReceiverCmd struct {
 	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
 	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
 	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
-	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). The transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
+	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
 	Secret   string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
 	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
@@ -825,6 +826,14 @@ func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar
     if err != nil {
         return err
     }
+    // Proactive fail-fast (#139): registering a foreign transmitter requires
+    // admin scope. When the resolved credential decodes to a goSignals
+    // ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
+    // call with an actionable message. If the credential cannot be classified
+    // locally (opaque/IdP token), degrade gracefully and fall through.
+    if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
+        return errTxAliasAdminRequired
+    }
     if bearer != "" {
         req.Header.Set("Authorization", "Bearer "+bearer)
     }
@@ -843,10 +852,41 @@ func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar
         // Transmitter already registered on this node — proceed.
         fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
         return nil
+    case http.StatusUnauthorized, http.StatusForbidden:
+        // Reactive translation (#139): surface the SAME actionable admin-scope
+        // guidance instead of leaking a raw status/body.
+        return errTxAliasAdminRequired
     default:
         body, _ := io.ReadAll(resp.Body)
         return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
     }
+}
+
+// errTxAliasAdminRequired is the actionable guidance returned both proactively
+// (offline precheck) and reactively (401/403 translation) when a tx-alias
+// registration is attempted without an admin-scoped credential (#139).
+var errTxAliasAdminRequired = errors.New("registering tx-alias requires admin scope; log in with an admin session or configure an admin client token")
+
+// clientTokenHasAdminScope decodes a bearer as a goSignals ClientToken JWT
+// WITHOUT verifying its signature and reports whether the scope could be
+// determined (known) and, if so, whether it grants admin (root rides free). An
+// opaque or non-goSignals token returns known=false so callers degrade
+// gracefully and proceed to the network.
+func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
+    if bearer == "" {
+        return false, false
+    }
+    var eat authSupport.EventAuthToken
+    parser := jwt.NewParser()
+    if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
+        return false, false
+    }
+    // A goSignals ClientToken carries roles and/or a scope claim. Absent both,
+    // this is an IdP/opaque token we cannot classify here.
+    if len(eat.Roles) == 0 && eat.Scope == "" {
+        return false, false
+    }
+    return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
@@ -1464,7 +1504,13 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -1556,7 +1602,13 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+		bearer, err := serverBearer(&cli.Globals, server)
+		if err != nil {
+			return err
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
 		client := http.Client{}
 		resp, err := client.Do(req)
 		defer httpSupport.HandleRespClose(resp)
@@ -1623,8 +1675,12 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	if server.ClientToken != "" {
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	} else {
 		fmt.Println(fmt.Sprintf("No client admin token for %s, attempting anonymous request.", server.Alias))
 	}
@@ -2249,7 +2305,7 @@ var errSubjectFilteringDisabled = errors.New("subject filtering is disabled on t
 
 // fetchSubjectFilterSettings issues a settings-only POST to the admin review
 // endpoint (no subject body field) and decodes the policy bits.
-func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
+func fetchSubjectFilterSettings(g *Globals, server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
 	reqBody, err := json.Marshal(map[string]any{"stream_id": streamId})
 	if err != nil {
 		return nil, err
@@ -2262,7 +2318,13 @@ func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFil
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2350,7 +2412,7 @@ type subjectFilterStatusLookup struct {
 // decodes the filter-table state. When subject is non-nil it rides in the body
 // so the response carries a point-lookup result; otherwise the request is
 // summary-only (counts + pending list).
-func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
+func fetchSubjectFilterStatus(g *Globals, server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
 	body := map[string]any{"stream_id": streamId}
 	if subject != nil {
 		body["subject"] = subject
@@ -2367,7 +2429,13 @@ func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2460,7 +2528,7 @@ func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	if stream == nil {
 		return errors.New("Could not locate locally defined stream alias: " + alias)
 	}
-	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	wire, err := fetchSubjectFilterSettings(&cli.Globals, server, stream.Id)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2540,7 +2608,7 @@ func (g *GetSubjectFilterStatusCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	review, err := fetchSubjectFilterStatus(server, stream.Id, subject)
+	review, err := fetchSubjectFilterStatus(&cli.Globals, server, stream.Id, subject)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2652,7 +2720,13 @@ func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2673,7 +2747,7 @@ func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	// Read back the post-update settings so the operator sees what actually
 	// landed. This surfaces the server's WARN/ignore behavior for a grace
 	// override set on a receiver stream — the persisted value comes back as 0.
-	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	wire, err := fetchSubjectFilterSettings(&cli.Globals, server, stream.Id)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2737,7 +2811,13 @@ func changeSubjectFilter(cli *CLI, alias, jsonArg string, flags subjectArgFlags,
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := getHttpClient(0)

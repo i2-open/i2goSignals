@@ -65,6 +65,67 @@ func TestRegisterCannotSelfGrantStreamAdmin(t *testing.T) {
 	assert.Contains(t, granted, authSupport.ScopeStreamMgmt)
 }
 
+// TestRegisterAllDroppedScopesRejected verifies that an explicit, non-empty
+// scope list that filters entirely to empty (every entry unknown or above the
+// privilege ceiling) is rejected with 400 rather than silently producing a
+// zero-scope client that authorizes nothing (#137).
+func TestRegisterAllDroppedScopesRejected(t *testing.T) {
+	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
+	instance, err := createServer(t, "register_all_dropped_test", true)
+	require.NoError(t, err)
+	defer instance.app.Shutdown()
+
+	// Above the ceiling: stream_admin only.
+	status, _ := registerClient(t, instance, instance.iatToken,
+		[]string{authSupport.ScopeStreamAdmin})
+	assert.Equal(t, http.StatusBadRequest, status,
+		"an explicit scope list of only above-ceiling scopes must be rejected with 400")
+
+	// Unknown scope only.
+	status, _ = registerClient(t, instance, instance.iatToken, []string{"bogus"})
+	assert.Equal(t, http.StatusBadRequest, status,
+		"an explicit scope list of only unknown scopes must be rejected with 400")
+}
+
+// TestRegisterNoScopesDefaults verifies the preserved behavior: a request with
+// NO scopes at all still yields the [stream, event] default grant (#137).
+func TestRegisterNoScopesDefaults(t *testing.T) {
+	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
+	instance, err := createServer(t, "register_no_scopes_test", true)
+	require.NoError(t, err)
+	defer instance.app.Shutdown()
+
+	// No requested scopes falls back to the [stream, event] default at the
+	// handler. The issued stream-client token carries stream_mgmt (never admin)
+	// — the observable signal that the default grant succeeded.
+	status, granted := registerClient(t, instance, instance.iatToken, nil)
+	require.Equal(t, http.StatusOK, status,
+		"no requested scopes must succeed via the default grant")
+	assert.Contains(t, granted, authSupport.ScopeStreamMgmt)
+	assert.NotContains(t, granted, authSupport.ScopeStreamAdmin)
+}
+
+// TestRegisterMixedScopesAcceptedSubset verifies the preserved silent-drop
+// behavior for mixed requests (ADR 0006): an accepted scope alongside a dropped
+// one still succeeds, granting only the accepted subset (#137).
+func TestRegisterMixedScopesAcceptedSubset(t *testing.T) {
+	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
+	instance, err := createServer(t, "register_mixed_scopes_test", true)
+	require.NoError(t, err)
+	defer instance.app.Shutdown()
+
+	// stream_mgmt is accepted; stream_admin is dropped (above the ceiling). The
+	// request still succeeds with the accepted subset, and the issued token must
+	// not carry admin.
+	status, granted := registerClient(t, instance, instance.iatToken,
+		[]string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
+	require.Equal(t, http.StatusOK, status,
+		"a mixed request must succeed with the accepted subset")
+	assert.Contains(t, granted, authSupport.ScopeStreamMgmt)
+	assert.NotContains(t, granted, authSupport.ScopeStreamAdmin,
+		"the dropped admin scope must not appear in the issued token")
+}
+
 // TestStreamMgmtClientCanCreateStream verifies the end-to-end SCIM-receiver
 // bootstrap: a client self-registered through /register is capped at
 // stream_mgmt + event_delivery (never stream_admin), and must still be able to
