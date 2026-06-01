@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -328,7 +329,7 @@ type CreatePollReceiverCmd struct {
 	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
 	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
 	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
-	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). The transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
+	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
 	Secret   string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
 	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
 }
@@ -825,6 +826,14 @@ func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar
     if err != nil {
         return err
     }
+    // Proactive fail-fast (#139): registering a foreign transmitter requires
+    // admin scope. When the resolved credential decodes to a goSignals
+    // ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
+    // call with an actionable message. If the credential cannot be classified
+    // locally (opaque/IdP token), degrade gracefully and fall through.
+    if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
+        return errTxAliasAdminRequired
+    }
     if bearer != "" {
         req.Header.Set("Authorization", "Bearer "+bearer)
     }
@@ -843,10 +852,41 @@ func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar
         // Transmitter already registered on this node — proceed.
         fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
         return nil
+    case http.StatusUnauthorized, http.StatusForbidden:
+        // Reactive translation (#139): surface the SAME actionable admin-scope
+        // guidance instead of leaking a raw status/body.
+        return errTxAliasAdminRequired
     default:
         body, _ := io.ReadAll(resp.Body)
         return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
     }
+}
+
+// errTxAliasAdminRequired is the actionable guidance returned both proactively
+// (offline precheck) and reactively (401/403 translation) when a tx-alias
+// registration is attempted without an admin-scoped credential (#139).
+var errTxAliasAdminRequired = errors.New("registering tx-alias requires admin scope; log in with an admin session or configure an admin client token")
+
+// clientTokenHasAdminScope decodes a bearer as a goSignals ClientToken JWT
+// WITHOUT verifying its signature and reports whether the scope could be
+// determined (known) and, if so, whether it grants admin (root rides free). An
+// opaque or non-goSignals token returns known=false so callers degrade
+// gracefully and proceed to the network.
+func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
+    if bearer == "" {
+        return false, false
+    }
+    var eat authSupport.EventAuthToken
+    parser := jwt.NewParser()
+    if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
+        return false, false
+    }
+    // A goSignals ClientToken carries roles and/or a scope claim. Absent both,
+    // this is an IdP/opaque token we cannot classify here.
+    if len(eat.Roles) == 0 && eat.Scope == "" {
+        return false, false
+    }
+    return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {

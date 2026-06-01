@@ -403,7 +403,9 @@ Parameters Used to Create Streams:
 | `--mode`          | For i2goSignals servers mode informs the server what it does with events.  See below.                                                        | `IMPORT` for receiver<BR>`PUBLISH` for publisher |
 | `--event-url`     | Used to tell Push Publishers where to deliver events using RFC8935. For Poll receivers, indicates where to retrieve events using RFC8936     | none                                             |
 | `--auth`          | The authorization header value to use when communicating with a polling or push endpoint (i.e. `--event-url`)                                | none                                             |
-| `--connect`, `-c` | Partially automates stream creation by providing the local alias for the stream being connected to.                                          | none                                             |      
+| `--connect`, `-c` | Partially automates stream creation by providing the local alias for the stream being connected to.                                          | none                                             |
+| `--tx-alias`      | (Poll receiver) Alias of a configured foreign SSF transmitter to auto-register and wire. **Requires an ADMIN credential, not the IAT** — it registers the transmitter on the node (`POST /server`, admin-only) and provisions a stream against it. | none                                             |
+| `--secret`        | OAuth client secret for the `--tx-alias` transmitter (non-interactive); resolved staged → flag → env. Rides on the request body only; never persisted. | none                                             |
 
 > [!Tip]
 > For more information on the meaning of terms like iss, aud, and event URIs, see the [JWT Specification](https://datatracker.ietf.org/doc/html/rfc7519), 

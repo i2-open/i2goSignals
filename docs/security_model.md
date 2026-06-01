@@ -54,6 +54,21 @@ This is the machine tier ladder: a bootstrap identity (`key`) seeds an issuer ke
 and a `reg` IAT; the `reg` IAT registers a client that caps at `stream`+`event`;
 `admin` clients are provisioned out of band, not through the registration door.
 
+### Foreign-server provisioning (endpoint → scope)
+
+Provisioning a *foreign* SSF transmitter is a privileged, management-plane
+operation and requires `admin` (`root` rides free). See ADR 0009.
+
+| Endpoint | Required scope |
+| :------- | :------------- |
+| `POST/GET/PUT/DELETE /server`, `GET /server` (list) | `admin` (`root` free) — `reg`/`stream` are rejected. |
+| `POST /stream` **without** `tx_alias` | `stream` (base `reg`/`stream`/`admin` gate) — the SCIM-receiver / unattended-IAT-bootstrap local-only path, unchanged. |
+| `POST /stream` **with** `tx_alias` | `admin` (`root` free) — resolves a stored foreign-server credential and provisions a stream remotely. |
+
+The `/server` endpoints stay distinct from `/stream` (they are not folded into
+stream creation) so a foreign transmitter's credential keeps an independent
+lifecycle, which goSignalsAdmin's console depends on.
+
 ### The bootstrap secret
 
 `I2SIG_BOOTSTRAP_TOKEN` is a shared secret. On the server, a bearer that

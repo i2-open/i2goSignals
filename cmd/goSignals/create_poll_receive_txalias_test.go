@@ -9,6 +9,7 @@ import (
     "sync"
     "testing"
 
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
@@ -48,9 +49,11 @@ func stagedTxServer(t *testing.T, cli *CLI, alias, nodeHost string) {
         },
     }
     cli.Data.Servers["node"] = SsfServer{
-        Alias:       "node",
-        Host:        nodeHost,
-        ClientToken: "node-admin-token",
+        Alias: "node",
+        Host:  nodeHost,
+        // An admin-scoped ClientToken so the offline precheck (#139) passes; the
+        // POST /server call requires admin and the precheck mirrors that.
+        ClientToken: mintClientToken(t, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt),
         Streams:     map[string]Stream{},
     }
 }
@@ -82,7 +85,7 @@ func TestRegisterTxAliasServer_PostsRegistration(t *testing.T) {
     require.NoError(t, err)
 
     assert.Equal(t, "/server", gotPath)
-    assert.Equal(t, "Bearer node-admin-token", gotAuth)
+    assert.Equal(t, "Bearer "+node.ClientToken, gotAuth, "the node's admin ClientToken must authenticate the POST /server call")
     assert.Equal(t, "ssfTx", gotServer.Alias)
     assert.Equal(t, "kc-client", gotServer.OAuthClientConfig.ClientID)
     assert.Equal(t, "staged-secret", gotServer.OAuthClientConfig.ClientSecret,

@@ -938,7 +938,7 @@ func (sa *SignalsApplication) CreateServer(w http.ResponseWriter, r *http.Reques
 }
 
 func CreateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -987,7 +987,7 @@ func (sa *SignalsApplication) ServerGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1038,7 +1038,7 @@ func (sa *SignalsApplication) ServerUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1109,7 +1109,7 @@ func (sa *SignalsApplication) ServerDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -1160,7 +1160,7 @@ func (sa *SignalsApplication) ServerList(w http.ResponseWriter, r *http.Request)
 }
 
 func ListServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRegister, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return

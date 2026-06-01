@@ -1242,6 +1242,10 @@ plannedChange, add, graceSeconds)`, returns one of three decisions:
     elapsed), matching the slice #99 `entryDelivers` boundary, so the local
     delivery decision and the sweep both flip on the same tick.
 
+## [2026-05-31] Foreign-server provisioning requires admin scope (#139)
+
+`/server` CRUD is admin-only (drop `reg`); `POST /stream` with `tx_alias` requires `admin` (`root` free) while a plain create stays at `stream`; the CLI fails fast offline and translates 401/403 into actionable admin-scope guidance. `/server` stays separate from `/stream`. See ADR 0009.
+
 ---
 
 <!-- gosignals-brand-footer -->
