@@ -3,6 +3,7 @@ package mongo_provider
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"strconv"
 	"sync"
@@ -89,6 +90,14 @@ type MongoProvider struct {
 	serverDAO        *mongodao.ServerDAOMongo
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
+
+	// tokenTTLEnsured records whether the token TTL index has been reconciled in
+	// THIS process. The desired expireAfterSeconds comes from I2SIG_TOKEN_RETENTION
+	// which is fixed for the process lifetime, so once reconciled, reconnects can
+	// skip the per-(re)connect ListSpecifications round-trip. Accessed under m.mu
+	// (initialize() runs while the lock is held). A changed env requires a restart,
+	// which resets this to false.
+	tokenTTLEnsured bool
 
 	// Services — long-lived, never swapped after Open returns. Reconnects
 	// only rebind DAO collections in place (rebindable-collection pattern).
@@ -257,11 +266,17 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// A fresh database (first connect, or after a ResetDb that dropped it)
+		// has no TTL index; force the reconcile below to run even if a prior
+		// connect in this process had already ensured it.
+		m.tokenTTLEnsured = false
 	}
 
-	// The token TTL index is ensured on every (re)connect — not just on a
-	// fresh DB — so a changed I2SIG_TOKEN_RETENTION is applied to an existing
-	// collection in place via collMod (no data migration). Slice #131.
+	// Ensure the token TTL index. After the first successful reconcile in this
+	// process this is a cheap no-op (the desired retention is fixed for the
+	// process lifetime), so reconnects skip the ListSpecifications round-trip.
+	// On a pre-existing collection the first reconcile applies a changed
+	// I2SIG_TOKEN_RETENTION in place via collMod (no data migration). Slice #131.
 	if err = m.ensureTokenTTLIndex(ctx, tokenRetentionSeconds()); err != nil {
 		return err
 	}
@@ -327,7 +342,9 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 }
 
 // tokenRetentionSeconds reads I2SIG_TOKEN_RETENTION (seconds). It falls back to
-// CDefTokenRetentionSeconds (30 days) when unset, non-numeric, or negative.
+// CDefTokenRetentionSeconds (30 days) when unset, non-numeric, negative, or out
+// of range for Mongo's int32 expireAfterSeconds. The bounds are checked BEFORE
+// narrowing to int32 so a value above math.MaxInt32 cannot wrap to a negative.
 func tokenRetentionSeconds() int32 {
     val := os.Getenv(CEnvTokenRetention)
     if val == "" {
@@ -339,25 +356,42 @@ func tokenRetentionSeconds() int32 {
             "env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
         return CDefTokenRetentionSeconds
     }
-    if parsed < 0 {
-        pLog.Warn("Negative value not permitted; falling back to default token retention",
-            "env", CEnvTokenRetention, "value", parsed, "default", CDefTokenRetentionSeconds)
+    if parsed < 0 || parsed > math.MaxInt32 {
+        pLog.Warn("Value out of range (0..MaxInt32); falling back to default token retention",
+            "env", CEnvTokenRetention, "value", parsed, "max", int(math.MaxInt32), "default", CDefTokenRetentionSeconds)
         return CDefTokenRetentionSeconds
     }
     return int32(parsed)
 }
 
-// ensureTokenTTLIndex makes the token collection's TTL index match the desired
-// expireAfterSeconds. Mongo deletes a token record expireAfterSeconds AFTER its
-// `exp` timestamp, so a revoked-but-unexpired record stays present (and reports
-// active:false) until retention lapses. Runs on every (re)connect:
+// ensureTokenTTLIndex reconciles the token collection's TTL index to the
+// desired expireAfterSeconds, at most once per process. The desired value comes
+// from I2SIG_TOKEN_RETENTION (fixed for the process lifetime), so after the
+// first successful reconcile, later reconnects skip the work entirely — avoiding
+// a ListSpecifications round-trip on every reconnect. A changed retention takes
+// effect on restart (which clears tokenTTLEnsured).
+//
+// TTL is Mongo-only; the memory provider intentionally has no equivalent.
+func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int32) error {
+    if m.tokenTTLEnsured {
+        return nil
+    }
+    if err := m.reconcileTokenTTLIndex(ctx, expireAfter); err != nil {
+        return err
+    }
+    m.tokenTTLEnsured = true
+    return nil
+}
+
+// reconcileTokenTTLIndex makes the token collection's TTL index match the
+// desired expireAfterSeconds. Mongo deletes a token record expireAfterSeconds
+// AFTER its `exp` timestamp, so a revoked-but-unexpired record stays present
+// (and reports active:false) until retention lapses:
 //   - no TTL index yet  -> create one named tokenTTLIndexName on {exp:1}
 //   - exists, same value -> no-op
 //   - exists, different  -> collMod the index in place (no drop/recreate, so no
 //     collection migration is needed to change retention on a live deployment)
-//
-// TTL is Mongo-only; the memory provider intentionally has no equivalent.
-func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int32) error {
+func (m *MongoProvider) reconcileTokenTTLIndex(ctx context.Context, expireAfter int32) error {
     if m.tokenCol == nil {
         return errors.New("token collection not initialized")
     }

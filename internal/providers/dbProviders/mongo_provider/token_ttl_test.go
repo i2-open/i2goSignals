@@ -105,6 +105,9 @@ func TestTokenTTLIndex_CreatedWithConfiguredRetention(t *testing.T) {
 }
 
 // AC: Retention can be changed via collMod without re-creating the collection.
+// The reconcile mechanism (invoked once per connect by ensureTokenTTLIndex) is
+// exercised directly here: on a restart with a changed I2SIG_TOKEN_RETENTION it
+// collMods the existing index in place.
 func TestTokenTTLIndex_AdjustViaCollMod(t *testing.T) {
     t.Setenv(CEnvTokenRetention, "300")
     p := openTTLProvider(t)
@@ -113,20 +116,38 @@ func TestTokenTTLIndex_AdjustViaCollMod(t *testing.T) {
         t.Fatalf("precondition: expireAfterSeconds=%d found=%v, want 300/true", got, found)
     }
 
-    // Re-run with a different retention; must collMod the existing index.
-    if err := p.ensureTokenTTLIndex(context.Background(), 600); err != nil {
-        t.Fatalf("ensureTokenTTLIndex adjust: %v", err)
+    // Reconcile with a different retention; must collMod the existing index.
+    if err := p.reconcileTokenTTLIndex(context.Background(), 600); err != nil {
+        t.Fatalf("reconcileTokenTTLIndex adjust: %v", err)
     }
     if got, found := findTokenTTLIndex(t, p); !found || got != 600 {
         t.Errorf("after collMod expireAfterSeconds=%d found=%v, want 600/true", got, found)
     }
 
     // Same value again must be a no-op (no error).
-    if err := p.ensureTokenTTLIndex(context.Background(), 600); err != nil {
-        t.Fatalf("ensureTokenTTLIndex no-op: %v", err)
+    if err := p.reconcileTokenTTLIndex(context.Background(), 600); err != nil {
+        t.Fatalf("reconcileTokenTTLIndex no-op: %v", err)
     }
     if got, _ := findTokenTTLIndex(t, p); got != 600 {
         t.Errorf("after no-op expireAfterSeconds=%d, want 600", got)
+    }
+}
+
+// ensureTokenTTLIndex reconciles at most once per process: after the first
+// reconcile, a subsequent call with a different value is a no-op (the desired
+// retention is fixed for the process lifetime; a change takes effect on
+// restart). This avoids the per-reconnect ListSpecifications round-trip.
+func TestTokenTTLIndex_EnsureOncePerProcess(t *testing.T) {
+    t.Setenv(CEnvTokenRetention, "300")
+    p := openTTLProvider(t)
+
+    // Startup already ensured at 300; a further ensure with a new value must
+    // NOT touch the index (guarded by tokenTTLEnsured).
+    if err := p.ensureTokenTTLIndex(context.Background(), 600); err != nil {
+        t.Fatalf("ensureTokenTTLIndex: %v", err)
+    }
+    if got, found := findTokenTTLIndex(t, p); !found || got != 300 {
+        t.Errorf("expireAfterSeconds=%d found=%v, want 300/true (guard should skip)", got, found)
     }
 }
 
