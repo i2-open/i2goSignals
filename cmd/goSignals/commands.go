@@ -1464,7 +1464,13 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp, err := client.Do(req)
 	defer httpSupport.HandleRespClose(resp)
 	if err != nil {
@@ -1556,7 +1562,13 @@ func (s *SetStreamConfigCmd) Run(cli *CLI) error {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+		bearer, err := serverBearer(&cli.Globals, server)
+		if err != nil {
+			return err
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
 		client := http.Client{}
 		resp, err := client.Do(req)
 		defer httpSupport.HandleRespClose(resp)
@@ -1623,8 +1635,12 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	if server.ClientToken != "" {
-		req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	} else {
 		fmt.Println(fmt.Sprintf("No client admin token for %s, attempting anonymous request.", server.Alias))
 	}
@@ -2249,7 +2265,7 @@ var errSubjectFilteringDisabled = errors.New("subject filtering is disabled on t
 
 // fetchSubjectFilterSettings issues a settings-only POST to the admin review
 // endpoint (no subject body field) and decodes the policy bits.
-func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
+func fetchSubjectFilterSettings(g *Globals, server *SsfServer, streamId string) (*subjectFilterReviewWire, error) {
 	reqBody, err := json.Marshal(map[string]any{"stream_id": streamId})
 	if err != nil {
 		return nil, err
@@ -2262,7 +2278,13 @@ func fetchSubjectFilterSettings(server *SsfServer, streamId string) (*subjectFil
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2350,7 +2372,7 @@ type subjectFilterStatusLookup struct {
 // decodes the filter-table state. When subject is non-nil it rides in the body
 // so the response carries a point-lookup result; otherwise the request is
 // summary-only (counts + pending list).
-func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
+func fetchSubjectFilterStatus(g *Globals, server *SsfServer, streamId string, subject *goSet.SubjectIdentifier) (*subjectFilterStatusWire, error) {
 	body := map[string]any{"stream_id": streamId}
 	if subject != nil {
 		body["subject"] = subject
@@ -2367,7 +2389,13 @@ func fetchSubjectFilterStatus(server *SsfServer, streamId string, subject *goSet
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2460,7 +2488,7 @@ func (g *GetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	if stream == nil {
 		return errors.New("Could not locate locally defined stream alias: " + alias)
 	}
-	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	wire, err := fetchSubjectFilterSettings(&cli.Globals, server, stream.Id)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2540,7 +2568,7 @@ func (g *GetSubjectFilterStatusCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	review, err := fetchSubjectFilterStatus(server, stream.Id, subject)
+	review, err := fetchSubjectFilterStatus(&cli.Globals, server, stream.Id, subject)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2652,7 +2680,13 @@ func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	client := getHttpClient(0)
 	defer client.CloseIdleConnections()
@@ -2673,7 +2707,7 @@ func (s *SetSubjectFilterConfigCmd) Run(cli *CLI) error {
 	// Read back the post-update settings so the operator sees what actually
 	// landed. This surfaces the server's WARN/ignore behavior for a grace
 	// override set on a receiver stream — the persisted value comes back as 0.
-	wire, err := fetchSubjectFilterSettings(server, stream.Id)
+	wire, err := fetchSubjectFilterSettings(&cli.Globals, server, stream.Id)
 	if err != nil {
 		// A 404 means subject filtering is switched off server-wide; surface a
 		// plain operator message rather than a raw HTTP status.
@@ -2737,7 +2771,13 @@ func changeSubjectFilter(cli *CLI, alias, jsonArg string, flags subjectArgFlags,
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+server.ClientToken)
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := getHttpClient(0)
