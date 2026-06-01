@@ -259,7 +259,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 			AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 			Email:         "test@test.com",
 			Description:   "server test",
-		}, eat.ProjectId, true)
+		}, eat.ProjectId, true, eat.ID)
 		instance.streamMgmtToken = clientToken
 
 		testLog.Println("  Checking validation and project ids...")

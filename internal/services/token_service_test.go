@@ -36,7 +36,7 @@ func (s *TokenServiceTestSuite) TestTokenLifecycle() {
 	}
 
 	// 1. Track
-	err := s.service.TrackToken(ctx, claims, model.TokenTypeStream)
+	err := s.service.TrackToken(ctx, claims, "", model.TokenTypeStream)
 	s.NoError(err)
 
 	// 2. IsRevoked (should be false)
@@ -74,17 +74,17 @@ func (s *TokenServiceTestSuite) TestListByProjectAndClient() {
 		ProjectId:        "p1",
 		ClientId:         "c1",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j1"},
-	}, model.TokenTypeStream)
+	}, "", model.TokenTypeStream)
 	_ = s.service.TrackToken(ctx, &authSupport.EventAuthToken{
 		ProjectId:        "p1",
 		ClientId:         "c2",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j2"},
-	}, model.TokenTypeStream)
+	}, "", model.TokenTypeStream)
 	_ = s.service.TrackToken(ctx, &authSupport.EventAuthToken{
 		ProjectId:        "p2",
 		ClientId:         "c1",
 		RegisteredClaims: jwt.RegisteredClaims{ID: "j3"},
-	}, model.TokenTypeStream)
+	}, "", model.TokenTypeStream)
 
 	// List by Project p1
 	tokens, err := s.service.ListByProject(ctx, "p1")
@@ -95,6 +95,26 @@ func (s *TokenServiceTestSuite) TestListByProjectAndClient() {
 	tokens, err = s.service.ListByClient(ctx, "c1")
 	s.NoError(err)
 	s.Len(tokens, 2)
+}
+
+func (s *TokenServiceTestSuite) TestRecordRedemption() {
+	ctx := context.Background()
+	jti := "iat-redeem"
+	err := s.service.TrackToken(ctx, &authSupport.EventAuthToken{
+		ProjectId:        "p1",
+		RegisteredClaims: jwt.RegisteredClaims{ID: jti},
+	}, "", model.TokenTypeIAT)
+	s.NoError(err)
+
+	at := time.Now().UTC()
+	err = s.service.RecordRedemption(ctx, jti, "192.0.2.10", at)
+	s.NoError(err)
+
+	rec, err := s.service.dao.FindByJTI(ctx, jti)
+	s.NoError(err)
+	s.Equal(int64(1), rec.RedemptionCount)
+	s.Equal("192.0.2.10", rec.LastRedemptionIP)
+	s.WithinDuration(at, rec.LastRedemptionAt, time.Second)
 }
 
 func TestTokenServiceSuite(t *testing.T) {

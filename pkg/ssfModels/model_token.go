@@ -16,6 +16,13 @@ type TokenRecord struct {
 	ExpiresAt time.Time `bson:"exp" json:"exp"`
 	RevokedAt time.Time `bson:"revoked_at,omitzero" json:"revoked_at,omitzero"`
 	Parent    string    `bson:"parent" json:"parent,omitempty"`
+
+	// Provenance: redemption tracking (ADR 0007 — track redemption, not
+	// issuance). LastRedemptionIP/At record where and when the token was last
+	// used (a /register call for an IAT); RedemptionCount is the running tally.
+	LastRedemptionIP string    `bson:"last_redemption_ip,omitzero" json:"last_redemption_ip,omitempty"`
+	LastRedemptionAt time.Time `bson:"last_redemption_at,omitzero" json:"last_redemption_at,omitzero"`
+	RedemptionCount  int64     `bson:"redemption_count,omitzero" json:"redemption_count,omitempty"`
 }
 
 // IntrospectionResponse implements RFC7662 response format.
@@ -29,6 +36,12 @@ type IntrospectionResponse struct {
 	Exp       int64  `json:"exp,omitzero"`
 	Iat       int64  `json:"iat,omitzero"`
 	Jti       string `json:"jti"`
+
+	// Provenance (ADR 0007) surfaced for audit display.
+	Parent           string `json:"parent,omitempty"`
+	LastRedemptionIP string `json:"last_redemption_ip,omitempty"`
+	LastRedemptionAt int64  `json:"last_redemption_at,omitzero"`
+	RedemptionCount  int64  `json:"redemption_count,omitzero"`
 }
 
 const (

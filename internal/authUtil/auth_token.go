@@ -249,12 +249,16 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	if err != nil {
 		authLog.Error("IssueProjectIat signing failed", "kid", kid, "error", err)
 	} else if a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeIAT)
+		// An IAT is the root of the token lineage — no parent.
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, "", model.TokenTypeIAT)
 	}
 	return signed, err
 }
 
-func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
+// IssueStreamClientToken mints a stream-client (management) token. parentJTI is
+// the JTI of the IAT redeemed to register the client, recorded as the token's
+// lineage parent.
+func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool, parentJTI string) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
 	scopes := []string{authSupport.ScopeStreamMgmt}
@@ -290,7 +294,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 
 	signed, err := token.SignedString(privateKey)
 	if err == nil && a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
 	return signed, err
 }
@@ -322,10 +326,14 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 		eat.ProjectId = projectId
 	}
 	eat.Roles = []string{authSupport.ScopeEventDelivery}
+	// A delivery token's lineage parent is the stream-client token that
+	// authorized this mint (the issuing session's EAT).
+	parentJTI := ""
 	if session != nil {
 		if session.Eat != nil {
 			eat.ClientId = session.Eat.ClientId
 			eat.Subject, _ = session.Eat.GetSubject()
+			parentJTI = session.Eat.ID
 		}
 
 	}
@@ -336,7 +344,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 
 	signed, err := token.SignedString(privateKey)
 	if err == nil && a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
 	return signed, err
 }

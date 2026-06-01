@@ -18,7 +18,7 @@ func NewTokenService(dao interfaces.TokenDAO) *TokenService {
 	return &TokenService{dao: dao}
 }
 
-func (s *TokenService) TrackToken(ctx context.Context, claims *authSupport.EventAuthToken, tokenPurpose string) error {
+func (s *TokenService) TrackToken(ctx context.Context, claims *authSupport.EventAuthToken, parent string, tokenPurpose string) error {
 	iat := time.Now()
 	if claims.IssuedAt != nil {
 		iat = claims.IssuedAt.Time
@@ -37,8 +37,15 @@ func (s *TokenService) TrackToken(ctx context.Context, claims *authSupport.Event
 		Scopes:    claims.Roles,
 		IssuedAt:  iat,
 		ExpiresAt: exp,
+		Parent:    parent,
 	}
 	return s.dao.Insert(ctx, record)
+}
+
+// RecordRedemption captures a token redemption (ADR 0007): it bumps the
+// redemption count and records the last-redemption IP and time.
+func (s *TokenService) RecordRedemption(ctx context.Context, jti string, ip string, at time.Time) error {
+	return s.dao.RecordRedemption(ctx, jti, ip, at)
 }
 
 func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) {
@@ -81,7 +88,22 @@ func (s *TokenService) IntrospectToken(ctx context.Context, jti string) (*model.
 		Exp:       record.ExpiresAt.Unix(),
 		Iat:       record.IssuedAt.Unix(),
 		Jti:       record.JTI,
+
+		Parent:           record.Parent,
+		LastRedemptionIP: record.LastRedemptionIP,
+		RedemptionCount:  record.RedemptionCount,
+		LastRedemptionAt: redemptionUnix(record.LastRedemptionAt),
 	}, nil
+}
+
+// redemptionUnix returns the Unix timestamp for t, or 0 when t is the zero
+// time, so a never-redeemed token reports 0 (and is omitted) rather than a
+// large negative epoch.
+func redemptionUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }
 
 func (s *TokenService) ListByProject(ctx context.Context, projectID string) ([]*model.TokenRecord, error) {

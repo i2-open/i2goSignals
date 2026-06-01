@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
@@ -645,10 +646,26 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Id:            bson.NewObjectID(),
 	}
 
-	response := sa.GetClientService().RegisterClient(r.Context(), client, authCtx.ProjectId)
+	// The redeemed IAT's JTI is this client token's lineage parent (ADR 0007).
+	parentJTI := ""
+	if authCtx.Eat != nil {
+		parentJTI = authCtx.Eat.ID
+	}
+
+	response := sa.GetClientService().RegisterClient(r.Context(), client, authCtx.ProjectId, parentJTI)
 	if response == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+
+	// Best-effort IAT redemption capture: a /register call is a redemption of
+	// the IAT (ADR 0007). A write failure logs at WARN and never blocks
+	// registration, matching the TrackToken posture.
+	if parentJTI != "" {
+		remoteIP := model.BuildRemoteIPFromRequest(r).String()
+		if err := sa.GetTokenService().RecordRedemption(r.Context(), parentJTI, remoteIP, time.Now().UTC()); err != nil {
+			serverLog.Warn("RegisterClient: failed to record IAT redemption", "jti", parentJTI, "error", err)
+		}
 	}
 
 	regBytes, _ := json.MarshalIndent(response, "", " ")

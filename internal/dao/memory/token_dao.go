@@ -49,6 +49,19 @@ func (d *TokenDAOMemory) Revoke(ctx context.Context, jti string) error {
 	return nil
 }
 
+func (d *TokenDAOMemory) RecordRedemption(ctx context.Context, jti string, ip string, at time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	record, ok := d.tokens[jti]
+	if !ok {
+		return errors.New("token not found")
+	}
+	record.RedemptionCount++
+	record.LastRedemptionIP = ip
+	record.LastRedemptionAt = at
+	return nil
+}
+
 func (d *TokenDAOMemory) DeleteExpired(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

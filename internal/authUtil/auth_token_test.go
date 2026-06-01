@@ -72,7 +72,7 @@ func newTestTokens() testTokensSet {
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
 		Email:         "test@example.com",
 		Description:   "Test auth_token",
-	}, "abc", true)
+	}, "abc", true, "")
 	if err != nil {
 		fmt.Printf("Failed to issue stream client token: %s\n", err.Error())
 		os.Exit(-1)

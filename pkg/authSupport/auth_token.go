@@ -9,7 +9,7 @@ import (
 
 // TokenTracker is an interface for tracking and checking token revocation.
 type TokenTracker interface {
-	TrackToken(ctx context.Context, claims *EventAuthToken, tokenPurpose string) error
+	TrackToken(ctx context.Context, claims *EventAuthToken, parent string, tokenPurpose string) error
 	IsRevoked(ctx context.Context, jti string) (bool, error)
 }
 

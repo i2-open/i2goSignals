@@ -56,6 +56,7 @@ func (instance *ssfInstance) keySvc() *services.KeyService       { return instan
 func (instance *ssfInstance) eventSvc() *services.EventService   { return instance.persistence.EventService }
 func (instance *ssfInstance) serverSvc() *services.ServerService { return instance.persistence.ServerService }
 func (instance *ssfInstance) clientSvc() *services.ClientService { return instance.persistence.ClientService }
+func (instance *ssfInstance) tokenSvc() *services.TokenService   { return instance.persistence.TokenService }
 
 // The methods below preserve the call shape that test files used to reach
 // through `instance.provider.X` so the per-test diff is mechanical. Each
@@ -220,7 +221,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",
 		Description:   "server test",
-	}, eat.ProjectId, true)
+	}, eat.ProjectId, true, eat.ID)
 	instance.streamMgmtToken = clientToken
 
 	instance.projectId = eat.ProjectId

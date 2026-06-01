@@ -25,6 +25,10 @@ type tokenRecordBson struct {
 	ExpiresAt time.Time `bson:"exp"`
 	RevokedAt time.Time `bson:"revoked_at,omitzero"`
 	Parent    any       `bson:"parent,omitzero"`
+
+	LastRedemptionIP string    `bson:"last_redemption_ip,omitzero"`
+	LastRedemptionAt time.Time `bson:"last_redemption_at,omitzero"`
+	RedemptionCount  int64     `bson:"redemption_count,omitzero"`
 }
 
 func toBson(record *model.TokenRecord) *tokenRecordBson {
@@ -39,6 +43,10 @@ func toBson(record *model.TokenRecord) *tokenRecordBson {
 		ExpiresAt: record.ExpiresAt,
 		RevokedAt: record.RevokedAt,
 		Parent:    ToFlexibleID(record.Parent),
+
+		LastRedemptionIP: record.LastRedemptionIP,
+		LastRedemptionAt: record.LastRedemptionAt,
+		RedemptionCount:  record.RedemptionCount,
 	}
 }
 
@@ -54,6 +62,10 @@ func fromBson(b *tokenRecordBson) *model.TokenRecord {
 		ExpiresAt: b.ExpiresAt,
 		RevokedAt: b.RevokedAt,
 		Parent:    IDToString(b.Parent),
+
+		LastRedemptionIP: b.LastRedemptionIP,
+		LastRedemptionAt: b.LastRedemptionAt,
+		RedemptionCount:  b.RedemptionCount,
 	}
 }
 
@@ -118,6 +130,23 @@ func (d *TokenDAOMongo) Revoke(ctx context.Context, jti string) error {
     _, err = c.UpdateOne(ctx, bson.M{"_id": ToFlexibleID(jti)}, bson.M{"$set": bson.M{"revoked_at": time.Now().UTC()}})
     if err != nil {
         tLog.Error("Error revoking token record", "jti", jti, "error", err)
+    }
+    return err
+}
+
+func (d *TokenDAOMongo) RecordRedemption(ctx context.Context, jti string, ip string, at time.Time) error {
+    c, err := d.col()
+    if err != nil {
+        return err
+    }
+    _, err = c.UpdateOne(ctx,
+        bson.M{"_id": ToFlexibleID(jti)},
+        bson.M{
+            "$inc": bson.M{"redemption_count": 1},
+            "$set": bson.M{"last_redemption_ip": ip, "last_redemption_at": at},
+        })
+    if err != nil {
+        tLog.Error("Error recording token redemption", "jti", jti, "error", err)
     }
     return err
 }
