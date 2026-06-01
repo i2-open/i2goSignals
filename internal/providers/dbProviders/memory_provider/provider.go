@@ -129,6 +129,7 @@ func (m *MemoryProvider) buildServices() {
     tokenDAO := newNotifyingTokenDAO(m.rawTokenDAO, m.markDirty)
 
     m.tokenService = services.NewTokenService(tokenDAO)
+    m.tokenService.SetStreamDAO(streamDAO)
     m.keyService = services.NewKeyService(keyDAO, m.TokenIssuer, m.tokenService)
     m.streamService = services.NewStreamService(streamDAO, m.keyService, m.DefaultIssuer)
     m.eventService = services.NewEventService(eventDAO)

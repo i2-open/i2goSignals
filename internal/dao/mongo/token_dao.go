@@ -25,6 +25,7 @@ type tokenRecordBson struct {
 	ExpiresAt time.Time `bson:"exp"`
 	RevokedAt time.Time `bson:"revoked_at,omitzero"`
 	Parent    any       `bson:"parent,omitzero"`
+	StreamID  string    `bson:"stream_id,omitzero"`
 
 	LastRedemptionIP string    `bson:"last_redemption_ip,omitzero"`
 	LastRedemptionAt time.Time `bson:"last_redemption_at,omitzero"`
@@ -43,6 +44,7 @@ func toBson(record *model.TokenRecord) *tokenRecordBson {
 		ExpiresAt: record.ExpiresAt,
 		RevokedAt: record.RevokedAt,
 		Parent:    ToFlexibleID(record.Parent),
+		StreamID:  record.StreamID,
 
 		LastRedemptionIP: record.LastRedemptionIP,
 		LastRedemptionAt: record.LastRedemptionAt,
@@ -62,6 +64,7 @@ func fromBson(b *tokenRecordBson) *model.TokenRecord {
 		ExpiresAt: b.ExpiresAt,
 		RevokedAt: b.RevokedAt,
 		Parent:    IDToString(b.Parent),
+		StreamID:  b.StreamID,
 
 		LastRedemptionIP: b.LastRedemptionIP,
 		LastRedemptionAt: b.LastRedemptionAt,
@@ -177,6 +180,29 @@ func (d *TokenDAOMongo) FindByProjectID(ctx context.Context, projectID string) (
     err = cursor.All(ctx, &bResults)
     if err != nil {
         tLog.Error("Error parsing tokens by project", "projectID", projectID, "error", err)
+        return nil, err
+    }
+    results := make([]*model.TokenRecord, len(bResults))
+    for i, b := range bResults {
+        results[i] = fromBson(b)
+    }
+    return results, nil
+}
+
+func (d *TokenDAOMongo) FindAll(ctx context.Context) ([]*model.TokenRecord, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    cursor, err := c.Find(ctx, bson.M{})
+    if err != nil {
+        tLog.Error("Error finding all tokens", "error", err)
+        return nil, err
+    }
+    var bResults []*tokenRecordBson
+    err = cursor.All(ctx, &bResults)
+    if err != nil {
+        tLog.Error("Error parsing all tokens", "error", err)
         return nil, err
     }
     results := make([]*model.TokenRecord, len(bResults))

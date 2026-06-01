@@ -97,3 +97,13 @@ func (d *TokenDAOMemory) FindByClientID(ctx context.Context, clientID string) ([
 	}
 	return results, nil
 }
+
+func (d *TokenDAOMemory) FindAll(ctx context.Context) ([]*model.TokenRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	results := make([]*model.TokenRecord, 0, len(d.tokens))
+	for _, record := range d.tokens {
+		results = append(results, record)
+	}
+	return results, nil
+}

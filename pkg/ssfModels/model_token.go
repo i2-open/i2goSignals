@@ -17,6 +17,11 @@ type TokenRecord struct {
 	RevokedAt time.Time `bson:"revoked_at,omitzero" json:"revoked_at,omitzero"`
 	Parent    string    `bson:"parent" json:"parent,omitempty"`
 
+	// StreamID links a STREAM-typed token to the stream it authorizes (the
+	// stream's hex id). It is a join key only — the last-seen IP is NOT copied
+	// here; it is read live from the stream's RemoteAddress when listing.
+	StreamID string `bson:"stream_id,omitzero" json:"stream_id,omitempty"`
+
 	// Provenance: redemption tracking (ADR 0007 — track redemption, not
 	// issuance). LastRedemptionIP/At record where and when the token was last
 	// used (a /register call for an IAT); RedemptionCount is the running tally.
@@ -42,6 +47,18 @@ type IntrospectionResponse struct {
 	LastRedemptionIP string `json:"last_redemption_ip,omitempty"`
 	LastRedemptionAt int64  `json:"last_redemption_at,omitzero"`
 	RedemptionCount  int64  `json:"redemption_count,omitzero"`
+}
+
+// TokenListEntry is an enriched, caller-scoped row returned by GET /token. It
+// embeds the stored TokenRecord (provenance + lineage included) and adds the
+// live last-seen IP joined from the stream's RemoteAddress for STREAM-typed
+// tokens (never stored a second time on the token).
+type TokenListEntry struct {
+	*TokenRecord `bson:",inline"`
+
+	// LastSeenIP is the stream's most recent RemoteAddress, joined at list time
+	// for STREAM-typed rows. Empty for IAT tokens or when no address is known.
+	LastSeenIP string `json:"last_seen_ip,omitempty"`
 }
 
 const (

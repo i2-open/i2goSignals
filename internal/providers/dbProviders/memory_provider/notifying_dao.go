@@ -347,3 +347,7 @@ func (d *notifyingTokenDAO) FindByProjectID(ctx context.Context, projectID strin
 func (d *notifyingTokenDAO) FindByClientID(ctx context.Context, clientID string) ([]*model.TokenRecord, error) {
     return d.inner.FindByClientID(ctx, clientID)
 }
+
+func (d *notifyingTokenDAO) FindAll(ctx context.Context) ([]*model.TokenRecord, error) {
+    return d.inner.FindAll(ctx)
+}

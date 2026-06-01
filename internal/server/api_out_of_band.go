@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1289,32 +1290,43 @@ func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// TokenListHandler lists tokens by project or client.
+// TokenListHandler returns a caller-scoped, enriched token inventory.
+//
+// Project scope is derived from the AuthContext, never from a query parameter:
+// admin/root callers see all projects; every other authorized caller sees only
+// its own project. Optional filters: type=IAT|STREAM and active=true|false
+// (composable). STREAM-typed rows include the stream's last-seen IP, joined
+// live from the stream's RemoteAddress.
 func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt})
 	if status != http.StatusOK || authCtx == nil {
 		http.Error(w, "Unauthorized", status)
 		return
 	}
 
 	queryParams := r.URL.Query()
-	projectId := queryParams.Get("project_id")
-	clientId := queryParams.Get("client_id")
 
-	var tokens []*model.TokenRecord
-	var err error
-
-	if clientId != "" {
-		tokens, err = sa.GetTokenService().ListByClient(r.Context(), clientId)
-	} else if projectId != "" {
-		tokens, err = sa.GetTokenService().ListByProject(r.Context(), projectId)
-	} else {
-		// List all? DAO doesn't have list all yet. I'll use projectId if provided, else return error for now
-		// or I can add ListAll to DAO.
-		http.Error(w, "Missing project_id or client_id", http.StatusBadRequest)
+	filters := services.TokenListFilters{}
+	switch typeParam := queryParams.Get("type"); typeParam {
+	case "":
+		// no type filter
+	case model.TokenTypeIAT, model.TokenTypeStream:
+		filters.Type = typeParam
+	default:
+		http.Error(w, "invalid type filter (expected IAT or STREAM)", http.StatusBadRequest)
 		return
 	}
 
+	if activeParam := queryParams.Get("active"); activeParam != "" {
+		active, err := strconv.ParseBool(activeParam)
+		if err != nil {
+			http.Error(w, "invalid active filter (expected true or false)", http.StatusBadRequest)
+			return
+		}
+		filters.Active = &active
+	}
+
+	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx.Eat, filters)
 	if err != nil {
 		serverLog.Error("Token list error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

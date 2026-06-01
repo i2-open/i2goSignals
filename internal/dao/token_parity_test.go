@@ -94,3 +94,43 @@ func TestTokenDAO_RecordRedemption_Parity(t *testing.T) {
         })
     }
 }
+
+// TestTokenDAO_FindAll_Parity enforces that the Mongo and memory TokenDAO
+// adapters implement FindAll identically: it returns every tracked token
+// across all projects (used by the admin/root caller-scoped list) and round
+// trips the StreamID join key.
+func TestTokenDAO_FindAll_Parity(t *testing.T) {
+    for _, f := range tokenDAOFactories() {
+        t.Run(f.name, func(t *testing.T) {
+            dao, cleanup := f.open(t)
+            defer cleanup()
+            ctx := context.Background()
+
+            require.NoError(t, dao.Insert(ctx, &model.TokenRecord{
+                JTI:       "all-iat",
+                ProjectID: "p1",
+                Type:      model.TokenTypeIAT,
+                IssuedAt:  time.Now().UTC(),
+            }))
+            require.NoError(t, dao.Insert(ctx, &model.TokenRecord{
+                JTI:       "all-stream",
+                ProjectID: "p2",
+                Type:      model.TokenTypeStream,
+                StreamID:  "stream-hex-1",
+                IssuedAt:  time.Now().UTC(),
+            }))
+
+            all, err := dao.FindAll(ctx)
+            require.NoError(t, err)
+            require.Len(t, all, 2)
+
+            byJTI := map[string]*model.TokenRecord{}
+            for _, r := range all {
+                byJTI[r.JTI] = r
+            }
+            require.Contains(t, byJTI, "all-iat")
+            require.Contains(t, byJTI, "all-stream")
+            require.Equal(t, "stream-hex-1", byJTI["all-stream"].StreamID)
+        })
+    }
+}

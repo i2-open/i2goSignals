@@ -131,6 +131,9 @@ type TokenDAO interface {
     DeleteExpired(ctx context.Context) error
     FindByProjectID(ctx context.Context, projectID string) ([]*model.TokenRecord, error)
     FindByClientID(ctx context.Context, clientID string) ([]*model.TokenRecord, error)
+    // FindAll returns every tracked token regardless of project. Used by the
+    // caller-scoped list for admin/root callers who see all projects.
+    FindAll(ctx context.Context) ([]*model.TokenRecord, error)
 }
 
 // ServerDAO handles server configuration data access

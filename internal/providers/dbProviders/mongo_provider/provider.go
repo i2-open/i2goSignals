@@ -139,6 +139,7 @@ func (m *MongoProvider) initServices() {
 	m.subjectFilterDAO = mongodao.NewSubjectFilterDAO(nil).(*mongodao.SubjectFilterDAOMongo)
 
 	m.tokenService = services.NewTokenService(m.tokenDAO)
+	m.tokenService.SetStreamDAO(m.streamDAO)
 	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService)
 	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
 	m.eventService = services.NewEventService(m.eventDAO)
