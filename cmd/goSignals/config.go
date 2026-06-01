@@ -298,6 +298,14 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 			}
 		} else {
 			fmt.Printf("Using GOSIGNALS_HOME path: %s\n", configPath)
+			// When GOSIGNALS_HOME points at a directory (existing dir, or a
+			// path with no file extension), it names the home dir — append the
+			// config filename so g.ConfigFile is the config FILE and
+			// filepath.Dir(g.ConfigFile) is the true home dir. Otherwise treat
+			// it as an explicit config file path (GH #143).
+			if info, statErr := os.Stat(configPath); (statErr == nil && info.IsDir()) || filepath.Ext(configPath) == "" {
+				configPath = filepath.Join(configPath, ConfigFile)
+			}
 			g.ConfigFile = configPath
 			return nil
 		}
