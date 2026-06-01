@@ -68,8 +68,11 @@ func TestLogoutCmd_AllDropsEverySession(t *testing.T) {
 func TestUseServerCmd_OverridesActiveIssuer(t *testing.T) {
     c := newTestCLI(t)
     store := &CredentialStore{Path: credentialsPath(&c.Globals)}
-    store.Set("https://r1", &Session{AccessToken: "1", LoggedInAt: time.Now().Add(-time.Hour)})
-    store.Set("https://r2", &Session{AccessToken: "2", LoggedInAt: time.Now()})
+    // Give both sessions a live expiry so serverBearer presents the stored
+    // token directly (a zero Expiry is treated as "unknown -> needs refresh"
+    // per GH #142, which is not what this routing test is exercising).
+    store.Set("https://r1", &Session{AccessToken: "1", Expiry: time.Now().Add(time.Hour), LoggedInAt: time.Now().Add(-time.Hour)})
+    store.Set("https://r2", &Session{AccessToken: "2", Expiry: time.Now().Add(time.Hour), LoggedInAt: time.Now()})
     if err := store.Save(); err != nil {
         t.Fatalf("save store: %v", err)
     }
