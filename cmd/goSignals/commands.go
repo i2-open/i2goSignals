@@ -2035,25 +2035,23 @@ func applyServerBearer(cli *CLI, server *SsfServer, req *http.Request) error {
 	return nil
 }
 
-// tokenState derives the human-readable lifecycle state of a token record:
-// revoked (RevokedAt set), expired (ExpiresAt past), else active.
-func tokenState(rec model.TokenRecord) string {
-	if !rec.RevokedAt.IsZero() {
-		return "revoked"
-	}
-	if !rec.ExpiresAt.IsZero() && rec.ExpiresAt.Before(time.Now()) {
-		return "expired"
-	}
-	return "active"
-}
-
 // tokenListEntry decodes the management /token list response. It embeds the
-// server's TokenRecord and additively decodes a usage_ip field that a later
-// slice (#132) will populate; until then the column renders blank. Keeping the
-// extra field local avoids touching the shared server model in this CLI slice.
+// server's TokenRecord (which carries last_redemption_ip for IATs) and decodes
+// the live last_seen_ip the server joins onto STREAM-typed rows. These are the
+// field names the server's TokenListEntry actually emits.
 type tokenListEntry struct {
 	model.TokenRecord
-	UsageIP string `json:"usage_ip,omitempty"`
+	LastSeenIP string `json:"last_seen_ip,omitempty"`
+}
+
+// usageIP answers "where is this token being used?" (ADR 0007): a STREAM
+// token's live last-seen IP, or an IAT's last-redemption IP. Empty when the
+// token has never been redeemed/connected.
+func (e tokenListEntry) usageIP() string {
+	if e.LastSeenIP != "" {
+		return e.LastSeenIP
+	}
+	return e.LastRedemptionIP
 }
 
 // renderTokenTable formats token records as a tab-aligned table an operator can
@@ -2076,7 +2074,7 @@ func renderTokenTable(records []tokenListEntry) string {
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			rec.JTI, rec.ClientID, rec.Subject, rec.Type,
-			strings.Join(rec.Scopes, ","), issued, expires, tokenState(rec.TokenRecord), rec.UsageIP)
+			strings.Join(rec.Scopes, ","), issued, expires, rec.State(), rec.usageIP())
 	}
 	_ = w.Flush()
 	return buf.String()

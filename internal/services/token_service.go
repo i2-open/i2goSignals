@@ -139,15 +139,24 @@ func (s *TokenService) IntrospectToken(ctx context.Context, jti string) (*model.
 		}
 		return nil, err
 	}
+	return IntrospectionFromRecord(record), nil
+}
+
+// IntrospectionFromRecord builds an RFC 7662 introspection response from an
+// already-fetched token record, avoiding a second store read on the introspect
+// path. A nil record (untracked/unknown JTI) yields active:false without
+// leaking existence.
+func IntrospectionFromRecord(record *model.TokenRecord) *model.IntrospectionResponse {
+	if record == nil {
+		return &model.IntrospectionResponse{Active: false}
+	}
 	scope := ""
 	if record.Scopes != nil {
 		scope = strings.Join(record.Scopes, ",")
 	}
 
-	active := record.RevokedAt.IsZero() && (record.ExpiresAt.IsZero() || record.ExpiresAt.After(time.Now()))
-
 	return &model.IntrospectionResponse{
-		Active:    active,
+		Active:    record.IsActive(),
 		ClientID:  record.ClientID,
 		Subject:   record.Subject,
 		Type:      record.Type,
@@ -161,7 +170,7 @@ func (s *TokenService) IntrospectToken(ctx context.Context, jti string) (*model.
 		LastRedemptionIP: record.LastRedemptionIP,
 		RedemptionCount:  record.RedemptionCount,
 		LastRedemptionAt: redemptionUnix(record.LastRedemptionAt),
-	}, nil
+	}
 }
 
 // redemptionUnix returns the Unix timestamp for t, or 0 when t is the zero
@@ -190,6 +199,13 @@ func (s *TokenService) ListByClient(ctx context.Context, clientID string) ([]*mo
 // token. The result is capped (cap-and-log) since there is no pagination here.
 func (s *TokenService) ListForAuthority(ctx context.Context, authCtx *authSupport.EventAuthToken, filters TokenListFilters) ([]*model.TokenListEntry, error) {
 	unrestricted, projectID := ProjectScope(authCtx)
+
+	// Fail closed: a confined caller with no resolved project (e.g. an OAuth
+	// client or a token carrying no ProjectId) must see nothing, rather than
+	// being scoped to the empty-project bucket via FindByProjectID("").
+	if !unrestricted && projectID == "" {
+		return []*model.TokenListEntry{}, nil
+	}
 
 	var records []*model.TokenRecord
 	var err error
@@ -260,8 +276,7 @@ func matchesFilters(rec *model.TokenRecord, filters TokenListFilters) bool {
 		return false
 	}
 	if filters.Active != nil {
-		active := rec.RevokedAt.IsZero() && (rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(time.Now()))
-		if active != *filters.Active {
+		if rec.IsActive() != *filters.Active {
 			return false
 		}
 	}

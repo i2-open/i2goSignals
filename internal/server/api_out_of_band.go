@@ -1247,7 +1247,13 @@ func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string
 	if unrestricted {
 		return true
 	}
-	return targetProjectID != "" && targetProjectID == projectID
+	// Fail closed: a confined caller with no resolved project (OAuth client or
+	// token with no ProjectId) may act on nothing; never match the empty-project
+	// bucket. A confined caller may act only on a target in its own project.
+	if projectID == "" {
+		return false
+	}
+	return targetProjectID == projectID
 }
 
 // IntrospectHandler implements RFC7662 token introspection.
@@ -1293,13 +1299,9 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 5. Introspect
-	resp, err := sa.GetTokenService().IntrospectToken(r.Context(), jti)
-	if err != nil {
-		serverLog.Error("Introspection error", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// 5. Introspect — build the response from the record already fetched for the
+	// project guard (a nil record yields active:false), avoiding a second read.
+	resp := services.IntrospectionFromRecord(record)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

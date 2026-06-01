@@ -61,6 +61,26 @@ type TokenListEntry struct {
 	LastSeenIP string `json:"last_seen_ip,omitempty"`
 }
 
+// IsActive reports whether the token is currently live: neither revoked nor
+// expired. This is the single source of truth for token liveness, shared by
+// introspection, the list filter, and the CLI, so the three cannot diverge.
+func (r TokenRecord) IsActive() bool {
+	return r.RevokedAt.IsZero() && (r.ExpiresAt.IsZero() || r.ExpiresAt.After(time.Now()))
+}
+
+// State returns the human-readable lifecycle state of the token: "revoked"
+// (RevokedAt set, taking precedence), "expired" (ExpiresAt in the past), else
+// "active". Consistent with IsActive.
+func (r TokenRecord) State() string {
+	if !r.RevokedAt.IsZero() {
+		return "revoked"
+	}
+	if !r.ExpiresAt.IsZero() && r.ExpiresAt.Before(time.Now()) {
+		return "expired"
+	}
+	return "active"
+}
+
 const (
 	TokenTypeIAT    = "IAT"
 	TokenTypeStream = "STREAM"
