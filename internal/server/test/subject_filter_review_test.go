@@ -357,6 +357,59 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverr
     assert.Equal(t, 600, review.SubjectRemovalGraceSeconds, "subject_removal_grace_seconds round-trips")
 }
 
+// TestReviewSurfacesEffectiveEventSourceAndGrace verifies that when a stream
+// carries Go zero-values — EventSource==nil and SubjectRemovalGraceSeconds==0 —
+// the admin review response still ALWAYS carries both fields on the wire (GH
+// #118): event_source resolves to the effective {"type":"AUDIENCE"} default and
+// subject_removal_grace_seconds is present as an explicit integer (the
+// configured I2SIG_SUBJECT_REMOVAL_GRACE default). goSignalsAdmin's Subjects
+// overview relies on these columns never being silently omitted.
+func (suite *SubjectFilterReviewSuite) TestReviewSurfacesEffectiveEventSourceAndGrace() {
+    t := suite.T()
+    t.Setenv("I2SIG_SUBJECT_REMOVAL_GRACE", "45")
+    instance := suite.instance
+    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
+        &authUtil.AuthContext{ProjectId: instance.projectId})
+    created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+        StreamConfiguration: model.StreamConfiguration{
+            Iss: "DEFAULT",
+            Aud: []string{"https://receiver.example.com"},
+            Delivery: &model.OneOfStreamConfigurationDelivery{
+                PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+            },
+        },
+        DefaultSubjects:   model.DefaultSubjectsNone,
+        SubjectFilterMode: model.SubjectFilterModeLocal,
+        // EventSource left nil and SubjectRemovalGraceSeconds left 0 — the
+        // zero-values that previously got omitted from the wire.
+    }, instance.projectId, nil)
+    require.NoError(t, err)
+
+    body := `{"stream_id":"` + created.Id + `"}`
+    resp := suite.postReview(suite.instance.streamMgmtToken, body)
+    require.Equal(t, http.StatusOK, resp.StatusCode)
+
+    raw, _ := io.ReadAll(resp.Body)
+    // Decode into a presence-sensitive map: the typed reviewResponse uses
+    // omitempty, which cannot distinguish "key absent" from "zero value".
+    var wire map[string]json.RawMessage
+    require.NoError(t, json.Unmarshal(raw, &wire), "response must be JSON: %s", string(raw))
+
+    esRaw, esPresent := wire["event_source"]
+    require.True(t, esPresent, "event_source key must always be present: %s", string(raw))
+    var es model.EventSource
+    require.NoError(t, json.Unmarshal(esRaw, &es))
+    assert.Equal(t, model.EventSourceAudience, es.Type,
+        "nil stream EventSource must resolve to effective AUDIENCE")
+
+    graceRaw, gracePresent := wire["subject_removal_grace_seconds"]
+    require.True(t, gracePresent, "subject_removal_grace_seconds key must always be present: %s", string(raw))
+    var grace int
+    require.NoError(t, json.Unmarshal(graceRaw, &grace))
+    assert.Equal(t, 45, grace,
+        "zero per-stream grace must resolve to the configured I2SIG_SUBJECT_REMOVAL_GRACE default")
+}
+
 // reviewResponse mirrors the wire shape of the admin review endpoint. It is
 // kept inside the test package so the test pins the JSON contract independently
 // of the server's internal types.

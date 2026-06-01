@@ -28,8 +28,8 @@ type subjectFilterReviewResponse struct {
     StreamId                   string                           `json:"stream_id"`
     Mode                       string                           `json:"mode,omitempty"`
     DefaultSubjects            string                           `json:"default_subjects,omitempty"`
-    EventSource                *model.EventSource               `json:"event_source,omitempty"`
-    SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds,omitempty"`
+    EventSource                *model.EventSource               `json:"event_source"`
+    SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
     PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
     Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
     Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
@@ -157,8 +157,8 @@ func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *s
         StreamId:                   stream.StreamConfiguration.Id,
         Mode:                       stream.SubjectFilterMode,
         DefaultSubjects:            stream.DefaultSubjects,
-        EventSource:                stream.EventSource,
-        SubjectRemovalGraceSeconds: stream.SubjectRemovalGraceSeconds,
+        EventSource:                effectiveEventSource(stream.EventSource),
+        SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
         PassthruNoLocalFilter:      review.NoLocalFilter,
     }
     if review.Counts != nil {
@@ -190,4 +190,27 @@ func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *s
         }
     }
     return out
+}
+
+// effectiveEventSource resolves a stream's stored EventSource to the value the
+// admin review wire contract surfaces. A nil descriptor has EFFECTIVE type
+// AUDIENCE (GH #118 / the nil-EventSource→AUDIENCE decision: an unset source
+// behaves as audience matching), so it resolves to {"type":"AUDIENCE"} rather
+// than being omitted. A non-nil descriptor is surfaced unchanged.
+func effectiveEventSource(es *model.EventSource) *model.EventSource {
+    if es == nil {
+        return &model.EventSource{Type: model.EventSourceAudience}
+    }
+    return es
+}
+
+// effectiveRemovalGrace resolves the SSF §9.3 grace seconds surfaced by the
+// admin review: a non-zero per-stream override wins; otherwise the server-wide
+// I2SIG_SUBJECT_REMOVAL_GRACE default. Mirrors SubjectFilterService.resolveGrace
+// so the review reports the same effective value the service enforces.
+func effectiveRemovalGrace(perStream int) int {
+    if perStream > 0 {
+        return perStream
+    }
+    return services.SubjectRemovalGraceDefaultSeconds()
 }
