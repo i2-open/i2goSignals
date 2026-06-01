@@ -648,6 +648,15 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 				// token cannot escalate its own privilege.
 			}
 		}
+		// An explicit, non-empty scope list that filters entirely to empty (every
+		// entry above the ceiling or unknown) is refused rather than silently
+		// falling back to the default — a caller asking only for above-ceiling
+		// scopes may be attempting privilege escalation (WARN-worthy).
+		if len(scopes) == 0 {
+			serverLog.Warn("RegisterClient: refusing registration; all requested scopes were dropped", "requestedScopes", jsonRequest.Scopes)
+			http.Error(w, "None of the requested scopes can be granted", http.StatusBadRequest)
+			return
+		}
 	}
 
 	client := model.SsfClient{
