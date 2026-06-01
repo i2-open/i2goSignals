@@ -34,10 +34,14 @@ func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClie
 		return nil
 	}
 
-	// Issue a token reflecting only the scopes the client was actually granted.
-	// A self-registered client is capped below stream_admin by the registration
-	// handler's privilege ceiling, so admin is granted only when the client's
-	// AllowedScopes explicitly carry stream_admin (out-of-band provisioning).
+	// Issue the stream-client (management) token. Only stream-management roles are
+	// minted here: stream_mgmt always, and stream_admin when AllowedScopes carries
+	// it (out-of-band provisioning, capped below by the /register ceiling).
+	//
+	// event_delivery is deliberately NOT minted, even when AllowedScopes records it
+	// as a granted capability. Event delivery is authorized by a separate per-stream
+	// delivery token (IssueStreamToken), so the management token's roles diverge
+	// from AllowedScopes by design (#140). See SsfClient.AllowedScopes.
 	admin := slices.Contains(client.AllowedScopes, authSupport.ScopeStreamAdmin)
 	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin, parentJTI)
 	if err != nil {

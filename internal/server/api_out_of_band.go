@@ -635,6 +635,14 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Privilege ceiling: a reg (IAT) caller may not self-grant stream_admin at
 	// /register. A self-registration caps at stream_mgmt + event_delivery; an
 	// admin client is provisioned out of band, not via the registration door.
+	//
+	// event_delivery granted here is persisted in the client's AllowedScopes as a
+	// capability, but is intentionally NOT minted into the stream-client
+	// (management) token (see services.ClientService.RegisterClient and
+	// authUtil.IssueStreamClientToken). Event delivery is authorized by a separate
+	// per-stream delivery token (authUtil.IssueStreamToken), issued at stream
+	// creation. The stored-capability vs minted-token-role divergence is by design
+	// (#140); do not reconcile it by adding event to the management token.
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
 		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
