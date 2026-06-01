@@ -129,6 +129,17 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	}
 
 	if len(body) > 0 {
+		// The "key" scope is create-only and server-generated. A key-scope-only
+		// (bootstrap) caller may NOT upload caller-supplied key material: a
+		// non-empty body routes to loadKeyHandler, which would install an issuer
+		// signing key of the caller's choosing (private PEM or external jwks_uri)
+		// for a brand-new issuer with no force/rotate required — enabling SET
+		// forgery under that issuer. Uploading requires stream_admin/root, the
+		// same scope LoadKeyHandler enforces.
+		if keyScopeOnly(authCtx) {
+			http.Error(w, "key scope is create-only; uploading key material requires stream_admin/root", http.StatusForbidden)
+			return
+		}
 		loadKeyHandler(sa, w, r, authCtx, body)
 	} else {
 		createKeyByNameHandler(sa, w, r, authCtx)
