@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -47,6 +48,20 @@ const CEnvClusterInternalPort = "I2SIG_CLUSTER_INTERNAL_PORT"
 const CEnvTransmitterBackfillInterval = "I2SIG_TRANSMITTER_BACKFILL_INTERVAL"
 const CEnvTransmitterBackfillBatch = "I2SIG_TRANSMITTER_BACKFILL_BATCH"
 const CEnvMongoWatchEnabled = "I2SIG_STORE_MONGO_WATCH_ENABLED"
+
+// CEnvTokenRetention sets how long (in seconds, measured from a token's `exp`
+// timestamp) an expired token record is retained in the management-plane token
+// collection before MongoDB's TTL reaper deletes it. Slice #131 / PRD #128.
+const CEnvTokenRetention = "I2SIG_TOKEN_RETENTION"
+
+// CDefTokenRetentionSeconds is the default token retention: 30 days.
+const CDefTokenRetentionSeconds = 30 * 24 * 60 * 60 // 2592000
+
+// tokenTTLIndexName is the stable name of the TTL index on the token
+// collection's `exp` field. A fixed name lets startup recognise the existing
+// index and adjust expireAfterSeconds in place via collMod.
+const tokenTTLIndexName = "exp_ttl"
+
 const CDefTokenIssuer = "DEFAULT"
 const ErrorInvalidProject = "invalid project_id - invalid token"
 
@@ -244,6 +259,13 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		}
 	}
 
+	// The token TTL index is ensured on every (re)connect — not just on a
+	// fresh DB — so a changed I2SIG_TOKEN_RETENTION is applied to an existing
+	// collection in place via collMod (no data migration). Slice #131.
+	if err = m.ensureTokenTTLIndex(ctx, tokenRetentionSeconds()); err != nil {
+		return err
+	}
+
     // Rebind the existing DAOs in place. The DAOs are created once by
     // initServices with nil collections; here we point them at the
     // collections from the freshly-(re)connected database. Services hold
@@ -302,6 +324,93 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// tokenRetentionSeconds reads I2SIG_TOKEN_RETENTION (seconds). It falls back to
+// CDefTokenRetentionSeconds (30 days) when unset, non-numeric, or negative.
+func tokenRetentionSeconds() int32 {
+    val := os.Getenv(CEnvTokenRetention)
+    if val == "" {
+        return CDefTokenRetentionSeconds
+    }
+    parsed, err := strconv.Atoi(val)
+    if err != nil {
+        pLog.Warn("Invalid integer; falling back to default token retention",
+            "env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
+        return CDefTokenRetentionSeconds
+    }
+    if parsed < 0 {
+        pLog.Warn("Negative value not permitted; falling back to default token retention",
+            "env", CEnvTokenRetention, "value", parsed, "default", CDefTokenRetentionSeconds)
+        return CDefTokenRetentionSeconds
+    }
+    return int32(parsed)
+}
+
+// ensureTokenTTLIndex makes the token collection's TTL index match the desired
+// expireAfterSeconds. Mongo deletes a token record expireAfterSeconds AFTER its
+// `exp` timestamp, so a revoked-but-unexpired record stays present (and reports
+// active:false) until retention lapses. Runs on every (re)connect:
+//   - no TTL index yet  -> create one named tokenTTLIndexName on {exp:1}
+//   - exists, same value -> no-op
+//   - exists, different  -> collMod the index in place (no drop/recreate, so no
+//     collection migration is needed to change retention on a live deployment)
+//
+// TTL is Mongo-only; the memory provider intentionally has no equivalent.
+func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int32) error {
+    if m.tokenCol == nil {
+        return errors.New("token collection not initialized")
+    }
+
+    specs, err := m.tokenCol.Indexes().ListSpecifications(ctx, nil)
+    if err != nil {
+        pLog.Error("Error listing token collection indexes", "error", err)
+        return err
+    }
+
+    var existing *int32
+    for _, s := range specs {
+        if s.Name == tokenTTLIndexName {
+            existing = s.ExpireAfterSeconds
+            break
+        }
+    }
+
+    if existing == nil {
+        ttlIndex := mongo.IndexModel{
+            Keys: bson.D{{Key: "exp", Value: 1}},
+            Options: options.Index().
+                SetName(tokenTTLIndexName).
+                SetExpireAfterSeconds(expireAfter),
+        }
+        if _, err = m.tokenCol.Indexes().CreateOne(ctx, ttlIndex); err != nil {
+            pLog.Error("Error creating token TTL index", "error", err)
+            return err
+        }
+        pLog.Info("Created token TTL index", "index", tokenTTLIndexName, "expireAfterSeconds", expireAfter)
+        return nil
+    }
+
+    if *existing == expireAfter {
+        return nil
+    }
+
+    // Adjust in place via collMod rather than drop+recreate.
+    cmd := bson.D{
+        {Key: "collMod", Value: CDbTokens},
+        {Key: "index", Value: bson.D{
+            {Key: "name", Value: tokenTTLIndexName},
+            {Key: "expireAfterSeconds", Value: expireAfter},
+        }},
+    }
+    if err = m.ssefDb.RunCommand(ctx, cmd).Err(); err != nil {
+        pLog.Error("Error adjusting token TTL index via collMod",
+            "from", *existing, "to", expireAfter, "error", err)
+        return err
+    }
+    pLog.Info("Adjusted token TTL index expireAfterSeconds",
+        "index", tokenTTLIndexName, "from", *existing, "to", expireAfter)
+    return nil
 }
 
 func (m *MongoProvider) Check() error {

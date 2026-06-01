@@ -150,6 +150,7 @@ understands. They are documented in their natural section below.
 | `I2SIG_STORE_MONGO_FALLBACK_MEM`          | If `false`, the server fails to start when it cannot connect to MongoDB. If `true`, it falls back to the in-memory provider.                 | `true`                                                 |
 | `I2SIG_STORE_MONGO_BACKGROUND_RECONNECT`  | If `true`, the server starts even when MongoDB is unreachable and retries the connection in the background. Used with `_FALLBACK_MEM=true`.  | `false`                                                |
 | `I2SIG_STORE_MONGO_WATCH_ENABLED`         | If `true`, the server uses MongoDB Change Streams to watch for new events. Deprecated in favour of cluster wake-ups + backfill.              | `false`                                                |
+| `I2SIG_TOKEN_RETENTION`                   | How long (in seconds, measured from a token's `exp`) an expired token record is retained in the management-plane token collection before MongoDB's TTL reaper deletes it. A revoked-but-unexpired record stays visible (reporting `active:false`) until retention lapses, so revocations remain auditable. Applied via a TTL index on `exp`; changing the value on a live deployment updates the index in place via `collMod` (no data migration). Mongo-only. | `2592000` _(30 days)_ |
 
 ## Store_Mem
 
