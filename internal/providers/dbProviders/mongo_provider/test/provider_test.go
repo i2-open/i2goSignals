@@ -111,7 +111,7 @@ func (s *MongoProviderSuite) TestA_ClientReg() {
 		AllowedScopes: []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
 	}
 
-	resp := s.provider.GetClientService().RegisterClient(context.Background(), client, s.project)
+	resp := s.provider.GetClientService().RegisterClient(context.Background(), client, s.project, "")
 	s.NotNil(resp, "Client registration response return check")
 	s.mgmtToken = resp.Token
 	tkn, err := s.auth.ParseAuthToken(s.mgmtToken)

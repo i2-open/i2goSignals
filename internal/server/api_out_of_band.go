@@ -15,7 +15,9 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
@@ -645,10 +647,26 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Id:            bson.NewObjectID(),
 	}
 
-	response := sa.GetClientService().RegisterClient(r.Context(), client, authCtx.ProjectId)
+	// The redeemed IAT's JTI is this client token's lineage parent (ADR 0007).
+	parentJTI := ""
+	if authCtx.Eat != nil {
+		parentJTI = authCtx.Eat.ID
+	}
+
+	response := sa.GetClientService().RegisterClient(r.Context(), client, authCtx.ProjectId, parentJTI)
 	if response == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+
+	// Best-effort IAT redemption capture: a /register call is a redemption of
+	// the IAT (ADR 0007). A write failure logs at WARN and never blocks
+	// registration, matching the TrackToken posture.
+	if parentJTI != "" {
+		remoteIP := model.BuildRemoteIPFromRequest(r).String()
+		if err := sa.GetTokenService().RecordRedemption(r.Context(), parentJTI, remoteIP, time.Now().UTC()); err != nil {
+			serverLog.Warn("RegisterClient: failed to record IAT redemption", "jti", parentJTI, "error", err)
+		}
 	}
 
 	regBytes, _ := json.MarshalIndent(response, "", " ")
@@ -1213,6 +1231,31 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 	_, _ = w.Write(resp)
 }
 
+// callerMayActOnProject implements the shared single-token project guard
+// (ADR 0008). It reuses the ProjectScope derivation from the token service: an
+// admin/root caller is unrestricted; every other caller may act only on tokens
+// whose project matches its own AuthContext.ProjectId. A target with no tracked
+// project (unknown JTI) is treated as out-of-scope for a confined caller, which
+// the callers turn into a no-op (revoke) or active:false (introspect) without
+// leaking existence.
+func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string) bool {
+	var eat *authSupport.EventAuthToken
+	if authCtx != nil {
+		eat = authCtx.Eat
+	}
+	unrestricted, projectID := services.ProjectScope(eat)
+	if unrestricted {
+		return true
+	}
+	// Fail closed: a confined caller with no resolved project (OAuth client or
+	// token with no ProjectId) may act on nothing; never match the empty-project
+	// bucket. A confined caller may act only on a target in its own project.
+	if projectID == "" {
+		return false
+	}
+	return targetProjectID == projectID
+}
+
 // IntrospectHandler implements RFC7662 token introspection.
 func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. Validate authorization (Relatively open) - should this be anyone?
@@ -1233,21 +1276,99 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 	jti := token
 	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
+	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+		jti = peeked
 	}
 
-	// 4. Introspect
-	resp, err := sa.GetTokenService().IntrospectToken(r.Context(), jti)
+	// 4. Project guard (ADR 0008): a non-admin caller may only introspect tokens
+	// in its own project. A cross-project (or unknown) target is reported as
+	// active:false rather than 403, so existence is not leaked.
+	record, err := sa.GetTokenService().FindByJTI(r.Context(), jti)
 	if err != nil {
-		serverLog.Error("Introspection error", "error", err)
+		serverLog.Error("Introspection lookup error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	targetProject := ""
+	if record != nil {
+		targetProject = record.ProjectID
+	}
+	if !callerMayActOnProject(authCtx, targetProject) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&model.IntrospectionResponse{Active: false})
+		return
+	}
+
+	// 5. Introspect — build the response from the record already fetched for the
+	// project guard (a nil record yields active:false), avoiding a second read.
+	resp := services.IntrospectionFromRecord(record)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// TokenRevokeHandler revokes a token by its JTI.
+// RevokeHandler implements RFC 7009 token revocation for a token holder. The
+// holder presents the token string in a `token` form field (with an
+// accepted-but-ignored `token_type_hint`); the JTI is parsed from the JWT and
+// revoked. Per RFC 7009 §2.2 the response is ALWAYS HTTP 200 — for an unknown,
+// already-revoked, expired, unparseable, or cross-project-denied token — so the
+// existence of a token is never leaked. Only a malformed request (no `token`
+// parameter) is a 400.
+func (sa *SignalsApplication) RevokeHandler(w http.ResponseWriter, r *http.Request) {
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery})
+	if status != http.StatusOK || authCtx == nil {
+		http.Error(w, "Unauthorized", status)
+		return
+	}
+
+	token := r.FormValue("token")
+	if token == "" {
+		http.Error(w, "Missing token", http.StatusBadRequest)
+		return
+	}
+	// token_type_hint is accepted but ignored (RFC 7009 §2.1).
+
+	// Parse the JTI from the JWT. An unverified peek is used so that an expired
+	// or already-revoked token still yields its JTI; an unparseable token leaves
+	// jti empty and the handler simply returns 200 without revoking.
+	jti := ""
+	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
+		jti = claims.ID
+	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+		jti = peeked
+	}
+
+	if jti != "" {
+		sa.revokeIfPermitted(r, authCtx, jti)
+	}
+
+	// RFC 7009 §2.2: always 200, regardless of outcome.
+	w.WriteHeader(http.StatusOK)
+}
+
+// revokeIfPermitted applies the project guard then revokes by JTI. A
+// cross-project (or unknown) target is a silent no-op so /revoke never leaks
+// existence. Revocation failures are logged but never change the HTTP outcome.
+func (sa *SignalsApplication) revokeIfPermitted(r *http.Request, authCtx *authUtil.AuthContext, jti string) {
+	record, err := sa.GetTokenService().FindByJTI(r.Context(), jti)
+	if err != nil {
+		serverLog.Warn("Revoke lookup error", "jti", jti, "error", err)
+		return
+	}
+	targetProject := ""
+	if record != nil {
+		targetProject = record.ProjectID
+	}
+	if !callerMayActOnProject(authCtx, targetProject) {
+		// Cross-project or unknown: no-op, but still 200 (no leak).
+		return
+	}
+	if err := sa.GetTokenService().RevokeToken(r.Context(), jti); err != nil {
+		serverLog.Warn("Revocation error", "jti", jti, "error", err)
+	}
+}
+
+// TokenRevokeHandler revokes a token by its JTI (admin path, DELETE /token/{jti}).
 func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.Request) {
 	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt})
 	if status != http.StatusOK || authCtx == nil {
@@ -1262,8 +1383,26 @@ func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err := sa.GetTokenService().RevokeToken(r.Context(), jti)
+	// Project guard (ADR 0008): a non-admin caller may only revoke tokens in its
+	// own project. Unlike RFC 7009 /revoke, the admin-by-identifier path returns
+	// 403 on a cross-project target (the admin acts from a table row and is
+	// entitled to a clear authorization error).
+	record, err := sa.GetTokenService().FindByJTI(r.Context(), jti)
 	if err != nil {
+		serverLog.Error("Revoke lookup error", "jti", jti, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	targetProject := ""
+	if record != nil {
+		targetProject = record.ProjectID
+	}
+	if !callerMayActOnProject(authCtx, targetProject) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	if err := sa.GetTokenService().RevokeToken(r.Context(), jti); err != nil {
 		serverLog.Error("Revocation error", "jti", jti, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1272,32 +1411,43 @@ func (sa *SignalsApplication) TokenRevokeHandler(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// TokenListHandler lists tokens by project or client.
+// TokenListHandler returns a caller-scoped, enriched token inventory.
+//
+// Project scope is derived from the AuthContext, never from a query parameter:
+// admin/root callers see all projects; every other authorized caller sees only
+// its own project. Optional filters: type=IAT|STREAM and active=true|false
+// (composable). STREAM-typed rows include the stream's last-seen IP, joined
+// live from the stream's RemoteAddress.
 func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt})
 	if status != http.StatusOK || authCtx == nil {
 		http.Error(w, "Unauthorized", status)
 		return
 	}
 
 	queryParams := r.URL.Query()
-	projectId := queryParams.Get("project_id")
-	clientId := queryParams.Get("client_id")
 
-	var tokens []*model.TokenRecord
-	var err error
-
-	if clientId != "" {
-		tokens, err = sa.GetTokenService().ListByClient(r.Context(), clientId)
-	} else if projectId != "" {
-		tokens, err = sa.GetTokenService().ListByProject(r.Context(), projectId)
-	} else {
-		// List all? DAO doesn't have list all yet. I'll use projectId if provided, else return error for now
-		// or I can add ListAll to DAO.
-		http.Error(w, "Missing project_id or client_id", http.StatusBadRequest)
+	filters := services.TokenListFilters{}
+	switch typeParam := queryParams.Get("type"); typeParam {
+	case "":
+		// no type filter
+	case model.TokenTypeIAT, model.TokenTypeStream:
+		filters.Type = typeParam
+	default:
+		http.Error(w, "invalid type filter (expected IAT or STREAM)", http.StatusBadRequest)
 		return
 	}
 
+	if activeParam := queryParams.Get("active"); activeParam != "" {
+		active, err := strconv.ParseBool(activeParam)
+		if err != nil {
+			http.Error(w, "invalid active filter (expected true or false)", http.StatusBadRequest)
+			return
+		}
+		filters.Active = &active
+	}
+
+	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx.Eat, filters)
 	if err != nil {
 		serverLog.Error("Token list error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

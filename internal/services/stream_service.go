@@ -20,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -297,9 +298,18 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	}
 
 	isOAuth := false
+	// deliveryParent carries the lineage parent for any delivery (stream) token
+	// minted below: the stream-client token that authorized this CreateStream
+	// (ADR 0007). Passing it as the issuing session sets Parent without altering
+	// the delivery token's other claims (an empty-ID session leaves Parent empty).
+	var deliveryParent *authUtil.AuthContext
 	if ctx.Value("authCtx") != nil {
 		authCtx := ctx.Value("authCtx").(*authUtil.AuthContext)
 		isOAuth = authCtx.IsOAuthClient
+		if authCtx.Eat != nil {
+			deliveryParent = &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{}}
+			deliveryParent.Eat.ID = authCtx.Eat.ID
+		}
 	}
 
 	config.Id = mid.Hex()
@@ -357,7 +367,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	case model.DeliveryPoll, "DEFAULT":
 		authToken := ""
 		if !isOAuth {
-			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
+			authToken, err = authIssuer.IssueStreamToken(mid.Hex(), projectID, deliveryParent)
 		}
 		if err != nil {
 			return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
@@ -385,7 +395,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		method := config.Delivery.PushReceiveMethod
 		method.EndpointUrl = s.getFullUrl(fmt.Sprintf("/events/%s", mid.Hex()))
 		if !isOAuth {
-			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID, nil)
+			authToken, err := authIssuer.IssueStreamToken(mid.Hex(), projectID, deliveryParent)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to issue stream token: %v", err)
 			}

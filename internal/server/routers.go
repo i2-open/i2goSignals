@@ -376,6 +376,13 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 		Route{
+			"Revoke",
+			http.MethodPost,
+			"/revoke",
+			h.sa.RevokeHandler,
+			false,
+		},
+		Route{
 			"TokenRevoke",
 			http.MethodDelete,
 			"/token/{jti}",

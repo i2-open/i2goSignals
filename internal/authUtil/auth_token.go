@@ -249,12 +249,16 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	if err != nil {
 		authLog.Error("IssueProjectIat signing failed", "kid", kid, "error", err)
 	} else if a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeIAT)
+		// An IAT is the root of the token lineage — no parent.
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, "", model.TokenTypeIAT)
 	}
 	return signed, err
 }
 
-func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool) (string, error) {
+// IssueStreamClientToken mints a stream-client (management) token. parentJTI is
+// the JTI of the IAT redeemed to register the client, recorded as the token's
+// lineage parent.
+func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool, parentJTI string) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
 	scopes := []string{authSupport.ScopeStreamMgmt}
@@ -290,7 +294,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 
 	signed, err := token.SignedString(privateKey)
 	if err == nil && a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
 	return signed, err
 }
@@ -322,10 +326,14 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 		eat.ProjectId = projectId
 	}
 	eat.Roles = []string{authSupport.ScopeEventDelivery}
+	// A delivery token's lineage parent is the stream-client token that
+	// authorized this mint (the issuing session's EAT).
+	parentJTI := ""
 	if session != nil {
 		if session.Eat != nil {
 			eat.ClientId = session.Eat.ClientId
 			eat.Subject, _ = session.Eat.GetSubject()
+			parentJTI = session.Eat.ID
 		}
 
 	}
@@ -336,7 +344,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 
 	signed, err := token.SignedString(privateKey)
 	if err == nil && a.TokenTracker != nil {
-		_ = a.TokenTracker.TrackToken(context.Background(), &eat, model.TokenTypeStream)
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
 	return signed, err
 }
@@ -477,6 +485,30 @@ func (a *AuthIssuer) classifyToken(tokenString string) tokenRoute {
 
 // peekKid parses only the JWT header to extract the kid. No signature check.
 // Returns "" when the token is malformed or has no kid.
+// PeekJti extracts the "jti" claim from a JWT payload WITHOUT verifying the
+// signature, expiry, or revocation state. It is used by the RFC 7009 /revoke
+// path, which must extract a JTI from a token that may already be expired or
+// revoked (and which RFC 7009 §2.2 must still answer with HTTP 200). Returns ""
+// when the token is not a parseable JWT.
+func PeekJti(tokenString string) string {
+	parts := strings.Split(strings.TrimSpace(tokenString), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return ""
+	}
+	if jti, ok := payload["jti"].(string); ok {
+		return jti
+	}
+	return ""
+}
+
 func peekKid(tokenString string) string {
 	parts := strings.Split(strings.TrimSpace(tokenString), ".")
 	if len(parts) < 1 {

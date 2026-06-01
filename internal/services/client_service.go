@@ -24,7 +24,10 @@ func NewClientService(clientDAO interfaces.ClientDAO, keyService *KeyService) *C
 	}
 }
 
-func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClient, projectID string) *model.RegisterResponse {
+// RegisterClient persists the client and mints its stream-client token. parentJTI
+// is the JTI of the IAT redeemed to register the client; it is threaded onto the
+// minted token as its lineage parent (ADR 0007). It may be empty.
+func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClient, projectID string, parentJTI string) *model.RegisterResponse {
 	err := s.clientDAO.Insert(ctx, &client)
 	if err != nil {
 		csLog.Error("Error registering client", "error", err)
@@ -36,7 +39,7 @@ func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClie
 	// handler's privilege ceiling, so admin is granted only when the client's
 	// AllowedScopes explicitly carry stream_admin (out-of-band provisioning).
 	admin := slices.Contains(client.AllowedScopes, authSupport.ScopeStreamAdmin)
-	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin)
+	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin, parentJTI)
 	if err != nil {
 		csLog.Error("Error issuing stream client token", "error", err)
 		return nil

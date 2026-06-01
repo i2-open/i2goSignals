@@ -32,7 +32,7 @@ func (suite *ServerSuite) TestF_JwksSummaries() {
 		AllowedScopes: []string{authSupport.ScopeEventDelivery},
 		Email:         "lowscope@test.com",
 		Description:   "low scope test client",
-	}, suite.servers[0].projectId, false)
+	}, suite.servers[0].projectId, false, "")
 	suite.NoError(err)
 
 	req, _ = http.NewRequest(http.MethodGet, baseUrl, nil)

@@ -124,9 +124,16 @@ type TokenDAO interface {
     Insert(ctx context.Context, record *model.TokenRecord) error
     FindByJTI(ctx context.Context, jti string) (*model.TokenRecord, error)
     Revoke(ctx context.Context, jti string) error
+    // RecordRedemption captures a token redemption: it increments
+    // redemption_count and overwrites last_redemption_ip/last_redemption_at.
+    // Per ADR 0007 this is the "where is it used" signal (not issuance).
+    RecordRedemption(ctx context.Context, jti string, ip string, at time.Time) error
     DeleteExpired(ctx context.Context) error
     FindByProjectID(ctx context.Context, projectID string) ([]*model.TokenRecord, error)
     FindByClientID(ctx context.Context, clientID string) ([]*model.TokenRecord, error)
+    // FindAll returns every tracked token regardless of project. Used by the
+    // caller-scoped list for admin/root callers who see all projects.
+    FindAll(ctx context.Context) ([]*model.TokenRecord, error)
 }
 
 // ServerDAO handles server configuration data access
