@@ -57,22 +57,73 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 		// TODO: Validate IAT token based config? Issue is that validation of an IAT may cause IAT to expire
 	}
 
-	// Infer the server Type from the resolved auth mode when the caller leaves
-	// it empty. A foreign SSF transmitter authenticated via OAuth client
-	// credentials is ServerTypeSsf; everything else defaults to
-	// ServerTypeGosignals. The CLI deliberately leaves Type unset (PRD #83 /
-	// #85: no --type flag).
+	// Determine the server Type via well-known discovery when the caller leaves
+	// it empty. An explicit caller value always wins. The CLI deliberately
+	// leaves Type unset (PRD #83 / #85: no --type flag), so the server is
+	// authoritative. See resolveServerType for the discovery ladder.
 	if server.Type == "" {
-		if server.GetAuthMode() == model.AuthModeClient {
-			server.Type = model.ServerTypeSsf
-		} else {
-			server.Type = model.ServerTypeGosignals
-		}
+		server.Type = s.resolveServerType(ctx, server)
 	}
 
 	// We are assuming the client previously validated the server. We may still need to deal with connectivity issues where the admin server can reach the SSF server but this server cannot.
 
 	return s.serverDAO.Create(ctx, server)
+}
+
+// resolveServerType classifies a peer server by querying its well-known
+// metadata rather than guessing from the auth mode (issue #141). The only
+// positive signal for a goSignals peer is gosignals_version in SSF discovery;
+// PRM/OIDC are used for reachability + endpoint harvest, never to decide type.
+//
+// Discovery ladder (runs for OAuth-client / token / IAT modes):
+//
+//	1. SSF discovery parses AND has gosignals_version -> gosignals
+//	2. SSF discovery parses, but no gosignals_version  -> ssf
+//	3. No SSF discovery, but PRM resolves              -> ssf (harvest endpoints)
+//	4. Nothing resolves                                -> gosignals (provenance)
+//
+// SPIFFE skips the ladder and stays gosignals by provenance (closed trust
+// domain, never a foreign SSF peer; avoids a handshake just to classify).
+func (s *ServerService) resolveServerType(ctx context.Context, server *model.Server) string {
+	if server.GetAuthMode() == model.AuthModeSpiffe {
+		return model.ServerTypeGosignals
+	}
+
+	client, closeClient, err := oauthClient.GetClientForServer(ctx, server)
+	if err != nil {
+		srvLog.Debug("Type discovery: could not build client, defaulting to gosignals by provenance",
+			"alias", server.Alias, "err", err)
+		return model.ServerTypeGosignals
+	}
+	defer closeClient()
+
+	// Step 1 & 2: SSF discovery is the only signal that can yield gosignals.
+	if cfg, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, server.Host); err == nil && cfg != nil {
+		server.ServerConfiguration = cfg
+		if cfg.IsGoSignalsServer() {
+			return model.ServerTypeGosignals
+		}
+		return model.ServerTypeSsf
+	}
+
+	// Step 3: No (parseable) SSF discovery -> try PRM. An external RFC8935/8936
+	// server is ssf; harvest its overlapping metadata into ServerConfiguration.
+	if prm, err := wellKnownSupport.FetchProtectedResourceMetadata(ctx, client, server.Host); err == nil && prm != nil {
+		if server.ServerConfiguration == nil {
+			server.ServerConfiguration = &model.TransmitterConfiguration{}
+		}
+		server.ServerConfiguration.AuthorizationServers = prm.AuthorizationServers
+		server.ServerConfiguration.ScopesSupported = prm.ScopesSupported
+		server.ServerConfiguration.BearerMethodsSupported = prm.BearerMethodsSupported
+		return model.ServerTypeSsf
+	}
+
+	// Step 4: Nothing resolved -> keep gosignals by provenance. OAuth-client
+	// mode has already hard-failed reachability upstream, so this path is for
+	// token/IAT peers we simply could not probe.
+	srvLog.Debug("Type discovery: no SSF/PRM metadata, defaulting to gosignals by provenance",
+		"alias", server.Alias, "host", server.Host)
+	return model.ServerTypeGosignals
 }
 
 func (s *ServerService) GetServer(ctx context.Context, id string) (*model.Server, error) {
