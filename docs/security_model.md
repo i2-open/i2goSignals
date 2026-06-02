@@ -275,6 +275,64 @@ documented in [`configuration_properties.md`](configuration_properties.md),
 and the storage shape (sparse `enforce_at` index, lazy-purge lifecycle) is in
 [`adr/0003-split-subject-filter-storage.md`](adr/0003-split-subject-filter-storage.md).
 
+## Token administration
+
+The server tracks the management-plane tokens it issues (IATs and
+stream/client tokens) so an operator can inventory, introspect, and revoke
+them. The CLI surface is documented in
+[gosignals_tool.md](gosignals_tool.md#token-administration); the durable
+decisions are recorded in
+[ADR 0007](adr/0007-track-token-redemption-not-issuance.md) and
+[ADR 0008](adr/0008-two-revocation-endpoints.md).
+
+- **Inventory — `GET /token`.** Caller-scoped: the project scope is derived
+  from the caller's `AuthContext` (admin/root see every project; everyone else
+  is confined to their own project) and is **never** taken from a
+  client-supplied query parameter. Supports composable `type=IAT|STREAM` and
+  `active=true|false` filters. Each row is enriched with provenance.
+- **Provenance — redemption, not issuance (ADR 0007).** A token record carries
+  `last_redemption_ip` / `last_redemption_at` / `redemption_count` and an
+  immediate-`parent` JTI (an IAT is the lineage root; a stream-client token's
+  parent is the redeemed IAT; a delivery token's parent is the issuing
+  stream-client token). Recording redemption is best-effort — a failed write
+  logs at WARN and never blocks the operation.
+- **Introspection — `POST /introspect` (RFC 7662).** Reports `active`, the
+  RFC 7662 `token_type`, scopes, and the additive provenance extensions. A
+  cross-project, unknown, expired, or revoked target reports `active:false` —
+  no existence oracle.
+- **Revocation — two endpoints (ADR 0008).**
+  `DELETE /token/{jti}` is the admin-by-identifier path (revoke a named token
+  you can see in the inventory); a non-admin caller acting on another project's
+  token gets `403`. `POST /revoke` is the RFC 7009 self-service path where a
+  token holder presents the token string; per RFC 7009 §2.2 it **always**
+  returns HTTP 200 (unknown / already-revoked / expired / unparseable /
+  cross-project all look identical), so token existence is never leaked.
+- **Auto-expiry.** Expired records age out of the token collection via a
+  MongoDB TTL index measured from the token's `exp`, retained for
+  `I2SIG_TOKEN_RETENTION` (default 30 days). A revoked-but-unexpired record
+  stays visible (reporting `active:false`) until retention lapses, keeping
+  revocations auditable. Mongo-only; see
+  [configuration_properties.md](configuration_properties.md).
+
+## Inbound bearer-token validation (OAuth audience + algorithm allow-list)
+
+Inbound *external* OIDC bearer tokens (validated against
+`I2SIG_AUTH_OAUTH_SERVERS`) are subject to an audience check and a signing
+algorithm allow-list:
+
+- When `I2SIG_AUTH_OAUTH_AUDIENCE` is set, a token whose `aud` does not contain
+  that value is rejected. When unset, audience validation is disabled and a
+  one-time WARN is logged (fail-open-with-warning, to preserve existing
+  deployments).
+- External OIDC tokens are restricted to asymmetric signing algorithms
+  (`RS256/384/512`, `PS256/384/512`, `ES256/384/512`); symmetric HMAC (`HS*`) is
+  rejected.
+
+This is the cross-link placeholder for the OAuth inbound-bearer hardening
+landed under issue #144; the env vars are documented in
+[configuration_properties.md](configuration_properties.md#auth). A fuller
+treatment of the inbound-bearer threat model is deferred to a follow-up.
+
 ## Admin UI Issues
 
 The current command line stores local state and tokens in a local configuration file. The use of tokens for stream management 

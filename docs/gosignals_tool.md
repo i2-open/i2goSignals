@@ -22,6 +22,9 @@ The following table lists currently available commands in the goSignals tool.  N
 | create key                                     | No                        | Generate a key pair which can be used by a transmitter. i2goSignals provides a JWKS_URL endpoint for the public key            |
 | get key                                        | N/A                       | Returns a public key from a specified URL or i2goSignals server                                                                |
 | create iat                                     | No                        | Issues a new initial access token (IAT) which can be used to create streams within an identified project                       |
+| [token list](#token-administration)            | No                        | List issued tokens for a project or client, with redemption provenance and state (rendered as a table, or `--json`)            |
+| [token introspect](#token-administration)      | No                        | Introspect a token (RFC 7662) — reports `active`, `token_type`, scopes, and provenance extensions                              |
+| [token revoke](#token-administration)          | No                        | Revoke an issued token by its JTI (admin-by-identifier, `DELETE /token/{jti}`)                                                  |
 | <BR>**Stream Management**                      |                           | <BR>Creating and managing streams                                                                                              |
 | [create stream](#creating-streams)             |                           |                                                                                                                                |
 | create stream push publisher                   | Yes                       | Configures a transmission stream on i2goSignals using RFC8935 (HTTP SET Push)                                                  |
@@ -77,7 +80,10 @@ information is stored in the local session store.
 >       --email=STRING         Contact email for project
 >       --iat=STRING           Registration Initial Access Token (non-interactive)
 >       --token=STRING         Administration authorization token (non-interactive)
+>       --client-id=STRING     OAuth client_id for a foreign SSF transmitter (client-credentials grant)
 >       --client-secret=STRING OAuth client secret for non-interactive client-credentials use
+>       --token-url=STRING     OAuth token endpoint for the transmitter (optional; discovered if omitted)
+>       --scopes=SCOPES,...    Comma-separated OAuth scopes for the client-credentials grant
 >       --bootstrap            Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)
 > ```
 
@@ -161,6 +167,25 @@ The non-interactive flags select an alternative, exactly one applying:
 - `--bootstrap` — present `Bearer $I2SIG_BOOTSTRAP_TOKEN` to `/iat` and record
   the returned `reg`-only IAT. Errors if `I2SIG_BOOTSTRAP_TOKEN` is unset. Client
   auto-registration is skipped.
+- `--client-id=<id>` (with optional `--client-secret`, `--token-url`,
+  `--scopes`) — stage a **foreign SSF transmitter** to be polled via the OAuth
+  client-credentials grant. The non-secret fields (`client_id`, `token_url`,
+  `scopes`) are written to `config.json`; the **client secret is held in memory
+  only and never persisted**. No registration call is made at `add server`
+  time — the transmitter is registered later, on the receiver node, by
+  [`create stream poll receive --tx-alias`](#creating-streams). A server staged
+  this way is a polling target, not the active management server, so it does
+  **not** become the selected server. The SSF server *type* is inferred
+  server-side at registration from the transmitter's well-known metadata.
+
+Example (foreign SSF transmitter via OAuth client credentials):
+```shell
+goSignals> add server kc-ssf https://keycloak:9080/realms/ssf-demo \
+    --client-id=caep-dev-receiver \
+    --client-secret=$RECV_SECRET \
+    --token-url=https://keycloak:9080/realms/ssf-demo/protocol/openid-connect/token \
+    --scopes=ssf
+```
 
 > [!IMPORTANT]
 > The anonymous `/iat` path is **closed**. `add server` no longer auto-fetches an
@@ -358,6 +383,61 @@ include streams created by other means.  `ServerConfiguration` contains the SSF 
 > The information returned in many responses includes access tokens that should be kept confidential. They are persisted
 > in the goSignals tool configuration file (typically `~/.goSignals/config.json`).
 
+## Token Administration
+
+The `token` command group administers the management-plane tokens an
+i2goSignals server has issued (IATs and stream/client tokens). It is backed by
+the server's token inventory and the RFC 7662 introspection / RFC 7009-style
+revocation endpoints. All three subcommands authorize via the standard server
+bearer (the active `login` session, silently refreshed, or a configured client
+token). A non-admin caller is confined to tokens in its own project; `admin` /
+`root` see every project. See [Security Model](security_model.md#token-administration)
+for the authorization rules and provenance model, and ADRs
+[0007](adr/0007-track-token-redemption-not-issuance.md) /
+[0008](adr/0008-two-revocation-endpoints.md) for the durable decisions.
+
+> ```
+> Commands:
+> token list        List issued tokens
+>     --project=STRING   Filter by project ID
+>     --client=STRING    Filter by client ID
+>     --json             Emit the raw JSON response instead of a table
+> token introspect <token>   Introspect a token (RFC 7662)
+>     --json             Emit the raw JSON response instead of a table
+> token revoke <jti>         Revoke a token by JTI
+>     --json             Emit the raw JSON response instead of a confirmation message
+> ```
+
+- **`token list`** renders a human-readable table by default — JTI, client,
+  subject, type, scopes, issued, expires, state (revoked &gt; expired &gt;
+  active), and usage IP (the stream's last-seen IP or the IAT's last-redemption
+  IP). With neither `--client` nor `--project`, it defaults to the selected
+  server's current project; if none is known it errors asking for one. `--json`
+  emits the raw enriched response (for scripting / the GoSignalsAdmin backend).
+- **`token introspect <token>`** POSTs the token string to `/introspect`
+  (RFC 7662) and prints the JSON response: `active`, the RFC 7662 `token_type`,
+  scopes, and the additive provenance extensions (`parent`,
+  `last_redemption_ip`/`at`, `redemption_count`). A cross-project or
+  unknown/expired/revoked token reports `active:false` (no existence oracle).
+- **`token revoke <jti>`** revokes an issued token by its JTI via
+  `DELETE /token/{jti}` (admin-by-identifier). A subsequent introspect reports
+  `active:false`; the record itself stays visible until retention lapses
+  (`I2SIG_TOKEN_RETENTION`), so revocations remain auditable.
+
+```shell
+goSignals> token list                                   # current project, table
+goSignals> token list --client myclient --json
+goSignals> token introspect eyJhbGciOiJSUzI1...p9aw6935
+goSignals> token revoke 2Wb1QCh50csdAUB2LVm99gc1Xk3
+```
+
+> [!NOTE]
+> `token revoke <jti>` is the operator path (revoke a *named* token you can see
+> in `token list`). The server also exposes a separate RFC 7009 `POST /revoke`
+> endpoint where a token *holder* presents the token string to revoke itself;
+> that endpoint always returns HTTP 200 and is not surfaced as a CLI verb. See
+> [ADR 0008](adr/0008-two-revocation-endpoints.md).
+
 ## Creating Streams
 
 > ```
@@ -448,6 +528,21 @@ gosignals create stream push receive go1 \n
   --iss=cluster.scim.example.com \n
   --events=* \n
   --iss-jwks-url=http://goSignals1:8888/jwks/cluster.scim.example.com
+```
+
+To poll a **foreign SSF transmitter** that was staged with
+[`add server --client-id`](#adding-a-server), create a poll-receive stream with
+`--tx-alias`. This registers the transmitter on the receiver node
+(`POST /server`, **admin-only** — the IAT is not sufficient) and the server-side
+auto-registration path discovers the transmitter's `ssf-configuration`,
+provisions the upstream stream, and wires the returned poll endpoint. The OAuth
+client secret is resolved (staged → `--secret` flag → env) and rides on the
+request body only; it is never persisted.
+
+```shell
+goSignals create stream poll receive go2 \
+  --tx-alias=kc-ssf \
+  --events=*
 ```
 
 When entered, the goSignals tool will display the request it is about to send and will ask: `Proceed Y|[n]?`
