@@ -316,22 +316,65 @@ decisions are recorded in
 
 ## Inbound bearer-token validation (OAuth audience + algorithm allow-list)
 
-Inbound *external* OIDC bearer tokens (validated against
-`I2SIG_AUTH_OAUTH_SERVERS`) are subject to an audience check and a signing
-algorithm allow-list:
+goSignals accepts two kinds of bearer token on its management and SSF endpoints:
+**locally issued** tokens minted by this cluster (project IATs, ADMIN tokens —
+HMAC-signed against the cluster's own key) and **external OIDC** tokens issued by
+a third-party IdP and validated against the discovery URLs in
+`I2SIG_AUTH_OAUTH_SERVERS`. The hardening below (issue #144) applies to the
+**external** path only — `validateOAuthToken` in
+`internal/authUtil/auth_token.go`. Locally issued tokens are unaffected.
 
-- When `I2SIG_AUTH_OAUTH_AUDIENCE` is set, a token whose `aud` does not contain
-  that value is rejected. When unset, audience validation is disabled and a
-  one-time WARN is logged (fail-open-with-warning, to preserve existing
-  deployments).
-- External OIDC tokens are restricted to asymmetric signing algorithms
-  (`RS256/384/512`, `PS256/384/512`, `ES256/384/512`); symmetric HMAC (`HS*`) is
-  rejected.
+External tokens are subject to three controls.
 
-This is the cross-link placeholder for the OAuth inbound-bearer hardening
-landed under issue #144; the env vars are documented in
-[configuration_properties.md](configuration_properties.md#auth). A fuller
-treatment of the inbound-bearer threat model is deferred to a follow-up.
+### 1. Audience enforcement
+
+When `I2SIG_AUTH_OAUTH_AUDIENCE` is set, an external token whose `aud` claim does
+not contain that value is rejected (`jwt.WithAudience`). This stops a token
+minted for some *other* relying party in the same IdP from being replayed
+against goSignals (the token-substitution / confused-deputy case).
+
+When the variable is **unset**, audience is not checked and a one-time `WARN` is
+logged:
+
+```
+OAuth audience validation is DISABLED (I2SIG_AUTH_OAUTH_AUDIENCE unset);
+external OIDC tokens are accepted without an aud check
+```
+
+This **fail-open-with-warning** default preserves existing deployments that
+configured `I2SIG_AUTH_OAUTH_SERVERS` without an audience. **Operators running
+external OIDC in production should set `I2SIG_AUTH_OAUTH_AUDIENCE`** to the value
+their IdP stamps for goSignals; leaving it unset is a known-weaker posture, not a
+supported steady state.
+
+### 2. Signing-algorithm allow-list (algorithm-confusion defense)
+
+External OIDC tokens are restricted to **asymmetric** signing algorithms —
+`RS256/384/512`, `PS256/384/512`, `ES256/384/512` — and symmetric HMAC (`HS*`) is
+rejected (`jwt.WithValidMethods`). The security property is *excluding `HS*`*,
+which closes the classic JWT algorithm-confusion attack (an attacker re-signing a
+token with `HS256` using the IdP's public key as the HMAC secret). Allowing the
+full asymmetric set, rather than pinning a single variant, avoids breaking
+legitimate non-Keycloak IdPs that sign with ECDSA or RSA-PSS.
+
+This is **defense-in-depth**: the JWKS keyfunc already rejects HS256 (it returns
+an `*rsa.PublicKey`, so HMAC verification fails on key type), but
+`WithValidMethods` rejects the algorithm *before* the keyfunc runs and so closes
+the gap even for a JWKS that omits the `alg` parameter.
+
+### 3. No bare-`root` escalation from foreign realms
+
+`oidcRolesMatchScopes` requires an external token's realm role to match the
+specific accepted scope name. A foreign-realm role literally named `root`
+(`authSupport.ScopeRoot`) **no longer** confers cluster-wide privilege — a
+third-party-administered IdP must not be able to escalate into goSignals simply
+by defining a role with a privileged-sounding name. The `root` super-power
+remains intentional and unchanged for goSignals' **own** locally issued tokens
+(`EventAuthToken.IsScopeMatch`).
+
+The environment variables are catalogued in
+[configuration_properties.md](configuration_properties.md#auth); the decision
+record is in [DECISIONS_LOG.md](../DECISIONS_LOG.md) under the 2026-06-02 entry.
 
 ## Admin UI Issues
 
