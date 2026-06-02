@@ -664,6 +664,132 @@ func mintOAuthToken(t *testing.T, priv *rsa.PrivateKey, kid string, roles []stri
 	return s
 }
 
+// mintOAuthTokenHS256 mints an OIDC-shaped token signed with HS256 (a symmetric
+// method outside the RS256 allow-list). The kid matches the JWKS so routing
+// reaches the OAuth validator; the algorithm must be rejected by
+// jwt.WithValidMethods before any signature check succeeds.
+func mintOAuthTokenHS256(t *testing.T, kid string, roles []string) string {
+	t.Helper()
+	claims := authSupport.OidcClaims{
+		RealmAccess: struct {
+			Roles []string `json:"roles"`
+		}{Roles: roles},
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			Issuer:    "http://example-issuer",
+			Audience:  []string{"gosignals"},
+			ID:        goSet.GenerateJti(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token.Header["kid"] = kid
+	s, err := token.SignedString([]byte("shared-secret"))
+	if err != nil {
+		t.Fatalf("failed signing HS256 token: %v", err)
+	}
+	return s
+}
+
+// Issue #144: a token whose alg header is outside the RS256 allow-list must be
+// rejected by jwt.WithValidMethods, even though its kid matches the JWKS.
+func TestValidateAuthorizationAny_disallowedAlg_rejected(t *testing.T) {
+	srv, kid, _ := startOIDCTestServer(t)
+	defer srv.Close()
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	tok := mintOAuthTokenHS256(t, kid, []string{authSupport.ScopeEventDelivery})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code == http.StatusOK || got != nil {
+		t.Fatalf("expected rejection of HS256-signed token, got code=%d ctx=%+v", code, got)
+	}
+}
+
+// mintOAuthTokenAud mints an RS256 OIDC token with a caller-specified audience.
+func mintOAuthTokenAud(t *testing.T, priv *rsa.PrivateKey, kid string, roles []string, aud []string) string {
+	t.Helper()
+	claims := authSupport.OidcClaims{
+		RealmAccess: struct {
+			Roles []string `json:"roles"`
+		}{Roles: roles},
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			Issuer:    "http://example-issuer",
+			Audience:  aud,
+			ID:        goSet.GenerateJti(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = kid
+	s, err := token.SignedString(priv)
+	if err != nil {
+		t.Fatalf("failed signing oauth token: %v", err)
+	}
+	return s
+}
+
+// Issue #144: when I2SIG_AUTH_OAUTH_AUDIENCE is configured, a token whose `aud`
+// does not contain the expected audience must be rejected even though it is
+// validly signed and carries a matching role (audience-confusion defense).
+func TestValidateAuthorizationAny_wrongAudience_rejected(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_AUDIENCE", "gosignals")
+
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	tok := mintOAuthTokenAud(t, priv, kid, []string{authSupport.ScopeEventDelivery}, []string{"someone-else"})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code == http.StatusOK || got != nil {
+		t.Fatalf("expected rejection of wrong-audience token, got code=%d ctx=%+v", code, got)
+	}
+}
+
+// Issue #144: when I2SIG_AUTH_OAUTH_AUDIENCE is configured and the token's `aud`
+// matches, validation succeeds.
+func TestValidateAuthorizationAny_matchingAudience_success(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	t.Setenv("I2SIG_AUTH_OAUTH_AUDIENCE", "gosignals")
+
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	tok := mintOAuthTokenAud(t, priv, kid, []string{authSupport.ScopeEventDelivery}, []string{"gosignals"})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	if code != http.StatusOK || got == nil {
+		t.Fatalf("expected 200 for matching-audience token, got code=%d ctx=%+v", code, got)
+	}
+}
+
 func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()
@@ -732,7 +858,10 @@ func Test_oidcRolesMatchScopes(t *testing.T) {
 	}{
 		{[]string{"stream"}, []string{authSupport.ScopeStreamMgmt}, true},
 		{[]string{"EVENT"}, []string{authSupport.ScopeEventDelivery}, true},
-		{[]string{"root"}, []string{"anything"}, true},
+		// Issue #144: a foreign realm role literally named "root" must NOT confer
+		// cluster-wide privilege against an unrelated scope. External OIDC realm
+		// roles must match the specific accepted scope name.
+		{[]string{"root"}, []string{"anything"}, false},
 		{[]string{"viewer"}, []string{authSupport.ScopeStreamAdmin}, false},
 	}
 	for _, c := range cases {
@@ -761,6 +890,31 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamMgmt})
 	if code != http.StatusForbidden || got != nil {
 		t.Fatalf("expected Unauthorized with nil context, got code=%d ctx=%+v", code, got)
+	}
+}
+
+// Issue #144: a foreign OIDC token whose only realm role is literally "root" must
+// NOT authorize against an unrelated required scope. The bare-root shortcut is
+// removed; external roles must match the specific accepted scope name.
+func TestValidateAuthorizationAny_bareRootRole_notAuthorized(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+
+	auth.OAuthServer = nil
+	auth.mu.Lock()
+	auth.OAuthPubKeys = nil
+	auth.mu.Unlock()
+
+	tok := mintOAuthToken(t, priv, kid, []string{"root"})
+	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "1"})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamMgmt})
+	if code == http.StatusOK || got != nil {
+		t.Fatalf("expected bare-root role to be rejected, got code=%d ctx=%+v", code, got)
 	}
 }
 

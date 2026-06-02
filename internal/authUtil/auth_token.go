@@ -30,6 +30,18 @@ const AuthContextKey = "AuthContext"
 
 var authLog = logger.Sub("AUTH")
 
+// oauthAllowedAlgs pins the JWT signing algorithms accepted for EXTERNAL OIDC
+// tokens (issue #144). The list is the common asymmetric set published by OIDC
+// IdPs (RSA, RSA-PSS, ECDSA). The security property is excluding symmetric HMAC
+// (HS*) algorithms, which closes algorithm-confusion regardless of whether a JWKS
+// publishes an `alg` parameter; pinning to asymmetric-only (rather than a single
+// variant like RS256) avoids breaking legitimate non-Keycloak IdPs.
+var oauthAllowedAlgs = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
+
+// oauthAudWarnOnce ensures the "OAuth audience validation disabled" WARN is
+// emitted at most once per process when I2SIG_AUTH_OAUTH_AUDIENCE is unset.
+var oauthAudWarnOnce sync.Once
+
 type AuthContext struct {
 	StreamId      string
 	ProjectId     string
@@ -98,6 +110,25 @@ func (a *AuthIssuer) GetOAuthServers() []string {
 	}
 	a.OAuthServer = urls
 	return a.OAuthServer
+}
+
+// oauthParserOptions returns the jwt.ParserOption set applied to EXTERNAL OIDC
+// token validation (issue #144). It always pins the signing-algorithm allow-list
+// (oauthAllowedAlgs). When I2SIG_AUTH_OAUTH_AUDIENCE is configured it also enforces
+// the expected audience via jwt.WithAudience. When the audience is unset it logs a
+// one-time WARN and accepts as before (fail-open-with-warning) so existing
+// deployments without an audience configured are not broken.
+func oauthParserOptions() []jwt.ParserOption {
+	opts := []jwt.ParserOption{jwt.WithValidMethods(oauthAllowedAlgs)}
+	aud := strings.TrimSpace(os.Getenv("I2SIG_AUTH_OAUTH_AUDIENCE"))
+	if aud != "" {
+		opts = append(opts, jwt.WithAudience(aud))
+	} else {
+		oauthAudWarnOnce.Do(func() {
+			authLog.Warn("OAuth audience validation is DISABLED (I2SIG_AUTH_OAUTH_AUDIENCE unset); external OIDC tokens are accepted without an aud check")
+		})
+	}
+	return opts
 }
 
 // loadOAuthJWKS resolves JWKS from all configured OAuth/OIDC servers via their discovery documents
@@ -572,8 +603,9 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 	tryValidate := func() (*AuthContext, bool, bool) {
 		var scopeOK bool
 		var missingKID bool
+		parserOpts := oauthParserOptions()
 		for _, jwks := range pubKeys {
-			token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc)
+			token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc, parserOpts...)
 			if err != nil {
 				if strings.Contains(err.Error(), "key ID was not found") {
 					missingKID = true
@@ -648,11 +680,12 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 }
 
 func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
+	// Issue #144: External OIDC realm roles must match the specific accepted scope
+	// name. A foreign realm role literally named "root" (authSupport.ScopeRoot)
+	// must NOT confer cluster-wide privilege — that super-power is reserved for our
+	// own locally issued tokens (see EventAuthToken.IsScopeMatch).
 	for _, accepted := range scopesAccepted {
 		for _, role := range roles {
-			if strings.EqualFold(role, authSupport.ScopeRoot) {
-				return true
-			}
 			if strings.EqualFold(role, accepted) {
 				return true
 			}
