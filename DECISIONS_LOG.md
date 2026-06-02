@@ -3,6 +3,42 @@
 
 # Architectural Decision & Regression Log
 
+## [2026-06-02] OAuth bearer validation: audience + algorithm allow-list, drop bare-root role (issue #144)
+
+### Change
+External OIDC bearer-token validation in `internal/authUtil/auth_token.go`
+(`validateOAuthToken`) now (1) pins the signing-algorithm allow-list to `RS256`
+via `jwt.WithValidMethods`, (2) enforces an expected audience via
+`jwt.WithAudience` when `I2SIG_AUTH_OAUTH_AUDIENCE` is configured, and
+(3) no longer treats a foreign realm role literally named `root` as a
+cluster-wide grant in `oidcRolesMatchScopes`.
+
+### Decisions
+*   **Audience is fail-open-with-warning.** When `I2SIG_AUTH_OAUTH_AUDIENCE`
+    is unset, audience is not checked and a one-time WARN is logged
+    (`oauthAudWarnOnce`). This preserves existing deployments that configured
+    `OAUTH_SERVERS` without an audience; operators opt in to the stricter
+    posture by setting the new env var. Documented in
+    `docs/configuration_properties.md`.
+*   **Algorithm allow-list is fixed at `RS256`.** This is what the JWKS test
+    fixtures and Keycloak use. It is defense-in-depth: the keyfunc layer
+    already rejects HS256 (the JWKS publishes `alg=RS256` and the keyfunc
+    returns an `*rsa.PublicKey`, so HMAC verification fails on type), but
+    `WithValidMethods` rejects the algorithm *before* the keyfunc runs and
+    closes algorithm-confusion even for JWKS that omit `alg`. Because the
+    keyfunc already rejects HS256, `TestValidateAuthorizationAny_disallowedAlg_rejected`
+    asserts observable rejection rather than driving the implementation as a
+    strict RED.
+*   **Bare-root role removed for EXTERNAL tokens only.** The
+    `strings.EqualFold(role, authSupport.ScopeRoot)` shortcut in
+    `oidcRolesMatchScopes` is deleted: a third-party-administered realm that
+    defines a role named `root`/`admin` must not escalate to goSignals
+    privilege. The root super-power for our OWN locally issued tokens
+    (`authSupport.EventAuthToken.IsScopeMatch` / `ScopeRoot`) is intentional
+    and unchanged. The existing test case
+    `Test_oidcRolesMatchScopes {[]string{"root"}, []string{"anything"}, true}`
+    was deliberately flipped to expect `false`.
+
 ## [2026-05-20] SSF subject filtering — §9.1/§9.2 posture and relay-error tolerance (issue #103)
 
 ### Change
