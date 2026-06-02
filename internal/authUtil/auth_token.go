@@ -31,10 +31,12 @@ const AuthContextKey = "AuthContext"
 var authLog = logger.Sub("AUTH")
 
 // oauthAllowedAlgs pins the JWT signing algorithms accepted for EXTERNAL OIDC
-// tokens (issue #144). RS256 is what the JWKS test fixtures and Keycloak use.
-// Pinning here closes algorithm-confusion regardless of whether a JWKS publishes
-// an `alg` parameter.
-var oauthAllowedAlgs = []string{"RS256"}
+// tokens (issue #144). The list is the common asymmetric set published by OIDC
+// IdPs (RSA, RSA-PSS, ECDSA). The security property is excluding symmetric HMAC
+// (HS*) algorithms, which closes algorithm-confusion regardless of whether a JWKS
+// publishes an `alg` parameter; pinning to asymmetric-only (rather than a single
+// variant like RS256) avoids breaking legitimate non-Keycloak IdPs.
+var oauthAllowedAlgs = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
 
 // oauthAudWarnOnce ensures the "OAuth audience validation disabled" WARN is
 // emitted at most once per process when I2SIG_AUTH_OAUTH_AUDIENCE is unset.

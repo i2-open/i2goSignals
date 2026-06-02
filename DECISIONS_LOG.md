@@ -20,9 +20,13 @@ cluster-wide grant in `oidcRolesMatchScopes`.
     `OAUTH_SERVERS` without an audience; operators opt in to the stricter
     posture by setting the new env var. Documented in
     `docs/configuration_properties.md`.
-*   **Algorithm allow-list is fixed at `RS256`.** This is what the JWKS test
-    fixtures and Keycloak use. It is defense-in-depth: the keyfunc layer
-    already rejects HS256 (the JWKS publishes `alg=RS256` and the keyfunc
+*   **Algorithm allow-list is asymmetric-only.** The accepted set is the common
+    asymmetric algorithms published by OIDC IdPs — `RS256/384/512`,
+    `PS256/384/512`, `ES256/384/512` — and explicitly excludes symmetric HMAC
+    (`HS*`). The security property is excluding `HS*` (algorithm-confusion),
+    not pinning a single RSA variant; allowing the full asymmetric set avoids
+    breaking legitimate non-Keycloak IdPs that sign with ECDSA or RSA-PSS.
+    It is defense-in-depth: the keyfunc layer already rejects HS256 (the JWKS
     returns an `*rsa.PublicKey`, so HMAC verification fails on type), but
     `WithValidMethods` rejects the algorithm *before* the keyfunc runs and
     closes algorithm-confusion even for JWKS that omit `alg`. Because the
