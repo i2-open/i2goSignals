@@ -3,6 +3,40 @@
 
 # Architectural Decision & Regression Log
 
+## [2026-06-02] Token-admin endpoints honor OAuth/STS admin scope (PRD #128 regression)
+
+### Change
+The PRD #128 token-admin endpoints (`GET /token`, `DELETE /token/{jti}`,
+`POST /introspect`) returned nothing / acted as no-ops for an admin caller whose
+token was obtained via STS/OAuth exchange (e.g. the GoSignalsAdmin console).
+`ProjectScope` derived "admin sees all" from `AuthContext.Eat`, but
+`validateOAuthToken` returns `Eat: nil` for every OAuth-validated caller, so
+`ProjectScope(nil)` fell through to the fail-closed empty-project branch.
+
+`internal/authUtil/auth_token.go` now records the AS-granted scopes on the
+`AuthContext` (`GrantedScopes`), and `services.ProjectScope` takes the whole
+`*authUtil.AuthContext` (not just the EAT) so it can grant the unrestricted view
+to an OAuth caller on the strength of its `admin` grant.
+
+### Decisions
+*   **OAuth callers are gated on `admin`, never on a foreign `root`.** Consistent
+    with the [#144] decision below, a scope literally named `root` on an external
+    token does NOT confer the unrestricted view — only `admin` does. The root
+    super-power remains reserved for locally issued tokens (whose EAT roles are
+    still evaluated via `EventAuthToken.IsScopeMatch`, unchanged).
+*   **`ProjectScope` is the single source of truth, now AuthContext-typed.** Both
+    `ListForAuthority` and the single-token guard `callerMayActOnProject` route
+    through it, so the OAuth fix lands on list, revoke, and introspect together.
+    `internal/services` already depends on `internal/authUtil` (no new cycle).
+*   **Fail-closed posture is preserved.** A non-admin OAuth caller (no project,
+    no `admin`) still sees nothing rather than the empty-project bucket.
+*   **CLI `token list` reworked to match.** Dropped the `--project`/`--client`
+    flags (the server ignored them and the "must specify…" client-side error
+    blocked admins entirely); added an optional `<alias>` arg to target a
+    specific configured server and `--type`/`--active` filters that map to the
+    query params the server actually honors. CLI bearer/STS acquisition is
+    explicitly out of scope for this fix.
+
 ## [2026-06-02] OAuth bearer validation: audience + algorithm allow-list, drop bare-root role (issue #144)
 
 ### Change

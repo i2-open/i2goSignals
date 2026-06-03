@@ -822,6 +822,43 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 
 }
 
+// TestValidateAuthorizationAny_OAuthCarriesGrantedScopes is the auth-layer half
+// of the PRD-128 fix: an OAuth/STS token has no local EAT, so the AuthContext
+// must surface the AS-granted scopes (GrantedScopes) for downstream
+// project-scope decisions (admin sees all tokens). Without this the admin view
+// silently fails closed.
+func TestValidateAuthorizationAny_OAuthCarriesGrantedScopes(t *testing.T) {
+	srv, kid, priv := startOIDCTestServer(t)
+	defer srv.Close()
+
+	t.Setenv("I2SIG_AUTH_OAUTH_SERVERS", srv.URL+"/.well-known/openid-configuration")
+	auth.OAuthServer = nil
+	auth.OAuthPubKeys = nil
+
+	// An STS-exchanged admin token: realm role maps to our "admin" scope.
+	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeStreamAdmin})
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example/token", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamAdmin})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from ValidateAuthorizationAny, got %d", code)
+	}
+	if got == nil || !got.IsOAuthClient {
+		t.Fatalf("expected OAuth AuthContext, got %+v", got)
+	}
+	found := false
+	for _, s := range got.GrantedScopes {
+		if s == authSupport.ScopeStreamAdmin {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected GrantedScopes to include %q, got %v", authSupport.ScopeStreamAdmin, got.GrantedScopes)
+	}
+}
+
 func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	srv, kid, priv := startOIDCTestServer(t)
 	defer srv.Close()

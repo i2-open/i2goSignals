@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -59,8 +60,27 @@ func (s *TokenListAuthorityTestSuite) seedStream(hexID, projectID, ip string) {
 	s.NoError(s.streamDAO.Create(context.Background(), rec))
 }
 
-func nonAdmin(projectID string) *authSupport.EventAuthToken {
-	return &authSupport.EventAuthToken{ProjectId: projectID, Roles: []string{authSupport.ScopeStreamMgmt}}
+// nonAdmin builds a locally-issued, project-confined caller (stream scope).
+func nonAdmin(projectID string) *authUtil.AuthContext {
+	return localScoped(projectID, authSupport.ScopeStreamMgmt)
+}
+
+// localScoped builds a locally-issued caller (an EAT) with the given roles.
+func localScoped(projectID string, roles ...string) *authUtil.AuthContext {
+	return &authUtil.AuthContext{
+		ProjectId: projectID,
+		Eat:       &authSupport.EventAuthToken{ProjectId: projectID, Roles: roles},
+	}
+}
+
+// oauthScoped builds an OAuth/STS-validated caller. Such callers carry no local
+// EAT or ProjectId — their authority is only the scope set granted by the
+// trusted authorization server (issue #144).
+func oauthScoped(grantedScopes ...string) *authUtil.AuthContext {
+	return &authUtil.AuthContext{
+		IsOAuthClient: true,
+		GrantedScopes: grantedScopes,
+	}
 }
 
 func (s *TokenListAuthorityTestSuite) TestNonAdminSeesOnlyOwnProject() {
@@ -79,7 +99,7 @@ func (s *TokenListAuthorityTestSuite) TestAdminSeesAllProjects() {
 	s.track("j1", "p1", "c1", model.TokenTypeIAT, "")
 	s.track("j2", "p2", "c2", model.TokenTypeIAT, "")
 
-	admin := &authSupport.EventAuthToken{ProjectId: "p1", Roles: []string{authSupport.ScopeStreamAdmin}}
+	admin := localScoped("p1", authSupport.ScopeStreamAdmin)
 	rows, err := s.service.ListForAuthority(ctx, admin, TokenListFilters{})
 	s.NoError(err)
 	s.Len(rows, 2)
@@ -90,10 +110,49 @@ func (s *TokenListAuthorityTestSuite) TestRootSeesAllProjects() {
 	s.track("j1", "p1", "c1", model.TokenTypeIAT, "")
 	s.track("j2", "p2", "c2", model.TokenTypeIAT, "")
 
-	root := &authSupport.EventAuthToken{ProjectId: "", Roles: []string{authSupport.ScopeRoot}}
+	root := localScoped("", authSupport.ScopeRoot)
 	rows, err := s.service.ListForAuthority(ctx, root, TokenListFilters{})
 	s.NoError(err)
 	s.Len(rows, 2)
+}
+
+// TestOAuthAdminSeesAllProjects is the regression test for the PRD-128 bug: an
+// admin token obtained via STS/OAuth exchange validates through the OAuth path,
+// which carries no local EAT or ProjectId. It must still be treated as
+// unrestricted (see all projects) on the strength of its granted "admin" scope.
+func (s *TokenListAuthorityTestSuite) TestOAuthAdminSeesAllProjects() {
+	ctx := context.Background()
+	s.track("j1", "p1", "c1", model.TokenTypeIAT, "")
+	s.track("j2", "p2", "c2", model.TokenTypeIAT, "")
+
+	rows, err := s.service.ListForAuthority(ctx, oauthScoped(authSupport.ScopeStreamAdmin), TokenListFilters{})
+	s.NoError(err)
+	s.Len(rows, 2)
+}
+
+// TestOAuthNonAdminSeesNothing: an OAuth caller without admin scope carries no
+// ProjectId, so it must fail closed (see nothing) rather than leak the
+// empty-project bucket.
+func (s *TokenListAuthorityTestSuite) TestOAuthNonAdminSeesNothing() {
+	ctx := context.Background()
+	s.track("j1", "p1", "c1", model.TokenTypeIAT, "")
+
+	rows, err := s.service.ListForAuthority(ctx, oauthScoped(authSupport.ScopeStreamMgmt), TokenListFilters{})
+	s.NoError(err)
+	s.Len(rows, 0)
+}
+
+// TestOAuthForeignRootDoesNotSeeAll guards issue #144: a foreign realm role
+// literally named "root" must NOT confer the cluster super-power. Only an
+// "admin" grant unlocks the unrestricted view for OAuth callers.
+func (s *TokenListAuthorityTestSuite) TestOAuthForeignRootDoesNotSeeAll() {
+	ctx := context.Background()
+	s.track("j1", "p1", "c1", model.TokenTypeIAT, "")
+	s.track("j2", "p2", "c2", model.TokenTypeIAT, "")
+
+	rows, err := s.service.ListForAuthority(ctx, oauthScoped(authSupport.ScopeRoot), TokenListFilters{})
+	s.NoError(err)
+	s.Len(rows, 0)
 }
 
 func (s *TokenListAuthorityTestSuite) TestTypeFilter() {
@@ -162,4 +221,32 @@ func (s *TokenListAuthorityTestSuite) TestStreamRowJoinsLastSeenIP() {
 
 func TestTokenListAuthoritySuite(t *testing.T) {
 	suite.Run(t, new(TokenListAuthorityTestSuite))
+}
+
+// TestProjectScope locks the single source of truth for caller visibility,
+// covering both the locally-issued (EAT) and OAuth/STS (granted-scope) paths.
+func TestProjectScope(t *testing.T) {
+	cases := []struct {
+		name             string
+		authCtx          *authUtil.AuthContext
+		wantUnrestricted bool
+		wantProjectID    string
+	}{
+		{"nil", nil, false, ""},
+		{"local admin", localScoped("p1", authSupport.ScopeStreamAdmin), true, ""},
+		{"local root", localScoped("", authSupport.ScopeRoot), true, ""},
+		{"local stream confined", localScoped("p1", authSupport.ScopeStreamMgmt), false, "p1"},
+		{"oauth admin", oauthScoped(authSupport.ScopeStreamAdmin), true, ""},
+		{"oauth stream", oauthScoped(authSupport.ScopeStreamMgmt), false, ""},
+		{"oauth foreign root (#144)", oauthScoped(authSupport.ScopeRoot), false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			unrestricted, projectID := ProjectScope(c.authCtx)
+			if unrestricted != c.wantUnrestricted || projectID != c.wantProjectID {
+				t.Fatalf("ProjectScope() = (%v, %q), want (%v, %q)",
+					unrestricted, projectID, c.wantUnrestricted, c.wantProjectID)
+			}
+		})
+	}
 }

@@ -1267,11 +1267,7 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 // the callers turn into a no-op (revoke) or active:false (introspect) without
 // leaking existence.
 func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string) bool {
-	var eat *authSupport.EventAuthToken
-	if authCtx != nil {
-		eat = authCtx.Eat
-	}
-	unrestricted, projectID := services.ProjectScope(eat)
+	unrestricted, projectID := services.ProjectScope(authCtx)
 	if unrestricted {
 		return true
 	}
@@ -1475,7 +1471,7 @@ func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Re
 		filters.Active = &active
 	}
 
-	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx.Eat, filters)
+	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx, filters)
 	if err != nil {
 		serverLog.Error("Token list error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

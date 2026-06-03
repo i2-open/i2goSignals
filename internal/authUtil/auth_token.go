@@ -43,9 +43,15 @@ var oauthAllowedAlgs = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS
 var oauthAudWarnOnce sync.Once
 
 type AuthContext struct {
-	StreamId      string
-	ProjectId     string
-	Eat           *authSupport.EventAuthToken
+	StreamId  string
+	ProjectId string
+	Eat       *authSupport.EventAuthToken
+	// GrantedScopes carries the scopes the caller was actually granted. For an
+	// OAuth/STS-validated caller (IsOAuthClient) there is no local EAT to read
+	// roles from, so this is the only record of its authority — used by
+	// ProjectScope to grant the unrestricted (admin) view. For a locally issued
+	// token the EAT roles remain authoritative.
+	GrantedScopes []string
 	IsOAuthClient bool
 }
 
@@ -624,11 +630,16 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 					hasScopes = append(hasScopes, strings.Fields(claims.Scope)...)
 				}
 				if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
-					// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
+					// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access.
+					// GrantedScopes preserves the AS-granted scope set so downstream
+					// authorization (e.g. the token-admin endpoints' ProjectScope) can
+					// still tell an admin caller apart from a confined one — the nil
+					// Eat would otherwise erase that distinction.
 					return &AuthContext{
 						StreamId:      streamRequested,
 						ProjectId:     "",
 						Eat:           nil,
+						GrantedScopes: hasScopes,
 						IsOAuthClient: true,
 					}, true, false
 				}
