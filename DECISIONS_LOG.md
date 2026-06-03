@@ -3,6 +3,50 @@
 
 # Architectural Decision & Regression Log
 
+## [2026-06-02] tx_alias provisioning scope policy + shape-aware scope checks (issue #150)
+
+### Change
+Creating a stream against a FOREIGN transmitter (`tx_alias` set) failed with
+`403 "...requires admin scope"` for an admin caller whose token came via STS/OAuth
+(the GoSignalsAdmin console), even with scopes `admin, stream, reg, event`. Same
+root cause as [#128]: the gate added by the #139 tx_alias work read scope off
+`AuthContext.Eat`, but `validateOAuthToken` returns `Eat: nil` for every
+OAuth/STS caller, so the check denied them regardless of granted scope.
+
+`internal/authUtil/auth_token.go` gained two shape-aware predicates that are the
+ONLY sanctioned way to scope-check a caller:
+*   `AuthContext.HasScope(scopes...)` — OR semantics; reads `GrantedScopes` for
+    OAuth callers and the EAT for local tokens.
+*   `AuthContext.IsAuthorizedForStream(streamId, scopes...)` — the stream-bound
+    companion; preserves the EAT's stream-id binding for local tokens and reduces
+    to `HasScope` for OAuth callers (the bearer token carries no per-stream bind).
+
+Three direct-`Eat` scope sites were migrated onto them: the new tx_alias gate
+(`canProvisionTxAlias` in `api_stream_management.go`), the `StreamUpdate` payload
+re-check (`api_stream_management.go`), and the create-only key guard
+(`keyScopeOnly` in `api_out_of_band.go`).
+
+### Decisions
+*   **tx_alias provisioning needs `admin` OR the full `reg`+`stream`+`event` set.**
+    A `tx_alias` stream drives a remote stream's entire lifecycle (create, start,
+    poll), so a partial subset is not enough. `admin` covers it (local `root`
+    rides free); otherwise the caller must hold all three of register (create),
+    stream (manage/status), and event (poll) together. Register alone is
+    deliberately denied. Plain (non-`tx_alias`) stream create is unchanged and
+    still accepts any of `reg`/`stream`/`admin`.
+*   **`reg` is a first-class create scope, not a legacy IAT-only path.** A
+    `reg, stream, event` credential can create, start, monitor, and poll a plain
+    stream. Locked by `TestStreamCreate_PlainAtRegScopeSucceeds`.
+*   **Never scope-check via `authCtx.Eat` directly.** This bug class has bitten
+    twice (#128, #139); the `Eat`-only shape silently denies every OAuth/STS
+    caller. `HasScope`/`IsAuthorizedForStream` are now the house pattern. Foreign
+    `root` is never honored for OAuth callers, consistent with [#144].
+*   **`keyScopeOnly` migration also closed a latent privilege escalation.** The
+    old `Eat`-only predicate returned `false` for OAuth callers (`Eat==nil`),
+    which *exempted* an OAuth key-only caller from the create-only guard and
+    granted full key takeover/upload. Routing through `HasScope` correctly
+    restricts them; local behavior is unchanged. Locked by `TestKeyScopeOnly`.
+
 ## [2026-06-02] Token-admin endpoints honor OAuth/STS admin scope (PRD #128 regression)
 
 ### Change

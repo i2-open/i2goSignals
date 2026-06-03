@@ -26,6 +26,144 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// TestAuthContext_HasScope locks the shape-aware scope predicate that the
+// tx_alias and other admin gates rely on. The OAuth/STS rows are the ones the
+// bare authCtx.Eat check used to get wrong (nil Eat -> always denied), plus the
+// #144 rule that a foreign "root" scope confers nothing.
+func TestAuthContext_HasScope(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  *AuthContext
+		want bool
+	}{
+		{name: "nil context", ctx: nil, want: false},
+		{
+			name: "OAuth admin grant matches admin",
+			ctx:  &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"admin"}},
+			want: true,
+		},
+		{
+			name: "OAuth admin grant case-insensitive",
+			ctx:  &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"ADMIN"}},
+			want: true,
+		},
+		{
+			name: "OAuth non-admin grant denied",
+			ctx:  &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"stream", "event"}},
+			want: false,
+		},
+		{
+			name: "OAuth foreign root is not honored (#144)",
+			ctx:  &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"root"}},
+			want: false,
+		},
+		{
+			name: "OAuth empty grant denied",
+			ctx:  &AuthContext{IsOAuthClient: true, GrantedScopes: nil},
+			want: false,
+		},
+		{
+			name: "local EAT admin role matches",
+			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"admin"}}},
+			want: true,
+		},
+		{
+			name: "local EAT root rides free",
+			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"root"}}},
+			want: true,
+		},
+		{
+			name: "local EAT non-admin denied",
+			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}}},
+			want: false,
+		},
+		{
+			name: "local EAT nil denied",
+			ctx:  &AuthContext{Eat: nil},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.ctx.HasScope(authSupport.ScopeStreamAdmin); got != tc.want {
+				t.Errorf("HasScope(admin) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuthContext_IsAuthorizedForStream locks the stream-bound companion to
+// HasScope. The local rows prove the EAT's stream-id binding is still enforced
+// (an EAT issued for stream A cannot act on stream B); the OAuth rows prove the
+// check no longer silently denies an OAuth/STS caller (nil Eat) and reduces to a
+// pure scope check since the bearer token carries no per-stream binding.
+func TestAuthContext_IsAuthorizedForStream(t *testing.T) {
+	scopes := []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}
+	tests := []struct {
+		name     string
+		ctx      *AuthContext
+		streamId string
+		want     bool
+	}{
+		{name: "nil context", ctx: nil, streamId: "A", want: false},
+		{
+			name:     "local EAT bound to the same stream",
+			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
+			streamId: "A",
+			want:     true,
+		},
+		{
+			name:     "local EAT bound to a different stream denied",
+			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
+			streamId: "B",
+			want:     false,
+		},
+		{
+			name:     "local EAT unbound (any stream) with scope",
+			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}}},
+			streamId: "B",
+			want:     true,
+		},
+		{
+			name:     "local EAT lacking scope denied",
+			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"event"}, StreamIds: []string{"A"}}},
+			streamId: "A",
+			want:     false,
+		},
+		{
+			name:     "OAuth with stream scope authorized regardless of stream id",
+			ctx:      &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"stream"}},
+			streamId: "B",
+			want:     true,
+		},
+		{
+			name:     "OAuth admin authorized",
+			ctx:      &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"admin"}},
+			streamId: "B",
+			want:     true,
+		},
+		{
+			name:     "OAuth lacking scope denied",
+			ctx:      &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"event"}},
+			streamId: "B",
+			want:     false,
+		},
+		{
+			name:     "OAuth foreign root is not honored (#144)",
+			ctx:      &AuthContext{IsOAuthClient: true, GrantedScopes: []string{"root"}},
+			streamId: "B",
+			want:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.ctx.IsAuthorizedForStream(tc.streamId, scopes...); got != tc.want {
+				t.Errorf("IsAuthorizedForStream(%q) = %v, want %v", tc.streamId, got, tc.want)
+			}
+		})
+	}
+}
+
 type testTokensSet struct {
 	iat            string
 	client         string

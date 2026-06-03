@@ -433,6 +433,23 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 	StreamCreateHandler(sa, w, r)
 }
 
+// canProvisionTxAlias reports whether the caller may create a stream against a
+// FOREIGN transmitter (tx_alias set). Foreign-server provisioning resolves a
+// stored credential and drives the remote stream's whole lifecycle, so the caller
+// must hold either admin (root rides free) or the full operational scope set —
+// register (create) + stream (manage/status) + event (poll) together. Register
+// alone is deliberately not enough. It routes through HasScope (never a bare
+// authCtx.Eat check) so an OAuth/STS caller — whose Eat is nil and whose grants
+// live in GrantedScopes — is evaluated correctly rather than always denied (#128).
+func canProvisionTxAlias(authCtx *authUtil.AuthContext) bool {
+	if authCtx.HasScope(authSupport.ScopeStreamAdmin) {
+		return true
+	}
+	return authCtx.HasScope(authSupport.ScopeRegister) &&
+		authCtx.HasScope(authSupport.ScopeStreamMgmt) &&
+		authCtx.HasScope(authSupport.ScopeEventDelivery)
+}
+
 func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	// Creating a stream is a stream-management operation: a self-registered
 	// receiver (capped at stream_mgmt by the /register privilege ceiling, never
@@ -458,14 +475,14 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	// Provisioning a stream against a FOREIGN transmitter (tx_alias set) is a
 	// privileged operation: it resolves a stored foreign-server credential and
-	// remotely manages a stream on another node's behalf. It therefore requires
-	// admin (root rides free); the base stream/reg gate above is not enough. A
-	// plain create (no tx_alias) — the SCIM-receiver / unattended-IAT-bootstrap
-	// path — is unaffected. See ADR 0009.
-	if jsonRequest.TxAlias != nil && *jsonRequest.TxAlias != "" &&
-		!(authCtx.Eat != nil && authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})) {
-		serverLog.Warn("StreamCreate: denied tx_alias provisioning; admin scope required", "tx_alias", *jsonRequest.TxAlias, "projectId", authCtx.ProjectId)
-		http.Error(w, "creating a stream with tx_alias (foreign-server provisioning) requires admin scope; use an admin session or an admin client token", http.StatusForbidden)
+	// remotely manages a stream on another node's behalf. The caller must be able
+	// to operate the whole foreign stream lifecycle, so the base stream/reg gate
+	// above is not enough — it needs canProvisionTxAlias (admin, or the full
+	// reg+stream+event set). A plain create (no tx_alias) — the SCIM-receiver /
+	// unattended-IAT-bootstrap path — is unaffected. See ADR 0009.
+	if jsonRequest.TxAlias != nil && *jsonRequest.TxAlias != "" && !canProvisionTxAlias(authCtx) {
+		serverLog.Warn("StreamCreate: denied tx_alias provisioning; needs admin or reg+stream+event", "tx_alias", *jsonRequest.TxAlias, "projectId", authCtx.ProjectId)
+		http.Error(w, "creating a stream with tx_alias (foreign-server provisioning) requires admin scope, or the full reg+stream+event scope set", http.StatusForbidden)
 		return
 	}
 
@@ -542,8 +559,10 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check
-	if authCtx.Eat != nil && !authCtx.Eat.IsAuthorized(jsonRequest.StreamConfiguration.Id, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}) {
+	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check.
+	// Use IsAuthorizedForStream (not a bare Eat check) so local tokens keep their stream-id binding while
+	// OAuth/STS callers — who carry no per-stream binding — are still validated against the granted scope set.
+	if !authCtx.IsAuthorizedForStream(jsonRequest.StreamConfiguration.Id, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
