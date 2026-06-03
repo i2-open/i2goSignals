@@ -25,7 +25,7 @@
 - **Race**: When testing concurrent code, use `go test -race` to detect potential race conditions, but ensure reasonable timeouts or lock detections to ensure tests finish within 5 minutes.
 
 #### Debugging and Diagnosis
-- **Decision Log**: Maintain a log of all changes and decisions to help prevent repeated attempts to do the same fix and regressions in general.  See `./DECISIONS_LOG.md`
+- **Decision Records**: Capture non-trivial architecture, dependency, or definition decisions as an ADR under `docs/adr/` (next sequential number), so the rationale is preserved and the same fix/regression is not re-attempted. Routine bug fixes belong in git history, not an ADR.
 - **Implement tests**: Implement reproduction tests when feasible and keep if resonable
 
 #### Coding Standards

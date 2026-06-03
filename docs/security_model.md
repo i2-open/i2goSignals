@@ -374,7 +374,7 @@ remains intentional and unchanged for goSignals' **own** locally issued tokens
 
 The environment variables are catalogued in
 [configuration_properties.md](configuration_properties.md#auth); the decision
-record is in [DECISIONS_LOG.md](../DECISIONS_LOG.md) under the 2026-06-02 entry.
+record is [ADR 0012](adr/0012-scope-checks-via-hasscope-not-eat.md).
 
 ## Admin UI Issues
 

@@ -6,7 +6,7 @@
 All server configuration is environment-variable driven; there is no config
 file. This document is the canonical reference. Section names match the
 v0.11.0 prefix taxonomy described in
-[`DECISIONS_LOG.md`](../DECISIONS_LOG.md).
+[ADR 0011](adr/0011-environment-variable-taxonomy.md).
 
 ## Migrating from pre-v0.11.0 names
 
