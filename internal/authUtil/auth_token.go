@@ -43,10 +43,67 @@ var oauthAllowedAlgs = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS
 var oauthAudWarnOnce sync.Once
 
 type AuthContext struct {
-	StreamId      string
-	ProjectId     string
-	Eat           *authSupport.EventAuthToken
+	StreamId  string
+	ProjectId string
+	Eat       *authSupport.EventAuthToken
+	// GrantedScopes carries the scopes the caller was actually granted. For an
+	// OAuth/STS-validated caller (IsOAuthClient) there is no local EAT to read
+	// roles from, so this is the only record of its authority — used by
+	// ProjectScope to grant the unrestricted (admin) view. For a locally issued
+	// token the EAT roles remain authoritative.
+	GrantedScopes []string
 	IsOAuthClient bool
+}
+
+// HasScope reports whether the caller holds any of the named scopes, accounting
+// for both caller shapes so a scope check never silently fails for an OAuth/STS
+// caller. A locally issued token's EAT is authoritative (root rides free, per
+// EventAuthToken.IsScopeMatch). An OAuth/STS-validated caller has no EAT; its
+// authority is the scope set granted by the trusted authorization server
+// (GrantedScopes), matched literally and case-insensitively. A foreign scope
+// literally named "root" is never honored for OAuth callers (issue #144) — that
+// super-power is reserved for locally issued tokens.
+//
+// Prefer this over reaching into authCtx.Eat directly: an Eat-only check denies
+// every OAuth/STS caller because their Eat is nil (see #128, #139).
+func (a *AuthContext) HasScope(scopes ...string) bool {
+	if a == nil {
+		return false
+	}
+	if a.IsOAuthClient {
+		for _, want := range scopes {
+			if strings.EqualFold(want, authSupport.ScopeRoot) {
+				continue // foreign root is never honored (#144)
+			}
+			for _, granted := range a.GrantedScopes {
+				if strings.EqualFold(granted, want) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return a.Eat != nil && a.Eat.IsScopeMatch(scopes)
+}
+
+// IsAuthorizedForStream reports whether the caller may act on a specific stream
+// with any of the named scopes. It is the stream-bound companion to HasScope and
+// must be used in place of a bare authCtx.Eat.IsAuthorized check, which denies
+// every OAuth/STS caller because their Eat is nil (see #128, #139).
+//
+// For a locally issued token the EAT is authoritative: it both checks scope and
+// enforces the token's stream-id binding (an EAT issued for stream A cannot act on
+// stream B). For an OAuth/STS-validated caller there is no per-stream binding in
+// the bearer token — its authority is the granted scope set — so this reduces to
+// HasScope(scopes...). A foreign scope named "root" is never honored (#144).
+func (a *AuthContext) IsAuthorizedForStream(streamId string, scopes ...string) bool {
+	if a == nil {
+		return false
+	}
+	if a.IsOAuthClient {
+		return a.HasScope(scopes...)
+	}
+	return a.Eat != nil && a.Eat.IsAuthorized(streamId, scopes)
 }
 
 type AuthIssuer struct {
@@ -624,11 +681,16 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 					hasScopes = append(hasScopes, strings.Fields(claims.Scope)...)
 				}
 				if oidcRolesMatchScopes(hasScopes, scopesAccepted) {
-					// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access
+					// External tokens don't carry our ProjectId or stream restrictions; accept scope-based access.
+					// GrantedScopes preserves the AS-granted scope set so downstream
+					// authorization (e.g. the token-admin endpoints' ProjectScope) can
+					// still tell an admin caller apart from a confined one — the nil
+					// Eat would otherwise erase that distinction.
 					return &AuthContext{
 						StreamId:      streamRequested,
 						ProjectId:     "",
 						Eat:           nil,
+						GrantedScopes: hasScopes,
 						IsOAuthClient: true,
 					}, true, false
 				}

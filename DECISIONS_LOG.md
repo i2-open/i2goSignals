@@ -3,6 +3,84 @@
 
 # Architectural Decision & Regression Log
 
+## [2026-06-02] tx_alias provisioning scope policy + shape-aware scope checks (issue #150)
+
+### Change
+Creating a stream against a FOREIGN transmitter (`tx_alias` set) failed with
+`403 "...requires admin scope"` for an admin caller whose token came via STS/OAuth
+(the GoSignalsAdmin console), even with scopes `admin, stream, reg, event`. Same
+root cause as [#128]: the gate added by the #139 tx_alias work read scope off
+`AuthContext.Eat`, but `validateOAuthToken` returns `Eat: nil` for every
+OAuth/STS caller, so the check denied them regardless of granted scope.
+
+`internal/authUtil/auth_token.go` gained two shape-aware predicates that are the
+ONLY sanctioned way to scope-check a caller:
+*   `AuthContext.HasScope(scopes...)` — OR semantics; reads `GrantedScopes` for
+    OAuth callers and the EAT for local tokens.
+*   `AuthContext.IsAuthorizedForStream(streamId, scopes...)` — the stream-bound
+    companion; preserves the EAT's stream-id binding for local tokens and reduces
+    to `HasScope` for OAuth callers (the bearer token carries no per-stream bind).
+
+Three direct-`Eat` scope sites were migrated onto them: the new tx_alias gate
+(`canProvisionTxAlias` in `api_stream_management.go`), the `StreamUpdate` payload
+re-check (`api_stream_management.go`), and the create-only key guard
+(`keyScopeOnly` in `api_out_of_band.go`).
+
+### Decisions
+*   **tx_alias provisioning needs `admin` OR the full `reg`+`stream`+`event` set.**
+    A `tx_alias` stream drives a remote stream's entire lifecycle (create, start,
+    poll), so a partial subset is not enough. `admin` covers it (local `root`
+    rides free); otherwise the caller must hold all three of register (create),
+    stream (manage/status), and event (poll) together. Register alone is
+    deliberately denied. Plain (non-`tx_alias`) stream create is unchanged and
+    still accepts any of `reg`/`stream`/`admin`.
+*   **`reg` is a first-class create scope, not a legacy IAT-only path.** A
+    `reg, stream, event` credential can create, start, monitor, and poll a plain
+    stream. Locked by `TestStreamCreate_PlainAtRegScopeSucceeds`.
+*   **Never scope-check via `authCtx.Eat` directly.** This bug class has bitten
+    twice (#128, #139); the `Eat`-only shape silently denies every OAuth/STS
+    caller. `HasScope`/`IsAuthorizedForStream` are now the house pattern. Foreign
+    `root` is never honored for OAuth callers, consistent with [#144].
+*   **`keyScopeOnly` migration also closed a latent privilege escalation.** The
+    old `Eat`-only predicate returned `false` for OAuth callers (`Eat==nil`),
+    which *exempted* an OAuth key-only caller from the create-only guard and
+    granted full key takeover/upload. Routing through `HasScope` correctly
+    restricts them; local behavior is unchanged. Locked by `TestKeyScopeOnly`.
+
+## [2026-06-02] Token-admin endpoints honor OAuth/STS admin scope (PRD #128 regression)
+
+### Change
+The PRD #128 token-admin endpoints (`GET /token`, `DELETE /token/{jti}`,
+`POST /introspect`) returned nothing / acted as no-ops for an admin caller whose
+token was obtained via STS/OAuth exchange (e.g. the GoSignalsAdmin console).
+`ProjectScope` derived "admin sees all" from `AuthContext.Eat`, but
+`validateOAuthToken` returns `Eat: nil` for every OAuth-validated caller, so
+`ProjectScope(nil)` fell through to the fail-closed empty-project branch.
+
+`internal/authUtil/auth_token.go` now records the AS-granted scopes on the
+`AuthContext` (`GrantedScopes`), and `services.ProjectScope` takes the whole
+`*authUtil.AuthContext` (not just the EAT) so it can grant the unrestricted view
+to an OAuth caller on the strength of its `admin` grant.
+
+### Decisions
+*   **OAuth callers are gated on `admin`, never on a foreign `root`.** Consistent
+    with the [#144] decision below, a scope literally named `root` on an external
+    token does NOT confer the unrestricted view — only `admin` does. The root
+    super-power remains reserved for locally issued tokens (whose EAT roles are
+    still evaluated via `EventAuthToken.IsScopeMatch`, unchanged).
+*   **`ProjectScope` is the single source of truth, now AuthContext-typed.** Both
+    `ListForAuthority` and the single-token guard `callerMayActOnProject` route
+    through it, so the OAuth fix lands on list, revoke, and introspect together.
+    `internal/services` already depends on `internal/authUtil` (no new cycle).
+*   **Fail-closed posture is preserved.** A non-admin OAuth caller (no project,
+    no `admin`) still sees nothing rather than the empty-project bucket.
+*   **CLI `token list` reworked to match.** Dropped the `--project`/`--client`
+    flags (the server ignored them and the "must specify…" client-side error
+    blocked admins entirely); added an optional `<alias>` arg to target a
+    specific configured server and `--type`/`--active` filters that map to the
+    query params the server actually honors. CLI bearer/STS acquisition is
+    explicitly out of scope for this fix.
+
 ## [2026-06-02] OAuth bearer validation: audience + algorithm allow-list, drop bare-root role (issue #144)
 
 ### Change

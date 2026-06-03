@@ -149,15 +149,19 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 // keyScopeOnly reports whether the AuthContext carries the narrow "key" scope
 // but NOT a broader stream_admin/root capability. Such a caller is a bootstrap
 // identity and is restricted to create-only key operations.
+//
+// It routes through HasScope (never a bare authCtx.Eat check) so the restriction
+// applies to OAuth/STS callers too: an Eat-only check returned false for them
+// (Eat==nil), which silently exempted an OAuth key-only caller from the
+// create-only guard and granted full key takeover/upload (see #128, #139, #150).
 func keyScopeOnly(authCtx *authUtil.AuthContext) bool {
-	if authCtx == nil || authCtx.Eat == nil {
+	if authCtx == nil {
 		return false
 	}
-	if authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin}) ||
-		authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeRoot}) {
+	if authCtx.HasScope(authSupport.ScopeStreamAdmin) || authCtx.HasScope(authSupport.ScopeRoot) {
 		return false
 	}
-	return authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeKey})
+	return authCtx.HasScope(authSupport.ScopeKey)
 }
 
 // requestIsKeyTakeover reports whether the key request asks to replace or rotate
@@ -1267,11 +1271,7 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 // the callers turn into a no-op (revoke) or active:false (introspect) without
 // leaking existence.
 func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string) bool {
-	var eat *authSupport.EventAuthToken
-	if authCtx != nil {
-		eat = authCtx.Eat
-	}
-	unrestricted, projectID := services.ProjectScope(eat)
+	unrestricted, projectID := services.ProjectScope(authCtx)
 	if unrestricted {
 		return true
 	}
@@ -1475,7 +1475,7 @@ func (sa *SignalsApplication) TokenListHandler(w http.ResponseWriter, r *http.Re
 		filters.Active = &active
 	}
 
-	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx.Eat, filters)
+	tokens, err := sa.GetTokenService().ListForAuthority(r.Context(), authCtx, filters)
 	if err != nil {
 		serverLog.Error("Token list error", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

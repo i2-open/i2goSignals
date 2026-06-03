@@ -174,6 +174,71 @@ func TestTokenListCmd_TableByDefault(t *testing.T) {
     assert.NotContains(t, out, `"jti":`, "default output should be a table, not JSON")
 }
 
+// TestTokenListCmd_NoProjectFilter is the CLI half of the PRD-128 fix: the
+// command must NOT inject a project_id/client_id query param (the server ignores
+// them and derives scope from the bearer), and must not hard-error when no
+// filter is given. An admin caller relies on this to list all tokens.
+func TestTokenListCmd_NoProjectFilter(t *testing.T) {
+    var gotQuery string
+    stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotQuery = r.URL.RawQuery
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(fixedTokenRecords())
+    }))
+    defer stub.Close()
+
+    cli := configuredTokenCLI(t, stub.URL)
+    require.NoError(t, (&TokenListCmd{}).Run(cli))
+    assert.NotContains(t, gotQuery, "project_id", "token list must not send project_id")
+    assert.NotContains(t, gotQuery, "client_id", "token list must not send client_id")
+}
+
+// TestTokenListCmd_TypeAndActiveFilters proves the supported server-side filters
+// (type, active) are passed through as query params.
+func TestTokenListCmd_TypeAndActiveFilters(t *testing.T) {
+    var gotQuery string
+    stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        gotQuery = r.URL.RawQuery
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(fixedTokenRecords())
+    }))
+    defer stub.Close()
+
+    cli := configuredTokenCLI(t, stub.URL)
+    require.NoError(t, (&TokenListCmd{Type: "IAT", Active: "true"}).Run(cli))
+    assert.Contains(t, gotQuery, "type=IAT")
+    assert.Contains(t, gotQuery, "active=true")
+}
+
+// TestTokenListCmd_Alias proves "token list <alias>" targets the named server
+// rather than the currently-selected one.
+func TestTokenListCmd_Alias(t *testing.T) {
+    var selectedHit, aliasHit bool
+    selected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        selectedHit = true
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(fixedTokenRecords())
+    }))
+    defer selected.Close()
+    other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        aliasHit = true
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(fixedTokenRecords())
+    }))
+    defer other.Close()
+
+    cli := configuredTokenCLI(t, selected.URL)
+    cli.Data.Servers["gs2"] = SsfServer{
+        Alias:       "gs2",
+        Host:        other.URL,
+        ClientToken: "gs2-token",
+    }
+
+    require.NoError(t, (&TokenListCmd{Alias: "gs2"}).Run(cli))
+    assert.True(t, aliasHit, "token list gs2 should hit the gs2 server")
+    assert.False(t, selectedHit, "token list gs2 should not hit the selected server")
+}
+
 // TestTokenIntrospectCmd_UsesSessionBearer proves introspect authenticates via
 // the session bearer.
 func TestTokenIntrospectCmd_UsesSessionBearer(t *testing.T) {

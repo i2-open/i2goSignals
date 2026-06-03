@@ -2137,29 +2137,30 @@ func renderTokenTable(records []tokenListEntry) string {
 }
 
 type TokenListCmd struct {
-	Project string `help:"Filter by project ID"`
-	Client  string `help:"Filter by client ID"`
-	Json    bool   `help:"Emit the raw JSON response instead of a table"`
+	Alias  string `arg:"" optional:"" help:"Alias of the server to query (default is the selected server)"`
+	Type   string `help:"Filter by token type: IAT or STREAM" enum:"IAT,STREAM," default:""`
+	Active string `help:"Filter by liveness: true (active) or false (revoked/expired)" enum:"true,false," default:""`
+	Json   bool   `help:"Emit the raw JSON response instead of a table"`
 }
 
 func (t *TokenListCmd) Run(cli *CLI) error {
-	server, err := cli.Data.GetServer("")
+	server, err := cli.Data.GetServer(t.Alias)
 	if err != nil {
 		return err
 	}
 
+	// Project/client scope is derived server-side from the caller's bearer, never
+	// from a query param. The only filters the server honors are type and active.
+	q := url.Values{}
+	if t.Type != "" {
+		q.Set("type", t.Type)
+	}
+	if t.Active != "" {
+		q.Set("active", t.Active)
+	}
 	reqUrl := server.Host + "/token"
-	if t.Client != "" {
-		reqUrl += "?client_id=" + t.Client
-	} else if t.Project != "" {
-		reqUrl += "?project_id=" + t.Project
-	} else {
-		// Default to current project if available
-		if server.ProjectId != "" {
-			reqUrl += "?project_id=" + server.ProjectId
-		} else {
-			return errors.New("must specify --project or --client")
-		}
+	if len(q) > 0 {
+		reqUrl += "?" + q.Encode()
 	}
 
 	req, err := http.NewRequest(http.MethodGet, reqUrl, nil)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -44,21 +45,48 @@ type TokenListFilters struct {
 	Active *bool
 }
 
-// ProjectScope derives the project visibility for a caller from its
-// AuthContext, never from a client-supplied query parameter. admin/root
-// callers are unrestricted (see all projects); every other caller is confined
-// to its own AuthContext.ProjectId. This is the shared scoping derivation that
-// the single-token endpoints (revoke/introspect) reuse.
+// ProjectScope derives the project visibility for a caller from its validated
+// AuthContext, never from a client-supplied query parameter. It is the single
+// source of truth reused by the token-admin endpoints (list/revoke/introspect).
+//
+// Two caller shapes feed in:
+//   - Locally issued tokens carry an EAT whose roles are authoritative:
+//     root/admin are unrestricted (see all projects); everyone else is confined
+//     to the EAT's own ProjectId.
+//   - OAuth/STS-validated callers carry no EAT or ProjectId — only the scope set
+//     granted by the trusted authorization server (GrantedScopes). An "admin"
+//     grant is unrestricted. A scope literally named "root" is deliberately NOT
+//     honored for these foreign callers (issue #144): only a locally issued
+//     token may wield root.
 //
 // Returns (unrestricted, confinedProjectID).
-func ProjectScope(authCtx *authSupport.EventAuthToken) (bool, string) {
+func ProjectScope(authCtx *authUtil.AuthContext) (bool, string) {
 	if authCtx == nil {
 		return false, ""
 	}
-	if authCtx.IsScopeMatch([]string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin}) {
+	if authCtx.IsOAuthClient {
+		if containsFold(authCtx.GrantedScopes, authSupport.ScopeStreamAdmin) {
+			return true, ""
+		}
+		return false, ""
+	}
+	if authCtx.Eat == nil {
+		return false, ""
+	}
+	if authCtx.Eat.IsScopeMatch([]string{authSupport.ScopeRoot, authSupport.ScopeStreamAdmin}) {
 		return true, ""
 	}
-	return false, authCtx.ProjectId
+	return false, authCtx.Eat.ProjectId
+}
+
+// containsFold reports whether scopes contains target (case-insensitive).
+func containsFold(scopes []string, target string) bool {
+	for _, s := range scopes {
+		if strings.EqualFold(s, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *TokenService) TrackToken(ctx context.Context, claims *authSupport.EventAuthToken, parent string, tokenPurpose string) error {
@@ -197,7 +225,7 @@ func (s *TokenService) ListByClient(ctx context.Context, clientID string) ([]*mo
 // param. The type and active filters compose. STREAM-typed rows are joined to
 // the stream's live RemoteAddress (last-seen IP); the IP is not stored on the
 // token. The result is capped (cap-and-log) since there is no pagination here.
-func (s *TokenService) ListForAuthority(ctx context.Context, authCtx *authSupport.EventAuthToken, filters TokenListFilters) ([]*model.TokenListEntry, error) {
+func (s *TokenService) ListForAuthority(ctx context.Context, authCtx *authUtil.AuthContext, filters TokenListFilters) ([]*model.TokenListEntry, error) {
 	unrestricted, projectID := ProjectScope(authCtx)
 
 	// Fail closed: a confined caller with no resolved project (e.g. an OAuth

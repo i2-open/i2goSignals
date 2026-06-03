@@ -398,9 +398,10 @@ for the authorization rules and provenance model, and ADRs
 
 > ```
 > Commands:
-> token list        List issued tokens
->     --project=STRING   Filter by project ID
->     --client=STRING    Filter by client ID
+> token list [<alias>]       List issued tokens
+>     <alias>            Server to query (default is the selected server)
+>     --type=STRING      Filter by token type: IAT or STREAM
+>     --active=STRING    Filter by liveness: true (active) or false (revoked/expired)
 >     --json             Emit the raw JSON response instead of a table
 > token introspect <token>   Introspect a token (RFC 7662)
 >     --json             Emit the raw JSON response instead of a table
@@ -408,11 +409,15 @@ for the authorization rules and provenance model, and ADRs
 >     --json             Emit the raw JSON response instead of a confirmation message
 > ```
 
-- **`token list`** renders a human-readable table by default — JTI, client,
-  subject, type, scopes, issued, expires, state (revoked &gt; expired &gt;
-  active), and usage IP (the stream's last-seen IP or the IAT's last-redemption
-  IP). With neither `--client` nor `--project`, it defaults to the selected
-  server's current project; if none is known it errors asking for one. `--json`
+- **`token list [<alias>]`** renders a human-readable table by default — JTI,
+  client, subject, type, scopes, issued, expires, state (revoked &gt; expired
+  &gt; active), and usage IP (the stream's last-seen IP or the IAT's
+  last-redemption IP). The optional `<alias>` selects which configured server to
+  query (default is the selected server). Project/client visibility is derived
+  server-side from the caller's bearer — never from a query param — so there are
+  no `--project`/`--client` flags: a non-admin sees its own project, `admin`/`root`
+  (including an admin scope obtained via STS exchange) see every project. The
+  `--type` (IAT|STREAM) and `--active` (true|false) filters compose. `--json`
   emits the raw enriched response (for scripting / the GoSignalsAdmin backend).
 - **`token introspect <token>`** POSTs the token string to `/introspect`
   (RFC 7662) and prints the JSON response: `active`, the RFC 7662 `token_type`,
