@@ -94,7 +94,7 @@ All server config is environment-variable driven (no config file). `docs/configu
 
 - **Indentation: 4 spaces, never tabs.** External formatters/linters in this repo may reformat tabs, but our own edits stay 4-space.
 - **Logging:** use `internal/logger` (wraps `slog`). Create sub-loggers per component: `var eventLogger = logger.Sub("ROUTER")`. Log levels via `LOG_LEVEL` env var.
-- **Decisions log:** non-trivial design changes go in `DECISIONS_LOG.md` to prevent re-litigating the same fix.
+- **Decisions log:** Write an ADR for non-trivial architecture, or dependency or definition requirements that should be remembered.
 - **MongoDB code:** follow patterns in `internal/providers/dbProviders/mongo_provider/`. The provider is responsible for lease semantics — don't reach into Mongo from `eventRouter` or service layers.
 - **Pre-existing `go vet` warnings** in `internal/model`, `pkg/goScim`, and `cmd/goSignals` (duplicate JSON tags, mutex copies). Don't be alarmed by them; don't add new ones.
 - **Package boundary:** `pkg/goSet*` packages must not import anything under `internal/`. They are intended as standalone libraries.
@@ -111,14 +111,21 @@ All server config is environment-variable driven (no config file). `docs/configu
 
 ## Claude Development work cycle
 
-1. Each new idea starts with the skil /grill-me or /grill-with-docs in plan mode to work to a common understanding
-2. /to-prd to write a PRD and commit to Github
-3. /to-issues to create Github issues (slices)
-4. Create a new branch for the PRD. Each issue in the PRD will be part of a common PR
-5. Implement each issue using /tdd skill and commit to Github. Check to see if other claude clients or agents are running to avoid conflicts. If the issue is not HITL, use an independent agent with its own context to run the /tdd skill. When an issue is complete commit it but do not push.
-6. Once all issues are implemented, complete QA cycle assessing whether all issues are complete in the PRD. Push commits and open a documented PR.
-7. Request HITL QA approval
-8. Merge PR
+### Issues and Work Management
+1. Each new idea starts with the /grill-me or /grill-with-docs skill in plan mode to work to a common understanding, or begins with /triage on issues marked "needs-triage" in github (advancing them through the needs-triage → ready-for-agent / ready-for-human labels).
+2. /to-prd to write a PRD and commit to Github for complex issues
+3. /to-issues to create Github issues (slices) or to update a simple issue such as a bug.
+
+### Development Workflow Cycle
+Claude orchestrates this cycle directly: it runs the skills below in sequence and dispatches a subagent (the Task tool) per independent slice when work can run in parallel, pausing at the approval (step 2) and HITL (step 6) gates. Executing this cycle is the standing authorization to commit and push on the PRD/slice branches it creates — never commit to `master`, and never open the PR (step 7) until explicitly asked.
+1. Create a new branch for the identified PRD or specific set of issues (the "PRD branch"). Every issue in the PRD or set becomes part of one common PR off this branch.
+2. Request approval for the workflow sequence and the agents to be run.
+3. Implement each issue: for a single issue, use /tdd directly on the PRD branch; for multiple, run /slice per issue — each slice on its own branch, committed (no push) and labelled ready-for-review. Independent issues (no dependency or file overlap) may be worked by parallel /slice sub-agents; overlapping issues are serialized.
+4. Integrate and QA. If slices were used, run /merge-slices to rebase each ready-for-review slice onto the PRD branch, resolve conflicts in line with the PRD, and run a combined QA gate. Then confirm every issue's PRD acceptance criteria are met — `go test -race ./...` plus /verify to check the change in the running app.
+5. Complete a /review cycle.
+6. Request HITL QA approval.
+7. Open the PR and check CI. If green, ask to have it merged.
+8. Upon successful merge, clean up the PRD and slice branches and switch back to `master`.
 
 ## Agent skills
 

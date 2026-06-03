@@ -35,6 +35,24 @@ reserved for genuinely cross-cutting identity.
   not extended to the observability/web tier because, on a single-host bridge
   network, it adds fiddly client-cert configuration for little gain.
 
+## Update (2026-05-16): Grafana is SSO-only — local password form disabled
+
+Issue #78 originally kept Grafana's local `admin/grafana` username/password form
+enabled as a break-glass fallback alongside Keycloak SSO. That fallback is
+removed: every compose stack now sets `GF_AUTH_DISABLE_LOGIN_FORM=true`, so the
+`gosignals` realm is the only interactive login path (the generic-OAuth button
+reads **Sign in with GoSignals Realm**). The TLS + SSO configuration (cert mount,
+HTTPS, generic-OAuth env block) is applied uniformly to all six compose files;
+the three that #78 left unconfigured would otherwise fail Grafana datasource
+provisioning against the shared `config/monitor/grafana/datasource.yml`.
+
+- **API Basic Auth is deliberately *not* disabled.** `GF_AUTH_DISABLE_LOGIN_FORM`
+  removes only the interactive UI form; Grafana's API Basic Auth is a separate
+  setting and stays on, so `scripts/verify-observability.sh` (`-u admin:grafana`)
+  can still inspect `/api/datasources` without driving a full OIDC flow.
+- **Invariant:** a `POST /login` to Grafana with otherwise-valid credentials MUST
+  NOT return `200` — asserted by `scripts/verify-observability.sh` section 14.
+
 ---
 
 <!-- gosignals-brand-footer -->
