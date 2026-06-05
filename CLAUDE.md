@@ -48,6 +48,22 @@ go test -v -run TestPollRecovery ./pkg/goSignals/server/...
 
 Integration tests use `github.com/stretchr/testify/suite`. Race-tested code should still complete within ~5 minutes — tune timeouts/lock detection accordingly. Some tests (notably under `pkg/goSignals/server`) spin up a full server and Mongo provider; they're slower than pure unit tests.
 
+## Planning vs Implementation
+
+When asked for a plan or design exploration, do NOT begin implementing code until I explicitly approve. Produce the plan first and wait for confirmation.
+
+## Commit Hygiene
+
+Never include unrelated whitespace/formatting reformats in a commit. Verify the diff is scoped to the intended change before committing.
+
+## Design & Grilling
+
+During grilling/design interviews, ground each recommendation in the codebase and avoid overspecifying requirements (e.g., persistence, dedup, dual-write). Confirm assumptions before treating them as decided.
+
+## TDD & Slicing
+
+Before doing TDD slices, write tests first and run the full gate suite before marking ready-for-review; verify scope matches the issue.
+
 ## Architecture (the parts you need to read multiple files to understand)
 
 ### Two binaries, one library
@@ -126,6 +142,10 @@ Claude orchestrates this cycle directly: it runs the skills below in sequence an
 6. Request HITL QA approval.
 7. Open the PR and check CI. If green, ask to have it merged.
 8. Upon successful merge, clean up the PRD and slice branches and switch back to `master`.
+
+## Git & Issue Operations
+
+Only perform the exact git/branch/issue operations I authorize. Do not bundle extra actions (e.g., remote branch deletion, closing issues) into a step unless explicitly requested.
 
 ## Agent skills
 
