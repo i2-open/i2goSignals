@@ -1,6 +1,6 @@
 module github.com/i2-open/i2goSignals
 
-go 1.26.3
+go 1.26.4
 
 // replace github.com/i2-open/i2goSignals => ../i2goSignals
 

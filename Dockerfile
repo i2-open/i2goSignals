@@ -3,7 +3,8 @@
 # chainguard/bash (minimal distroless image with bash) — required because operators
 # run shell scripts inside the container to drive the goSignals CLI. Digest pin keeps
 # builds reproducible; bump deliberately when refreshing the base image.
-FROM cgr.dev/chainguard/bash:latest@sha256:4bfd053f5c52a4a3e7568da06550c520bf97a5d32cd8b966b03a11c8049c0a58
+# Refresh procedure: `crane digest cgr.dev/chainguard/bash:latest`.
+FROM cgr.dev/chainguard/bash:latest@sha256:580c4beaeb19e77fbfbaf0a28752b7d47edb04fb939986b8b8d7c5cc01bc80e5
 
 # Build-time metadata, populated by the Makefile from pkg/constants/version.txt,
 # `git rev-parse --short HEAD`, and the build host's UTC clock.
