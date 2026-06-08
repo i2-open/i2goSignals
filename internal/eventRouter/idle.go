@@ -43,14 +43,18 @@ func LoadIdleVerifyInterval() time.Duration {
 // Both call paths produce identical persisted records: the only difference is who triggered the
 // generation. Returns the persisted AgEventRecord (with Operational=true) on success.
 func (r *router) GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error) {
-    stream, err := r.streamService.GetStreamState(r.ctx, sid)
+    // Resolve the per-direction StreamConfiguration so verify targets the
+    // outbound side of whichever direction the SID names (Q40). For an SSTP
+    // pair's rx-side SID this returns the inbound direction's iss/aud; for a
+    // plain stream (or the tx side) it returns the primary StreamConfiguration.
+    cfg, err := r.streamService.GetStreamConfigBySID(r.ctx, sid)
     if err != nil {
         return nil, fmt.Errorf("GenerateVerifyEvent: lookup stream %s: %w", sid, err)
     }
-    if stream == nil {
+    if cfg == nil {
         return nil, fmt.Errorf("GenerateVerifyEvent: stream not found: %s", sid)
     }
-    set := events.CreateVerifyEvent(sid, state, stream.Iss, stream.Aud)
+    set := events.CreateVerifyEvent(sid, state, cfg.Iss, cfg.Aud)
     return r.SubmitOperationalEvent(sid, set, "")
 }
 

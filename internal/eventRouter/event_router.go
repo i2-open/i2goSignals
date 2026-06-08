@@ -690,7 +690,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 // point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
-	stream, err := r.streamService.GetStreamState(r.ctx, sid)
+	// SSTP-aware resolution: an operational event keyed on the rx-side SID of an
+	// SSTP pair must still find the (single) pair record, whose document _id is
+	// the tx-side SID, not the rx-side SID (Q40).
+	stream, err := r.streamService.GetStreamStateBySID(r.ctx, sid)
 	if err != nil {
 		return nil, err
 	}

@@ -971,6 +971,24 @@ func (s *StreamService) GetStream(ctx context.Context, id string) (*model.Stream
 	return &config, nil
 }
 
+// GetStreamConfigBySID resolves a SID to its StreamConfiguration, routing per
+// direction for SSTP pairs (Q40). Naming the tx-side SID returns the primary
+// (outbound) StreamConfiguration; naming the rx-side SID returns the inbound
+// StreamConfiguration. Verification (POST /verify) targets the outbound side of
+// whichever direction the SID names, so it scopes the generated verify SET to
+// the resolved direction's iss/aud. Non-SSTP streams resolve via FindByID.
+func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*model.StreamConfiguration, error) {
+	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+		if rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
+			inbound := *rec.SstpInbound
+			return &inbound, nil
+		}
+		config := rec.StreamConfiguration
+		return &config, nil
+	}
+	return s.GetStream(ctx, sid)
+}
+
 func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfiguration {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
@@ -987,6 +1005,19 @@ func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfigura
 
 func (s *StreamService) GetStreamState(ctx context.Context, id string) (*model.StreamStateRecord, error) {
 	return s.streamDAO.FindByID(ctx, id)
+}
+
+// GetStreamStateBySID resolves a SID to its StreamStateRecord, routing SSTP
+// pairs by either direction (Q40/Q41). A non-SSTP SID, or the tx-side SID of a
+// pair, resolves via FindByID; the rx-side (inbound) SID of a pair resolves to
+// the same single pair record. This lets operational paths keyed on a SID (e.g.
+// verify) find the pair when the named SID is the inbound side, whose value is
+// not the document _id.
+func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+		return rec, nil
+	}
+	return s.streamDAO.FindByID(ctx, sid)
 }
 
 // GetStreamStateByInboundSID returns the SSTP pair record whose receive-side
@@ -1049,6 +1080,25 @@ func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string
 }
 
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
+	// SSTP pairs report status per direction (Q41). When streamID names the rx
+	// (inbound) side, report InboundStatus/InboundErrorMsg; when it names the tx
+	// side, report Status/ErrorMsg. findSstpPairBySID resolves either direction;
+	// non-SSTP streams fall through to the plain FindByID path below.
+	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+		if rec.SstpInbound != nil && streamID == rec.SstpInbound.Id {
+			status := model.StreamStatus{Status: rec.InboundStatus}
+			if rec.InboundErrorMsg != "" {
+				status.Reason = rec.InboundErrorMsg
+			}
+			return &status, nil
+		}
+		status := model.StreamStatus{Status: rec.Status}
+		if rec.ErrorMsg != "" {
+			status.Reason = rec.ErrorMsg
+		}
+		return &status, nil
+	}
+
 	state, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		return nil, err
