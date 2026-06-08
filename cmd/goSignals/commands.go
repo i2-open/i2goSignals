@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"gopkg.in/yaml.v3"
 )
 
 // getHttpClient returns a standard or SPIFFE-aware HTTP client
@@ -991,9 +993,199 @@ type CreateStreamPushCmd struct {
 	Connection CreatePushConnectionCmd `cmd:"" aliases:"c" help:"Create a push stream connection between servers"`
 }
 
+// CreateStreamSstpCmd provisions an SSTP pair (PRD #154 Q44, slice #170) with a
+// single invocation. It is issued against the <client-alias> side (the SSTP HTTP
+// client, role=initiator); that node's StreamService cascades the mirrored
+// bootstrap to <server-alias> via the stored Server credentials (slice #161).
+//
+// Two input shapes:
+//   - Symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode) build a
+//     symmetric SstpPairBootstrap: identical business-plane inputs both
+//     directions.
+//   - --config-file <file> (JSON or YAML) supplies a full SstpPairBootstrap for
+//     the asymmetric / multi-hop case (per-direction Primary/Inbound). It is
+//     named --config-file rather than --config because the global --config flag
+//     (GOSIGNALS_HOME) already owns that name.
+//
+// The two shapes are mutually exclusive.
+type CreateStreamSstpCmd struct {
+	ClientAlias string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
+	ServerAlias string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
+	Name        string   `optional:"" help:"An alias name for the pair to be stored locally."`
+	Description string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
+	Config      string   `name:"config-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
+	Iss         string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
+	IssJwksUrl  string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
+	Aud         []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
+	Events      []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode)."`
+	Mode        string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
+}
+
+func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
+	flagsUsed := p.Iss != "" || p.IssJwksUrl != "" || len(p.Aud) > 0 || len(p.Events) > 0 || p.Mode != ""
+	if p.Config != "" && flagsUsed {
+		return errors.New("--config cannot be combined with the symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode); use one input mode")
+	}
+
+	var boot model.SstpPairBootstrap
+	if p.Config != "" {
+		loaded, err := loadSstpBootstrapFile(p.Config)
+		if err != nil {
+			return err
+		}
+		boot = *loaded
+	} else {
+		boot = model.SstpPairBootstrap{
+			Description: p.Description,
+			Primary: model.SstpDirection{
+				Iss:        p.Iss,
+				IssJwksUrl: p.IssJwksUrl,
+				Aud:        p.Aud,
+				Events:     p.Events,
+				Mode:       p.Mode,
+			},
+			Inbound: model.SstpDirection{
+				Iss:        p.Iss,
+				IssJwksUrl: p.IssJwksUrl,
+				Aud:        p.Aud,
+				Events:     p.Events,
+				Mode:       p.Mode,
+			},
+		}
+	}
+
+	// The issuing client side plays initiator; the named server alias is the
+	// peer the StreamService cascades the mirror to.
+	boot.Role = model.SstpRoleInitiator
+	boot.PeerServerAlias = p.ServerAlias
+	if p.Description != "" {
+		boot.Description = p.Description
+	}
+
+	server, err := cli.Data.GetServer(p.ClientAlias)
+	if err != nil {
+		return err
+	}
+
+	jsonString, _ := json.MarshalIndent(boot, "", "  ")
+	fmt.Println(fmt.Sprintf("Create SSTP pair on: %s\n%s", server.ServerConfiguration.ConfigurationEndpoint, string(jsonString)))
+	if !ConfirmProceed("") {
+		return nil
+	}
+
+	return cli.executeCreateSstpPair(p.Name, boot, server)
+}
+
+// loadSstpBootstrapFile reads an SstpPairBootstrap from a JSON or YAML file. A
+// `.yaml`/`.yml` extension selects YAML; anything else is parsed as JSON.
+func loadSstpBootstrapFile(path string) (*model.SstpPairBootstrap, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read --config file %s: %w", path, err)
+	}
+	var boot model.SstpPairBootstrap
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		if err = yaml.Unmarshal(data, &boot); err != nil {
+			return nil, fmt.Errorf("unable to parse YAML --config file %s: %w", path, err)
+		}
+	} else {
+		if err = json.Unmarshal(data, &boot); err != nil {
+			return nil, fmt.Errorf("unable to parse JSON --config file %s: %w", path, err)
+		}
+	}
+	return &boot, nil
+}
+
+// executeCreateSstpPair POSTs an SstpPairBootstrap body to the client node's
+// stream-configuration endpoint, authenticated with the node's bearer, parses
+// the returned StreamStateRecord, stores a local stream alias, and prints the
+// PairId, both pair SIDs, and the resolved EndpointUrls.
+func (cli *CLI) executeCreateSstpPair(streamAlias string, boot model.SstpPairBootstrap, server *SsfServer) error {
+	serverUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	regUrl, err := serverUrl.Parse(server.ServerConfiguration.ConfigurationEndpoint)
+	if err != nil {
+		return err
+	}
+
+	bootBytes, err := json.MarshalIndent(&boot, "", " ")
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bootBytes))
+	if err != nil {
+		return err
+	}
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	} else {
+		fmt.Println("No server credential detected. Run 'login " + server.Alias + "' or attempt anonymous request...")
+	}
+
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
+	}
+
+	var record model.StreamStateRecord
+	if err = json.Unmarshal(body, &record); err != nil {
+		return err
+	}
+
+	txSid := record.PairId
+	if txSid == "" {
+		txSid = record.StreamConfiguration.Id
+	}
+	rxSid := ""
+	if record.SstpInbound != nil {
+		rxSid = record.SstpInbound.Id
+	}
+	localEndpoint := ""
+	peerPairId := ""
+	if record.SstpMethod != nil {
+		localEndpoint = record.SstpMethod.EndpointUrl
+		peerPairId = record.SstpMethod.PeerPairId
+	}
+
+	if streamAlias == "" {
+		streamAlias = generateAlias(3)
+		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
+			streamAlias = generateAlias(3)
+		}
+	}
+	stream := Stream{
+		Alias:       streamAlias,
+		Id:          txSid,
+		Description: "SSTP Pair",
+		Iss:         record.StreamConfiguration.Iss,
+		Endpoint:    localEndpoint,
+		IssJwksUrl:  record.StreamConfiguration.IssuerJWKSUrl,
+	}
+	server.Streams[streamAlias] = stream
+
+	fmt.Println(fmt.Sprintf("SSTP pair created:\n  PairId:       %s\n  txSid:        %s\n  rxSid:        %s\n  EndpointUrl:  %s\n  PeerPairId:   %s", record.PairId, txSid, rxSid, localEndpoint, peerPairId))
+
+	return cli.Data.Save(&cli.Globals)
+}
+
 type CreateStreamCmd struct {
 	Push       CreateStreamPushCmd `cmd:"" help:"Create a SET PUSH Stream (RFC8935)"`
 	Poll       CreateStreamPollCmd `cmd:"" help:"Create a SET Polling Stream (RFC8936)"`
+	Sstp       CreateStreamSstpCmd `cmd:"" help:"Create an SSTP bidirectional pair (draft-hunt-secevent-sstp)"`
 	Aud        []string            `optional:"" sep:"," help:"One or more audience values separated by commas"`
 	Iss        string              `optional:"" help:"The event issuer value (e.g. scim.example.com)"`
 	Name       string              `optional:"" short:"n" help:"An alias name for the stream to be created"`
