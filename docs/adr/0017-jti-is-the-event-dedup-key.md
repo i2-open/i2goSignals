@@ -40,26 +40,33 @@ goSignals is one transmitter scope, so JTI alone is sufficient.
 The contract is enforced at the storage edge and carried up to the router as a
 typed sentinel:
 
-- **Mongo DAO** (`internal/providers/dbProviders/mongo_provider/event_dao.go`):
-  a sparse-unique index on `eventCol.jti` is created at startup. Inserts that
+- **Mongo DAO** (`internal/dao/mongo/event_dao.go`): a sparse-unique index on
+  `eventCol.jti` is created at startup (in
+  `internal/providers/dbProviders/mongo_provider/provider.go`). Inserts that
   violate it surface as MongoDB error code 11000; the DAO translates that into
   the exported sentinel `interfaces.ErrDuplicateJTI`.
-- **Memory DAO** (`internal/providers/dbProviders/memory_provider/event_dao.go`):
-  a map-existence check before insert returns `interfaces.ErrDuplicateJTI`
-  directly. No silent overwrite.
-- **Event service** propagates the sentinel unchanged — the storage edge is
-  authoritative; the service does not pre-check (which would race).
+- **Memory DAO** (`internal/dao/memory/event_dao.go`): a map-existence check
+  before insert returns `interfaces.ErrDuplicateJTI` directly. No silent
+  overwrite.
+- **Event service** (`internal/services/event_service.go`) loads the existing
+  record via `FindByJTI` on the sentinel branch and returns
+  `(existingRec, ErrDuplicateJTI)` — the storage edge is authoritative; the
+  service does not pre-check (which would race). An INFO log line
+  `"Duplicate JTI ingestion suppressed"` (with `jti` and `sid`) records the
+  no-op.
 - **Router** (`internal/eventRouter`) short-circuits on
-  `errors.Is(err, interfaces.ErrDuplicateJTI)`: the inbound event is logged at
-  DEBUG, `eventsIn` is *not* incremented a second time, and the matcher is not
-  run. The handler returns 202 Accepted, matching the RFC 8935 idempotency
-  expectation.
+  `errors.Is(err, interfaces.ErrDuplicateJTI)`: `eventsIn` is *not* incremented
+  a second time, the matcher does not run, no JTI is added to any outbound
+  stream's pending queue, and no push/poll buffer is woken. The handler
+  returns 202 Accepted, matching the RFC 8935 idempotency expectation.
 
 At server startup the Mongo provider runs a one-shot safety net: if duplicate
 JTIs already exist in `eventCol`, the sparse-unique index creation is skipped
-and a WARN is logged naming the offending count. Duplicate-suppression is OFF
-until the operator deletes the extras and restarts. This is documented in the
-v0.12.0 release notes alongside a Mongo shell snippet for cleanup.
+and a WARN is logged with a remediation hint pointing at the release-note
+cleanup snippet. Duplicate-suppression is OFF until the operator deletes the
+extras and restarts. The missing index is also visible to operators as an
+`eventsIn` discrepancy in the Prometheus view. Documented in the v0.12.0
+release notes alongside a Mongo shell snippet for cleanup.
 
 ## Consequences
 
@@ -98,5 +105,5 @@ v0.12.0 release notes alongside a Mongo shell snippet for cleanup.
 - RFC 8417 §2.2 (`jti` globally unique), RFC 8935 §2.4 (push idempotency),
   draft-hunt-secevent-sstp-00 (crash recovery relies on single-document
   atomic idempotency).
-- `internal/providers/dbProviders/interfaces` (sentinel),
+- `internal/dao/interfaces` (sentinel),
   `docs/releases/v0.12.0.md` (operator-facing migration note).

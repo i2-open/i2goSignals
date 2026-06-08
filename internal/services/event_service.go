@@ -72,8 +72,12 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 			esLog.Info("Duplicate JTI ingestion suppressed", "jti", jti, "sid", sid)
 			existing, findErr := s.eventDAO.FindByJTI(ctx, jti)
 			if findErr != nil {
+				// Surface the lookup failure rather than the dup sentinel.
+				// A nil record paired with the sentinel would let SubmitOperationalEvent
+				// return (nil, nil) to its caller — indistinguishable from a successful
+				// submission — and panic any caller that dereferences the record.
 				esLog.Error("Error loading existing record after duplicate JTI", "jti", jti, "sid", sid, "error", findErr)
-				return nil, err
+				return nil, findErr
 			}
 			return existing, interfaces.ErrDuplicateJTI
 		}

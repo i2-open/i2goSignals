@@ -23,6 +23,9 @@ type fakeEventDAO struct {
 	// FindByJTI — this lets the test assert that addEvent returns the
 	// already-stored record, not the new one.
 	firstSeen *model.AgEventRecord
+	// findErr, if set, makes FindByJTI return (nil, findErr) so the
+	// "dup detected then lookup fails" edge can be exercised.
+	findErr error
 }
 
 func (f *fakeEventDAO) Insert(_ context.Context, record *model.AgEventRecord) error {
@@ -41,6 +44,9 @@ func (f *fakeEventDAO) Insert(_ context.Context, record *model.AgEventRecord) er
 }
 
 func (f *fakeEventDAO) FindByJTI(_ context.Context, jti string) (*model.AgEventRecord, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
 	if f.firstSeen != nil && f.firstSeen.Jti == jti {
 		return f.firstSeen, nil
 	}
@@ -152,6 +158,31 @@ func TestAddOperationalEvent_DuplicateReturnsExistingRecord(t *testing.T) {
 	}
 	if rec == nil || rec.Original != existing.Original {
 		t.Fatalf("AddOperationalEvent: expected existing record, got %+v", rec)
+	}
+}
+
+// TestAddEvent_DuplicateWithFindFailureSurfacesLookupError asserts the safety
+// fix for the (rare) edge where the DAO reports ErrDuplicateJTI but the
+// subsequent FindByJTI also fails. The service must NOT pair the dup
+// sentinel with a nil record: SubmitOperationalEvent's short-circuit returns
+// (rec, nil) to its caller and a nil rec would look like success.
+func TestAddEvent_DuplicateWithFindFailureSurfacesLookupError(t *testing.T) {
+	lookupBoom := errors.New("mongo connection blip")
+	fake := &fakeEventDAO{
+		insertErr: interfaces.ErrDuplicateJTI,
+		findErr:   lookupBoom,
+	}
+	svc := NewEventService(fake)
+
+	rec, err := svc.AddEvent(context.Background(), newTokenWithJTI("dup-then-lost"), "stream-1", "")
+	if !errors.Is(err, lookupBoom) {
+		t.Fatalf("AddEvent: expected the lookup error to be returned, got %v", err)
+	}
+	if errors.Is(err, interfaces.ErrDuplicateJTI) {
+		t.Errorf("AddEvent must NOT pair ErrDuplicateJTI with a nil record; should surface findErr instead")
+	}
+	if rec != nil {
+		t.Errorf("AddEvent must return nil record when lookup fails, got %+v", rec)
 	}
 }
 
