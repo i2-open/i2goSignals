@@ -64,7 +64,10 @@ func newSstpTestPair(t *testing.T, instance *ssfInstance, status string) *sstpTe
 func (p *sstpTestPair) post(t *testing.T, instance *ssfInstance, contentType string, bearer string) *http.Response {
 	t.Helper()
 	url := fmt.Sprintf("http://%s/sstp/%s", instance.host, p.pairId)
-	body, _ := json.Marshal(goSetSstp.Message{})
+	// returnImmediately=true: these subtests assert routing/content-type/auth
+	// behavior, not the outbound long-poll. Without it an enabled pair holds the
+	// POST for the full default poll timeout (30s).
+	body, _ := json.Marshal(goSetSstp.Message{ReturnImmediately: goSetSstp.BoolPtr(true)})
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	require.NoError(t, err)
 	if contentType != "" {

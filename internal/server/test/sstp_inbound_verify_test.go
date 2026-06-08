@@ -59,7 +59,10 @@ func newSstpVerifyPair(t *testing.T, instance *ssfInstance) *sstpTestPair {
 func (p *sstpTestPair) postSets(t *testing.T, instance *ssfInstance, sets map[string]string) *http.Response {
     t.Helper()
     url := fmt.Sprintf("http://%s/sstp/%s", instance.host, p.pairId)
-    body, _ := json.Marshal(goSetSstp.Message{Sets: sets})
+    // returnImmediately=true: this test exercises inbound SET verification, not
+    // the outbound long-poll. Without it the server holds each POST for the full
+    // default poll timeout (30s) with nothing to deliver.
+    body, _ := json.Marshal(goSetSstp.Message{Sets: sets, ReturnImmediately: goSetSstp.BoolPtr(true)})
     req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
     require.NoError(t, err)
     req.Header.Set("Content-Type", goSetSstp.ContentType)
