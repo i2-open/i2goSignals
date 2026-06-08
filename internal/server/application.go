@@ -407,7 +407,7 @@ func (sa *SignalsApplication) Shutdown() {
 	// down the router and storage. Duration is configurable (I2SIG_SHUTDOWN_DRAIN,
 	// seconds) so tests can set it to 0; production keeps the historical ~1s per
 	// phase.
-	drain := resolveShutdownDrain()
+	drain := ResolveShutdownDrain()
 	if drain > 0 {
 		time.Sleep(drain)
 	}
@@ -428,12 +428,13 @@ func (sa *SignalsApplication) Shutdown() {
 	serverLog.Info("Shutdown Complete", "db", name)
 }
 
-// resolveShutdownDrain returns the per-phase graceful-drain delay used by
+// ResolveShutdownDrain returns the per-phase graceful-drain delay used by
 // Shutdown. It reads I2SIG_SHUTDOWN_DRAIN (legacy SHUTDOWN_DRAIN) as a float
 // number of seconds. Unset/empty or unparseable falls back to 1s, preserving
 // the historical two-phase ~2s drain; a value of 0 disables the drain (used by
-// the test suite, which spins up and tears down dozens of servers).
-func resolveShutdownDrain() time.Duration {
+// the test suite, which spins up and tears down dozens of servers). Shared with
+// pkg/goSsfServer, which applies the same drain in its Shutdown.
+func ResolveShutdownDrain() time.Duration {
 	val := envcompat.Lookup("I2SIG_SHUTDOWN_DRAIN", "SHUTDOWN_DRAIN")
 	if val == "" {
 		return time.Second

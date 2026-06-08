@@ -110,7 +110,6 @@ func (suite *toolSuite) cleanup() {
 	for _, instance := range suite.servers {
 		testLog.Printf("** Shutting down server %s...", instance.Name())
 		instance.app.Shutdown()
-		time.Sleep(time.Second)
 	}
 
 	_ = os.RemoveAll(suite.testDir)

@@ -425,13 +425,20 @@ func (sa *SsfApplication) Shutdown() {
 		_ = sa.Server.Shutdown(context.Background())
 	}
 
-	time.Sleep(time.Second)
+	// Graceful drain, configurable via I2SIG_SHUTDOWN_DRAIN (see
+	// server.ResolveShutdownDrain); 0 disables it for tests.
+	drain := server.ResolveShutdownDrain()
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
 
 	// Give some time to ensure all ops are finished.
-	time.Sleep(time.Second)
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Shutdown the provider
 	if sa.Storage != nil {
