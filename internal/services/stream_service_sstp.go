@@ -136,6 +136,10 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 
 	mid := bson.NewObjectID()
 	pairId := mid.Hex()
+	// Generate the inbound (rx-side) SID up front so the responder can mint the
+	// pair bearer covering BOTH real SIDs (finding #7). buildSstpRecord is told to
+	// reuse this exact SID so the token binding and the persisted record agree.
+	inboundSid := bson.NewObjectID().Hex()
 
 	if bootstrap.Role == model.SstpRoleResponder {
 		// Responder rejects an operator-supplied EndpointUrl and bearer; both are
@@ -148,8 +152,10 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		}
 		endpointUrl = s.getFullUrl(fmt.Sprintf("/sstp/%s", pairId))
 
-		// Mint the per-pair bearer covering both SIDs.
-		token, err := s.keyService.GetAuthIssuer().IssueSstpPairToken(pairId, "", projectID, false, sessionFromCtx(ctx))
+		// Mint the per-pair bearer covering both SIDs: [txSid (== PairId), rxSid
+		// (== inbound SID)]. Both must be real so per-direction status/verify naming
+		// the inbound SID authorizes (finding #7).
+		token, err := s.keyService.GetAuthIssuer().IssueSstpPairToken(pairId, inboundSid, projectID, false, sessionFromCtx(ctx))
 		if err != nil {
 			return model.StreamStateRecord{}, fmt.Errorf("failed to mint sstp pair token: %v", err)
 		}
@@ -170,7 +176,7 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		}
 	}
 
-	rec := s.buildSstpRecord(mid, pairId, projectID, bootstrap, endpointUrl, authHeader)
+	rec := s.buildSstpRecord(mid, pairId, inboundSid, projectID, bootstrap, endpointUrl, authHeader)
 
 	if bootstrap.Role == model.SstpRoleResponder {
 		// ReceivePush-style: write local first, then cascade; roll back on failure.
@@ -409,9 +415,10 @@ func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.Str
 
 // buildSstpRecord assembles the bidirectional StreamStateRecord from a validated
 // bootstrap. The tx (primary) side aliases its Id to the Mongo _id hex (== the
-// PairId), preserving the existing aliasing invariant; the inbound side gets its
-// own fresh SID.
-func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
+// PairId), preserving the existing aliasing invariant; the inbound side uses the
+// caller-provided inboundSid so the SID the pair bearer authorizes and the SID
+// persisted on SstpInbound are the same value (finding #7).
+func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
 	now := time.Now()
 
 	primaryMode, _ := model.SstpModeToRouteMode(b.Primary.Mode)
@@ -436,7 +443,7 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, projectID str
 	}
 
 	inbound := model.StreamConfiguration{
-		Id:              bson.NewObjectID().Hex(),
+		Id:              inboundSid,
 		Iss:             b.Inbound.Iss,
 		Aud:             b.Inbound.Aud,
 		IssuerJWKSUrl:   b.Inbound.IssJwksUrl,
