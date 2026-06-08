@@ -916,6 +916,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			// serve a poll, so the filter is consulted here at poll-response
 			// time; a filtered-out event is discarded (acked) rather than
 			// returned, so the poll buffer stays bounded (ADR-0002).
+			// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
+			// the primary StreamConfiguration, so this is the pair's transmit-side
+			// subject filter — there is no separate inbound/ingest-time filter.
 			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
 				r.discardPolledEvent(sid, jti, pollBuffer)
 				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
@@ -1327,6 +1330,9 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	// (ADR-0002); the no-op success classification advances the push loop
 	// exactly as a stale/deleted JTI does. Operational events and a disabled
 	// feature always pass — Allows handles both internally.
+	// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is the
+	// primary StreamConfiguration, so this is the pair's transmit-side subject
+	// filter — there is no separate inbound/ingest-time filter.
 	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
 		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
 			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)

@@ -98,6 +98,18 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
 	if err != nil {
+		// SSTP slice 11 (PRD #154 Q45): subject filters live on the transmit
+		// (outbound) side only. GetStreamState keys on the tx-side SID (== _id),
+		// so a NOT-FOUND here may be an SSTP pair's rxSid (the receive/inbound
+		// direction). Inbound SSTP events are trusted to be pre-filtered by the
+		// peer — there is no local ingest-time filter — so an Add/Remove against
+		// the rxSid is rejected with peer-API guidance rather than a bare 404.
+		if pair, inboundErr := sa.GetStreamService().GetStreamStateByInboundSID(r.Context(), req.StreamId); inboundErr == nil &&
+			pair.GetType() == model.DeliverySstpPair && pair.SstpInbound != nil && pair.SstpInbound.Id == req.StreamId {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_request","error_description":"This stream_id names the receive (inbound) side of an SSTP pair; subject filters apply to the transmit side only. Manage subjects on the upstream peer that emits to this side by calling its add-subject/remove-subject endpoint against its transmit-side stream_id (the peer's txSid)."}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
