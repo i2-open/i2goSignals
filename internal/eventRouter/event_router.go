@@ -68,6 +68,14 @@ type EventRouter interface {
 	SetStatsHandler(stats interface{})
 	ResetStream(sid string)
 	WakeTransmitter(sid string, mode string)
+	// WakeSstpClient wakes the SSTP-client outbound buffer for pairId so the
+	// lease owner drains a pending outbound event into the next outbound cycle.
+	// Invoked by the /_cluster/wake-sstp-client handler (PRD #154 Q11.2, #167).
+	WakeSstpClient(pairId string)
+	// WakeSstpServer wakes the SSTP-server long-poll buffer for txSid so a held
+	// long-poll on this node returns the outbound event immediately. Invoked by
+	// the /_cluster/wake-sstp-server handler (PRD #154 Q11.1, #167).
+	WakeSstpServer(txSid string)
 	// NotifySubjectFilterChange propagates an Add/Remove Subject change to the
 	// node whose match-result cache governs delivery for the stream, so a
 	// subject filter change processed on any cluster node takes effect on the
@@ -97,6 +105,11 @@ type router struct {
 	// keyed on PairId and created lazily on first request. Every node can serve the
 	// endpoint (no lease, Q11.1), so each maintains its own buffer.
 	sstpServerBuffers map[string]*buffer.EventPollBuffer
+	// sstpServerStreams holds SSTP pair records whose server (responder) side this
+	// node may serve, keyed on the pair's tx-side SID. Used by HandleEvent to match
+	// an outbound event against an SSTP-server pair and broadcast a wake-sstp-server
+	// to active nodes so a held long-poll returns the event (PRD #154 Q11.1, #167).
+	sstpServerStreams map[string]model.StreamStateRecord
 	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
 	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
 	// outbound arrival while a push is already running coalesces into that push's
@@ -221,6 +234,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpClientStreams:      map[string]model.StreamStateRecord{},
 		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpServerBuffers:      map[string]*buffer.EventPollBuffer{},
+		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
 		issuerKeys:             map[string]*rsa.PrivateKey{},
 		issuerKids:             map[string]string{},
@@ -607,6 +621,12 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	if stream.GetType() == model.DeliverySstpPair {
 		r.preInitializeCounterLocked(stream)
 		if stream.SstpMethod == nil || stream.SstpMethod.Role != model.SstpRoleInitiator {
+			// Responder (server) side: every node may serve POST /sstp/{id} and
+			// takes no lease. Track the pair by its tx-side SID so HandleEvent can
+			// match an outbound event and broadcast a wake-sstp-server (Q11.1, #167).
+			if stream.SstpMethod != nil && stream.SstpMethod.Role == model.SstpRoleResponder {
+				r.sstpServerStreams[stream.StreamConfiguration.Id] = *stream
+			}
 			return
 		}
 		pairId := stream.PairId
@@ -792,7 +812,47 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
 	}
+
+	r.routeEventToSstpPairsLocked(event)
 	return nil
+}
+
+// routeEventToSstpPairsLocked fans an outbound event out to the SSTP pairs this
+// router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must hold r.mu (at
+// least RLock).
+//
+//   - SSTP-client (initiator) pairs: when the event matches and the
+//     sstp-client:<PairId> lease is held by a different node, broadcast
+//     wake-sstp-client so the owner drains the pending event into the next cycle;
+//     when the lease is local or unheld, wake the local outbound buffer directly.
+//   - SSTP-server (responder) pairs: when the event matches, broadcast
+//     wake-sstp-server to active nodes (the server side takes no lease, so any node
+//     may be holding the long-poll) and wake the local long-poll buffer.
+func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
+	for pairId, pair := range r.sstpClientStreams {
+		if !r.eventService.MatchesStream(&pair, event) {
+			continue
+		}
+		resource := fmt.Sprintf("sstp-client:%s", pairId)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			if buf, ok := r.sstpBuffers[pairId]; ok {
+				buf.Wakeup()
+			}
+		} else {
+			go r.broadcastSstpClientWake(pairId)
+		}
+	}
+
+	for txSid, pair := range r.sstpServerStreams {
+		if !r.eventService.MatchesStream(&pair, event) {
+			continue
+		}
+		if buf, ok := r.sstpServerBuffers[txSid]; ok {
+			buf.Wakeup()
+		}
+		go r.broadcastSstpServerWake(txSid)
+	}
 }
 
 // SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to

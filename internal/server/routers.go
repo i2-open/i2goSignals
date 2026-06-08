@@ -381,6 +381,23 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 
+		// SSTP cluster wake-up routes (PRD #154 Q11.1, Q11.2, #167). Kept separate
+		// from wake-transmitter for telemetry separation; same SPIFFE/HMAC auth.
+		Route{
+			"WakeSstpClient",
+			http.MethodPost,
+			"/_cluster/wake-sstp-client",
+			h.sa.WakeSstpClient,
+			false,
+		},
+		Route{
+			"WakeSstpServer",
+			http.MethodPost,
+			"/_cluster/wake-sstp-server",
+			h.sa.WakeSstpServer,
+			false,
+		},
+
 		Route{
 			"ProtectedResourceMetadata",
 			http.MethodGet,
