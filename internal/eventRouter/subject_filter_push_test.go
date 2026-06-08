@@ -5,10 +5,10 @@ import (
     "fmt"
     "testing"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
     "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/services"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/i2-open/i2goSignals/pkg/goSetPush"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -86,7 +86,7 @@ func (h *filterPushHarness) createPushStream(t *testing.T, defaultSubjects strin
             },
         },
     }
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
     created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: cfg,
         DefaultSubjects:     defaultSubjects,

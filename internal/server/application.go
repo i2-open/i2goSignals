@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
@@ -33,7 +33,7 @@ var serverLog = logger.Sub("SERVER")
 
 type SsfApplicationInterface interface {
 	GetEventRouter() eventRouter.EventRouter
-	GetAuth() *authUtil.AuthIssuer
+	GetAuth() *authSupport.AuthIssuer
 	GetBaseUrl() *url.URL
 	GetDefIssuer() string
 	Name() string
@@ -71,7 +71,7 @@ type SignalsApplication struct {
 	HostName             string
 	DefIssuer            string
 	AdminRole            string
-	Auth                 *authUtil.AuthIssuer
+	Auth                 *authSupport.AuthIssuer
 	pollClients          map[string]*ClientPollStream
 	pushClients          map[string]*ReceiverPushStream
 	pushReceivers        map[string]model.StreamStateRecord
@@ -109,7 +109,7 @@ func (sa *SignalsApplication) GetSubjectRelayService() *services.SubjectRelaySer
 func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
 func (sa *SignalsApplication) GetStorage() storage.Storage                { return sa.Storage }
 
-func (sa *SignalsApplication) GetAuth() *authUtil.AuthIssuer {
+func (sa *SignalsApplication) GetAuth() *authSupport.AuthIssuer {
 	if sa.KeyService == nil {
 		return nil
 	}

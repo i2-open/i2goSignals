@@ -10,7 +10,7 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
@@ -41,8 +41,8 @@ func TestAddSubjectNotifiesRemoteLeaseOwner(t *testing.T) {
     defer owner.Close()
 
     // Create a PUSH transmitter stream and a stream-scoped bearer token.
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: "DEFAULT",

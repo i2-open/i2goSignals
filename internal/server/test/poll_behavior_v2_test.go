@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -40,7 +40,7 @@ func (suite *PollBehaviorSuite) SetupSuite() {
 		},
 	}
 
-	stream, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(suite.T(), err)
 	state, err := instance.GetStreamState(stream.Id)
 	assert.NoError(suite.T(), err)
@@ -393,7 +393,7 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 		},
 	}
 
-	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authSupport.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
 	state, _ := suite.instance.GetStreamState(createdConfig.Id)
 
@@ -445,7 +445,7 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 		},
 	}
 
-	createdConfig, err := suite.instance.CreateStream(streamConfig, authUtil.ConvertProject(suite.instance.projectId))
+	createdConfig, err := suite.instance.CreateStream(streamConfig, authSupport.ConvertProject(suite.instance.projectId))
 	assert.NoError(t, err)
 	state, _ := suite.instance.GetStreamState(createdConfig.Id)
 

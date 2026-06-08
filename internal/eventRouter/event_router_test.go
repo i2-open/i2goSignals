@@ -6,7 +6,7 @@ import (
     "time"
 
     "github.com/golang-jwt/jwt/v5"
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -157,7 +157,7 @@ func TestNewRouter_PollBufferUsesEnvTimeoutValues(t *testing.T) {
             },
         },
     }
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
     created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
     require.NoError(t, err)
     state, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)
@@ -235,7 +235,7 @@ func setupDedupRouterPollStream(t *testing.T) *dedupTestSetup {
             },
         },
     }
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
     created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
     require.NoError(t, err)
     state, err := h.streamService.GetStreamState(context.Background(), created.Id)

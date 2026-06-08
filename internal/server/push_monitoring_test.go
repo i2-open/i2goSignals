@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -184,8 +184,8 @@ func TestReceiverPushStream_Recovery(t *testing.T) {
 	}
 
 	// Create the stream via the StreamService so UpdateStreamStatus doesn't fail
-	atx := authUtil.ConvertProject("test-project")
-	createCtx := context.WithValue(context.Background(), authUtil.AuthContextKey, atx)
+	atx := authSupport.ConvertProject("test-project")
+	createCtx := context.WithValue(context.Background(), authSupport.AuthContextKey, atx)
 	created, _ := persistence.StreamService.CreateStream(createCtx, model.StreamStateRecord{StreamConfiguration: streamConfig}, atx.ProjectId, nil)
 	sid = created.Id
 

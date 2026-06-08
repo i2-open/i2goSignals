@@ -9,10 +9,10 @@ import (
     "sync"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/memory"
+    "github.com/i2-open/i2goSignals/pkg/dao/memory"
     "github.com/i2-open/i2goSignals/internal/envcompat"
     "github.com/i2-open/i2goSignals/internal/providers/cluster"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/services"
     "github.com/i2-open/i2goSignals/pkg/logger"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -130,8 +130,8 @@ func (m *MemoryProvider) buildServices() {
 
     m.tokenService = services.NewTokenService(tokenDAO)
     m.tokenService.SetStreamDAO(streamDAO)
-    m.keyService = services.NewKeyService(keyDAO, m.TokenIssuer, m.tokenService)
-    m.streamService = services.NewStreamService(streamDAO, m.keyService, m.DefaultIssuer)
+    m.keyService = services.NewKeyService(keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
+    m.streamService = services.NewStreamService(streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
     m.eventService = services.NewEventService(eventDAO)
     m.clientService = services.NewClientService(clientDAO, m.keyService)
     m.serverService = services.NewServerService(serverDAO)

@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -44,7 +44,7 @@ type SsfApplication struct {
 	HostName      string
 	DefIssuer     string
 	AdminRole     string
-	Auth          *authUtil.AuthIssuer
+	Auth          *authSupport.AuthIssuer
 	mu            sync.RWMutex
 	NodeID        string
 	StartedAt     time.Time
@@ -69,7 +69,7 @@ func (sa *SsfApplication) GetEventRouter() eventRouter.EventRouter {
 	return sa.EventRouter
 }
 
-func (sa *SsfApplication) GetAuth() *authUtil.AuthIssuer {
+func (sa *SsfApplication) GetAuth() *authSupport.AuthIssuer {
 	if sa.KeyService == nil {
 		return sa.Auth
 	}

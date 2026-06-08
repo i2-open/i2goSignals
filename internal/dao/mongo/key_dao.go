@@ -5,8 +5,8 @@ import (
     "errors"
     "slices"
 
-    "github.com/i2-open/i2goSignals/internal/dao/ids"
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    "github.com/i2-open/i2goSignals/pkg/dao/ids"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     "github.com/i2-open/i2goSignals/pkg/logger"
     "go.mongodb.org/mongo-driver/v2/bson"
     "go.mongodb.org/mongo-driver/v2/mongo"

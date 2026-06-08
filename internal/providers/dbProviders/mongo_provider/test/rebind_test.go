@@ -7,8 +7,8 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/ids"
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    "github.com/i2-open/i2goSignals/pkg/dao/ids"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     "github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/suite"

@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -164,8 +164,8 @@ func (m *MongoProvider) initServices() {
 
 	m.tokenService = services.NewTokenService(m.tokenDAO)
 	m.tokenService.SetStreamDAO(m.streamDAO)
-	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService)
-	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer)
+	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
+	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
 	m.eventService = services.NewEventService(m.eventDAO)
 	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 	m.serverService = services.NewServerService(m.serverDAO)

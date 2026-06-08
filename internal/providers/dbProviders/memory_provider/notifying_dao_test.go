@@ -6,8 +6,8 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
-    "github.com/i2-open/i2goSignals/internal/dao/memory"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+    "github.com/i2-open/i2goSignals/pkg/dao/memory"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "go.mongodb.org/mongo-driver/v2/bson"

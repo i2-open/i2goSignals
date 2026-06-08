@@ -9,8 +9,8 @@ import (
     "sync/atomic"
     "testing"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
+    "github.com/i2-open/i2goSignals/pkg/services"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
@@ -68,8 +68,8 @@ func TestPassthruRelaysAddSubjectToUpstream(t *testing.T) {
     instance.app.SubjectRelayService = fakeRelay
 
     // Create a PASSTHRU transmitter stream feeding from the upstream issuer.
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: upstreamIss,
@@ -156,8 +156,8 @@ func TestHybridRelaysAndFiltersLocally(t *testing.T) {
     instance.app.SubjectRelayService = fakeRelay
 
     // Create a HYBRID NONE-baseline transmitter stream feeding from the upstream.
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: upstreamIss,
@@ -239,8 +239,8 @@ func TestPassthruToleratesUpstreamErrorOnAddSubject(t *testing.T) {
     instance.streamSvc().SetSubjectRelayService(fakeRelay)
     instance.app.SubjectRelayService = fakeRelay
 
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: upstreamIss,
@@ -309,8 +309,8 @@ func TestPassthruToleratesUpstreamErrorOnRemoveSubject(t *testing.T) {
     instance.streamSvc().SetSubjectRelayService(fakeRelay)
     instance.app.SubjectRelayService = fakeRelay
 
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: upstreamIss,

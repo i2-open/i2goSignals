@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -13,8 +13,8 @@ import (
 // AuthContext-bearing context. Used by the provider DAO tests to keep the
 // arrange step terse.
 func createStreamHelper(p *MemoryProvider, cfg model.StreamConfiguration, projectId string) (model.StreamConfiguration, error) {
-	authCtx := authUtil.ConvertProject(projectId)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(projectId)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	return p.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, authCtx.ProjectId, nil)
 }
 

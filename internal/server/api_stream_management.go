@@ -17,9 +17,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -465,7 +464,7 @@ func (sa *SignalsApplication) StreamCreate(w http.ResponseWriter, r *http.Reques
 // alone is deliberately not enough. It routes through HasScope (never a bare
 // authCtx.Eat check) so an OAuth/STS caller — whose Eat is nil and whose grants
 // live in GrantedScopes — is evaluated correctly rather than always denied (#128).
-func canProvisionTxAlias(authCtx *authUtil.AuthContext) bool {
+func canProvisionTxAlias(authCtx *authSupport.AuthContext) bool {
 	if authCtx.HasScope(authSupport.ScopeStreamAdmin) {
 		return true
 	}
@@ -530,7 +529,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
+	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -623,7 +622,7 @@ func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 // new pair, and returns the full StreamStateRecord (PairId, SstpInbound, and
 // SstpMethod) so the caller — and a cascading peer — can learn the pair SIDs,
 // the derived EndpointUrl, and the minted bearer.
-func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext, body []byte) {
 	var bootstrap model.SstpPairBootstrap
 	if err := json.Unmarshal(body, &bootstrap); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -647,7 +646,7 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	}
 
 	rec, err := sa.GetStreamService().CreateSstpPair(
-		context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx),
+		context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx),
 		bootstrap, authCtx.ProjectId, nil)
 	if err != nil {
 		serverLog.Warn("SSTP pair create failed", "role", bootstrap.Role, "error", err)

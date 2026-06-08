@@ -5,7 +5,7 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func (h *filterPushHarness) createPollStream(t *testing.T, defaultSubjects strin
             },
         },
     }
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
     created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: cfg,
         DefaultSubjects:     defaultSubjects,

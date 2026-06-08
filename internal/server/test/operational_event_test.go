@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -111,7 +111,7 @@ func mustCreatePollStream(t *testing.T, instance *ssfInstance, iss string, aud [
 			},
 		},
 	}
-	created, err := instance.CreateStream(cfg, authUtil.ConvertProject(instance.projectId))
+	created, err := instance.CreateStream(cfg, authSupport.ConvertProject(instance.projectId))
 	require.NoError(t, err)
 	return created
 }
