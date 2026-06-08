@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -299,6 +300,17 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	// SSTP pair delete (ADR 0020, Q37): an SSTP pair is removed via DeleteSstpPair
+	// so the local rows for BOTH directions are cleaned up and — when
+	// cascade_peer=true and the peer Server is resolvable — a courtesy DELETE is
+	// cascaded to the peer. Local cleanup always succeeds; a peer-cleanup failure
+	// answers 207 Multi-Status with per-side outcomes rather than failing the call.
+	if state.GetType() == model.DeliverySstpPair {
+		deleteSstpPairHandler(sa, w, r, authContext.StreamId)
+		return
+	}
+
 	state.Status = model.StreamStateDisable
 	sa.GetEventRouter().UpdateStreamState(state)
 
@@ -474,13 +486,30 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		w.WriteHeader(status)
 		return
 	}
+	// Read the body once so it can be discriminated between the SSF
+	// StreamConfiguration shape and the SSTP SstpPairBootstrap shape (ADR 0019).
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// POST /stream accepts a second body shape, SstpPairBootstrap, discriminated
+	// on shape alongside the existing StreamConfiguration (ADR 0019). An SSTP
+	// bootstrap is expanded into a bidirectional pair via CreateSstpPair; the
+	// mirror is cascaded to the peer when peer_server_alias is supplied. This is
+	// the create-side wiring of the discriminator the ADR specifies.
+	if model.IsSstpBootstrapBody(body) {
+		createSstpPairHandler(sa, w, r, authCtx, body)
+		return
+	}
+
 	// Decode into a StreamStateRecord (not a bare StreamConfiguration) so the
 	// goSignals-specific subject-filtering operator knobs ride alongside the
 	// SSF wire-format fields. The embedded StreamConfiguration is flattened by
 	// encoding/json, so existing request bodies decode unchanged.
 	var jsonRequest model.StreamStateRecord
-	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
-	if err != nil {
+	if err := json.Unmarshal(body, &jsonRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -533,6 +562,98 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(respBytes)
 
+}
+
+// deleteSstpPairHandler is the delete-side dispatch for an SSTP pair on
+// DELETE /stream (ADR 0020, Q37). It removes BOTH local direction rows and, when
+// cascade_peer=true and peer_server_alias resolves a stored Server, cascades a
+// courtesy DELETE to the peer. Local cleanup always succeeds. The response is
+// 200 (local-only, or local + peer success) or 207 Multi-Status (local success
+// but peer cleanup failed), carrying the per-side SstpDeleteOutcome.
+func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, sid string) {
+	q := r.URL.Query()
+	cascadePeer := strings.EqualFold(q.Get("cascade_peer"), "true")
+
+	var peerServer *model.Server
+	if cascadePeer {
+		if alias := q.Get("peer_server_alias"); alias != "" {
+			if resolved, err := sa.GetServerService().GetServerByAlias(r.Context(), alias); err == nil {
+				peerServer = resolved
+			} else {
+				serverLog.Warn("SSTP delete: peer_server_alias did not resolve", "alias", alias, "error", err)
+			}
+		}
+	}
+
+	// Stop any in-flight delivery for the tx side before the rows are removed.
+	sa.GetEventRouter().RemoveStream(sid)
+
+	outcome, err := sa.GetStreamService().DeleteSstpPair(r.Context(), sid, cascadePeer, peerServer)
+	if err != nil {
+		if err.Error() == "not found" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+
+	status := http.StatusOK
+	if outcome.PartialFailure() {
+		// Local delete succeeded but the requested peer cleanup did not.
+		status = http.StatusMultiStatus
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	respBytes, mErr := json.MarshalIndent(outcome, "", "  ")
+	if mErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(respBytes)
+	serverLog.Info("SSTP pair DELETED", "sid", sid, "cascade_peer", cascadePeer, "status", status)
+}
+
+// createSstpPairHandler is the create-side dispatch for an SstpPairBootstrap body
+// on POST /stream (ADR 0019). It expands the bootstrap into a bidirectional pair
+// via CreateSstpPair (which cascades the mirror to the peer over real HTTP when
+// peer_server_alias resolves a stored Server), starts the SSTP runner for the
+// new pair, and returns the full StreamStateRecord (PairId, SstpInbound, and
+// SstpMethod) so the caller — and a cascading peer — can learn the pair SIDs,
+// the derived EndpointUrl, and the minted bearer.
+func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+	var bootstrap model.SstpPairBootstrap
+	if err := json.Unmarshal(body, &bootstrap); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rec, err := sa.GetStreamService().CreateSstpPair(
+		context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx),
+		bootstrap, authCtx.ProjectId, nil)
+	if err != nil {
+		serverLog.Warn("SSTP pair create failed", "role", bootstrap.Role, "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Start the SSTP-client runner (initiator) / register the responder side so
+	// the pair begins serving immediately, mirroring the StreamConfiguration path.
+	sa.GetEventRouter().UpdateStreamState(&rec)
+
+	serverLog.Info("SSTP pair CREATED", "pairId", rec.PairId, "role", bootstrap.Role)
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	respBytes, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(respBytes)
 }
 
 // StreamUpdate updates (replaces or patches) an existing stream configuration.
