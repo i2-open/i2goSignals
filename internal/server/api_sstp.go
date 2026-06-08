@@ -3,12 +3,14 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"strings"
 
 	"github.com/gorilla/mux"
 	daoInterfaces "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -78,19 +80,83 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		return
 	}
 
-	// Paused-pair semantics: a paused pair returns 200 with returnEvents=false so
-	// the long-poll cycle keeps running and resumes draining on unpause. 4xx is
-	// reserved for the deleted-pair case (PRD #154 Q20, Q7.3). When either
-	// direction is paused we decline to return events on this cycle.
-	if rec.Status == model.StreamStatePause || rec.InboundStatus == model.StreamStatePause {
-		writeSstpMessage(w, goSetSstp.Message{ReturnEvents: goSetSstp.BoolPtr(false)})
+	// Parse the SSTP request body. A malformed body is a 4xx (HTTP status is the
+	// primary error signal end-to-end, PRD #154 Q20).
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeSstpError(w, http.StatusBadRequest, goSetPush.ErrInvalidRequest, "Unable to read SSTP request body")
+		return
+	}
+	var inbound goSetSstp.Message
+	if len(body) > 0 {
+		if jErr := json.Unmarshal(body, &inbound); jErr != nil {
+			writeSstpError(w, http.StatusBadRequest, goSetPush.ErrInvalidRequest, "SSTP request body is not valid application/sstp+json")
+			return
+		}
+	}
+
+	// Parse each inbound SET (byte-identical to an RFC8935 SET, Q5.1) against the
+	// rx-side issuer/audience/JWKS. Per-JTI parse rejections become "setErrs"; valid
+	// SETs are ingested by the runner. The rx-side SID resolves the inbound config.
+	parseErrs := map[string]goSetSstp.SetErr{}
+	var parsedIn []eventRouter.SstpInboundSet
+	if len(inbound.Sets) > 0 {
+		rxCfg := goSetPush.ReceiverConfig{}
+		if rec.SstpInbound != nil {
+			rxCfg.ExpectedIssuer = rec.SstpInbound.Iss
+			rxCfg.ExpectedAudiences = rec.SstpInbound.Aud
+			rxCfg.JWKS = sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), rec.SstpInbound.Id)
+		}
+		parsedIn, parseErrs = parseSstpInboundSets(inbound, rxCfg)
+	}
+
+	// Run one SSTP-server cycle: ingest valid inbound SETs (persist-then-route,
+	// counting eventsIn with tfr=SSTP, stream_id=rxSid) and long-poll the outbound
+	// buffer. The runner shapes the paused-pair response (200, returnEvents=false)
+	// and returns 4xx only for a deleted/unknown pair (Q11.1, Q15, Q20, Q46).
+	resp, status := sa.GetEventRouter().SstpServerHandler(r.Context(), pairId, inbound, parsedIn)
+	if status != http.StatusOK {
+		writeSstpError(w, status, goSetPush.ErrNotFound, "SSTP pair "+pairId+" could not be located or was deleted")
 		return
 	}
 
-	// Enabled pair: the runner slices (#164/#165) fill in outbound draining and
-	// inbound ingestion. Until then, answer with an empty SSTP message so the route
-	// + auth gate is exercisable end-to-end.
-	writeSstpMessage(w, goSetSstp.Message{})
+	// Merge per-JTI parse errors into the response's setErrs before sending.
+	for jti, se := range parseErrs {
+		if resp.SetErrs == nil {
+			resp.SetErrs = map[string]goSetSstp.SetErr{}
+		}
+		resp.SetErrs[jti] = se
+	}
+
+	writeSstpMessage(w, resp)
+}
+
+// parseSstpInboundSets parses each SET in the SSTP message's "sets" map using
+// goSetPush.ParseReceivedSET (each SET is byte-identical to an RFC8935 SET, Q5.1).
+// Successfully parsed SETs are returned as the inbound batch to ingest; rejected
+// SETs are returned in a per-JTI setErrs map mapped to the SSTP §2.3 vocabulary.
+func parseSstpInboundSets(msg goSetSstp.Message, cfg goSetPush.ReceiverConfig) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
+	parsed := make([]eventRouter.SstpInboundSet, 0, len(msg.Sets))
+	setErrs := map[string]goSetSstp.SetErr{}
+	for jti, raw := range msg.Sets {
+		req, err := http.NewRequest(goSetSstp.Method, "/", strings.NewReader(raw))
+		if err != nil {
+			setErrs[jti] = goSetSstp.SetErr{Err: goSetSstp.ErrSetParse, Description: err.Error()}
+			continue
+		}
+		req.Header.Set("Content-Type", "application/secevent+jwt")
+		received, deliveryErr := goSetPush.ParseReceivedSET(req, cfg)
+		if deliveryErr != nil {
+			setErrs[jti] = goSetSstp.ClassifyFromGoSetPushError(deliveryErr)
+			continue
+		}
+		parsed = append(parsed, eventRouter.SstpInboundSet{
+			Jti:   jti,
+			Token: received.Token,
+			Raw:   received.TokenString,
+		})
+	}
+	return parsed, setErrs
 }
 
 // sstpAuthorized validates the request's bearer and verifies, defense-in-depth,

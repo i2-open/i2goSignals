@@ -29,6 +29,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -51,6 +52,13 @@ type EventRouter interface {
 	GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
+	// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId:
+	// it ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
+	// counting eventsIn with tfr=SSTP, stream_id=rxSid), long-polls the outbound
+	// EventPollBuffer, and returns the SSTP response message plus an HTTP status
+	// (200 served/paused, 4xx deleted/unknown pair). Takes no cluster lease — every
+	// node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19, Q20, Q46).
+	SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	PreInitializeCounter(stream *model.StreamStateRecord)
@@ -84,6 +92,11 @@ type router struct {
 	// reusing EventPollBuffer (PRD #154 Q5.1).
 	sstpClientStreams map[string]model.StreamStateRecord
 	sstpBuffers       map[string]*buffer.EventPollBuffer
+	// sstpServerBuffers holds the outbound long-poll buffer for each SSTP pair
+	// this node serves on POST /sstp/{id} (the responder/server side, #165). It is
+	// keyed on PairId and created lazily on first request. Every node can serve the
+	// endpoint (no lease, Q11.1), so each maintains its own buffer.
+	sstpServerBuffers map[string]*buffer.EventPollBuffer
 	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
 	// backoff timing for SSTP-client runner tests. Production leaves it nil and
 	// loads the POLL_RETRY_* env knobs.
@@ -202,6 +215,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pollBuffers:          map[string]*buffer.EventPollBuffer{},
 		sstpClientStreams:    map[string]model.StreamStateRecord{},
 		sstpBuffers:          map[string]*buffer.EventPollBuffer{},
+		sstpServerBuffers:    map[string]*buffer.EventPollBuffer{},
 		issuerKeys:           map[string]*rsa.PrivateKey{},
 		issuerKids:           map[string]string{},
 		enabled:              false,
@@ -508,6 +522,25 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 
 	eventsIn.With(labels).Add(0)
 	eventsOut.With(labels).Add(0)
+
+	// SSTP pairs are bidirectional: the loop above primed the tx (outbound) side.
+	// Also prime the rx (inbound) side so the inbound eventsIn series — labelled
+	// with the rx-side SID and issuer — is visible from process start, paired with
+	// the tx side primed for slice #164 (PRD #154 Q46, issue #165).
+	if stream.GetType() == model.DeliverySstpPair && stream.SstpInbound != nil {
+		rxIss := stream.SstpInbound.Iss
+		if rxIss == "" {
+			rxIss = "DEFAULT"
+		}
+		rxLabels := prometheus.Labels{
+			"type":      "NONE",
+			"iss":       rxIss,
+			"tfr":       "SSTP",
+			"stream_id": stream.SstpInbound.Id,
+		}
+		eventsIn.With(rxLabels).Add(0)
+		eventsOut.With(rxLabels).Add(0)
+	}
 }
 
 func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
@@ -662,9 +695,20 @@ evaluates if it should be added to any streams for outgoing propagation
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
+	sstpInbound := false
 	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil {
-		return err
+		// SSTP-server inbound (PRD #154 Q5.1, Q46): an inbound SET is keyed on the
+		// pair's rx-side SID, which is NOT the document _id, so the plain FindByID
+		// lookup above misses. Resolve the pair by either direction and relabel the
+		// inbound counter to the rx-side SID that was passed in, so eventsIn carries
+		// stream_id=rxSid rather than the tx-side SID.
+		pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
+		if pairErr != nil || pair == nil {
+			return err
+		}
+		streamState = sstpInboundCounterRecord(pair, sid)
+		sstpInbound = true
 	}
 
 	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
@@ -681,6 +725,14 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return err
 	}
 	r.IncrementCounter(streamState, eventToken, true)
+
+	// SSTP-server inbound is terminal: the rx side imports the SET for local
+	// consumption (RouteModeImport). It is not fanned out to RFC8935/RFC8936
+	// outbound streams — the pair's own outbound is the tx side, fed independently
+	// (PRD #154 Q5.1).
+	if sstpInbound {
+		return nil
+	}
 
 	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
@@ -1511,6 +1563,9 @@ func (r *router) Shutdown() {
 	}
 	for _, sstpBuffer := range r.sstpBuffers {
 		sstpBuffer.Close()
+	}
+	for _, sstpServerBuffer := range r.sstpServerBuffers {
+		sstpServerBuffer.Close()
 	}
 	if r.x509Source != nil {
 		_ = r.x509Source.Close()
