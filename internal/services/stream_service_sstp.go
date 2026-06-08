@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -578,12 +578,12 @@ func sstpPeerStreamEndpoint(ctx context.Context, client *http.Client, peerServer
 // sessionFromCtx extracts the issuing AuthContext from the request context so a
 // minted pair token records its lineage parent, mirroring CreateStream. Returns
 // nil when no auth context is present (e.g. unit tests).
-func sessionFromCtx(ctx context.Context) *authUtil.AuthContext {
+func sessionFromCtx(ctx context.Context) *authSupport.AuthContext {
 	v := ctx.Value("authCtx")
 	if v == nil {
 		return nil
 	}
-	if authCtx, ok := v.(*authUtil.AuthContext); ok {
+	if authCtx, ok := v.(*authSupport.AuthContext); ok {
 		return authCtx
 	}
 	return nil

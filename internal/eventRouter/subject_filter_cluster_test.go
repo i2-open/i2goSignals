@@ -10,7 +10,6 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
     "github.com/i2-open/i2goSignals/internal/dao/memory"
     "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
     "github.com/i2-open/i2goSignals/internal/services"
@@ -87,7 +86,7 @@ func (h *clusterFilterHarness) createNoneStream(t *testing.T) *model.StreamState
             },
         },
     }
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
     created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: cfg,
         DefaultSubjects:     model.DefaultSubjectsNone,

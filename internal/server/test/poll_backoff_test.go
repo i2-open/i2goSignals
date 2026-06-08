@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -39,7 +39,7 @@ func TestPollBackoffRetry(t *testing.T) {
 		},
 	}
 
-	atx := authUtil.AuthContext{
+	atx := authSupport.AuthContext{
 		ProjectId: instance.projectId,
 	}
 	// Add stream to provider
@@ -97,7 +97,7 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 			},
 		},
 	}
-	atx := authUtil.AuthContext{
+	atx := authSupport.AuthContext{
 		ProjectId: instance.projectId,
 	}
 

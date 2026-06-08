@@ -1,4 +1,4 @@
-package authUtil
+package authSupport
 
 import (
 	"bytes"
@@ -19,7 +19,6 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -64,17 +63,17 @@ func TestAuthContext_HasScope(t *testing.T) {
 		},
 		{
 			name: "local EAT admin role matches",
-			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"admin"}}},
+			ctx:  &AuthContext{Eat: &EventAuthToken{Roles: []string{"admin"}}},
 			want: true,
 		},
 		{
 			name: "local EAT root rides free",
-			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"root"}}},
+			ctx:  &AuthContext{Eat: &EventAuthToken{Roles: []string{"root"}}},
 			want: true,
 		},
 		{
 			name: "local EAT non-admin denied",
-			ctx:  &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}}},
+			ctx:  &AuthContext{Eat: &EventAuthToken{Roles: []string{"stream"}}},
 			want: false,
 		},
 		{
@@ -85,7 +84,7 @@ func TestAuthContext_HasScope(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.ctx.HasScope(authSupport.ScopeStreamAdmin); got != tc.want {
+			if got := tc.ctx.HasScope(ScopeStreamAdmin); got != tc.want {
 				t.Errorf("HasScope(admin) = %v, want %v", got, tc.want)
 			}
 		})
@@ -98,7 +97,7 @@ func TestAuthContext_HasScope(t *testing.T) {
 // check no longer silently denies an OAuth/STS caller (nil Eat) and reduces to a
 // pure scope check since the bearer token carries no per-stream binding.
 func TestAuthContext_IsAuthorizedForStream(t *testing.T) {
-	scopes := []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin}
+	scopes := []string{ScopeStreamMgmt, ScopeStreamAdmin}
 	tests := []struct {
 		name     string
 		ctx      *AuthContext
@@ -108,25 +107,25 @@ func TestAuthContext_IsAuthorizedForStream(t *testing.T) {
 		{name: "nil context", ctx: nil, streamId: "A", want: false},
 		{
 			name:     "local EAT bound to the same stream",
-			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
+			ctx:      &AuthContext{Eat: &EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
 			streamId: "A",
 			want:     true,
 		},
 		{
 			name:     "local EAT bound to a different stream denied",
-			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
+			ctx:      &AuthContext{Eat: &EventAuthToken{Roles: []string{"stream"}, StreamIds: []string{"A"}}},
 			streamId: "B",
 			want:     false,
 		},
 		{
 			name:     "local EAT unbound (any stream) with scope",
-			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"stream"}}},
+			ctx:      &AuthContext{Eat: &EventAuthToken{Roles: []string{"stream"}}},
 			streamId: "B",
 			want:     true,
 		},
 		{
 			name:     "local EAT lacking scope denied",
-			ctx:      &AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{"event"}, StreamIds: []string{"A"}}},
+			ctx:      &AuthContext{Eat: &EventAuthToken{Roles: []string{"event"}, StreamIds: []string{"A"}}},
 			streamId: "A",
 			want:     false,
 		},
@@ -207,7 +206,7 @@ func newTestTokens() testTokensSet {
 	client, err := auth.IssueStreamClientToken(model.SsfClient{
 		Id:            bson.NewObjectID(),
 		ProjectIds:    []string{"abc", "def"},
-		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery},
+		AllowedScopes: []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery},
 		Email:         "test@example.com",
 		Description:   "Test auth_token",
 	}, "abc", true, "")
@@ -227,7 +226,7 @@ func newTestTokens() testTokensSet {
 		os.Exit(-1)
 	}
 
-	expiredToken, err := auth.generateTestToken(time.Now(), []string{authSupport.ScopeEventDelivery}, "abc", "123")
+	expiredToken, err := auth.generateTestToken(time.Now(), []string{ScopeEventDelivery}, "abc", "123")
 	if err != nil {
 		fmt.Printf("Failed to issue expired token: %s\n", err.Error())
 		os.Exit(-1)
@@ -275,13 +274,13 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Roles:            []string{authSupport.ScopeEventDelivery},
+				Roles:            []string{ScopeEventDelivery},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
 				streamId:       "1234",
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
@@ -290,13 +289,13 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{ScopeEventDelivery, ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
 				streamId:       "1234",
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
@@ -305,13 +304,13 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{ScopeEventDelivery, ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
 				streamId:       "1234",
-				scopesAccepted: []string{authSupport.ScopeStreamAdmin},
+				scopesAccepted: []string{ScopeStreamAdmin},
 			},
 			want: false,
 		},
@@ -320,20 +319,20 @@ func TestEventAuthToken_IsAuthorized(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "a123",
-				Roles:            []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt},
+				Roles:            []string{ScopeEventDelivery, ScopeStreamMgmt},
 				ClientId:         "aaa",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
 				streamId:       "4321",
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t1.Run(tt.name, func(t1 *testing.T) {
-			t := &authSupport.EventAuthToken{
+			t := &EventAuthToken{
 				StreamIds:        tt.fields.StreamIds,
 				ProjectId:        tt.fields.ProjectId,
 				Roles:            tt.fields.Roles,
@@ -384,7 +383,7 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: false,
 		},
@@ -393,12 +392,12 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Roles:            []string{authSupport.ScopeEventDelivery},
+				Roles:            []string{ScopeEventDelivery},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
@@ -407,12 +406,12 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Roles:            []string{"bleh", authSupport.ScopeEventDelivery},
+				Roles:            []string{"bleh", ScopeEventDelivery},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
@@ -421,52 +420,52 @@ func TestEventAuthToken_IsScopeMatch(t1 *testing.T) {
 			fields: fields{
 				StreamIds:        []string{"1234"},
 				ProjectId:        "1234",
-				Roles:            []string{authSupport.ScopeRoot},
+				Roles:            []string{ScopeRoot},
 				ClientId:         "1234",
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
 		{
 			name: "Test OAuth scope single",
 			fields: fields{
-				Scope:            authSupport.ScopeEventDelivery,
+				Scope:            ScopeEventDelivery,
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
 		{
 			name: "Test OAuth scope multi",
 			fields: fields{
-				Scope:            "bleh " + authSupport.ScopeEventDelivery,
+				Scope:            "bleh " + ScopeEventDelivery,
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
 		{
 			name: "Test OAuth scope root",
 			fields: fields{
-				Scope:            authSupport.ScopeRoot,
+				Scope:            ScopeRoot,
 				RegisteredClaims: standardClaims,
 			},
 			args: args{
-				scopesAccepted: []string{authSupport.ScopeEventDelivery},
+				scopesAccepted: []string{ScopeEventDelivery},
 			},
 			want: true,
 		},
 	}
 	for _, tt := range tests {
 		t1.Run(tt.name, func(t1 *testing.T) {
-			t := &authSupport.EventAuthToken{
+			t := &EventAuthToken{
 				StreamIds:        tt.fields.StreamIds,
 				ProjectId:        tt.fields.ProjectId,
 				Roles:            tt.fields.Roles,
@@ -496,7 +495,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
 	testRequest.Header.Set("Authorization", "Bearer "+clientToken)
 
-	authCtx, stat := auth.ValidateAuthorizationAny(testRequest, []string{authSupport.ScopeStreamAdmin})
+	authCtx, stat := auth.ValidateAuthorizationAny(testRequest, []string{ScopeStreamAdmin})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 
 	projId2 := authCtx.ProjectId
@@ -510,7 +509,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest2, err := http.NewRequest(http.MethodGet, "http://example.com/iat", nil)
 	testRequest2.Header.Set("Authorization", "Bearer "+newIat)
 
-	authCtx2, stat := auth.ValidateAuthorizationAny(testRequest2, []string{authSupport.ScopeRegister})
+	authCtx2, stat := auth.ValidateAuthorizationAny(testRequest2, []string{ScopeRegister})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 
 	fmt.Println("ProjectID3:\t" + authCtx2.ProjectId)
@@ -519,7 +518,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 
 	regUrl := "http://example.com/register"
 	clientReg := model.RegisterParameters{
-		Scopes:      []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
+		Scopes:      []string{ScopeStreamAdmin, ScopeStreamMgmt},
 		Email:       "joe@example.com",
 		Description: "just another test",
 	}
@@ -527,7 +526,7 @@ func TestIssueProjectIat(t1 *testing.T) {
 	testRequest3, err := http.NewRequest(http.MethodPost, regUrl, bytes.NewReader(regBytes))
 	testRequest3.Header.Set("Authorization", "Bearer "+newIat)
 
-	authCtx3, stat := auth.ValidateAuthorizationAny(testRequest3, []string{authSupport.ScopeRegister})
+	authCtx3, stat := auth.ValidateAuthorizationAny(testRequest3, []string{ScopeRegister})
 	assert.Equal(t1, 200, stat, "Should be status 200")
 	assert.NotNil(t1, authCtx3, "Should be authenticated")
 
@@ -540,16 +539,16 @@ func TestParseAuthToken(t *testing.T) {
 	tests := []struct {
 		name        string
 		tokenString string
-		want        func(token *authSupport.EventAuthToken) bool
+		want        func(token *EventAuthToken) bool
 		wantErr     bool
 	}{
 		{
 			name:        "Straight parse iat",
 			tokenString: testTokens.iat,
-			want: func(token *authSupport.EventAuthToken) bool {
+			want: func(token *EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Roles[0] == authSupport.ScopeRegister &&
+					token.Roles[0] == ScopeRegister &&
 					len(token.Roles) == 1 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
@@ -558,10 +557,10 @@ func TestParseAuthToken(t *testing.T) {
 		{
 			name:        "Straight parse client",
 			tokenString: testTokens.client,
-			want: func(token *authSupport.EventAuthToken) bool {
+			want: func(token *EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Roles[0] == authSupport.ScopeStreamAdmin &&
+					token.Roles[0] == ScopeStreamAdmin &&
 					len(token.Roles) == 2 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
@@ -570,10 +569,10 @@ func TestParseAuthToken(t *testing.T) {
 		{
 			name:        "Straight parse stream",
 			tokenString: testTokens.streamToken,
-			want: func(token *authSupport.EventAuthToken) bool {
+			want: func(token *EventAuthToken) bool {
 				return token != nil &&
 					token.ProjectId != "" &&
-					token.Roles[0] == authSupport.ScopeEventDelivery &&
+					token.Roles[0] == ScopeEventDelivery &&
 					len(token.Roles) == 1 &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
@@ -582,7 +581,7 @@ func TestParseAuthToken(t *testing.T) {
 		{
 			name:        "Parse stream token bad",
 			tokenString: testTokens.altStreamToken,
-			want: func(token *authSupport.EventAuthToken) bool {
+			want: func(token *EventAuthToken) bool {
 				return token == nil // token should have crypto error and result should be nil
 			},
 			wantErr: true,
@@ -590,7 +589,7 @@ func TestParseAuthToken(t *testing.T) {
 		{
 			name:        "Parse stream token expired",
 			tokenString: testTokens.expToken,
-			want: func(token *authSupport.EventAuthToken) bool {
+			want: func(token *EventAuthToken) bool {
 				return token == nil // token should have crypto error and result should be nil
 			},
 			wantErr: true,
@@ -649,7 +648,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 			args: args{
 				r:      reqWithVars,
-				scopes: []string{authSupport.ScopeEventDelivery},
+				scopes: []string{ScopeEventDelivery},
 			},
 			want: &AuthContext{
 				StreamId:  "1",
@@ -663,7 +662,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 			args: args{
 				r:      reqWithVars,
-				scopes: []string{authSupport.ScopeStreamMgmt},
+				scopes: []string{ScopeStreamMgmt},
 			},
 			want:  nil,
 			want1: http.StatusForbidden,
@@ -673,7 +672,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 			args: args{
 				r:      reqWithVars2,
-				scopes: []string{authSupport.ScopeEventDelivery},
+				scopes: []string{ScopeEventDelivery},
 			},
 			want:  nil,
 			want1: http.StatusUnauthorized,
@@ -683,7 +682,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 			args: args{
 				r:      reqWithVars3,
-				scopes: []string{authSupport.ScopeEventDelivery},
+				scopes: []string{ScopeEventDelivery},
 			},
 			want:  nil,
 			want1: http.StatusUnauthorized,
@@ -693,7 +692,7 @@ func TestValidateAuthorization(t *testing.T) {
 
 			args: args{
 				r:      testRequest4,
-				scopes: []string{authSupport.ScopeEventDelivery},
+				scopes: []string{ScopeEventDelivery},
 			},
 			want: &AuthContext{
 				StreamId:  "1",
@@ -781,7 +780,7 @@ func startOIDCTestServer(t *testing.T) (*httptest.Server, string, *rsa.PrivateKe
 
 func mintOAuthToken(t *testing.T, priv *rsa.PrivateKey, kid string, roles []string) string {
 	t.Helper()
-	claims := authSupport.OidcClaims{
+	claims := OidcClaims{
 		RealmAccess: struct {
 			Roles []string `json:"roles"`
 		}{Roles: roles},
@@ -808,7 +807,7 @@ func mintOAuthToken(t *testing.T, priv *rsa.PrivateKey, kid string, roles []stri
 // jwt.WithValidMethods before any signature check succeeds.
 func mintOAuthTokenHS256(t *testing.T, kid string, roles []string) string {
 	t.Helper()
-	claims := authSupport.OidcClaims{
+	claims := OidcClaims{
 		RealmAccess: struct {
 			Roles []string `json:"roles"`
 		}{Roles: roles},
@@ -842,12 +841,12 @@ func TestValidateAuthorizationAny_disallowedAlg_rejected(t *testing.T) {
 	auth.OAuthPubKeys = nil
 	auth.mu.Unlock()
 
-	tok := mintOAuthTokenHS256(t, kid, []string{authSupport.ScopeEventDelivery})
+	tok := mintOAuthTokenHS256(t, kid, []string{ScopeEventDelivery})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code == http.StatusOK || got != nil {
 		t.Fatalf("expected rejection of HS256-signed token, got code=%d ctx=%+v", code, got)
 	}
@@ -856,7 +855,7 @@ func TestValidateAuthorizationAny_disallowedAlg_rejected(t *testing.T) {
 // mintOAuthTokenAud mints an RS256 OIDC token with a caller-specified audience.
 func mintOAuthTokenAud(t *testing.T, priv *rsa.PrivateKey, kid string, roles []string, aud []string) string {
 	t.Helper()
-	claims := authSupport.OidcClaims{
+	claims := OidcClaims{
 		RealmAccess: struct {
 			Roles []string `json:"roles"`
 		}{Roles: roles},
@@ -892,12 +891,12 @@ func TestValidateAuthorizationAny_wrongAudience_rejected(t *testing.T) {
 	auth.OAuthPubKeys = nil
 	auth.mu.Unlock()
 
-	tok := mintOAuthTokenAud(t, priv, kid, []string{authSupport.ScopeEventDelivery}, []string{"someone-else"})
+	tok := mintOAuthTokenAud(t, priv, kid, []string{ScopeEventDelivery}, []string{"someone-else"})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code == http.StatusOK || got != nil {
 		t.Fatalf("expected rejection of wrong-audience token, got code=%d ctx=%+v", code, got)
 	}
@@ -917,12 +916,12 @@ func TestValidateAuthorizationAny_matchingAudience_success(t *testing.T) {
 	auth.OAuthPubKeys = nil
 	auth.mu.Unlock()
 
-	tok := mintOAuthTokenAud(t, priv, kid, []string{authSupport.ScopeEventDelivery}, []string{"gosignals"})
+	tok := mintOAuthTokenAud(t, priv, kid, []string{ScopeEventDelivery}, []string{"gosignals"})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusOK || got == nil {
 		t.Fatalf("expected 200 for matching-audience token, got code=%d ctx=%+v", code, got)
 	}
@@ -940,14 +939,14 @@ func TestValidateAuthorizationAny_withOAuthToken_success(t *testing.T) {
 	auth.OAuthServer = nil
 	auth.OAuthPubKeys = nil
 
-	// Create an OAuth token with role that maps to authSupport.ScopeEventDelivery
-	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeEventDelivery})
+	// Create an OAuth token with role that maps to ScopeEventDelivery
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeEventDelivery})
 
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorizationAny, got %d", code)
 	}
@@ -974,12 +973,12 @@ func TestValidateAuthorizationAny_OAuthCarriesGrantedScopes(t *testing.T) {
 	auth.OAuthPubKeys = nil
 
 	// An STS-exchanged admin token: realm role maps to our "admin" scope.
-	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeStreamAdmin})
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeStreamAdmin})
 
 	req, _ := http.NewRequest(http.MethodGet, "http://example/token", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamAdmin})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeStreamAdmin})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorizationAny, got %d", code)
 	}
@@ -988,12 +987,12 @@ func TestValidateAuthorizationAny_OAuthCarriesGrantedScopes(t *testing.T) {
 	}
 	found := false
 	for _, s := range got.GrantedScopes {
-		if s == authSupport.ScopeStreamAdmin {
+		if s == ScopeStreamAdmin {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected GrantedScopes to include %q, got %v", authSupport.ScopeStreamAdmin, got.GrantedScopes)
+		t.Fatalf("expected GrantedScopes to include %q, got %v", ScopeStreamAdmin, got.GrantedScopes)
 	}
 }
 
@@ -1007,13 +1006,13 @@ func TestValidateAuthorization_withOAuthFallback_success(t *testing.T) {
 	auth.OAuthPubKeys = nil
 
 	// Token signed with external key (not local), so local ParseAuthToken should fail
-	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeEventDelivery})
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeEventDelivery})
 
 	req, _ := http.NewRequest(http.MethodPost, "http://example.com/events/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorization via OAuth fallback, got %d", code)
 	}
@@ -1031,13 +1030,13 @@ func Test_oidcRolesMatchScopes(t *testing.T) {
 		scopes []string
 		want   bool
 	}{
-		{[]string{"stream"}, []string{authSupport.ScopeStreamMgmt}, true},
-		{[]string{"EVENT"}, []string{authSupport.ScopeEventDelivery}, true},
+		{[]string{"stream"}, []string{ScopeStreamMgmt}, true},
+		{[]string{"EVENT"}, []string{ScopeEventDelivery}, true},
 		// Issue #144: a foreign realm role literally named "root" must NOT confer
 		// cluster-wide privilege against an unrelated scope. External OIDC realm
 		// roles must match the specific accepted scope name.
 		{[]string{"root"}, []string{"anything"}, false},
-		{[]string{"viewer"}, []string{authSupport.ScopeStreamAdmin}, false},
+		{[]string{"viewer"}, []string{ScopeStreamAdmin}, false},
 	}
 	for _, c := range cases {
 		if got := oidcRolesMatchScopes(c.roles, c.scopes); got != c.want {
@@ -1062,7 +1061,7 @@ func TestValidateAuthorization_oauthRoleMismatch_unauthorized(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamMgmt})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeStreamMgmt})
 	if code != http.StatusForbidden || got != nil {
 		t.Fatalf("expected Unauthorized with nil context, got code=%d ctx=%+v", code, got)
 	}
@@ -1087,7 +1086,7 @@ func TestValidateAuthorizationAny_bareRootRole_notAuthorized(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	got, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeStreamMgmt})
+	got, code := auth.ValidateAuthorizationAny(req, []string{ScopeStreamMgmt})
 	if code == http.StatusOK || got != nil {
 		t.Fatalf("expected bare-root role to be rejected, got code=%d ctx=%+v", code, got)
 	}
@@ -1151,13 +1150,13 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	auth.OAuthPubKeys = nil
 	auth.mu.Unlock()
 
-	tok := mintOAuthToken(t, priv, kid, []string{authSupport.ScopeEventDelivery})
+	tok := mintOAuthToken(t, priv, kid, []string{ScopeEventDelivery})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	// 1. Initial attempt - key is missing in JWKS
-	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	_, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 (Service Unavailable) from ValidateAuthorizationAny when key is missing (refresh in progress), got %d", code)
 	}
@@ -1170,7 +1169,7 @@ func TestValidateAuthorizationAny_DynamicKeys(t *testing.T) {
 	// 3. Second attempt - key should be picked up via RefreshUnknownKID
 	// Need to wait for RefreshRateLimit (which I set to 1s in the code for testing? No, I should use a smaller value in the test if possible, or just wait)
 	time.Sleep(1200 * time.Millisecond)
-	_, code = auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	_, code = auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorizationAny after key is enabled, got %d", code)
 	}
@@ -1244,13 +1243,13 @@ func TestValidateAuthorizationAny_WaitsForJWKSRefresh(t *testing.T) {
 		mu.Unlock()
 	}()
 
-	tok := mintOAuthToken(t, priv2, newKid, []string{authSupport.ScopeEventDelivery})
+	tok := mintOAuthToken(t, priv2, newKid, []string{ScopeEventDelivery})
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "1"})
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	start := time.Now()
-	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	_, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	elapsed := time.Since(start)
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 after JWKS refresh grace, got %d (elapsed %v)", code, elapsed)
@@ -1313,7 +1312,7 @@ func (a *AuthIssuer) generateTestToken(exp time.Time, scopes []string, projectId
 	privateKey := a.PrivateKey
 	a.mu.RUnlock()
 
-	eat := authSupport.EventAuthToken{
+	eat := EventAuthToken{
 		ProjectId: projectId,
 		Roles:     scopes,
 		ClientId:  clientId,
@@ -1355,24 +1354,24 @@ func TestValidateAuthorizationAny_PartialOAuthFailure(t *testing.T) {
 
 	// Create a token from a THIRD (not configured) source to ensure it fails validation
 	priv3, _ := rsa.GenerateKey(rand.Reader, 2048)
-	tok3 := mintOAuthToken(t, priv3, "kid3", []string{authSupport.ScopeEventDelivery})
+	tok3 := mintOAuthToken(t, priv3, "kid3", []string{ScopeEventDelivery})
 
 	req, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req.Header.Set("Authorization", "Bearer "+tok3)
 
 	// Should return 503 because one server failed to load
-	_, code := auth.ValidateAuthorizationAny(req, []string{authSupport.ScopeEventDelivery})
+	_, code := auth.ValidateAuthorizationAny(req, []string{ScopeEventDelivery})
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 from ValidateAuthorizationAny when partial load fails, got %d", code)
 	}
 
 	// Now try a token from the WORKING server (srv1)
-	tok1 := mintOAuthToken(t, priv1, kid1, []string{authSupport.ScopeEventDelivery})
+	tok1 := mintOAuthToken(t, priv1, kid1, []string{ScopeEventDelivery})
 	req1, _ := http.NewRequest(http.MethodGet, "http://example/streams/1", nil)
 	req1.Header.Set("Authorization", "Bearer "+tok1)
 
 	// Should return 200 because it validated successfully even if other server failed to load
-	_, code = auth.ValidateAuthorizationAny(req1, []string{authSupport.ScopeEventDelivery})
+	_, code = auth.ValidateAuthorizationAny(req1, []string{ScopeEventDelivery})
 	if code != http.StatusOK {
 		t.Fatalf("expected 200 from ValidateAuthorizationAny for valid token even with partial load failure, got %d", code)
 	}

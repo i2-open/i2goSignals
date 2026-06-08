@@ -1,11 +1,10 @@
-package authUtil
+package authSupport
 
 import (
     "testing"
     "time"
 
     "github.com/golang-jwt/jwt/v5"
-    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/stretchr/testify/assert"
 )
@@ -27,15 +26,15 @@ func TestIssueSstpPairToken_StreamIds(t *testing.T) {
     assert.ElementsMatch(t, []string{txSid, rxSid}, eat.StreamIds, "pair bearer carries both pair SIDs")
 
     // scope=event is sufficient for read-status / verify on either direction (Q42).
-    assert.True(t, eat.IsAuthorized(txSid, []string{authSupport.ScopeEventDelivery}), "tx side authorized for event")
-    assert.True(t, eat.IsAuthorized(rxSid, []string{authSupport.ScopeEventDelivery}), "rx side authorized for event")
+    assert.True(t, eat.IsAuthorized(txSid, []string{ScopeEventDelivery}), "tx side authorized for event")
+    assert.True(t, eat.IsAuthorized(rxSid, []string{ScopeEventDelivery}), "rx side authorized for event")
 }
 
 // sstpPairEat builds an EventAuthToken shaped exactly like a minted SSTP pair
 // bearer (StreamIds=[txSid, rxSid]) with the given roles, for asserting the
 // scope-driven authorization paths without going through signing.
-func sstpPairEat(txSid, rxSid string, roles ...string) *authSupport.EventAuthToken {
-    return &authSupport.EventAuthToken{
+func sstpPairEat(txSid, rxSid string, roles ...string) *EventAuthToken {
+    return &EventAuthToken{
         StreamIds: []string{txSid, rxSid},
         ProjectId: "proj-sstp",
         Roles:     roles,
@@ -61,24 +60,24 @@ func TestSstpPairToken_WriteRequiresStreamScope(t *testing.T) {
     assert.NoError(t, err)
     full, err := auth.ParseAuthToken(signed)
     assert.NoError(t, err)
-    assert.True(t, full.IsAuthorized(txSid, []string{authSupport.ScopeStreamMgmt}), "stream-scope write authorized on tx side")
-    assert.True(t, full.IsAuthorized(rxSid, []string{authSupport.ScopeStreamMgmt}), "stream-scope write authorized on rx side")
+    assert.True(t, full.IsAuthorized(txSid, []string{ScopeStreamMgmt}), "stream-scope write authorized on tx side")
+    assert.True(t, full.IsAuthorized(rxSid, []string{ScopeStreamMgmt}), "stream-scope write authorized on rx side")
 
     // A bearer holding only event scope may read but not write.
-    eventOnly := sstpPairEat(txSid, rxSid, authSupport.ScopeEventDelivery)
-    assert.True(t, eventOnly.IsAuthorized(txSid, []string{authSupport.ScopeEventDelivery}), "event-only reads tx side")
-    assert.True(t, eventOnly.IsAuthorized(rxSid, []string{authSupport.ScopeEventDelivery}), "event-only reads rx side")
-    assert.False(t, eventOnly.IsAuthorized(txSid, []string{authSupport.ScopeStreamMgmt}), "event-only rejected for stream-scope write on tx side")
-    assert.False(t, eventOnly.IsAuthorized(rxSid, []string{authSupport.ScopeStreamMgmt}), "event-only rejected for stream-scope write on rx side")
+    eventOnly := sstpPairEat(txSid, rxSid, ScopeEventDelivery)
+    assert.True(t, eventOnly.IsAuthorized(txSid, []string{ScopeEventDelivery}), "event-only reads tx side")
+    assert.True(t, eventOnly.IsAuthorized(rxSid, []string{ScopeEventDelivery}), "event-only reads rx side")
+    assert.False(t, eventOnly.IsAuthorized(txSid, []string{ScopeStreamMgmt}), "event-only rejected for stream-scope write on tx side")
+    assert.False(t, eventOnly.IsAuthorized(rxSid, []string{ScopeStreamMgmt}), "event-only rejected for stream-scope write on rx side")
 }
 
 // TestSstpPairToken_WrongSidRejected locks the StreamIds containment boundary: a
 // pair bearer for [txSid, rxSid] must not authorize a third, unrelated SID even
 // when the scope matches (issue #160 wrong-SID rejection path).
 func TestSstpPairToken_WrongSidRejected(t *testing.T) {
-    pair := sstpPairEat("tx-sid-3", "rx-sid-3", authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
-    assert.False(t, pair.IsAuthorized("someone-elses-sid", []string{authSupport.ScopeEventDelivery}), "unrelated SID rejected for event")
-    assert.False(t, pair.IsAuthorized("someone-elses-sid", []string{authSupport.ScopeStreamMgmt}), "unrelated SID rejected for stream")
+    pair := sstpPairEat("tx-sid-3", "rx-sid-3", ScopeStreamMgmt, ScopeEventDelivery)
+    assert.False(t, pair.IsAuthorized("someone-elses-sid", []string{ScopeEventDelivery}), "unrelated SID rejected for event")
+    assert.False(t, pair.IsAuthorized("someone-elses-sid", []string{ScopeStreamMgmt}), "unrelated SID rejected for stream")
 }
 
 // TestSstpPairToken_OAuthWithoutStreamIdsRejected locks the OAuth/STS path for an
@@ -92,10 +91,10 @@ func TestSstpPairToken_OAuthWithoutStreamIdsRejected(t *testing.T) {
     // No scope granted -> rejected, and crucially does not panic on a nil Eat.
     noScope := &AuthContext{IsOAuthClient: true, GrantedScopes: nil}
     assert.Nil(t, noScope.Eat, "OAuth caller carries no local EAT / StreamIds")
-    assert.False(t, noScope.IsAuthorizedForStream(txSid, authSupport.ScopeEventDelivery), "OAuth without scope rejected for SSTP-pair route")
+    assert.False(t, noScope.IsAuthorizedForStream(txSid, ScopeEventDelivery), "OAuth without scope rejected for SSTP-pair route")
 
     // event scope granted -> read authorized despite no StreamIds binding.
-    eventScope := &AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeEventDelivery}}
-    assert.True(t, eventScope.IsAuthorizedForStream(txSid, authSupport.ScopeEventDelivery), "OAuth with event scope authorized for read")
-    assert.False(t, eventScope.IsAuthorizedForStream(txSid, authSupport.ScopeStreamMgmt), "OAuth with only event scope rejected for write")
+    eventScope := &AuthContext{IsOAuthClient: true, GrantedScopes: []string{ScopeEventDelivery}}
+    assert.True(t, eventScope.IsAuthorizedForStream(txSid, ScopeEventDelivery), "OAuth with event scope authorized for read")
+    assert.False(t, eventScope.IsAuthorizedForStream(txSid, ScopeStreamMgmt), "OAuth with only event scope rejected for write")
 }

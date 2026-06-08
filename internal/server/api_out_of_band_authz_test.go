@@ -3,7 +3,6 @@ package server
 import (
     "testing"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
     "github.com/i2-open/i2goSignals/pkg/authSupport"
 )
 
@@ -18,50 +17,50 @@ import (
 func TestKeyScopeOnly(t *testing.T) {
     tests := []struct {
         name string
-        ctx  *authUtil.AuthContext
+        ctx  *authSupport.AuthContext
         want bool
     }{
         {name: "nil context", ctx: nil, want: false},
         // Local (EAT-backed) callers.
         {
             name: "local key-only is restricted",
-            ctx:  &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeKey}}},
+            ctx:  &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeKey}}},
             want: true,
         },
         {
             name: "local admin is not restricted",
-            ctx:  &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeStreamAdmin}}},
+            ctx:  &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeStreamAdmin}}},
             want: false,
         },
         {
             name: "local root rides free (not restricted)",
-            ctx:  &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeRoot}}},
+            ctx:  &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeRoot}}},
             want: false,
         },
         {
             name: "local key+admin is not restricted",
-            ctx:  &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin}}},
+            ctx:  &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{Roles: []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin}}},
             want: false,
         },
         // OAuth/STS callers — the regression-fix rows.
         {
             name: "OAuth key-only is restricted (privilege-escalation fix)",
-            ctx:  &authUtil.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey}},
+            ctx:  &authSupport.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey}},
             want: true,
         },
         {
             name: "OAuth admin is not restricted",
-            ctx:  &authUtil.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeStreamAdmin}},
+            ctx:  &authSupport.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeStreamAdmin}},
             want: false,
         },
         {
             name: "OAuth key+admin is not restricted",
-            ctx:  &authUtil.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin}},
+            ctx:  &authSupport.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey, authSupport.ScopeStreamAdmin}},
             want: false,
         },
         {
             name: "OAuth foreign root does not bypass the guard (#144)",
-            ctx:  &authUtil.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey, authSupport.ScopeRoot}},
+            ctx:  &authSupport.AuthContext{IsOAuthClient: true, GrantedScopes: []string{authSupport.ScopeKey, authSupport.ScopeRoot}},
             want: true,
         },
     }

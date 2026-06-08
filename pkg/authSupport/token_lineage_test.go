@@ -1,10 +1,8 @@
-package authUtil
+package authSupport
 
 import (
     "context"
     "testing"
-
-    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
@@ -23,7 +21,7 @@ type trackedCall struct {
     purpose string
 }
 
-func (c *captureTracker) TrackToken(_ context.Context, claims *authSupport.EventAuthToken, parent string, purpose string) error {
+func (c *captureTracker) TrackToken(_ context.Context, claims *EventAuthToken, parent string, purpose string) error {
     c.tracked = append(c.tracked, trackedCall{jti: claims.ID, parent: parent, purpose: purpose})
     return nil
 }
@@ -47,7 +45,7 @@ func TestParentLineage(t *testing.T) {
     assert.Empty(t, iat.parent, "IAT is the lineage root and has no parent")
 
     // Stream-client token — parent is the IAT JTI.
-    iatCtx := &AuthContext{Eat: &authSupport.EventAuthToken{}}
+    iatCtx := &AuthContext{Eat: &EventAuthToken{}}
     iatCtx.Eat.ID = iat.jti
     _, err = issuer.IssueStreamClientToken(model.SsfClient{
         Id:         bson.NewObjectID(),
@@ -61,7 +59,7 @@ func TestParentLineage(t *testing.T) {
 
     // Delivery (stream) token — parent is the stream-client JTI, taken from
     // the issuing session's EAT.
-    session := &AuthContext{Eat: &authSupport.EventAuthToken{}}
+    session := &AuthContext{Eat: &EventAuthToken{}}
     session.Eat.ID = streamClient.jti
     _, err = issuer.IssueStreamToken("stream-1", "abc", session)
     require.NoError(t, err)

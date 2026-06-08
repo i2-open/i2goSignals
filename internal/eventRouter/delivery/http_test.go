@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -220,7 +220,7 @@ func TestHTTPAdapter_RemoteAddressPersistedToStreamService(t *testing.T) {
 	projectId := parsed.ProjectId
 
 	cfg := newForwardStream(receiver.URL + "/events").StreamConfiguration
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
 	created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)
 	stream, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)
@@ -264,7 +264,7 @@ func TestHTTPAdapter_SamePeerSecondPushDoesNotChangeRemoteAddress(t *testing.T) 
 	projectId := parsed.ProjectId
 
 	cfg := newForwardStream(receiver.URL + "/events").StreamConfiguration
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authUtil.ConvertProject(projectId))
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
 	created, err := persistence.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)
 	stream, err := persistence.StreamService.GetStreamState(context.Background(), created.Id)

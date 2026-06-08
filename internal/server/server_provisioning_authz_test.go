@@ -14,7 +14,6 @@ import (
 
     "github.com/golang-jwt/jwt/v5"
     "github.com/gorilla/mux"
-    "github.com/i2-open/i2goSignals/internal/authUtil"
     "github.com/i2-open/i2goSignals/internal/eventRouter"
     "github.com/i2-open/i2goSignals/internal/providers/dbProviders"
     "github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -72,7 +71,7 @@ func (s *ServerProvisioningAuthzSuite) streamToken(projectId string) string {
 
 // regToken mints a register (IAT) token bound to the project.
 func (s *ServerProvisioningAuthzSuite) regToken(projectId string) string {
-    tok, err := s.app.GetAuth().IssueProjectIat(&authUtil.AuthContext{ProjectId: projectId})
+    tok, err := s.app.GetAuth().IssueProjectIat(&authSupport.AuthContext{ProjectId: projectId})
     s.Require().NoError(err)
     return tok
 }
@@ -126,11 +125,11 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_TxAliasWithAdminScopeSuc
 // needs admin (root rides free) OR the full reg+stream+event operate-the-stream
 // set. Any subset short of that — including register alone — is denied.
 func TestCanProvisionTxAlias(t *testing.T) {
-    oauth := func(scopes ...string) *authUtil.AuthContext {
-        return &authUtil.AuthContext{IsOAuthClient: true, GrantedScopes: scopes}
+    oauth := func(scopes ...string) *authSupport.AuthContext {
+        return &authSupport.AuthContext{IsOAuthClient: true, GrantedScopes: scopes}
     }
-    local := func(roles ...string) *authUtil.AuthContext {
-        return &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{Roles: roles}}
+    local := func(roles ...string) *authSupport.AuthContext {
+        return &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{Roles: roles}}
     }
     const (
         reg    = authSupport.ScopeRegister
@@ -141,7 +140,7 @@ func TestCanProvisionTxAlias(t *testing.T) {
     )
     tests := []struct {
         name string
-        ctx  *authUtil.AuthContext
+        ctx  *authSupport.AuthContext
         want bool
     }{
         {"oauth admin", oauth(admin), true},

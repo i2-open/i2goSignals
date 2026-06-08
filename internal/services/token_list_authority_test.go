@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -61,13 +60,13 @@ func (s *TokenListAuthorityTestSuite) seedStream(hexID, projectID, ip string) {
 }
 
 // nonAdmin builds a locally-issued, project-confined caller (stream scope).
-func nonAdmin(projectID string) *authUtil.AuthContext {
+func nonAdmin(projectID string) *authSupport.AuthContext {
 	return localScoped(projectID, authSupport.ScopeStreamMgmt)
 }
 
 // localScoped builds a locally-issued caller (an EAT) with the given roles.
-func localScoped(projectID string, roles ...string) *authUtil.AuthContext {
-	return &authUtil.AuthContext{
+func localScoped(projectID string, roles ...string) *authSupport.AuthContext {
+	return &authSupport.AuthContext{
 		ProjectId: projectID,
 		Eat:       &authSupport.EventAuthToken{ProjectId: projectID, Roles: roles},
 	}
@@ -76,8 +75,8 @@ func localScoped(projectID string, roles ...string) *authUtil.AuthContext {
 // oauthScoped builds an OAuth/STS-validated caller. Such callers carry no local
 // EAT or ProjectId — their authority is only the scope set granted by the
 // trusted authorization server (issue #144).
-func oauthScoped(grantedScopes ...string) *authUtil.AuthContext {
-	return &authUtil.AuthContext{
+func oauthScoped(grantedScopes ...string) *authSupport.AuthContext {
+	return &authSupport.AuthContext{
 		IsOAuthClient: true,
 		GrantedScopes: grantedScopes,
 	}
@@ -228,7 +227,7 @@ func TestTokenListAuthoritySuite(t *testing.T) {
 func TestProjectScope(t *testing.T) {
 	cases := []struct {
 		name             string
-		authCtx          *authUtil.AuthContext
+		authCtx          *authSupport.AuthContext
 		wantUnrestricted bool
 		wantProjectID    string
 	}{

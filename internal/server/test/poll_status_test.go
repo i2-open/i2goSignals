@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -77,7 +77,7 @@ func TestPollTransmitterStatus(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
@@ -152,7 +152,7 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	}
 
 	// Add stream to provider
-	createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 

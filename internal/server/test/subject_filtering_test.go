@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -93,8 +93,8 @@ func (suite *SubjectFilteringSuite) TestSubjectHandlersReturn404WhenDisabled() {
 func (suite *SubjectFilteringSuite) newFilterTestStream(defaultSubjects string) (string, string) {
 	t := suite.T()
 	instance := suite.instance
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-		&authUtil.AuthContext{ProjectId: instance.projectId})
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+		&authSupport.AuthContext{ProjectId: instance.projectId})
 
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

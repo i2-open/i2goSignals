@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -41,7 +41,7 @@ func (suite *LongPollSuite) SetupSuite() {
 		},
 	}
 
-	stream, _ := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+	stream, _ := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 	state, _ := instance.GetStreamState(stream.Id)
 	instance.app.EventRouter.UpdateStreamState(state)
 

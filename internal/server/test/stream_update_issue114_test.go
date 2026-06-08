@@ -13,7 +13,6 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -60,7 +59,7 @@ func TestStreamUpdate_Issue114_AdminTokenRealProject(t *testing.T) {
 		Aud: []string{"test.example.com"},
 		Iss: "DEFAULT",
 	}
-	config, err := instance.CreateStream(transConfig, authUtil.ConvertProject(instance.projectId))
+	config, err := instance.CreateStream(transConfig, authSupport.ConvertProject(instance.projectId))
 	assert.NoError(t, err)
 	assert.NotEmpty(t, instance.projectId, "stream must be owned by a real project")
 

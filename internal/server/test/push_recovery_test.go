@@ -10,7 +10,7 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/i2-open/i2goSignals/pkg/goSetPush"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -62,7 +62,7 @@ func createPushStream(t *testing.T, instance *ssfInstance, eventsURL string) str
             },
         },
     }
-    atx := authUtil.AuthContext{ProjectId: instance.projectId}
+    atx := authSupport.AuthContext{ProjectId: instance.projectId}
     created, err := instance.CreateStream(streamConfig, &atx)
     require.NoError(t, err)
     state, err := instance.GetStreamState(created.Id)

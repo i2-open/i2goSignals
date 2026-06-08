@@ -1,11 +1,9 @@
-package authUtil
+package authSupport
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 )
 
 // newBearerRequest builds a GET request carrying the supplied bearer token.
@@ -23,19 +21,19 @@ func newBearerRequest(token string) *http.Request {
 func TestBootstrapResolver_AcceptsMatchingSecret(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "s3cret-bootstrap")
 
-	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest("s3cret-bootstrap"), []string{authSupport.ScopeKey})
+	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest("s3cret-bootstrap"), []string{ScopeKey})
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 for matching bootstrap secret, got %d", status)
 	}
 	if ctx == nil || ctx.Eat == nil {
 		t.Fatalf("expected non-nil AuthContext with Eat")
 	}
-	if !ctx.Eat.IsScopeMatch([]string{authSupport.ScopeKey}) {
+	if !ctx.Eat.IsScopeMatch([]string{ScopeKey}) {
 		t.Errorf("bootstrap AuthContext must carry the key scope; roles=%v", ctx.Eat.Roles)
 	}
 	// The bootstrap identity must NOT carry broader capabilities.
-	if ctx.Eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin}) ||
-		ctx.Eat.IsScopeMatch([]string{authSupport.ScopeRoot}) {
+	if ctx.Eat.IsScopeMatch([]string{ScopeStreamAdmin}) ||
+		ctx.Eat.IsScopeMatch([]string{ScopeRoot}) {
 		t.Errorf("bootstrap AuthContext must not carry admin/root; roles=%v", ctx.Eat.Roles)
 	}
 }
@@ -45,8 +43,8 @@ func TestBootstrapResolver_AcceptsMatchingSecret(t *testing.T) {
 func TestBootstrapResolver_RejectsWrongSecret(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "s3cret-bootstrap")
 
-	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest("not-the-secret"), []string{authSupport.ScopeKey})
-	if status == http.StatusOK && ctx != nil && ctx.Eat != nil && ctx.Eat.IsScopeMatch([]string{authSupport.ScopeKey}) {
+	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest("not-the-secret"), []string{ScopeKey})
+	if status == http.StatusOK && ctx != nil && ctx.Eat != nil && ctx.Eat.IsScopeMatch([]string{ScopeKey}) {
 		t.Fatalf("wrong bootstrap secret must not resolve to a key-scope context")
 	}
 }
@@ -58,17 +56,17 @@ func TestBootstrapResolver_UnsetFailsClosed(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 
 	// An empty presented bearer must never match an unset secret.
-	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest(""), []string{authSupport.ScopeKey})
+	ctx, status := auth.ValidateAuthorizationAny(newBearerRequest(""), []string{ScopeKey})
 	if status == http.StatusOK {
 		t.Fatalf("with bootstrap unset, an empty bearer must not be authorized; got 200")
 	}
-	if ctx != nil && ctx.Eat != nil && ctx.Eat.IsScopeMatch([]string{authSupport.ScopeKey}) {
+	if ctx != nil && ctx.Eat != nil && ctx.Eat.IsScopeMatch([]string{ScopeKey}) {
 		t.Fatalf("with bootstrap unset, no key-scope context may be synthesized")
 	}
 
 	// A caller presenting the empty string as its bearer must likewise not match.
-	ctx2, status2 := auth.ValidateAuthorizationAny(newBearerRequest("anything"), []string{authSupport.ScopeKey})
-	if status2 == http.StatusOK && ctx2 != nil && ctx2.Eat != nil && ctx2.Eat.IsScopeMatch([]string{authSupport.ScopeKey}) {
+	ctx2, status2 := auth.ValidateAuthorizationAny(newBearerRequest("anything"), []string{ScopeKey})
+	if status2 == http.StatusOK && ctx2 != nil && ctx2.Eat != nil && ctx2.Eat.IsScopeMatch([]string{ScopeKey}) {
 		t.Fatalf("with bootstrap unset, arbitrary bearer must not resolve to key scope")
 	}
 }

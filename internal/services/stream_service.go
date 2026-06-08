@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -255,8 +254,8 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
     mid := bson.NewObjectID()
 
-	// var authCtx authUtil.AuthContext
-	// authCtx = ctx.Value(authUtil.AuthContextKey).(authUtil.AuthContext)
+	// var authCtx authSupport.AuthContext
+	// authCtx = ctx.Value(authSupport.AuthContextKey).(authSupport.AuthContext)
 
 	if logger.IsDebugEnabled() {
 		ssLog.Debug("CreateStream dump:")
@@ -302,12 +301,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// minted below: the stream-client token that authorized this CreateStream
 	// (ADR 0007). Passing it as the issuing session sets Parent without altering
 	// the delivery token's other claims (an empty-ID session leaves Parent empty).
-	var deliveryParent *authUtil.AuthContext
+	var deliveryParent *authSupport.AuthContext
 	if ctx.Value("authCtx") != nil {
-		authCtx := ctx.Value("authCtx").(*authUtil.AuthContext)
+		authCtx := ctx.Value("authCtx").(*authSupport.AuthContext)
 		isOAuth = authCtx.IsOAuthClient
 		if authCtx.Eat != nil {
-			deliveryParent = &authUtil.AuthContext{Eat: &authSupport.EventAuthToken{}}
+			deliveryParent = &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{}}
 			deliveryParent.Eat.ID = authCtx.Eat.ID
 		}
 	}

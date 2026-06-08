@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/services"
@@ -69,12 +68,12 @@ func (instance *ssfInstance) Name() string {
 	return ""
 }
 
-func (instance *ssfInstance) GetAuthIssuer() *authUtil.AuthIssuer {
+func (instance *ssfInstance) GetAuthIssuer() *authSupport.AuthIssuer {
 	return instance.keySvc().GetAuthIssuer()
 }
 
-func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, authCtx *authUtil.AuthContext) (model.StreamConfiguration, error) {
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+func (instance *ssfInstance) CreateStream(request model.StreamConfiguration, authCtx *authSupport.AuthContext) (model.StreamConfiguration, error) {
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	projectId := ""
 	if authCtx != nil {
 		projectId = authCtx.ProjectId

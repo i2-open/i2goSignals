@@ -1,10 +1,8 @@
-package authUtil
+package authSupport
 
 import (
 	"crypto/subtle"
 	"os"
-
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 )
 
 // bootstrapTokenEnv is the environment variable holding the shared bootstrap
@@ -33,8 +31,8 @@ func (a *AuthIssuer) resolveBootstrapBearer(tokenString string) *AuthContext {
 
 	authLog.Debug("Bootstrap bearer accepted; synthesizing key-scope context")
 	return &AuthContext{
-		Eat: &authSupport.EventAuthToken{
-			Roles: []string{authSupport.ScopeKey},
+		Eat: &EventAuthToken{
+			Roles: []string{ScopeKey},
 		},
 	}
 }

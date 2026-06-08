@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -257,7 +257,7 @@ func (suite *PushErrorSuite) TestAccessDenied() {
 		RouteMode: model.RouteModeImport,
 	}
 
-	stream2, _ := suite.instance.CreateStream(streamConfig2, authUtil.ConvertProject(suite.instance.projectId))
+	stream2, _ := suite.instance.CreateStream(streamConfig2, authSupport.ConvertProject(suite.instance.projectId))
 
 	// Try to use stream2's auth token to access stream1's endpoint
 	req, _ := http.NewRequest(http.MethodPost, suite.stream.Delivery.PushReceiveMethod.EndpointUrl, strings.NewReader(tokenString))

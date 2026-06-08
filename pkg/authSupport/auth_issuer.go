@@ -1,4 +1,4 @@
-package authUtil
+package authSupport
 
 import (
 	"context"
@@ -17,8 +17,6 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/envcompat"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -45,7 +43,7 @@ var oauthAudWarnOnce sync.Once
 type AuthContext struct {
 	StreamId  string
 	ProjectId string
-	Eat       *authSupport.EventAuthToken
+	Eat       *EventAuthToken
 	// GrantedScopes carries the scopes the caller was actually granted. For an
 	// OAuth/STS-validated caller (IsOAuthClient) there is no local EAT to read
 	// roles from, so this is the only record of its authority — used by
@@ -72,7 +70,7 @@ func (a *AuthContext) HasScope(scopes ...string) bool {
 	}
 	if a.IsOAuthClient {
 		for _, want := range scopes {
-			if strings.EqualFold(want, authSupport.ScopeRoot) {
+			if strings.EqualFold(want, ScopeRoot) {
 				continue // foreign root is never honored (#144)
 			}
 			for _, granted := range a.GrantedScopes {
@@ -115,7 +113,14 @@ type AuthIssuer struct {
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
 	OAuthServer  []string                 // OAuth Authorization Server identifiers
-	TokenTracker authSupport.TokenTracker // Tracker for revocation
+	TokenTracker TokenTracker // Tracker for revocation
+	// OAuthServersLookup supplies the raw, comma-separated OAuth Authorization
+	// Server discovery endpoints. Production wiring sets this from the
+	// environment (including any deprecated-alias handling) so this package
+	// holds no env/internal coupling. When nil, GetOAuthServers falls back to a
+	// stdlib-only read of I2SIG_AUTH_OAUTH_SERVERS, then the deprecated
+	// OAUTH_SERVERS, preserving precedence without emitting a deprecation WARN.
+	OAuthServersLookup func() string
 }
 
 func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *keyfunc.JWKS) {
@@ -157,7 +162,7 @@ func (a *AuthIssuer) GetOAuthServers() []string {
 		return a.OAuthServer
 	}
 
-	as_env := envcompat.Lookup("I2SIG_AUTH_OAUTH_SERVERS", "OAUTH_SERVERS")
+	as_env := a.lookupOAuthServers()
 	if as_env == "" {
 		return nil
 	}
@@ -167,6 +172,22 @@ func (a *AuthIssuer) GetOAuthServers() []string {
 	}
 	a.OAuthServer = urls
 	return a.OAuthServer
+}
+
+// lookupOAuthServers resolves the raw OAuth-servers configuration string. When
+// the caller has supplied OAuthServersLookup (production wiring, which routes
+// through internal/envcompat to honor the deprecated OAUTH_SERVERS alias with a
+// WARN), it is used. Otherwise this falls back to a stdlib-only read that still
+// prefers the new I2SIG_AUTH_OAUTH_SERVERS over the deprecated OAUTH_SERVERS,
+// keeping this package free of any internal/* dependency.
+func (a *AuthIssuer) lookupOAuthServers() string {
+	if a.OAuthServersLookup != nil {
+		return a.OAuthServersLookup()
+	}
+	if v := os.Getenv("I2SIG_AUTH_OAUTH_SERVERS"); v != "" {
+		return v
+	}
+	return os.Getenv("OAUTH_SERVERS")
 }
 
 // oauthParserOptions returns the jwt.ParserOption set applied to EXTERNAL OIDC
@@ -314,9 +335,9 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 		subject = authCtx.Eat.Subject
 	}
 
-	eat := authSupport.EventAuthToken{
+	eat := EventAuthToken{
 		ProjectId: projectId,
-		Roles:     []string{authSupport.ScopeRegister},
+		Roles:     []string{ScopeRegister},
 		ClientId:  clientId,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   subject,
@@ -349,9 +370,9 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId string, admin bool, parentJTI string) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 
-	scopes := []string{authSupport.ScopeStreamMgmt}
+	scopes := []string{ScopeStreamMgmt}
 	if admin { // 'admin' allows creation and deletion instead of just update
-		scopes = []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt}
+		scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt}
 	}
 
 	a.mu.RLock()
@@ -363,7 +384,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	privateKey := a.PrivateKey
 	a.mu.RUnlock()
 
-	eat := authSupport.EventAuthToken{
+	eat := EventAuthToken{
 		ProjectId: projectId,
 		Roles:     scopes,
 		ClientId:  client.Id.Hex(),
@@ -410,12 +431,12 @@ func (a *AuthIssuer) IssueSstpPairToken(txSid string, rxSid string, projectId st
     privateKey := a.PrivateKey
     a.mu.RUnlock()
 
-    scopes := []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery}
+    scopes := []string{ScopeStreamMgmt, ScopeEventDelivery}
     if admin {
-        scopes = []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery}
+        scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery}
     }
 
-    eat := authSupport.EventAuthToken{
+    eat := EventAuthToken{
         StreamIds: []string{txSid, rxSid},
         ProjectId: projectId,
         Roles:     scopes,
@@ -460,7 +481,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 	privateKey := a.PrivateKey
 	a.mu.RUnlock()
 
-	eat := authSupport.EventAuthToken{
+	eat := EventAuthToken{
 		StreamIds: []string{streamId},
 		ProjectId: projectId,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -474,7 +495,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 	if projectId != "" {
 		eat.ProjectId = projectId
 	}
-	eat.Roles = []string{authSupport.ScopeEventDelivery}
+	eat.Roles = []string{ScopeEventDelivery}
 	// A delivery token's lineage parent is the stream-client token that
 	// authorized this mint (the issuing session's EAT).
 	parentJTI := ""
@@ -723,7 +744,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 		var missingKID bool
 		parserOpts := oauthParserOptions()
 		for _, jwks := range pubKeys {
-			token, err := jwt.ParseWithClaims(tokenString, &authSupport.OidcClaims{}, jwks.Keyfunc, parserOpts...)
+			token, err := jwt.ParseWithClaims(tokenString, &OidcClaims{}, jwks.Keyfunc, parserOpts...)
 			if err != nil {
 				if strings.Contains(err.Error(), "key ID was not found") {
 					missingKID = true
@@ -731,7 +752,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 				authLog.Debug("Not validated with key", "kids", jwks.KIDs(), "error", err)
 				continue
 			}
-			if claims, ok := token.Claims.(*authSupport.OidcClaims); ok && token.Valid {
+			if claims, ok := token.Claims.(*OidcClaims); ok && token.Valid {
 				scopeOK = true
 				// Map OIDC realm roles to our scopes by simple name match (case-insensitive)
 				var hasScopes []string
@@ -804,7 +825,7 @@ func (a *AuthIssuer) validateOAuthToken(tokenString string, streamRequested stri
 
 func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 	// Issue #144: External OIDC realm roles must match the specific accepted scope
-	// name. A foreign realm role literally named "root" (authSupport.ScopeRoot)
+	// name. A foreign realm role literally named "root" (ScopeRoot)
 	// must NOT confer cluster-wide privilege — that super-power is reserved for our
 	// own locally issued tokens (see EventAuthToken.IsScopeMatch).
 	for _, accepted := range scopesAccepted {
@@ -817,14 +838,14 @@ func oidcRolesMatchScopes(roles []string, scopesAccepted []string) bool {
 	return false
 }
 
-// ParseAuthToken parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
-func (a *AuthIssuer) ParseAuthToken(tokenString string) (*authSupport.EventAuthToken, error) {
+// ParseAuthToken parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
+func (a *AuthIssuer) ParseAuthToken(tokenString string) (*EventAuthToken, error) {
 	return a.parseAuthTokenInternal(tokenString, true, "")
 }
 
-// ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *authSupport.EventAuthToken is only returned if the token was validated otherwise nil
+// ParseAuthTokenVerbose parses and validates an internally issued event authorization token. An *EventAuthToken is only returned if the token was validated otherwise nil
 // When verbose is false, it does not log "Error validating token"
-func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*authSupport.EventAuthToken, error) {
+func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*EventAuthToken, error) {
 	return a.parseAuthTokenInternal(tokenString, verbose, "")
 }
 
@@ -832,7 +853,7 @@ func (a *AuthIssuer) ParseAuthTokenVerbose(tokenString string, verbose bool) (*a
 // ParseAuthTokenVerbose. The streamId argument is included in diagnostic logs so
 // validation failures can be tied to the stream the caller was trying to reach.
 // Pass an empty string when no stream context is available.
-func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, streamId string) (*authSupport.EventAuthToken, error) {
+func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, streamId string) (*EventAuthToken, error) {
 	// If the public key is not yet loaded (server still starting up or in the middle
 	// of a MongoDB reconnect), wait up to 1 second for it to become available before
 	// giving up. This avoids 503 responses during the brief window between service
@@ -861,7 +882,7 @@ func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, st
 
 	tokenKid := peekKid(tokenString)
 	valid := true
-	token, err := jwt.ParseWithClaims(tokenString, &authSupport.EventAuthToken{}, pubKey.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &EventAuthToken{}, pubKey.Keyfunc)
 	if err != nil {
 		if verbose {
 			authLog.Error("Error validating token", "tokenKid", tokenKid, "jwksKids", pubKey.KIDs(), "streamId", streamId, "error", err)
@@ -879,7 +900,7 @@ func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, st
 	// claimString := string(jsonByte)
 	// authLog.Println(claimString)
 	if token != nil {
-		if claims, ok := token.Claims.(*authSupport.EventAuthToken); ok && valid {
+		if claims, ok := token.Claims.(*EventAuthToken); ok && valid {
 			if a.TokenTracker != nil {
 				revoked, _ := a.TokenTracker.IsRevoked(context.Background(), claims.ID)
 				if revoked {
@@ -923,14 +944,14 @@ func generateAlias(n int) string {
 
 // ValidateOidcToken validates an OIDC token from Keycloak and returns the claims
 // This is used by the adminUI to authenticate users
-func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*authSupport.OidcClaims, error) {
-	validator := authSupport.NewTokenValidator(a.PublicKey)
+func (a *AuthIssuer) ValidateOidcToken(tokenString string) (*OidcClaims, error) {
+	validator := NewTokenValidator(a.PublicKey)
 	return validator.ValidateOidcToken(tokenString)
 }
 
 // ValidateOidcAuthorizationMiddleware is middleware to validate OIDC tokens from adminUI
 func (a *AuthIssuer) ValidateOidcAuthorizationMiddleware(next http.Handler) http.Handler {
-	validator := authSupport.NewTokenValidator(a.PublicKey)
+	validator := NewTokenValidator(a.PublicKey)
 	return validator.ValidateOidcAuthorizationMiddleware(next)
 }
 

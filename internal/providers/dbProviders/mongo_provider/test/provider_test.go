@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -25,7 +24,7 @@ type MongoProviderSuite struct {
 	streamToken string
 	mgmtToken   string
 	project     string
-	auth        *authUtil.AuthIssuer
+	auth        *authSupport.AuthIssuer
 }
 
 func (s *MongoProviderSuite) SetupSuite() {
@@ -91,8 +90,8 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	if len(events) > 0 {
 		req.EventsRequested = events
 	}
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: req}, authCtx.ProjectId, nil)
 }
 
@@ -423,8 +422,8 @@ func (s *MongoProviderSuite) TestI_UpdateRemoteAddress() {
 func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
 	s.T().Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
 
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 
 	req := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -475,8 +474,8 @@ func (s *MongoProviderSuite) TestZ_SubjectFilterFieldsRoundTrip() {
 // create and update. Mirrors the memory-adapter coverage in
 // internal/services/stream_service_subject_filter_test.go.
 func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
-	authCtx := authUtil.ConvertProject(s.project)
-	ctx := context.WithValue(context.Background(), authUtil.AuthContextKey, authCtx)
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
 
 	req := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

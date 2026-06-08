@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -206,7 +206,7 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 		},
 	}
 
-	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
+	atx := authSupport.AuthContext{ProjectId: suite.instance.projectId}
 	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 
@@ -300,7 +300,7 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 		},
 	}
 
-	atx := authUtil.AuthContext{ProjectId: suite.instance.projectId}
+	atx := authSupport.AuthContext{ProjectId: suite.instance.projectId}
 	created, err := suite.instance.CreateStream(streamConfig, &atx)
 	require.NoError(t, err)
 

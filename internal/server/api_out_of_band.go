@@ -21,7 +21,6 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -32,11 +31,11 @@ import (
 
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
 // remain available when JwksJsonIssuer is requested.
-func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	RotateIssuerHandler(sa, w, r, authCtx)
 }
 
-func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	// This function is called by CreateJwksIssuer so authentication has already been checked.
 
 	vars := mux.Vars(r)
@@ -154,7 +153,7 @@ func CreateKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 // applies to OAuth/STS callers too: an Eat-only check returned false for them
 // (Eat==nil), which silently exempted an OAuth key-only caller from the
 // create-only guard and granted full key takeover/upload (see #128, #139, #150).
-func keyScopeOnly(authCtx *authUtil.AuthContext) bool {
+func keyScopeOnly(authCtx *authSupport.AuthContext) bool {
 	if authCtx == nil {
 		return false
 	}
@@ -179,7 +178,7 @@ func requestIsKeyTakeover(r *http.Request) bool {
 	return false
 }
 
-func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authUtil.AuthContext) {
+func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	vars := mux.Vars(r)
 	rawKeyName := vars["keyName"]
 	if rawKeyName == "" {
@@ -297,7 +296,7 @@ func CreateKeyNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *
 	createKeyByNameHandler(sa, w, r, authCtx)
 }
 
-func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authUtil.AuthContext, body []byte) {
+func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, request *http.Request, authCtx *authSupport.AuthContext, body []byte) {
 	ctx := request.Context()
 	vars := mux.Vars(request)
 	rawKeyName := vars["keyName"]
@@ -643,8 +642,8 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// event_delivery granted here is persisted in the client's AllowedScopes as a
 	// capability, but is intentionally NOT minted into the stream-client
 	// (management) token (see services.ClientService.RegisterClient and
-	// authUtil.IssueStreamClientToken). Event delivery is authorized by a separate
-	// per-stream delivery token (authUtil.IssueStreamToken), issued at stream
+	// authSupport.IssueStreamClientToken). Event delivery is authorized by a separate
+	// per-stream delivery token (authSupport.IssueStreamToken), issued at stream
 	// creation. The stored-capability vs minted-token-role divergence is by design
 	// (#140); do not reconcile it by adding event to the management token.
 	var scopes []string
@@ -1270,7 +1269,7 @@ func (sa *SignalsApplication) GetSummaries(w http.ResponseWriter, r *http.Reques
 // project (unknown JTI) is treated as out-of-scope for a confined caller, which
 // the callers turn into a no-op (revoke) or active:false (introspect) without
 // leaking existence.
-func callerMayActOnProject(authCtx *authUtil.AuthContext, targetProjectID string) bool {
+func callerMayActOnProject(authCtx *authSupport.AuthContext, targetProjectID string) bool {
 	unrestricted, projectID := services.ProjectScope(authCtx)
 	if unrestricted {
 		return true
@@ -1304,7 +1303,7 @@ func (sa *SignalsApplication) IntrospectHandler(w http.ResponseWriter, r *http.R
 	jti := token
 	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
-	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+	} else if peeked := authSupport.PeekJti(token); peeked != "" {
 		jti = peeked
 	}
 
@@ -1362,7 +1361,7 @@ func (sa *SignalsApplication) RevokeHandler(w http.ResponseWriter, r *http.Reque
 	jti := ""
 	if claims, err := sa.GetAuth().ParseAuthTokenVerbose(token, false); err == nil && claims != nil {
 		jti = claims.ID
-	} else if peeked := authUtil.PeekJti(token); peeked != "" {
+	} else if peeked := authSupport.PeekJti(token); peeked != "" {
 		jti = peeked
 	}
 
@@ -1377,7 +1376,7 @@ func (sa *SignalsApplication) RevokeHandler(w http.ResponseWriter, r *http.Reque
 // revokeIfPermitted applies the project guard then revokes by JTI. A
 // cross-project (or unknown) target is a silent no-op so /revoke never leaks
 // existence. Revocation failures are logged but never change the HTTP outcome.
-func (sa *SignalsApplication) revokeIfPermitted(r *http.Request, authCtx *authUtil.AuthContext, jti string) {
+func (sa *SignalsApplication) revokeIfPermitted(r *http.Request, authCtx *authSupport.AuthContext, jti string) {
 	record, err := sa.GetTokenService().FindByJTI(r.Context(), jti)
 	if err != nil {
 		serverLog.Warn("Revoke lookup error", "jti", jti, "error", err)

@@ -12,7 +12,7 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -22,22 +22,33 @@ import (
 
 var ksLog = logger.Sub("KEY_SERVICE")
 
+// oauthServersFromEnv resolves the OAuth Authorization Server discovery
+// endpoints from the environment, honoring the deprecated OAUTH_SERVERS alias
+// (with a one-time deprecation WARN) in favor of I2SIG_AUTH_OAUTH_SERVERS. This
+// envcompat parsing lives in the wiring tree (internal/services) and is injected
+// into authSupport.AuthIssuer via OAuthServersLookup so the public package stays
+// free of internal/* imports.
+func oauthServersFromEnv() string {
+	return envcompat.Lookup("I2SIG_AUTH_OAUTH_SERVERS", "OAUTH_SERVERS")
+}
+
 type KeyService struct {
 	keyDAO      interfaces.KeyDAO
 	tokenIssuer string
 	tokenKid    string
 	tokenKey    *rsa.PrivateKey
 	tokenPubKey *keyfunc.JWKS
-	authIssuer  *authUtil.AuthIssuer
+	authIssuer  *authSupport.AuthIssuer
 }
 
 func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker) *KeyService {
 	return &KeyService{
 		keyDAO:      keyDAO,
 		tokenIssuer: tokenIssuer,
-		authIssuer: &authUtil.AuthIssuer{
-			TokenIssuer:  tokenIssuer,
-			TokenTracker: tokenTracker,
+		authIssuer: &authSupport.AuthIssuer{
+			TokenIssuer:        tokenIssuer,
+			TokenTracker:       tokenTracker,
+			OAuthServersLookup: oauthServersFromEnv,
 		},
 	}
 }
@@ -465,7 +476,7 @@ func (s *KeyService) GetAuthValidatorPubKey() *keyfunc.JWKS {
 }
 
 // GetAuthIssuer returns the AuthIssuer used for signing auth tokens.
-func (s *KeyService) GetAuthIssuer() *authUtil.AuthIssuer {
+func (s *KeyService) GetAuthIssuer() *authSupport.AuthIssuer {
 	return s.authIssuer
 }
 

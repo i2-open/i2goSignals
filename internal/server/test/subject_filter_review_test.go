@@ -11,7 +11,7 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/authUtil"
+    "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/i2-open/i2goSignals/internal/services"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -53,8 +53,8 @@ func TestSubjectFilterReviewSuite(t *testing.T) {
 func (suite *SubjectFilterReviewSuite) newReviewStream(defaultSubjects, mode string) string {
     t := suite.T()
     instance := suite.instance
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: "DEFAULT",
@@ -259,8 +259,8 @@ func (suite *SubjectFilterReviewSuite) TestPassthruReportsNoLocalFilter() {
         instance.app.SubjectRelayService = prevRelay
     }()
 
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: upstreamIss,
@@ -328,8 +328,8 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturns404WhenFilteringDisabled
 func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverride() {
     t := suite.T()
     instance := suite.instance
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: "DEFAULT",
@@ -368,8 +368,8 @@ func (suite *SubjectFilterReviewSuite) TestReviewSurfacesEffectiveEventSourceAnd
     t := suite.T()
     t.Setenv("I2SIG_SUBJECT_REMOVAL_GRACE", "45")
     instance := suite.instance
-    ctx := context.WithValue(context.Background(), authUtil.AuthContextKey,
-        &authUtil.AuthContext{ProjectId: instance.projectId})
+    ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+        &authSupport.AuthContext{ProjectId: instance.projectId})
     created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
         StreamConfiguration: model.StreamConfiguration{
             Iss: "DEFAULT",

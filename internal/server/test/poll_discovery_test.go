@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )
@@ -99,7 +99,7 @@ func TestPollStatusDiscovery(t *testing.T) {
 				},
 			}
 
-			createdConfig, err := instance.CreateStream(streamConfig, authUtil.ConvertProject(instance.projectId))
+			createdConfig, err := instance.CreateStream(streamConfig, authSupport.ConvertProject(instance.projectId))
 			assert.NoError(t, err)
 
 			streamState, err := instance.GetStreamState(createdConfig.Id)

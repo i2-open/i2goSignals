@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/authUtil"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -60,7 +59,7 @@ type TokenListFilters struct {
 //     token may wield root.
 //
 // Returns (unrestricted, confinedProjectID).
-func ProjectScope(authCtx *authUtil.AuthContext) (bool, string) {
+func ProjectScope(authCtx *authSupport.AuthContext) (bool, string) {
 	if authCtx == nil {
 		return false, ""
 	}
@@ -225,7 +224,7 @@ func (s *TokenService) ListByClient(ctx context.Context, clientID string) ([]*mo
 // param. The type and active filters compose. STREAM-typed rows are joined to
 // the stream's live RemoteAddress (last-seen IP); the IP is not stored on the
 // token. The result is capped (cap-and-log) since there is no pagination here.
-func (s *TokenService) ListForAuthority(ctx context.Context, authCtx *authUtil.AuthContext, filters TokenListFilters) ([]*model.TokenListEntry, error) {
+func (s *TokenService) ListForAuthority(ctx context.Context, authCtx *authSupport.AuthContext, filters TokenListFilters) ([]*model.TokenListEntry, error) {
 	unrestricted, projectID := ProjectScope(authCtx)
 
 	// Fail closed: a confined caller with no resolved project (e.g. an OAuth
