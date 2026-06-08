@@ -55,18 +55,18 @@ func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound g
 	// delivered SET would be re-sent forever.
 	txSid := rec.StreamConfiguration.Id
 	if len(inbound.Ack) > 0 {
-		// Finding #3: gate the peer's ack to JTIs THIS node actually delivered to it
-		// on a prior cycle (recorded in sstpServerDelivered). A buggy/replaying peer
-		// that acks a JTI never delivered to it must not prematurely remove a
-		// still-undelivered outbound SET — mirrors the client handleSstpAcks sent-set
-		// gate. Scoped per-pair (keyed on txSid).
-		gated := r.gateSstpServerAck(txSid, inbound.Ack)
-		if len(gated) > 0 {
-			buf := r.sstpServerBufferFor(txSid)
-			buf.AckEvents(gated)
-			for _, jti := range gated {
-				_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
-			}
+		// Ack unconditionally, mirroring the RFC8936 poll transmitter
+		// (PollStreamHandler): the per-pair buffer's AckEvents is a no-op for any JTI
+		// not pending, and a peer can only ever ack JTIs from its own pair's outbound
+		// stream — so an ack for a not-yet-delivered JTI at worst drops that peer's own
+		// event, never another stream's. Crucially this endpoint takes NO cluster lease
+		// (any node serves it), so the ack MUST be honored regardless of which node
+		// delivered the SET; per-node delivery tracking would silently drop a legitimate
+		// cross-node ack and redeliver forever.
+		buf := r.sstpServerBufferFor(txSid)
+		buf.AckEvents(inbound.Ack)
+		for _, jti := range inbound.Ack {
+			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
 		}
 	}
 
@@ -108,59 +108,9 @@ func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound g
 	sets := r.drainSstpOutbound(ctx, rec, inbound)
 	if len(sets) > 0 {
 		resp.Sets = sets
-		// Finding #3: record the JTIs delivered this cycle as delivered-but-unacked so
-		// the NEXT cycle's inbound Ack is gated to them.
-		delivered := make([]string, 0, len(sets))
-		for jti := range sets {
-			delivered = append(delivered, jti)
-		}
-		r.recordSstpServerDelivered(txSid, delivered)
 	}
 
 	return resp, http.StatusOK
-}
-
-// recordSstpServerDelivered marks the given JTIs as delivered-but-unacked for the
-// pair's tx SID, so a later inbound Ack for one of them is honored (Finding #3).
-func (r *router) recordSstpServerDelivered(txSid string, jtis []string) {
-	if len(jtis) == 0 {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	set := r.sstpServerDelivered[txSid]
-	if set == nil {
-		set = map[string]bool{}
-		r.sstpServerDelivered[txSid] = set
-	}
-	for _, jti := range jtis {
-		set[jti] = true
-	}
-}
-
-// gateSstpServerAck returns the subset of acked JTIs that this node actually
-// delivered to the peer (present in sstpServerDelivered for txSid), and clears
-// them from the delivered set. A JTI never delivered by this node is dropped, so a
-// buggy/replaying peer cannot prematurely remove an undelivered outbound SET
-// (Finding #3). Scoped per-pair.
-func (r *router) gateSstpServerAck(txSid string, acked []string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	set := r.sstpServerDelivered[txSid]
-	if len(set) == 0 {
-		return nil
-	}
-	gated := make([]string, 0, len(acked))
-	for _, jti := range acked {
-		if set[jti] {
-			gated = append(gated, jti)
-			delete(set, jti)
-		}
-	}
-	if len(set) == 0 {
-		delete(r.sstpServerDelivered, txSid)
-	}
-	return gated
 }
 
 // drainSstpOutbound long-polls the pair's outbound EventPollBuffer and returns the

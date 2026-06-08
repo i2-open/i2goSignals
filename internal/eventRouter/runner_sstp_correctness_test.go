@@ -315,12 +315,16 @@ func TestSstpClient_FailedDeliveryRetriesClaimedEvent(t *testing.T) {
 	assert.Equal(t, 0, buf.Cnt(), "after the successful ack the SET must be gone from the buffer")
 }
 
-// --- NEW Finding #3: server gates inbound Ack to JTIs it actually delivered ----
+// --- Cross-node ack: the server honors an ack regardless of delivering node -----
 
-// TestSstpServer_IgnoresAckForUndeliveredJti proves a peer that acks a JTI the
-// server never delivered to it does NOT cause that still-undelivered outbound SET
-// to be removed from the pending list / buffer (silent loss).
-func TestSstpServer_IgnoresAckForUndeliveredJti(t *testing.T) {
+// TestSstpServer_AcksOutboundRegardlessOfDeliveringNode proves the SSTP-server
+// endpoint honors a peer's inbound Ack even when THIS router never delivered the
+// SET itself. The endpoint takes no cluster lease (any node serves it, Q11.1), so
+// in production cycle N's delivery and cycle N+1's ack routinely land on different
+// nodes. Per-node delivery tracking would silently drop the legitimate ack and
+// redeliver the SET forever; the handler instead acks unconditionally against the
+// durable pending list, mirroring the RFC8936 poll transmitter (PollStreamHandler).
+func TestSstpServer_AcksOutboundRegardlessOfDeliveringNode(t *testing.T) {
 	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
 	h := newSstpRunnerHarness(t, adapter)
 
@@ -328,36 +332,25 @@ func TestSstpServer_IgnoresAckForUndeliveredJti(t *testing.T) {
 	rec := sstpServerPairState(txSid, rxSid, pairId)
 	require.NoError(t, h.router.streamService.PersistStreamStateRecord(context.Background(), rec))
 
-	// A pending outbound SET that has NOT yet been delivered to the peer. Prime the
-	// server buffer (the long-poll empty Message wakes on the async submit).
-	jti := "sstp-srv-undelivered"
+	// A pending outbound SET. This router never delivers it (simulating that another
+	// node served the delivering cycle). The peer now acks it against THIS node.
+	jti := "sstp-srv-acked-elsewhere"
 	h.persistOutboundEvent(t, txSid, jti)
 
-	// The peer (buggy / replaying) acks a JTI the server never delivered to it. Use
-	// returnImmediately so this cycle does NOT itself deliver the SET — proving the
-	// ack alone cannot remove a never-delivered outbound SET. The buffer's async
-	// drain may not have surfaced the JTI yet either; the assertion below is on the
-	// durable pending list, which is unaffected by the buffer race.
-	bogusAck := goSetSstp.Message{
+	ack := goSetSstp.Message{
 		Ack:               []string{jti},
 		ReturnImmediately: goSetSstp.BoolPtr(true),
 	}
-	resp, status := h.router.SstpServerHandler(context.Background(), pairId, bogusAck, nil)
+	_, status := h.router.SstpServerHandler(context.Background(), pairId, ack, nil)
 	require.Equal(t, 200, status)
-	assert.NotContains(t, resp.Sets, jti, "the bogus-ack cycle must not deliver the SET (returnImmediately, never delivered before)")
 
-	// The undelivered SET must STILL be pending — the bogus ack must be ignored.
+	// The ack must be honored: the SET is removed from the durable pending list even
+	// though this node never delivered it. A per-node delivery gate would leave it
+	// pending and redeliver it forever.
 	pending, _ := h.router.eventService.GetEventIds(context.Background(), txSid, model.PollParameters{
 		MaxEvents: 10, ReturnImmediately: true,
 	})
-	assert.Contains(t, pending, jti, "an ack for a never-delivered JTI must NOT remove the pending outbound SET")
-
-	// And a subsequent cycle (no bogus ack, long-poll so the async buffer drain
-	// surfaces the JTI) still delivers it — it was never removed.
-	resp2, status2 := h.router.SstpServerHandler(context.Background(), pairId,
-		goSetSstp.Message{}, nil)
-	require.Equal(t, 200, status2)
-	assert.Contains(t, resp2.Sets, jti, "the never-delivered SET must still be deliverable on a later cycle")
+	assert.NotContains(t, pending, jti, "a cross-node ack must remove the pending outbound SET (no per-node delivery gate)")
 }
 
 // --- Finding #8: RemoveStream tears down the SSTP maps, buffers, and runner ----

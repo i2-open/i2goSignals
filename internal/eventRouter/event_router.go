@@ -110,13 +110,6 @@ type router struct {
 	// an outbound event against an SSTP-server pair and broadcast a wake-sstp-server
 	// to active nodes so a held long-poll returns the event (PRD #154 Q11.1, #167).
 	sstpServerStreams map[string]model.StreamStateRecord
-	// sstpServerDelivered tracks, per SSTP-server pair (keyed on tx-side SID), the
-	// set of outbound JTIs this node has actually delivered to the peer on a prior
-	// cycle but the peer has not yet acked. The inbound-Ack consumption is gated to
-	// this set (NEW Finding #3): a buggy/replaying peer that acks a JTI never
-	// delivered to it cannot prematurely remove a still-undelivered outbound SET.
-	// Scoped per-pair. Entries are cleared on ack.
-	sstpServerDelivered map[string]map[string]bool
 	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
 	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
 	// outbound arrival while a push is already running coalesces into that push's
@@ -253,7 +246,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
 		sstpInFlight:           map[string]map[string]bool{},
-		sstpServerDelivered:    map[string]map[string]bool{},
 		issuerKeys:             map[string]*rsa.PrivateKey{},
 		issuerKids:             map[string]string{},
 		enabled:                false,
@@ -1665,7 +1657,6 @@ func (r *router) RemoveStream(sid string) {
 	if _, ok := r.sstpServerStreams[sid]; ok {
 		delete(r.sstpServerStreams, sid)
 	}
-	delete(r.sstpServerDelivered, sid)
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }
