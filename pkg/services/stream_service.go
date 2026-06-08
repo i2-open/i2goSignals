@@ -170,9 +170,17 @@ func applyEventSource(streamRec *model.StreamStateRecord, requested *model.Event
 // previously read from environment variables inside the constructor. The wiring
 // tree (the provider) now resolves these — via internal/envcompat or otherwise —
 // and passes concrete values in, so this package no longer reads the
-// environment. A non-positive MinVerificationInterval/MaxInactivityTimeout
-// falls back to the historical defaults (300 / 3600), preserving prior
-// behaviour when the caller leaves them unset.
+// environment.
+//
+// MinVerificationInterval / MaxInactivityTimeout: any non-positive value
+// (absent / zero-valued cfg, an explicit 0, or a negative) means "unset" and
+// falls back to the historical defaults (300 / 3600). 0 is deliberately NOT a
+// supported operator value for these two knobs: the rest of the stream-config
+// layer already treats 0 as "no value set" (a receiver-requested override is
+// applied only when > 0, and config-update paths only when != 0), so storing a
+// literal 0 as the server default would be read back everywhere as "unset".
+// This contract is pinned by TestNewStreamServiceConfigDefaults and was decided
+// in issue #182.
 type StreamServiceConfig struct {
 	BaseUrl                 *url.URL
 	MinVerificationInterval int
