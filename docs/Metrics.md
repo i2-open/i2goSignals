@@ -23,6 +23,16 @@ These metrics track the flow of Security Event Tokens (SETs) and the state of ev
 | `goSignals_router_stream_start_date_seconds` | Gauge | `stream_id` | Timestamp when the stream was started (Unix seconds). |
 | `goSignals_router_stream_modified_at_seconds` | Gauge | `stream_id` | Timestamp when the stream was last modified (Unix seconds). |
 
+The `tfr` ("transfer method") label on `goSignals_router_events_in_total` and
+`goSignals_router_events_out_total` takes one of three values: **`PUSH`** (RFC
+8935), **`POLL`** (RFC 8936), or **`SSTP`** (Synchronous SET Transfer Protocol).
+For an SSTP pair both directions report `tfr=SSTP`: the inbound counter
+(`events_in`) is labelled `stream_id=<rxSid>` and the outbound counter
+(`events_out`) `stream_id=<txSid>`, so each direction of a pair is observable
+independently. The active-stream gauges above are not split by SSTP — an SSTP
+pair is counted via its underlying publisher/receiver activity. See
+[docs/SSTP.md](SSTP.md).
+
 ## Push Delivery Metrics
 
 These metrics surface the push state machine described in `docs/operations.md`. They give operators

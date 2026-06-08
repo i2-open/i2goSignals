@@ -204,6 +204,15 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 | `I2SIG_POLL_DEFAULT_TIMEOUT`   | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                          | `30`    |
 | `I2SIG_POLL_MAX_TIMEOUT`       | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                       | `300`   |
 
+> **SSTP reuses the poll knobs.** SSTP defines **no** delivery-timeout or
+> retry env vars of its own. The SSTP **server (responder)** side applies
+> `I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT` to its outbound
+> long-poll wait, and the SSTP **client (initiator)** side applies
+> `I2SIG_POLL_RETRY_BASE_DELAY` / `I2SIG_POLL_RETRY_MAX_DELAY` /
+> `I2SIG_POLL_RETRY_BACKOFF_FACTOR` to its transport/transient backoff. The
+> only SSTP-specific knob is `I2SIG_INSECURE_SSTP_HTTP` (see **Stream** above).
+> See [docs/SSTP.md](SSTP.md).
+
 ## TLS
 
 | Variable               | Description                                                                                                       | Default                          |

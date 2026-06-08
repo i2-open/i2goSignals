@@ -69,6 +69,40 @@ The `/server` endpoints stay distinct from `/stream` (they are not folded into
 stream creation) so a foreign transmitter's credential keeps an independent
 lifecycle, which goSignalsAdmin's console depends on.
 
+### SSTP pair authorization
+
+An SSTP pair is one bidirectional relationship with two internal stream IDs per
+node — `txSid` (outbound) and `rxSid` (inbound). Its authorization model differs
+from a single-direction push/poll stream in three ways (PRD #154 Q9.1, Q19, Q38,
+Q42):
+
+- **One multi-SID pair bearer.** At pair create the existing register-tokens path
+  mints a **single** management bearer whose `EventAuthToken.StreamIds` carries
+  **both** SIDs (`[txSid, rxSid]`), via `IssueSstpPairToken`. `scope=event` is
+  sufficient for data-plane delivery and for status-read / verify; `scope=stream`
+  is required for `UpdateStatus` and config writes.
+- **Never a bare `authCtx.Eat` check.** Scope/stream checks always go through
+  `HasScope` / `IsAuthorizedForStream`, never a direct `authCtx.Eat` read — the
+  `Eat` is `nil` for OAuth/STS callers, so a bare check would silently deny them.
+  For a locally issued pair bearer the EAT enforces `StreamIds` containment; for
+  an OAuth/STS caller authority is the granted scope set.
+- **`FindByPairId` defense-in-depth at `POST /sstp/{id}`.** The `{id}` on the
+  path is the pair's `PairId` (the on-wire SSF `stream_id`), but the bearer is
+  bound to the **internal** SIDs, not the PairId. The handler resolves the record
+  via `FindByPairId` / `GetStreamStateByPairId` and authorizes the bearer against
+  the record's **actual** `txSid`/`rxSid` for `scope=event`. A token minted for a
+  different pair therefore cannot act on this one even if it reaches the right
+  path.
+
+**OAuth supersedes the static pair-bearer (migration path).** When the peer's
+stored `Server` alias carries an OAuth Client Config, that OAuth credential is
+intended to **supersede** the static per-pair bearer on the outbound (client)
+side — giving operators a migration path off static bearers without an
+SSTP-specific code change. The *enforcement* stance — actively rejecting a static
+bearer once OAuth is configured — is deferred to the bearer-rotation work in
+GH #152 (Q38); today the static `SstpMethod.AuthorizationHeader` is used when
+present.
+
 ### The bootstrap secret
 
 `I2SIG_BOOTSTRAP_TOKEN` is a shared secret. On the server, a bearer that
