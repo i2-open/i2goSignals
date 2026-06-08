@@ -128,7 +128,7 @@ All server config is environment-variable driven (no config file). `docs/configu
 ## Claude Development work cycle
 
 ### Issues and Work Management
-1. Each new idea starts with the /grill-me or /grill-with-docs skill in plan mode to work to a common understanding, or begins with /triage on issues marked "needs-triage" in github (advancing them through the needs-triage → ready-for-agent / ready-for-human labels).
+1. Each new idea starts with the /grill-me or /grill-with-docs skill in plan mode to work to a common understanding, or begins with /triage on issues marked "needs-triage" in github (advancing them through the needs-triage → ready-for-agent / ready-for-human labels). Use graphify to explore and understand the codebase.
 2. /to-prd to write a PRD and commit to Github for complex issues
 3. /to-issues to create Github issues (slices) or to update a simple issue such as a bug.
 

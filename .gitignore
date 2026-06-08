@@ -36,3 +36,4 @@
 /.idea/go.imports.xml
 /.idea/vcs.xml
 __debug_bin*
+/graphify-out/
