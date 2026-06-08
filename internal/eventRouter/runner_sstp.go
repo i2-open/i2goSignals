@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
@@ -259,7 +260,6 @@ func (r *router) runSstpClientLoop(resource string, stream *model.StreamStateRec
 	go r.sstpHeartbeat(cycleCtx, cycleCancel, resource, pairId, cfg)
 
 	delay := cfg.BaseDelay
-	wakeup := eventBuf.WakeupCh()
 
 	for {
 		select {
@@ -284,7 +284,15 @@ func (r *router) runSstpClientLoop(resource string, stream *model.StreamStateRec
 		}
 		*stream = live
 
-		outcome, resumeDelay, exit := r.runSstpCycle(cycleCtx, stream, eventBuf, fencingToken, cfg, &delay)
+		// Run the primary cycle concurrently so the loop can react to a new outbound
+		// SET arriving while the peer holds this cycle's connection open as a
+		// long-poll (push-while-poll-held, Q7.2, #166). A synchronous call would
+		// block here for the whole long-poll, delaying the new SET to the end of it.
+		// While the primary is in flight we select on the buffer wake signal and fire
+		// a bounded SECOND POST (returnEvents=false) to flush the freshly-arrived
+		// outbound immediately. The second push uses cycleCtx, so lease loss /
+		// shutdown cancels both the primary and any in-flight second push.
+		outcome, resumeDelay, exit := r.runPrimaryCycleWithSecondPush(cycleCtx, stream, eventBuf, fencingToken, cfg, &delay)
 		_ = outcome
 		if exit {
 			if r.ctx.Err() != nil {
@@ -304,10 +312,77 @@ func (r *router) runSstpClientLoop(resource string, stream *model.StreamStateRec
 					return false
 				}
 				return true
-			case <-wakeup:
+			case <-eventBuf.WakeupCh():
 				timer.Stop()
 			case <-timer.C:
 			}
+		}
+	}
+}
+
+// runPrimaryCycleWithSecondPush runs one primary SSTP cycle in a goroutine while
+// the calling loop watches the outbound buffer's wake signal. When a new outbound
+// SET arrives (SubmitEvent + Wakeup from routeEventToSstpPairsLocked / WakeSstpClient)
+// WHILE the primary cycle is still held open by the peer as a long-poll, it fires a
+// bounded SECOND POST (pushSstpWhilePollHeld, returnEvents=false) to flush the
+// queued outbound immediately rather than waiting for the held long-poll to return
+// (Q7.2, #166). The one-in-flight guard inside pushSstpWhilePollHeld coalesces a
+// storm of wake-ups into at most one secondary push per pair. Both the primary
+// cycle and any second push share ctx (cycleCtx), so lease loss / shutdown cancels
+// both. Returns the primary cycle's (classification, resumeDelay, exit) verbatim.
+func (r *router) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, fencingToken int64, cfg sstpBackoffConfig, delay *time.Duration) (goSetSstp.Classification, time.Duration, bool) {
+	// Capture pairId before launching the primary cycle goroutine: PairId is stable
+	// for the record's life, but reading it after the goroutine may write *stream
+	// (updateStream on a pause) would otherwise be a concurrent access.
+	pairId := stream.PairId
+	type cycleResult struct {
+		cls   goSetSstp.Classification
+		delay time.Duration
+		exit  bool
+	}
+	done := make(chan cycleResult, 1)
+	go func() {
+		cls, d, exit := r.runSstpCycle(ctx, stream, eventBuf, fencingToken, cfg, delay)
+		done <- cycleResult{cls: cls, delay: d, exit: exit}
+	}()
+
+	// secondPushWg tracks any in-flight second-push goroutines so we do not leak
+	// them past this cycle: we wait for them before returning. Each goroutine
+	// respects ctx and releases its in-flight slot via pushSstpWhilePollHeld's defer.
+	var secondPushWg sync.WaitGroup
+	defer secondPushWg.Wait()
+
+	wakeup := eventBuf.WakeupCh()
+	for {
+		select {
+		case res := <-done:
+			return res.cls, res.delay, res.exit
+		case <-ctx.Done():
+			// Lease loss / shutdown: the primary cycle observes ctx and returns
+			// (with exit=true); wait for it so we return its result and never leak it.
+			res := <-done
+			return res.cls, res.delay, res.exit
+		case <-wakeup:
+			// A new outbound SET arrived (or a state-change wake) while the primary
+			// cycle is held. Fire a bounded second push to flush it now. The guard in
+			// pushSstpWhilePollHeld coalesces concurrent wakes to one in-flight push.
+			wakeup = eventBuf.WakeupCh() // re-arm: Wakeup() swapped the notifier channel.
+			// The second push gets its OWN copy of the record, snapshotted from the
+			// source-of-truth map under r.mu (not the shared *stream the primary cycle
+			// goroutine may be writing via updateStream on a pause — that would race).
+			// The copy carries the live endpoint/bearer/route. A pause from the second
+			// push still lands durably because pauseSstpOutbound writes it back into the
+			// map, which the loop re-reads on its next cycle.
+			live, ok := r.refreshSstpClientStream(pairId)
+			if !ok {
+				continue // pair removed; the primary cycle's next refresh exits the loop.
+			}
+			streamCopy := live
+			secondPushWg.Add(1)
+			go func() {
+				defer secondPushWg.Done()
+				r.pushSstpWhilePollHeld(ctx, &streamCopy, eventBuf, fencingToken)
+			}()
 		}
 	}
 }

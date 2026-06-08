@@ -424,6 +424,108 @@ func TestSstpPushWhilePollHeld_BoundsToOneInFlight(t *testing.T) {
 	}
 }
 
+// TestSstpClientLoop_FiresSecondPushWhilePrimaryHeld drives the REAL runner loop
+// (runSstpClientLoop), not pushSstpWhilePollHeld in isolation, and proves the
+// push-while-poll-held feature actually runs in production: while the primary
+// long-poll cycle is held open by the peer (primary DeliverSstp blocked), a new
+// outbound SET arriving (buffer SubmitEvent + Wakeup, as routeEventToSstpPairsLocked
+// does) causes the loop to fire a SECOND POST with returnEvents=false carrying the
+// new SET — without waiting for the held long-poll to return. The one-in-flight
+// bound is respected (no third parallel request). Race-tested via -race.
+func TestSstpClientLoop_FiresSecondPushWhilePrimaryHeld(t *testing.T) {
+	// Primary cycles (returnEvents nil/true) block — the held long-poll. The
+	// second push (returnEvents=false) passes through immediately and acks.
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		Acked:          []string{"sstp-held-new"},
+	})
+	adapter.SetBlockingPrimaryOnly()
+	primaryStarted := make(chan struct{}, 1)
+	adapter.SetOnDeliver(func() {
+		select {
+		case primaryStarted <- struct{}{}:
+		default:
+		}
+	})
+
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-held"
+	// Seed an initial outbound SET so the first (primary) cycle has work and opens
+	// the held long-poll.
+	h.persistOutboundEvent(t, txSid, "sstp-held-initial")
+
+	state := sstpPairState(txSid, "pair-held")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
+
+	cfg := *fastSstpCfg()
+	cfg.fillDefaults()
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- h.router.runSstpClientLoop("sstp-client:pair-held", state, buf, 1, cfg)
+	}()
+
+	// The primary long-poll must start and block.
+	select {
+	case <-primaryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("primary long-poll cycle never started")
+	}
+
+	// A NEW outbound SET arrives while the primary is held — exactly what
+	// routeEventToSstpPairsLocked does: persist + SubmitEvent + Wakeup.
+	h.persistOutboundEvent(t, txSid, "sstp-held-new")
+	buf.SubmitEvent("sstp-held-new")
+	buf.Wakeup()
+
+	// The loop must fire a SECOND POST (returnEvents=false) carrying the new SET,
+	// while the primary is still held.
+	require.Eventually(t, func() bool {
+		for _, req := range adapter.Requests() {
+			if req.ReturnEvents != nil && !*req.ReturnEvents {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond,
+		"loop must fire a returnEvents=false second push while the primary long-poll is held")
+
+	// Verify the second push carried the newly-arrived outbound SET, and the
+	// one-in-flight bound held (exactly one returnEvents=false request).
+	secondPushes := 0
+	carried := false
+	for _, req := range adapter.Requests() {
+		if req.ReturnEvents != nil && !*req.ReturnEvents {
+			secondPushes++
+			for _, ev := range req.Events {
+				if ev.Jti == "sstp-held-new" {
+					carried = true
+				}
+			}
+		}
+	}
+	assert.Equal(t, 1, secondPushes, "exactly one second push (one-in-flight bound)")
+	assert.True(t, carried, "second push must carry the newly-arrived outbound SET")
+
+	// The acked outbound SET is counted (tfr=SSTP, stream_id=txSid).
+	require.Eventually(t, func() bool {
+		return outCounterValueSstp(t, h.outCounter, txSid) >= 1.0
+	}, 2*time.Second, 10*time.Millisecond, "second push must ack+count the outbound SET")
+
+	// Tear down: release the held primary, then cancel the router so the loop exits
+	// without leaking the goroutine.
+	adapter.Unblock()
+	h.router.Shutdown()
+	select {
+	case <-loopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner loop did not exit after shutdown")
+	}
+}
+
 // --- Acceptance: 4xx pauses ONLY the outbound direction ---------------------
 
 // TestSstpCycle_4xxPausesOutboundOnly: a ClassRequestError (4xx) transitions the

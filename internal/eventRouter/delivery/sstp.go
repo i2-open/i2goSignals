@@ -206,12 +206,13 @@ func signOne(req SstpRequest, ev *model.AgEventRecord) (string, bool) {
 // request so tests can assert what was sent, and honors ctx cancellation by
 // returning a transport-class outcome (so lease-loss cancellation is observable).
 type SstpMemoryAdapter struct {
-	mu        sync.Mutex
-	outcomes  []SstpOutcome
-	calls     int
-	requests  []SstpRequest
-	blockCh   chan struct{}
-	onDeliver func()
+	mu               sync.Mutex
+	outcomes         []SstpOutcome
+	calls            int
+	requests         []SstpRequest
+	blockCh          chan struct{}
+	onDeliver        func()
+	blockPrimaryOnly bool
 }
 
 // NewSstpMemoryAdapter returns an adapter that yields outcome on every DeliverSstp call.
@@ -236,6 +237,30 @@ func (m *SstpMemoryAdapter) SetBlocking() {
 	m.mu.Unlock()
 }
 
+// SetBlockingPrimaryOnly makes only PRIMARY cycles block (those with
+// ReturnEvents nil or true — the held long-poll). A second push
+// (ReturnEvents=false, push-while-poll-held) passes through immediately.
+// This models the SSTP wire semantics where the peer holds the long-poll open
+// but answers a short returnEvents=false push right away, so a test can prove
+// the runner fires the second POST while the primary is still held.
+func (m *SstpMemoryAdapter) SetBlockingPrimaryOnly() {
+	m.mu.Lock()
+	m.blockCh = make(chan struct{})
+	m.blockPrimaryOnly = true
+	m.mu.Unlock()
+}
+
+// Unblock releases any DeliverSstp calls currently blocked by SetBlocking /
+// SetBlockingPrimaryOnly and lets future blocking calls proceed immediately.
+func (m *SstpMemoryAdapter) Unblock() {
+	m.mu.Lock()
+	if m.blockCh != nil {
+		close(m.blockCh)
+		m.blockCh = nil
+	}
+	m.mu.Unlock()
+}
+
 // SetOnDeliver registers a callback invoked at the start of each DeliverSstp call
 // (before any blocking), so tests can signal that a cycle began.
 func (m *SstpMemoryAdapter) SetOnDeliver(fn func()) {
@@ -257,11 +282,19 @@ func (m *SstpMemoryAdapter) DeliverSstp(ctx context.Context, req SstpRequest) Ss
 	m.calls++
 	out := m.outcomes[idx]
 	block := m.blockCh
+	primaryOnly := m.blockPrimaryOnly
 	onDeliver := m.onDeliver
 	m.mu.Unlock()
 
 	if onDeliver != nil {
 		onDeliver()
+	}
+
+	// A second push (ReturnEvents explicitly false) never blocks when
+	// blockPrimaryOnly is set — only the primary long-poll is held.
+	isSecondPush := req.ReturnEvents != nil && !*req.ReturnEvents
+	if primaryOnly && isSecondPush {
+		block = nil
 	}
 
 	if block != nil {
