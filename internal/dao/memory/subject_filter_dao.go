@@ -5,7 +5,7 @@ import (
     "sync"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 

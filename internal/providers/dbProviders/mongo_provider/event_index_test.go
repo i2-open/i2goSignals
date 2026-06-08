@@ -8,7 +8,7 @@ import (
     "time"
 
     mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "go.mongodb.org/mongo-driver/v2/bson"
 )

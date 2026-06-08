@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/authUtil"
-	daoInterfaces "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"

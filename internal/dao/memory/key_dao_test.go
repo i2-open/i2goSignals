@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/stretchr/testify/suite"
 )
 

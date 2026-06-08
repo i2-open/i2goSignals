@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 )
 
 // KeyDAOMemory uses a simpler mutex-based approach because it stores

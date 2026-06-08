@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"

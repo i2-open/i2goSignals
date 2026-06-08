@@ -5,7 +5,7 @@ import (
     "testing"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     "github.com/i2-open/i2goSignals/internal/dao/memory"
     "github.com/i2-open/i2goSignals/internal/dao/mongo"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"

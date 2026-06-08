@@ -5,7 +5,7 @@ import (
     "errors"
     "time"
 
-    "github.com/i2-open/i2goSignals/internal/dao/interfaces"
+    interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     "github.com/i2-open/i2goSignals/pkg/logger"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "go.mongodb.org/mongo-driver/v2/bson"
