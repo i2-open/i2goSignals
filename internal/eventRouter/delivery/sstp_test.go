@@ -135,6 +135,51 @@ func TestSstpHTTPAdapter_5xxClassifiesTransient(t *testing.T) {
 	assert.Equal(t, goSetSstp.ClassTransient, out.Classification.Class)
 }
 
+// TestSstpHTTPAdapter_200GarbageBodyIsTransientNotAcked is the regression for the
+// silent-SET-loss finding: a peer (or on-path proxy) returns HTTP 200 with a body
+// that is not valid SSTP JSON. This must NOT be treated as delivered — the adapter
+// surfaces the parse failure and the classifier returns ClassTransient (retry, no
+// ack). Crucially Acked must be empty so the runner does NOT advance the sent JTIs
+// past as delivered.
+func TestSstpHTTPAdapter_200GarbageBodyIsTransientNotAcked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("this is not json at all <<<"))
+	}))
+	defer srv.Close()
+
+	adapter := NewSstpHTTPAdapter(srv.Client())
+	out := adapter.DeliverSstp(context.Background(), SstpRequest{
+		Stream: sstpPairRecord(srv.URL),
+		Events: []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+	})
+
+	assert.Equal(t, goSetSstp.ClassTransient, out.Classification.Class,
+		"a 200 with an unparseable body must be transient, not delivered")
+	assert.Empty(t, out.Acked, "an unparseable 200 must not ack the sent JTIs")
+}
+
+// TestSstpHTTPAdapter_200EmptyBodyIsOK: a 200 with an empty body is the §2.3
+// success-without-detail case — still ClassOK so the runner acks the sent set.
+func TestSstpHTTPAdapter_200EmptyBodyIsOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	adapter := NewSstpHTTPAdapter(srv.Client())
+	out := adapter.DeliverSstp(context.Background(), SstpRequest{
+		Stream: sstpPairRecord(srv.URL),
+		Events: []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+	})
+
+	assert.Equal(t, goSetSstp.ClassOK, out.Classification.Class,
+		"an empty 200 body is success-without-detail, still OK")
+	assert.Empty(t, out.Acked, "no explicit ack list; runner ack-all happens at the runner layer")
+}
+
 // TestSstpHTTPAdapter_TransportFailureClassifiesTransport: an unreachable peer
 // yields ClassTransport (no HTTP response).
 func TestSstpHTTPAdapter_TransportFailureClassifiesTransport(t *testing.T) {

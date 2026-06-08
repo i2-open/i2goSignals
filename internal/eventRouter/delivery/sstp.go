@@ -122,11 +122,25 @@ func (a *SstpHTTPAdapter) DeliverSstp(ctx context.Context, req SstpRequest) Sstp
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
+		raw, rErr := io.ReadAll(resp.Body)
 		var parsed goSetSstp.Message
-		if len(raw) > 0 {
+		switch {
+		case rErr != nil:
+			// Could not even read the 200 body — treat as a failed parse so the
+			// classifier returns transient (retry, do not ack).
+			result.Err = rErr
+		case len(raw) == 0:
+			// A 200 with an empty body is the §2.3 success-without-detail case:
+			// no SetErrs, no explicit ack list. Leave Message/Err nil so the
+			// classifier returns ClassOK and the runner acks the sent set.
+		default:
 			if jErr := json.Unmarshal(raw, &parsed); jErr == nil {
 				result.Message = &parsed
+			} else {
+				// A 200 with an unparseable body is NOT success (a broken peer or
+				// an on-path proxy). Surface the parse error so ClassifyResult
+				// classifies it transient/retryable instead of silently acking.
+				result.Err = jErr
 			}
 		}
 		cls := goSetSstp.ClassifyResult(result)

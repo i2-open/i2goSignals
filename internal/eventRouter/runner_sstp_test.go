@@ -464,6 +464,46 @@ func TestSstpCycle_5xxBacksOffWithoutPausing(t *testing.T) {
 	assert.Equal(t, model.StreamStateEnabled, state.Status, "5xx must not pause the stream")
 }
 
+// TestSstpCycle_Garbage200DoesNotAck is the regression for the silent-SET-loss
+// finding: an HTTP 200 with an unparseable body is classified ClassTransient by the
+// delivery seam (empty Acked). The runner must NOT advance the sent JTI past as
+// delivered — it must remain pending for re-send — and the cycle must back off
+// (positive delay, no exit, no pause) rather than ack.
+func TestSstpCycle_Garbage200DoesNotAck(t *testing.T) {
+	// This is exactly what SstpHTTPAdapter produces for a 200 with garbage body:
+	// transient classification, no acked JTIs.
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassTransient},
+		Acked:          nil,
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-garbage"
+	jti := "jgarbage"
+	h.persistOutboundEvent(t, txSid, jti)
+	state := sstpPairState(txSid, "pair-garbage")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	cfg := *fastSstpCfg()
+	cfg.fillDefaults()
+	delay := cfg.BaseDelay
+	_, resumeDelay, exit := h.router.runSstpCycle(context.Background(), state, buf, 0, cfg, &delay)
+
+	assert.False(t, exit, "garbage 200 (transient) must not exit the cycle loop")
+	assert.Greater(t, resumeDelay, time.Duration(0), "garbage 200 must back off")
+	assert.Equal(t, model.StreamStateEnabled, state.Status, "garbage 200 must not pause the stream")
+	assert.Equal(t, 0.0, outCounterValueSstp(t, h.outCounter, txSid),
+		"no outbound SET may be counted as delivered for an unparseable 200")
+
+	// The JTI must remain pending for the stream — it was NOT acked.
+	pending, _ := h.router.eventService.GetEventIds(context.Background(), txSid, model.PollParameters{
+		MaxEvents:         10,
+		ReturnImmediately: true,
+	})
+	assert.Contains(t, pending, jti, "the sent JTI must remain pending (unacked) after a garbage 200")
+}
+
 // TestSstpCycle_TransportBacksOffExponentially: consecutive transport failures
 // grow the backoff delay per the configured factor, capped at MaxDelay (Q25).
 func TestSstpCycle_TransportBacksOffExponentially(t *testing.T) {

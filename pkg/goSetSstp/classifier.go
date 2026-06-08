@@ -91,6 +91,9 @@ type Classification struct {
 
 // ClassifyResult maps an SSTP Result to its FailureClass and the metadata needed for recovery.
 // 4xx → request-level, 5xx → transient, 200-with-non-empty-setErrs → per-JTI (Q12.1, Q12.2, Q20).
+// 200 + successfully-parsed body + empty setErrs → ClassOK (real success). 200 whose body failed
+// to parse (Result.Err set, Message nil) → ClassTransient: a 200 we cannot parse is not success,
+// so the caller retries rather than acking SETs the peer may never have received.
 func ClassifyResult(result Result) Classification {
 	// Transport-layer failure: no HTTP response received.
 	if result.StatusCode == 0 {
@@ -104,6 +107,15 @@ func ClassifyResult(result Result) Classification {
 				NextDelay: result.RetryAfter,
 				SetErrs:   result.Message.SetErrs,
 			}
+		}
+		// A 200 we cannot parse is NOT success (silent SET loss): a broken peer or
+		// an on-path proxy can return 200 with a garbage/empty-when-required body.
+		// Treat it as transient/retryable (same class as 5xx) so the caller backs
+		// off and re-sends rather than acking SETs the real peer never received.
+		// The delivery seam signals an unparseable 200 by setting Err with a nil
+		// Message; a genuine success-without-detail 200 leaves both nil.
+		if result.Err != nil {
+			return Classification{Class: ClassTransient, NextDelay: result.RetryAfter}
 		}
 		return Classification{Class: ClassOK, NextDelay: result.RetryAfter}
 	}

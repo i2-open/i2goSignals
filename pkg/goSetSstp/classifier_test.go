@@ -37,6 +37,14 @@ func TestClassifyResult_Table(t *testing.T) {
 			want: ClassOK,
 		},
 		{
+			name: "200 OK whose body failed to parse is transient (not delivered)",
+			result: Result{
+				StatusCode: http.StatusOK,
+				Err:        errors.New("invalid character 'g' looking for beginning of value"),
+			},
+			want: ClassTransient,
+		},
+		{
 			name: "200 OK with non-empty setErrs is per-JTI",
 			result: Result{
 				StatusCode: http.StatusOK,
