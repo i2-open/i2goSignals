@@ -106,6 +106,7 @@ understands. They are documented in their natural section below.
 | `I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT`     | Maximum inactivity timeout, in seconds, before a stream connection is considered idle.     | `3600`  |
 | `I2SIG_SUBJECT_FILTERING`                 | Enables SSF subject filtering (Add/Remove Subject, §8.1.3) server-wide. `ENABLED` advertises the `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery and makes the per-stream `defaultSubjects` knob settable; `DISABLED` omits both endpoints, returns `404` from the Add/Remove Subject handlers, and silently ignores `defaultSubjects`. | `DISABLED` |
 | `I2SIG_SUBJECT_REMOVAL_GRACE`             | Server-wide default for the SSF §9.3 ("Malicious Subject Removal") removal grace period, in **seconds**. `0` (or unset) means immediate enforcement — no behavior change. Per-transmitter-stream overrides can be set via `subject_removal_grace_seconds` on the stream's `StreamStateRecord` (set via the management API; an override on a receiver stream is ignored with a `WARN`). Negative or non-integer values fall back to `0`. On `LOCAL` and `HYBRID` streams a delivery-stopping change is deferred for the grace window before it takes effect; on `HYBRID` the upstream `remove` relay is also deferred to the same deadline and fired by the push-transmitter lease owner's backfill sweep, so the upstream keeps feeding events during the window. `PASSTHRU` adds no grace of its own — the upstream transmitter's §9.3 handling is authoritative. | `0` |
+| `I2SIG_INSECURE_SSTP_HTTP`                 | When `true`, allows an SSTP pair `endpoint_url` to use the `http` scheme (otherwise only `https` is accepted). Create-time validation is syntactic only — there is no network probe. Intended for local/dev only. | `false` |
 
 ## Issuer
 
@@ -202,6 +203,15 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 |--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_POLL_DEFAULT_TIMEOUT`   | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                          | `30`    |
 | `I2SIG_POLL_MAX_TIMEOUT`       | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                       | `300`   |
+
+> **SSTP reuses the poll knobs.** SSTP defines **no** delivery-timeout or
+> retry env vars of its own. The SSTP **server (responder)** side applies
+> `I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT` to its outbound
+> long-poll wait, and the SSTP **client (initiator)** side applies
+> `I2SIG_POLL_RETRY_BASE_DELAY` / `I2SIG_POLL_RETRY_MAX_DELAY` /
+> `I2SIG_POLL_RETRY_BACKOFF_FACTOR` to its transport/transient backoff. The
+> only SSTP-specific knob is `I2SIG_INSECURE_SSTP_HTTP` (see **Stream** above).
+> See [docs/SSTP.md](SSTP.md).
 
 ## TLS
 

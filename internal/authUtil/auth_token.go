@@ -387,6 +387,67 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	return signed, err
 }
 
+// IssueSstpPairToken mints the single management bearer that covers BOTH
+// directions of an SSTP pair (issue #160; PRD #154 Q9.1, Q42). Unlike a
+// single-stream delivery token, the pair bearer's EventAuthToken.StreamIds carries
+// the two internal pair SIDs [txSid, rxSid]; EventAuthToken.IsAuthorized then
+// authorizes either side by StreamIds containment. The bearer holds both the
+// event scope (sufficient for read-status / verify on either direction) and the
+// stream scope (required for UpdateStatus and config writes); admin additionally
+// grants the stream-admin scope for pair create/delete. The on-wire SSF stream_id
+// per side is the PairId, not these SIDs — these SIDs are the authorization
+// binding only. Authorization must go through AuthContext.HasScope /
+// IsAuthorizedForStream, never a bare authCtx.Eat check (nil for OAuth/STS).
+func (a *AuthIssuer) IssueSstpPairToken(txSid string, rxSid string, projectId string, admin bool, session *AuthContext) (string, error) {
+    exp := time.Now().AddDate(0, 0, 90)
+
+    a.mu.RLock()
+    issuer := a.TokenIssuer
+    kid := a.TokenKid
+    if kid == "" {
+        kid = issuer
+    }
+    privateKey := a.PrivateKey
+    a.mu.RUnlock()
+
+    scopes := []string{authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery}
+    if admin {
+        scopes = []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery}
+    }
+
+    eat := authSupport.EventAuthToken{
+        StreamIds: []string{txSid, rxSid},
+        ProjectId: projectId,
+        Roles:     scopes,
+        RegisteredClaims: jwt.RegisteredClaims{
+            IssuedAt:  jwt.NewNumericDate(time.Now()),
+            ExpiresAt: jwt.NewNumericDate(exp),
+            Audience:  []string{issuer},
+            Issuer:    issuer,
+            ID:        goSet.GenerateJti(),
+        },
+    }
+
+    // The pair bearer's lineage parent is the stream-client token that authorized
+    // the pair create (the issuing session's EAT), mirroring IssueStreamToken.
+    parentJTI := ""
+    if session != nil && session.Eat != nil {
+        eat.ClientId = session.Eat.ClientId
+        eat.Subject, _ = session.Eat.GetSubject()
+        parentJTI = session.Eat.ID
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
+    token.Header["typ"] = "jwt"
+    token.Header["kid"] = kid
+
+    signed, err := token.SignedString(privateKey)
+    if err == nil && a.TokenTracker != nil {
+        _ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
+    }
+    return signed, err
+}
+
 func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session *AuthContext) (string, error) {
 	exp := time.Now().AddDate(0, 0, 90)
 

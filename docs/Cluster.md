@@ -12,6 +12,7 @@ The clustering mechanism ensures that specific tasks are owned by a single node 
 The following features are owned by a single node per stream:
 *   **Event Stream Poll Receivers**: Only one node polls an upstream SSF Events endpoint.
 *   **Event Stream Push Transmitters**: Only one node pushes events to a downstream receiver endpoint.
+*   **SSTP Pair Clients (initiators)**: Only one node opens the outbound SSTP connection cycle for a pair. The SSTP **server (responder)** side takes **no** lease — every node can answer `POST /sstp/{id}`, so the receiver side scales horizontally.
 
 ## Node Identity
 
@@ -59,6 +60,13 @@ Similarly, for `PUSH` transmitters, the node attempts to acquire the lease `push
 *   Only the lease holder runs the `PushStreamHandler` loop for that stream.
 *   If the lease is lost, the loop stops.
 
+### SSTP Pair Clients
+For the **client (initiator)** side of an SSTP pair, the node attempts to acquire the lease `sstp-client:<PairId>` (note: keyed by the pair's `PairId`, not a per-direction SID).
+*   Only the lease holder runs the SSTP-client connection loop, opening and re-opening the single bidirectional HTTP cycle for that pair.
+*   The lease uses the same 30 s duration / 10 s heartbeat as push/poll. A new owner waits a short randomized takeover jitter before opening its first connection, spreading the thundering-herd after a cluster-wide blip.
+*   If the lease is lost, the heartbeat cancels the cycle context, aborting any in-flight request; another node takes over after the lease expires.
+*   The SSTP **server (responder)** side takes no lease and is not listed here — see the overview above.
+
 ## Intra-Cluster Coordination (Wake-up Mechanism)
 
 To ensure low-latency event delivery without relying on MongoDB Change Streams (which can be resource-intensive and complex to manage), `goSignalsServer` uses a lease-aware wake-up mechanism.
@@ -70,6 +78,13 @@ When a node receives or generates an event that needs to be routed to an outboun
 4. The receiving node, upon validation of the request, triggers an immediate backfill from MongoDB to fetch and transmit any pending events.
 
 This mechanism is secured using a shared HMAC secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) and includes rate-limiting to prevent denial-of-service.
+
+### SSTP wake-up endpoints
+
+SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are kept separate for telemetry. Both reuse the wake-transmitter authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer) and the same coalescing window, so duplicate wake-ups are idempotent no-ops:
+
+*   **`POST /_cluster/wake-sstp-client`** — the request body's `sid` field carries the pair's **`PairId`**. Broadcast to all cluster nodes when a node receives an inbound event whose target SSTP-client pair is owned (via the `sstp-client:<PairId>` lease) by a different node, so the lease owner drains the pending event into the next outbound cycle.
+*   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Broadcast when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the receiver side returns the event immediately.
 
 ## Periodic Backfill
 

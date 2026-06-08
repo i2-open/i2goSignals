@@ -131,7 +131,7 @@ func (suite *ServerSuite) Test2_WellKnownConfigs() {
 	assert.Equal(suite.T(), streamUrlString, config.ConfigurationEndpoint, "Configuration endpoint matches")
 
 	suite.Equal(constants.GoSignalsVersion, config.GoSignalsVersion, "Go Signals Version should have correct version")
-	suite.Equal(4, len(config.DeliveryMethodsSupported), "GoSignals has 4 methods")
+	suite.Equal(5, len(config.DeliveryMethodsSupported), "GoSignals has 5 methods (4 RFC + SSTP)")
 }
 
 // Test3_StreamConfig Tests the following sequence

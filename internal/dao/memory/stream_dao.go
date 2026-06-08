@@ -67,6 +67,26 @@ func (d *StreamDAOMemory) FindByProjectID(ctx context.Context, projectID string)
 	return recs, nil
 }
 
+func (d *StreamDAOMemory) FindByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	matches := d.store.FindAll(func(state *model.StreamStateRecord) bool {
+		return state.SstpInbound != nil && state.SstpInbound.Id == sid
+	})
+	if len(matches) == 0 {
+		return nil, interfaces.ErrNotFound
+	}
+	return matches[0], nil
+}
+
+func (d *StreamDAOMemory) FindByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error) {
+	matches := d.store.FindAll(func(state *model.StreamStateRecord) bool {
+		return state.PairId == pairId
+	})
+	if len(matches) == 0 {
+		return nil, interfaces.ErrNotFound
+	}
+	return matches[0], nil
+}
+
 func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
 	if state, ok := d.store.Get(id); ok {
 		state.Status = status

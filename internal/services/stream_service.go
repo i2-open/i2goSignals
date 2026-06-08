@@ -804,10 +804,24 @@ func (s *StreamService) calculateDeliveredEvents(requested []string, supported [
 func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
-		return nil, err
+		// An SSTP pair's receive-side SID is not its document _id; fall back to the
+		// inbound-SID index so an rxSid resolves to its pair record. (Q35, Q39)
+		inboundRec, inboundErr := s.streamDAO.FindByInboundSID(ctx, streamID)
+		if inboundErr != nil {
+			return nil, err
+		}
+		streamRec = inboundRec
 	}
 	if projectID != "" && streamRec.ProjectId != projectID {
 		return nil, errors.New(ErrorInvalidProject)
+	}
+
+	// SSTP pairs use a distinct patchable-fields whitelist (Q35): the generic
+	// delivery-method switch below does not apply. streamID names a direction
+	// (txSid == PairId, or rxSid == SstpInbound.Id) so per-direction Iss/Aud can
+	// be targeted.
+	if streamRec.GetType() == model.DeliverySstpPair {
+		return s.updateSstpPair(ctx, streamRec, streamID, configReq)
 	}
 
 	// Validate goSignals-specific knobs against the request before mutating
@@ -957,6 +971,24 @@ func (s *StreamService) GetStream(ctx context.Context, id string) (*model.Stream
 	return &config, nil
 }
 
+// GetStreamConfigBySID resolves a SID to its StreamConfiguration, routing per
+// direction for SSTP pairs (Q40). Naming the tx-side SID returns the primary
+// (outbound) StreamConfiguration; naming the rx-side SID returns the inbound
+// StreamConfiguration. Verification (POST /verify) targets the outbound side of
+// whichever direction the SID names, so it scopes the generated verify SET to
+// the resolved direction's iss/aud. Non-SSTP streams resolve via FindByID.
+func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*model.StreamConfiguration, error) {
+	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+		if rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
+			inbound := *rec.SstpInbound
+			return &inbound, nil
+		}
+		config := rec.StreamConfiguration
+		return &config, nil
+	}
+	return s.GetStream(ctx, sid)
+}
+
 func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfiguration {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
@@ -975,7 +1007,48 @@ func (s *StreamService) GetStreamState(ctx context.Context, id string) (*model.S
 	return s.streamDAO.FindByID(ctx, id)
 }
 
+// GetStreamStateBySID resolves a SID to its StreamStateRecord, routing SSTP
+// pairs by either direction (Q40/Q41). A non-SSTP SID, or the tx-side SID of a
+// pair, resolves via FindByID; the rx-side (inbound) SID of a pair resolves to
+// the same single pair record. This lets operational paths keyed on a SID (e.g.
+// verify) find the pair when the named SID is the inbound side, whose value is
+// not the document _id.
+func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+		return rec, nil
+	}
+	return s.streamDAO.FindByID(ctx, sid)
+}
+
+// GetStreamStateByInboundSID returns the SSTP pair record whose receive-side
+// SID (SstpInbound.Id) equals sid, or interfaces.ErrNotFound. (PRD #154 Q24)
+func (s *StreamService) GetStreamStateByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return s.streamDAO.FindByInboundSID(ctx, sid)
+}
+
+// GetStreamStateByPairId returns the record whose PairId equals pairId, or
+// interfaces.ErrNotFound. PairId is the on-wire SSF stream_id for an SSTP pair.
+func (s *StreamService) GetStreamStateByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error) {
+	return s.streamDAO.FindByPairId(ctx, pairId)
+}
+
+// PersistStreamStateRecord writes a fully-formed StreamStateRecord directly via
+// the DAO, bypassing CreateStream's request-shaped validation. It is the
+// storage-layer seam SSTP pair creation (slice #161) will build on; this slice
+// uses it only to exercise the bidirectional record round-trip across both
+// providers. (PRD #154 Q24)
+func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model.StreamStateRecord) error {
+	return s.streamDAO.Create(ctx, rec)
+}
+
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	// SSTP pairs route status per direction (Q39, Q41) and Disabled couples both
+	// directions. When the SID belongs to a pair, the SSTP path owns the update.
+	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
+		return
+	}
+
 	err := s.streamDAO.UpdateStatus(ctx, streamID, status, errorMsg)
 	if err != nil {
 		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
@@ -1007,6 +1080,25 @@ func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string
 }
 
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
+	// SSTP pairs report status per direction (Q41). When streamID names the rx
+	// (inbound) side, report InboundStatus/InboundErrorMsg; when it names the tx
+	// side, report Status/ErrorMsg. findSstpPairBySID resolves either direction;
+	// non-SSTP streams fall through to the plain FindByID path below.
+	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+		if rec.SstpInbound != nil && streamID == rec.SstpInbound.Id {
+			status := model.StreamStatus{Status: rec.InboundStatus}
+			if rec.InboundErrorMsg != "" {
+				status.Reason = rec.InboundErrorMsg
+			}
+			return &status, nil
+		}
+		status := model.StreamStatus{Status: rec.Status}
+		if rec.ErrorMsg != "" {
+			status.Reason = rec.ErrorMsg
+		}
+		return &status, nil
+	}
+
 	state, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		return nil, err
@@ -1035,10 +1127,14 @@ func (s *StreamService) GetStateMap(ctx context.Context) map[string]model.Stream
 	return stateMap
 }
 
-// ListReceiverStreams returns the streams whose delivery method makes this server a receiver
-// (ReceivePush or ReceivePoll). It is a pure query — no cache mutation, no JWKS loading —
-// and is the canonical home for the receiver-stream predicate. The DAO layer no longer
-// owns this filter; both adapters used to apply different predicates here, masking drift.
+// ListReceiverStreams returns the streams that receive events on this server
+// (ReceivePush, ReceivePoll, or either direction of an SSTP pair). It uses
+// HasInbound() rather than IsReceiver() so an SSTP pair — whose primary Delivery
+// is the transmit marker but which still ingests inbound SETs — is enumerated for
+// the startup inbound-JWKS preload (finding #10). For plain RFC8935/8936 streams
+// HasInbound() == IsReceiver(), so they are unaffected. It is a pure query — no
+// cache mutation, no JWKS loading — and is the canonical home for the
+// receiver-stream predicate.
 func (s *StreamService) ListReceiverStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
@@ -1046,17 +1142,21 @@ func (s *StreamService) ListReceiverStreams(ctx context.Context) ([]model.Stream
 	}
 	out := make([]model.StreamStateRecord, 0, len(recs))
 	for _, rec := range recs {
-		if rec.IsReceiver() {
+		if rec.HasInbound() {
 			out = append(out, rec)
 		}
 	}
 	return out, nil
 }
 
-// ListTransmitterStreams returns the streams whose delivery method makes this server a
-// transmitter (DeliveryPush or DeliveryPoll) — the downstream-stream set the HYBRID
-// interested-set is computed over (issue #96). Like ListReceiverStreams it is a pure
-// query: no cache mutation, no JWKS loading.
+// ListTransmitterStreams returns the streams that transmit events from this server
+// (DeliveryPush, DeliveryPoll, or either direction of an SSTP pair) — the
+// downstream-stream set the HYBRID interested-set is computed over (issue #96). It
+// uses HasOutbound() rather than !IsReceiver() so an SSTP pair is enumerated for
+// its transmit side without being mis-classified as transmit-only (finding #10).
+// For plain RFC8935/8936 streams HasOutbound() == !IsReceiver(), so they are
+// unaffected. Like ListReceiverStreams it is a pure query: no cache mutation, no
+// JWKS loading.
 func (s *StreamService) ListTransmitterStreams(ctx context.Context) ([]model.StreamStateRecord, error) {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
@@ -1064,7 +1164,7 @@ func (s *StreamService) ListTransmitterStreams(ctx context.Context) ([]model.Str
 	}
 	out := make([]model.StreamStateRecord, 0, len(recs))
 	for _, rec := range recs {
-		if !rec.IsReceiver() {
+		if rec.HasOutbound() {
 			out = append(out, rec)
 		}
 	}
@@ -1081,6 +1181,18 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
 		state := streamState
+		// An SSTP pair receives on its inbound direction: preload the inbound JWKS
+		// keyed under the rx-side SID (== SstpInbound.Id), the key the receive path
+		// looks up (finding #1/#2/#10). The tx-side primary config holds no inbound
+		// issuer, so loadJwksForReceiver would resolve nothing useful for it.
+		if state.GetType() == model.DeliverySstpPair {
+			if state.SstpInbound != nil {
+				inboundView := state
+				inboundView.ValidateJwks = s.loadInboundJwksForPair(ctx, &state)
+				res[state.SstpInbound.Id] = &inboundView
+			}
+			continue
+		}
 		res[streamState.StreamConfiguration.Id] = &state
 		s.loadJwksForReceiver(ctx, &state)
 	}
@@ -1143,49 +1255,69 @@ func isPermanentJwksError(err error) bool {
 
 func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *model.StreamStateRecord) {
 	if streamState.Status == model.StreamStateEnabled {
-		var jwks *keyfunc.JWKS
-		var err error
+		jwks := s.fetchReceiverJwks(ctx, streamState.StreamConfiguration.Id, streamState.Iss, streamState.IssuerJWKSUrl, streamState)
+		if jwks != nil {
+			streamState.ValidateJwks = jwks
+		}
+	}
+}
 
-		if streamState.IssuerJWKSUrl == "" {
-			ssLog.Debug("Attempting to lLoading JWKS internally", "iss", streamState.Iss)
-			jwksJson := s.keyService.GetPublicJWKS(ctx, streamState.Iss)
-			if jwksJson == nil {
-				ssLog.Debug("No JWKS key found for issuer", "iss", streamState.Iss)
-				return
-			}
+// fetchReceiverJwks resolves the verification JWKS for a receiver direction. It
+// loads from the explicit iss_jwks_url when set, otherwise from the internally
+// registered key for the issuer. On a permanent fetch error it disables the
+// owning record (disableRec) and persists it; transient errors are logged and
+// left for retry. Returning nil means "no JWKS available" — callers must NOT
+// treat that as "verification disabled" (finding #2). Used for both plain
+// receiver streams and the inbound direction of an SSTP pair.
+func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl string, disableRec *model.StreamStateRecord) *keyfunc.JWKS {
+	var jwks *keyfunc.JWKS
+	var err error
+	if jwksUrl == "" {
+		ssLog.Debug("Attempting to load JWKS internally", "iss", iss)
+		jwksJson := s.keyService.GetPublicJWKS(ctx, iss)
+		if jwksJson == nil {
+			ssLog.Debug("No JWKS key found for issuer", "iss", iss)
+			return nil
+		}
+		jwks, err = keyfunc.NewJSON(*jwksJson)
+		if jwks == nil && err != nil {
+			ssLog.Error("Unable to parse internal key", "iss", iss, "err", err.Error())
+			return nil
+		}
+		return jwks
+	}
 
-			// Convert json.RawMessage to keyfunc.JWKS
-			jwks, err = keyfunc.NewJSON(*jwksJson)
-			if jwks == nil && err != nil {
-				ssLog.Error("Unable to parse internal key", "iss", streamState.Iss, "err", err.Error())
+	ssLog.Debug("Loading JWKS key", "url", jwksUrl)
+	jwks, err = goSet.GetJwks(jwksUrl)
+	if err != nil {
+		msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
+		if isPermanentJwksError(err) {
+			ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", sid, "error", err.Error())
+			if disableRec != nil {
+				disableRec.Status = model.StreamStateDisable
+				disableRec.ErrorMsg = msg
+				if uErr := s.streamDAO.Update(ctx, disableRec); uErr != nil {
+					ssLog.Error("Error updating stream status in database", "sid", sid, "error", uErr)
+				}
 			}
 		} else {
-			ssLog.Debug("Loading JWKS key", "url", streamState.IssuerJWKSUrl)
-			jwks, err = goSet.GetJwks(streamState.IssuerJWKSUrl)
-			if err != nil {
-				msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
-
-				// Determine if this is a permanent error that should disable the stream
-				if isPermanentJwksError(err) {
-					// Permanent error - disable the stream immediately
-					ssLog.Error("Permanent error loading JWKS, disabling stream", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
-					streamState.Status = model.StreamStateDisable
-					streamState.ErrorMsg = msg
-					// Update the stream in the database
-					err = s.streamDAO.Update(ctx, streamState)
-					if err != nil {
-						ssLog.Error("Error updating stream status in database", "sid", streamState.StreamConfiguration.Id, "error", err)
-					}
-				} else {
-					// Temporary error - log but don't change stream state
-					// Let the polling client handle retries with backoff
-					ssLog.Error("Temporary error loading JWKS, will retry", "sid", streamState.StreamConfiguration.Id, "error", err.Error())
-				}
-				return
-			}
+			ssLog.Error("Temporary error loading JWKS, will retry", "sid", sid, "error", err.Error())
 		}
-		streamState.ValidateJwks = jwks
+		return nil
 	}
+	return jwks
+}
+
+// loadInboundJwksForPair resolves the inbound-direction verification JWKS for an
+// SSTP pair from its SstpInbound config (inbound iss / iss_jwks_url), honoring the
+// pair's InboundStatus (finding #1/#2). It returns nil when the inbound side is
+// not enabled or no key is resolvable; a non-nil result is the JWKS that
+// goSetPush.ParseReceivedSET must use so a forged inbound SET is rejected.
+func (s *StreamService) loadInboundJwksForPair(ctx context.Context, rec *model.StreamStateRecord) *keyfunc.JWKS {
+	if rec.SstpInbound == nil || rec.InboundStatus != model.StreamStateEnabled {
+		return nil
+	}
+	return s.fetchReceiverJwks(ctx, rec.SstpInbound.Id, rec.SstpInbound.Iss, rec.SstpInbound.IssuerJWKSUrl, rec)
 }
 
 func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string) *keyfunc.JWKS {
@@ -1197,6 +1329,19 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 		return streamState.ValidateJwks
 	}
 
+	// An SSTP pair receives on its inbound direction whose SID (== SstpInbound.Id)
+	// is NOT the document _id, so FindByID(sid) misses. Resolve the pair by its
+	// inbound SID and load the JWKS from the inbound config so a forged inbound SET
+	// is verified and rejected (finding #1/#2).
+	if pair, pErr := s.streamDAO.FindByInboundSID(ctx, sid); pErr == nil && pair != nil {
+		inboundView := *pair
+		inboundView.ValidateJwks = s.loadInboundJwksForPair(ctx, pair)
+		s.mu.Lock()
+		s.receiverStreams[sid] = &inboundView
+		s.mu.Unlock()
+		return inboundView.ValidateJwks
+	}
+
 	// Try to load the stream
 	streamState, err := s.streamDAO.FindByID(ctx, sid)
 	if err != nil {
@@ -1206,7 +1351,9 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 
 	if streamState.IsReceiver() {
 		s.loadJwksForReceiver(ctx, streamState)
+		s.mu.Lock()
 		s.receiverStreams[sid] = streamState
+		s.mu.Unlock()
 		return streamState.ValidateJwks
 	}
 

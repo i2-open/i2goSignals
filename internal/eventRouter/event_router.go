@@ -29,6 +29,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -51,6 +52,13 @@ type EventRouter interface {
 	GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
+	// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId:
+	// it ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
+	// counting eventsIn with tfr=SSTP, stream_id=rxSid), long-polls the outbound
+	// EventPollBuffer, and returns the SSTP response message plus an HTTP status
+	// (200 served/paused, 4xx deleted/unknown pair). Takes no cluster lease — every
+	// node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19, Q20, Q46).
+	SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	PreInitializeCounter(stream *model.StreamStateRecord)
@@ -60,6 +68,14 @@ type EventRouter interface {
 	SetStatsHandler(stats interface{})
 	ResetStream(sid string)
 	WakeTransmitter(sid string, mode string)
+	// WakeSstpClient wakes the SSTP-client outbound buffer for pairId so the
+	// lease owner drains a pending outbound event into the next outbound cycle.
+	// Invoked by the /_cluster/wake-sstp-client handler (PRD #154 Q11.2, #167).
+	WakeSstpClient(pairId string)
+	// WakeSstpServer wakes the SSTP-server long-poll buffer for txSid so a held
+	// long-poll on this node returns the outbound event immediately. Invoked by
+	// the /_cluster/wake-sstp-server handler (PRD #154 Q11.1, #167).
+	WakeSstpServer(txSid string)
 	// NotifySubjectFilterChange propagates an Add/Remove Subject change to the
 	// node whose match-result cache governs delivery for the stream, so a
 	// subject filter change processed on any cluster node takes effect on the
@@ -68,17 +84,50 @@ type EventRouter interface {
 }
 
 type router struct {
-	mu                   sync.RWMutex
-	pushStreams          map[string]model.StreamStateRecord // These are transmitters
-	pollStreams          map[string]model.StreamStateRecord
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	enabled              bool
-	nodeId               string
-	issuerKeys           map[string]*rsa.PrivateKey
-	issuerKids           map[string]string
-	pollBuffers          map[string]*buffer.EventPollBuffer
-	pushBuffers          map[string]*buffer.EventPushBuffer
+	mu          sync.RWMutex
+	pushStreams map[string]model.StreamStateRecord // These are transmitters
+	pollStreams map[string]model.StreamStateRecord
+	ctx         context.Context
+	cancel      context.CancelFunc
+	enabled     bool
+	nodeId      string
+	issuerKeys  map[string]*rsa.PrivateKey
+	issuerKids  map[string]string
+	pollBuffers map[string]*buffer.EventPollBuffer
+	pushBuffers map[string]*buffer.EventPushBuffer
+	// sstpClientStreams holds SSTP pair records whose client (initiator) side
+	// this router runs. sstpBuffers is the outbound-to-flush queue per pair,
+	// reusing EventPollBuffer (PRD #154 Q5.1).
+	sstpClientStreams map[string]model.StreamStateRecord
+	sstpBuffers       map[string]*buffer.EventPollBuffer
+	// sstpServerBuffers holds the outbound long-poll buffer for each SSTP pair
+	// this node serves on POST /sstp/{id} (the responder/server side, #165). It is
+	// keyed on PairId and created lazily on first request. Every node can serve the
+	// endpoint (no lease, Q11.1), so each maintains its own buffer.
+	sstpServerBuffers map[string]*buffer.EventPollBuffer
+	// sstpServerStreams holds SSTP pair records whose server (responder) side this
+	// node may serve, keyed on the pair's tx-side SID. Used by HandleEvent to match
+	// an outbound event against an SSTP-server pair and broadcast a wake-sstp-server
+	// to active nodes so a held long-poll returns the event (PRD #154 Q11.1, #167).
+	sstpServerStreams map[string]model.StreamStateRecord
+	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
+	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
+	// outbound arrival while a push is already running coalesces into that push's
+	// buffer drain rather than opening a third parallel request.
+	sstpSecondPushInFlight map[string]bool
+	// sstpInFlight tracks, per SSTP-client pair (keyed on PairId), the set of
+	// outbound JTIs currently claimed by an in-flight delivery cycle. drainSstpBuffer
+	// claims the JTIs it hands out and skips any already claimed, so the primary
+	// long-poll cycle and a concurrent push-while-poll-held second push never re-send
+	// the SAME SET (NEW Finding #2). A claim is cleared on peer-ack (handleSstpAcks)
+	// or released on delivery failure so the event is retried. The events collection /
+	// pending list remains the durable source of truth, so a takeover re-reads pending
+	// regardless of any in-memory claim.
+	sstpInFlight map[string]map[string]bool
+	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
+	// backoff timing for SSTP-client runner tests. Production leaves it nil and
+	// loads the POLL_RETRY_* env knobs.
+	sstpCfgOverride      *sstpBackoffConfig
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
 	keyService           *services.KeyService
@@ -86,6 +135,7 @@ type router struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
+	sstpDelivery         delivery.SstpDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
 	stats                statsTracker
 
@@ -161,6 +211,11 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
+	// SstpDelivery is the client-side SSTP seam for one-cycle SET delivery to a
+	// pair endpoint (PRD #154 slice 7). Main.go injects the HTTP adapter
+	// (production); tests inject delivery.NewSstpMemoryAdapter. If nil, NewRouter
+	// constructs a default SstpHTTPAdapter.
+	SstpDelivery delivery.SstpDelivery
 	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
 	// time. When nil (or the feature is disabled) every event passes.
 	SubjectFilterService *services.SubjectFilterService
@@ -174,25 +229,31 @@ type RouterDeps struct {
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
-		coordinator:          deps.Coordinator,
-		streamService:        deps.StreamService,
-		keyService:           deps.KeyService,
-		eventService:         deps.EventService,
-		subjectFilterService: deps.SubjectFilterService,
-		subjectRelayService:  deps.SubjectRelayService,
-		nodeId:               nodeId,
-		pushStreams:          map[string]model.StreamStateRecord{},
-		pollStreams:          map[string]model.StreamStateRecord{},
-		pushBuffers:          map[string]*buffer.EventPushBuffer{},
-		pollBuffers:          map[string]*buffer.EventPollBuffer{},
-		issuerKeys:           map[string]*rsa.PrivateKey{},
-		issuerKids:           map[string]string{},
-		enabled:              false,
-		ctx:                  ctx,
-		cancel:               cancel,
-		httpClient:           &http.Client{Timeout: 5 * time.Second},
-		clusterSecret:        os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes:  make(map[string]time.Time),
+		coordinator:            deps.Coordinator,
+		streamService:          deps.StreamService,
+		keyService:             deps.KeyService,
+		eventService:           deps.EventService,
+		subjectFilterService:   deps.SubjectFilterService,
+		subjectRelayService:    deps.SubjectRelayService,
+		nodeId:                 nodeId,
+		pushStreams:            map[string]model.StreamStateRecord{},
+		pollStreams:            map[string]model.StreamStateRecord{},
+		pushBuffers:            map[string]*buffer.EventPushBuffer{},
+		pollBuffers:            map[string]*buffer.EventPollBuffer{},
+		sstpClientStreams:      map[string]model.StreamStateRecord{},
+		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
+		sstpServerBuffers:      map[string]*buffer.EventPollBuffer{},
+		sstpServerStreams:      map[string]model.StreamStateRecord{},
+		sstpSecondPushInFlight: map[string]bool{},
+		sstpInFlight:           map[string]map[string]bool{},
+		issuerKeys:             map[string]*rsa.PrivateKey{},
+		issuerKids:             map[string]string{},
+		enabled:                false,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		httpClient:             &http.Client{Timeout: 5 * time.Second},
+		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
+		recentOutboundWakes:    make(map[string]time.Time),
 	}
 
 	if deps.PushDelivery != nil {
@@ -206,6 +267,12 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		}
 	} else {
 		router.pushDelivery = delivery.NewHTTPAdapter(deps.StreamService, router)
+	}
+
+	if deps.SstpDelivery != nil {
+		router.sstpDelivery = deps.SstpDelivery
+	} else {
+		router.sstpDelivery = delivery.NewSstpHTTPAdapter(nil)
 	}
 
 	// When SPIFFE is configured, replace the plain HTTP client with one that
@@ -385,6 +452,8 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	switch stream.GetType() {
 	case model.DeliveryPoll, model.ReceivePoll:
 		tfr = "POLL"
+	case model.DeliverySstpPair:
+		tfr = "SSTP"
 	}
 
 	eventTypes := "UNSET"
@@ -461,6 +530,8 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 	switch stream.GetType() {
 	case model.DeliveryPoll, model.ReceivePoll:
 		tfr = "POLL"
+	case model.DeliverySstpPair:
+		tfr = "SSTP"
 	}
 
 	iss := stream.StreamConfiguration.Iss
@@ -481,6 +552,25 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 
 	eventsIn.With(labels).Add(0)
 	eventsOut.With(labels).Add(0)
+
+	// SSTP pairs are bidirectional: the loop above primed the tx (outbound) side.
+	// Also prime the rx (inbound) side so the inbound eventsIn series — labelled
+	// with the rx-side SID and issuer — is visible from process start, paired with
+	// the tx side primed for slice #164 (PRD #154 Q46, issue #165).
+	if stream.GetType() == model.DeliverySstpPair && stream.SstpInbound != nil {
+		rxIss := stream.SstpInbound.Iss
+		if rxIss == "" {
+			rxIss = "DEFAULT"
+		}
+		rxLabels := prometheus.Labels{
+			"type":      "NONE",
+			"iss":       rxIss,
+			"tfr":       "SSTP",
+			"stream_id": stream.SstpInbound.Id,
+		}
+		eventsIn.With(rxLabels).Add(0)
+		eventsOut.With(rxLabels).Add(0)
+	}
 }
 
 func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
@@ -534,6 +624,37 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// SSTP bidirectional pair: the initiator side runs the SSTP-client runner
+	// keyed on PairId. The responder side answers POST /sstp/{id} (server-side
+	// runner, #165) and takes no client lease (Q4.1, Q11.1).
+	if stream.GetType() == model.DeliverySstpPair {
+		r.preInitializeCounterLocked(stream)
+		if stream.SstpMethod == nil || stream.SstpMethod.Role != model.SstpRoleInitiator {
+			// Responder (server) side: every node may serve POST /sstp/{id} and
+			// takes no lease. Track the pair by its tx-side SID so HandleEvent can
+			// match an outbound event and broadcast a wake-sstp-server (Q11.1, #167).
+			if stream.SstpMethod != nil && stream.SstpMethod.Role == model.SstpRoleResponder {
+				r.sstpServerStreams[stream.StreamConfiguration.Id] = *stream
+			}
+			return
+		}
+		pairId := stream.PairId
+		if current, ok := r.sstpClientStreams[pairId]; ok {
+			current.Update(stream)
+			r.sstpClientStreams[pairId] = current
+			return
+		}
+		r.mu.Unlock()
+		jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+			MaxEvents:         0,
+			ReturnImmediately: true,
+			TimeoutSecs:       10,
+		})
+		r.mu.Lock()
+		r.initSstpClientStreamLocked(stream, jtis)
+		return
+	}
 
 	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
 		r.preInitializeCounterLocked(stream)
@@ -610,9 +731,20 @@ evaluates if it should be added to any streams for outgoing propagation
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
+	sstpInbound := false
 	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil {
-		return err
+		// SSTP-server inbound (PRD #154 Q5.1, Q46): an inbound SET is keyed on the
+		// pair's rx-side SID, which is NOT the document _id, so the plain FindByID
+		// lookup above misses. Resolve the pair by either direction and relabel the
+		// inbound counter to the rx-side SID that was passed in, so eventsIn carries
+		// stream_id=rxSid rather than the tx-side SID.
+		pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
+		if pairErr != nil || pair == nil {
+			return err
+		}
+		streamState = sstpInboundCounterRecord(pair, sid)
+		sstpInbound = true
 	}
 
 	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
@@ -629,6 +761,14 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return err
 	}
 	r.IncrementCounter(streamState, eventToken, true)
+
+	// SSTP-server inbound is terminal: the rx side imports the SET for local
+	// consumption (RouteModeImport). It is not fanned out to RFC8935/RFC8936
+	// outbound streams — the pair's own outbound is the tx side, fed independently
+	// (PRD #154 Q5.1).
+	if sstpInbound {
+		return nil
+	}
 
 	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
@@ -682,7 +822,65 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
 		}
 	}
+
+	r.routeEventToSstpPairsLocked(event)
 	return nil
+}
+
+// routeEventToSstpPairsLocked fans an outbound event out to the SSTP pairs this
+// router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must hold r.mu (at
+// least RLock).
+//
+//   - SSTP-client (initiator) pairs: when the event matches and the
+//     sstp-client:<PairId> lease is held by a different node, broadcast
+//     wake-sstp-client so the owner drains the pending event into the next cycle;
+//     when the lease is local or unheld, wake the local outbound buffer directly.
+//   - SSTP-server (responder) pairs: when the event matches, broadcast
+//     wake-sstp-server to active nodes (the server side takes no lease, so any node
+//     may be holding the long-poll) and wake the local long-poll buffer.
+func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
+	for pairId, pair := range r.sstpClientStreams {
+		if !r.eventService.MatchesStream(&pair, event) {
+			continue
+		}
+		// Finding #6: persist the JTI into the tx-side pending list BEFORE waking the
+		// runner — exactly as the push/poll branches do with AddEventToStream. Without
+		// this the JTI is never AddPending'd for the tx SID, so the runner's
+		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
+		// (not even backfill-recoverable). AddEvent only Insert()s the token.
+		txSid := pair.StreamConfiguration.Id
+		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
+			eventLogger.Error("ROUTER: Error adding event to SSTP-client pair", "pairId", pairId, "sid", txSid, "jti", event.Jti, "error", err)
+		}
+		resource := fmt.Sprintf("sstp-client:%s", pairId)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			if buf, ok := r.sstpBuffers[pairId]; ok {
+				buf.SubmitEvent(event.Jti)
+				buf.Wakeup()
+			}
+		} else {
+			go r.broadcastSstpClientWake(pairId)
+		}
+	}
+
+	for txSid, pair := range r.sstpServerStreams {
+		if !r.eventService.MatchesStream(&pair, event) {
+			continue
+		}
+		// Finding #6 (server side): add the JTI to the tx-side pending list so the
+		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
+		// server takes no client lease — every node may serve the long-poll — so we do
+		// not gate this on lease ownership.
+		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
+			eventLogger.Error("ROUTER: Error adding event to SSTP-server pair", "sid", txSid, "jti", event.Jti, "error", err)
+		}
+		if buf, ok := r.sstpServerBuffers[txSid]; ok {
+			buf.SubmitEvent(event.Jti)
+			buf.Wakeup()
+		}
+		go r.broadcastSstpServerWake(txSid)
+	}
 }
 
 // SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to
@@ -690,7 +888,10 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 // point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
-	stream, err := r.streamService.GetStreamState(r.ctx, sid)
+	// SSTP-aware resolution: an operational event keyed on the rx-side SID of an
+	// SSTP pair must still find the (single) pair record, whose document _id is
+	// the tx-side SID, not the rx-side SID (Q40).
+	stream, err := r.streamService.GetStreamStateBySID(r.ctx, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -916,6 +1117,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			// serve a poll, so the filter is consulted here at poll-response
 			// time; a filtered-out event is discarded (acked) rather than
 			// returned, so the poll buffer stays bounded (ADR-0002).
+			// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
+			// the primary StreamConfiguration, so this is the pair's transmit-side
+			// subject filter — there is no separate inbound/ingest-time filter.
 			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
 				r.discardPolledEvent(sid, jti, pollBuffer)
 				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
@@ -1327,6 +1531,9 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 	// (ADR-0002); the no-op success classification advances the push loop
 	// exactly as a stale/deleted JTI does. Operational events and a disabled
 	// feature always pass — Allows handles both internally.
+	// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is the
+	// primary StreamConfiguration, so this is the pair's transmit-side subject
+	// filter — there is no separate inbound/ingest-time filter.
 	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
 		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
 			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
@@ -1424,6 +1631,33 @@ func (r *router) RemoveStream(sid string) {
 		}
 		delete(r.pollBuffers, sid)
 	}
+
+	// Finding #8: tear down the SSTP pair's four maps and buffers. For a pair the
+	// document _id == PairId == tx-side SID, so the single sid passed here matches
+	// both the client maps (keyed by PairId) and the server maps (keyed by txSid).
+	// Closing the buffers wakes any in-flight long-poll wait; deleting the
+	// sstpClientStreams entry is the stop signal the client runner observes on its
+	// next-cycle refresh (refreshSstpClientStream returns ok=false), so the runner
+	// goroutine exits rather than polling a dead peer forever.
+	if cb, ok := r.sstpBuffers[sid]; ok {
+		cb.Close()
+		delete(r.sstpBuffers, sid)
+	}
+	if _, ok := r.sstpClientStreams[sid]; ok {
+		delete(r.sstpClientStreams, sid)
+	}
+	// Drop the pair's in-flight claim set and second-push slot so a removed pair
+	// leaves no stale entries (keyed on PairId == sid for a pair).
+	delete(r.sstpInFlight, sid)
+	delete(r.sstpSecondPushInFlight, sid)
+	if sb, ok := r.sstpServerBuffers[sid]; ok {
+		sb.Close()
+		delete(r.sstpServerBuffers, sid)
+	}
+	if _, ok := r.sstpServerStreams[sid]; ok {
+		delete(r.sstpServerStreams, sid)
+	}
+
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }
 
@@ -1447,6 +1681,12 @@ func (r *router) Shutdown() {
 	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
+	}
+	for _, sstpBuffer := range r.sstpBuffers {
+		sstpBuffer.Close()
+	}
+	for _, sstpServerBuffer := range r.sstpServerBuffers {
+		sstpServerBuffer.Close()
 	}
 	if r.x509Source != nil {
 		_ = r.x509Source.Close()

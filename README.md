@@ -30,7 +30,7 @@ The IETF and the OpenID Foundation have been assembling consensus around the sta
 [RFC 8417](https://www.rfc-editor.org/rfc/rfc8417) defines the **Security Event Token (SET)**: a JWT-based data structure that conveys a statement of fact, from an issuer, about a security subject — that something happened to or about that subject. A SET is not a command. It is a signed claim that an event occurred, which the receiver is free to act on, or not, according to its own policy. Every other spec in this stack rides on top of SETs.
 
 **2. How do SETs get from a transmitter to a receiver?**
-[RFC 8935](https://www.rfc-editor.org/rfc/rfc8935) defines **push-based delivery** over HTTP, in which the transmitter POSTs each SET to a receiver endpoint. [RFC 8936](https://www.rfc-editor.org/rfc/rfc8936) defines **poll-based delivery**, in which the receiver fetches batches of pending SETs from the transmitter. Push fits receivers that can host endpoints; poll fits receivers behind a firewall or in environments where outbound is the only reliable direction.
+[RFC 8935](https://www.rfc-editor.org/rfc/rfc8935) defines **push-based delivery** over HTTP, in which the transmitter POSTs each SET to a receiver endpoint. [RFC 8936](https://www.rfc-editor.org/rfc/rfc8936) defines **poll-based delivery**, in which the receiver fetches batches of pending SETs from the transmitter. Push fits receivers that can host endpoints; poll fits receivers behind a firewall or in environments where outbound is the only reliable direction. goSignals also implements a third, bidirectional method — **SSTP** ([draft-hunt-secevent-sstp-00](docs/specs/draft-hunt-secevent-sstp-00.txt)), the Synchronous SET Transfer Protocol — which carries SETs in *both* directions over a single HTTP cycle for peers that want a symmetric, firewall-friendly exchange. See [docs/SSTP.md](docs/SSTP.md).
 
 **3. How do transmitters and receivers find each other, agree on what they share, and manage the relationship over time?**
 The OpenID Foundation's [Shared Signals Framework (SSF)](https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html) defines that layer — configuration discovery, stream lifecycle management, subject identifiers, and verification flows. SSF turns a bespoke integration into a managed stream.
@@ -58,6 +58,7 @@ _A quick reference for the specifications i2goSignals implements and interoperat
 | [RFC 8935](https://www.rfc-editor.org/rfc/rfc8935) | Push-based SET delivery over HTTP | IETF Proposed Standard (2020) |
 | [RFC 8936](https://www.rfc-editor.org/rfc/rfc8936) | Poll-based SET delivery over HTTP | IETF Proposed Standard (2020) |
 | [RFC 9967](https://www.rfc-editor.org/rfc/rfc9967) | SCIM Profile for Security Event Tokens — provisioning-lifecycle event types; updates RFC 7643 and RFC 7644 | IETF Proposed Standard (May 2026) |
+| [draft-hunt-secevent-sstp-00](docs/specs/draft-hunt-secevent-sstp-00.txt) | Synchronous SET Transfer Protocol (SSTP) — bidirectional SET delivery over a single HTTP cycle | IETF Internet-Draft |
 
 ## What is goSignals?
 

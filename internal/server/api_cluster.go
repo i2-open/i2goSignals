@@ -151,6 +151,8 @@ func (sa *SignalsApplication) startInternalServer() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_cluster/wake-transmitter", sa.WakeTransmitter)
+	mux.HandleFunc("/_cluster/wake-sstp-client", sa.WakeSstpClient)
+	mux.HandleFunc("/_cluster/wake-sstp-server", sa.WakeSstpServer)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

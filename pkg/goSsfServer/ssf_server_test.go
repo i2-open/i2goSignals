@@ -46,7 +46,7 @@ func (suite *SsfServerTestSuite) TestWellKnownSSFConfiguration() {
 	err = json.NewDecoder(resp.Body).Decode(&config)
 	suite.NoError(err)
 	suite.Equal("", config.GoSignalsVersion, "Go Signals Version should be empty")
-	suite.Equal(2, len(config.DeliveryMethodsSupported), "SSF only supports 2 transmit methods")
+	suite.Equal(3, len(config.DeliveryMethodsSupported), "SSF: 2 transmit methods + SSTP advertised unconditionally")
 
 }
 

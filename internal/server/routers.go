@@ -54,6 +54,14 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 				Name(route.Name).
 				Handler(handler).
 				Queries("stream_id", "{id:[^/]+}")
+		} else if route.Method == "" {
+			// A method-agnostic route (e.g. /sstp/{id}) matches every HTTP method
+			// on its path so the handler can return an explicit 405 for the
+			// disallowed ones rather than gorilla/mux 404ing an unmatched method.
+			httpRouter.router.
+				Path(route.Pattern).
+				Name(route.Name).
+				Handler(handler)
 		} else {
 			httpRouter.router.
 				Methods(route.Method).
@@ -353,11 +361,40 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 
+		// SSTP is registered without a method restriction so that any non-POST
+		// method on /sstp/{id} reaches the handler and returns an explicit 405
+		// (gorilla/mux otherwise 404s an unmatched method on a method-pinned
+		// route). The handler enforces POST-only (PRD #154 Q19, Q21.a).
+		Route{
+			"ReceiveSstpEvent",
+			"",
+			"/sstp/{id}",
+			h.sa.ReceiveSstpEvent,
+			false,
+		},
+
 		Route{
 			"WakeTransmitter",
 			http.MethodPost,
 			"/_cluster/wake-transmitter",
 			h.sa.WakeTransmitter,
+			false,
+		},
+
+		// SSTP cluster wake-up routes (PRD #154 Q11.1, Q11.2, #167). Kept separate
+		// from wake-transmitter for telemetry separation; same SPIFFE/HMAC auth.
+		Route{
+			"WakeSstpClient",
+			http.MethodPost,
+			"/_cluster/wake-sstp-client",
+			h.sa.WakeSstpClient,
+			false,
+		},
+		Route{
+			"WakeSstpServer",
+			http.MethodPost,
+			"/_cluster/wake-sstp-server",
+			h.sa.WakeSstpServer,
 			false,
 		},
 

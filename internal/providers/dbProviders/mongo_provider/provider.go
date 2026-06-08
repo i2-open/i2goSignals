@@ -371,6 +371,33 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Sparse-unique indexes on the SSTP pair lookup keys (PRD #154, slice #159).
+	// Both fields are absent on non-SSTP records, so the sparse option means
+	// those records pay zero index cost. Uniqueness guards against two pairs
+	// colliding on the same inbound SID or PairId.
+	sstpInboundIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "sstp_inbound.id", Value: 1}},
+		Options: options.Index().
+			SetName("sstpInboundSidUnique").
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.streamCol.Indexes().CreateOne(ctx, sstpInboundIndex); err != nil {
+		pLog.Error("Error creating sstp_inbound.id index for streamCol", "error", err)
+		return err
+	}
+	pairIdIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "pair_id", Value: 1}},
+		Options: options.Index().
+			SetName("sstpPairIdUnique").
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.streamCol.Indexes().CreateOne(ctx, pairIdIndex); err != nil {
+		pLog.Error("Error creating pair_id index for streamCol", "error", err)
+		return err
+	}
 	return nil
 }
 
