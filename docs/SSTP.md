@@ -224,13 +224,13 @@ goSignals create stream sstp <client-alias> <server-alias> \
 
 # Asymmetric / multi-hop (full SstpPairBootstrap with per-direction primary/inbound):
 goSignals create stream sstp <client-alias> <server-alias> \
-    --config-file ./pair.json
+    --bootstrap-file ./pair.json
 ```
 
-> **Flag note:** the asymmetric input flag is `--config-file`, **not**
-> `--config` — the global `--config` flag (GOSIGNALS_HOME) already owns that
-> name. A `.yaml`/`.yml` extension is parsed as YAML; anything else as JSON.
-> `--config-file` and the symmetric flags are mutually exclusive.
+> **Flag note:** the asymmetric input flag is `--bootstrap-file` (**not**
+> `--config` — the global `--config` flag, GOSIGNALS_HOME, already owns that
+> name). A `.yaml`/`.yml` extension is parsed as YAML; anything else as JSON.
+> `--bootstrap-file` and the symmetric flags are mutually exclusive.
 
 The command prints the `PairId`, both pair SIDs, and the resolved
 `EndpointUrl`s. The issuing side plays `initiator`; the named server alias is the

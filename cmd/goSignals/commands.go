@@ -800,68 +800,68 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 // success (idempotent). The resolved client secret rides on the request body
 // only; it is never persisted to config.json.
 func (cli *CLI) registerTxAliasServer(node *SsfServer, alias, flagSecret, envVar string) error {
-    reg, err := cli.Data.BuildServerRegistration(alias, flagSecret, envVar)
-    if err != nil {
-        return err
-    }
+	reg, err := cli.Data.BuildServerRegistration(alias, flagSecret, envVar)
+	if err != nil {
+		return err
+	}
 
-    serverUrl, err := url.Parse(node.Host)
-    if err != nil {
-        return err
-    }
-    regUrl, err := serverUrl.Parse("/server")
-    if err != nil {
-        return err
-    }
+	serverUrl, err := url.Parse(node.Host)
+	if err != nil {
+		return err
+	}
+	regUrl, err := serverUrl.Parse("/server")
+	if err != nil {
+		return err
+	}
 
-    bodyBytes, err := json.Marshal(reg)
-    if err != nil {
-        return err
-    }
+	bodyBytes, err := json.Marshal(reg)
+	if err != nil {
+		return err
+	}
 
-    req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bodyBytes))
-    if err != nil {
-        return err
-    }
-    req.Header.Set("Content-Type", "application/json")
-    bearer, err := serverBearer(&cli.Globals, node)
-    if err != nil {
-        return err
-    }
-    // Proactive fail-fast (#139): registering a foreign transmitter requires
-    // admin scope. When the resolved credential decodes to a goSignals
-    // ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
-    // call with an actionable message. If the credential cannot be classified
-    // locally (opaque/IdP token), degrade gracefully and fall through.
-    if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
-        return errTxAliasAdminRequired
-    }
-    if bearer != "" {
-        req.Header.Set("Authorization", "Bearer "+bearer)
-    }
+	req, err := http.NewRequest(http.MethodPost, regUrl.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, node)
+	if err != nil {
+		return err
+	}
+	// Proactive fail-fast (#139): registering a foreign transmitter requires
+	// admin scope. When the resolved credential decodes to a goSignals
+	// ClientToken whose scopes lack admin/root, short-circuit BEFORE the network
+	// call with an actionable message. If the credential cannot be classified
+	// locally (opaque/IdP token), degrade gracefully and fall through.
+	if known, hasAdmin := clientTokenHasAdminScope(bearer); known && !hasAdmin {
+		return errTxAliasAdminRequired
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 
-    client := getHttpClient(0)
-    resp, err := client.Do(req)
-    if err != nil {
-        return err
-    }
-    defer httpSupport.HandleRespClose(resp)
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer httpSupport.HandleRespClose(resp)
 
-    switch resp.StatusCode {
-    case http.StatusOK, http.StatusCreated:
-        return nil
-    case http.StatusConflict:
-        // Transmitter already registered on this node — proceed.
-        fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
-        return nil
-    case http.StatusUnauthorized, http.StatusForbidden:
-        // Reactive translation (#139): surface the SAME actionable admin-scope
-        // guidance instead of leaking a raw status/body.
-        return errTxAliasAdminRequired
-    default:
-        body, _ := io.ReadAll(resp.Body)
-        return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
-    }
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		return nil
+	case http.StatusConflict:
+		// Transmitter already registered on this node — proceed.
+		fmt.Printf("Transmitter '%s' already registered on %s (409); proceeding.\n", alias, node.Alias)
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// Reactive translation (#139): surface the SAME actionable admin-scope
+		// guidance instead of leaking a raw status/body.
+		return errTxAliasAdminRequired
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status registering tx-alias '%s' on %s: %s (body: %s)", alias, node.Alias, resp.Status, string(body))
+	}
 }
 
 // errTxAliasAdminRequired is the actionable guidance returned both proactively
@@ -875,20 +875,20 @@ var errTxAliasAdminRequired = errors.New("registering tx-alias requires admin sc
 // opaque or non-goSignals token returns known=false so callers degrade
 // gracefully and proceed to the network.
 func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
-    if bearer == "" {
-        return false, false
-    }
-    var eat authSupport.EventAuthToken
-    parser := jwt.NewParser()
-    if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
-        return false, false
-    }
-    // A goSignals ClientToken carries roles and/or a scope claim. Absent both,
-    // this is an IdP/opaque token we cannot classify here.
-    if len(eat.Roles) == 0 && eat.Scope == "" {
-        return false, false
-    }
-    return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
+	if bearer == "" {
+		return false, false
+	}
+	var eat authSupport.EventAuthToken
+	parser := jwt.NewParser()
+	if _, _, err := parser.ParseUnverified(bearer, &eat); err != nil {
+		return false, false
+	}
+	// A goSignals ClientToken carries roles and/or a scope claim. Absent both,
+	// this is an IdP/opaque token we cannot classify here.
+	if len(eat.Roles) == 0 && eat.Scope == "" {
+		return false, false
+	}
+	return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
@@ -1002,34 +1002,34 @@ type CreateStreamPushCmd struct {
 //   - Symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode) build a
 //     symmetric SstpPairBootstrap: identical business-plane inputs both
 //     directions.
-//   - --config-file <file> (JSON or YAML) supplies a full SstpPairBootstrap for
-//     the asymmetric / multi-hop case (per-direction Primary/Inbound). It is
-//     named --config-file rather than --config because the global --config flag
+//   - --bootstrap-file <file> (JSON or YAML) supplies a full SstpPairBootstrap
+//     for the asymmetric / multi-hop case (per-direction Primary/Inbound). It is
+//     named --bootstrap-file (not --config) because the global --config flag
 //     (GOSIGNALS_HOME) already owns that name.
 //
 // The two shapes are mutually exclusive.
 type CreateStreamSstpCmd struct {
-	ClientAlias string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
-	ServerAlias string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
-	Name        string   `optional:"" help:"An alias name for the pair to be stored locally."`
-	Description string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
-	Config      string   `name:"config-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
-	Iss         string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
-	IssJwksUrl  string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
-	Aud         []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
-	Events      []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode)."`
-	Mode        string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
+	ClientAlias   string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
+	ServerAlias   string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
+	Name          string   `optional:"" help:"An alias name for the pair to be stored locally."`
+	Description   string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
+	BootstrapFile string   `name:"bootstrap-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
+	Iss           string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
+	IssJwksUrl    string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
+	Aud           []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
+	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode)."`
+	Mode          string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
 }
 
 func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
 	flagsUsed := p.Iss != "" || p.IssJwksUrl != "" || len(p.Aud) > 0 || len(p.Events) > 0 || p.Mode != ""
-	if p.Config != "" && flagsUsed {
-		return errors.New("--config cannot be combined with the symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode); use one input mode")
+	if p.BootstrapFile != "" && flagsUsed {
+		return errors.New("--bootstrap-file cannot be combined with the symmetric flags (--iss/--iss-jwks-url/--aud/--events/--mode); use one input mode")
 	}
 
 	var boot model.SstpPairBootstrap
-	if p.Config != "" {
-		loaded, err := loadSstpBootstrapFile(p.Config)
+	if p.BootstrapFile != "" {
+		loaded, err := loadSstpBootstrapFile(p.BootstrapFile)
 		if err != nil {
 			return err
 		}
@@ -1081,17 +1081,17 @@ func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
 func loadSstpBootstrapFile(path string) (*model.SstpPairBootstrap, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("unable to read --config file %s: %w", path, err)
+		return nil, fmt.Errorf("unable to read --bootstrap-file %s: %w", path, err)
 	}
 	var boot model.SstpPairBootstrap
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".yaml" || ext == ".yml" {
 		if err = yaml.Unmarshal(data, &boot); err != nil {
-			return nil, fmt.Errorf("unable to parse YAML --config file %s: %w", path, err)
+			return nil, fmt.Errorf("unable to parse YAML --bootstrap-file %s: %w", path, err)
 		}
 	} else {
 		if err = json.Unmarshal(data, &boot); err != nil {
-			return nil, fmt.Errorf("unable to parse JSON --config file %s: %w", path, err)
+			return nil, fmt.Errorf("unable to parse JSON --bootstrap-file %s: %w", path, err)
 		}
 	}
 	return &boot, nil
