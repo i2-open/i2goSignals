@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
@@ -615,6 +617,15 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 
 	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
 	if err != nil {
+		// JTI dedup short-circuit: the persistence layer rejected this JTI
+		// because it was already stored. Reply 202 (nil) without counting the
+		// inbound or fanning out to outbound streams again. The receiver may
+		// retry safely; the second arrival is observable only as the single
+		// INFO log emitted by the event service ("Duplicate JTI ingestion
+		// suppressed").
+		if errors.Is(err, interfaces.ErrDuplicateJTI) {
+			return nil
+		}
 		return err
 	}
 	r.IncrementCounter(streamState, eventToken, true)
@@ -689,6 +700,13 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 
 	rec, err := r.eventService.AddOperationalEvent(r.ctx, eventToken, sid, rawEvent)
 	if err != nil {
+		// JTI dedup short-circuit: the persistence layer rejected this JTI as
+		// a duplicate. Return the existing record so the SSF caller still has
+		// the original receipt, but do NOT count the inbound, add to pending,
+		// or wake the buffer — the original submission already did all of that.
+		if errors.Is(err, interfaces.ErrDuplicateJTI) {
+			return rec, nil
+		}
 		return nil, err
 	}
 	r.IncrementCounter(stream, eventToken, true)

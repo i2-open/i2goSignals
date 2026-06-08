@@ -65,6 +65,18 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 
 	err := s.eventDAO.Insert(ctx, rec)
 	if err != nil {
+		// JTI dedup: the record already exists. Load the original and surface
+		// the typed sentinel so callers (router) can short-circuit without
+		// counting the inbound or fanning out to outbound streams again.
+		if errors.Is(err, interfaces.ErrDuplicateJTI) {
+			esLog.Info("Duplicate JTI ingestion suppressed", "jti", jti, "sid", sid)
+			existing, findErr := s.eventDAO.FindByJTI(ctx, jti)
+			if findErr != nil {
+				esLog.Error("Error loading existing record after duplicate JTI", "jti", jti, "sid", sid, "error", findErr)
+				return nil, err
+			}
+			return existing, interfaces.ErrDuplicateJTI
+		}
 		esLog.Error("Error inserting event", "error", err)
 		return nil, err
 	}

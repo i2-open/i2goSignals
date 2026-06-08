@@ -49,6 +49,12 @@ func (d *EventDAOMemory) Insert(_ context.Context, record *model.AgEventRecord) 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// JTI is the persistence-layer dedup key. Reject the new write and leave
+	// the existing record untouched (matches Mongo's reject-new-write semantic).
+	if _, exists := d.events[record.Jti]; exists {
+		return interfaces.ErrDuplicateJTI
+	}
+
 	if d.useDisk {
 		err := d.saveEventToDiskLocked(record)
 		if err == nil {
