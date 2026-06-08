@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -401,13 +402,23 @@ func (sa *SignalsApplication) Shutdown() {
 		client.Close()
 	}
 	sa.mu.Unlock()
-	time.Sleep(time.Second)
+
+	// Graceful drain: let in-flight receiver/event work settle before tearing
+	// down the router and storage. Duration is configurable (I2SIG_SHUTDOWN_DRAIN,
+	// seconds) so tests can set it to 0; production keeps the historical ~1s per
+	// phase.
+	drain := resolveShutdownDrain()
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
 
 	// Give some time to ensure all ops are finished.
-	time.Sleep(time.Second)
+	if drain > 0 {
+		time.Sleep(drain)
+	}
 
 	// Shutdown the storage
 	if sa.Storage != nil {
@@ -415,4 +426,23 @@ func (sa *SignalsApplication) Shutdown() {
 	}
 
 	serverLog.Info("Shutdown Complete", "db", name)
+}
+
+// resolveShutdownDrain returns the per-phase graceful-drain delay used by
+// Shutdown. It reads I2SIG_SHUTDOWN_DRAIN (legacy SHUTDOWN_DRAIN) as a float
+// number of seconds. Unset/empty or unparseable falls back to 1s, preserving
+// the historical two-phase ~2s drain; a value of 0 disables the drain (used by
+// the test suite, which spins up and tears down dozens of servers).
+func resolveShutdownDrain() time.Duration {
+	val := envcompat.Lookup("I2SIG_SHUTDOWN_DRAIN", "SHUTDOWN_DRAIN")
+	if val == "" {
+		return time.Second
+	}
+	secs, err := strconv.ParseFloat(val, 64)
+	if err != nil || secs < 0 {
+		serverLog.Warn("Invalid I2SIG_SHUTDOWN_DRAIN; falling back to 1s",
+			"value", val)
+		return time.Second
+	}
+	return time.Duration(secs * float64(time.Second))
 }

@@ -97,6 +97,7 @@ understands. They are documented in their natural section below.
 | `BASE_URL`                     | Public host:port the server presents (e.g. `127.0.0.1:8888`).                                                            | `127.0.0.1:<PORT>` or `127.0.0.1:8888` |
 | `LOG_LEVEL`                    | Logging level: `debug`, `info`, `warn`, `error`.                                                                         | `info`                             |
 | `LOG_FORMAT`                   | `text` for human-readable key=value, `json` for one-object-per-line consumption by Alloy / Fluent Bit / CloudWatch agent. See [`observability.md`](observability.md). | `text` |
+| `I2SIG_SHUTDOWN_DRAIN`         | Per-phase graceful-drain delay, in seconds (float), applied during `Shutdown()` — once after closing receiver/poll connections and once after stopping the event router, so total drain is roughly `2 ×` this value. `0` disables the drain (used by the test suite, which tears down dozens of servers). Unparseable/negative falls back to the default. | `1` |
 
 ## Stream
 

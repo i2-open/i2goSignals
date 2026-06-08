@@ -17,5 +17,12 @@ func TestMain(m *testing.M) {
     if os.Getenv("I2SIG_POLL_DEFAULT_TIMEOUT") == "" {
         _ = os.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "1")
     }
+    // SignalsApplication.Shutdown() drains for I2SIG_SHUTDOWN_DRAIN seconds per
+    // phase (production default 1s => ~2s total). This package spins up and tears
+    // down ~77 servers, so the default would add ~150s of pure waiting. Disable
+    // the drain unless an operator set it explicitly.
+    if os.Getenv("I2SIG_SHUTDOWN_DRAIN") == "" {
+        _ = os.Setenv("I2SIG_SHUTDOWN_DRAIN", "0")
+    }
     os.Exit(m.Run())
 }
