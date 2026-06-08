@@ -47,6 +47,20 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+      - name: pkg boundary gate (PRD #175 cleaned packages)
+        # The lifted packages (pkg/services, pkg/dao incl. ids+memory,
+        # pkg/authSupport) must never import internal/*. Scoped on purpose:
+        # other pkg/* still carry pre-existing pkg->internal violations that
+        # are out of scope here, so a blanket gate would be a false failure.
+        run: |
+          if grep -rn 'github.com/i2-open/i2goSignals/internal/' \
+               --include='*.go' \
+               pkg/services pkg/dao pkg/authSupport; then
+            echo "ERROR: pkg->internal import found in a PRD #175 cleaned package" >&2
+            exit 1
+          fi
+          echo "OK: no pkg->internal imports in pkg/services, pkg/dao, pkg/authSupport"
+
       - name: go vet
         # pkg/ssfModels (swagger-generated), pkg/goScim, and cmd/cluster-monitor
         # have pre-existing warnings called out in CLAUDE.md. Vetting everything

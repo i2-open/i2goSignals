@@ -10,7 +10,7 @@ import (
     "testing"
 
     "github.com/i2-open/i2goSignals/pkg/authSupport"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/services"
     "github.com/i2-open/i2goSignals/pkg/goSet"
     model "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"

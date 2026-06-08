@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
-	"github.com/i2-open/i2goSignals/internal/services"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"

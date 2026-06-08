@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/internal/dao/memory"
+	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 )

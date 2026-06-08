@@ -8,8 +8,8 @@ import (
     "time"
 
     interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-    "github.com/i2-open/i2goSignals/internal/dao/memory"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/dao/memory"
+    "github.com/i2-open/i2goSignals/pkg/services"
     "github.com/i2-open/i2goSignals/pkg/authSupport"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"

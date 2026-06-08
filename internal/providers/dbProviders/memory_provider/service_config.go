@@ -6,7 +6,7 @@ import (
     "strconv"
 
     "github.com/i2-open/i2goSignals/internal/envcompat"
-    "github.com/i2-open/i2goSignals/internal/services"
+    "github.com/i2-open/i2goSignals/pkg/services"
 )
 
 const CEnvBaseURL = "BASE_URL"

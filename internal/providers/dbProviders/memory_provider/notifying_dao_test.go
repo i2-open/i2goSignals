@@ -7,7 +7,7 @@ import (
     "time"
 
     interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-    "github.com/i2-open/i2goSignals/internal/dao/memory"
+    "github.com/i2-open/i2goSignals/pkg/dao/memory"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "go.mongodb.org/mongo-driver/v2/bson"
