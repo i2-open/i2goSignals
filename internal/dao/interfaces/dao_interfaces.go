@@ -168,7 +168,7 @@ type ServerDAO interface {
 
 // JwkKeyRec represents a cryptographic key record.
 //
-// Id is an opaque 24-character hex string (see internal/dao/ids). The Mongo
+// Id is an opaque 24-character hex string (see pkg/dao/ids). The Mongo
 // adapter stores this internally as a bson.ObjectID via a private doc type
 // for backward compatibility with existing data; callers must not assume
 // the Mongo serialization format.

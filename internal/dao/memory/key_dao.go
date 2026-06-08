@@ -5,7 +5,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/i2-open/i2goSignals/internal/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
 )
 
