@@ -12,7 +12,6 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
-	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -21,16 +20,6 @@ import (
 )
 
 var ksLog = logger.Sub("KEY_SERVICE")
-
-// oauthServersFromEnv resolves the OAuth Authorization Server discovery
-// endpoints from the environment, honoring the deprecated OAUTH_SERVERS alias
-// (with a one-time deprecation WARN) in favor of I2SIG_AUTH_OAUTH_SERVERS. This
-// envcompat parsing lives in the wiring tree (internal/services) and is injected
-// into authSupport.AuthIssuer via OAuthServersLookup so the public package stays
-// free of internal/* imports.
-func oauthServersFromEnv() string {
-	return envcompat.Lookup("I2SIG_AUTH_OAUTH_SERVERS", "OAUTH_SERVERS")
-}
 
 type KeyService struct {
 	keyDAO      interfaces.KeyDAO
@@ -41,14 +30,19 @@ type KeyService struct {
 	authIssuer  *authSupport.AuthIssuer
 }
 
-func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker) *KeyService {
+// NewKeyService constructs a KeyService. oauthServersLookup supplies the OAuth
+// Authorization Server discovery endpoints for the AuthIssuer; the caller (the
+// wiring tree) owns where those come from (env, config, etc.) so this package
+// stays free of internal/envcompat. A nil lookup leaves AuthIssuer with no
+// OAuth servers configured.
+func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker, oauthServersLookup func() string) *KeyService {
 	return &KeyService{
 		keyDAO:      keyDAO,
 		tokenIssuer: tokenIssuer,
 		authIssuer: &authSupport.AuthIssuer{
 			TokenIssuer:        tokenIssuer,
 			TokenTracker:       tokenTracker,
-			OAuthServersLookup: oauthServersFromEnv,
+			OAuthServersLookup: oauthServersLookup,
 		},
 	}
 }

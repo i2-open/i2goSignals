@@ -40,7 +40,7 @@ type KeyServiceTestSuite struct {
 
 func (s *KeyServiceTestSuite) newService(tokenIssuer string) (*KeyService, interfaces.KeyDAO) {
 	dao := memory.NewKeyDAO()
-	return NewKeyService(dao, tokenIssuer, nil), dao
+	return NewKeyService(dao, tokenIssuer, nil, nil), dao
 }
 
 // TestInitializeTokenKey_FreshStart verifies that on an empty DB the service
@@ -62,11 +62,11 @@ func (s *KeyServiceTestSuite) TestInitializeTokenKey_ExistingKey() {
 	_, dao := s.newService("DEFAULT")
 
 	// First init — creates the key
-	svc1 := NewKeyService(dao, "DEFAULT", nil)
+	svc1 := NewKeyService(dao, "DEFAULT", nil, nil)
 	s.Require().NoError(svc1.InitializeTokenKey(ctx, "DEFAULT"))
 
 	// Second init — loads the existing key (simulate MongoDB reconnect)
-	svc2 := NewKeyService(dao, "DEFAULT", nil)
+	svc2 := NewKeyService(dao, "DEFAULT", nil, nil)
 	s.Require().NoError(svc2.InitializeTokenKey(ctx, "DEFAULT"))
 	s.NotNil(svc2.authIssuer.PublicKey)
 	s.NotNil(svc2.authIssuer.PrivateKey)
@@ -81,12 +81,12 @@ func (s *KeyServiceTestSuite) TestInitializeTokenKey_JWKSLoadFailure_ReturnsErro
 
 	// Seed a key into the in-memory store so the "load existing" path is taken.
 	inner := memory.NewKeyDAO()
-	seed := NewKeyService(inner, "DEFAULT", nil)
+	seed := NewKeyService(inner, "DEFAULT", nil, nil)
 	s.Require().NoError(seed.InitializeTokenKey(ctx, "DEFAULT"))
 
 	// Wrap with a DAO that fails FindByKeyName (prevents JWKS from being built).
 	dao := &failingKeyDAO{KeyDAO: inner}
-	svc := NewKeyService(dao, "DEFAULT", nil)
+	svc := NewKeyService(dao, "DEFAULT", nil, nil)
 
 	err := svc.InitializeTokenKey(ctx, "DEFAULT")
 	s.Error(err, "InitializeTokenKey must return error when JWKS cannot be built")
@@ -105,7 +105,7 @@ func (s *KeyServiceTestSuite) TestInitializeTokenKey_TransientDBError_ReturnsErr
 	// Seed a key so the DB is non-empty — this simulates a server that has
 	// already run at least once and has a DEFAULT key in MongoDB.
 	inner := memory.NewKeyDAO()
-	seed := NewKeyService(inner, "DEFAULT", nil)
+	seed := NewKeyService(inner, "DEFAULT", nil, nil)
 	s.Require().NoError(seed.InitializeTokenKey(ctx, "DEFAULT"))
 
 	// Confirm exactly one key exists before the test.
@@ -116,7 +116,7 @@ func (s *KeyServiceTestSuite) TestInitializeTokenKey_TransientDBError_ReturnsErr
 	// Inject a DAO whose FindLatestByKeyName returns a transient error.
 	// This simulates a brief MongoDB outage mid-reconnect.
 	dao := &failingFindLatestKeyDAO{KeyDAO: inner}
-	svc := NewKeyService(dao, "DEFAULT", nil)
+	svc := NewKeyService(dao, "DEFAULT", nil, nil)
 
 	initErr := svc.InitializeTokenKey(ctx, "DEFAULT")
 	s.Error(initErr, "InitializeTokenKey must return error on transient DB failure")
@@ -149,7 +149,7 @@ func (s *KeyServiceTestSuite) TestCreateKeyPair_JWKSLoadFailure_PreservesExistin
 	ctx := context.Background()
 	inner := memory.NewKeyDAO()
 
-	svc := NewKeyService(inner, "DEFAULT", nil)
+	svc := NewKeyService(inner, "DEFAULT", nil, nil)
 	s.Require().NoError(svc.InitializeTokenKey(ctx, "DEFAULT"))
 
 	existingPubKey := svc.authIssuer.PublicKey
@@ -206,13 +206,13 @@ func (s *KeyServiceTestSuite) TestIssuedTokenValidatesAfterReconnect() {
 	_, dao := s.newService("DEFAULT")
 
 	// First service instance — creates the key and issues a token.
-	svc1 := NewKeyService(dao, "DEFAULT", nil)
+	svc1 := NewKeyService(dao, "DEFAULT", nil, nil)
 	s.Require().NoError(svc1.InitializeTokenKey(ctx, "DEFAULT"))
 	tokenStr, err := svc1.GetAuthIssuer().IssueProjectIat(nil)
 	s.Require().NoError(err)
 
 	// Second service instance — simulates reconnect (loads existing key from DB).
-	svc2 := NewKeyService(dao, "DEFAULT", nil)
+	svc2 := NewKeyService(dao, "DEFAULT", nil, nil)
 	s.Require().NoError(svc2.InitializeTokenKey(ctx, "DEFAULT"))
 
 	// Token issued before reconnect must still validate.

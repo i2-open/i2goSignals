@@ -98,11 +98,11 @@ func TestListReceiverStreams_IncludesSstpPair(t *testing.T) {
 func TestGetIssuerJwksForReceiver_SstpPairLoadsInboundJwks(t *testing.T) {
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "https://inbound-issuer.example", nil)
+    keyService := NewKeyService(keyDAO, "https://inbound-issuer.example", nil, nil)
     // InitializeTokenKey registers an internal signing key under the issuer; the
     // inbound side references that issuer so the JWKS is resolvable internally.
     require.NoError(t, keyService.InitializeTokenKey(context.Background(), "https://inbound-issuer.example"))
-    svc := NewStreamService(streamDAO, keyService, "https://local.example")
+    svc := NewStreamService(streamDAO, keyService, "https://local.example", StreamServiceConfig{})
     ctx := context.Background()
 
     txSid := bson.NewObjectID()

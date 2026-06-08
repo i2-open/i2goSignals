@@ -9,16 +9,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
@@ -169,38 +166,34 @@ func applyEventSource(streamRec *model.StreamStateRecord, requested *model.Event
     streamRec.EventSource = requested
 }
 
-func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string) *StreamService {
-	minVerificationInterval := 300
-	maxInactivityTimeout := 3600
-	var err error
-	var baseUrl *url.URL
-	base, exist := os.LookupEnv("BASE_URL")
-	if exist {
-		baseUrl, err = url.Parse(base)
-		if err != nil {
-			ssLog.Error("Invalid BASE_URL value", "error", err.Error())
-		}
+// StreamServiceConfig carries the operator-tunable stream knobs that were
+// previously read from environment variables inside the constructor. The wiring
+// tree (the provider) now resolves these — via internal/envcompat or otherwise —
+// and passes concrete values in, so this package no longer reads the
+// environment. A non-positive MinVerificationInterval/MaxInactivityTimeout
+// falls back to the historical defaults (300 / 3600), preserving prior
+// behaviour when the caller leaves them unset.
+type StreamServiceConfig struct {
+	BaseUrl                 *url.URL
+	MinVerificationInterval int
+	MaxInactivityTimeout    int
+}
+
+func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string, cfg StreamServiceConfig) *StreamService {
+	minVerificationInterval := cfg.MinVerificationInterval
+	if minVerificationInterval <= 0 {
+		minVerificationInterval = 300
 	}
-	if minVer := envcompat.Lookup("I2SIG_STREAM_MIN_VERIFICATION_INTERVAL", "MIN_VERIFICATION_INTERVAL"); minVer != "" {
-		minVerificationInterval, err = strconv.Atoi(minVer)
-		if err != nil {
-			minVerificationInterval = 300
-			ssLog.Error("Invalid I2SIG_STREAM_MIN_VERIFICATION_INTERVAL value", "error", err.Error())
-		}
-	}
-	if maxInactivityStr := envcompat.Lookup("I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT", "MAX_INACTIVITY_TIMEOUT"); maxInactivityStr != "" {
-		maxInactivityTimeout, err = strconv.Atoi(maxInactivityStr)
-		if err != nil {
-			maxInactivityTimeout = 3600
-			ssLog.Error("Invalid I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT value", "error", err.Error())
-		}
+	maxInactivityTimeout := cfg.MaxInactivityTimeout
+	if maxInactivityTimeout <= 0 {
+		maxInactivityTimeout = 3600
 	}
 	return &StreamService{
 		streamDAO:               streamDAO,
 		keyService:              keyService,
 		defaultIssuer:           defaultIssuer,
 		receiverStreams:         make(map[string]*model.StreamStateRecord),
-		BaseUrl:                 baseUrl,
+		BaseUrl:                 cfg.BaseUrl,
 		minVerificationInterval: minVerificationInterval,
 		maxInactivityTimeout:    maxInactivityTimeout,
 	}

@@ -64,8 +64,8 @@ func TestStreamService_ListReceiverStreams(t *testing.T) {
 
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "http://test", nil)
-    svc := NewStreamService(streamDAO, keyService, "http://test")
+    keyService := NewKeyService(keyDAO, "http://test", nil, nil)
+    svc := NewStreamService(streamDAO, keyService, "http://test", StreamServiceConfig{})
     ctx := context.Background()
 
     expectedIDs := map[string]bool{}

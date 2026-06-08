@@ -56,13 +56,13 @@ func TestCreateStream_AutomaticRegistration(t *testing.T) {
 	// 2. Setup StreamService
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
-	keyService := NewKeyService(keyDAO, "http://receiver.com", nil)
+	keyService := NewKeyService(keyDAO, "http://receiver.com", nil, nil)
 
 	// We need to initialize token keys for the key service to have an auth issuer
 	err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
 	assert.NoError(t, err)
 
-	svc := NewStreamService(streamDAO, keyService, "http://receiver.com")
+	svc := NewStreamService(streamDAO, keyService, "http://receiver.com", StreamServiceConfig{})
 	baseUrl, _ := url.Parse("http://receiver.com")
 	svc.SetBaseUrl(baseUrl)
 
@@ -141,12 +141,12 @@ func TestCreateStream_AutomaticPollRegistration(t *testing.T) {
 	// 2. Setup StreamService
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
-	keyService := NewKeyService(keyDAO, "http://receiver.com", nil)
+	keyService := NewKeyService(keyDAO, "http://receiver.com", nil, nil)
 
 	err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
 	assert.NoError(t, err)
 
-	svc := NewStreamService(streamDAO, keyService, "http://receiver.com")
+	svc := NewStreamService(streamDAO, keyService, "http://receiver.com", StreamServiceConfig{})
 	baseUrl, _ := url.Parse("http://receiver.com")
 	svc.SetBaseUrl(baseUrl)
 

@@ -19,14 +19,14 @@ func streamServiceFixture(t *testing.T) (*StreamService, *ServerService) {
     t.Helper()
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "http://receiver.com", nil)
+    keyService := NewKeyService(keyDAO, "http://receiver.com", nil, nil)
     err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
     assert.NoError(t, err)
 
     serverDAO := memory.NewServerDAO()
     serverService := NewServerService(serverDAO)
 
-    svc := NewStreamService(streamDAO, keyService, "http://receiver.com")
+    svc := NewStreamService(streamDAO, keyService, "http://receiver.com", StreamServiceConfig{})
     svc.SetServerService(serverService)
     return svc, serverService
 }

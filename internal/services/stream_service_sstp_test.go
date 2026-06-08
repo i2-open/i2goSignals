@@ -73,13 +73,13 @@ func sstpFixture(t *testing.T) (*StreamService, *ServerService) {
 	t.Helper()
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
-	keyService := NewKeyService(keyDAO, "https://local.example", nil)
+	keyService := NewKeyService(keyDAO, "https://local.example", nil, nil)
 	require.NoError(t, keyService.InitializeTokenKey(context.Background(), "https://local.example"))
 
 	serverDAO := memory.NewServerDAO()
 	serverService := NewServerService(serverDAO)
 
-	svc := NewStreamService(streamDAO, keyService, "https://local.example")
+	svc := NewStreamService(streamDAO, keyService, "https://local.example", StreamServiceConfig{})
 	svc.SetServerService(serverService)
 	baseUrl, _ := url.Parse("https://local.example")
 	svc.SetBaseUrl(baseUrl)

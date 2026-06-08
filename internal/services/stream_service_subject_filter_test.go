@@ -21,8 +21,8 @@ import (
 func newSubjectFilterTestService() *StreamService {
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "http://test", nil)
-    return NewStreamService(streamDAO, keyService, "http://test")
+    keyService := NewKeyService(keyDAO, "http://test", nil, nil)
+    return NewStreamService(streamDAO, keyService, "http://test", StreamServiceConfig{})
 }
 
 // pushTransmitterRequest returns a minimal DeliveryPush transmitter stream
@@ -183,8 +183,8 @@ func TestStreamService_SubjectRemovalGraceIgnoredOnReceiverStream(t *testing.T) 
     logs := captureLogs(t)
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "http://test", nil)
-    svc := NewStreamService(streamDAO, keyService, "http://test")
+    keyService := NewKeyService(keyDAO, "http://test", nil, nil)
+    svc := NewStreamService(streamDAO, keyService, "http://test", StreamServiceConfig{})
     ctx := context.Background()
 
     sid := seedReceiverStream(t, ctx, streamDAO)
@@ -445,8 +445,8 @@ func TestStreamService_EventSourceDroppedOnReceiverStream(t *testing.T) {
     logs := captureLogs(t)
     streamDAO := memory.NewStreamDAO()
     keyDAO := memory.NewKeyDAO()
-    keyService := NewKeyService(keyDAO, "http://test", nil)
-    svc := NewStreamService(streamDAO, keyService, "http://test")
+    keyService := NewKeyService(keyDAO, "http://test", nil, nil)
+    svc := NewStreamService(streamDAO, keyService, "http://test", StreamServiceConfig{})
     ctx := context.Background()
 
     sid := seedReceiverStream(t, ctx, streamDAO)

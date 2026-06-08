@@ -40,8 +40,8 @@ func TestUpdateStream_AllTxFieldsPersistence(t *testing.T) {
 
 	dao := memory.NewStreamDAO()
 	keyDao := memory.NewKeyDAO()
-	ks := NewKeyService(keyDao, "http://localhost", nil)
-	svc := NewStreamService(dao, ks, "http://localhost")
+	ks := NewKeyService(keyDao, "http://localhost", nil, nil)
+	svc := NewStreamService(dao, ks, "http://localhost", StreamServiceConfig{})
 	ctx := context.Background()
 
 	// Initial configuration with all Tx-related fields
@@ -98,8 +98,8 @@ func TestUpdateStream_AllTxFieldsPersistence(t *testing.T) {
 func TestCreateStream_NoDiscovery_TxAliasPreserved(t *testing.T) {
 	dao := memory.NewStreamDAO()
 	keyDao := memory.NewKeyDAO()
-	ks := NewKeyService(keyDao, "http://localhost", nil)
-	svc := NewStreamService(dao, ks, "http://localhost")
+	ks := NewKeyService(keyDao, "http://localhost", nil, nil)
+	svc := NewStreamService(dao, ks, "http://localhost", StreamServiceConfig{})
 	ctx := context.Background()
 
 	txAlias := "manual-alias"
