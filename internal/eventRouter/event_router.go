@@ -68,17 +68,26 @@ type EventRouter interface {
 }
 
 type router struct {
-	mu                   sync.RWMutex
-	pushStreams          map[string]model.StreamStateRecord // These are transmitters
-	pollStreams          map[string]model.StreamStateRecord
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	enabled              bool
-	nodeId               string
-	issuerKeys           map[string]*rsa.PrivateKey
-	issuerKids           map[string]string
-	pollBuffers          map[string]*buffer.EventPollBuffer
-	pushBuffers          map[string]*buffer.EventPushBuffer
+	mu          sync.RWMutex
+	pushStreams map[string]model.StreamStateRecord // These are transmitters
+	pollStreams map[string]model.StreamStateRecord
+	ctx         context.Context
+	cancel      context.CancelFunc
+	enabled     bool
+	nodeId      string
+	issuerKeys  map[string]*rsa.PrivateKey
+	issuerKids  map[string]string
+	pollBuffers map[string]*buffer.EventPollBuffer
+	pushBuffers map[string]*buffer.EventPushBuffer
+	// sstpClientStreams holds SSTP pair records whose client (initiator) side
+	// this router runs. sstpBuffers is the outbound-to-flush queue per pair,
+	// reusing EventPollBuffer (PRD #154 Q5.1).
+	sstpClientStreams map[string]model.StreamStateRecord
+	sstpBuffers       map[string]*buffer.EventPollBuffer
+	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
+	// backoff timing for SSTP-client runner tests. Production leaves it nil and
+	// loads the POLL_RETRY_* env knobs.
+	sstpCfgOverride      *sstpBackoffConfig
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
 	keyService           *services.KeyService
@@ -86,6 +95,7 @@ type router struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
+	sstpDelivery         delivery.SstpDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
 	stats                statsTracker
 
@@ -161,6 +171,11 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
+	// SstpDelivery is the client-side SSTP seam for one-cycle SET delivery to a
+	// pair endpoint (PRD #154 slice 7). Main.go injects the HTTP adapter
+	// (production); tests inject delivery.NewSstpMemoryAdapter. If nil, NewRouter
+	// constructs a default SstpHTTPAdapter.
+	SstpDelivery delivery.SstpDelivery
 	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
 	// time. When nil (or the feature is disabled) every event passes.
 	SubjectFilterService *services.SubjectFilterService
@@ -185,6 +200,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pollStreams:          map[string]model.StreamStateRecord{},
 		pushBuffers:          map[string]*buffer.EventPushBuffer{},
 		pollBuffers:          map[string]*buffer.EventPollBuffer{},
+		sstpClientStreams:    map[string]model.StreamStateRecord{},
+		sstpBuffers:          map[string]*buffer.EventPollBuffer{},
 		issuerKeys:           map[string]*rsa.PrivateKey{},
 		issuerKids:           map[string]string{},
 		enabled:              false,
@@ -206,6 +223,12 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		}
 	} else {
 		router.pushDelivery = delivery.NewHTTPAdapter(deps.StreamService, router)
+	}
+
+	if deps.SstpDelivery != nil {
+		router.sstpDelivery = deps.SstpDelivery
+	} else {
+		router.sstpDelivery = delivery.NewSstpHTTPAdapter(nil)
 	}
 
 	// When SPIFFE is configured, replace the plain HTTP client with one that
@@ -385,6 +408,8 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	switch stream.GetType() {
 	case model.DeliveryPoll, model.ReceivePoll:
 		tfr = "POLL"
+	case model.DeliverySstpPair:
+		tfr = "SSTP"
 	}
 
 	eventTypes := "UNSET"
@@ -461,6 +486,8 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 	switch stream.GetType() {
 	case model.DeliveryPoll, model.ReceivePoll:
 		tfr = "POLL"
+	case model.DeliverySstpPair:
+		tfr = "SSTP"
 	}
 
 	iss := stream.StreamConfiguration.Iss
@@ -534,6 +561,31 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// SSTP bidirectional pair: the initiator side runs the SSTP-client runner
+	// keyed on PairId. The responder side answers POST /sstp/{id} (server-side
+	// runner, #165) and takes no client lease (Q4.1, Q11.1).
+	if stream.GetType() == model.DeliverySstpPair {
+		r.preInitializeCounterLocked(stream)
+		if stream.SstpMethod == nil || stream.SstpMethod.Role != model.SstpRoleInitiator {
+			return
+		}
+		pairId := stream.PairId
+		if current, ok := r.sstpClientStreams[pairId]; ok {
+			current.Update(stream)
+			r.sstpClientStreams[pairId] = current
+			return
+		}
+		r.mu.Unlock()
+		jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+			MaxEvents:         0,
+			ReturnImmediately: true,
+			TimeoutSecs:       10,
+		})
+		r.mu.Lock()
+		r.initSstpClientStreamLocked(stream, jtis)
+		return
+	}
 
 	if stream.StreamConfiguration.Delivery.GetMethod() == model.DeliveryPoll {
 		r.preInitializeCounterLocked(stream)
@@ -1456,6 +1508,9 @@ func (r *router) Shutdown() {
 	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
+	}
+	for _, sstpBuffer := range r.sstpBuffers {
+		sstpBuffer.Close()
 	}
 	if r.x509Source != nil {
 		_ = r.x509Source.Close()
