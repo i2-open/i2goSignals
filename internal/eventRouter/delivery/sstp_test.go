@@ -64,6 +64,51 @@ func TestSstpHTTPAdapter_PostsSetsAndParsesAck(t *testing.T) {
 	assert.Equal(t, "signed.set.value", gotBody.Sets["jti-1"])
 }
 
+// TestSstpHTTPAdapter_ReturnEventsFalseOnWire: a second parallel push cycle
+// (push-while-poll-held, Q7.2) sets SstpRequest.ReturnEvents=false; the adapter
+// must surface that on the wire as returnEvents:false so the peer does NOT hold a
+// long-poll for this short-lived push. When ReturnEvents is nil the field is
+// omitted (default true applies on the peer).
+func TestSstpHTTPAdapter_ReturnEventsFalseOnWire(t *testing.T) {
+	var gotBody goSetSstp.Message
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{Ack: []string{"jti-1"}})
+	}))
+	defer srv.Close()
+
+	adapter := NewSstpHTTPAdapter(srv.Client())
+	out := adapter.DeliverSstp(context.Background(), SstpRequest{
+		Stream:       sstpPairRecord(srv.URL),
+		Events:       []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+		ReturnEvents: goSetSstp.BoolPtr(false),
+	})
+
+	assert.Equal(t, goSetSstp.ClassOK, out.Classification.Class)
+	require.NotNil(t, gotBody.ReturnEvents, "returnEvents must be present on the second push")
+	assert.False(t, *gotBody.ReturnEvents, "second push must set returnEvents=false")
+}
+
+// TestSstpHTTPAdapter_ReturnEventsOmittedWhenNil: a normal (primary) cycle leaves
+// ReturnEvents nil so the field is omitted and the peer applies the default (true).
+func TestSstpHTTPAdapter_ReturnEventsOmittedWhenNil(t *testing.T) {
+	var gotBody goSetSstp.Message
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{})
+	}))
+	defer srv.Close()
+
+	adapter := NewSstpHTTPAdapter(srv.Client())
+	_ = adapter.DeliverSstp(context.Background(), SstpRequest{Stream: sstpPairRecord(srv.URL)})
+	assert.Nil(t, gotBody.ReturnEvents, "primary cycle must omit returnEvents (default true)")
+}
+
 // TestSstpHTTPAdapter_4xxClassifiesRequestError: an HTTP 4xx maps to
 // ClassRequestError so the runner pauses only the outbound direction.
 func TestSstpHTTPAdapter_4xxClassifiesRequestError(t *testing.T) {

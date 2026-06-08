@@ -46,6 +46,12 @@ type SstpRequest struct {
 	Events []*model.AgEventRecord
 	Key    *rsa.PrivateKey
 	Kid    string
+
+	// ReturnEvents sets the wire "returnEvents" field. Nil (the primary cycle)
+	// omits it so the peer applies the §2.1 default (true) and holds its long-poll.
+	// A second, parallel push-while-poll-held cycle (Q7.2) sets this to false so
+	// the peer returns immediately without holding a long-poll for the push.
+	ReturnEvents *bool
 }
 
 // SstpOutcome is the result of a single SSTP client cycle. Classification reports
@@ -81,7 +87,8 @@ func (a *SstpHTTPAdapter) DeliverSstp(ctx context.Context, req SstpRequest) Sstp
 	}
 
 	msg := goSetSstp.Message{
-		Sets: a.buildSets(req),
+		ReturnEvents: req.ReturnEvents,
+		Sets:         a.buildSets(req),
 	}
 	body, err := json.Marshal(msg)
 	if err != nil {

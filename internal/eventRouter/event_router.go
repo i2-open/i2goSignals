@@ -97,6 +97,11 @@ type router struct {
 	// keyed on PairId and created lazily on first request. Every node can serve the
 	// endpoint (no lease, Q11.1), so each maintains its own buffer.
 	sstpServerBuffers map[string]*buffer.EventPollBuffer
+	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
+	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
+	// outbound arrival while a push is already running coalesces into that push's
+	// buffer drain rather than opening a third parallel request.
+	sstpSecondPushInFlight map[string]bool
 	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
 	// backoff timing for SSTP-client runner tests. Production leaves it nil and
 	// loads the POLL_RETRY_* env knobs.
@@ -202,28 +207,29 @@ type RouterDeps struct {
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
-		coordinator:          deps.Coordinator,
-		streamService:        deps.StreamService,
-		keyService:           deps.KeyService,
-		eventService:         deps.EventService,
-		subjectFilterService: deps.SubjectFilterService,
-		subjectRelayService:  deps.SubjectRelayService,
-		nodeId:               nodeId,
-		pushStreams:          map[string]model.StreamStateRecord{},
-		pollStreams:          map[string]model.StreamStateRecord{},
-		pushBuffers:          map[string]*buffer.EventPushBuffer{},
-		pollBuffers:          map[string]*buffer.EventPollBuffer{},
-		sstpClientStreams:    map[string]model.StreamStateRecord{},
-		sstpBuffers:          map[string]*buffer.EventPollBuffer{},
-		sstpServerBuffers:    map[string]*buffer.EventPollBuffer{},
-		issuerKeys:           map[string]*rsa.PrivateKey{},
-		issuerKids:           map[string]string{},
-		enabled:              false,
-		ctx:                  ctx,
-		cancel:               cancel,
-		httpClient:           &http.Client{Timeout: 5 * time.Second},
-		clusterSecret:        os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes:  make(map[string]time.Time),
+		coordinator:            deps.Coordinator,
+		streamService:          deps.StreamService,
+		keyService:             deps.KeyService,
+		eventService:           deps.EventService,
+		subjectFilterService:   deps.SubjectFilterService,
+		subjectRelayService:    deps.SubjectRelayService,
+		nodeId:                 nodeId,
+		pushStreams:            map[string]model.StreamStateRecord{},
+		pollStreams:            map[string]model.StreamStateRecord{},
+		pushBuffers:            map[string]*buffer.EventPushBuffer{},
+		pollBuffers:            map[string]*buffer.EventPollBuffer{},
+		sstpClientStreams:      map[string]model.StreamStateRecord{},
+		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
+		sstpServerBuffers:      map[string]*buffer.EventPollBuffer{},
+		sstpSecondPushInFlight: map[string]bool{},
+		issuerKeys:             map[string]*rsa.PrivateKey{},
+		issuerKids:             map[string]string{},
+		enabled:                false,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		httpClient:             &http.Client{Timeout: 5 * time.Second},
+		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
+		recentOutboundWakes:    make(map[string]time.Time),
 	}
 
 	if deps.PushDelivery != nil {

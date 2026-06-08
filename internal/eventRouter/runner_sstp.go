@@ -482,6 +482,98 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, acked []string,
 	return count
 }
 
+// pushSstpWhilePollHeld performs a SECOND, parallel SSTP POST to flush queued
+// outbound SETs while the pair's primary long-poll cycle is held open by the peer
+// (push-while-poll-held, Q7.2, #166). It carries returnEvents=false so the peer
+// returns immediately without holding a long-poll for this short-lived push, and
+// classifies the response through the same goSetSstp classifier as the primary
+// cycle. On 4xx it pauses ONLY the outbound direction (Q12.3); on 5xx/transport it
+// does not pause (the primary cycle owns backoff). The held primary cycle is
+// unaffected — this is an independent HTTP request with its own context.
+//
+// Concurrency is bounded to at most one in-flight secondary push per pair: if a
+// push is already running for the pair, this call returns ClassOK without opening
+// a third parallel request (the in-flight push drains the shared buffer, Q7.2).
+func (r *router) pushSstpWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, fencingToken int64) goSetSstp.Classification {
+	pairId := stream.PairId
+	sid := stream.StreamConfiguration.Id
+
+	if !r.acquireSstpSecondPushSlot(pairId) {
+		// A secondary push is already in flight for this pair; coalesce.
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+	}
+	defer r.releaseSstpSecondPushSlot(pairId)
+
+	// Drain whatever outbound is queued; recovery after takeover relies on persisted
+	// outbound events, so fall back to the provider's pending list when the buffer's
+	// async drain has not yet surfaced anything (mirrors runSstpCycle).
+	outJtis := drainSstpBuffer(eventBuf, r.backfillBatch)
+	if len(outJtis) == 0 {
+		outJtis, _ = r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+			MaxEvents:         int32(r.backfillBatch),
+			ReturnImmediately: true,
+		})
+	}
+	if len(outJtis) == 0 {
+		// Nothing to push: do not open a second POST.
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+	}
+
+	events := r.resolveSstpEventsByJti(outJtis)
+	if len(events) == 0 {
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+	}
+
+	var rsaKey *rsa.PrivateKey
+	var kid string
+	if stream.GetRouteMode() != model.RouteModeForward {
+		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+	}
+
+	outcome := r.sstpDelivery.DeliverSstp(ctx, delivery.SstpRequest{
+		Stream:       stream,
+		Events:       events,
+		Key:          rsaKey,
+		Kid:          kid,
+		ReturnEvents: goSetSstp.BoolPtr(false),
+	})
+
+	cls := outcome.Classification
+	switch cls.Class {
+	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
+		r.handleSstpAcks(stream, outcome.Acked, events, fencingToken)
+	case goSetSstp.ClassRequestError:
+		// 4xx on the second push pauses ONLY the outbound direction; the held
+		// primary long-poll (inbound) continues uninterrupted (Q12.3).
+		r.pauseSstpOutbound(stream, fmt.Sprintf("SSTP-CLIENT: 4xx on push-while-poll-held for pair=%s", pairId))
+	case goSetSstp.ClassWeirdResponse:
+		r.pauseSstpOutbound(stream, fmt.Sprintf("SSTP-CLIENT: weird response on push-while-poll-held for pair=%s", pairId))
+	default: // ClassTransient / ClassTransport: do not pause; the primary cycle owns backoff.
+		eventLogger.Warn("SSTP-CLIENT: push-while-poll-held transport/transient failure",
+			"pairId", pairId, "class", cls.Class.String())
+	}
+	return cls
+}
+
+// acquireSstpSecondPushSlot reserves the single in-flight push-while-poll-held slot
+// for a pair, returning false when one is already held (Q7.2 concurrency bound).
+func (r *router) acquireSstpSecondPushSlot(pairId string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sstpSecondPushInFlight[pairId] {
+		return false
+	}
+	r.sstpSecondPushInFlight[pairId] = true
+	return true
+}
+
+// releaseSstpSecondPushSlot releases the in-flight push-while-poll-held slot.
+func (r *router) releaseSstpSecondPushSlot(pairId string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sstpSecondPushInFlight, pairId)
+}
+
 // pauseSstpOutbound pauses ONLY the outbound (client) direction of the pair by
 // setting the record's Status to paused via the single transition point. The
 // inbound side (InboundStatus) is owned by the SSTP-server runner (#165) and is

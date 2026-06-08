@@ -202,6 +202,216 @@ func TestSstpClient_FlushesOutboundAndCountsMetric(t *testing.T) {
 	assert.GreaterOrEqual(t, h.coord.AcquireCalls(), 1, "runner must acquire the sstp-client lease")
 }
 
+// --- Acceptance: push-while-poll-held second parallel POST (Q7.2, #166) ------
+
+// TestSstpPushWhilePollHeld_SecondPostReturnEventsFalse: when an outbound SET
+// arrives while a primary long-poll is held, the runner opens a SECOND parallel
+// POST carrying the outbound sets with returnEvents=false, and acks on the peer
+// ack — incrementing eventsOut with tfr=SSTP/stream_id=txSid.
+func TestSstpPushWhilePollHeld_SecondPostReturnEventsFalse(t *testing.T) {
+	jti := "sstp-push-1"
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		Acked:          []string{jti},
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-push"
+	h.persistOutboundEvent(t, txSid, jti)
+
+	state := sstpPairState(txSid, "pair-push")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+
+	assert.Equal(t, goSetSstp.ClassOK, cls.Class, "second push must classify the response")
+
+	reqs := adapter.Requests()
+	require.Len(t, reqs, 1, "exactly one second POST")
+	require.NotNil(t, reqs[0].ReturnEvents, "second push must set returnEvents")
+	assert.False(t, *reqs[0].ReturnEvents, "second push must set returnEvents=false")
+	require.Len(t, reqs[0].Events, 1)
+	assert.Equal(t, jti, reqs[0].Events[0].Jti, "outbound SET must be carried in the push")
+
+	assert.Equal(t, 1.0, outCounterValueSstp(t, h.outCounter, txSid),
+		"acked outbound SET must be counted on the second push")
+}
+
+// TestSstpPushWhilePollHeld_NoOutboundIsNoop: with nothing pending, the runner
+// does NOT open a second POST (no spurious parallel request).
+func TestSstpPushWhilePollHeld_NoOutboundIsNoop(t *testing.T) {
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	state := sstpPairState("sstp-tx-noop", "pair-noop")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+	assert.Equal(t, goSetSstp.ClassOK, cls.Class)
+	assert.Equal(t, 0, adapter.Calls(), "no outbound means no second POST")
+}
+
+// TestSstpPushWhilePollHeld_4xxPausesOutboundOnly: a 4xx on the second parallel
+// push pauses ONLY the outbound direction; the inbound side (InboundStatus, which
+// backs the held primary long-poll) is left untouched (Q12.3, #166 AC).
+func TestSstpPushWhilePollHeld_4xxPausesOutboundOnly(t *testing.T) {
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassRequestError},
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-push4xx"
+	h.persistOutboundEvent(t, txSid, "jpush4xx")
+	state := sstpPairState(txSid, "pair-push4xx")
+	state.InboundStatus = model.StreamStateEnabled
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+
+	assert.Equal(t, goSetSstp.ClassRequestError, cls.Class)
+	assert.Equal(t, model.StreamStatePause, state.Status, "outbound must pause on a 4xx second push")
+	assert.Equal(t, model.StreamStateEnabled, state.InboundStatus,
+		"inbound (held primary long-poll) must NOT be paused")
+}
+
+// TestSstpPushWhilePollHeld_5xxDoesNotPause: a 5xx on the second push does NOT
+// pause either direction (the primary cycle owns backoff).
+func TestSstpPushWhilePollHeld_5xxDoesNotPause(t *testing.T) {
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassTransient},
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-push5xx"
+	h.persistOutboundEvent(t, txSid, "jpush5xx")
+	state := sstpPairState(txSid, "pair-push5xx")
+	state.InboundStatus = model.StreamStateEnabled
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+
+	assert.Equal(t, goSetSstp.ClassTransient, cls.Class)
+	assert.Equal(t, model.StreamStateEnabled, state.Status, "5xx second push must not pause outbound")
+	assert.Equal(t, model.StreamStateEnabled, state.InboundStatus, "5xx second push must not pause inbound")
+}
+
+// TestSstpPushWhilePollHeld_PrimaryUnaffected: a second push runs to completion
+// while the primary long-poll cycle is still held (blocked), proving the held
+// long-poll is unaffected (separate, independent HTTP request) (#166 AC).
+func TestSstpPushWhilePollHeld_PrimaryUnaffected(t *testing.T) {
+	// Primary adapter blocks (simulating a held long-poll); second-push adapter
+	// returns immediately. They are distinct seams so we can hold one while the
+	// other completes.
+	primary := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+	})
+	primary.SetBlocking()
+	primaryStarted := make(chan struct{}, 1)
+	primary.SetOnDeliver(func() {
+		select {
+		case primaryStarted <- struct{}{}:
+		default:
+		}
+	})
+
+	h := newSstpRunnerHarness(t, primary)
+
+	txSid := "sstp-tx-primunaff"
+	h.persistOutboundEvent(t, txSid, "jprimunaff")
+	state := sstpPairState(txSid, "pair-primunaff")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	// Start a "primary" cycle that will block (held long-poll).
+	primaryCtx, cancelPrimary := context.WithCancel(context.Background())
+	t.Cleanup(cancelPrimary)
+	primaryDone := make(chan struct{})
+	go func() {
+		_ = primary.DeliverSstp(primaryCtx, delivery.SstpRequest{Stream: state, ReturnEvents: goSetSstp.BoolPtr(true)})
+		close(primaryDone)
+	}()
+	select {
+	case <-primaryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("primary long-poll never started")
+	}
+
+	// While the primary is held, fire a second push using a non-blocking seam.
+	secondAdapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		Acked:          []string{"jprimunaff"},
+	})
+	h.router.sstpDelivery = secondAdapter
+
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+	assert.Equal(t, goSetSstp.ClassOK, cls.Class, "second push completes while primary held")
+
+	// The primary must still be blocked (not returned) — held long-poll unaffected.
+	select {
+	case <-primaryDone:
+		t.Fatal("primary long-poll returned — it must remain held")
+	default:
+	}
+}
+
+// TestSstpPushWhilePollHeld_BoundsToOneInFlight: while one second-push is in
+// flight (blocked), a concurrent push-while-poll-held call for the SAME pair
+// coalesces — it returns without opening a third parallel POST (Q7.2 bound).
+// Race-tested via -race.
+func TestSstpPushWhilePollHeld_BoundsToOneInFlight(t *testing.T) {
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		Acked:          []string{"jbound"},
+	})
+	adapter.SetBlocking()
+	started := make(chan struct{}, 1)
+	adapter.SetOnDeliver(func() {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid := "sstp-tx-bound"
+	h.persistOutboundEvent(t, txSid, "jbound")
+	state := sstpPairState(txSid, "pair-bound")
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+
+	// First push blocks inside DeliverSstp holding the in-flight slot.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	firstDone := make(chan goSetSstp.Classification, 1)
+	go func() { firstDone <- h.router.pushSstpWhilePollHeld(ctx, state, buf, 0) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first second-push never started")
+	}
+
+	// Concurrent call for the same pair must coalesce: return immediately without
+	// a new DeliverSstp call.
+	cls := h.router.pushSstpWhilePollHeld(context.Background(), state, buf, 0)
+	assert.Equal(t, goSetSstp.ClassOK, cls.Class, "coalesced call returns OK")
+	assert.Equal(t, 1, adapter.Calls(), "only one in-flight second-push per pair")
+
+	// Unblock the first push and let it finish.
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first second-push did not finish after cancel")
+	}
+}
+
 // --- Acceptance: 4xx pauses ONLY the outbound direction ---------------------
 
 // TestSstpCycle_4xxPausesOutboundOnly: a ClassRequestError (4xx) transitions the
