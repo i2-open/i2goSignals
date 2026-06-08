@@ -121,6 +121,245 @@ func TestSstpClientFanout_AddsEventToStreamPendingList(t *testing.T) {
 	assert.True(t, found, "the inbound event must be delivered on the outbound cycle, not lost")
 }
 
+// --- NEW Finding #1: CLIENT acks its outbound buffer (no infinite redelivery) -
+
+// TestSstpClient_AcksOutboundBufferAndStopsRedelivery is the CLIENT-side analogue
+// of TestSstpServer_ConsumesInboundAckAndStopsRedelivery. The client outbound
+// buffer is filled by SubmitEvent (the #6 fan-out) and drained via GetEvents,
+// which only COPIES — only AckEvents removes. After a SET is confirmed
+// delivered/acked in cycle 1, the runner must AckEvents it on the client outbound
+// buffer so cycle 2 does NOT re-drain and re-send it, and the buffer is empty.
+func TestSstpClient_AcksOutboundBufferAndStopsRedelivery(t *testing.T) {
+	jti := "sstp-cli-out-1"
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		Acked:          []string{jti},
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid, pairId := "sstp-tx-cli-ack", "pair-cli-ack"
+	state := sstpPairState(txSid, pairId)
+	h.persistOutboundEvent(t, txSid, jti)
+
+	// Fill the client outbound buffer exactly as the #6 fan-out does: SubmitEvent.
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
+	buf.SubmitEvent(jti)
+	// Wait for the buffer's async drain to surface the JTI so cycle 1 drains it.
+	require.Eventually(t, func() bool { return buf.Cnt() == 1 },
+		2*time.Second, 5*time.Millisecond, "outbound SET must land in the client buffer")
+
+	cfg := *fastSstpCfg()
+	cfg.fillDefaults()
+	delay := cfg.BaseDelay
+
+	// Cycle 1: drains + delivers + acks the SET.
+	_, _, _ = h.router.runSstpCycle(context.Background(), state, buf, 1, cfg, &delay)
+	require.GreaterOrEqual(t, adapter.Calls(), 1, "cycle 1 must deliver the SET")
+	c1 := adapter.Calls()
+
+	// After cycle 1 the acked SET must be GONE from the client outbound buffer.
+	assert.Equal(t, 0, buf.Cnt(), "an acked outbound SET must be removed from the client buffer")
+
+	// The acked JTI must also be gone from the tx-side pending list.
+	pending, _ := h.router.eventService.GetEventIds(context.Background(), txSid, model.PollParameters{
+		MaxEvents: 10, ReturnImmediately: true,
+	})
+	assert.NotContains(t, pending, jti, "an acked outbound SET must be removed from the tx-side pending list")
+
+	// Cycle 2: nothing left to drain from the buffer (and nothing pending), so the
+	// SET is NOT re-sent. The only way it would be re-sent is the buffer GetEvents
+	// re-surfacing it (the bug) — assert the request set carrying this JTI did not grow.
+	_, _, _ = h.router.runSstpCycle(context.Background(), state, buf, 1, cfg, &delay)
+	sends := 0
+	for _, rq := range adapter.Requests() {
+		for _, ev := range rq.Events {
+			if ev.Jti == jti {
+				sends++
+			}
+		}
+	}
+	assert.Equal(t, 1, sends, "the acked SET must be sent exactly once, not redelivered on cycle 2")
+	_ = c1
+}
+
+// --- NEW Finding #2: held-cycle second push does not re-send in-flight SETs ----
+
+// TestSstpClient_SecondPushDoesNotResendInFlight proves that while a primary cycle
+// holds [X] in flight (X still physically in the buffer because GetEvents only
+// copies), a second push fired by a newly-arrived event Y sends ONLY Y, not X.
+func TestSstpClient_SecondPushDoesNotResendInFlight(t *testing.T) {
+	x, y := "sstp-inflight-x", "sstp-inflight-y"
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{
+		Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+		// Never ack: the primary's X stays unacked/in-flight so we can prove the
+		// second push does not re-grab it from the still-populated buffer.
+		Acked: nil,
+	})
+	adapter.SetBlockingPrimaryOnly()
+	primaryStarted := make(chan struct{}, 1)
+	adapter.SetOnDeliver(func() {
+		select {
+		case primaryStarted <- struct{}{}:
+		default:
+		}
+	})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid, pairId := "sstp-tx-inflight", "pair-inflight"
+	state := sstpPairState(txSid, pairId)
+	h.persistOutboundEvent(t, txSid, x)
+	h.persistOutboundEvent(t, txSid, y)
+
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
+	buf.SubmitEvent(x)
+	require.Eventually(t, func() bool { return buf.Cnt() == 1 },
+		2*time.Second, 5*time.Millisecond, "X must land in the buffer")
+
+	cfg := *fastSstpCfg()
+	cfg.fillDefaults()
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- h.router.runSstpClientLoop("sstp-client:"+pairId, state, buf, 1, cfg)
+	}()
+
+	select {
+	case <-primaryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("primary long-poll cycle never started")
+	}
+
+	// Y arrives while the primary holds X in flight.
+	buf.SubmitEvent(y)
+	buf.Wakeup()
+
+	// A second push (returnEvents=false) must fire carrying ONLY Y.
+	require.Eventually(t, func() bool {
+		for _, req := range adapter.Requests() {
+			if req.ReturnEvents != nil && !*req.ReturnEvents {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond, "a second push must fire for Y")
+
+	for _, req := range adapter.Requests() {
+		if req.ReturnEvents != nil && !*req.ReturnEvents {
+			jtis := map[string]bool{}
+			for _, ev := range req.Events {
+				jtis[ev.Jti] = true
+			}
+			assert.True(t, jtis[y], "second push must carry Y")
+			assert.False(t, jtis[x], "second push must NOT re-send X (already in flight in the primary cycle)")
+		}
+	}
+
+	adapter.Unblock()
+	h.router.Shutdown()
+	select {
+	case <-loopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner loop did not exit after shutdown")
+	}
+}
+
+// TestSstpClient_FailedDeliveryRetriesClaimedEvent proves the in-flight claim is
+// released on delivery FAILURE so the event is re-drained and retried on a later
+// cycle (not dropped).
+func TestSstpClient_FailedDeliveryRetriesClaimedEvent(t *testing.T) {
+	jti := "sstp-retry-1"
+	// Script: cycle 1 transport-fails (no ack), cycle 2 succeeds and acks.
+	adapter := delivery.NewSstpMemoryScript(
+		delivery.SstpOutcome{Classification: goSetSstp.Classification{Class: goSetSstp.ClassTransport}},
+		delivery.SstpOutcome{
+			Classification: goSetSstp.Classification{Class: goSetSstp.ClassOK},
+			Acked:          []string{jti},
+		},
+	)
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid, pairId := "sstp-tx-retry", "pair-retry"
+	state := sstpPairState(txSid, pairId)
+	h.persistOutboundEvent(t, txSid, jti)
+
+	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
+	buf.SubmitEvent(jti)
+	require.Eventually(t, func() bool { return buf.Cnt() == 1 },
+		2*time.Second, 5*time.Millisecond, "SET must land in the buffer")
+
+	cfg := *fastSstpCfg()
+	cfg.fillDefaults()
+	delay := cfg.BaseDelay
+
+	// Cycle 1: transport failure — claim must be released so the event is retried.
+	_, _, _ = h.router.runSstpCycle(context.Background(), state, buf, 1, cfg, &delay)
+	assert.Equal(t, 1, buf.Cnt(), "failed delivery must leave the SET in the buffer for retry")
+
+	// Cycle 2: succeeds and acks — proving the previously-failed event was re-drained.
+	_, _, _ = h.router.runSstpCycle(context.Background(), state, buf, 1, cfg, &delay)
+	sends := 0
+	for _, rq := range adapter.Requests() {
+		for _, ev := range rq.Events {
+			if ev.Jti == jti {
+				sends++
+			}
+		}
+	}
+	assert.GreaterOrEqual(t, sends, 2, "the failed event must be re-drained and re-sent on a later cycle")
+	assert.Equal(t, 0, buf.Cnt(), "after the successful ack the SET must be gone from the buffer")
+}
+
+// --- NEW Finding #3: server gates inbound Ack to JTIs it actually delivered ----
+
+// TestSstpServer_IgnoresAckForUndeliveredJti proves a peer that acks a JTI the
+// server never delivered to it does NOT cause that still-undelivered outbound SET
+// to be removed from the pending list / buffer (silent loss).
+func TestSstpServer_IgnoresAckForUndeliveredJti(t *testing.T) {
+	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
+	h := newSstpRunnerHarness(t, adapter)
+
+	txSid, rxSid, pairId := "sstp-tx-srvack", "sstp-rx-srvack", "pair-srvack"
+	rec := sstpServerPairState(txSid, rxSid, pairId)
+	require.NoError(t, h.router.streamService.PersistStreamStateRecord(context.Background(), rec))
+
+	// A pending outbound SET that has NOT yet been delivered to the peer. Prime the
+	// server buffer (the long-poll empty Message wakes on the async submit).
+	jti := "sstp-srv-undelivered"
+	h.persistOutboundEvent(t, txSid, jti)
+
+	// The peer (buggy / replaying) acks a JTI the server never delivered to it. Use
+	// returnImmediately so this cycle does NOT itself deliver the SET — proving the
+	// ack alone cannot remove a never-delivered outbound SET. The buffer's async
+	// drain may not have surfaced the JTI yet either; the assertion below is on the
+	// durable pending list, which is unaffected by the buffer race.
+	bogusAck := goSetSstp.Message{
+		Ack:               []string{jti},
+		ReturnImmediately: goSetSstp.BoolPtr(true),
+	}
+	resp, status := h.router.SstpServerHandler(context.Background(), pairId, bogusAck, nil)
+	require.Equal(t, 200, status)
+	assert.NotContains(t, resp.Sets, jti, "the bogus-ack cycle must not deliver the SET (returnImmediately, never delivered before)")
+
+	// The undelivered SET must STILL be pending — the bogus ack must be ignored.
+	pending, _ := h.router.eventService.GetEventIds(context.Background(), txSid, model.PollParameters{
+		MaxEvents: 10, ReturnImmediately: true,
+	})
+	assert.Contains(t, pending, jti, "an ack for a never-delivered JTI must NOT remove the pending outbound SET")
+
+	// And a subsequent cycle (no bogus ack, long-poll so the async buffer drain
+	// surfaces the JTI) still delivers it — it was never removed.
+	resp2, status2 := h.router.SstpServerHandler(context.Background(), pairId,
+		goSetSstp.Message{}, nil)
+	require.Equal(t, 200, status2)
+	assert.Contains(t, resp2.Sets, jti, "the never-delivered SET must still be deliverable on a later cycle")
+}
+
 // --- Finding #8: RemoveStream tears down the SSTP maps, buffers, and runner ----
 
 // TestRemoveStream_TearsDownSstpClient proves RemoveStream deletes the four sstp*

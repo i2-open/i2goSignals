@@ -110,11 +110,27 @@ type router struct {
 	// an outbound event against an SSTP-server pair and broadcast a wake-sstp-server
 	// to active nodes so a held long-poll returns the event (PRD #154 Q11.1, #167).
 	sstpServerStreams map[string]model.StreamStateRecord
+	// sstpServerDelivered tracks, per SSTP-server pair (keyed on tx-side SID), the
+	// set of outbound JTIs this node has actually delivered to the peer on a prior
+	// cycle but the peer has not yet acked. The inbound-Ack consumption is gated to
+	// this set (NEW Finding #3): a buggy/replaying peer that acks a JTI never
+	// delivered to it cannot prematurely remove a still-undelivered outbound SET.
+	// Scoped per-pair. Entries are cleared on ack.
+	sstpServerDelivered map[string]map[string]bool
 	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
 	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
 	// outbound arrival while a push is already running coalesces into that push's
 	// buffer drain rather than opening a third parallel request.
 	sstpSecondPushInFlight map[string]bool
+	// sstpInFlight tracks, per SSTP-client pair (keyed on PairId), the set of
+	// outbound JTIs currently claimed by an in-flight delivery cycle. drainSstpBuffer
+	// claims the JTIs it hands out and skips any already claimed, so the primary
+	// long-poll cycle and a concurrent push-while-poll-held second push never re-send
+	// the SAME SET (NEW Finding #2). A claim is cleared on peer-ack (handleSstpAcks)
+	// or released on delivery failure so the event is retried. The events collection /
+	// pending list remains the durable source of truth, so a takeover re-reads pending
+	// regardless of any in-memory claim.
+	sstpInFlight map[string]map[string]bool
 	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
 	// backoff timing for SSTP-client runner tests. Production leaves it nil and
 	// loads the POLL_RETRY_* env knobs.
@@ -236,6 +252,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpServerBuffers:      map[string]*buffer.EventPollBuffer{},
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
+		sstpInFlight:           map[string]map[string]bool{},
+		sstpServerDelivered:    map[string]map[string]bool{},
 		issuerKeys:             map[string]*rsa.PrivateKey{},
 		issuerKids:             map[string]string{},
 		enabled:                false,
@@ -1636,6 +1654,10 @@ func (r *router) RemoveStream(sid string) {
 	if _, ok := r.sstpClientStreams[sid]; ok {
 		delete(r.sstpClientStreams, sid)
 	}
+	// Drop the pair's in-flight claim set and second-push slot so a removed pair
+	// leaves no stale entries (keyed on PairId == sid for a pair).
+	delete(r.sstpInFlight, sid)
+	delete(r.sstpSecondPushInFlight, sid)
 	if sb, ok := r.sstpServerBuffers[sid]; ok {
 		sb.Close()
 		delete(r.sstpServerBuffers, sid)
@@ -1643,6 +1665,7 @@ func (r *router) RemoveStream(sid string) {
 	if _, ok := r.sstpServerStreams[sid]; ok {
 		delete(r.sstpServerStreams, sid)
 	}
+	delete(r.sstpServerDelivered, sid)
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }

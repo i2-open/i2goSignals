@@ -398,15 +398,18 @@ func (r *router) runSstpCycle(ctx context.Context, stream *model.StreamStateReco
 	sid := stream.StreamConfiguration.Id
 
 	// Gather the outbound JTIs to flush this cycle. Drain whatever is already in
-	// the buffer first; if it is empty, pull the pending list directly from the
-	// provider (recovery after takeover relies on persisted outbound events,
-	// Q13). The direct pull avoids racing the buffer's async channel drain.
-	outJtis := drainSstpBuffer(eventBuf, r.backfillBatch)
+	// the buffer first (claiming it in-flight so a concurrent push-while-poll-held
+	// second push does not re-send the same SET, NEW Finding #2); if it is empty,
+	// pull the pending list directly from the provider (recovery after takeover
+	// relies on persisted outbound events, Q13) and claim those too. The direct pull
+	// avoids racing the buffer's async channel drain.
+	outJtis := r.drainSstpBuffer(pairId, eventBuf, r.backfillBatch)
 	if len(outJtis) == 0 {
-		outJtis, _ = r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+		pending, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 			MaxEvents:         int32(r.backfillBatch),
 			ReturnImmediately: true,
 		})
+		outJtis = r.claimSstpJtis(pairId, pending)
 	}
 
 	// Nothing to flush: idle a short cycle so we don't busy-loop. (The inbound
@@ -417,6 +420,9 @@ func (r *router) runSstpCycle(ctx context.Context, stream *model.StreamStateReco
 	}
 
 	events := r.resolveSstpEventsByJti(outJtis)
+	// resolveSstpEventsByJti may drop JTIs whose event record was deleted; release
+	// the claim on those so we never leak a permanent claim for a vanished event.
+	r.releaseUnresolvedSstpClaims(pairId, outJtis, events)
 
 	var rsaKey *rsa.PrivateKey
 	var kid string
@@ -432,13 +438,16 @@ func (r *router) runSstpCycle(ctx context.Context, stream *model.StreamStateReco
 	})
 
 	if ctx.Err() != nil {
+		// Cancelled in flight (lease loss / shutdown): release the claim so the
+		// next owner re-drains and retries these events (they are not acked).
+		r.releaseSstpEventClaims(pairId, events)
 		return outcome.Classification, 0, true
 	}
 
 	cls := outcome.Classification
 	switch cls.Class {
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
-		acked := r.handleSstpAcks(stream, outcome.Acked, events, fencingToken)
+		acked := r.handleSstpAcks(stream, eventBuf, outcome.Acked, events, fencingToken)
 		*delay = cfg.BaseDelay
 		// If we acked everything we sent, the next cycle can drain more
 		// immediately; otherwise idle a short cycle to avoid re-sending the same
@@ -450,13 +459,17 @@ func (r *router) runSstpCycle(ctx context.Context, stream *model.StreamStateReco
 
 	case goSetSstp.ClassRequestError:
 		// 4xx: pause ONLY the outbound (client) direction of the pair. Inbound
-		// (server side) keeps running independently (Q12.3).
+		// (server side) keeps running independently (Q12.3). Release the claim so a
+		// later resume re-drains and retries these (un-acked) events.
+		r.releaseSstpEventClaims(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: 4xx request error on pair=%s", pairId)
 		r.pauseSstpOutbound(stream, reason)
 		return cls, 0, true
 
 	case goSetSstp.ClassTransient, goSetSstp.ClassTransport:
 		// 5xx / connection failure: back off per POLL_RETRY_*, do NOT pause (Q25).
+		// Release the claim so the retried cycle re-drains these un-acked events.
+		r.releaseSstpEventClaims(pairId, events)
 		next := *delay
 		if cls.NextDelay > 0 {
 			next = cls.NextDelay
@@ -467,6 +480,8 @@ func (r *router) runSstpCycle(ctx context.Context, stream *model.StreamStateReco
 		return cls, next, false
 
 	default: // ClassWeirdResponse
+		// Release the claim so a later resume re-drains and retries these events.
+		r.releaseSstpEventClaims(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: weird response on pair=%s", pairId)
 		r.pauseSstpOutbound(stream, reason)
 		return cls, 0, true
@@ -524,10 +539,15 @@ func (r *router) renewSstpLeaseWithRetry(ctx context.Context, resource, pairId s
 	return ok && err == nil
 }
 
-// drainSstpBuffer pops up to max JTIs currently resident in the buffer (the
-// synchronous portion — events whose async channel-drain has completed). Returns
-// nil when the buffer is empty.
-func drainSstpBuffer(eventBuf *buffer.EventPollBuffer, max int) []string {
+// drainSstpBuffer reads up to max JTIs currently resident in the buffer (the
+// synchronous portion — events whose async channel-drain has completed) that are
+// NOT already claimed in flight for the pair, and claims the survivors. EventPollBuffer.GetEvents
+// only COPIES (it does not remove), so without the claim filter a SET already in
+// flight in the primary long-poll cycle would be re-handed-out to a concurrent
+// push-while-poll-held second push and re-sent (NEW Finding #2). Returns nil when
+// the buffer is empty or every resident JTI is already claimed. Caller MUST later
+// ack (ackSstpJtis) or release (releaseSstpClaims) the returned JTIs.
+func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer, max int) []string {
 	jtis, _ := eventBuf.GetEvents(model.PollParameters{
 		MaxEvents:         int32(max),
 		ReturnImmediately: true,
@@ -535,9 +555,9 @@ func drainSstpBuffer(eventBuf *buffer.EventPollBuffer, max int) []string {
 	if jtis == nil || len(*jtis) == 0 {
 		return nil
 	}
-	out := make([]string, len(*jtis))
-	copy(out, *jtis)
-	return out
+	candidates := make([]string, len(*jtis))
+	copy(candidates, *jtis)
+	return r.claimSstpJtis(pairId, candidates)
 }
 
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to flush,
@@ -557,16 +577,22 @@ func (r *router) resolveSstpEventsByJti(jtis []string) []*model.AgEventRecord {
 	return events
 }
 
-// handleSstpAcks acks (in the provider) the peer-acknowledged JTIs that we
-// actually sent this cycle, and increments the outbound eventsOut counter
-// (tfr=SSTP, stream_id=txSid) per acked event (Q46). A peer ack is honored only
-// for JTIs in the sent set — a stray ack for something we did not send is
-// ignored, so an un-sent SET is never removed from the pending list. When the
-// peer returns no explicit ack list, every SET sent this cycle is treated as
-// accepted (the §2.3 success-without-detail case). Returns the number of acked
-// (and counted) events.
-func (r *router) handleSstpAcks(stream *model.StreamStateRecord, acked []string, sent []*model.AgEventRecord, fencingToken int64) int {
+// handleSstpAcks acks the peer-acknowledged JTIs that we actually sent this cycle:
+// it removes each acked JTI from the pair's outbound buffer (eventBuf.AckEvents —
+// NEW Finding #1: without this the buffer's copy-only GetEvents re-drains and
+// re-sends an already-acked SET forever), acks it in the provider, clears its
+// in-flight claim, and increments the outbound eventsOut counter (tfr=SSTP,
+// stream_id=txSid) per acked event (Q46). A peer ack is honored only for JTIs in
+// the sent set — a stray ack for something we did not send is ignored, so an
+// un-sent SET is never removed. When the peer returns no explicit ack list, every
+// SET sent this cycle is treated as accepted (the §2.3 success-without-detail
+// case). Any sent-but-NOT-acked JTI has its in-flight claim released so it is
+// re-drained and retried on a later cycle. Returns the number of acked (and
+// counted) events. This mirrors the SSTP-server runner's inbound-Ack consumption
+// (runner_sstp_server.go) and the RFC8936 poll path (event_router.go ~1035).
+func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.AgEventRecord, fencingToken int64) int {
 	sid := stream.StreamConfiguration.Id
+	pairId := stream.PairId
 	if len(sent) == 0 {
 		return 0
 	}
@@ -584,6 +610,7 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, acked []string,
 		}
 	}
 
+	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
 	for _, jti := range ackSet {
 		ev := sentByJti[jti]
@@ -592,9 +619,66 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, acked []string,
 		}
 		_ = r.eventService.AckEvent(r.ctx, jti, sid, fencingToken)
 		r.IncrementCounter(stream, &ev.Event, false)
+		ackedJtis = append(ackedJtis, jti)
 		count++
 	}
+
+	// Finding #1: remove the confirmed-delivered SETs from the outbound buffer so
+	// GetEvents (copy-only) never re-hands them out, and clear their in-flight claim.
+	if len(ackedJtis) > 0 {
+		if eventBuf != nil {
+			eventBuf.AckEvents(ackedJtis)
+		}
+		r.releaseSstpClaims(pairId, ackedJtis)
+	}
+
+	// Release the in-flight claim on any sent-but-unacked SET so it is re-drained
+	// and retried on a later cycle (it stays in the buffer / pending list).
+	ackedSet := make(map[string]bool, len(ackedJtis))
+	for _, jti := range ackedJtis {
+		ackedSet[jti] = true
+	}
+	unacked := make([]string, 0, len(sent))
+	for _, ev := range sent {
+		if !ackedSet[ev.Jti] {
+			unacked = append(unacked, ev.Jti)
+		}
+	}
+	r.releaseSstpClaims(pairId, unacked)
+
 	return count
+}
+
+// releaseSstpEventClaims releases the in-flight claim on every JTI in events.
+func (r *router) releaseSstpEventClaims(pairId string, events []*model.AgEventRecord) {
+	if len(events) == 0 {
+		return
+	}
+	jtis := make([]string, len(events))
+	for i, ev := range events {
+		jtis[i] = ev.Jti
+	}
+	r.releaseSstpClaims(pairId, jtis)
+}
+
+// releaseUnresolvedSstpClaims releases the claim on any claimed JTI that did NOT
+// resolve to an event record (deleted between claim and resolve), so a vanished
+// event never holds a permanent claim that would block an unrelated re-add.
+func (r *router) releaseUnresolvedSstpClaims(pairId string, claimed []string, resolved []*model.AgEventRecord) {
+	if len(claimed) == len(resolved) {
+		return
+	}
+	have := make(map[string]bool, len(resolved))
+	for _, ev := range resolved {
+		have[ev.Jti] = true
+	}
+	gone := make([]string, 0, len(claimed)-len(resolved))
+	for _, jti := range claimed {
+		if !have[jti] {
+			gone = append(gone, jti)
+		}
+	}
+	r.releaseSstpClaims(pairId, gone)
 }
 
 // pushSstpWhilePollHeld performs a SECOND, parallel SSTP POST to flush queued
@@ -619,22 +703,26 @@ func (r *router) pushSstpWhilePollHeld(ctx context.Context, stream *model.Stream
 	}
 	defer r.releaseSstpSecondPushSlot(pairId)
 
-	// Drain whatever outbound is queued; recovery after takeover relies on persisted
-	// outbound events, so fall back to the provider's pending list when the buffer's
-	// async drain has not yet surfaced anything (mirrors runSstpCycle).
-	outJtis := drainSstpBuffer(eventBuf, r.backfillBatch)
+	// Drain whatever outbound is queued (claiming it so the held primary cycle does
+	// not also re-send the same SET, NEW Finding #2); recovery after takeover relies
+	// on persisted outbound events, so fall back to the provider's pending list when
+	// the buffer's async drain has not yet surfaced anything (mirrors runSstpCycle).
+	outJtis := r.drainSstpBuffer(pairId, eventBuf, r.backfillBatch)
 	if len(outJtis) == 0 {
-		outJtis, _ = r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+		pending, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 			MaxEvents:         int32(r.backfillBatch),
 			ReturnImmediately: true,
 		})
+		outJtis = r.claimSstpJtis(pairId, pending)
 	}
 	if len(outJtis) == 0 {
-		// Nothing to push: do not open a second POST.
+		// Nothing to push (or everything already in flight in the primary cycle): do
+		// not open a second POST.
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
 	}
 
 	events := r.resolveSstpEventsByJti(outJtis)
+	r.releaseUnresolvedSstpClaims(pairId, outJtis, events)
 	if len(events) == 0 {
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
 	}
@@ -656,14 +744,19 @@ func (r *router) pushSstpWhilePollHeld(ctx context.Context, stream *model.Stream
 	cls := outcome.Classification
 	switch cls.Class {
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
-		r.handleSstpAcks(stream, outcome.Acked, events, fencingToken)
+		r.handleSstpAcks(stream, eventBuf, outcome.Acked, events, fencingToken)
 	case goSetSstp.ClassRequestError:
 		// 4xx on the second push pauses ONLY the outbound direction; the held
-		// primary long-poll (inbound) continues uninterrupted (Q12.3).
+		// primary long-poll (inbound) continues uninterrupted (Q12.3). Release the
+		// claim so the un-acked events are re-drained on resume.
+		r.releaseSstpEventClaims(pairId, events)
 		r.pauseSstpOutbound(stream, fmt.Sprintf("SSTP-CLIENT: 4xx on push-while-poll-held for pair=%s", pairId))
 	case goSetSstp.ClassWeirdResponse:
+		r.releaseSstpEventClaims(pairId, events)
 		r.pauseSstpOutbound(stream, fmt.Sprintf("SSTP-CLIENT: weird response on push-while-poll-held for pair=%s", pairId))
 	default: // ClassTransient / ClassTransport: do not pause; the primary cycle owns backoff.
+		// Release the claim so these un-acked events are retried on a later cycle.
+		r.releaseSstpEventClaims(pairId, events)
 		eventLogger.Warn("SSTP-CLIENT: push-while-poll-held transport/transient failure",
 			"pairId", pairId, "class", cls.Class.String())
 	}
@@ -687,6 +780,57 @@ func (r *router) releaseSstpSecondPushSlot(pairId string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.sstpSecondPushInFlight, pairId)
+}
+
+// claimSstpJtis filters candidate JTIs to those NOT already claimed in-flight for
+// the pair, marks the survivors as claimed, and returns them. The primary
+// long-poll cycle and a concurrent push-while-poll-held second push both call this
+// before delivering, so a SET already in flight in one is never re-sent by the
+// other (NEW Finding #2). Claims are cleared by ackSstpJtis (on peer-ack) or
+// releaseSstpClaims (on delivery failure). The events collection / pending list
+// remains the durable source of truth, so this in-memory claim is purely a
+// same-node dedup and is safe across takeover.
+func (r *router) claimSstpJtis(pairId string, candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	claimed := r.sstpInFlight[pairId]
+	if claimed == nil {
+		claimed = map[string]bool{}
+		r.sstpInFlight[pairId] = claimed
+	}
+	out := make([]string, 0, len(candidates))
+	for _, jti := range candidates {
+		if claimed[jti] {
+			continue // already in flight in another concurrent push/cycle.
+		}
+		claimed[jti] = true
+		out = append(out, jti)
+	}
+	return out
+}
+
+// releaseSstpClaims drops the in-flight claim on the given JTIs WITHOUT removing
+// them from the buffer, so a failed-delivery SET is re-drained (and retried) on a
+// later cycle. Called from the delivery-failure paths.
+func (r *router) releaseSstpClaims(pairId string, jtis []string) {
+	if len(jtis) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	claimed := r.sstpInFlight[pairId]
+	if claimed == nil {
+		return
+	}
+	for _, jti := range jtis {
+		delete(claimed, jti)
+	}
+	if len(claimed) == 0 {
+		delete(r.sstpInFlight, pairId)
+	}
 }
 
 // pauseSstpOutbound pauses ONLY the outbound (client) direction of the pair by
