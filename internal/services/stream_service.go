@@ -804,10 +804,24 @@ func (s *StreamService) calculateDeliveredEvents(requested []string, supported [
 func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
-		return nil, err
+		// An SSTP pair's receive-side SID is not its document _id; fall back to the
+		// inbound-SID index so an rxSid resolves to its pair record. (Q35, Q39)
+		inboundRec, inboundErr := s.streamDAO.FindByInboundSID(ctx, streamID)
+		if inboundErr != nil {
+			return nil, err
+		}
+		streamRec = inboundRec
 	}
 	if projectID != "" && streamRec.ProjectId != projectID {
 		return nil, errors.New(ErrorInvalidProject)
+	}
+
+	// SSTP pairs use a distinct patchable-fields whitelist (Q35): the generic
+	// delivery-method switch below does not apply. streamID names a direction
+	// (txSid == PairId, or rxSid == SstpInbound.Id) so per-direction Iss/Aud can
+	// be targeted.
+	if streamRec.GetType() == model.DeliverySstpPair {
+		return s.updateSstpPair(ctx, streamRec, streamID, configReq)
 	}
 
 	// Validate goSignals-specific knobs against the request before mutating
@@ -997,6 +1011,13 @@ func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model
 }
 
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	// SSTP pairs route status per direction (Q39, Q41) and Disabled couples both
+	// directions. When the SID belongs to a pair, the SSTP path owns the update.
+	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
+		return
+	}
+
 	err := s.streamDAO.UpdateStatus(ctx, streamID, status, errorMsg)
 	if err != nil {
 		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)

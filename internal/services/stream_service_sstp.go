@@ -209,6 +209,204 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 	return *rec, nil
 }
 
+// updateSstpPair applies the SSTP patchable-fields whitelist (PRD #154 Q35) to
+// a bidirectional pair record. streamID selects the direction whose Iss/Aud the
+// patch targets (txSid == PairId → primary; rxSid == SstpInbound.Id → inbound).
+//
+// Patchable: SstpMethod.AuthorizationHeader (rotate the static bearer), the
+// targeted direction's Iss and Aud, and peer connectivity fields (EndpointUrl,
+// PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
+//
+// Immutable (rejected with a 4xx-shaped error): SstpMethod.Role, an already-set
+// EndpointUrl/PeerPairId, and all IDs. UPDATE never re-triggers the peer cascade
+// — delete-and-recreate is the path for that (Q35a).
+func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	if patch.SstpMethod != nil {
+		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
+			return nil, errors.New("invalid patch: sstp role is immutable")
+		}
+		if patch.SstpMethod.AuthorizationHeader != "" {
+			streamRec.SstpMethod.AuthorizationHeader = patch.SstpMethod.AuthorizationHeader
+		}
+		// EndpointUrl and PeerPairId are fill-in-once: a patch may set them while
+		// still unset (staged rollout, Q35a) but never repoint an already-set
+		// value (immutable, Q35).
+		if patch.SstpMethod.EndpointUrl != "" && patch.SstpMethod.EndpointUrl != streamRec.SstpMethod.EndpointUrl {
+			if streamRec.SstpMethod.EndpointUrl != "" {
+				return nil, errors.New("invalid patch: sstp endpoint_url is immutable once set")
+			}
+			if err := validateSstpEndpointUrl(patch.SstpMethod.EndpointUrl); err != nil {
+				return nil, err
+			}
+			streamRec.SstpMethod.EndpointUrl = patch.SstpMethod.EndpointUrl
+		}
+		if patch.SstpMethod.PeerPairId != "" && patch.SstpMethod.PeerPairId != streamRec.SstpMethod.PeerPairId {
+			if streamRec.SstpMethod.PeerPairId != "" {
+				return nil, errors.New("invalid patch: sstp peer_pair_id is immutable once set")
+			}
+			streamRec.SstpMethod.PeerPairId = patch.SstpMethod.PeerPairId
+		}
+	}
+
+	// Per-direction Iss/Aud patch (Q35): streamID names the targeted direction.
+	// rxSid (== SstpInbound.Id) patches the inbound side; anything else (txSid ==
+	// PairId) patches the primary (tx) side.
+	target := &streamRec.StreamConfiguration
+	if streamRec.SstpInbound != nil && streamID == streamRec.SstpInbound.Id {
+		target = streamRec.SstpInbound
+	}
+	if patch.Iss != "" {
+		target.Iss = patch.Iss
+	}
+	if len(patch.Aud) > 0 {
+		target.Aud = patch.Aud
+	}
+
+	streamRec.ModifiedAt = time.Now()
+	if err := s.streamDAO.Update(ctx, streamRec); err != nil {
+		return nil, err
+	}
+	config := streamRec.StreamConfiguration
+	return &config, nil
+}
+
+// SstpDeleteOutcome reports the per-side result of an SSTP pair delete (Q37,
+// ADR 0020). Local cleanup always proceeds; peer cleanup is courtesy and opt-in.
+// The HTTP handler maps it to 200 (local-only, or local + peer success) or 207
+// Multi-Status (local success but peer cleanup failed).
+type SstpDeleteOutcome struct {
+	// LocalDeleted reports that the local pair row was removed.
+	LocalDeleted bool `json:"local_deleted"`
+	// PeerAttempted reports whether a courtesy peer-cleanup call was made
+	// (cascade_peer=true with a resolvable peer Server).
+	PeerAttempted bool `json:"peer_attempted"`
+	// PeerDeleted reports that the peer accepted the courtesy cleanup.
+	PeerDeleted bool `json:"peer_deleted,omitempty"`
+	// PeerError carries the peer-cleanup failure reason when PeerAttempted is true
+	// and PeerDeleted is false.
+	PeerError string `json:"peer_error,omitempty"`
+}
+
+// PartialFailure reports whether the local delete succeeded but a requested peer
+// cleanup did not — the 207 Multi-Status condition (Q37).
+func (o SstpDeleteOutcome) PartialFailure() bool {
+	return o.LocalDeleted && o.PeerAttempted && !o.PeerDeleted
+}
+
+// DeleteSstpPair removes an SSTP pair (PRD #154 Q37, ADR 0020). Local cleanup
+// ALWAYS proceeds and never blocks on peer reachability. When cascadePeer is
+// true and a peer Server is resolvable, a courtesy DELETE is sent to the peer's
+// SSF stream-configuration endpoint for the peer's PairId; a peer failure does
+// not fail the local delete — it is surfaced in the outcome so the handler can
+// answer 207 Multi-Status.
+func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadePeer bool, peerServer *model.Server) (SstpDeleteOutcome, error) {
+	rec := s.findSstpPairBySID(ctx, sid)
+	if rec == nil {
+		return SstpDeleteOutcome{}, errors.New("not found")
+	}
+
+	var outcome SstpDeleteOutcome
+	if err := s.DeleteStream(ctx, rec.StreamConfiguration.Id); err != nil {
+		return outcome, err
+	}
+	outcome.LocalDeleted = true
+
+	if !cascadePeer || peerServer == nil {
+		return outcome, nil
+	}
+
+	outcome.PeerAttempted = true
+	if err := s.cascadeSstpPeerDelete(ctx, rec, peerServer); err != nil {
+		outcome.PeerError = err.Error()
+		ssLog.Warn("sstp peer cleanup failed after local delete", "pair_id", rec.PairId, "error", err)
+		return outcome, nil
+	}
+	outcome.PeerDeleted = true
+	return outcome, nil
+}
+
+// cascadeSstpPeerDelete sends a courtesy DELETE to the peer's SSF stream-
+// configuration endpoint for the peer's PairId, using the stored Server
+// credentials (Q37, Q44). It returns an error only on a failed/declined peer
+// call; the caller has already completed the local delete.
+func (s *StreamService) cascadeSstpPeerDelete(ctx context.Context, rec *model.StreamStateRecord, peerServer *model.Server) error {
+	peerPairId := ""
+	if rec.SstpMethod != nil {
+		peerPairId = rec.SstpMethod.PeerPairId
+	}
+	if peerPairId == "" {
+		return errors.New("peer_pair_id unknown; cannot target peer cleanup")
+	}
+
+	client, closeClient, err := oauthClient.GetClientForServer(ctx, peerServer)
+	if err != nil {
+		return fmt.Errorf("failed to get client for peer: %v", err)
+	}
+	defer closeClient()
+
+	endpoint, err := sstpPeerStreamEndpoint(ctx, client, peerServer)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint+"?stream_id="+url.QueryEscape(peerPairId), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit peer delete: %v", err)
+	}
+	defer httpSupport.HandleRespClose(resp)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("peer rejected delete with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// findSstpPairBySID resolves sid to its SSTP pair record, whether sid names the
+// tx side (== PairId == document _id) or the rx side (== SstpInbound.Id), or
+// returns nil when sid is not an SSTP pair SID. (Q39, Q41)
+func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *model.StreamStateRecord {
+	if rec, err := s.streamDAO.FindByID(ctx, sid); err == nil && rec.GetType() == model.DeliverySstpPair {
+		return rec
+	}
+	if rec, err := s.streamDAO.FindByInboundSID(ctx, sid); err == nil {
+		return rec
+	}
+	return nil
+}
+
+// updateSstpPairStatus applies a status change to an SSTP pair with per-direction
+// routing (Q39, Q41): naming the tx-side SID writes Status/ErrorMsg; naming the
+// rx-side SID writes InboundStatus/InboundErrorMsg. Disabled is a pair-level
+// lifecycle event and ALWAYS couples both directions regardless of which SID is
+// named (Q39); Paused and Enabled honor per-direction routing.
+func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
+	isInbound := rec.SstpInbound != nil && sid == rec.SstpInbound.Id
+
+	if status == model.StreamStateDisable {
+		// Pair-level: couple both directions.
+		rec.Status = status
+		rec.ErrorMsg = errorMsg
+		rec.InboundStatus = status
+		rec.InboundErrorMsg = errorMsg
+	} else if isInbound {
+		rec.InboundStatus = status
+		rec.InboundErrorMsg = errorMsg
+	} else {
+		rec.Status = status
+		rec.ErrorMsg = errorMsg
+	}
+
+	if err := s.streamDAO.Update(ctx, rec); err != nil {
+		ssLog.Error("Error updating sstp pair status", "sid", sid, "error", err)
+	}
+}
+
 // buildSstpRecord assembles the bidirectional StreamStateRecord from a validated
 // bootstrap. The tx (primary) side aliases its Id to the Mongo _id hex (== the
 // PairId), preserving the existing aliasing invariant; the inbound side gets its
