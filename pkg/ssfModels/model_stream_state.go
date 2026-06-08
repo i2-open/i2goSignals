@@ -105,6 +105,32 @@ type StreamStateRecord struct {
 	// CreateStream/UpdateStream with a WARN. No enforcement is wired up in this
 	// slice — it is settable, persisted, and round-trippable.
 	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitempty" bson:"subject_removal_grace_seconds,omitempty"`
+
+	// --- SSTP bidirectional pair fields (PRD #154, ADR 0018) ---
+	// A single StreamStateRecord represents both directions of an SSTP pair on
+	// one node: the embedded StreamConfiguration is the transmit (outbound)
+	// side and SstpInbound is the receive (inbound) side. These fields are unset
+	// (and omitted from JSON/BSON) for RFC8935/RFC8936 records.
+
+	// SstpInbound is the receive-side StreamConfiguration of an SSTP pair. Its
+	// Delivery carries the marker-only SstpReceiveMarker; no per-pair secrets.
+	SstpInbound *StreamConfiguration `json:"sstp_inbound,omitempty" bson:"sstp_inbound,omitempty"`
+
+	// SstpMethod carries pair-scoped connectivity (Role, EndpointUrl,
+	// AuthorizationHeader, PeerPairId). Secrets/endpoints live here, not on the
+	// per-direction Delivery fields, so the SSF wire shape never leaks them.
+	SstpMethod *SstpMethod `json:"sstp_method,omitempty" bson:"sstp_method,omitempty"`
+
+	// PairId is a fresh bson.ObjectID hex minted at create time and IS the
+	// on-wire SSF stream_id for each side of the pair.
+	PairId string `json:"pair_id,omitempty" bson:"pair_id,omitempty"`
+
+	// InboundStatus mirrors Status for the receive (inbound) direction of an
+	// SSTP pair (StreamStateEnabled / StreamStatePause / StreamStateDisable).
+	InboundStatus string `json:"inbound_status,omitempty" bson:"inbound_status,omitempty"`
+
+	// InboundErrorMsg mirrors ErrorMsg for the receive (inbound) direction.
+	InboundErrorMsg string `json:"inbound_error_msg,omitempty" bson:"inbound_error_msg,omitempty"`
 }
 
 // EventSource describes where a transmitter stream's events originate. This is
@@ -136,6 +162,11 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res := *ss
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
+	if ss.SstpInbound != nil {
+		inbound := ss.SstpInbound.DeepCopy()
+		res.SstpInbound = &inbound
+	}
+	res.SstpMethod = ss.SstpMethod.DeepCopy()
 	return &res
 }
 
@@ -155,20 +186,60 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.SubjectFilterMode = mod.SubjectFilterMode
 	ss.EventSource = mod.EventSource
 	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
+	ss.SstpInbound = mod.SstpInbound
+	ss.SstpMethod = mod.SstpMethod
+	ss.PairId = mod.PairId
+	ss.InboundStatus = mod.InboundStatus
+	ss.InboundErrorMsg = mod.InboundErrorMsg
 }
 
-// GetType returns the delivery method for the stream state record. Returns one of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll.
+// GetType returns the delivery method for the stream state record. Returns one
+// of ReceivePush, ReceivePoll, DeliveryPush, DeliveryPoll, or DeliverySstpPair.
+// A record carrying SstpMethod is a bidirectional SSTP pair and reports
+// DeliverySstpPair regardless of which marker its primary Delivery holds.
 func (ss *StreamStateRecord) GetType() string {
+	if ss.SstpMethod != nil {
+		return DeliverySstpPair
+	}
 	return ss.Delivery.GetMethod()
 }
 
 func (ss *StreamStateRecord) IsReceiver() bool {
-	switch ss.GetType() {
+	switch ss.Delivery.GetMethod() {
 	case ReceivePush, ReceivePoll:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsTransmitter reports whether the embedded (primary) Delivery is a
+// transmit-side RFC8935/RFC8936 method.
+func (ss *StreamStateRecord) IsTransmitter() bool {
+	switch ss.Delivery.GetMethod() {
+	case DeliveryPush, DeliveryPoll:
+		return true
+	default:
+		return false
+	}
+}
+
+// HasInbound reports whether the record receives events. An SSTP pair always
+// receives (true); RFC8935/RFC8936 records fall through to IsReceiver().
+func (ss *StreamStateRecord) HasInbound() bool {
+	if ss.GetType() == DeliverySstpPair {
+		return true
+	}
+	return ss.IsReceiver()
+}
+
+// HasOutbound reports whether the record transmits events. An SSTP pair always
+// transmits (true); RFC8935/RFC8936 records fall through to IsTransmitter().
+func (ss *StreamStateRecord) HasOutbound() bool {
+	if ss.GetType() == DeliverySstpPair {
+		return true
+	}
+	return ss.IsTransmitter()
 }
 
 func (ss *StreamStateRecord) HasTxServer() bool {
@@ -197,6 +268,22 @@ const (
 
 	// ReceivePush indicates that a stream receives events using HTTP Set Delivery via PUSH using HTTP POST by the transmitter. It defines an SSF receiver. This is used by goSignals to define the receiver half of a transmitter/receiver pair.
 	ReceivePush = "urn:ietf:rfc:8935:receive"
+
+	// DeliverySstp is the SSF delivery-method URN advertised on
+	// .well-known/ssf-configuration for the Synchronous SET Transfer Protocol
+	// (draft-hunt-secevent-sstp-00). It also identifies the transmit (outbound)
+	// side marker of an SSTP pair's per-direction Delivery field. (PRD #154 Q8.1)
+	DeliverySstp = "urn:i2-open:secevent:delivery:sstp"
+
+	// ReceiveSstp identifies the receive (inbound) side marker of an SSTP pair's
+	// per-direction Delivery field.
+	ReceiveSstp = "urn:i2-open:secevent:delivery:sstp:receive"
+
+	// DeliverySstpPair is the GetType() result for a bidirectional SSTP pair
+	// StreamStateRecord. It is NOT an SSF wire URN — it is the goSignals-internal
+	// type discriminator for the single record that carries both directions of an
+	// SSTP pair. (PRD #154 Q22)
+	DeliverySstpPair = "urn:i2-open:secevent:delivery:sstp:pair"
 
 	StreamStateEnabled  = "enabled"
 	StreamStatePause    = "paused"

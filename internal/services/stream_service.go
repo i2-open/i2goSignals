@@ -975,6 +975,27 @@ func (s *StreamService) GetStreamState(ctx context.Context, id string) (*model.S
 	return s.streamDAO.FindByID(ctx, id)
 }
 
+// GetStreamStateByInboundSID returns the SSTP pair record whose receive-side
+// SID (SstpInbound.Id) equals sid, or interfaces.ErrNotFound. (PRD #154 Q24)
+func (s *StreamService) GetStreamStateByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return s.streamDAO.FindByInboundSID(ctx, sid)
+}
+
+// GetStreamStateByPairId returns the record whose PairId equals pairId, or
+// interfaces.ErrNotFound. PairId is the on-wire SSF stream_id for an SSTP pair.
+func (s *StreamService) GetStreamStateByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error) {
+	return s.streamDAO.FindByPairId(ctx, pairId)
+}
+
+// PersistStreamStateRecord writes a fully-formed StreamStateRecord directly via
+// the DAO, bypassing CreateStream's request-shaped validation. It is the
+// storage-layer seam SSTP pair creation (slice #161) will build on; this slice
+// uses it only to exercise the bidirectional record round-trip across both
+// providers. (PRD #154 Q24)
+func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model.StreamStateRecord) error {
+	return s.streamDAO.Create(ctx, rec)
+}
+
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
 	err := s.streamDAO.UpdateStatus(ctx, streamID, status, errorMsg)
 	if err != nil {

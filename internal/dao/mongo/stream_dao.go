@@ -154,6 +154,47 @@ func (d *StreamDAOMongo) FindByProjectID(ctx context.Context, projectID string) 
     return recs, nil
 }
 
+// FindByInboundSID returns the SSTP pair record whose receive-side SID
+// (sstp_inbound.id) equals sid. Backed by the sparse-unique index on
+// sstp_inbound.id, so non-SSTP records (which lack the field) pay no cost.
+func (d *StreamDAOMongo) FindByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{"sstp_inbound.id": sid}
+    res := c.FindOne(ctx, filter)
+    if err := HandleFindError(res.Err(), interfaces.ErrNotFound); err != nil {
+        return nil, err
+    }
+    var rec model.StreamStateRecord
+    if err := res.Decode(&rec); err != nil {
+        sLog.Error("Error parsing StreamStateRecord", "error", err)
+        return nil, err
+    }
+    return &rec, nil
+}
+
+// FindByPairId returns the record whose pair_id equals pairId. Backed by the
+// sparse-unique index on pair_id.
+func (d *StreamDAOMongo) FindByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error) {
+    c, err := d.col()
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{"pair_id": pairId}
+    res := c.FindOne(ctx, filter)
+    if err := HandleFindError(res.Err(), interfaces.ErrNotFound); err != nil {
+        return nil, err
+    }
+    var rec model.StreamStateRecord
+    if err := res.Decode(&rec); err != nil {
+        sLog.Error("Error parsing StreamStateRecord", "error", err)
+        return nil, err
+    }
+    return &rec, nil
+}
+
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
     c, err := d.col()
     if err != nil {

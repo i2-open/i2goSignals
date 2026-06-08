@@ -32,6 +32,15 @@ type StreamDAO interface {
     // Queries
     FindByProjectID(ctx context.Context, projectID string) ([]model.StreamStateRecord, error)
 
+    // FindByInboundSID returns the SSTP pair record whose receive-side
+    // (SstpInbound.Id) equals sid, or ErrNotFound. Only SSTP pair records carry
+    // an SstpInbound, so non-SSTP records are never matched. (PRD #154 Q24)
+    FindByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error)
+
+    // FindByPairId returns the record whose PairId equals pairId, or ErrNotFound.
+    // PairId is the on-wire SSF stream_id for an SSTP pair. (PRD #154 Q24)
+    FindByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error)
+
     // Status updates
     UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error
 

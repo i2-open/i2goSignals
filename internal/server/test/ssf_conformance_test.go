@@ -99,6 +99,7 @@ func (suite *SSFConformanceSuite) TestDeliveryMethodsSupported() {
 	deliveryMethods := config.DeliveryMethodsSupported
 	assert.Contains(t, deliveryMethods, model.DeliveryPoll, "Should support poll delivery")
 	assert.Contains(t, deliveryMethods, model.DeliveryPush, "Should support push delivery")
+	assert.Contains(t, deliveryMethods, model.DeliverySstp, "Should advertise SSTP delivery unconditionally")
 
 	// All delivery methods should be valid URIs (at minimum, contain "urn:")
 	for _, method := range deliveryMethods {

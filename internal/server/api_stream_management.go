@@ -751,12 +751,14 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 			model.DeliveryPush,
 			model.ReceivePoll,
 			model.ReceivePush,
+			model.DeliverySstp,
 		}
 	default:
 		goVersion = "" // Simulate an SSF server
 		methods = []string{
 			model.DeliveryPoll,
 			model.DeliveryPush,
+			model.DeliverySstp,
 		}
 	}
 

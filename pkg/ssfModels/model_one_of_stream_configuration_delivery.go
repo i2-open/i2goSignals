@@ -19,6 +19,12 @@ type OneOfStreamConfigurationDelivery struct {
 	*PushReceiveMethod
 	*PollTransmitMethod
 	*PollReceiveMethod
+	// SstpTransmitMarker and SstpReceiveMarker are marker-only variants for the
+	// two directions of an SSTP pair. They carry the method URN and nothing
+	// else; pair-scoped connectivity lives in StreamStateRecord.SstpMethod so
+	// the SSF wire shape never leaks the per-pair bearer/endpoint. (ADR 0018)
+	*SstpTransmitMarker
+	*SstpReceiveMarker
 }
 
 func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
@@ -34,6 +40,12 @@ func (d *OneOfStreamConfigurationDelivery) MarshalJSON() ([]byte, error) {
 	}
 	if d.PushReceiveMethod != nil {
 		return json.Marshal(d.PushReceiveMethod)
+	}
+	if d.SstpTransmitMarker != nil {
+		return json.Marshal(d.SstpTransmitMarker)
+	}
+	if d.SstpReceiveMarker != nil {
+		return json.Marshal(d.SstpReceiveMarker)
 	}
 	return []byte("{}"), nil
 }
@@ -59,6 +71,14 @@ func (d *OneOfStreamConfigurationDelivery) DeepCopy() *OneOfStreamConfigurationD
 		copyMethod := *d.PollReceiveMethod
 		res.PollReceiveMethod = &copyMethod
 	}
+	if d.SstpTransmitMarker != nil {
+		copyMethod := *d.SstpTransmitMarker
+		res.SstpTransmitMarker = &copyMethod
+	}
+	if d.SstpReceiveMarker != nil {
+		copyMethod := *d.SstpReceiveMarker
+		res.SstpReceiveMarker = &copyMethod
+	}
 	return res
 }
 
@@ -81,6 +101,14 @@ func (d *OneOfStreamConfigurationDelivery) GetMethod() string {
 
 	if d.PollReceiveMethod != nil {
 		return ReceivePoll
+	}
+
+	if d.SstpReceiveMarker != nil {
+		return ReceiveSstp
+	}
+
+	if d.SstpTransmitMarker != nil {
+		return DeliverySstp
 	}
 	return "DEFAULT"
 }
@@ -149,10 +177,30 @@ func (d *OneOfStreamConfigurationDelivery) UnmarshalJSON(data []byte) error {
 		d.PushTransmitMethod = nil
 		d.PollReceiveMethod = nil
 		d.PushReceiveMethod = nil
+		d.SstpTransmitMarker = nil
+		d.SstpReceiveMarker = nil
 		return nil
 	}
 
 	lowString := strings.ToLower(dataString)
+	// SSTP markers are matched before the RFC8935/8936 URNs. ReceiveSstp is a
+	// superstring of DeliverySstp, so the receive check must come first.
+	if strings.Contains(lowString, DeliverySstp) {
+		if strings.Contains(lowString, ReceiveSstp) {
+			var marker SstpReceiveMarker
+			if err := json.Unmarshal(data, &marker); err != nil {
+				return err
+			}
+			d.SstpReceiveMarker = &marker
+			return nil
+		}
+		var marker SstpTransmitMarker
+		if err := json.Unmarshal(data, &marker); err != nil {
+			return err
+		}
+		d.SstpTransmitMarker = &marker
+		return nil
+	}
 	if strings.Contains(lowString, DeliveryPoll) {
 		if strings.Contains(lowString, ReceivePoll) {
 			var poll PollReceiveMethod
