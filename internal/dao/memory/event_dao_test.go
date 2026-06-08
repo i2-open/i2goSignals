@@ -2,6 +2,9 @@ package memory
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +45,121 @@ func TestEventDAOMemory_Insert(t *testing.T) {
 
 	if retrieved.Jti != "test-jti" {
 		t.Errorf("Expected JTI test-jti, got %s", retrieved.Jti)
+	}
+}
+
+// TestEventDAOMemory_Insert_DuplicateJTI verifies the persistence-layer dedup
+// contract: a second Insert with the same JTI returns interfaces.ErrDuplicateJTI
+// without overwriting the existing record. FindByJTI must continue to return
+// the FIRST insert's payload.
+func TestEventDAOMemory_Insert_DuplicateJTI(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	first := &model.AgEventRecord{
+		Jti:      "dup-jti",
+		Original: `{"jti":"dup-jti","first":true}`,
+		SortTime: time.Now(),
+	}
+	if err := dao.Insert(ctx, first); err != nil {
+		t.Fatalf("first Insert failed: %v", err)
+	}
+
+	second := &model.AgEventRecord{
+		Jti:      "dup-jti",
+		Original: `{"jti":"dup-jti","second":true}`,
+		SortTime: time.Now(),
+	}
+	err := dao.Insert(ctx, second)
+	if err == nil {
+		t.Fatalf("second Insert: expected ErrDuplicateJTI, got nil")
+	}
+	if !errors.Is(err, interfaces.ErrDuplicateJTI) {
+		t.Fatalf("second Insert: expected ErrDuplicateJTI, got %v", err)
+	}
+
+	// The existing record must be untouched — the second arrival's payload
+	// must NOT replace the first.
+	got, err := dao.FindByJTI(ctx, "dup-jti")
+	if err != nil {
+		t.Fatalf("FindByJTI after dup: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindByJTI returned nil after duplicate Insert")
+	}
+	if got.Original != first.Original {
+		t.Errorf("FindByJTI returned overwritten record: got Original=%q want %q",
+			got.Original, first.Original)
+	}
+}
+
+func TestEventDAOMemory_Insert_DistinctJTIs(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	a := &model.AgEventRecord{Jti: "jti-a", SortTime: time.Now()}
+	b := &model.AgEventRecord{Jti: "jti-b", SortTime: time.Now()}
+
+	if err := dao.Insert(ctx, a); err != nil {
+		t.Fatalf("Insert(a) failed: %v", err)
+	}
+	if err := dao.Insert(ctx, b); err != nil {
+		t.Fatalf("Insert(b) failed: %v", err)
+	}
+
+	gotA, _ := dao.FindByJTI(ctx, "jti-a")
+	gotB, _ := dao.FindByJTI(ctx, "jti-b")
+	if gotA == nil || gotB == nil {
+		t.Fatalf("expected both records, got a=%v b=%v", gotA, gotB)
+	}
+}
+
+// TestEventDAOMemory_Insert_ConcurrentDuplicates fires 50 goroutines at the
+// same JTI; the write-lock must serialize them so exactly one Insert succeeds
+// and 49 return ErrDuplicateJTI.
+func TestEventDAOMemory_Insert_ConcurrentDuplicates(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	const goroutines = 50
+	var (
+		wg       sync.WaitGroup
+		ok       atomic.Int32
+		dup      atomic.Int32
+		other    atomic.Int32
+		start    = make(chan struct{})
+	)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := &model.AgEventRecord{
+				Jti:      "race-jti",
+				SortTime: time.Now(),
+			}
+			err := dao.Insert(ctx, rec)
+			switch {
+			case err == nil:
+				ok.Add(1)
+			case errors.Is(err, interfaces.ErrDuplicateJTI):
+				dup.Add(1)
+			default:
+				other.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := ok.Load(); got != 1 {
+		t.Errorf("expected exactly 1 successful Insert, got %d", got)
+	}
+	if got := dup.Load(); got != goroutines-1 {
+		t.Errorf("expected %d ErrDuplicateJTI, got %d", goroutines-1, got)
+	}
+	if got := other.Load(); got != 0 {
+		t.Errorf("expected 0 other errors, got %d", got)
 	}
 }
 

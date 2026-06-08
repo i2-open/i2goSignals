@@ -1,11 +1,33 @@
 package dbProviders
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/interfaces"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/stretchr/testify/assert"
 )
+
+// assertDedupParity exercises the slice #156 cross-provider parity check: a
+// double-AddEvent on the same JTI must return interfaces.ErrDuplicateJTI on
+// the second call. The Persistence record's EventService is wired to the
+// underlying provider's EventDAO, so a green assertion proves the dedup
+// sentinel propagates correctly through the composition root for this
+// variant.
+func assertDedupParity(t *testing.T, p *Persistence) {
+	t.Helper()
+	ctx := context.Background()
+	evt := &goSet.SecurityEventToken{Events: map[string]interface{}{"x": "y"}}
+	evt.ID = "dedup-parity-jti"
+	_, err := p.EventService.AddEvent(ctx, evt, "stream-x", "raw-1")
+	assert.NoError(t, err, "first AddEvent should succeed")
+	_, err2 := p.EventService.AddEvent(ctx, evt, "stream-x", "raw-2")
+	assert.True(t, errors.Is(err2, interfaces.ErrDuplicateJTI),
+		"second AddEvent should return ErrDuplicateJTI, got %v", err2)
+}
 
 // TestOpenPersistence_Memory exercises the composition root: the memory
 // adapter must produce a complete Persistence (services + Coordinator +
@@ -31,6 +53,10 @@ func TestOpenPersistence_Memory(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, ok, "MemoryCoordinator should grant first acquire")
 
+	// events-dedup parity: confirms the EventService wired into the memory
+	// provider surfaces interfaces.ErrDuplicateJTI on a duplicate JTI.
+	assertDedupParity(t, p)
+
 	_ = p.Storage.Close()
 }
 
@@ -47,6 +73,10 @@ func TestOpenPersistence_Fallback(t *testing.T) {
 	assert.NotNil(t, p.StreamService)
 	assert.NotNil(t, p.Coordinator)
 	assert.NotNil(t, p.Storage)
+
+	// events-dedup parity: the fallback variant must propagate the dedup
+	// sentinel through the underlying memory EventDAO.
+	assertDedupParity(t, p)
 
 	_ = p.Storage.Close()
 }

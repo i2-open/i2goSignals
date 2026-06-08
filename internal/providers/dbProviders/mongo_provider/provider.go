@@ -314,6 +314,14 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
     return nil
 }
 
+// eventJtiIndexName is the fixed name for the sparse-unique JTI index on
+// eventCol. JTI is the persistence-layer dedup key (RFC 8417 §2.2). The
+// index is the authoritative race breaker for concurrent inserts; the DAO
+// translates the resulting duplicate-key error to interfaces.ErrDuplicateJTI
+// so the service/router can short-circuit. Sparse so historical or
+// operational records missing the field are not rejected.
+const eventJtiIndexName = "eventJtiUnique"
+
 func (m *MongoProvider) createIndexes(ctx context.Context) error {
 	indexSid := mongo.IndexModel{
 		Keys: bson.M{"sid": 1},
@@ -337,6 +345,31 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
 		return err
+	}
+
+	// Sparse-unique index on eventCol.jti — the persistence-layer dedup
+	// contract for SET ingestion (PRD #153, slice #156). Startup safety net:
+	// if pre-existing duplicate JTIs are present in the collection, Mongo
+	// will refuse to build the index. Log at WARN with a remediation hint
+	// and continue startup; the dedup guarantee is OFF until an operator
+	// cleans up duplicates and restarts. This is a documented degradation:
+	// we do NOT silently swallow (we log it), and we do NOT abort startup.
+	eventJtiIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "jti", Value: 1}},
+		Options: options.Index().
+			SetName(eventJtiIndexName).
+			SetUnique(true).
+			SetSparse(true),
+	}
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, eventJtiIndex); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			pLog.Warn("Pre-existing duplicate JTIs prevent eventJtiUnique index; SET ingestion dedup guarantee is OFF. Remediate duplicates in eventCol and restart to re-enable.",
+				"index", eventJtiIndexName,
+				"error", err)
+		} else {
+			pLog.Error("Error creating index for eventCol", "error", err)
+			return err
+		}
 	}
 	return nil
 }

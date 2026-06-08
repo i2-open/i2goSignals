@@ -13,6 +13,11 @@ import (
 var (
     ErrNotFound    = errors.New("not found")
     ErrKeyNotFound = errors.New("key not found")
+    // ErrDuplicateJTI is returned by EventDAO.Insert when the record's JTI
+    // already exists in the events collection. The JTI is the persistence-layer
+    // dedup key (RFC 8417 §2.2 globally unique). Callers MUST handle this
+    // sentinel; the existing record is retrievable via EventDAO.FindByJTI(jti).
+    ErrDuplicateJTI = errors.New("duplicate jti")
 )
 
 // StreamDAO handles stream configuration data access
@@ -37,6 +42,12 @@ type StreamDAO interface {
 // EventDAO handles event data access
 type EventDAO interface {
     // Event storage
+    //
+    // Insert persists a single event record. The JTI is the persistence-layer
+    // dedup key for the events collection: implementations MUST return
+    // ErrDuplicateJTI when the JTI already exists, and MUST NOT overwrite the
+    // existing record. Callers MUST handle ErrDuplicateJTI; the existing
+    // record is retrievable via FindByJTI(jti).
     Insert(ctx context.Context, record *model.AgEventRecord) error
     FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error)
     FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error)

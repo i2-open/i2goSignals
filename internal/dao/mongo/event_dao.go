@@ -85,6 +85,16 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord)
     }
     _, err = c.InsertOne(ctx, record)
     if err != nil {
+        // JTI is the persistence-layer dedup key (RFC 8417 §2.2). The
+        // sparse-unique eventJtiUnique index installed by createIndexes is
+        // the authoritative race breaker; translate Mongo's duplicate-key
+        // error to the shared interfaces.ErrDuplicateJTI sentinel so the
+        // service layer can fetch the original via FindByJTI and the router
+        // can short-circuit. Precedent: cluster_coordinator.go uses the same
+        // mongo.IsDuplicateKeyError translation pattern.
+        if mongo.IsDuplicateKeyError(err) {
+            return interfaces.ErrDuplicateJTI
+        }
         eLog.Error("Error inserting event", "error", err)
     }
     return err
