@@ -49,14 +49,13 @@ func TestPollInfiniteLoopFix(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait for it to hit the connection error and enter Pause state
-	// With our changes, it should STAY in runPollLoop and use the backoff
-	time.Sleep(1 * time.Second)
-
-	// Check that it's in Pause state
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
+	// Wait for it to hit the connection error and enter Pause state. With our
+	// changes it stays in runPollLoop and uses the backoff (base delay 0.1s), so
+	// poll for the transition rather than sleeping a fixed second.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStatePause
+	}, 3*time.Second, 20*time.Millisecond, "stream should enter Pause after connection errors")
 
 	// If the infinite loop were present, we would see thousands of "Node lease acquired" messages in the log.
 	// Since we can't easily count them here, we just verify it's still running and hasn't crashed.

@@ -1,6 +1,7 @@
 package test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -55,24 +56,22 @@ func TestPollBackoffRetry(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait for first retry
-	// Delay 0 is 0.1s
-	time.Sleep(200 * time.Millisecond)
+	// Poll for the transient Pause state (retry in progress, base delay 0.1s)
+	// rather than sleeping a fixed interval.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStatePause &&
+			strings.Contains(st.ErrorMsg, "retry being attempted")
+	}, 2*time.Second, 20*time.Millisecond, "stream should pause with a retry-in-progress message")
 
-	// Check provider status - it should be "paused" with "retry being attempted"
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
-	assert.Contains(t, updatedState.ErrorMsg, "retry being attempted")
+	// After the retry limit (1.0s) is exceeded the stream must be disabled.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStateDisable
+	}, 3*time.Second, 20*time.Millisecond, "stream should disable after exceeding the retry limit")
 
-	// Wait for more retries and eventually exceeding the limit
-	// retryLimit is 1.0s.
-	time.Sleep(1500 * time.Millisecond)
-
-	// Now it should be disabled
 	finalState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "connection error")
 }
 
@@ -107,15 +106,17 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	assert.NoError(t, err)
 	streamID = createdConfig.Id
 
-	// Give it a moment to process
-	time.Sleep(100 * time.Millisecond)
+	// A permanent JWKS error disables the stream almost immediately; poll for it
+	// rather than sleeping a fixed interval.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st != nil && st.Status == model.StreamStateDisable
+	}, 2*time.Second, 20*time.Millisecond, "permanent JWKS error should disable the stream")
 
 	// Get the stream state - it should be disabled due to permanent JWKS error
 	streamState, err := instance.GetStreamState(streamID)
 	assert.NoError(t, err)
 	assert.NotNil(t, streamState)
-
-	// Stream should be disabled immediately due to permanent error
 	assert.Equal(t, model.StreamStateDisable, streamState.Status)
 	assert.Contains(t, streamState.ErrorMsg, "Error retrieving issuer JWKS public key")
 	assert.Contains(t, streamState.ErrorMsg, "unsupported protocol scheme")

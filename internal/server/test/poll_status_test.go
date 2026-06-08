@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,12 +30,14 @@ func TestPollTransmitterStatus(t *testing.T) {
 		Reason: "testing pause",
 	}
 	var mu sync.Mutex
+	statusChecks := 0
 
 	// Mock transmitter
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/status" {
 			w.Header().Set("Content-Type", "application/json")
 			mu.Lock()
+			statusChecks++
 			resp := statusResponse
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(resp)
@@ -86,27 +89,27 @@ func TestPollTransmitterStatus(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait a bit for the first status check
-	time.Sleep(300 * time.Millisecond)
+	// Poll for the receiver to observe the transmitter's paused status rather
+	// than sleeping a fixed interval (check interval is 0.2s).
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStatePause &&
+			strings.Contains(st.ErrorMsg, "Transmitter stream is paused: testing pause")
+	}, 2*time.Second, 20*time.Millisecond, "receiver should reflect the transmitter's paused status")
 
-	// Check status - should be paused in provider
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, updatedState.Status)
-	assert.Contains(t, updatedState.ErrorMsg, "Transmitter stream is paused: testing pause")
-
-	// Now change status to enabled
+	// Now change status to enabled and confirm the status-check loop keeps
+	// running (it must poll /status at least once more) instead of sleeping.
 	mu.Lock()
+	checksBefore := statusChecks
 	statusResponse.Status = model.StreamStateEnabled
 	statusResponse.Reason = ""
 	mu.Unlock()
 
-	// Wait for next check (interval is 0.2s)
-	time.Sleep(400 * time.Millisecond)
-
-	// Now it should have resumed polling.
-	// We can't easily check if it's "enabled" in provider because nothing sets it back to enabled in the provider
-	// unless we add that logic. But the loop should be running.
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return statusChecks > checksBefore
+	}, 2*time.Second, 20*time.Millisecond, "status-check loop should keep polling after status flips to enabled")
 }
 
 func TestPollTransmitterStatusDisabled(t *testing.T) {
@@ -161,12 +164,11 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Wait a bit
-	time.Sleep(300 * time.Millisecond)
-
-	// Check status - should be disabled
-	updatedState, err := instance.GetStreamState(streamID)
-	assert.NoError(t, err)
-	assert.Equal(t, model.StreamStateDisable, updatedState.Status)
-	assert.Contains(t, updatedState.ErrorMsg, "Transmitter stream is disabled: testing disable")
+	// Poll for the receiver to observe the transmitter's disabled status rather
+	// than sleeping a fixed interval.
+	assert.Eventually(t, func() bool {
+		st, err := instance.GetStreamState(streamID)
+		return err == nil && st.Status == model.StreamStateDisable &&
+			strings.Contains(st.ErrorMsg, "Transmitter stream is disabled: testing disable")
+	}, 2*time.Second, 20*time.Millisecond, "receiver should reflect the transmitter's disabled status")
 }
