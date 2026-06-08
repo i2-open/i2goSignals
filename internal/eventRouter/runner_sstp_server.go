@@ -45,6 +45,23 @@ func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound g
 
 	resp := goSetSstp.Message{}
 
+	// Outbound ack consumption (Finding #5): the peer's request carries, in
+	// Message.Ack, the JTIs of outbound SETs it received on a previous cycle. Ack
+	// them on the pair's outbound buffer AND via eventService so they are removed
+	// from the pending list and never re-delivered. This mirrors the RFC8936 poll
+	// transmitter's params.Acks handling (PollStreamHandler): a SET delivered in
+	// cycle N is acked by the peer in cycle N+1's request. drainSstpOutbound's
+	// GetEvents only COPIES; only AckEvents removes — so without this, every
+	// delivered SET would be re-sent forever.
+	txSid := rec.StreamConfiguration.Id
+	if len(inbound.Ack) > 0 {
+		buf := r.sstpServerBufferFor(txSid)
+		buf.AckEvents(inbound.Ack)
+		for _, jti := range inbound.Ack {
+			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
+		}
+	}
+
 	// Inbound ingest: persist-then-process each parsed SET via HandleEvent, keyed
 	// on the rx-side SID so the inbound counter carries stream_id=rxSid (Q46). A
 	// duplicate JTI is swallowed silently by HandleEvent's #153 short-circuit; we

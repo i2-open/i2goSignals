@@ -833,10 +833,20 @@ func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
 		if !r.eventService.MatchesStream(&pair, event) {
 			continue
 		}
+		// Finding #6: persist the JTI into the tx-side pending list BEFORE waking the
+		// runner — exactly as the push/poll branches do with AddEventToStream. Without
+		// this the JTI is never AddPending'd for the tx SID, so the runner's
+		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
+		// (not even backfill-recoverable). AddEvent only Insert()s the token.
+		txSid := pair.StreamConfiguration.Id
+		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
+			eventLogger.Error("ROUTER: Error adding event to SSTP-client pair", "pairId", pairId, "sid", txSid, "jti", event.Jti, "error", err)
+		}
 		resource := fmt.Sprintf("sstp-client:%s", pairId)
 		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[pairId]; ok {
+				buf.SubmitEvent(event.Jti)
 				buf.Wakeup()
 			}
 		} else {
@@ -848,7 +858,15 @@ func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
 		if !r.eventService.MatchesStream(&pair, event) {
 			continue
 		}
+		// Finding #6 (server side): add the JTI to the tx-side pending list so the
+		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
+		// server takes no client lease — every node may serve the long-poll — so we do
+		// not gate this on lease ownership.
+		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
+			eventLogger.Error("ROUTER: Error adding event to SSTP-server pair", "sid", txSid, "jti", event.Jti, "error", err)
+		}
 		if buf, ok := r.sstpServerBuffers[txSid]; ok {
+			buf.SubmitEvent(event.Jti)
 			buf.Wakeup()
 		}
 		go r.broadcastSstpServerWake(txSid)
@@ -1603,6 +1621,29 @@ func (r *router) RemoveStream(sid string) {
 		}
 		delete(r.pollBuffers, sid)
 	}
+
+	// Finding #8: tear down the SSTP pair's four maps and buffers. For a pair the
+	// document _id == PairId == tx-side SID, so the single sid passed here matches
+	// both the client maps (keyed by PairId) and the server maps (keyed by txSid).
+	// Closing the buffers wakes any in-flight long-poll wait; deleting the
+	// sstpClientStreams entry is the stop signal the client runner observes on its
+	// next-cycle refresh (refreshSstpClientStream returns ok=false), so the runner
+	// goroutine exits rather than polling a dead peer forever.
+	if cb, ok := r.sstpBuffers[sid]; ok {
+		cb.Close()
+		delete(r.sstpBuffers, sid)
+	}
+	if _, ok := r.sstpClientStreams[sid]; ok {
+		delete(r.sstpClientStreams, sid)
+	}
+	if sb, ok := r.sstpServerBuffers[sid]; ok {
+		sb.Close()
+		delete(r.sstpServerBuffers, sid)
+	}
+	if _, ok := r.sstpServerStreams[sid]; ok {
+		delete(r.sstpServerStreams, sid)
+	}
+
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }
 

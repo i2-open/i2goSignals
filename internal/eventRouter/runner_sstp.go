@@ -139,12 +139,31 @@ func (r *router) sstpConfig() sstpBackoffConfig {
 
 // initSstpClientStreamLocked registers an SSTP pair's client side and starts its
 // runner. The caller must hold r.mu.
+//
+// Finding #9: r.sstpClientStreams[pairId] is the SINGLE source of truth for the
+// pair's live config (endpoint, bearer, status). The runner does NOT close over a
+// divergent copy; it re-reads the map under r.mu each cycle (refreshSstpClientStream)
+// so a rotated bearer / changed endpoint / pause applied via UpdateStreamState is
+// observed within one cycle. We pass a fresh copy to the goroutine purely as its
+// initial snapshot.
 func (r *router) initSstpClientStreamLocked(state *model.StreamStateRecord, jtis []string) {
 	pairId := state.PairId
 	r.sstpClientStreams[pairId] = *state
 	buf := buffer.CreateEventPollBuffer(jtis, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
 	r.sstpBuffers[pairId] = buf
-	go r.SstpClientStreamHandler(state, buf)
+	initial := *state
+	go r.SstpClientStreamHandler(&initial, buf)
+}
+
+// refreshSstpClientStream returns the current source-of-truth record for the pair
+// from r.sstpClientStreams under r.mu. ok=false means the pair has been removed
+// (RemoveStream / Finding #8) and the runner should exit. The returned value is a
+// copy, safe to read without further locking. (Finding #9.)
+func (r *router) refreshSstpClientStream(pairId string) (model.StreamStateRecord, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.sstpClientStreams[pairId]
+	return rec, ok
 }
 
 // SstpClientStreamHandler manages the lifecycle of an SSTP-client connection for
@@ -156,6 +175,16 @@ func (r *router) SstpClientStreamHandler(stream *model.StreamStateRecord, eventB
 	cfg := r.sstpConfig()
 
 	for {
+		// Finding #9 / #8: re-read the live record from the source-of-truth map. A
+		// missing entry means the pair was removed (RemoveStream); a non-enabled
+		// status means it was paused/disabled. Either way the handler exits and the
+		// goroutine stops — no leak.
+		live, ok := r.refreshSstpClientStream(pairId)
+		if !ok {
+			eventLogger.Info("SSTP-CLIENT pair removed. Handler exiting.", "pairId", pairId)
+			return
+		}
+		*stream = live
 		if stream.Status != model.StreamStateEnabled {
 			eventLogger.Info("SSTP-CLIENT no longer enabled. Handler exiting.", "pairId", pairId)
 			return
@@ -243,6 +272,17 @@ func (r *router) runSstpClientLoop(resource string, stream *model.StreamStateRec
 			return true
 		default:
 		}
+
+		// Finding #9 / #8: refresh the live config from the source-of-truth map each
+		// cycle so a rotated bearer / changed endpoint / pause applied via
+		// UpdateStreamState (which mutates the map) is observed within one cycle, and
+		// a RemoveStream (map entry gone) stops the loop. Returning false here exits
+		// the handler entirely (do not re-acquire a deleted/paused pair's lease).
+		live, ok := r.refreshSstpClientStream(pairId)
+		if !ok || live.Status != model.StreamStateEnabled {
+			return false
+		}
+		*stream = live
 
 		outcome, resumeDelay, exit := r.runSstpCycle(cycleCtx, stream, eventBuf, fencingToken, cfg, &delay)
 		_ = outcome
@@ -580,4 +620,14 @@ func (r *router) releaseSstpSecondPushSlot(pairId string) {
 // untouched here (Q12.3).
 func (r *router) pauseSstpOutbound(stream *model.StreamStateRecord, reason string) {
 	r.updateStream(stream, model.StreamStatePause, reason)
+	// Finding #9: write the pause back into the source-of-truth map so the runner's
+	// next-cycle refresh observes it (and the cycle exits) rather than reverting to
+	// the stale enabled status held in the map.
+	r.mu.Lock()
+	if rec, ok := r.sstpClientStreams[stream.PairId]; ok {
+		rec.Status = stream.Status
+		rec.ErrorMsg = stream.ErrorMsg
+		r.sstpClientStreams[stream.PairId] = rec
+	}
+	r.mu.Unlock()
 }

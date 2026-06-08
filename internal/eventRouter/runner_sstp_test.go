@@ -163,6 +163,17 @@ func outCounterValueSstp(t *testing.T, vec *prometheus.CounterVec, sid string) f
 	}))
 }
 
+// registerSstpClient seeds the source-of-truth map entry + buffer for a pair, as
+// the production initSstpClientStreamLocked does before launching the runner. The
+// runner re-reads this entry each cycle (refreshSstpClientStream, Finding #9), so a
+// runner driven directly in a test must have its pair registered.
+func (h *sstpRunnerHarness) registerSstpClient(state *model.StreamStateRecord, buf *buffer.EventPollBuffer) {
+	h.router.mu.Lock()
+	h.router.sstpClientStreams[state.PairId] = *state
+	h.router.sstpBuffers[state.PairId] = buf
+	h.router.mu.Unlock()
+}
+
 // persistOutboundEvent persists a SET for txSid and marks it pending for that
 // stream so the runner's backfill picks it up.
 func (h *sstpRunnerHarness) persistOutboundEvent(t *testing.T, txSid, jti string) {
@@ -192,6 +203,7 @@ func TestSstpClient_FlushesOutboundAndCountsMetric(t *testing.T) {
 	state := sstpPairState(txSid, "pair-flush")
 	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
 	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
 
 	go h.router.SstpClientStreamHandler(state, buf)
 
@@ -555,6 +567,7 @@ func TestSstpClient_LeaseLossCancelsInflight(t *testing.T) {
 	state := sstpPairState("sstp-tx-loss", "pair-loss")
 	buf := buffer.CreateEventPollBuffer([]string{"x"}, 0, 0)
 	t.Cleanup(buf.Close)
+	h.registerSstpClient(state, buf)
 	// Give the runner something to "deliver" so it enters DeliverSstp.
 	h.persistOutboundEvent(t, "sstp-tx-loss", "x")
 
@@ -659,6 +672,7 @@ func TestSstpClient_GracefulShutdownReleasesLease(t *testing.T) {
 
 	state := sstpPairState("sstp-tx-shut", "pair-shut")
 	buf := buffer.CreateEventPollBuffer(nil, 0, 0)
+	h.registerSstpClient(state, buf)
 
 	handlerDone := make(chan struct{})
 	go func() {
