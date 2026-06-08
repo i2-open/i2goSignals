@@ -44,14 +44,14 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 
 	// Strict Content-Type: application/sstp+json. Match on the base media type and
 	// ignore parameters so "application/sstp+json; charset=utf-8" is accepted
-	// (PRD #154 Q21.c). A mismatch is a 415.
-	if ct := r.Header.Get("Content-Type"); ct != "" {
-		baseType, _, err := mime.ParseMediaType(ct)
-		if err != nil || !strings.EqualFold(baseType, goSetSstp.ContentType) {
-			writeSstpError(w, http.StatusUnsupportedMediaType, goSetPush.ErrInvalidRequest,
-				"Expecting Content-Type "+goSetSstp.ContentType)
-			return
-		}
+	// (PRD #154 Q21.c). The strict-content-type contract forces a deliberate SSTP
+	// client, so a MISSING Content-Type is rejected exactly like a wrong one — the
+	// base type MUST be present. Any mismatch (or absence) is a 415.
+	baseType, _, ctErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if ctErr != nil || !strings.EqualFold(baseType, goSetSstp.ContentType) {
+		writeSstpError(w, http.StatusUnsupportedMediaType, goSetPush.ErrInvalidRequest,
+			"Expecting Content-Type "+goSetSstp.ContentType)
+		return
 	}
 
 	pairId := mux.Vars(r)["id"]

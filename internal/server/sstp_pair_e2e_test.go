@@ -527,6 +527,61 @@ func (s *SstpPairE2ESuite) TestSstpEndpoint_BearerMismatch() {
 	s.Equal(http.StatusOK, okStatus, "the pair's own minted bearer is accepted")
 }
 
+// ---------------------------------------------------------------------------
+// Strict Content-Type contract on /sstp/{id} (PRD Q21.c).
+// ---------------------------------------------------------------------------
+
+// sstpPostCT POSTs to a node's /sstp endpoint with an explicit Content-Type value
+// (an empty contentType OMITS the header entirely, so the no-header case can be
+// exercised) and the pair's verbatim Authorization header.
+func (n *sstpNode) sstpPostCT(t *testing.T, path, authHeader, contentType string, body []byte) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(goSetSstp.Method, n.baseURL+path, bytes.NewReader(body))
+	require.NoError(t, err)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	client := &http.Client{Timeout: 40 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
+// TestSstpEndpoint_StrictContentType locks the strict-content-type contract
+// (PRD Q21.c): the application/sstp+json base type MUST be present. A request
+// with NO Content-Type header is rejected 415 exactly like a wrong-but-present
+// type — closing the bypass where a missing header skipped the check entirely.
+// The base type and its charset variant are accepted (auth passes, so the
+// accepted path reaches the runner and returns 200 with returnImmediately).
+func (s *SstpPairE2ESuite) TestSstpEndpoint_StrictContentType() {
+	rec := s.createPairResponder(s.b, s.a, "peerA")
+	endpointPath := "/sstp/" + rec.PairId
+	pairBearer := rec.SstpMethod.AuthorizationHeader
+	body := []byte(`{"sets":{},"returnImmediately":true}`)
+
+	// No Content-Type header at all → 415 (the bypass being fixed).
+	noCT, _ := s.b.sstpPostCT(s.T(), endpointPath, pairBearer, "", body)
+	s.Equal(http.StatusUnsupportedMediaType, noCT, "a missing Content-Type must be rejected 415, not accepted")
+
+	// A wrong-but-present type → 415 (unchanged behavior).
+	wrongCT, _ := s.b.sstpPostCT(s.T(), endpointPath, pairBearer, "text/plain", body)
+	s.Equal(http.StatusUnsupportedMediaType, wrongCT, "a wrong Content-Type must be rejected 415")
+
+	// The exact base type → accepted (passes the 415 gate, then auth + runner → 200).
+	baseCT, _ := s.b.sstpPostCT(s.T(), endpointPath, pairBearer, goSetSstp.ContentType, body)
+	s.Equal(http.StatusOK, baseCT, "application/sstp+json must be accepted")
+
+	// The charset variant → accepted (base-type match ignores parameters).
+	charsetCT, _ := s.b.sstpPostCT(s.T(), endpointPath, pairBearer, goSetSstp.ContentType+"; charset=utf-8", body)
+	s.Equal(http.StatusOK, charsetCT, "application/sstp+json; charset=utf-8 must be accepted")
+}
+
 // sstpPost POSTs an application/sstp+json body to a node's /sstp endpoint with a
 // "Bearer <token>" header and returns the status and body.
 func (n *sstpNode) sstpPost(t *testing.T, path, bearer string, body []byte) (int, []byte) {

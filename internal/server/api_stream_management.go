@@ -630,6 +630,22 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		return
 	}
 
+	// An SSTP pair-create that cascades to a FOREIGN peer (peer_server_alias set)
+	// resolves a stored peer credential and remotely provisions the mirror on
+	// another node, and a responder mints a long-lived dual-SID pair bearer. Both
+	// are the same elevated-trust operation as tx_alias foreign provisioning, so
+	// the base stream/reg gate on StreamCreateHandler is not enough — it needs
+	// canProvisionTxAlias (admin, or the full reg+stream+event set). A purely-local
+	// initiator bootstrap (no peer_server_alias) that does not mint a bearer is
+	// unaffected. Reuse the tx_alias predicate so the two foreign-provisioning
+	// paths share one policy (ADR 0009, ADR 0019).
+	if (bootstrap.PeerServerAlias != "" || bootstrap.Role == model.SstpRoleResponder) && !canProvisionTxAlias(authCtx) {
+		serverLog.Warn("SSTP pair create: denied foreign provisioning; needs admin or reg+stream+event",
+			"role", bootstrap.Role, "peer_server_alias", bootstrap.PeerServerAlias, "projectId", authCtx.ProjectId)
+		http.Error(w, "creating an SSTP pair that cascades to a peer or mints a pair bearer requires admin scope, or the full reg+stream+event scope set", http.StatusForbidden)
+		return
+	}
+
 	rec, err := sa.GetStreamService().CreateSstpPair(
 		context.WithValue(r.Context(), authUtil.AuthContextKey, authCtx),
 		bootstrap, authCtx.ProjectId, nil)

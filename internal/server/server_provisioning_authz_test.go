@@ -327,6 +327,81 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_PlainAtRegScopeSucceeds(
     s.Equal(http.StatusCreated, rr.Code, "a plain stream-create with the reg scope must be allowed")
 }
 
+// --- StreamCreateHandler SSTP pair-create discriminator (finding #4) ---
+
+// sstpCascadeBootstrap builds a discriminated SstpPairBootstrap body that both
+// passes IsSstpBootstrapBody (role + a per-direction object) and triggers the
+// foreign-cascade path (peer_server_alias set). This is the request shape that
+// drives a remote write using stored peer credentials and must be gated like a
+// tx_alias foreign provision.
+func sstpCascadeBootstrap() []byte {
+    boot := model.SstpPairBootstrap{
+        Role:            model.SstpRoleInitiator,
+        PeerServerAlias: "peerTx",
+        Primary: model.SstpDirection{
+            Iss: "https://a.example", Aud: []string{"https://b.example"},
+        },
+    }
+    body, _ := json.Marshal(boot)
+    return body
+}
+
+// A caller with only stream_mgmt must NOT be able to drive an SSTP pair-create
+// that cascades to a peer (peer_server_alias set) — that is the privilege-
+// escalation finding. It must be rejected at the same gate tx_alias uses.
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpCascadeWithStreamScope403() {
+    tok := s.streamToken("proj-A")
+    rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, sstpCascadeBootstrap(), nil)
+    s.Equal(http.StatusForbidden, rr.Code, "SSTP cascade create at stream scope must be denied")
+    s.Contains(rr.Body.String(), "admin", "denial message must be actionable")
+}
+
+// A register-only caller is likewise denied the cascade path (register alone is
+// not enough to provision against a foreign peer, mirroring tx_alias).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpCascadeWithRegScope403() {
+    tok := s.regToken("proj-A")
+    rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, sstpCascadeBootstrap(), nil)
+    s.Equal(http.StatusForbidden, rr.Code, "SSTP cascade create at register scope must be denied")
+}
+
+// A responder-role bootstrap mints a long-lived pair bearer even without a peer
+// cascade, so it too must clear the elevated gate.
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpResponderWithStreamScope403() {
+    tok := s.streamToken("proj-A")
+    boot := model.SstpPairBootstrap{
+        Role: model.SstpRoleResponder,
+        Inbound: model.SstpDirection{
+            Iss: "https://a.example", Aud: []string{"https://b.example"},
+        },
+    }
+    body, _ := json.Marshal(boot)
+    rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
+    s.Equal(http.StatusForbidden, rr.Code, "SSTP responder create (mints a pair bearer) at stream scope must be denied")
+}
+
+// An admin caller must clear the SSTP cascade gate — the gate admits the same
+// authorized callers tx_alias does. We assert only that the request is NOT
+// rejected at the authz gate (it may later fail in CreateSstpPair because the
+// peer alias does not resolve to a real server in this unit fixture).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpCascadeWithAdminScopePassesGate() {
+    tok := s.adminToken("proj-A")
+    rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, sstpCascadeBootstrap(), nil)
+    s.NotEqual(http.StatusForbidden, rr.Code, "SSTP cascade create at admin scope must pass the authz gate")
+}
+
+// A non-admin caller holding the full reg+stream+event operational set can also
+// clear the SSTP cascade gate (parity with the tx_alias policy).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpCascadeWithOAuthFullScopeSetPassesGate() {
+    discoveryURL, kid, priv := s.startOIDC()
+    s.T().Setenv("I2SIG_AUTH_OAUTH_SERVERS", discoveryURL)
+    tok := s.mintOAuth(priv, kid, []string{
+        authSupport.ScopeRegister, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery,
+    })
+    rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, sstpCascadeBootstrap(), nil)
+    s.NotEqual(http.StatusForbidden, rr.Code,
+        "SSTP cascade create with the full reg+stream+event set must pass the authz gate")
+}
+
 // --- /server endpoints are admin-only ---
 
 func (s *ServerProvisioningAuthzSuite) TestCreateServer_RejectsRegAndStream() {
