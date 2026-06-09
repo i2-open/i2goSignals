@@ -17,6 +17,16 @@ Reads against sister repos (file inspection, `gh ... view`, `git log`) are alway
 
 **Branch policy stays in force:** all PRD work on this repo lands on `release-0.12.0`, never `main`/`master`. Enterprise pins community by SHA via `.community-sha` per ADR 0042; uncoordinated history rewrites here cascade pin breakage into enterprise.
 
+## Coordination plane — implementation.md lock protocol
+
+Cross-repo status lives in enterprise's `docs/planning/implementation.md` (local checkout `~/git/i2gosignals-enterprise`); §5.5 there is the canonical protocol. Agents in this repo have standing authorization (2026-06-09) to update **this repo's own status** in that file's working tree — the single standing exception to the cross-repo hard rule above. You MUST hold the edit lock while doing so:
+
+1. Acquire atomically: `(set -o noclobber; echo "repo=community agent=<short-desc> at=$(date -u +%Y-%m-%dT%H:%M:%SZ) intent=<one line>" > ~/git/i2gosignals-enterprise/docs/planning/.implementation.lock) 2>/dev/null` — exit 0 means you hold it. If held, retry every ~30 s for up to 5 min; a lock older than 30 min is stale (take over and note it in your update).
+2. Keep the hold short (minutes); edit only this repo's rows/items and append to §7 rather than rewriting other repos' text.
+3. Release with `rm ~/git/i2gosignals-enterprise/docs/planning/.implementation.lock` — always, including on abort.
+
+Leave the edit uncommitted — the enterprise manager agent commits it on its review loop. Do not commit or push enterprise `main` unless the user separately authorizes it.
+
 ## What this project is
 
 `i2goSignals` is a Go-based Security Event Token (SET) router/gateway implementing the OpenID Shared Signals Framework (SSF). It bridges SET transmitters and receivers across protocols and domains, persists streams/events in MongoDB, and runs as a horizontally scaled cluster coordinated by MongoDB-backed leases.
