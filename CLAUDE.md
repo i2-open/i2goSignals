@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Cross-repo boundary (hard rule)
+
+This repo is one of four in the i2gosignals family: **enterprise** (`independentid/i2gosignals-enterprise`, design canon + cross-repo coordination plane), **tenancy** (`independentid/i2gosignals-tenancy`), **admin** (`i2-open/i2goSignalsAdmin`), and **community** (this repo, `i2-open/i2goSignals`).
+
+A Claude agent in this repo MUST NOT modify files, push branches, or open/edit issues in any sister repo without:
+
+1. **Explicit user authorization for the cross-repo scope** (per-action, not transferable across turns), AND
+2. **Confirmation that no other agent is currently working in that sister repo** — consult enterprise's `docs/planning/implementation.md` §3 (sister-repo status), then check `gh -R <owner/repo> pr list --state open` and `gh -R <owner/repo> issue list --label ready-for-agent` for active work. When in doubt, ask.
+
+**Default for cross-repo work: raise an issue in the sister repo's tracker** (`gh -R <owner/repo> issue create`) and coordinate through enterprise's `docs/planning/implementation.md` §5. That doc carries the canonical rule in §5.4 — read it before any cross-repo action.
+
+Reads against sister repos (file inspection, `gh ... view`, `git log`) are always allowed and are part of how you satisfy gate 2.
+
+**Branch policy stays in force:** all PRD work on this repo lands on `release-0.12.0`, never `main`/`master`. Enterprise pins community by SHA via `.community-sha` per ADR 0042; uncoordinated history rewrites here cascade pin breakage into enterprise.
+
 ## What this project is
 
 `i2goSignals` is a Go-based Security Event Token (SET) router/gateway implementing the OpenID Shared Signals Framework (SSF). It bridges SET transmitters and receivers across protocols and domains, persists streams/events in MongoDB, and runs as a horizontally scaled cluster coordinated by MongoDB-backed leases.
@@ -151,11 +166,11 @@ Only perform the exact git/branch/issue operations I authorize. Do not bundle ex
 
 ### Issue tracker
 
-Issues and PRDs live as GitHub issues at `i2-open/i2goSignals`. Use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues and PRDs live as GitHub issues at `i2-open/i2goSignals`. Prefer the GitHub MCP server (`mcp__github__*`) when available; fall back to the `gh` CLI in headless/container runs (e.g. Sandcastle). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Default canonical strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). `needs-triage` and `wontfix` already exist in the repo; create the other three with `gh label create` when first needed. See `docs/agents/triage-labels.md`.
+Default canonical strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). `needs-triage` and `wontfix` already exist in the repo; create the other three with `gh label create` when first needed (label creation has no GitHub MCP equivalent, so use the `gh` CLI for this). See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
