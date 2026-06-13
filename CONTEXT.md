@@ -31,7 +31,60 @@ Two independent authorization planes:
   project.
 
 A management session never grants event delivery; a delivery token never
-administers the server. See [`docs/security_model.md`](docs/security_model.md).
+administers the server — with one narrow carve-out: a delivery token may
+read its **own** stream's configuration, which (when it presents the
+stream's current server-issued bearer) doubles as self-service credential
+rotation. See **Rotate-on-GET** below and
+[`docs/security_model.md`](docs/security_model.md).
+
+### Rotate-on-GET (bearer rotation)
+
+The SSF behavior where a GET of a stream's configuration returns a
+freshly-minted delivery bearer. The trigger is **proof of possession**:
+rotation fires only when the GET is authenticated by the stream's
+*current server-issued bearer* (the credential about to be replaced).
+The caller is thereby obligated to persist and switch to the new value.
+
+Any *other* authorized read of the same configuration — a management
+session, an admin token, or a valid-but-non-current delivery token —
+receives a **masked** bearer value and triggers no rotation. Admins
+observing config never see (or invalidate) the live credential; the
+live value is surfaced exactly twice in a credential's life: the
+response that created it and the rotation response that retires it.
+
+Rotation applies only to credentials goSignals itself issued
+(inbound-facing bearers); peer-supplied outbound credentials are never
+rotated by a local GET.
+
+Rotation preserves the credential's authorization shape — same scopes,
+same project — but the replacement is **always bound to the stream(s)
+it serves**: a rotated bearer never widens to a wildcard, and a
+presented bearer whose stream binding does not match the stream being
+read never rotates anything.
+
+### Masked credential
+
+How a credential field reads on any surface other than the response
+that minted it: the literal sentinel `***`, with the field present.
+The sentinel is deliberately not omission — an absent credential means
+"none configured", a `***` means "configured, not shown". Writing
+`***` back through an update means **"leave unchanged"**, so a
+read-edit-write round-trip can never clobber a live credential.
+Masking covers every stored credential — server-issued bearers and
+peer-supplied ones alike.
+
+### Rotation grace
+
+The bounded window after a rotation during which the *retired* bearer
+remains valid. It exists for two client-experience reasons: requests
+already in flight with the old bearer are not failed mid-race, and a
+caller whose rotation response was lost can retry its GET with the old
+bearer and receive the **same** current bearer again (idempotent
+re-read — no third credential is minted). When the window expires the
+old bearer is dead cluster-wide. A zero-length grace means immediate
+revocation. Deliberate trade-off: a stolen old bearer can re-read the
+live credential until the window closes — inherent to
+possession-proves-rotation, bounded by the window.
 
 ### `key` scope
 
