@@ -34,14 +34,15 @@ func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClie
 		return nil
 	}
 
-	// Issue the stream-client (management) token. Only stream-management roles are
-	// minted here: stream_mgmt always, and stream_admin when AllowedScopes carries
-	// it (out-of-band provisioning, capped below by the /register ceiling).
-	//
-	// event_delivery is deliberately NOT minted, even when AllowedScopes records it
-	// as a granted capability. Event delivery is authorized by a separate per-stream
-	// delivery token (IssueStreamToken), so the management token's roles diverge
-	// from AllowedScopes by design (#140). See SsfClient.AllowedScopes.
+	// Issue the stream-client token from the client's granted capabilities:
+	// stream_mgmt always, stream_admin when AllowedScopes carries it (out-of-band
+	// provisioning, capped by the /register ceiling), and event_delivery when
+	// granted. Minting event_delivery as a role lets a single registered token
+	// drive both stream management and the delivery endpoints (poll/events) — a
+	// token with empty StreamIds authorizes any stream in the project and the
+	// delivery handlers take the stream id from the request path. This supersedes
+	// the earlier #140 divergence, which withheld event from the token on the
+	// (incorrect) premise that such a token would be rejected at delivery anyway.
 	admin := slices.Contains(client.AllowedScopes, authSupport.ScopeStreamAdmin)
 	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin, parentJTI)
 	if err != nil {

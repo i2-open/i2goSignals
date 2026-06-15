@@ -10,6 +10,7 @@ import (
 	mathRand "math/rand"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -373,6 +374,17 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 	scopes := []string{ScopeStreamMgmt}
 	if admin { // 'admin' allows creation and deletion instead of just update
 		scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt}
+	}
+	// Honor a granted event-delivery capability by minting it as a token role.
+	// A client that registered for event delivery then receives a token usable
+	// on the delivery endpoints (poll/events), not only stream management: a
+	// token with empty StreamIds authorizes any stream in the project
+	// (EventAuthToken.IsAuthorized), and the delivery handlers resolve the
+	// stream id from the request path. The /register ceiling still caps
+	// self-registration at stream_mgmt+event (stream_admin is out-of-band only),
+	// so this is not a privilege escalation. (Supersedes the #140 divergence.)
+	if slices.Contains(client.AllowedScopes, ScopeEventDelivery) && !slices.Contains(scopes, ScopeEventDelivery) {
+		scopes = append(scopes, ScopeEventDelivery)
 	}
 
 	a.mu.RLock()

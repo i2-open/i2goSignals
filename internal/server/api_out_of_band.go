@@ -639,13 +639,12 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// /register. A self-registration caps at stream_mgmt + event_delivery; an
 	// admin client is provisioned out of band, not via the registration door.
 	//
-	// event_delivery granted here is persisted in the client's AllowedScopes as a
-	// capability, but is intentionally NOT minted into the stream-client
-	// (management) token (see services.ClientService.RegisterClient and
-	// authSupport.IssueStreamClientToken). Event delivery is authorized by a separate
-	// per-stream delivery token (authSupport.IssueStreamToken), issued at stream
-	// creation. The stored-capability vs minted-token-role divergence is by design
-	// (#140); do not reconcile it by adding event to the management token.
+	// event_delivery granted here is persisted in the client's AllowedScopes and
+	// is also minted into the issued token as a role (see
+	// services.ClientService.RegisterClient and authSupport.IssueStreamClientToken),
+	// so a single registered token can both manage a stream and poll/receive its
+	// events. (A per-stream delivery token, authSupport.IssueStreamToken, is still
+	// issued at stream creation for counterparties that authenticate per stream.)
 	var scopes []string
 	if len(jsonRequest.Scopes) == 0 {
 		scopes = append(scopes, authSupport.ScopeStreamMgmt, authSupport.ScopeEventDelivery)
