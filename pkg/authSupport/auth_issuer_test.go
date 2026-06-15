@@ -558,10 +558,14 @@ func TestParseAuthToken(t *testing.T) {
 			name:        "Straight parse client",
 			tokenString: testTokens.client,
 			want: func(token *EventAuthToken) bool {
+				// AllowedScopes grants stream_admin+stream_mgmt+event, so the
+				// minted token carries all three roles (event is minted from the
+				// granted capability; supersedes the old #140 divergence).
 				return token != nil &&
 					token.ProjectId != "" &&
 					token.Roles[0] == ScopeStreamAdmin &&
-					len(token.Roles) == 2 &&
+					len(token.Roles) == 3 &&
+					token.Roles[2] == ScopeEventDelivery &&
 					strings.EqualFold(auth.TokenIssuer, token.Issuer)
 			},
 			wantErr: false,

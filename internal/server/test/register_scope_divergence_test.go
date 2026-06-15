@@ -10,23 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRegisterEventScopeIsCapabilityNotTokenRole pins the intentional divergence
-// reported in #140: a self-registered client's persisted AllowedScopes records
-// event_delivery as a *capability*, but the minted stream-client (management)
-// token never carries the event scope as a role.
+// TestRegisterEventScopeIsMintedAsTokenRole pins the contract that supersedes the
+// earlier #140 divergence: a granted event_delivery capability is BOTH persisted
+// in the client's AllowedScopes AND minted into the stream-client token as a role.
 //
-// This is correct-by-design. Event delivery is authorized by a separate
-// per-stream delivery token (IssueStreamToken: Roles=[event] + StreamIds=[sid]),
-// minted at stream creation and handed to the counterparty — never by the
-// client/management token, which carries only stream_mgmt (and stream_admin only
-// for out-of-band-provisioned clients). The delivery endpoints additionally
-// require a StreamId the management token does not carry, so threading event into
-// the management token would produce a token that is still 403'd everywhere.
+// A single registered token can therefore drive both stream management and the
+// delivery endpoints (poll/events): a token with empty StreamIds authorizes any
+// stream in the project (EventAuthToken.IsAuthorized) and the delivery handlers
+// resolve the stream id from the request path. (A per-stream delivery token,
+// IssueStreamToken with Roles=[event]+StreamIds=[sid], is still issued at stream
+// creation for counterparties that authenticate per stream.)
 //
-// The test guards against a future change that "reconciles" the divergence by
-// minting event into the management token (rejected option (a) in #140 triage):
-// that would flip the NotContains assertion and fail here.
-func TestRegisterEventScopeIsCapabilityNotTokenRole(t *testing.T) {
+// The earlier divergence withheld event from the token on the premise that such a
+// token would be 403'd at delivery anyway; that premise was incorrect, which is
+// why the behavior was reconciled.
+func TestRegisterEventScopeIsMintedAsTokenRole(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 	instance, err := createServer(t, "register_scope_divergence_test", true)
 	require.NoError(t, err)
@@ -37,16 +35,16 @@ func TestRegisterEventScopeIsCapabilityNotTokenRole(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, "default registration must succeed")
 	require.NotEmpty(t, clientToken)
 
-	// Minted management token carries stream_mgmt but NOT event_delivery.
+	// Minted token carries both stream_mgmt and event_delivery as roles.
 	assert.Contains(t, roles, authSupport.ScopeStreamMgmt,
-		"the management token must carry stream_mgmt")
-	assert.NotContains(t, roles, authSupport.ScopeEventDelivery,
-		"event_delivery is a capability, never minted as a management-token role (#140)")
+		"the token must carry stream_mgmt")
+	assert.Contains(t, roles, authSupport.ScopeEventDelivery,
+		"a granted event_delivery capability must be minted as a token role")
 
-	// Persisted AllowedScopes records event_delivery as a granted capability.
+	// Persisted AllowedScopes also records event_delivery as a granted capability.
 	eat, err := instance.GetAuthIssuer().ParseAuthToken(clientToken)
 	require.NoError(t, err)
-	require.NotEmpty(t, eat.ClientId, "the management token must identify its client")
+	require.NotEmpty(t, eat.ClientId, "the token must identify its client")
 	client, err := instance.clientSvc().GetClient(context.Background(), eat.ClientId)
 	require.NoError(t, err)
 	require.NotNil(t, client)
@@ -55,10 +53,10 @@ func TestRegisterEventScopeIsCapabilityNotTokenRole(t *testing.T) {
 	assert.Contains(t, client.AllowedScopes, authSupport.ScopeStreamMgmt)
 }
 
-// TestRegisterExplicitEventScopeDivergence pins the same divergence (#140) on the
+// TestRegisterExplicitEventScopeIsMinted pins the same contract on the
 // explicit-request path: a caller asking for [stream_mgmt, event_delivery] has
-// both granted and persisted, but the minted management token still omits event.
-func TestRegisterExplicitEventScopeDivergence(t *testing.T) {
+// both granted, persisted, and minted into the token as roles.
+func TestRegisterExplicitEventScopeIsMinted(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 	instance, err := createServer(t, "register_explicit_event_divergence_test", true)
 	require.NoError(t, err)
@@ -70,8 +68,8 @@ func TestRegisterExplicitEventScopeDivergence(t *testing.T) {
 	require.NotEmpty(t, clientToken)
 
 	assert.Contains(t, roles, authSupport.ScopeStreamMgmt)
-	assert.NotContains(t, roles, authSupport.ScopeEventDelivery,
-		"an explicitly requested event scope is still not minted as a management-token role (#140)")
+	assert.Contains(t, roles, authSupport.ScopeEventDelivery,
+		"an explicitly requested event scope must be minted as a token role")
 
 	eat, err := instance.GetAuthIssuer().ParseAuthToken(clientToken)
 	require.NoError(t, err)
