@@ -1,0 +1,30 @@
+# Build-from-source override for the SSF conformance stack.
+#
+# Layer this OVER docker-compose-conformance.yml to replace the published
+# i2gosignals image with one compiled from the current working tree, so each
+# fix/enhancement can be tested by rebuilding instead of pulling a release:
+#
+#   # from the conformance/ directory:
+#   docker compose \
+#     -f docker-compose-conformance.yml \
+#     -f docker-compose-conformance.build.yml \
+#     up -d --build
+#
+# `--build` recompiles goSignalsServer + healthcheck from source (see
+# Dockerfile.conformance). The module cache is reused across rebuilds, so after
+# the first build only changed packages recompile. To force a from-scratch
+# rebuild add `--no-cache` to a `docker compose build` invocation.
+#
+# The local tag i2gosignals:conformance-dev keeps source builds distinct from
+# any pulled release image. Everything else (ports, env, cert mount, healthcheck,
+# extra_hosts) is inherited from docker-compose-conformance.yml unchanged.
+
+services:
+  gosignals:
+    image: i2gosignals:conformance-dev
+    build:
+      # Repo root: the whole Go module must be in the build context.
+      context: ..
+      dockerfile: conformance/Dockerfile.conformance
+    # The base file pins command to /app/goSignalsServer, which is also this
+    # image's CMD; left inherited.

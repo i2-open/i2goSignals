@@ -1,0 +1,84 @@
+name: i2gosignals-ssf-conformance
+
+# Minimal, single-SUT deployment of goSignalsServer for running the OpenID
+# conformance suite SSF test plans against it. Brings up exactly:
+#   - mongo        : single-node MongoDB replica set (rs0) for change streams
+#   - mongo-init   : one-shot rs.initiate()
+#   - gosignals    : goSignalsServer, the System-Under-Test, published on :9443
+#
+# Prereqs:
+#   - `make build-docker` in the repo root to produce i2gosignals:latest
+#   - The conformance suite running at https://localhost.emobix.co.uk:8443
+#
+# See README.md for the full runbook.
+
+volumes:
+  ssfconf_mongo_data: {}
+
+networks:
+  ssfconf: {}
+
+services:
+  mongo:
+    image: mongo:latest
+    container_name: ssfconf-mongo
+    networks: [ssfconf]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - ssfconf_mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo-init:
+    image: mongo:latest
+    container_name: ssfconf-mongo-init
+    networks: [ssfconf]
+    restart: "no"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint:
+      - bash
+      - -c
+      - |
+        mongosh --host mongo:27017 --quiet --eval '
+          try { rs.status().ok }
+          catch (e) {
+            rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongo:27017" }] });
+          }'
+
+  gosignals:
+    # Override with GOSIGNALS_IMAGE=... ; defaults to the published alpha image.
+    image: ${GOSIGNALS_IMAGE:-independentid/i2gosignals:0.12.0.alpha.2}
+    container_name: ssfconf-gosignals
+    command: /app/goSignalsServer
+    hostname: gosignals
+    networks: [ssfconf]
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file:
+      - ./gosignals-conformance.env
+    ports:
+      # Published only on loopback; the suite reaches it via the public DNS name
+      # localhost.emobix.co.uk -> 127.0.0.1. Container :8888 -> host :9443.
+      - "127.0.0.1:9443:8888"
+    extra_hosts:
+      # PUSH callback: inside the container localhost.emobix.co.uk would resolve
+      # to the container itself. Map it to the docker host so goSignals can POST
+      # SETs back to the suite at https://localhost.emobix.co.uk:8443.
+      - "localhost.emobix.co.uk:host-gateway"
+    volumes:
+      # Server cert/key + outbound CA (see gosignals-conformance.env). Read-only.
+      - ../config/certs:/app/config/certs:ro
+    healthcheck:
+      # healthcheck binary requires a URL arg; -k skips TLS verification (the
+      # server presents the conformance cert for localhost.emobix.co.uk, not
+      # the in-container "localhost" host it's probed on).
+      test: ["CMD", "/app/healthcheck", "-k", "https://localhost:8888/.well-known/ssf-configuration"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

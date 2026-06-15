@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+#
+# Source-built image for SSF conformance testing. Unlike the production
+# Dockerfile (which COPYs pre-staged binaries produced by `make
+# cross-compile-linux`), this compiles goSignalsServer + healthcheck directly
+# from the working tree, so `docker compose build` rebuilds the SUT from
+# whatever fix is checked out — the iterative fix/test loop for conformance.
+#
+# Used by docker-compose-conformance.build.yml (layer it over
+# docker-compose-conformance.yml to replace the published image with a local
+# build). Build context is the repo root so the whole Go module is available.
+
+##
+## Build stage — compile from source (pinned to go.mod's toolchain).
+##
+FROM golang:1.26.4-bookworm AS build
+
+WORKDIR /src
+
+# Prime the module cache on go.mod/go.sum alone so dependency downloads are
+# cached independently of source edits (the common case while iterating).
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+COPY . .
+
+# CGO disabled -> static binaries that run on a distroless base. Only the two
+# binaries the conformance compose invokes (server + healthcheck probe).
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -o /out/goSignalsServer ./cmd/goSignalsServer/... && \
+    CGO_ENABLED=0 GOOS=linux go build -o /out/healthcheck     ./cmd/healthcheck/...
+
+# Stage a writable resume-token directory; distroless has no shell to mkdir it
+# in the runtime stage, so create it here and COPY it across with nonroot owner.
+RUN mkdir -p /out/resources
+
+##
+## Runtime stage — lean image matching the layout the conformance compose
+## expects: /app/goSignalsServer (command), /app/healthcheck (healthcheck).
+## base-debian12 ships ca-certificates for outbound TLS (PUSH callbacks).
+##
+FROM gcr.io/distroless/base-debian12:nonroot
+
+WORKDIR /app
+
+# nonroot's uid is 65532. /app/resources is where the mongo watchtokens code
+# persists its resume-token file (matches the production Dockerfile).
+COPY --from=build --chown=65532:65532 /out/resources       ./resources
+COPY --from=build --chown=65532:65532 /out/goSignalsServer ./goSignalsServer
+COPY --from=build --chown=65532:65532 /out/healthcheck     ./healthcheck
+
+EXPOSE 8888
+
+CMD ["/app/goSignalsServer"]
