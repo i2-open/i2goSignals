@@ -1708,7 +1708,9 @@ func (d *DeleteStreamCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
+	// SSF 1.0 §8.1.5 Stream Configuration Delete answers 204 No Content on
+	// success; tolerate a 200 OK as well for transmitters that still return it.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return errors.New(fmt.Sprintf("Error completing delete request: %s", resp.Status))
 	}
 	if _, ok := cli.Data.streamConfigs[stream.Alias]; ok {

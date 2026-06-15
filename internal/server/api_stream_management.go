@@ -331,7 +331,9 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	// sa.EventRouter.RemoveStream(authContext)
-	w.WriteHeader(http.StatusOK)
+	// SSF 1.0 §8.1.5 Stream Configuration Delete: a successful delete answers
+	// 204 No Content (the response carries no body).
+	w.WriteHeader(http.StatusNoContent)
 	serverLog.Info(fmt.Sprintf("Stream %s inactivated and deleted.", authContext.StreamId))
 }
 

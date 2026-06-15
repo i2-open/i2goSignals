@@ -237,7 +237,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream should be successfully deleted")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Should be OK status")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Should be 204 No Content")
 
 	// Step 4.
 
@@ -292,7 +292,7 @@ func (suite *ServerSuite) Test3_StreamConfig() {
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err = suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "Stream delete request ok")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Delete return status 200")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Delete return status 204")
 }
 
 // Test4_StreamUpdate checks the stream configuration update functionality via HTTP PUT.
@@ -357,7 +357,7 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 	if err != nil {
 		return
 	}
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Check delete ok")
+	assert.Equal(suite.T(), http.StatusNoContent, resp.StatusCode, "Check delete ok")
 }
 
 // Test5_PollStreamDelivery sets up a polling delivery stream between SSF1 and SSF2 and tests an event can be transferred
