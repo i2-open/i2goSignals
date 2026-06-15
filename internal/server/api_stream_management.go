@@ -709,10 +709,20 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	// Because the PUT/PATCH request does not have a stream id parameter, we extract from payload and re-check.
+	// SSF identifies the target stream by the stream_id query parameter, surfaced
+	// here as authCtx.StreamId. PUT/PATCH instead carry the full StreamConfiguration
+	// in the body, where stream_id is a field, so receivers that omit the query
+	// parameter (e.g. the OpenID conformance suite) leave authCtx.StreamId empty.
+	// Fall back to the body's stream_id in that case. Earlier SSF drafts encoded
+	// the stream id in the token, which is why authCtx.StreamId exists at all.
+	streamId := authCtx.StreamId
+	if streamId == "" {
+		streamId = jsonRequest.StreamConfiguration.Id
+	}
+
 	// Use IsAuthorizedForStream (not a bare Eat check) so local tokens keep their stream-id binding while
 	// OAuth/STS callers — who carry no per-stream binding — are still validated against the granted scope set.
-	if !authCtx.IsAuthorizedForStream(jsonRequest.StreamConfiguration.Id, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin) {
+	if !authCtx.IsAuthorizedForStream(streamId, authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin) {
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
@@ -722,7 +732,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetDate = nil
 	jsonRequest.ResetJti = ""
 
-	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), authCtx.StreamId, authCtx.ProjectId, jsonRequest)
+	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), streamId, authCtx.ProjectId, jsonRequest)
 	if err != nil || configResp == nil {
 		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
@@ -737,13 +747,13 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
 	if err != nil {
-		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
+		serverLog.Error("Error getting stream state after update", "id", streamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
 		// reset the stream to a particular date
-		err := sa.GetEventService().ResetEventStream(r.Context(), authCtx.StreamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
+		err := sa.GetEventService().ResetEventStream(r.Context(), streamId, resetJti, resetDate, func(eventRecord *model.AgEventRecord) bool {
 			// Operational events (verify, stream-updated) are point-to-point and excluded from replay.
 			if eventRecord.Operational {
 				return false
@@ -762,17 +772,17 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	state, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
 	if err != nil {
-		serverLog.Error("Error getting stream state for event router update", "id", authCtx.StreamId, "error", err)
+		serverLog.Error("Error getting stream state for event router update", "id", streamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
-		sa.GetEventRouter().RemoveStream(authCtx.StreamId)
+		sa.GetEventRouter().RemoveStream(streamId)
 	}
 	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
 
-	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", authCtx.StreamId))
+	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	respBytes, err := json.MarshalIndent(adjustBaseUrl(sa, *configResp), "", "  ")
