@@ -303,8 +303,8 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// (ADR 0007). Passing it as the issuing session sets Parent without altering
 	// the delivery token's other claims (an empty-ID session leaves Parent empty).
 	var deliveryParent *authSupport.AuthContext
-	if ctx.Value("authCtx") != nil {
-		authCtx := ctx.Value("authCtx").(*authSupport.AuthContext)
+	authCtx, _ := ctx.Value(authSupport.AuthContextKey).(*authSupport.AuthContext)
+	if authCtx != nil {
 		isOAuth = authCtx.IsOAuthClient
 		if authCtx.Eat != nil {
 			deliveryParent = &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{}}
@@ -314,6 +314,20 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	config.Id = mid.Hex()
 	config.Aud = request.Aud
+	// aud identifies the Event Receiver(s); it is Read-Only / transmitter-asserted
+	// (SSF 1.0 §7.1.1) and is echoed into every SET's aud claim, so the transmitter
+	// must populate it even when the receiver asserts none. Resolve the most specific
+	// stable receiver identity available: the registered client_id for a locally
+	// issued token, falling back to the project id — always present, and the only
+	// identity an OAuth/STS caller carries (it has no local EAT). A receiver that
+	// needs a specific audience (e.g. a domain) sets it in the request.
+	if len(config.Aud) == 0 {
+		if authCtx != nil && authCtx.Eat != nil && authCtx.Eat.ClientId != "" {
+			config.Aud = []string{authCtx.Eat.ClientId}
+		} else if projectID != "" {
+			config.Aud = []string{projectID}
+		}
+	}
 
 	config.EventsSupported = model.GetSupportedEvents()
 
@@ -500,6 +514,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 			// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
 			config.EventsDelivered = txStreamResp.EventsDelivered
+			// aud/iss are transmitter-asserted, Read-Only (SSF 1.0 §7.1.1): accept the
+			// values the transmitter returns, overriding what we requested.
+			if len(txStreamResp.Aud) > 0 {
+				config.Aud = txStreamResp.Aud
+			}
+			if txStreamResp.Iss != "" {
+				config.Iss = txStreamResp.Iss
+			}
 			config.TxWellKnownUrl = request.TxWellKnownUrl
 			txId := txStreamResp.Id
 
@@ -726,6 +748,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 		// from the response, update config with the transmitters response values
 		config.EventsDelivered = txStreamResp.EventsDelivered
+		// aud/iss are transmitter-asserted, Read-Only (SSF 1.0 §7.1.1): accept the
+		// values the transmitter returns, overriding what we requested.
+		if len(txStreamResp.Aud) > 0 {
+			config.Aud = txStreamResp.Aud
+		}
+		if txStreamResp.Iss != "" {
+			config.Iss = txStreamResp.Iss
+		}
 		config.EventsRequested = request.EventsRequested
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
