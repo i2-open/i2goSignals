@@ -1357,7 +1357,20 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl
 	}
 
 	ssLog.Debug("Loading JWKS key", "url", jwksUrl)
-	jwks, err = goSet.GetJwks(jwksUrl)
+	// Honor the stream's transmitter TLS settings so the issuer JWKS can be
+	// fetched even when the transmitter presents a self-signed certificate;
+	// otherwise the load fails TLS verification and retries indefinitely.
+	var jwksClient *http.Client
+	if disableRec != nil {
+		skip := disableRec.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
+		if skip || disableRec.TxTLSCertificate != "" {
+			jwksClient = oauthClient.GetBaseHTTPClientForServer(&model.Server{
+				TLSSkipVerify:  skip,
+				TLSCertificate: disableRec.TxTLSCertificate,
+			})
+		}
+	}
+	jwks, err = goSet.GetJwksWithClient(jwksUrl, jwksClient)
 	if err != nil {
 		msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
 		if isPermanentJwksError(err) {
