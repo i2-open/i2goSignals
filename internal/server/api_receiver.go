@@ -235,6 +235,72 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 	return client, "", noop, nil
 }
 
+// CascadeReceiverStreamDelete deletes the corresponding stream on the FOREIGN
+// transmitter when a locally-auto-registered receiver stream is removed
+// (SSF 1.0 §8.1.1.5). It is best-effort: any failure is logged and swallowed so
+// local deletion always succeeds (mirroring the SSTP peer-cascade contract). A
+// no-op unless the stream is a receiver stream carrying a remote_stream_id.
+func (sa *SignalsApplication) CascadeReceiverStreamDelete(ctx context.Context, state *model.StreamStateRecord) {
+	conf := state.StreamConfiguration
+	if !(state.GetType() == model.ReceivePoll || state.GetType() == model.ReceivePush) {
+		return
+	}
+	if conf.RemoteStreamId == nil || *conf.RemoteStreamId == "" {
+		return
+	}
+
+	// Resolve the transmitter's configuration_endpoint: prefer a registered
+	// TxAlias server's cached metadata, else discover it from the well-known URL.
+	configEndpoint := ""
+	if server, _ := sa.getServerForStream(ctx, state); server != nil && server.ServerConfiguration != nil {
+		configEndpoint = server.ServerConfiguration.ConfigurationEndpoint
+	}
+	if configEndpoint == "" && conf.TxWellKnownUrl != nil && *conf.TxWellKnownUrl != "" {
+		wkClient := sa.getHTTPClientForWellKnownEndpoint(ctx, state)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ctx, wkClient, *conf.TxWellKnownUrl)
+		if err != nil {
+			serverLog.Warn("RCV: delete cascade skipped — failed to discover transmitter config", "sid", conf.Id, "error", err)
+			return
+		}
+		configEndpoint = txConfig.ConfigurationEndpoint
+	}
+	if configEndpoint == "" {
+		serverLog.Warn("RCV: delete cascade skipped — no transmitter configuration_endpoint", "sid", conf.Id)
+		return
+	}
+
+	delURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, *conf.RemoteStreamId)
+	client, auth, closeClient, err := sa.getHTTPClientForStream(ctx, state)
+	if err != nil {
+		serverLog.Warn("RCV: delete cascade skipped — client error", "sid", conf.Id, "error", err)
+		return
+	}
+	defer closeClient()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, delURL, nil)
+	if err != nil {
+		serverLog.Warn("RCV: delete cascade skipped — request build error", "sid", conf.Id, "error", err)
+		return
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		serverLog.Warn("RCV: delete cascade to transmitter failed", "sid", conf.Id, "remote", *conf.RemoteStreamId, "error", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// 204/200 = deleted; 404 = already gone (also acceptable per §8.1.1.5).
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		serverLog.Warn("RCV: delete cascade — unexpected transmitter status", "sid", conf.Id, "status", resp.StatusCode)
+		return
+	}
+	serverLog.Info("RCV: delete cascaded to transmitter", "sid", conf.Id, "remote", *conf.RemoteStreamId, "status", resp.StatusCode)
+}
+
 /*
 HandleReceiver checks if a stream is already defined and updates the configuration returning the ClientPollStream.
 Otherwise, if new, a new receiver is started and its handle is returned. Transmitter streams are ignored automatically.
