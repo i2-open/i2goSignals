@@ -508,7 +508,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 			}
 
 			var txStreamResp model.StreamConfiguration
-			if err := json.NewDecoder(resp.Body).Decode(&txStreamResp); err != nil {
+			respBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return model.StreamConfiguration{}, fmt.Errorf("failed to read transmitter registration response: %v", readErr)
+			}
+			// Tolerate a string-valued aud (RFC 7519 §4.1.3) from the transmitter.
+			if err := model.UnmarshalStreamConfigurationJSON(respBody, &txStreamResp); err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter registration response: %v", err)
 			}
 
@@ -758,7 +763,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		}
 
 		var txStreamResp model.StreamConfiguration
-		if err := json.NewDecoder(resp.Body).Decode(&txStreamResp); err != nil {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
+			return model.StreamConfiguration{}, fmt.Errorf("failed to read transmitter registration response: %v", readErr)
+		}
+		// Tolerate a string-valued aud (RFC 7519 §4.1.3) from the transmitter.
+		if err := model.UnmarshalStreamConfigurationJSON(respBody, &txStreamResp); err != nil {
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
 				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
 			}
