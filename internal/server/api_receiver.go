@@ -160,6 +160,17 @@ func (sa *SignalsApplication) getHTTPClientForWellKnownEndpoint(ctx context.Cont
 		}
 	}
 
+	// No TxAlias server: honor any per-stream transmitter-TLS settings recorded on
+	// the stream itself (self-signed or hostname-mismatched transmitter), so the
+	// inline static-token receiver path can discover a transmitter whose cert the
+	// system roots don't trust.
+	if conf.TxTLSSkipVerify || conf.TxTLSCertificate != "" {
+		srv := &model.Server{TLSSkipVerify: conf.TxTLSSkipVerify, TLSCertificate: conf.TxTLSCertificate}
+		client := oauthClient.GetBaseHTTPClientForServer(srv)
+		client.Timeout = 10 * time.Second
+		return client
+	}
+
 	// Fallback to default client with CA check
 	client := &http.Client{Timeout: 10 * time.Second}
 	tlsSupport.CheckCaInstalled(client)
@@ -186,10 +197,14 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 		serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
 	}
 
-	// 2. Backward compatibility: TxToken (no server object)
+	// 2. Backward compatibility: TxToken (no server object). Carry the per-stream
+	// transmitter-TLS settings so the inline static-token path honors a
+	// self-signed / hostname-mismatched transmitter cert.
 	if server == nil && conf.TxToken != nil && *conf.TxToken != "" {
 		server = &model.Server{
-			ClientToken: conf.TxToken,
+			ClientToken:    conf.TxToken,
+			TLSCertificate: conf.TxTLSCertificate,
+			TLSSkipVerify:  conf.TxTLSSkipVerify,
 		}
 	}
 

@@ -354,9 +354,16 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		if txServer == nil {
 			selectedTxServerParam = false
 			// In static token mode, we don't necessarily have a pre-defined server. Create one so we can use the new http client / credential handler
+			// Carry the receiver's transmitter-TLS settings onto the synthesized
+			// server so discovery and stream registration honor a self-signed or
+			// hostname-mismatched transmitter cert (tx_tls_certificate /
+			// tx_tls_skip_verify). Without this the inline static path always
+			// verified against the system roots regardless of the request fields.
 			txServer = &model.Server{
-				Host:        *request.TxWellKnownUrl,
-				ClientToken: request.TxToken,
+				Host:           *request.TxWellKnownUrl,
+				ClientToken:    request.TxToken,
+				TLSCertificate: request.TxTLSCertificate,
+				TLSSkipVerify:  request.TxTLSSkipVerify || TxTLSSkipVerifyDefault(),
 			}
 		}
 		client := oauthClient.GetBaseHTTPClientForServer(txServer)
