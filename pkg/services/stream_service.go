@@ -573,6 +573,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	config.InactivityTimeout = int32(s.maxInactivityTimeout)
 	config.MinVerificationInterval = int32(s.minVerificationInterval)
 
+	// TxTLSSkipVerify (goSignals extension): the transmitter skips receiver TLS
+	// certificate verification when delivering pushes. Honor an explicit per-stream
+	// request value (e.g. set by goSignalsAdmin) and allow a deployment-wide default
+	// via I2SIG_TX_TLS_SKIP_VERIFY for receivers that present a self-signed / SAN-less
+	// cert (dev, conformance). The field is built field-by-field here, so without
+	// this copy the request value would be silently dropped.
+	config.TxTLSSkipVerify = request.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
+
 	// It is not SSF compliant, but goSignals will accept these settings on stream creation
 	if request.InactivityTimeout > 0 {
 		config.InactivityTimeout = request.InactivityTimeout

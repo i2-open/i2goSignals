@@ -96,8 +96,9 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	traceCtx := httptrace.WithClientTrace(ctx, trace)
 
 	result := goSetPush.PushSET(traceCtx, tokenString, goSetPush.TransmitterConfig{
-		EndpointURL:   pushCfg.EndpointUrl,
-		Authorization: pushCfg.AuthorizationHeader,
+		EndpointURL:        pushCfg.EndpointUrl,
+		Authorization:      pushCfg.AuthorizationHeader,
+		InsecureSkipVerify: cfg.TxTLSSkipVerify,
 	})
 
 	cls := goSetPush.ClassifyResult(result)

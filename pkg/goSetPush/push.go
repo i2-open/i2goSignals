@@ -72,6 +72,12 @@ type TransmitterConfig struct {
 	// HTTPClient is an optional custom HTTP client. If nil, a default with 60s timeout is used.
 	HTTPClient *http.Client
 
+	// InsecureSkipVerify, when true and HTTPClient is nil, builds the default
+	// client with TLS certificate verification disabled. It carries the stream's
+	// tx_tls_skip_verify flag for receivers that present a self-signed or
+	// otherwise unverifiable TLS cert. Ignored when HTTPClient is supplied.
+	InsecureSkipVerify bool
+
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger
 }
