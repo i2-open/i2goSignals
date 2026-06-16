@@ -526,7 +526,7 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
-		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil && txConfig.VerificationEndpoint != "" {
 			rps.verifyUrl = txConfig.VerificationEndpoint
 			return rps.verifyUrl
@@ -574,7 +574,7 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 
 	if rps.stream.StreamConfiguration.TxWellKnownUrl != nil && *rps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
-		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil && txConfig.StatusEndpoint != "" {
 			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, rps.stream.StreamConfiguration.Id)
 			return rps.statusUrl
@@ -694,13 +694,20 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 		return ps.statusUrl
 	}
 
+	// Remote calls must reference the TRANSMITTER's stream_id (remote_stream_id),
+	// not our local id — they identify different streams on each side.
+	remoteId := ps.stream.StreamConfiguration.Id
+	if rid := ps.stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
+		remoteId = *rid
+	}
+
 	// Using goSsfUtils if server is available
 	server, _ := ps.sa.getServerForStream(ps.ctx, ps.stream)
 	if server != nil {
 		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
 		endpoint, err := goSsfUtils.GetStatusEndpoint(ps.ctx, client, server)
 		if err == nil && endpoint != "" {
-			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, ps.stream.StreamConfiguration.Id)
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, remoteId)
 			return ps.statusUrl
 		}
 	}
@@ -713,9 +720,9 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	// Step a: Use TxWellKnownUrl if defined.
 	if ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
 		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
-		txConfig, err := wellKnownSupport.Fetch[model.TransmitterConfiguration](ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil && txConfig.StatusEndpoint != "" {
-			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, ps.stream.StreamConfiguration.Id)
+			ps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, remoteId)
 			return ps.statusUrl
 		}
 	}
