@@ -81,6 +81,16 @@ func (suite *toolSuite) initialize(t *testing.T) error {
 	// server reads the same env var via the bootstrap-secret resolver.
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "tool-test-bootstrap")
 
+	// Cap the long-poll timeout to 1s for the in-process servers. Poll-receive
+	// streams default to TimeoutSecs=10, and DrainReceiver waits for the
+	// in-flight long-poll to return before a delete cascade, so each poll-stream
+	// delete would otherwise block ~10s (Test4 deletes two → ~20s). The cap
+	// clamps every long-poll to 1s, keeping event delivery correct (events still
+	// flush on the next poll) while cutting the suite from ~40s to a few seconds.
+	// Test-only; production poll timeouts are unaffected.
+	t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "1")
+	t.Setenv("I2SIG_POLL_MAX_TIMEOUT", "1")
+
 	cli := &CLI{}
 	cli.Globals.Config = configName
 

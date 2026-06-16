@@ -38,6 +38,7 @@ type SsfApplicationInterface interface {
 	GetDefIssuer() string
 	Name() string
 	CloseReceiver(sid string)
+	DrainReceiver(sid string)
 	CascadeReceiverStreamDelete(ctx context.Context, state *model.StreamStateRecord)
 	HandleReceiver(streamState *model.StreamStateRecord) *ClientPollStream
 

@@ -34,6 +34,7 @@ type ClientPollStream struct {
 	cancel    context.CancelFunc
 	active    bool // false once Close() or a terminal error asked the receiver to stop
 	running   bool // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
+	done      chan struct{} // closed by the polling goroutine when it exits; lets StopGracefully wait for an in-flight poll to drain
 	statusUrl string
 }
 
@@ -143,6 +144,36 @@ func (sa *SignalsApplication) CloseReceiver(sid string) {
 		delete(sa.pushReceivers, sid)
 	}
 
+}
+
+// DrainReceiver gracefully stops a polling receiver and waits for its in-flight
+// poll to complete, so no poll request to the transmitter overlaps a subsequent
+// delete cascade. It does not remove the client (CloseReceiver still does the
+// final cleanup); it only stops the long-poll loop without tearing the current
+// request. Push receivers issue no long-poll, so they are left for CloseReceiver.
+// Best-effort: a drain timeout just means CloseReceiver will force-cancel next.
+func (sa *SignalsApplication) DrainReceiver(sid string) {
+	sa.mu.Lock()
+	ps, ok := sa.pollClients[sid]
+	sa.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// Bound the wait by the poll's own long-poll timeout plus slack so the DELETE
+	// stays responsive; the in-flight poll returns within that window.
+	timeout := 12 * time.Second
+	ps.mu.RLock()
+	if rm := ps.stream.Delivery.PollReceiveMethod; rm != nil && rm.PollConfig != nil && rm.PollConfig.TimeoutSecs > 0 {
+		timeout = time.Duration(rm.PollConfig.TimeoutSecs+2) * time.Second
+	}
+	ps.mu.RUnlock()
+
+	if drained := ps.StopGracefully(timeout); !drained {
+		serverLog.Warn("RCV: poll drain timed out before delete; forcing close", "sid", sid, "timeout", timeout)
+	} else {
+		serverLog.Debug("RCV: poll drained before delete cascade", "sid", sid)
+	}
 }
 
 // getHTTPClientForWellKnownEndpoint returns an HTTP client for fetching well-known configuration endpoints
@@ -330,6 +361,7 @@ func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.Stream
 			running: true,
 			ctx:     ctx,
 			cancel:  cancel,
+			done:    make(chan struct{}),
 		}
 		sa.pollClients[streamState.StreamConfiguration.Id] = ps
 		pollUrl := streamState.Delivery.PollReceiveMethod.EndpointUrl
@@ -356,6 +388,7 @@ func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.Stream
 		ps.cancel = cancel
 		ps.active = true
 		ps.running = true
+		ps.done = make(chan struct{}) // fresh drain signal for the revived goroutine
 	}
 	ps.mu.Unlock()
 
@@ -707,6 +740,36 @@ func (ps *ClientPollStream) Close() {
 	}
 }
 
+// StopGracefully asks the polling goroutine to stop WITHOUT cancelling its
+// context, then waits up to timeout for it to exit. Because the context is left
+// intact, an in-flight long-poll completes naturally instead of being torn
+// mid-request — the loop only re-checks active between polls, so it exits once
+// the current poll returns. This is used before a delete cascade so the receiver
+// is not issuing a poll to the transmitter at the same moment the cascade hits
+// it (a single-threaded transmitter would otherwise race the two requests).
+// Returns true if the goroutine exited within the window; on timeout the caller
+// should fall back to Close() to force-cancel.
+func (ps *ClientPollStream) StopGracefully(timeout time.Duration) bool {
+	ps.mu.Lock()
+	if !ps.running {
+		ps.mu.Unlock()
+		return true
+	}
+	ps.active = false // stop issuing new polls; do NOT cancel so the in-flight poll drains
+	done := ps.done
+	ps.mu.Unlock()
+
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // isConnectionError returns true if the error is related to connection failure
 // and we should consider the server offline.
 func isConnectionError(err error) bool {
@@ -923,6 +986,9 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 	defer func() {
 		ps.mu.Lock()
 		ps.running = false
+		if ps.done != nil {
+			close(ps.done) // wake any StopGracefully waiter: the in-flight poll has fully drained
+		}
 		ps.mu.Unlock()
 	}()
 

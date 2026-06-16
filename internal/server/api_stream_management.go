@@ -313,17 +313,22 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	state.Status = model.StreamStateDisable
 	sa.GetEventRouter().UpdateStreamState(state)
 
-	// Stop all the inbound traffic if Polling. Done BEFORE the remote-delete
-	// cascade so the poll goroutine is no longer issuing its own requests to the
-	// transmitter while the cascade discovers/deletes — concurrent calls would
-	// otherwise race (and some transmitters serialize per-stream requests).
-	sa.CloseReceiver(authContext.StreamId)
+	// Gracefully stop a polling receiver and wait for its in-flight poll to drain
+	// BEFORE the remote-delete cascade, so the receiver is not mid-poll against the
+	// transmitter while the cascade discovers/deletes the same stream — concurrent
+	// calls would otherwise race (and some transmitters serialize per-stream
+	// requests). Unlike CloseReceiver this does not tear the current poll request.
+	sa.DrainReceiver(authContext.StreamId)
 
 	// For a receiver stream auto-registered against a foreign transmitter, delete
 	// the remote stream too (SSF §8.1.1.5). Best-effort: the stream's transmitter
 	// credentials/TLS settings are still available on `state`; a remote failure is
 	// logged but never blocks local deletion.
 	sa.CascadeReceiverStreamDelete(r.Context(), state)
+
+	// Final teardown of the (now-drained) receiver and its bookkeeping. The
+	// context-cancel here is a no-op when the poll goroutine already exited.
+	sa.CloseReceiver(authContext.StreamId)
 
 	// Stop any outbound activity
 	sa.GetEventRouter().RemoveStream(authContext.StreamId)
