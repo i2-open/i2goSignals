@@ -74,6 +74,38 @@ func TestPushStatusFetcher_ReturnsStreamStatus(t *testing.T) {
     assert.Equal(t, "Bearer fake-token", capturedAuth, "fetcher must reuse pushConfig.AuthorizationHeader")
 }
 
+// TestPushStatusFetcher_DisabledMakesNoRequest pins the I2SIG_PUSH_DISABLE_RECEIVER_STATUS
+// opt-out: when set, the fetcher returns an error WITHOUT contacting the receiver,
+// so goSignals never GETs a /status endpoint that standard SSF push receivers don't expose.
+func TestPushStatusFetcher_DisabledMakesNoRequest(t *testing.T) {
+    t.Setenv("I2SIG_PUSH_DISABLE_RECEIVER_STATUS", "true")
+
+    var hits int
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        hits++
+        w.WriteHeader(http.StatusOK)
+    }))
+    defer server.Close()
+
+    r := newTestRouter(t).router
+    stream := &model.StreamStateRecord{}
+    stream.StreamConfiguration = model.StreamConfiguration{
+        Id: "abc123",
+        Delivery: &model.OneOfStreamConfigurationDelivery{
+            PushTransmitMethod: &model.PushTransmitMethod{
+                Method:              model.DeliveryPush,
+                EndpointUrl:         server.URL + "/events/abc123",
+                AuthorizationHeader: "Bearer fake-token",
+            },
+        },
+    }
+
+    status, err := r.pushStatusFetcher()(context.Background(), stream)
+    require.Error(t, err, "fetcher must report disabled rather than poll the receiver")
+    assert.Nil(t, status)
+    assert.Equal(t, 0, hits, "no /status request must reach the receiver when disabled")
+}
+
 func TestPushStatusFetcher_NonOKReturnsError(t *testing.T) {
     server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
         w.WriteHeader(http.StatusUnauthorized)
