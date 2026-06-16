@@ -542,10 +542,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 			if txStreamResp.Delivery != nil && txStreamResp.Delivery.PollTransmitMethod != nil {
 
-				// Copy the authorization header for use at the Status and management endpoints
-				txToken := txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
-				config.TxToken = &txToken // Use for status and verification endpoints
-				config.Delivery.PollReceiveMethod.AuthorizationHeader = txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
+				// Copy the transmitter-issued poll authorization header for the status,
+				// management, poll and delete calls. RFC 8936 permits the transmitter to
+				// omit it, in which case the receiver keeps using the credential it
+				// registered with — otherwise we'd blank out the token and lose access to
+				// every subsequent call (the push path guards this the same way).
+				if hdr := txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader; hdr != "" {
+					config.TxToken = &hdr // Use for status and verification endpoints
+					config.Delivery.PollReceiveMethod.AuthorizationHeader = hdr
+				} else {
+					config.TxToken = request.TxToken
+				}
 				config.Delivery.PollReceiveMethod.EndpointUrl = txStreamResp.Delivery.PollTransmitMethod.EndpointUrl
 				config.Delivery.PollReceiveMethod.PollConfig = txStreamResp.Delivery.PollTransmitMethod.PollConfig // follow the Transmitters poll config if asserted
 				if transmitAlias != "" {
