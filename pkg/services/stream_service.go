@@ -612,6 +612,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	defaultSubjects := request.DefaultSubjects
 	if !SubjectFilteringEnabled() {
 		defaultSubjects = ""
+	} else if defaultSubjects == "" && request.SubjectFilterMode != model.SubjectFilterModePassthru {
+		// SSF §8.1.3 Add/Remove-Subject is an optional narrowing of an existing
+		// event subscription: a stream that filters locally but subscribes to event
+		// types without an explicit baseline must deliver every matching event. The
+		// local baseline must be ALL or NONE (never ""), but a create request rarely
+		// carries default_subjects, so default the empty case to ALL. Without this,
+		// entryDelivers only delivers under an ALL baseline when no per-subject entry
+		// exists, so enabling the feature server-wide would silently blackhole every
+		// stream's events. PASSTHRU streams are excluded: they filter nothing locally
+		// (subject management is relayed upstream), so they carry no local baseline.
+		defaultSubjects = model.DefaultSubjectsAll
 	}
 
 	streamRec := &model.StreamStateRecord{

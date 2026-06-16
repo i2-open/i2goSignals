@@ -10,6 +10,7 @@ import (
 
     interfaces "github.com/i2-open/i2goSignals/pkg/dao"
     "github.com/i2-open/i2goSignals/pkg/dao/memory"
+    "github.com/i2-open/i2goSignals/pkg/goSet"
     "github.com/i2-open/i2goSignals/pkg/ssfModels"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
@@ -520,4 +521,57 @@ func TestStreamService_DefaultSubjectsUnchangedKeepsFilter(t *testing.T) {
 
     _, getErr := filterDAO.Get(ctx, created.Id, "email:alice@example.com")
     require.NoError(t, getErr, "an unchanged defaultSubjects must leave the filter intact")
+}
+
+// TestStreamService_DefaultSubjectsDefaultsToAllWhenEnabled pins the fix for the
+// deny-all blackhole: a stream created while subject filtering is enabled but
+// without an explicit default_subjects (the common create/register case — the
+// OpenID conformance suite never sends the field) must default its baseline to
+// ALL. The baseline must be ALL or NONE (never ""); an empty baseline denies
+// every subject for which there is no per-subject entry, so without this default
+// enabling the feature server-wide silently blackholes every stream's events.
+func TestStreamService_DefaultSubjectsDefaultsToAllWhenEnabled(t *testing.T) {
+    t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+    svc := newSubjectFilterTestService()
+    ctx := context.Background()
+
+    // pushTransmitterRequest() carries no DefaultSubjects.
+    created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err)
+
+    state, err := svc.GetStreamState(ctx, created.Id)
+    require.NoError(t, err)
+    assert.Equal(t, model.DefaultSubjectsAll, state.DefaultSubjects,
+        "a filtering-enabled stream created without default_subjects must default to ALL so it delivers events")
+}
+
+// TestStreamService_DefaultAllStreamDeliversUnfilteredEvent verifies the
+// delivery consequence of the fix end-to-end through SubjectFilterService.Allows:
+// a non-operational (security) event whose subject is in no per-subject filter
+// entry must still be delivered, because the stream's baseline defaulted to ALL.
+// This is the exact path that POLL/PUSH delivery consults at send time; before
+// the fix the "" baseline returned false here and the event was discarded.
+func TestStreamService_DefaultAllStreamDeliversUnfilteredEvent(t *testing.T) {
+    t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+    ctx := context.Background()
+
+    svc := newSubjectFilterTestService()
+    filterDAO := memory.NewSubjectFilterDAO()
+    sfs := NewSubjectFilterService(filterDAO)
+    svc.SetSubjectFilterService(sfs)
+
+    created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+    require.NoError(t, err)
+    state, err := svc.GetStreamState(ctx, created.Id)
+    require.NoError(t, err)
+    require.Equal(t, model.DefaultSubjectsAll, state.DefaultSubjects)
+
+    // A non-operational event whose subject matches no filter entry.
+    ev := &model.AgEventRecord{Operational: false}
+    ev.Event.SubjectId = &goSet.SubjectIdentifier{Format: "opaque"}
+    ev.Event.SubjectId.Id = "user-with-no-filter-entry"
+
+    assert.True(t, sfs.Allows(ctx, state, ev),
+        "with the baseline defaulted to ALL, a non-operational event must be delivered "+
+            "even when no per-subject filter entry exists")
 }
