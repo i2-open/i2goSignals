@@ -20,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSsfUtils"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
@@ -32,10 +33,12 @@ type ClientPollStream struct {
 	stream    *model.StreamStateRecord
 	ctx       context.Context
 	cancel    context.CancelFunc
-	active    bool // false once Close() or a terminal error asked the receiver to stop
-	running   bool // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
-	done      chan struct{} // closed by the polling goroutine when it exits; lets StopGracefully wait for an in-flight poll to drain
-	statusUrl string
+	active          bool          // false once Close() or a terminal error asked the receiver to stop
+	running         bool          // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
+	done            chan struct{} // closed by the polling goroutine when it exits; lets StopGracefully wait for an in-flight poll to drain
+	statusUrl       string
+	verifyUrl       string // cached transmitter verification endpoint
+	verifyRequested bool   // true once a verification has been requested for this goroutine (one-shot on stream establishment)
 }
 
 type ReceiverPushStream struct {
@@ -555,8 +558,14 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	rps.verifyState = state
 	rps.mu.Unlock()
 
+	// The transmitter identifies the stream by its own (remote) stream_id.
+	remoteId := rps.stream.StreamConfiguration.Id
+	if rid := rps.stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
+		remoteId = *rid
+	}
 	params := model.VerificationParameters{
-		State: state,
+		StreamId: remoteId,
+		State:    state,
 	}
 
 	client, _, closeClient, err := rps.sa.getHTTPClientForStream(rps.ctx, rps.stream)
@@ -902,6 +911,100 @@ func (ps *ClientPollStream) getStatusEndpoint() string {
 	return ""
 }
 
+// getVerifyEndpoint resolves (and caches) the transmitter's verification endpoint
+// for this polling receiver. Unlike the status endpoint the stream_id is NOT put
+// in the URL — SSF 1.0 §8.1.4.2 carries it in the request body — so the bare
+// endpoint is cached. Resolution mirrors getStatusEndpoint: a registered TxAlias
+// server's discovered config first, else well-known discovery, else a fallback
+// derived from the status endpoint by swapping the trailing /status for /verify.
+func (ps *ClientPollStream) getVerifyEndpoint() string {
+	ps.mu.RLock()
+	if ps.verifyUrl != "" {
+		ps.mu.RUnlock()
+		return ps.verifyUrl
+	}
+	ps.mu.RUnlock()
+
+	// Resolve WITHOUT holding ps.mu: the helpers below (getServerForStream,
+	// well-known discovery, getStatusEndpoint) manage their own state/locks, and
+	// getStatusEndpoint takes ps.mu itself — holding it here would deadlock.
+	resolved := ""
+	if server, _ := ps.sa.getServerForStream(ps.ctx, ps.stream); server != nil {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+		if endpoint, err := goSsfUtils.GetVerificationEndpoint(ps.ctx, client, server); err == nil && endpoint != "" {
+			resolved = endpoint
+		}
+	}
+
+	if resolved == "" && ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
+		if err == nil && txConfig.VerificationEndpoint != "" {
+			resolved = txConfig.VerificationEndpoint
+		}
+	}
+
+	// Fallback: derive /verify from the resolved status endpoint, dropping the
+	// stream_id query the status URL carries (it belongs in the verify body).
+	if resolved == "" {
+		if statusUrl := ps.getStatusEndpoint(); statusUrl != "" {
+			if u, err := url.Parse(statusUrl); err == nil && strings.Contains(u.Path, "/status") {
+				u.Path = strings.Replace(u.Path, "/status", "/verify", 1)
+				u.RawQuery = ""
+				resolved = u.String()
+			}
+		}
+	}
+
+	ps.mu.Lock()
+	if ps.verifyUrl == "" {
+		ps.verifyUrl = resolved
+	}
+	v := ps.verifyUrl
+	ps.mu.Unlock()
+	return v
+}
+
+// initiateVerification asks the transmitter to emit a verification event for this
+// stream (SSF 1.0 §8.1.4.2). The resulting SET is delivered on a subsequent poll
+// and handled by the normal inbound path. Best-effort: failures are logged and do
+// not stop polling. Run once per goroutine, after the stream is confirmed enabled.
+func (ps *ClientPollStream) initiateVerification() {
+	if !services.RcvVerifyOnEstablishEnabled() {
+		return
+	}
+	sid := ps.stream.StreamConfiguration.Id
+
+	// The transmitter identifies the stream by its own (remote) stream_id.
+	remoteId := sid
+	if rid := ps.stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
+		remoteId = *rid
+	}
+
+	verifyUrl := ps.getVerifyEndpoint()
+	if verifyUrl == "" {
+		serverLog.Warn("POLL-RCV: Could not determine verification endpoint", "sid", sid)
+		return
+	}
+
+	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	if err != nil {
+		serverLog.Warn("POLL-RCV: Failed to get client for verification request", "sid", sid, "error", err)
+		return
+	}
+	defer closeClient()
+
+	params := model.VerificationParameters{
+		StreamId: remoteId,
+		State:    ksuid.New().String(),
+	}
+	if err := goSsfUtils.PostVerification(ps.ctx, client, verifyUrl, params); err != nil {
+		serverLog.Warn("POLL-RCV: Verification request failed", "sid", sid, "error", err)
+		return
+	}
+	serverLog.Info("POLL-RCV: Verification requested", "sid", sid, "remote", remoteId)
+}
+
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
 	server, _ := ps.sa.getServerForStream(ctx, ps.stream)
 	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
@@ -1100,6 +1203,20 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	// Initial status check upon lease acquisition - verify that the transmitter is active
 	if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
 		return
+	}
+
+	// Once the stream is established, optionally request a verification event from
+	// the transmitter (SSF 1.0 §8.1.4.2) so the receiver confirms end-to-end
+	// delivery. Gated by I2SIG_RCV_VERIFY_ON_ESTABLISH (off by default; the gate
+	// lives in initiateVerification). One-shot per goroutine; the verification SET
+	// arrives on a later poll and is processed by the normal inbound path.
+	// Best-effort — never blocks polling.
+	ps.mu.Lock()
+	shouldVerify := !ps.verifyRequested
+	ps.verifyRequested = true
+	ps.mu.Unlock()
+	if shouldVerify {
+		ps.initiateVerification()
 	}
 
 	retryCount := 0
