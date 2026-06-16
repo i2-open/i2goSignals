@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,17 +30,18 @@ import (
 )
 
 type ClientPollStream struct {
-	mu        sync.RWMutex
-	sa        *SignalsApplication
-	stream    *model.StreamStateRecord
-	ctx       context.Context
-	cancel    context.CancelFunc
-	active          bool          // false once Close() or a terminal error asked the receiver to stop
-	running         bool          // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
-	done            chan struct{} // closed by the polling goroutine when it exits; lets StopGracefully wait for an in-flight poll to drain
-	statusUrl       string
-	verifyUrl       string // cached transmitter verification endpoint
-	verifyRequested bool   // true once a verification has been requested for this goroutine (one-shot on stream establishment)
+	mu                  sync.RWMutex
+	sa                  *SignalsApplication
+	stream              *model.StreamStateRecord
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	active              bool          // false once Close() or a terminal error asked the receiver to stop
+	running             bool          // true while the polling goroutine is alive (set on launch, cleared on goroutine exit)
+	done                chan struct{} // closed by the polling goroutine when it exits; lets StopGracefully wait for an in-flight poll to drain
+	statusUrl           string
+	verifyUrl           string // cached transmitter verification endpoint
+	verifyRequested     bool   // true once a verification has been requested for this goroutine (one-shot on stream establishment)
+	managementExercised bool   // true once the management self-exercise has run for this goroutine (one-shot, conformance only)
 }
 
 type ReceiverPushStream struct {
@@ -285,19 +288,7 @@ func (sa *SignalsApplication) CascadeReceiverStreamDelete(ctx context.Context, s
 
 	// Resolve the transmitter's configuration_endpoint: prefer a registered
 	// TxAlias server's cached metadata, else discover it from the well-known URL.
-	configEndpoint := ""
-	if server, _ := sa.getServerForStream(ctx, state); server != nil && server.ServerConfiguration != nil {
-		configEndpoint = server.ServerConfiguration.ConfigurationEndpoint
-	}
-	if configEndpoint == "" && conf.TxWellKnownUrl != nil && *conf.TxWellKnownUrl != "" {
-		wkClient := sa.getHTTPClientForWellKnownEndpoint(ctx, state)
-		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ctx, wkClient, *conf.TxWellKnownUrl)
-		if err != nil {
-			serverLog.Warn("RCV: delete cascade skipped — failed to discover transmitter config", "sid", conf.Id, "error", err)
-			return
-		}
-		configEndpoint = txConfig.ConfigurationEndpoint
-	}
+	configEndpoint := sa.resolveTransmitterConfigEndpoint(ctx, state)
 	if configEndpoint == "" {
 		serverLog.Warn("RCV: delete cascade skipped — no transmitter configuration_endpoint", "sid", conf.Id)
 		return
@@ -333,6 +324,182 @@ func (sa *SignalsApplication) CascadeReceiverStreamDelete(ctx context.Context, s
 		return
 	}
 	serverLog.Info("RCV: delete cascaded to transmitter", "sid", conf.Id, "remote", *conf.RemoteStreamId, "status", resp.StatusCode)
+}
+
+// resolveTransmitterConfigEndpoint returns the transmitter's
+// configuration_endpoint for a receiver stream: a registered TxAlias server's
+// cached metadata if present, else discovered from the stream's well-known URL.
+// Returns "" if neither is available.
+func (sa *SignalsApplication) resolveTransmitterConfigEndpoint(ctx context.Context, state *model.StreamStateRecord) string {
+	conf := state.StreamConfiguration
+	if server, _ := sa.getServerForStream(ctx, state); server != nil && server.ServerConfiguration != nil {
+		if server.ServerConfiguration.ConfigurationEndpoint != "" {
+			return server.ServerConfiguration.ConfigurationEndpoint
+		}
+	}
+	if conf.TxWellKnownUrl != nil && *conf.TxWellKnownUrl != "" {
+		wkClient := sa.getHTTPClientForWellKnownEndpoint(ctx, state)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ctx, wkClient, *conf.TxWellKnownUrl)
+		if err != nil {
+			serverLog.Warn("RCV: failed to discover transmitter configuration_endpoint", "sid", conf.Id, "error", err)
+			return ""
+		}
+		return txConfig.ConfigurationEndpoint
+	}
+	return ""
+}
+
+// resolveTransmitterStatusEndpoint mirrors resolveTransmitterConfigEndpoint for
+// the status_endpoint (SSF 1.0 §8.1.2). Returns "" if it cannot be resolved.
+func (sa *SignalsApplication) resolveTransmitterStatusEndpoint(ctx context.Context, state *model.StreamStateRecord) string {
+	conf := state.StreamConfiguration
+	if server, _ := sa.getServerForStream(ctx, state); server != nil && server.ServerConfiguration != nil {
+		if server.ServerConfiguration.StatusEndpoint != "" {
+			return server.ServerConfiguration.StatusEndpoint
+		}
+	}
+	if conf.TxWellKnownUrl != nil && *conf.TxWellKnownUrl != "" {
+		wkClient := sa.getHTTPClientForWellKnownEndpoint(ctx, state)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ctx, wkClient, *conf.TxWellKnownUrl)
+		if err != nil {
+			serverLog.Warn("RCV: failed to discover transmitter status_endpoint", "sid", conf.Id, "error", err)
+			return ""
+		}
+		return txConfig.StatusEndpoint
+	}
+	return ""
+}
+
+// ExerciseReceiverManagement performs a one-shot, best-effort self-exercise of
+// the transmitter's stream-management API against a receiver stream once it is
+// established: read (GET), update (PATCH), replace (PUT) and status-update
+// (POST status). It is gated by I2SIG_RCV_MANAGEMENT_EXERCISE (off by default)
+// because a production receiver does not spontaneously mutate its own stream;
+// the OpenID SSF receiver conformance plan (happypath, stream-status-update)
+// requires the suite to observe these receiver-initiated calls.
+//
+// Every request is best-effort: any failure is logged and swallowed so the
+// receiver keeps polling. Each request body carries only Receiver-Supplied
+// properties plus the remote stream_id — Read-Only/transmitter-supplied
+// properties are omitted, as strict transmitters reject them (SSF 1.0 §8.1.1.3,
+// §8.1.1.4). Callers must invoke this OUTSIDE any in-flight long-poll window so
+// the requests run sequentially and never race a concurrent poll at a
+// single-threaded transmitter.
+func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, state *model.StreamStateRecord) {
+	if !services.RcvManagementExerciseEnabled() {
+		return
+	}
+	conf := state.StreamConfiguration
+	if !(state.GetType() == model.ReceivePoll || state.GetType() == model.ReceivePush) {
+		return
+	}
+	if conf.RemoteStreamId == nil || *conf.RemoteStreamId == "" {
+		return
+	}
+	remoteId := *conf.RemoteStreamId
+
+	configEndpoint := sa.resolveTransmitterConfigEndpoint(ctx, state)
+	if configEndpoint == "" {
+		serverLog.Warn("RCV: management exercise skipped — no transmitter configuration_endpoint", "sid", conf.Id)
+		return
+	}
+
+	client, auth, closeClient, err := sa.getHTTPClientForStream(ctx, state)
+	if err != nil {
+		serverLog.Warn("RCV: management exercise skipped — client error", "sid", conf.Id, "error", err)
+		return
+	}
+	defer closeClient()
+
+	// 1. Read the stream configuration (SSF 1.0 §8.1.1.2 — stream_id as query param).
+	readURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, remoteId)
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodGet, readURL, nil, conf.Id, "read")
+
+	// 2. Update the stream configuration (SSF 1.0 §8.1.1.3 — PATCH, Receiver-Supplied only).
+	updateBody := map[string]any{
+		"stream_id":   remoteId,
+		"description": "i2goSignals receiver (management exercise: update)",
+	}
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPatch, configEndpoint, updateBody, conf.Id, "update")
+
+	// 3. Replace the stream configuration (SSF 1.0 §8.1.1.4 — PUT, full Receiver-Supplied set).
+	replaceBody := map[string]any{
+		"stream_id":   remoteId,
+		"description": "i2goSignals receiver (management exercise: replace)",
+		"delivery":    receiverDeliveryBody(state),
+	}
+	if len(conf.EventsRequested) > 0 {
+		replaceBody["events_requested"] = conf.EventsRequested
+	}
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPut, configEndpoint, replaceBody, conf.Id, "replace")
+
+	// 4. Update the stream status (SSF 1.0 §8.1.2.2 — POST status). enabled→enabled
+	// is a safe no-op transition that keeps the stream running.
+	statusEndpoint := sa.resolveTransmitterStatusEndpoint(ctx, state)
+	if statusEndpoint == "" {
+		serverLog.Warn("RCV: management exercise — no transmitter status_endpoint, skipping status update", "sid", conf.Id)
+		return
+	}
+	statusBody := map[string]any{
+		"stream_id": remoteId,
+		"status":    string(model.StreamStateEnabled),
+		"reason":    "i2goSignals receiver (management exercise: status update)",
+	}
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPost, statusEndpoint, statusBody, conf.Id, "status-update")
+}
+
+// receiverDeliveryBody builds the Receiver-Supplied delivery sub-object for a
+// replace request, expressed with the management-API (transmit-direction)
+// method URN the transmitter expects, derived from the receiver's own delivery.
+func receiverDeliveryBody(state *model.StreamStateRecord) map[string]any {
+	if state.GetType() == model.ReceivePush && state.Delivery != nil && state.Delivery.PushReceiveMethod != nil {
+		return map[string]any{
+			"method":       model.DeliveryPush,
+			"endpoint_url": state.Delivery.PushReceiveMethod.EndpointUrl,
+		}
+	}
+	return map[string]any{"method": model.DeliveryPoll}
+}
+
+// doReceiverManagementRequest issues one best-effort management request to the
+// transmitter and logs the outcome. A nil body sends no payload. The
+// Authorization header is set only when an explicit token is supplied; for
+// TxAlias/OAuth clients the returned http.Client injects credentials itself.
+func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, client *http.Client, auth, method, url string, body map[string]any, sid, op string) {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			serverLog.Warn("RCV: management exercise — failed to marshal body", "sid", sid, "op", op, "error", err)
+			return
+		}
+		reader = bytes.NewReader(raw)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	if err != nil {
+		serverLog.Warn("RCV: management exercise — request build failed", "sid", sid, "op", op, "error", err)
+		return
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		serverLog.Warn("RCV: management exercise request failed", "sid", sid, "op", op, "error", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		serverLog.Warn("RCV: management exercise — unexpected transmitter status", "sid", sid, "op", op, "status", resp.StatusCode)
+		return
+	}
+	serverLog.Info("RCV: management exercise step ok", "sid", sid, "op", op, "remote", url, "status", resp.StatusCode)
 }
 
 /*
@@ -1217,6 +1384,18 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	ps.mu.Unlock()
 	if shouldVerify {
 		ps.initiateVerification()
+	}
+
+	// Conformance-only (I2SIG_RCV_MANAGEMENT_EXERCISE): once per goroutine, drive a
+	// read/update/replace/status-update round against the transmitter. Runs here,
+	// in the pre-poll window before any long-poll is open, so the calls are
+	// sequential and never race a concurrent poll at a single-threaded transmitter.
+	ps.mu.Lock()
+	shouldExercise := !ps.managementExercised
+	ps.managementExercised = true
+	ps.mu.Unlock()
+	if shouldExercise {
+		ps.sa.ExerciseReceiverManagement(ps.ctx, ps.stream)
 	}
 
 	retryCount := 0
