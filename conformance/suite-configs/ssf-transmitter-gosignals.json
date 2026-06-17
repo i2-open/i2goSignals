@@ -1,0 +1,21 @@
+{
+    "alias": "gosignals-ssf-tx",
+    "description": "SSF Transmitter conformance against goSignalsServer (suite emulates a Receiver)",
+    "ssf": {
+        "subjects": {
+            "valid": {
+                "format": "opaque",
+                "id": "valid"
+            },
+            "invalid": {
+                "format": "opaque",
+                "id": "invalid"
+            }
+        },
+        "transmitter": {
+            "issuer": "https://localhost.emobix.co.uk:9443",
+            "access_token": "__GOSIGNALS_STREAM_EVENT_TOKEN__",
+            "push_endpoint_authorization_header": "Bearer ssf-conformance-push"
+        }
+    }
+}

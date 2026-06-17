@@ -218,6 +218,33 @@ func TestPushSET_Accepted(t *testing.T) {
 	assert.NoError(t, result.Err)
 }
 
+// TestPushSET_InsecureSkipVerify pins the tx_tls_skip_verify wiring: a receiver
+// presenting a self-signed TLS cert (httptest.NewTLSServer) is rejected by the
+// default verifying client, but accepted when InsecureSkipVerify is set.
+func TestPushSET_InsecureSkipVerify(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	// Default (verify): the self-signed cert is untrusted, so the push fails at
+	// the TLS layer with no HTTP response.
+	verifyResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
+		EndpointURL: server.URL,
+	})
+	require.Error(t, verifyResult.Err, "default client must reject the self-signed receiver cert")
+	assert.False(t, verifyResult.Accepted)
+
+	// InsecureSkipVerify: TLS verification is skipped and the push is accepted.
+	skipResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
+		EndpointURL:        server.URL,
+		InsecureSkipVerify: true,
+	})
+	assert.NoError(t, skipResult.Err, "InsecureSkipVerify must accept the self-signed receiver cert")
+	assert.True(t, skipResult.Accepted)
+	assert.Equal(t, http.StatusAccepted, skipResult.StatusCode)
+}
+
 func TestPushSET_BadRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		errBody := DeliveryErr{

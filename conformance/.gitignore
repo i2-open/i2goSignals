@@ -1,0 +1,3 @@
+# bootstrap-token.sh writes the suite config with a live minted access token
+# here; it is a per-run local artifact, never committed.
+suite-configs/*.local.json

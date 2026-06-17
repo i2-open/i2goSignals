@@ -4,7 +4,11 @@ import "time"
 
 // StreamConfiguration is a JSON Object describing and Event Stream's configuration [Spec](https://openid.net/specs/openid-sse-framework-1_0.html#stream-config)\"
 type StreamConfiguration struct {
-	Id string `json:"stream_id" bson:"id"`
+	// stream_id is Read-Only / transmitter-assigned (SSF 1.0 §7.1.1). omitempty so
+	// a receiver's stream-registration request (which reuses this struct) does not
+	// send an empty stream_id — strict transmitters reject transmitter-supplied
+	// properties in a create body. Real responses always carry a non-empty Id.
+	Id string `json:"stream_id,omitempty" bson:"id"`
 
 	// Read-Only. A URL using the https scheme with no query or fragment component that the Transmitter asserts as its Issuer Identifier. This MUST be identical to the iss Claim value in Security Event Tokens issued from this Transmitter.
 	Iss string `json:"iss,omitempty" bson:"iss,omitempty"`

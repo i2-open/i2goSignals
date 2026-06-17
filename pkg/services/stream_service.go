@@ -303,8 +303,8 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// (ADR 0007). Passing it as the issuing session sets Parent without altering
 	// the delivery token's other claims (an empty-ID session leaves Parent empty).
 	var deliveryParent *authSupport.AuthContext
-	if ctx.Value("authCtx") != nil {
-		authCtx := ctx.Value("authCtx").(*authSupport.AuthContext)
+	authCtx, _ := ctx.Value(authSupport.AuthContextKey).(*authSupport.AuthContext)
+	if authCtx != nil {
 		isOAuth = authCtx.IsOAuthClient
 		if authCtx.Eat != nil {
 			deliveryParent = &authSupport.AuthContext{Eat: &authSupport.EventAuthToken{}}
@@ -314,6 +314,20 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	config.Id = mid.Hex()
 	config.Aud = request.Aud
+	// aud identifies the Event Receiver(s); it is Read-Only / transmitter-asserted
+	// (SSF 1.0 §7.1.1) and is echoed into every SET's aud claim, so the transmitter
+	// must populate it even when the receiver asserts none. Resolve the most specific
+	// stable receiver identity available: the registered client_id for a locally
+	// issued token, falling back to the project id — always present, and the only
+	// identity an OAuth/STS caller carries (it has no local EAT). A receiver that
+	// needs a specific audience (e.g. a domain) sets it in the request.
+	if len(config.Aud) == 0 {
+		if authCtx != nil && authCtx.Eat != nil && authCtx.Eat.ClientId != "" {
+			config.Aud = []string{authCtx.Eat.ClientId}
+		} else if projectID != "" {
+			config.Aud = []string{projectID}
+		}
+	}
 
 	config.EventsSupported = model.GetSupportedEvents()
 
@@ -340,9 +354,16 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		if txServer == nil {
 			selectedTxServerParam = false
 			// In static token mode, we don't necessarily have a pre-defined server. Create one so we can use the new http client / credential handler
+			// Carry the receiver's transmitter-TLS settings onto the synthesized
+			// server so discovery and stream registration honor a self-signed or
+			// hostname-mismatched transmitter cert (tx_tls_certificate /
+			// tx_tls_skip_verify). Without this the inline static path always
+			// verified against the system roots regardless of the request fields.
 			txServer = &model.Server{
-				Host:        *request.TxWellKnownUrl,
-				ClientToken: request.TxToken,
+				Host:           *request.TxWellKnownUrl,
+				ClientToken:    request.TxToken,
+				TLSCertificate: request.TxTLSCertificate,
+				TLSSkipVerify:  request.TxTLSSkipVerify || TxTLSSkipVerifyDefault(),
 			}
 		}
 		client := oauthClient.GetBaseHTTPClientForServer(txServer)
@@ -494,12 +515,25 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 			}
 
 			var txStreamResp model.StreamConfiguration
-			if err := json.NewDecoder(resp.Body).Decode(&txStreamResp); err != nil {
+			respBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return model.StreamConfiguration{}, fmt.Errorf("failed to read transmitter registration response: %v", readErr)
+			}
+			// Tolerate a string-valued aud (RFC 7519 §4.1.3) from the transmitter.
+			if err := model.UnmarshalStreamConfigurationJSON(respBody, &txStreamResp); err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to decode transmitter registration response: %v", err)
 			}
 
 			// from the response, update config.EventsDelivered with the transmitters response EventsDelivered
 			config.EventsDelivered = txStreamResp.EventsDelivered
+			// aud/iss are transmitter-asserted, Read-Only (SSF 1.0 §7.1.1): accept the
+			// values the transmitter returns, overriding what we requested.
+			if len(txStreamResp.Aud) > 0 {
+				config.Aud = txStreamResp.Aud
+			}
+			if txStreamResp.Iss != "" {
+				config.Iss = txStreamResp.Iss
+			}
 			config.TxWellKnownUrl = request.TxWellKnownUrl
 			txId := txStreamResp.Id
 
@@ -508,10 +542,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 			if txStreamResp.Delivery != nil && txStreamResp.Delivery.PollTransmitMethod != nil {
 
-				// Copy the authorization header for use at the Status and management endpoints
-				txToken := txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
-				config.TxToken = &txToken // Use for status and verification endpoints
-				config.Delivery.PollReceiveMethod.AuthorizationHeader = txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader
+				// Copy the transmitter-issued poll authorization header for the status,
+				// management, poll and delete calls. RFC 8936 permits the transmitter to
+				// omit it, in which case the receiver keeps using the credential it
+				// registered with — otherwise we'd blank out the token and lose access to
+				// every subsequent call (the push path guards this the same way).
+				if hdr := txStreamResp.Delivery.PollTransmitMethod.AuthorizationHeader; hdr != "" {
+					config.TxToken = &hdr // Use for status and verification endpoints
+					config.Delivery.PollReceiveMethod.AuthorizationHeader = hdr
+				} else {
+					config.TxToken = request.TxToken
+				}
 				config.Delivery.PollReceiveMethod.EndpointUrl = txStreamResp.Delivery.PollTransmitMethod.EndpointUrl
 				config.Delivery.PollReceiveMethod.PollConfig = txStreamResp.Delivery.PollTransmitMethod.PollConfig // follow the Transmitters poll config if asserted
 				if transmitAlias != "" {
@@ -550,6 +591,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// Set the default values based on environment values
 	config.InactivityTimeout = int32(s.maxInactivityTimeout)
 	config.MinVerificationInterval = int32(s.minVerificationInterval)
+
+	// TxTLSSkipVerify (goSignals extension): the transmitter skips receiver TLS
+	// certificate verification when delivering pushes. Honor an explicit per-stream
+	// request value (e.g. set by goSignalsAdmin) and allow a deployment-wide default
+	// via I2SIG_TX_TLS_SKIP_VERIFY for receivers that present a self-signed / SAN-less
+	// cert (dev, conformance). The field is built field-by-field here, so without
+	// this copy the request value would be silently dropped.
+	config.TxTLSSkipVerify = request.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
 
 	// It is not SSF compliant, but goSignals will accept these settings on stream creation
 	if request.InactivityTimeout > 0 {
@@ -590,6 +639,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	defaultSubjects := request.DefaultSubjects
 	if !SubjectFilteringEnabled() {
 		defaultSubjects = ""
+	} else if defaultSubjects == "" && request.SubjectFilterMode != model.SubjectFilterModePassthru {
+		// SSF §8.1.3 Add/Remove-Subject is an optional narrowing of an existing
+		// event subscription: a stream that filters locally but subscribes to event
+		// types without an explicit baseline must deliver every matching event. The
+		// local baseline must be ALL or NONE (never ""), but a create request rarely
+		// carries default_subjects, so default the empty case to ALL. Without this,
+		// entryDelivers only delivers under an ALL baseline when no per-subject entry
+		// exists, so enabling the feature server-wide would silently blackhole every
+		// stream's events. PASSTHRU streams are excluded: they filter nothing locally
+		// (subject management is relayed upstream), so they carry no local baseline.
+		defaultSubjects = model.DefaultSubjectsAll
 	}
 
 	streamRec := &model.StreamStateRecord{
@@ -717,7 +777,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		}
 
 		var txStreamResp model.StreamConfiguration
-		if err := json.NewDecoder(resp.Body).Decode(&txStreamResp); err != nil {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
+				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
+			}
+			return model.StreamConfiguration{}, fmt.Errorf("failed to read transmitter registration response: %v", readErr)
+		}
+		// Tolerate a string-valued aud (RFC 7519 §4.1.3) from the transmitter.
+		if err := model.UnmarshalStreamConfigurationJSON(respBody, &txStreamResp); err != nil {
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
 				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)
 			}
@@ -726,6 +794,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 		// from the response, update config with the transmitters response values
 		config.EventsDelivered = txStreamResp.EventsDelivered
+		// aud/iss are transmitter-asserted, Read-Only (SSF 1.0 §7.1.1): accept the
+		// values the transmitter returns, overriding what we requested.
+		if len(txStreamResp.Aud) > 0 {
+			config.Aud = txStreamResp.Aud
+		}
+		if txStreamResp.Iss != "" {
+			config.Iss = txStreamResp.Iss
+		}
 		config.EventsRequested = request.EventsRequested
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
@@ -1288,7 +1364,20 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl
 	}
 
 	ssLog.Debug("Loading JWKS key", "url", jwksUrl)
-	jwks, err = goSet.GetJwks(jwksUrl)
+	// Honor the stream's transmitter TLS settings so the issuer JWKS can be
+	// fetched even when the transmitter presents a self-signed certificate;
+	// otherwise the load fails TLS verification and retries indefinitely.
+	var jwksClient *http.Client
+	if disableRec != nil {
+		skip := disableRec.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
+		if skip || disableRec.TxTLSCertificate != "" {
+			jwksClient = oauthClient.GetBaseHTTPClientForServer(&model.Server{
+				TLSSkipVerify:  skip,
+				TLSCertificate: disableRec.TxTLSCertificate,
+			})
+		}
+	}
+	jwks, err = goSet.GetJwksWithClient(jwksUrl, jwksClient)
 	if err != nil {
 		msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
 		if isPermanentJwksError(err) {

@@ -90,6 +90,14 @@ func (sa *SsfApplication) CloseReceiver(_ string) {
 	// SSF-only server does not implement receivers
 }
 
+func (sa *SsfApplication) DrainReceiver(_ string) {
+	// SSF-only server does not implement receivers
+}
+
+func (sa *SsfApplication) CascadeReceiverStreamDelete(_ context.Context, _ *model.StreamStateRecord) {
+	// SSF-only server does not implement receivers
+}
+
 func (sa *SsfApplication) HandleReceiver(_ *model.StreamStateRecord) *server.ClientPollStream {
 	// SSF-only server does not implement receivers
 	return nil

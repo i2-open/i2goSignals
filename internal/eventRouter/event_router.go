@@ -1257,11 +1257,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	// attempt the first push; that wastes a JTI on a known failure and produces noise in logs.
 	// Transport/auth/decode errors are tolerated — they will surface immediately on the first
 	// push attempt and dispatch to T1 with the right RecoveryMode.
-	switch outcome := r.preflightCheckStatus(heartbeatCtx, stream, statusFetcher, recoveryCfg); outcome {
-	case RecoveryOutcomeDisabled:
-		return false
-	case RecoveryOutcomeContextDone:
-		return true
+	//
+	// The receiver status-poll is a goSignals/SSTP extension; standard SSF (§7.1.3) puts the
+	// status endpoint on the transmitter, so a plain RFC 8935 receiver exposes none. When
+	// disabled, skip the pre-flight (and recovery polls below) entirely — a receiver pause is
+	// still observed via the push response, not a status GET.
+	if PushReceiverStatusDisabled() {
+		eventLogger.Warn("PUSH-SRV: receiver status-poll disabled (I2SIG_PUSH_DISABLE_RECEIVER_STATUS); "+
+			"skipping T2 pre-flight /status check — push delivery proceeds without it", "sid", sid)
+	} else {
+		switch outcome := r.preflightCheckStatus(heartbeatCtx, stream, statusFetcher, recoveryCfg); outcome {
+		case RecoveryOutcomeDisabled:
+			return false
+		case RecoveryOutcomeContextDone:
+			return true
+		}
 	}
 
 	backfillTicker := time.NewTicker(r.backfillInterval)

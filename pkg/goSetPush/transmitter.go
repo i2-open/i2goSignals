@@ -2,6 +2,7 @@ package goSetPush
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,7 +22,16 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
-		tlsSupport.CheckCaInstalled(client)
+		if config.InsecureSkipVerify {
+			// Honor the stream's tx_tls_skip_verify: skip receiver cert
+			// verification entirely (dev / self-signed receivers). CheckCaInstalled
+			// is intentionally not called — verification is being disabled.
+			client.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
+			}
+		} else {
+			tlsSupport.CheckCaInstalled(client)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.EndpointURL, strings.NewReader(tokenString))
