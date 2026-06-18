@@ -59,8 +59,20 @@ SUITE_URL="${SUITE_URL:-https://localhost.emobix.co.uk:8443/}"
 SUT_READY_URL="${SUT_READY_URL:-https://localhost.emobix.co.uk:9443/.well-known/ssf-configuration}"
 SUT_READY_TRIES="${SUT_READY_TRIES:-30}"
 RX_TOKEN="${RX_TOKEN:-ssf-conformance-rx-token}"
-RX_DRIVER_INTERVAL="${RX_DRIVER_INTERVAL:-8}"
-RX_DRIVER_WINDOW="${RX_DRIVER_WINDOW:-600}"
+RX_DRIVER_WINDOW="${RX_DRIVER_WINDOW:-1800}"
+# Delay between the driver's CREATE and DELETE for a single module. The module
+# stays in WAITING until it has observed every expected receiver action; for
+# most modules that's CREATE + (SUT-side GET/PATCH/PUT/POST/verify driven by
+# I2SIG_RCV_MANAGEMENT_EXERCISE / I2SIG_RCV_VERIFY_ON_ESTABLISH) + DELETE. The
+# DELETE must come from us, otherwise the module never reaches isFinished().
+# This delay lets the SUT auto-exercise complete before we tear down. The
+# stream-supported-events module takes longer (suite generates a SET per
+# supported event and waits for ACKs).
+RX_MODULE_HOLD="${RX_MODULE_HOLD:-30}"
+RX_MODULE_HOLD_EVENTS="${RX_MODULE_HOLD_EVENTS:-90}"
+# Per-module guard: max seconds we wait for a terminal state after deleting,
+# before giving up and moving on (suite's own wait_for_state timeout is ~240s).
+RX_MODULE_GUARD="${RX_MODULE_GUARD:-60}"
 GOSIGNALS_CONTAINER="${GOSIGNALS_CONTAINER:-ssfconf-gosignals}"
 EXTRA_RUNNER_ARGS="${EXTRA_RUNNER_ARGS:-}"
 
@@ -127,12 +139,26 @@ for ((i = 1; i <= SUT_READY_TRIES; i++)); do
     sleep 1
 done
 
-# Bootstrap-token mint still useful for any /trigger-event the suite might need
-# downstream; harmless for pure receiver runs (suite never calls our APIs).
+# Mint a stream+event-scoped bearer the CLI presents to the SUT itself when it
+# registers the local-side half of the connection (see `add server local` below).
+# bootstrap-token.sh prints the token on the line after "Access token:".
 echo "==> Minting bearer token"
-"$SCRIPT_DIR/bootstrap-token.sh" >/dev/null || true
+BOOTSTRAP_OUT="$("$SCRIPT_DIR/bootstrap-token.sh" 2>&1)"
+echo "$BOOTSTRAP_OUT" >/dev/null
+RX_LOCAL_TOKEN="$(printf '%s\n' "$BOOTSTRAP_OUT" | awk '/^>> Access token:/{getline; print; exit}')"
+if [[ -z "$RX_LOCAL_TOKEN" ]]; then
+    echo "ERROR: failed to parse access token from bootstrap-token.sh output" >&2
+    printf '%s\n' "$BOOTSTRAP_OUT" >&2
+    exit 1
+fi
+
+# SUT base URL the CLI uses to register the local-side server (extra_hosts in
+# docker-compose-conformance.yml maps localhost.emobix.co.uk -> host-gateway so
+# the in-container CLI can reach the SUT's own published port).
+SUT_BASE_URL="${SUT_READY_URL%/.well-known/ssf-configuration}"
 
 DRIVER_LOG="$SCRIPT_DIR/results/rx-driver-$(date -u +%Y%m%dT%H%M%SZ).log"
+RUNNER_TAP="$SCRIPT_DIR/results/runner-tap-$(date -u +%Y%m%dT%H%M%SZ).log"
 DRIVER_PID=""
 cleanup_driver() {
     if [[ -n "$DRIVER_PID" ]] && kill -0 "$DRIVER_PID" 2>/dev/null; then
@@ -168,8 +194,10 @@ driver_loop() {
     local tx_path="${TX_URL#"$tx_host"}"
     local discovery_url="${tx_host}/.well-known/ssf-configuration${tx_path%/}"
     local discovery_ok=0
+    local discovery_body=""
     for ((j=0; j<60; j++)); do
-        if curl -fsk "$discovery_url" 2>/dev/null | grep -q '"issuer"[[:space:]]*:[[:space:]]*"http'; then
+        discovery_body="$(curl -fsk "$discovery_url" 2>/dev/null || true)"
+        if printf '%s' "$discovery_body" | grep -q '"issuer"[[:space:]]*:[[:space:]]*"http'; then
             discovery_ok=1
             break
         fi
@@ -179,32 +207,198 @@ driver_loop() {
         echo "[$(date +%H:%M:%S)] giving up: suite never returned a live ssf-configuration" >>"$DRIVER_LOG"
         return
     fi
-    echo "[$(date +%H:%M:%S)] suite ssf-configuration live; adding server" >>"$DRIVER_LOG"
+    # Extract suite-side iss + jwks_uri for the connection command (required by
+    # CreatePush/PollConnectionCmd when neither half pre-exists).
+    local suite_iss suite_jwks
+    suite_iss="$(printf '%s' "$discovery_body" | jq -r '.issuer // empty')"
+    suite_jwks="$(printf '%s' "$discovery_body" | jq -r '.jwks_uri // empty')"
+    if [[ -z "$suite_iss" || -z "$suite_jwks" ]]; then
+        echo "[$(date +%H:%M:%S)] giving up: suite ssf-configuration missing issuer or jwks_uri" >>"$DRIVER_LOG"
+        return
+    fi
+    # Explicit events list. The suite does NOT advertise events_supported in
+    # its ssf-configuration (and goSignals' '*' expansion needs a connecting
+    # config it can pull EventsDelivered from — the poll-connection publisher
+    # half has no such source and would marshal events_requested:null, which
+    # crashes the suite's gson cast). The list below is the union of SSF +
+    # CAEP + RISC standard event URIs from the suite's SsfEvents constants;
+    # caep-interop plans only need a subset of these to be present.
+    local suite_events="https://schemas.openid.net/secevent/ssf/event-type/verification"
+    suite_events+=",https://schemas.openid.net/secevent/ssf/event-type/stream-updated"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/session-revoked"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/token-claims-change"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/credential-change"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/assurance-level-change"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/device-compliance-change"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/session-established"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/session-presented"
+    suite_events+=",https://schemas.openid.net/secevent/caep/event-type/risk-level-change"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/account-credential-change-required"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/account-disabled"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/account-enabled"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/account-purged"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/credential-compromise"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/identifier-changed"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/identifier-recycled"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/opt-in"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/opt-out-cancelled"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/opt-out-effective"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/opt-out-initiated"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/recovery-activated"
+    suite_events+=",https://schemas.openid.net/secevent/risc/event-type/recovery-information-changed"
+    echo "[$(date +%H:%M:%S)] suite ssf-configuration live (iss=$suite_iss); adding servers" >>"$DRIVER_LOG"
 
-    # `add server` is one-shot — alias-already-exists errors out. Try it once;
-    # if the alias is already present from a prior run inside the same
-    # container, proceed with the create/delete cycle anyway.
+    # `add server` is one-shot per alias inside the SUT container's CLI config.
+    # The compose volume is wiped per plan run, so these always succeed on a
+    # fresh start; ignore non-zero so a hot rerun (no compose down) keeps going.
     docker "${exec_args[@]}" add server suite "$TX_URL" --token="$RX_TOKEN" \
         >>"$DRIVER_LOG" 2>&1 || \
-        echo "[$(date +%H:%M:%S)] add server returned non-zero (alias may already exist)" >>"$DRIVER_LOG"
+        echo "[$(date +%H:%M:%S)] add server suite returned non-zero (alias may already exist)" >>"$DRIVER_LOG"
+    # The SUT itself, addressable from inside the container via the host-gateway
+    # mapping in docker-compose-conformance.yml. The token must carry 'stream'
+    # scope so the CLI can POST to /streams.
+    docker "${exec_args[@]}" add server local "$SUT_BASE_URL" --token="$RX_LOCAL_TOKEN" \
+        >>"$DRIVER_LOG" 2>&1 || \
+        echo "[$(date +%H:%M:%S)] add server local returned non-zero (alias may already exist)" >>"$DRIVER_LOG"
+
+    # Event-driven cycle: each receiver test module needs exactly ONE stream
+    # pair. Tail the Python runner's stdout (mirrored to $RUNNER_TAP) and react
+    # to per-module state transitions:
+    #   - "module id <ID> status changed to WAITING" (first time per ID): the
+    #     suite is ready for our stream registration → issue one create.
+    #   - "module id <ID> status changed to (FINISHED|INTERRUPTED|REVIEW)": the
+    #     module is done → delete the streams.
+    # This replaces the old "loop and create as fast as possible" approach,
+    # which overran the suite's per-module stream-pool cap with "Too many
+    # streams configured for receiver" failures.
+    # Per-module state machine. For each module the suite walks through:
+    #   CONFIGURED → WAITING (driver: CREATE) → ... SUT-driven ops ... →
+    #   (after RX_MODULE_HOLD seconds) driver: DELETE → module observes the
+    #   final action → FINISHED/REVIEW (or INTERRUPTED on suite-side failure).
+    # The DELETE is what lets the test see the full create/.../delete sequence
+    # and reach isFinished(). Waiting for the module to advance before deleting
+    # deadlocks the test.
+    local current_mod="" current_alias="" current_test_name="" current_started=0 current_deleted=0 current_hold=0
+    local -A seen_mods=()
+    local last_test_name=""
+
+    do_delete() {
+        if (( current_deleted == 1 )) || [[ -z "$current_alias" ]]; then
+            return
+        fi
+        echo "[$(date +%H:%M:%S)] module=$current_mod delete streams (${current_alias}-pub, ${current_alias}-rcv)" >>"$DRIVER_LOG"
+        docker "${exec_args[@]}" delete stream "${current_alias}-pub" >>"$DRIVER_LOG" 2>&1 || true
+        docker "${exec_args[@]}" delete stream "${current_alias}-rcv" >>"$DRIVER_LOG" 2>&1 || true
+        current_deleted=1
+    }
+
+    end_current() {
+        do_delete
+        current_mod="" current_alias="" current_test_name="" current_started=0 current_deleted=0 current_hold=0
+    }
+
+    issue_create_for_module() {
+        local mod="$1" test_name="$2"
+        if [[ -n "${seen_mods[$mod]:-}" ]]; then
+            return
+        fi
+        seen_mods[$mod]=1
+        # If a module is already open, force-end it before starting the next
+        # (shouldn't normally happen because we end_current on terminal state).
+        end_current
+        cycle=$(( cycle + 1 ))
+        current_mod="$mod"
+        current_alias="rx${cycle}"
+        current_test_name="$test_name"
+        current_started=$SECONDS
+        current_deleted=0
+        # Pick the SUT-side hold based on the test name. supported-events sends
+        # one SET per supported event and waits for ACKs — needs longer.
+        if [[ "$test_name" == *supported-events* ]]; then
+            current_hold=$RX_MODULE_HOLD_EVENTS
+        else
+            current_hold=$RX_MODULE_HOLD
+        fi
+        echo "[$(date +%H:%M:%S)] module=$mod test=$test_name cycle=$cycle create connection ($DELIVERY_MODE) name=$current_alias (hold=${current_hold}s)" >>"$DRIVER_LOG"
+        if ! printf 'Y\n' | docker "${exec_args[@]}" \
+                create stream "$DELIVERY_MODE" connection suite local \
+                --name="$current_alias" --events="$suite_events" \
+                --iss="$suite_iss" --iss-jwks-url="$suite_jwks" \
+                >>"$DRIVER_LOG" 2>&1; then
+            echo "[$(date +%H:%M:%S)] module=$mod cycle=$cycle create FAILED" >>"$DRIVER_LOG"
+            return
+        fi
+        do_exercise_management
+    }
+
+    # CLI-driven receiver management exercise (Path A). After the publisher
+    # stream is registered on the suite, hit the suite's stream-management API
+    # with the operations the OpenID receiver conformance plan expects to see:
+    # GET (show), PATCH (patch stream config), PUT (replace stream config), and
+    # POST status. The DELETE comes later, gated by current_hold. Each
+    # invocation is a one-shot CLI script piped to the in-container goSignals
+    # binary — one process startup per cycle rather than one per verb. Failures
+    # are logged but never abort the cycle: the conformance suite asserts on
+    # observed transmitter-side traffic, so a single failure for one verb still
+    # lets the others complete.
+    do_exercise_management() {
+        local pub_alias="${current_alias}-pub"
+        echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt (GET/PATCH/PUT/status) on $pub_alias" >>"$DRIVER_LOG"
+        # docker exec -i wires our stdin straight into the CLI's stdin, where
+        # the goSignals REPL reads commands line-by-line (same path as
+        # config/scim/scripts/register.sh's `goSignals </scripts/auto-reg.gosignals`).
+        docker "${exec_args[@]}" >>"$DRIVER_LOG" 2>&1 <<EOF || \
+            echo "[$(date +%H:%M:%S)] module=$current_mod mgmt-exercise CLI returned non-zero" >>"$DRIVER_LOG"
+  show stream $pub_alias
+patch stream config $pub_alias --description="conformance: patch from receiver"
+replace stream config $pub_alias --description="conformance: replace from receiver" --events=$suite_events
+set stream status $pub_alias --state=active --reason="conformance: status exercise"
+exit
+EOF
+    }
+
+    local wait_for_tap=$(( SECONDS + 30 ))
+    while [[ ! -f "$RUNNER_TAP" ]] && (( SECONDS < wait_for_tap )); do sleep 1; done
+    if [[ ! -f "$RUNNER_TAP" ]]; then
+        echo "[$(date +%H:%M:%S)] runner tap never appeared at $RUNNER_TAP" >>"$DRIVER_LOG"
+        return
+    fi
+
+    exec 3< <(tail -F -n +1 "$RUNNER_TAP" 2>/dev/null)
 
     while (( SECONDS < deadline )); do
-        cycle=$(( cycle + 1 ))
-        local alias="rx${cycle}"
-        echo "[$(date +%H:%M:%S)] cycle=$cycle create stream ($DELIVERY_MODE)" >>"$DRIVER_LOG"
-        # Create. Pipe Y to satisfy ConfirmProceed.
-        if printf 'Y\n' | docker "${exec_args[@]}" \
-                create stream "$DELIVERY_MODE" receive suite \
-                --name="$alias" --events='*' >>"$DRIVER_LOG" 2>&1; then
-            sleep "$RX_DRIVER_INTERVAL"
-            echo "[$(date +%H:%M:%S)] cycle=$cycle delete stream" >>"$DRIVER_LOG"
-            docker "${exec_args[@]}" delete stream "$alias" \
-                >>"$DRIVER_LOG" 2>&1 || true
-        else
-            echo "[$(date +%H:%M:%S)] cycle=$cycle create FAILED (suite may be between modules)" >>"$DRIVER_LOG"
-            sleep 2
+        local line=""
+        if IFS= read -r -t 2 -u 3 line; then
+            if [[ "$line" =~ Running\ test\ module:\ ([A-Za-z0-9_-]+) ]]; then
+                last_test_name="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ module\ id\ ([A-Za-z0-9]+)\ status\ changed\ to\ WAITING ]]; then
+                issue_create_for_module "${BASH_REMATCH[1]}" "$last_test_name"
+            elif [[ "$line" =~ module\ id\ ([A-Za-z0-9]+)\ status\ changed\ to\ (FINISHED|INTERRUPTED|REVIEW) ]]; then
+                local mod="${BASH_REMATCH[1]}" state="${BASH_REMATCH[2]}"
+                if [[ "$mod" == "$current_mod" ]]; then
+                    echo "[$(date +%H:%M:%S)] module=$mod terminal=$state" >>"$DRIVER_LOG"
+                    end_current
+                fi
+            fi
+        fi
+        # Drive the per-module timeline:
+        #   1. After current_hold seconds, issue DELETE (lets the test observe
+        #      the full sequence and advance to FINISHED).
+        #   2. If the module hasn't reached terminal state within
+        #      RX_MODULE_GUARD seconds after delete, force-end and move on.
+        if [[ -n "$current_mod" ]]; then
+            local elapsed=$(( SECONDS - current_started ))
+            if (( current_deleted == 0 )) && (( elapsed >= current_hold )); then
+                do_delete
+            elif (( current_deleted == 1 )) && (( elapsed >= current_hold + RX_MODULE_GUARD )); then
+                echo "[$(date +%H:%M:%S)] module=$current_mod guard timeout after delete — abandoning" >>"$DRIVER_LOG"
+                end_current
+            fi
         fi
     done
+
+    end_current
+    exec 3<&-
     echo "[$(date +%H:%M:%S)] driver window elapsed" >>"$DRIVER_LOG"
 }
 
@@ -212,14 +406,17 @@ echo "==> Starting receiver driver (mode=$DELIVERY_MODE, log=$DRIVER_LOG)"
 driver_loop &
 DRIVER_PID=$!
 
-echo "==> Running plan: $PLAN_SPEC"
+echo "==> Running plan: $PLAN_SPEC (runner tap: $RUNNER_TAP)"
 cd "$SUITE_REPO"
+# Tee the runner's stdout+stderr so the driver can `tail -F` per-module state
+# transitions in real time without racing the per-plan log file that
+# run-all-plans.sh writes.
 CONFORMANCE_DEV_MODE=1 \
     CONFORMANCE_SERVER="$SUITE_URL" \
     .venv/bin/python3 scripts/run-test-plan.py \
     --export-dir "$SCRIPT_DIR/results" \
     $EXTRA_RUNNER_ARGS \
     "$PLAN_SPEC" \
-    "$CONFIG_PATH"
+    "$CONFIG_PATH" 2>&1 | tee "$RUNNER_TAP"
 
-echo "==> Done: $PLAN_SPEC (driver log: $DRIVER_LOG)"
+echo "==> Done: $PLAN_SPEC (driver log: $DRIVER_LOG, runner tap: $RUNNER_TAP)"

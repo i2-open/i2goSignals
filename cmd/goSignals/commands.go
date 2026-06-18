@@ -43,6 +43,41 @@ import (
 // for outbound CLI calls — the same knob the server honors for outbound push
 // delivery. Used by the receiver-conformance harness against the suite's
 // emulated transmitter, whose dev cert has no matching SAN.
+// normalizeJWTAud rewrites a top-level `"aud": "x"` to `"aud": ["x"]` in the
+// given JSON body so model.StreamConfiguration (Aud []string) can unmarshal a
+// scalar audience. Per RFC 7519 §4.1.3 the `aud` claim may be a string or
+// array; goSignals' wire model only handles the array form. No-op when aud is
+// already an array, null, or absent. Scope: response normalization only —
+// outbound bodies still emit an array.
+func normalizeJWTAud(body []byte) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	audRaw, ok := raw["aud"]
+	if !ok {
+		return body
+	}
+	trimmed := bytes.TrimSpace(audRaw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return body
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err != nil {
+		return body
+	}
+	wrapped, err := json.Marshal([]string{s})
+	if err != nil {
+		return body
+	}
+	raw["aud"] = wrapped
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func getHttpClient(timeout time.Duration) *http.Client {
 	client := &http.Client{Timeout: timeout}
 	if spiffeSource != nil {
@@ -916,6 +951,28 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 	return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
 }
 
+// stripTransmitterSupplied returns a copy of reg with Read-Only / transmitter-
+// supplied properties cleared. SSF §7.1.1 limits a receiver's CREATE/PATCH/PUT
+// bodies to Receiver-Supplied properties (events_requested, delivery,
+// description, format, receiverJWKSUrl); strict transmitters (e.g. the OpenID
+// conformance suite) reject requests that include stream_id, iss, aud,
+// events_supported, events_delivered, min_verification_interval, or
+// inactivity_timeout. The goSignals-to-goSignals connection flow populates
+// those fields on the publisher reg from the local receive stream's cached
+// config; valid as local state but illegal on the wire.
+func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfiguration {
+    wire := reg.DeepCopy()
+    wire.Id = ""
+    wire.Iss = ""
+    wire.Aud = nil
+    wire.EventsSupported = nil
+    wire.EventsDelivered = nil
+    wire.MinVerificationInterval = 0
+    wire.InactivityTimeout = 0
+    wire.IssuerJWKSUrl = ""
+    return wire
+}
+
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
 
 	serverUrl, err := url.Parse(server.Host)
@@ -928,7 +985,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		return nil, err
 	}
 
-	regBytes, err := json.MarshalIndent(&reg, "", " ")
+	wire := stripTransmitterSupplied(reg)
+
+	regBytes, err := json.MarshalIndent(&wire, "", " ")
 	if err != nil {
 		return nil, err
 	}
@@ -937,6 +996,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bearer, err := serverBearer(&cli.Globals, server)
 	if err != nil {
 		return nil, err
@@ -957,6 +1017,12 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
 	}
+
+	// Accept aud as either a single string or a string array (RFC 7519 §4.1.3
+	// allows both). Foreign SSF transmitters (e.g. the OpenID conformance
+	// suite) return a single string; our model is []string. Normalize before
+	// unmarshal so a string aud doesn't crash the parse.
+	body = normalizeJWTAud(body)
 
 	var config model.StreamConfiguration
 	err = json.Unmarshal(body, &config)
@@ -1945,6 +2011,151 @@ type SetStreamCmd struct {
 type SetCmd struct {
 	Stream        SetStreamCmd        `cmd:"" help:"Change settings on a stream"`
 	SubjectFilter SetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Change a stream's subject-filter configuration."`
+}
+
+// PatchStreamConfigCmd issues a non-interactive PATCH against the transmitter's
+// stream-configuration endpoint (SSF §8.1.1.3). It carries only the
+// Receiver-Supplied fields the caller explicitly set; all other fields are
+// omitted so the transmitter applies a true partial update. Transmitter-
+// Supplied fields are stripped (see stripTransmitterSupplied).
+type PatchStreamConfigCmd struct {
+    Alias       string   `arg:"" help:"Alias of stream to be patched"`
+    Description string   `optional:"" help:"Set the description"`
+    Events      []string `optional:"" short:"e" sep:"," help:"Replace events_requested with this list"`
+    RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+    Format      string   `optional:"" short:"f" help:"Set the subject format"`
+}
+
+func (p *PatchStreamConfigCmd) Run(cli *CLI) error {
+    return sendStreamMutation(cli, http.MethodPatch, p.Alias, p.Description, p.Events, p.RJwksUrl, p.Format, false)
+}
+
+type PatchStreamCmd struct {
+    Config PatchStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PATCH a partial Receiver-Supplied stream config"`
+}
+
+type PatchCmd struct {
+    Stream PatchStreamCmd `cmd:"" help:"Send a partial-update (PATCH) request to a transmitter"`
+}
+
+// ReplaceStreamConfigCmd issues a non-interactive PUT against the transmitter's
+// stream-configuration endpoint (SSF §8.1.1.4). It sends the full
+// Receiver-Supplied set: any fields not provided on the command line fall back
+// to the locally-cached stream config so the replace is well-formed. Used by
+// the conformance receiver-plan driver to exercise the replace path.
+type ReplaceStreamConfigCmd struct {
+    Alias       string   `arg:"" help:"Alias of stream to be replaced"`
+    Description string   `optional:"" help:"Set the description (defaults to existing)"`
+    Events      []string `optional:"" short:"e" sep:"," help:"Set events_requested (defaults to existing)"`
+    RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+    Format      string   `optional:"" short:"f" help:"Set the subject format"`
+}
+
+func (rp *ReplaceStreamConfigCmd) Run(cli *CLI) error {
+    return sendStreamMutation(cli, http.MethodPut, rp.Alias, rp.Description, rp.Events, rp.RJwksUrl, rp.Format, true)
+}
+
+type ReplaceStreamCmd struct {
+    Config ReplaceStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PUT a full Receiver-Supplied stream config"`
+}
+
+type ReplaceCmd struct {
+    Stream ReplaceStreamCmd `cmd:"" help:"Send a full-replace (PUT) request to a transmitter"`
+}
+
+// sendStreamMutation builds and sends a PATCH or PUT against
+// server.ConfigurationEndpoint?stream_id=<id> for the local alias's remote
+// stream. The body is a map[string]any populated ONLY with fields the caller
+// explicitly provided plus the required stream_id; this avoids serializing
+// zero-valued struct fields (notably events_requested: null, which strict
+// transmitters reject — the OpenID conformance suite's gson maps null into
+// JsonNull and a JsonArray cast then throws ClassCastException). For PUT
+// (full-replace) callers SHOULD pass every field they want set; missing
+// fields will not be sent on the wire. No interactive prompt: this is meant
+// to be driven from scripts.
+func sendStreamMutation(cli *CLI, method, alias, description string, events []string, rJwks, format string, inheritFromCache bool) error {
+    streamConfig, server := cli.Data.GetStreamAndServer(alias)
+    if streamConfig == nil {
+        return fmt.Errorf("stream alias %q not found", alias)
+    }
+    if server == nil || server.ServerConfiguration.ConfigurationEndpoint == "" {
+        return fmt.Errorf("no configuration_endpoint known for server hosting stream %q", alias)
+    }
+
+    body := map[string]any{"stream_id": streamConfig.Id}
+    // PUT (replace) seeds Receiver-Supplied fields from the cached config so
+    // unset flags carry through, matching SSF §8.1.1.4 full-replace semantics.
+    // PATCH (inheritFromCache=false) sends only explicitly-set fields.
+    if inheritFromCache {
+        cached, err := cli.Data.GetStreamConfig(alias)
+        if err != nil {
+            return fmt.Errorf("could not load cached stream config for %q: %w", alias, err)
+        }
+        if cached.Description != "" {
+            body["description"] = cached.Description
+        }
+        if len(cached.EventsRequested) > 0 {
+            body["events_requested"] = cached.EventsRequested
+        }
+        if cached.ReceiverJWKSUrl != "" {
+            body["receiverJWKSUrl"] = cached.ReceiverJWKSUrl
+        }
+        if cached.Format != "" {
+            body["format"] = cached.Format
+        }
+        if cached.Delivery != nil {
+            body["delivery"] = cached.Delivery
+        }
+    }
+    if description != "" {
+        body["description"] = description
+    }
+    if len(events) > 0 {
+        body["events_requested"] = events
+    }
+    if rJwks != "" {
+        body["receiverJWKSUrl"] = rJwks
+    }
+    if format != "" {
+        body["format"] = format
+    }
+
+    bodyBytes, err := json.MarshalIndent(body, "", " ")
+    if err != nil {
+        return err
+    }
+
+    reqUrl := server.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamConfig.Id
+    req, err := http.NewRequest(method, reqUrl, bytes.NewReader(bodyBytes))
+    if err != nil {
+        return err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    bearer, err := serverBearer(&cli.Globals, server)
+    if err != nil {
+        return err
+    }
+    if bearer != "" {
+        req.Header.Set("Authorization", "Bearer "+bearer)
+    }
+
+    client := getHttpClient(0)
+    defer client.CloseIdleConnections()
+    resp, err := client.Do(req)
+    defer httpSupport.HandleRespClose(resp)
+    if err != nil {
+        return err
+    }
+    respBytes, _ := io.ReadAll(resp.Body)
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+        return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
+    }
+    cli.Data.ResetStreamConfig(alias)
+    fmt.Printf("%s %s ok (%s)\n", method, alias, resp.Status)
+    if len(respBytes) > 0 {
+        fmt.Println(string(respBytes))
+    }
+    return nil
 }
 
 func ConfirmProceed(msg string) bool {
