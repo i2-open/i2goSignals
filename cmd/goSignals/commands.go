@@ -1242,8 +1242,20 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	if err != nil {
 		return err
 	}
-	hostUrl, _ := url.Parse(server.Host)
-	certUrl := hostUrl.JoinPath("/key", c.IssuerId)
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	// An SSF issuer id can be a full URL with a path component (a path-bearing
+	// local issuer, ADR 0023 / GH #188). url.JoinPath would leave its slashes
+	// literal (and collapse "//"), so the /key/{keyName} route would capture only
+	// the first segment. Percent-encode the issuer id so the whole value rides in
+	// a single path segment: the server runs with UseEncodedPath() and the
+	// CreateKey handler url.QueryUnescape's it back, so QueryEscape is the
+	// matching pair. A slash-free issuer id (e.g. example.com) encodes to itself.
+	certUrl := *hostUrl
+	certUrl.Path = "/key/" + c.IssuerId
+	certUrl.RawPath = "/key/" + url.QueryEscape(c.IssuerId)
 	if c.Force != "" {
 		q := certUrl.Query()
 		q.Set("force", c.Force)

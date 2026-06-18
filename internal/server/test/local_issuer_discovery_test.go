@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -40,9 +41,11 @@ func TestLocalIssuerDiscoverySuite(t *testing.T) {
 }
 
 // createIssuerKey creates a signing key stored under the given full issuer URL
-// (the keyName == issuer contract). The HTTP /key/{keyName} route cannot carry a
-// full URL with slashes, so this mirrors how startup provisions the default
-// issuer's key: directly via the KeyService.
+// (the keyName == issuer contract), mirroring how startup provisions the default
+// issuer's key: directly via the KeyService. (The HTTP /key route can also carry
+// a full URL when the keyName is percent-encoded — see
+// TestCreateLocalIssuerKeyViaHttp — but going through the service keeps the
+// discovery/JWKS assertions independent of the key-creation path.)
 func (suite *LocalIssuerDiscoverySuite) createIssuerKey(fullIssuer string) {
 	t := suite.T()
 	_, err := suite.instance.keySvc().CreateKeyPair(context.Background(), fullIssuer, "sig", suite.instance.projectId)
@@ -142,6 +145,44 @@ func (suite *LocalIssuerDiscoverySuite) TestHostOnlyIssuerUnchanged() {
 		"host-only issuer must equal the default issuer")
 	assert.Equal(t, suite.instance.ts.URL+"/jwks.json", config.JwksUri,
 		"host-only jwks_uri must remain /jwks.json")
+}
+
+// TestCreateLocalIssuerKeyViaHttp proves a path-bearing local issuer's signing
+// key CAN be provisioned over the HTTP POST /key route — the route is not
+// limited to slash-free key names. The router runs with UseEncodedPath() and the
+// CreateKey handler url.QueryUnescape's the captured var, so a percent-encoded
+// full issuer URL (slashes as %2F) survives routing and is stored under the
+// decoded name. This is the HTTP-API counterpart to startup key provisioning
+// (GH #188 follow-up); the CLI `create key` builds exactly this encoded URL.
+func (suite *LocalIssuerDiscoverySuite) TestCreateLocalIssuerKeyViaHttp() {
+	t := suite.T()
+	base := suite.instance.ts.URL
+	fullIssuer := base + "/httptenant"
+
+	// POST /key/<percent-encoded full issuer URL> with an admin bearer.
+	encoded := url.QueryEscape(fullIssuer)
+	req, err := http.NewRequest(http.MethodPost, base+"/key/"+encoded, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+suite.instance.streamMgmtToken)
+	resp, err := suite.instance.client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, resp.StatusCode,
+		"percent-encoded full-URL keyName must route to CreateKey and create the key")
+
+	// The key is now stored under the decoded full issuer URL, so discovery for
+	// the issuer path resolves exactly as a startup-provisioned issuer would.
+	dresp, config := suite.getDiscovery("httptenant")
+	assert.Equal(t, http.StatusOK, dresp.StatusCode)
+	assert.Equal(t, fullIssuer, config.Issuer,
+		"issuer created over HTTP must reconstruct to the full URL")
+	assert.Equal(t, base+"/jwks/httptenant", config.JwksUri)
+
+	// And the advertised jwks_uri serves that issuer's keys.
+	jresp, err := http.Get(config.JwksUri)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, jresp.StatusCode)
+	_ = jresp.Body.Close()
 }
 
 // JwksJsonIssuerHandler legacy fallback: a foreign/legacy keyName that is not a
