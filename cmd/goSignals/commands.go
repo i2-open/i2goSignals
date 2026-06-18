@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +37,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// getHttpClient returns a standard or SPIFFE-aware HTTP client
+// getHttpClient returns a standard or SPIFFE-aware HTTP client.
+// I2SIG_TX_TLS_SKIP_VERIFY=true (conformance-only) disables cert verification
+// for outbound CLI calls — the same knob the server honors for outbound push
+// delivery. Used by the receiver-conformance harness against the suite's
+// emulated transmitter, whose dev cert has no matching SAN.
 func getHttpClient(timeout time.Duration) *http.Client {
 	client := &http.Client{Timeout: timeout}
 	if spiffeSource != nil {
@@ -46,6 +51,10 @@ func getHttpClient(timeout time.Duration) *http.Client {
 		} else {
 			log.Printf("Warning: Failed to create resilient SPIFFE transport: %v", err)
 			client.Transport = tlsSupport.NewClusterMTLSClientTransport(spiffeSource)
+		}
+	} else if strings.EqualFold(os.Getenv("I2SIG_TX_TLS_SKIP_VERIFY"), "true") {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // explicit opt-in via I2SIG_TX_TLS_SKIP_VERIFY (conformance-only)
 		}
 	} else {
 		tlsSupport.CheckCaInstalled(client)
@@ -92,7 +101,13 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		Host:    serverUrl.String(),
 		Streams: map[string]Stream{},
 	}
-	tryUrl, _ := serverUrl.Parse("/.well-known/ssf-configuration")
+	// Preserve any base-path prefix on the host URL (e.g. the OpenID
+	// conformance suite's emulated transmitter lives under
+	// /test/a/<alias>/.well-known/ssf-configuration). url.Parse of an absolute
+	// path REPLACES the existing path, so build the discovery URL by joining
+	// the host's base path with the well-known suffix.
+	tryUrl := *serverUrl
+	tryUrl.Path = strings.TrimSuffix(serverUrl.Path, "/") + "/.well-known/ssf-configuration"
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	client := getHttpClient(30 * time.Second)

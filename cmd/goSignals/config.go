@@ -306,6 +306,15 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 			if info, statErr := os.Stat(configPath); (statErr == nil && info.IsDir()) || filepath.Ext(configPath) == "" {
 				configPath = filepath.Join(configPath, ConfigFile)
 			}
+			// Match the default-path branch below: create the parent dir if
+			// missing so a fresh GOSIGNALS_HOME works on first use.
+			if dir := filepath.Dir(configPath); dir != "" {
+				if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+					if mkErr := os.MkdirAll(dir, 0770); mkErr != nil {
+						return mkErr
+					}
+				}
+			}
 			g.ConfigFile = configPath
 			return nil
 		}

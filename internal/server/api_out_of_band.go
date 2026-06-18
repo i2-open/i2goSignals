@@ -21,10 +21,10 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -704,16 +704,27 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 }
 
-// TriggerEvent is a placeholder handler for triggering events manually. (Not currently implemented)
+// TriggerEvent injects an event into the named stream. Intended for
+// administrative/test use (notably the SSF conformance suite's CAEP-interop
+// module, which expects an operator-driven event during its delivery wait).
+//
+// Accepted bearers (any one of):
+//   - admin / root client token (out-of-band provisioning)
+//   - key-scope bootstrap bearer (I2SIG_BOOTSTRAP_TOKEN). The bootstrap secret
+//     already controls the SUT's signing keys and IATs; letting it also drive
+//     this endpoint lets the conformance harness fire CAEP events without an
+//     extra admin-client provisioning step.
 //
 // Return values:
-//   - 501 Not Implemented
+//   - 200 OK on success
+//   - 401/403 on auth failures
+//   - 400 on malformed body, 404 if the stream id is unknown
 func (sa *SignalsApplication) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	TriggerEventHandler(sa, w, r)
 }
 
 func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot, authSupport.ScopeKey})
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -723,6 +734,7 @@ func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		StreamID  string         `json:"stream_id"`
 		EventType string         `json:"event_type"`
 		Subject   map[string]any `json:"subject"`
+		EventData map[string]any `json:"event_data"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -750,11 +762,24 @@ func TriggerEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		_ = json.Unmarshal(subBytes, &subject.SubjectIdentifier)
 	}
 
+	// RFC8417 §2.2: each event-type key in `events` MUST map to a JSON object.
+	// Default to an empty object when the caller did not supply event_data.
+	eventData := req.EventData
+	if eventData == nil {
+		eventData = map[string]any{}
+	}
 	set := goSet.CreateSet(subject, state.Iss, state.Aud)
-	set.AddEventPayload(req.EventType, nil)
+	set.AddEventPayload(req.EventType, eventData)
 
-	// HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
-	if err := sa.GetEventRouter().HandleEvent(&set, "", state.Id.Hex()); err != nil {
+	// Submit directly to the requested stream and bypass the global
+	// MatchesStream fanout: an injected event is targeted at one stream by
+	// design. The fanout path is correct for inbound forwarding but would
+	// also deliver this synthetic event to every other registered stream
+	// whose subscription happens to overlap (same issuer/audience/event
+	// type) — including stale streams that earlier conformance modules left
+	// behind without authorization tokens, which then show up at the receiver
+	// as unauthenticated duplicate pushes.
+	if _, err := sa.GetEventRouter().SubmitOperationalEvent(state.Id.Hex(), &set, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
