@@ -117,6 +117,28 @@ issuer's OpenID configuration, then runs OAuth authorization-code + PKCE
 Sessions are stored per-issuer in `credentials.json`; see
 [`docs/cli_login.md`](docs/cli_login.md).
 
+### Local issuer / Foreign issuer
+
+Two classes of SSF issuer, distinguished by whether the issuer's root
+(`scheme://host[:port]`) equals the server's own base URL.
+
+- **Local issuer** — an issuer goSignals itself *publishes* (signs SETs
+  as). Its root is the server base URL, so it is addressed by its **path
+  component**: SSF discovery is served at the §7.2 insert path
+  (`/.well-known/ssf-configuration/<path>`), the discovery `issuer` and
+  the signed `iss` are the full URL, and `jwks_uri` points at a clean
+  `…/jwks/<path>` served by goSignals.
+- **Foreign issuer** — an issuer published by some other entity that
+  goSignals only *relays*. In forward mode a relayed SET keeps the
+  original publisher's `iss`, so the downstream receiver must verify
+  against that publisher's keys — goSignals references the **original
+  publishing entity** verbatim and never serves transmitter discovery on
+  its behalf.
+
+The split exists because SSF §7.2.4 binds `issuer` == fetch-URL == SET
+`iss`, and that binding belongs to whoever actually published the SET.
+See [`docs/adr/0023-local-issuer-addressing.md`](docs/adr/0023-local-issuer-addressing.md).
+
 ### Persistence record
 
 `*dbProviders.Persistence` — the composition root returned by
