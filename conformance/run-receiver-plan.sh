@@ -157,7 +157,16 @@ driver_loop() {
     # state; before then it returns "Illegal test state change" JSON which the
     # CLI happily parses into an empty config. Poll until we see a real
     # issuer in the response.
-    local discovery_url="${TX_URL%/}/.well-known/ssf-configuration"
+    # SSF §7.2 / RFC 8615 (issue #187): the well-known component is INSERTED
+    # between the suite host and the per-alias path, never appended. TX_URL is
+    # ${SUITE_URL%/}/test/a/$RX_ALIAS, so split off the host (scheme://authority)
+    # and splice /.well-known/ssf-configuration before the /test/a/<alias> path.
+    # Append-style (.../test/a/<alias>/.well-known/ssf-configuration) falls
+    # through the suite's handleHttp default and throws TestFailureException,
+    # poisoning every module.
+    local tx_host="${SUITE_URL%/}"
+    local tx_path="${TX_URL#"$tx_host"}"
+    local discovery_url="${tx_host}/.well-known/ssf-configuration${tx_path%/}"
     local discovery_ok=0
     for ((j=0; j<60; j++)); do
         if curl -fsk "$discovery_url" 2>/dev/null | grep -q '"issuer"[[:space:]]*:[[:space:]]*"http'; then

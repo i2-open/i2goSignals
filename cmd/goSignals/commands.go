@@ -18,6 +18,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
@@ -101,13 +102,22 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		Host:    serverUrl.String(),
 		Streams: map[string]Stream{},
 	}
-	// Preserve any base-path prefix on the host URL (e.g. the OpenID
-	// conformance suite's emulated transmitter lives under
-	// /test/a/<alias>/.well-known/ssf-configuration). url.Parse of an absolute
-	// path REPLACES the existing path, so build the discovery URL by joining
-	// the host's base path with the well-known suffix.
-	tryUrl := *serverUrl
-	tryUrl.Path = strings.TrimSuffix(serverUrl.Path, "/") + "/.well-known/ssf-configuration"
+	// Build the discovery URL per SSF §7.2 / RFC 8615 (issue #187): the
+	// well-known component is INSERTED between the host and any issuer path,
+	// not appended. The OpenID conformance suite's emulated transmitter lives
+	// under /test/a/<alias>, so an issuer of
+	//   https://host/test/a/<alias>
+	// must be probed at
+	//   https://host/.well-known/ssf-configuration/test/a/<alias>
+	// A host-only issuer yields https://host/.well-known/ssf-configuration.
+	discoveryUrlStr, err := wellKnownSupport.InsertWellKnownURL(serverUrl.String(), wellKnownSupport.SSFConfigurationPath)
+	if err != nil {
+		return err
+	}
+	tryUrl, err := url.Parse(discoveryUrlStr)
+	if err != nil {
+		return err
+	}
 	fmt.Println("Loading server configuration from: " + tryUrl.String())
 	var resp *http.Response
 	client := getHttpClient(30 * time.Second)
