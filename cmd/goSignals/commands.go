@@ -1896,9 +1896,10 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	}
 
 	updateStatus := model.UpdateStreamStatus{
-		Status:  setStatus,
-		Subject: nil,
-		Reason:  cleanQuotes(s.Reason),
+		StreamId: stream.Id,
+		Status:   setStatus,
+		Subject:  nil,
+		Reason:   cleanQuotes(s.Reason),
 	}
 
 	bodyBytes, err := json.MarshalIndent(updateStatus, "", " ")
@@ -1906,6 +1907,7 @@ func (s *SetStreamStatusCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	bearer, err := serverBearer(&cli.Globals, server)
 	if err != nil {
 		return err
