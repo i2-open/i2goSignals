@@ -1569,8 +1569,23 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		rawKeyName = vars["issuer"]
 	}
 	keyName, _ := url.QueryUnescape(rawKeyName)
-	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), keyName)
-	if jsonKey == nil {
+
+	// ADR 0023 (local-issuer addressing): a local issuer is addressed by its path
+	// component and stored under the reconstructed full URL (baseURL + "/" +
+	// <captured path>). Resolve that local issuer first; fall back to the captured
+	// value as-is for a legacy/foreign keyName (which references the original
+	// publishing entity verbatim — do not fold foreign issuers into the local
+	// scheme, that would break the SSF §7.2.4 binding for relayed SETs).
+	lookupName := keyName
+	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
+		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + keyName
+		if checkKeyNameExists(sa, localIss) {
+			lookupName = localIss
+		}
+	}
+
+	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), lookupName)
+	if jsonKey == nil || !checkKeyNameExists(sa, lookupName) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}

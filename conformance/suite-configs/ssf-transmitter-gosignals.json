@@ -13,7 +13,7 @@
             }
         },
         "transmitter": {
-            "issuer": "https://localhost.emobix.co.uk:9443",
+            "issuer": "https://localhost.emobix.co.uk:9443/issuer1",
             "access_token": "__GOSIGNALS_STREAM_EVENT_TOKEN__",
             "push_endpoint_authorization_header": "Bearer ssf-conformance-push"
         }
