@@ -734,6 +734,43 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		regReceiveStreamRequest = createRegRequestFromParams(model.ReceivePoll, p.Mode, cli, pubConfig)
 	}
 
+	// Carry the foreign transmitter's bearer onto the receiver stream as
+	// TxToken so outbound verify / status / stream-management calls back to
+	// that transmitter are authenticated. The bearer is the operator-configured
+	// token used when `add server <pub-alias> --token=<...>` registered the
+	// publisher; without it those calls land unauthorized.
+	if serverPub != nil && serverPub.ClientToken != "" {
+		tok := serverPub.ClientToken
+		regReceiveStreamRequest.TxToken = &tok
+	}
+	// Wire the foreign transmitter's stream id onto the receiver so cascade
+	// DELETE (SSF §8.1.1.5) and verify-on-establish can address the publisher
+	// stream by its transmitter-side id. Without this, CascadeReceiverStreamDelete
+	// silently early-outs (conf.RemoteStreamId == nil) and the suite-side pub
+	// stream is never deleted — the conformance test module stays in WAITING
+	// and times out. The publisher already exists by this point (created
+	// in-place above, or pre-existing in cli.Data), so we know its id.
+	if pubConfig == nil && streamPub != nil {
+		if existingPub, errPub := cli.Data.GetStreamConfig(streamPub.Alias); errPub == nil {
+			pubConfig = existingPub
+		}
+	}
+	if pubConfig != nil && pubConfig.Id != "" {
+		rid := pubConfig.Id
+		regReceiveStreamRequest.RemoteStreamId = &rid
+	}
+	// Wire the foreign transmitter's well-known URL onto the receiver so the
+	// SUT can resolve the publisher's configuration_endpoint at cascade-DELETE
+	// time. resolveTransmitterConfigEndpoint falls back to FetchSSFConfiguration
+	// on TxWellKnownUrl when no TxAlias-keyed Server record exists — and the
+	// conformance suite stream is foreign to the SUT, so no such record exists.
+	// Without this, the cascade silently no-ops and the test module stays in
+	// WAITING (SSF §8.1.1.5).
+	if serverPub != nil && serverPub.Host != "" {
+		if wkURL, errWk := wellKnownSupport.InsertWellKnownURL(serverPub.Host, wellKnownSupport.SSFConfigurationPath); errWk == nil && wkURL != "" {
+			regReceiveStreamRequest.TxWellKnownUrl = &wkURL
+		}
+	}
 	fmt.Println("Creating polling receiver stream...")
 	_, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
 	if err != nil {
@@ -829,6 +866,13 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 	var streamConfig *model.StreamConfiguration
 	var err error
 	if regReceiveStreamRequest != nil {
+		// See push-connection rationale above: plumb the foreign transmitter's
+		// bearer onto the receiver stream so outbound verify / status /
+		// stream-management calls back to the transmitter are authenticated.
+		if serverPub != nil && serverPub.ClientToken != "" {
+			tok := serverPub.ClientToken
+			regReceiveStreamRequest.TxToken = &tok
+		}
 		fmt.Println("Creating push receiver stream...")
 		streamConfig, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Push Receiver Connection from "+pubName, pubName)
 		if err != nil {
@@ -843,11 +887,73 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 	}
 
 	fmt.Println("Creating push publisher stream...")
-	_, err = cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
+	pubStreamConfig, err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating push publisher stream on %s: %s", serverPub.Alias, err.Error()))
 	}
 	fmt.Printf("... %s created.", pubName)
+
+	// Back-patch the SUT-side receiver stream with the publisher (transmitter)
+	// stream id so the receiver's verify-on-establish and status lookups quote
+	// the transmitter's stream_id, not its own local id. The POLL path does this
+	// implicitly in pkg/services/stream_service.go (sets config.RemoteStreamId
+	// from the txStreamResp.Id) because that path drives both registrations from
+	// a single in-process service call. The PUSH path creates the receiver
+	// first, then the publisher, so the receiver record is persisted before the
+	// remote stream id is known. Without this PATCH the SUT-side receiver sends
+	// its OWN id when calling back to the transmitter (the conformance suite),
+	// which 404s every verify/status request and blocks the verification and
+	// supported-events modules. Best-effort: log and continue on failure so
+	// connection creation itself is not regressed.
+	if pubStreamConfig != nil && streamRcv != nil && serverRcv != nil &&
+		serverRcv.ServerConfiguration.ConfigurationEndpoint != "" {
+		patchBody := map[string]any{
+			"stream_id":        streamRcv.Id,
+			"remote_stream_id": pubStreamConfig.Id,
+		}
+		// Iss/Aud are transmitter-asserted (SSF 1.0 §7.1.1). The publisher
+		// stream we just created on the foreign transmitter carries the values
+		// it will sign and audience-stamp every SET with; without back-patching
+		// them onto the local receiver record, inbound SETs fail
+		// audience/issuer validation in goSetPush.ParseReceivedSET. The poll
+		// receiver path applies these in-process during CreateStream, so this
+		// patch is the push-only equivalent.
+		if pubStreamConfig.Iss != "" {
+			patchBody["iss"] = pubStreamConfig.Iss
+		}
+		if len(pubStreamConfig.Aud) > 0 {
+			patchBody["aud"] = pubStreamConfig.Aud
+		}
+		if patchBytes, mErr := json.Marshal(patchBody); mErr == nil {
+			patchUrl := serverRcv.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamRcv.Id
+			patchReq, pErr := http.NewRequest(http.MethodPatch, patchUrl, bytes.NewReader(patchBytes))
+			if pErr == nil {
+				patchReq.Header.Set("Content-Type", "application/json")
+				if bearer, bErr := serverBearer(&cli.Globals, serverRcv); bErr == nil && bearer != "" {
+					patchReq.Header.Set("Authorization", "Bearer "+bearer)
+				}
+				patchClient := getHttpClient(0)
+				patchResp, doErr := patchClient.Do(patchReq)
+				if doErr != nil {
+					fmt.Printf("warning: failed to back-patch remote_stream_id on receiver %s: %s\n", rcvName, doErr.Error())
+				} else {
+					if patchResp.StatusCode != http.StatusOK && patchResp.StatusCode != http.StatusNoContent {
+						respBody, _ := io.ReadAll(patchResp.Body)
+						fmt.Printf("warning: back-patch of remote_stream_id on receiver %s returned %s (body: %s)\n", rcvName, patchResp.Status, string(respBody))
+					} else {
+						cli.Data.ResetStreamConfig(rcvName)
+					}
+					httpSupport.HandleRespClose(patchResp)
+				}
+				patchClient.CloseIdleConnections()
+			} else {
+				fmt.Printf("warning: failed to build back-patch request for receiver %s: %s\n", rcvName, pErr.Error())
+			}
+		} else {
+			fmt.Printf("warning: failed to marshal back-patch body for receiver %s: %s\n", rcvName, mErr.Error())
+		}
+	}
+
 	return nil
 }
 
@@ -960,16 +1066,28 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 // inactivity_timeout. The goSignals-to-goSignals connection flow populates
 // those fields on the publisher reg from the local receive stream's cached
 // config; valid as local state but illegal on the wire.
+//
+// For receiver-side registrations (Delivery.method = Receive*), Iss and
+// IssuerJWKSUrl identify the FOREIGN transmitter the local SUT will receive
+// from — the SUT needs them to discover the transmitter's SSF endpoints
+// (verification, status) for stream management. Preserve them in that case.
 func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfiguration {
     wire := reg.DeepCopy()
     wire.Id = ""
-    wire.Iss = ""
     wire.Aud = nil
     wire.EventsSupported = nil
     wire.EventsDelivered = nil
     wire.MinVerificationInterval = 0
     wire.InactivityTimeout = 0
-    wire.IssuerJWKSUrl = ""
+    method := ""
+    if reg.Delivery != nil {
+        method = reg.Delivery.GetMethod()
+    }
+    isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
+    if !isReceiverSide {
+        wire.Iss = ""
+        wire.IssuerJWKSUrl = ""
+    }
     return wire
 }
 

@@ -451,7 +451,23 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 		config.TxWellKnownUrl = request.TxWellKnownUrl
 
-		if selectedTxServerParam || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
+		// Skip auto-registration when the caller already supplied a RemoteStreamId:
+		// this is the paired/connection flow (e.g. `create stream poll connection`)
+		// where the publisher half was just created on the foreign transmitter and
+		// we only need to record TxWellKnownUrl + TxToken so the receiver-side can
+		// later resolve configuration_endpoint for cascade DELETE (SSF §8.1.1.5)
+		// and verify-on-establish. Auto-registering here would POST a duplicate
+		// stream-config request to the foreign tx and fail with 409 Conflict.
+		alreadyRegistered := request.RemoteStreamId != nil && *request.RemoteStreamId != ""
+		if alreadyRegistered {
+			config.RemoteStreamId = request.RemoteStreamId
+			if request.TxToken != nil && *request.TxToken != "" {
+				tok := *request.TxToken
+				config.TxToken = &tok
+			}
+		}
+
+		if !alreadyRegistered && (selectedTxServerParam || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "")) {
 			// Attempt to do an SSF registration to create the Polling Transmit Stream
 			ssLog.Debug("Retrieving SSF transmitter configuration for automatic registration...")
 
@@ -585,6 +601,21 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 				ReturnImmediately: false,
 				TimeoutSecs:       10,
 			}
+		}
+	}
+
+	// Honor an explicit request.RemoteStreamId on receiver-side creates when the
+	// auto-registration path above didn't populate it. The CLI's
+	// `create stream poll connection` flow registers the publisher half on the
+	// foreign transmitter via its own call, then POSTs the receiver half with
+	// the transmitter's stream_id in this field — without preserving it,
+	// CascadeReceiverStreamDelete (SSF §8.1.1.5) and verify-on-establish have
+	// no way to address the transmitter stream by its remote id.
+	if config.RemoteStreamId == nil && request.RemoteStreamId != nil && *request.RemoteStreamId != "" {
+		deliveryMethod := config.Delivery.GetMethod()
+		if deliveryMethod == model.ReceivePoll || deliveryMethod == model.ReceivePush {
+			rid := *request.RemoteStreamId
+			config.RemoteStreamId = &rid
 		}
 	}
 
@@ -953,6 +984,16 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		if configReq.RemoteStreamId != nil {
 			config.RemoteStreamId = configReq.RemoteStreamId
 		}
+		// Iss/Aud are transmitter-asserted (SSF 1.0 §7.1.1). For a receiver
+		// stream the asserting transmitter is the foreign one; the CLI bridges
+		// the two and may back-patch these once the publisher response is in
+		// hand. Without this, inbound SETs fail audience/issuer validation.
+		if len(configReq.Aud) > 0 {
+			config.Aud = configReq.Aud
+		}
+		if configReq.Iss != "" {
+			config.Iss = configReq.Iss
+		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval
 		}
@@ -974,6 +1015,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		}
 		if configReq.RemoteStreamId != nil {
 			config.RemoteStreamId = configReq.RemoteStreamId
+		}
+		if len(configReq.Aud) > 0 {
+			config.Aud = configReq.Aud
+		}
+		if configReq.Iss != "" {
+			config.Iss = configReq.Iss
 		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval

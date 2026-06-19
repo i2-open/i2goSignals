@@ -70,9 +70,13 @@ RX_DRIVER_WINDOW="${RX_DRIVER_WINDOW:-1800}"
 # supported event and waits for ACKs).
 RX_MODULE_HOLD="${RX_MODULE_HOLD:-30}"
 RX_MODULE_HOLD_EVENTS="${RX_MODULE_HOLD_EVENTS:-90}"
+# Modules that only need a CREATE + (suite-driven I/O) + DELETE — no patch /
+# replace / set-status traffic from the driver. Shorter hold because there's
+# no SUT-driven exercise to wait for.
+RX_MODULE_HOLD_READONLY="${RX_MODULE_HOLD_READONLY:-15}"
 # Per-module guard: max seconds we wait for a terminal state after deleting,
 # before giving up and moving on (suite's own wait_for_state timeout is ~240s).
-RX_MODULE_GUARD="${RX_MODULE_GUARD:-60}"
+RX_MODULE_GUARD="${RX_MODULE_GUARD:-30}"
 GOSIGNALS_CONTAINER="${GOSIGNALS_CONTAINER:-ssfconf-gosignals}"
 EXTRA_RUNNER_ARGS="${EXTRA_RUNNER_ARGS:-}"
 
@@ -121,6 +125,22 @@ mkdir -p "$SCRIPT_DIR/results"
 
 echo "==> Wiping SUT state (docker compose down -v)"
 docker compose "${COMPOSE_ARGS[@]}" down -v >/dev/null
+
+# Poll-mode-only override: the SUT-side ExerciseReceiverManagement
+# (I2SIG_RCV_MANAGEMENT_EXERCISE in gosignals-conformance.env) issues a
+# read/update/replace/status-update round against the transmitter at stream
+# establishment. In poll mode those /streams calls land on the suite's
+# per-module state machine concurrently with the SUT's long-poll traffic on
+# /events, and the suite NPEs in OIDSSFHandleAuthorizationHeader (env state
+# for one in-flight condition not yet populated when a second request lands).
+# Push-mode receiver-plan exercises the same management-API surface cleanly,
+# so disabling it for poll mode loses no coverage. The compose file's
+# `environment:` entry for I2SIG_RCV_MANAGEMENT_EXERCISE forwards this shell
+# var to the container, overriding the env_file's default of true.
+if [[ "$DELIVERY_MODE" == "poll" ]]; then
+    export I2SIG_RCV_MANAGEMENT_EXERCISE=false
+    echo "==> Poll mode: disabling SUT-side I2SIG_RCV_MANAGEMENT_EXERCISE (push variant covers /streams round)"
+fi
 
 echo "==> Starting SUT (docker compose up -d)"
 docker compose "${COMPOSE_ARGS[@]}" up -d >/dev/null
@@ -286,9 +306,22 @@ driver_loop() {
         if (( current_deleted == 1 )) || [[ -z "$current_alias" ]]; then
             return
         fi
-        echo "[$(date +%H:%M:%S)] module=$current_mod delete streams (${current_alias}-pub, ${current_alias}-rcv)" >>"$DRIVER_LOG"
-        docker "${exec_args[@]}" delete stream "${current_alias}-pub" >>"$DRIVER_LOG" 2>&1 || true
-        docker "${exec_args[@]}" delete stream "${current_alias}-rcv" >>"$DRIVER_LOG" 2>&1 || true
+        if [[ "$DELIVERY_MODE" == "poll" ]]; then
+            # Poll mode: the suite owns the publisher-side stream and rejects a
+            # direct DELETE while the test module is WAITING (the suite-side test
+            # framework returns 400 and moves the module to INTERRUPTED). The
+            # SUT-side "-rcv" delete goes through StreamDeleteHandler →
+            # DrainReceiver (waits for the in-flight long-poll to complete) →
+            # CascadeReceiverStreamDelete, which cleans up the suite-side stream
+            # after polling has stopped. So a single -rcv delete is sufficient
+            # and avoids the in-flight-poll-vs-delete race at the suite.
+            echo "[$(date +%H:%M:%S)] module=$current_mod delete stream (${current_alias}-rcv; cascade handles suite side)" >>"$DRIVER_LOG"
+            docker "${exec_args[@]}" delete stream "${current_alias}-rcv" >>"$DRIVER_LOG" 2>&1 || true
+        else
+            echo "[$(date +%H:%M:%S)] module=$current_mod delete streams (${current_alias}-pub, ${current_alias}-rcv)" >>"$DRIVER_LOG"
+            docker "${exec_args[@]}" delete stream "${current_alias}-pub" >>"$DRIVER_LOG" 2>&1 || true
+            docker "${exec_args[@]}" delete stream "${current_alias}-rcv" >>"$DRIVER_LOG" 2>&1 || true
+        fi
         current_deleted=1
     }
 
@@ -312,13 +345,25 @@ driver_loop() {
         current_test_name="$test_name"
         current_started=$SECONDS
         current_deleted=0
-        # Pick the SUT-side hold based on the test name. supported-events sends
-        # one SET per supported event and waits for ACKs — needs longer.
-        if [[ "$test_name" == *supported-events* ]]; then
-            current_hold=$RX_MODULE_HOLD_EVENTS
-        else
-            current_hold=$RX_MODULE_HOLD
-        fi
+        # Pick the SUT-side hold based on the test name:
+        #   supported-events    — suite sends one SET per supported event and
+        #                         waits for ACKs; longest hold.
+        #   verification/...    — driver only does CREATE + SHOW; the suite
+        #                         drives the verify round-trip itself (via
+        #                         I2SIG_RCV_VERIFY_ON_ESTABLISH). Short hold.
+        #   happypath / status  — driver runs the full PATCH/REPLACE/STATUS
+        #                         exercise; standard hold.
+        case "$test_name" in
+            *supported-events*)
+                current_hold=$RX_MODULE_HOLD_EVENTS
+                ;;
+            *verification*)
+                current_hold=$RX_MODULE_HOLD_READONLY
+                ;;
+            *)
+                current_hold=$RX_MODULE_HOLD
+                ;;
+        esac
         echo "[$(date +%H:%M:%S)] module=$mod test=$test_name cycle=$cycle create connection ($DELIVERY_MODE) name=$current_alias (hold=${current_hold}s)" >>"$DRIVER_LOG"
         if ! printf 'Y\n' | docker "${exec_args[@]}" \
                 create stream "$DELIVERY_MODE" connection suite local \
@@ -333,28 +378,58 @@ driver_loop() {
 
     # CLI-driven receiver management exercise (Path A). After the publisher
     # stream is registered on the suite, hit the suite's stream-management API
-    # with the operations the OpenID receiver conformance plan expects to see:
-    # GET (show), PATCH (patch stream config), PUT (replace stream config), and
-    # POST status. The DELETE comes later, gated by current_hold. Each
-    # invocation is a one-shot CLI script piped to the in-container goSignals
-    # binary — one process startup per cycle rather than one per verb. Failures
-    # are logged but never abort the cycle: the conformance suite asserts on
-    # observed transmitter-side traffic, so a single failure for one verb still
-    # lets the others complete.
+    # with the operations the current OpenID receiver module is asserting on.
+    # The verb set is gated by test name — patch/replace/set-status are noisy
+    # signals to modules that aren't testing them and were observed to confuse
+    # verification/supported-events state machines. The DELETE always comes
+    # later, gated by current_hold.
+    #
+    # Every cycle starts with `show stream` (GET /streams) — universally safe,
+    # all modules expect the receiver to introspect its registration.
     do_exercise_management() {
         local pub_alias="${current_alias}-pub"
-        echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt (GET/PATCH/PUT/status) on $pub_alias" >>"$DRIVER_LOG"
-        # docker exec -i wires our stdin straight into the CLI's stdin, where
-        # the goSignals REPL reads commands line-by-line (same path as
-        # config/scim/scripts/register.sh's `goSignals </scripts/auto-reg.gosignals`).
+        local test="$current_test_name"
+        # Poll-mode gate: in poll delivery, the SUT's poll loop is continuously
+        # hitting the suite for events on /events and /streams. Any extra
+        # management call from this driver (even a read-only GET /streams from
+        # phase=show) races the suite's per-module state machine and trips an
+        # NPE in OIDSSFHandleAuthorizationHeader — the env state for one
+        # in-flight condition has not been populated when the next request
+        # lands. The same modules run cleanly in push mode where there is no
+        # concurrent poll traffic, so management-API coverage is preserved via
+        # the push variant; skipping the exercise in poll mode loses nothing.
+        if [[ "$DELIVERY_MODE" == "poll" ]]; then
+            echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=skip (poll mode — push variant covers GET/PATCH/REPLACE)" >>"$DRIVER_LOG"
+            return
+        fi
+        # Phase 1: show — always.
+        # docker exec -i wires stdin straight into the CLI's REPL (same path
+        # as config/scim/scripts/register.sh's `goSignals </scripts/auto-reg.gosignals`).
+        echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=show on $pub_alias" >>"$DRIVER_LOG"
         docker "${exec_args[@]}" >>"$DRIVER_LOG" 2>&1 <<EOF || \
-            echo "[$(date +%H:%M:%S)] module=$current_mod mgmt-exercise CLI returned non-zero" >>"$DRIVER_LOG"
-  show stream $pub_alias
+            echo "[$(date +%H:%M:%S)] module=$current_mod show returned non-zero" >>"$DRIVER_LOG"
+show stream $pub_alias
+exit
+EOF
+        # Phase 2: patch/replace/set-status — only for modules that test those
+        # verbs. Verification modules don't expect them; supported-events tests
+        # the events_supported list and shouldn't be poked with status changes
+        # while the suite is generating SETs.
+        case "$test" in
+            *happypath*|*stream-create-delete*|*stream-status-update*)
+                echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=full (patch/replace/set-status)" >>"$DRIVER_LOG"
+                docker "${exec_args[@]}" >>"$DRIVER_LOG" 2>&1 <<EOF || \
+                    echo "[$(date +%H:%M:%S)] module=$current_mod mgmt full returned non-zero" >>"$DRIVER_LOG"
 patch stream config $pub_alias --description="conformance: patch from receiver"
 replace stream config $pub_alias --description="conformance: replace from receiver" --events=$suite_events
 set stream status $pub_alias --state=active --reason="conformance: status exercise"
 exit
 EOF
+                ;;
+            *)
+                echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=skip-full (read-only test)" >>"$DRIVER_LOG"
+                ;;
+        esac
     }
 
     local wait_for_tap=$(( SECONDS + 30 ))

@@ -62,6 +62,12 @@ services:
         condition: service_completed_successfully
     env_file:
       - ./gosignals-conformance.env
+    environment:
+      # Per-run override: run-receiver-plan.sh sets this to "false" for poll-mode
+      # plans so the SUT does not interleave /streams calls with its long-poll
+      # traffic and trip the conformance suite's intra-condition NPE. Defaults
+      # to the env_file value when the shell var is unset.
+      - I2SIG_RCV_MANAGEMENT_EXERCISE
     ports:
       # Published only on loopback; the suite reaches it via the public DNS name
       # localhost.emobix.co.uk -> 127.0.0.1. Container :8888 -> host :9443.
