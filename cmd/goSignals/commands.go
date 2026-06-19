@@ -110,6 +110,7 @@ type AddServerCmd struct {
 	TokenUrl     string   `help:"OAuth token endpoint for the transmitter (optional; discovered if omitted)"`
 	Scopes       []string `sep:"," help:"Comma-separated OAuth scopes for the client-credentials grant"`
 	Bootstrap    bool     `help:"Use the I2SIG_BOOTSTRAP_TOKEN shared secret to mint an IAT (non-interactive)"`
+	StrictSsf    bool     `name:"strict-ssf" help:"Treat the server as a strict-spec SSF transmitter (SSF §8.1.1.1): the CLI will strip iss/aud/issuerJWKSUrl from publisher-leg POSTs. Use for the OpenID conformance suite; leave off for goSignals-to-goSignals cluster connections."`
 }
 
 func (as *AddServerCmd) Run(c *CLI) error {
@@ -133,9 +134,10 @@ func (as *AddServerCmd) Run(c *CLI) error {
 		}
 	}
 	server := SsfServer{
-		Alias:   as.Alias,
-		Host:    serverUrl.String(),
-		Streams: map[string]Stream{},
+		Alias:     as.Alias,
+		Host:      serverUrl.String(),
+		Streams:   map[string]Stream{},
+		StrictSsf: as.StrictSsf,
 	}
 	// Build the discovery URL per SSF §7.2 / RFC 8615 (issue #187): the
 	// well-known component is INSERTED between the host and any issuer path,
@@ -1065,30 +1067,44 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 // goSignals-to-goSignals connection flow can carry these from the local
 // receive stream's cached config; valid as local state but illegal on the wire.
 //
-// Iss, Aud, and IssuerJWKSUrl are deliberately PRESERVED on both paths:
+// Iss, Aud, and IssuerJWKSUrl are PRESERVED by default on both paths:
 //   - Transmitter-side (Delivery.method = DeliveryPush/Poll/Sstp): the operator
-//     is asserting them via --iss / --aud / --iss-jwks-url. The local SUT,
-//     becoming the transmitter, MUST honor that intent (without it, the SUT
-//     falls back to its default issuer alias and silently drops the operator's
-//     configured audience).
+//     is asserting them via --iss / --aud / --iss-jwks-url. A goSignals SUT
+//     acting as transmitter MUST honor that intent (without it, the SUT falls
+//     back to its default issuer alias and silently drops the operator's
+//     configured audience — Test4_PollStream depends on this).
 //   - Receiver-side (Delivery.method = Receive*): these describe the FOREIGN
 //     transmitter the local SUT will receive from. The SUT needs Iss /
 //     IssuerJWKSUrl to discover the transmitter's SSF endpoints (verification,
 //     status) for stream management, and Aud as the expected audience to
 //     validate against inbound SETs' aud claim (RFC 8417 §2.2).
 //
-// In both cases, executeCreateRequest targets the operator's LOCAL SUT — not a
-// foreign transmitter. Outbound calls FROM the SUT to a foreign transmitter
-// (cascade DELETE, well-known discovery, etc.) are constructed inside the SUT
-// and apply their own SSF §7.1.1 wire cleanup; the CLI's only job is to convey
-// operator intent faithfully.
-func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfiguration {
+// When the target server is marked StrictSsf (see SsfServer.StrictSsf), the
+// transmitter-side wire body is additionally stripped of Iss/Aud/IssuerJWKSUrl
+// to satisfy SSF §8.1.1.1, which forbids the receiver from supplying these
+// transmitter-owned fields on a publisher-leg POST. Strict transmitters such
+// as the OpenID conformance suite reject the request with HTTP 400 otherwise.
+// Receiver-side bodies are never additionally stripped — they go to the local
+// SUT, which owns its own SSF wire cleanup on outbound calls.
+func stripTransmitterSupplied(reg model.StreamConfiguration, strict bool) model.StreamConfiguration {
     wire := reg.DeepCopy()
     wire.Id = ""
     wire.EventsSupported = nil
     wire.EventsDelivered = nil
     wire.MinVerificationInterval = 0
     wire.InactivityTimeout = 0
+    if strict {
+        method := ""
+        if reg.Delivery != nil {
+            method = reg.Delivery.GetMethod()
+        }
+        isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
+        if !isReceiverSide {
+            wire.Aud = nil
+            wire.Iss = ""
+            wire.IssuerJWKSUrl = ""
+        }
+    }
     return wire
 }
 
@@ -1104,7 +1120,7 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 		return nil, err
 	}
 
-	wire := stripTransmitterSupplied(reg)
+	wire := stripTransmitterSupplied(reg, server.StrictSsf)
 
 	regBytes, err := json.MarshalIndent(&wire, "", " ")
 	if err != nil {

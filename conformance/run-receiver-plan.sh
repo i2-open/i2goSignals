@@ -273,7 +273,15 @@ driver_loop() {
     # `add server` is one-shot per alias inside the SUT container's CLI config.
     # The compose volume is wiped per plan run, so these always succeed on a
     # fresh start; ignore non-zero so a hot rerun (no compose down) keeps going.
-    docker "${exec_args[@]}" add server suite "$TX_URL" --token="$RX_TOKEN" \
+    #
+    # --strict-ssf marks `suite` as a strict-spec SSF transmitter (SSF §8.1.1.1):
+    # the CLI will strip iss/aud/issuerJWKSUrl from publisher-leg POSTs to the
+    # suite. Without this flag the OpenID conformance suite returns HTTP 400
+    # ("Found transmitter supplied properties in stream request body") on every
+    # receiver module — every receiver plan FAILS/INTERRUPTED. goSignals-as-
+    # transmitter (the `local` alias below) is non-strict by default so that
+    # operator-asserted --iss/--aud still flow through on the receiver leg.
+    docker "${exec_args[@]}" add server suite "$TX_URL" --strict-ssf --token="$RX_TOKEN" \
         >>"$DRIVER_LOG" 2>&1 || \
         echo "[$(date +%H:%M:%S)] add server suite returned non-zero (alias may already exist)" >>"$DRIVER_LOG"
     # The SUT itself, addressable from inside the container via the host-gateway

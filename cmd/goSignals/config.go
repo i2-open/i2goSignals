@@ -41,6 +41,15 @@ type SsfServer struct {
 	// secret is NEVER stored here or in config.json; it is staged in
 	// ConfigData.oauthSecrets (in-memory only) or supplied at use time.
 	OAuthClientConfig *model.OAuthClientConfig `json:",omitempty"`
+	// StrictSsf marks this server as a strict-spec SSF transmitter (SSF §8.1.1.1):
+	// the CLI MUST NOT include transmitter-owned fields (iss, aud, issuerJWKSUrl)
+	// in publisher-leg POSTs to this server. goSignals-as-transmitter accepts
+	// those fields as an operator convenience (lets the receiver-CLI tell the
+	// transmitter what iss/aud to assert on outbound SETs); strict transmitters
+	// like the OpenID conformance suite reject them with HTTP 400. Set via
+	// `add server --strict-ssf`. Default false preserves the goSignals-to-
+	// goSignals cluster semantics.
+	StrictSsf bool `json:",omitempty"`
 }
 
 type Stream struct {
