@@ -133,7 +133,7 @@ All server config is environment-variable driven (no config file). `docs/configu
 
 ## Project conventions
 
-- **Indentation: 4 spaces, never tabs.** External formatters/linters in this repo may reformat tabs, but our own edits stay 4-space.
+- **Indentation:** Go files are gofmt-canonical — **tabs**, as `gofmt`/`go fmt` produce them. Run `gofmt -w` on any `.go` file you touch before committing; a commit must leave `gofmt -l` clean. For non-Go files (YAML, Markdown, shell, JSON, etc.) use **4 spaces, never tabs**. Do not author Go with 4-space indentation on the assumption a formatter will fix it later — format it yourself.
 - **Logging:** use `internal/logger` (wraps `slog`). Create sub-loggers per component: `var eventLogger = logger.Sub("ROUTER")`. Log levels via `LOG_LEVEL` env var.
 - **Decisions log:** Write an ADR for non-trivial architecture, or dependency or definition requirements that should be remembered.
 - **MongoDB code:** follow patterns in `internal/providers/dbProviders/mongo_provider/`. The provider is responsible for lease semantics — don't reach into Mongo from `eventRouter` or service layers.
