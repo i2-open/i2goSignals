@@ -426,6 +426,22 @@ set stream status $pub_alias --state=active --reason="conformance: status exerci
 exit
 EOF
                 ;;
+            *stream-caep-interop*)
+                # OIDSSFReceiverStreamCaepInteropTest.isFinished() requires the
+                # SUT to issue GET /stream (sets readStreamId) and GET /status
+                # (sets readStreamStatusStreamId) against the foreign
+                # transmitter — phase=show only reads the LOCAL cached config
+                # so neither condition fires and the test stays in WAITING.
+                # `get stream config|status $pub_alias` resolves $pub_alias to
+                # the suite server and issues those reads via the live API.
+                echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=remote-reads (caep-interop)" >>"$DRIVER_LOG"
+                docker "${exec_args[@]}" >>"$DRIVER_LOG" 2>&1 <<EOF || \
+                    echo "[$(date +%H:%M:%S)] module=$current_mod remote-reads returned non-zero" >>"$DRIVER_LOG"
+get stream config $pub_alias
+get stream status $pub_alias
+exit
+EOF
+                ;;
             *)
                 echo "[$(date +%H:%M:%S)] module=$current_mod exercise mgmt phase=skip-full (read-only test)" >>"$DRIVER_LOG"
                 ;;
