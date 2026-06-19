@@ -77,6 +77,42 @@ type OIDCConfiguration struct {
 	ClaimsSupported        []string `json:"claims_supported,omitempty"`
 }
 
+// InsertWellKnownURL builds the single, spec-correct discovery URL by inserting
+// the well-known component between the host and the issuer path, per RFC 8615
+// and SSF §7.2 (Figure 17). Unlike BuildWellKnownURLs, this returns exactly one
+// deterministic URL and never appends — callers that must match the OpenID SSF
+// transmitter routing (e.g. the admin CLI's `add server`) require insertion.
+//
+//	https://tr.example.com/issuer1 -> https://tr.example.com/.well-known/ssf-configuration/issuer1
+//	https://tr.example.com         -> https://tr.example.com/.well-known/ssf-configuration
+func InsertWellKnownURL(baseURL string, wellKnownPath string) (string, error) {
+	if baseURL == "" {
+		return "", errors.New("baseURL is empty")
+	}
+	if wellKnownPath == "" {
+		return "", errors.New("wellKnownPath is empty")
+	}
+
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+
+	wellKnownPath = "/" + strings.TrimPrefix(wellKnownPath, "/")
+
+	issuerPath := strings.Trim(u.Path, "/")
+	if issuerPath == "" {
+		u.Path = wellKnownPath
+	} else {
+		u.Path = wellKnownPath + "/" + issuerPath
+	}
+	return u.String(), nil
+}
+
 // BuildWellKnownURLs generates candidate URLs for a well-known endpoint.
 // It follows RFC 8414 logic for inserting .well-known and also handles simple appending.
 func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) {

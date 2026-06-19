@@ -291,10 +291,12 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 
+		// ADR 0023: capture a multi-segment issuer path so a local issuer carrying
+		// a path component (e.g. /tenants/acme) resolves, not just a single segment.
 		Route{
 			"WellKnownSsfConfigurationIssuerGet",
 			http.MethodGet,
-			"/.well-known/ssf-configuration/{issuer}",
+			"/.well-known/ssf-configuration/{issuer:.+}",
 			h.sa.WellKnownSsfConfigurationIssuerGet,
 			false,
 		},
@@ -345,10 +347,15 @@ func (h *HttpRouter) getRoutes() Routes {
 			IsIdQuery:   false,
 		},
 
+		// ADR 0023: multi-segment keyName so a local issuer's clean jwks_uri
+		// (baseURL + /jwks/<path>) resolves. The {keyName:.+} pattern requires the
+		// /jwks/ prefix and so does not shadow the literal GET /jwks.json (no
+		// trailing slash) above; it is GET-only and so does not shadow the
+		// POST /jwks/{keyName} create route either.
 		Route{
 			"JwksJsonTenant",
 			http.MethodGet,
-			"/jwks/{keyName}",
+			"/jwks/{keyName:.+}",
 			h.sa.JwksJsonIssuer,
 			false,
 		},

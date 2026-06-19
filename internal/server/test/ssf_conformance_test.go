@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -146,21 +147,23 @@ func (suite *SSFConformanceSuite) TestOptionalEndpoints() {
 	}
 }
 
-// TestMultipleIssuerPaths tests path-based issuer discovery per SSF spec
+// TestMultipleIssuerPaths tests path-based local-issuer discovery per SSF §7.2 /
+// §7.2.4 and ADR 0023. A local issuer (rooted at the server base URL) is
+// addressed by its path component; discovery reconstructs and echoes the full
+// issuer URL and advertises a clean jwks_uri.
 func (suite *SSFConformanceSuite) TestMultipleIssuerPaths() {
 	t := suite.T()
 
-	// Create a new issuer
-	issuerName := "conformance.example.com"
-	req, _ := http.NewRequest(http.MethodPost, suite.instance.ts.URL+"/key/"+issuerName, nil)
-	req.Header.Set("Authorization", "Bearer "+suite.instance.streamMgmtToken)
-
-	resp, err := suite.instance.client.Do(req)
+	// Create a local issuer: stored under the baseURL-rooted full URL (the
+	// keyName == issuer contract; startup provisions the default issuer this way).
+	base := suite.instance.ts.URL
+	issuerPath := "tenant-a"
+	fullIssuer := base + "/" + issuerPath
+	_, err := suite.instance.keySvc().CreateKeyPair(context.Background(), fullIssuer, "sig", suite.instance.projectId)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
-	// Test well-known endpoint with issuer path
-	resp, err = http.Get(suite.instance.ts.URL + "/.well-known/ssf-configuration/" + issuerName)
+	// Test well-known endpoint with the issuer path
+	resp, err := http.Get(base + "/.well-known/ssf-configuration/" + issuerPath)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -168,11 +171,11 @@ func (suite *SSFConformanceSuite) TestMultipleIssuerPaths() {
 	var config model.TransmitterConfiguration
 	_ = json.Unmarshal(body, &config)
 
-	// The issuer in the response should match the path
-	assert.Equal(t, issuerName, config.Issuer, "Issuer should match the path-based issuer")
+	// The issuer in the response must be the reconstructed full URL (§7.2.4).
+	assert.Equal(t, fullIssuer, config.Issuer, "Issuer should be the reconstructed full URL")
 
-	// JWKS URI should point to the issuer-specific endpoint
-	assert.Contains(t, config.JwksUri, issuerName, "JwksUri should reference the specific issuer")
+	// JWKS URI should be a clean local path component, not URL-encoded.
+	assert.Equal(t, base+"/jwks/"+issuerPath, config.JwksUri, "JwksUri should reference the issuer path")
 }
 
 // TestJWKSEndpointFormat tests that JWKS endpoint returns proper format per RFC7517

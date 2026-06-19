@@ -26,11 +26,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY . .
 
-# CGO disabled -> static binaries that run on a distroless base. Only the two
-# binaries the conformance compose invokes (server + healthcheck probe).
+# CGO disabled -> static binaries that run on a distroless base. The CLI
+# (goSignals) is included so run-receiver-plan.sh can drive receiver-side
+# create/delete cycles via `docker exec ssfconf-gosignals /app/goSignals ...`.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -o /out/goSignalsServer ./cmd/goSignalsServer/... && \
+    CGO_ENABLED=0 GOOS=linux go build -o /out/goSignals       ./cmd/goSignals/...       && \
     CGO_ENABLED=0 GOOS=linux go build -o /out/healthcheck     ./cmd/healthcheck/...
 
 # Stage a writable resume-token directory; distroless has no shell to mkdir it
@@ -50,6 +52,7 @@ WORKDIR /app
 # persists its resume-token file (matches the production Dockerfile).
 COPY --from=build --chown=65532:65532 /out/resources       ./resources
 COPY --from=build --chown=65532:65532 /out/goSignalsServer ./goSignalsServer
+COPY --from=build --chown=65532:65532 /out/goSignals       ./goSignals
 COPY --from=build --chown=65532:65532 /out/healthcheck     ./healthcheck
 
 EXPOSE 8888

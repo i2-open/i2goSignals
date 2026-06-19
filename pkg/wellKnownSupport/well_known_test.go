@@ -34,6 +34,38 @@ func (suite *WellKnownSupportTestSuite) TestBuildWellKnownURLs() {
 	suite.Equal([]string{"https://example.com/.well-known/ssf-configuration"}, urls)
 }
 
+// TestInsertWellKnownURL covers RFC 8615 / SSF §7.2 path insertion: the
+// well-known component is spliced between the host and the issuer path, never
+// appended. Figure 17: issuer https://tr.example.com/issuer1 ->
+// https://tr.example.com/.well-known/ssf-configuration/issuer1.
+func (suite *WellKnownSupportTestSuite) TestInsertWellKnownURL() {
+	// Issuer with a path: insert between host and path.
+	got, err := InsertWellKnownURL("https://tr.example.com/issuer1", SSFConfigurationPath)
+	suite.NoError(err)
+	suite.Equal("https://tr.example.com/.well-known/ssf-configuration/issuer1", got)
+
+	// Issuer with a host-only base: result is host + well-known path.
+	got, err = InsertWellKnownURL("https://tr.example.com", SSFConfigurationPath)
+	suite.NoError(err)
+	suite.Equal("https://tr.example.com/.well-known/ssf-configuration", got)
+
+	// Trailing slash on a host-only base behaves like host-only.
+	got, err = InsertWellKnownURL("https://tr.example.com/", SSFConfigurationPath)
+	suite.NoError(err)
+	suite.Equal("https://tr.example.com/.well-known/ssf-configuration", got)
+
+	// Multi-segment path with a trailing slash (the conformance suite shape:
+	// /test/a/<alias>/) inserts before the whole path.
+	got, err = InsertWellKnownURL("https://localhost:8443/test/a/abc/", SSFConfigurationPath)
+	suite.NoError(err)
+	suite.Equal("https://localhost:8443/.well-known/ssf-configuration/test/a/abc", got)
+
+	// Base without scheme defaults to https.
+	got, err = InsertWellKnownURL("tr.example.com/issuer1", SSFConfigurationPath)
+	suite.NoError(err)
+	suite.Equal("https://tr.example.com/.well-known/ssf-configuration/issuer1", got)
+}
+
 func (suite *WellKnownSupportTestSuite) TestFetchSSFConfiguration() {
 	config := &model.TransmitterConfiguration{
 		Issuer: "https://example.com",

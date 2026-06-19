@@ -1017,18 +1017,34 @@ func (sa *SignalsApplication) WellKnownSsfConfigurationIssuerGet(w http.Response
 func WellKnownSsfConfigurationIssuerGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	rawIssuer := vars["issuer"]
-	issuer, _ := url.QueryUnescape(rawIssuer)
-	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuer))
+	issuerPath, _ := url.QueryUnescape(rawIssuer)
+	serverLog.Debug(fmt.Sprintf("GET WellKnownSsfConfigurationIssuer/%s", issuerPath))
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	// TODO: Check that issuer is valid (ie. that there is a key that matches)
-
+	// ADR 0023 (local-issuer addressing): an issuer rooted at the server base
+	// URL is addressed by its path component. Reconstruct the full issuer URL
+	// (baseURL + "/" + <captured path>) — this is the keyName the signing key is
+	// stored under, and per SSF §7.2.4 it must be echoed verbatim as `issuer`.
+	// Do NOT collapse this into a uniform /jwks/<urlencoded-issuer> scheme: that
+	// would break the §7.2.4 binding for relayed (foreign) issuers (see ADR 0023
+	// "Considered alternatives").
 	baseUrl := sa.GetBaseUrl()
-	jwksUri, _ := baseUrl.Parse("/jwks/" + issuer)
+	fullIss := strings.TrimRight(baseUrl.String(), "/") + "/" + issuerPath
+
+	// Validate the issuer: only serve discovery for a known local signing key.
+	// Unknown issuers return 404 rather than synthesizing metadata. (GetPublicJWKS
+	// returns a non-nil empty keyset for unknown names, so test for a stored key.)
+	if !checkKeyNameExists(sa, fullIss) {
+		serverLog.Debug(fmt.Sprintf("Unknown issuer for discovery: %s", fullIss))
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	jwksUri, _ := baseUrl.Parse("/jwks/" + issuerPath)
 	config := getTransmitterConfig(sa)
 	config.JwksUri = jwksUri.String()
-	config.Issuer = issuer
+	config.Issuer = fullIss
 
 	resp, _ := json.Marshal(config)
 	w.WriteHeader(http.StatusOK)

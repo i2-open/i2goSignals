@@ -157,12 +157,73 @@ From the conformance-suite checkout, the transmitter/receiver config paths above
 can be passed to `.gitlab-ci/run-tests.sh --ssf-tests` plan specs (see the
 suite's `makeSsfTests()` for the `plan[variant]:module{...}config` syntax).
 
+### Plan-isolated runs (`run-plan.sh`, `run-receiver-plan.sh`)
+
+The suite plans are not hermetic — modules create streams that aren't always
+deleted at cleanup. A zombie stream from a prior plan will fire goSignals' T3
+idle-keepalive (default 5 min) at the suite's push endpoint without an
+`Authorization` header, and the *currently active* plan attributes that push to
+itself and reports a spurious header-missing failure (see `results/run-2026-06-17.md`
+§F1).
+
+`run-plan.sh` runs one **transmitter** plan against a freshly-wiped SUT:
+
+```bash
+./run-plan.sh "openid-ssf-transmitter-test-plan[ssf_delivery_mode=push][ssf_server_metadata=discovery][ssf_auth_mode=static]"
+```
+
+It runs `docker compose down -v` (drops the Mongo volume → no zombie streams),
+brings the SUT back up, waits for SSF metadata, re-mints the token, and invokes
+the upstream `scripts/run-test-plan.py`. CAEP plans auto-launch
+`trigger-caep.sh` for the operator-driven delivery window.
+
+`run-receiver-plan.sh` runs one **receiver** plan the same way and additionally
+spawns a background driver that loops `add server suite … --token=<RX_TOKEN>` +
+`create stream {push|poll} receive suite --events='*'` + `delete stream` inside
+the SUT container once per module. SUT-side knobs in
+`gosignals-conformance.env` (`I2SIG_RCV_MANAGEMENT_EXERCISE=true`,
+`I2SIG_RCV_VERIFY_ON_ESTABLISH=true`) take care of the GET/PATCH/PUT/POST-status
+and `/verify` calls the suite expects:
+
+```bash
+./run-receiver-plan.sh "openid-ssf-receiver-test-plan[ssf_delivery_mode=push]"
+./run-receiver-plan.sh "openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=poll]"
+```
+
+Env (both scripts): `SUITE_REPO` (default `~/git/openid-conformance-suite`),
+`SUITE_URL`, `EXTRA_RUNNER_ARGS`, pass-through of `GOSIGNALS_TOKEN` to
+`bootstrap-token.sh`. Receiver-specific: `RX_TOKEN` (default
+`ssf-conformance-rx-token` — must match `ssf.transmitter.access_token` in
+`suite-configs/ssf-receiver-gosignals.json`), `RX_DRIVER_INTERVAL`,
+`RX_DRIVER_WINDOW`, `GOSIGNALS_CONTAINER`.
+
+### Full-matrix run (`run-all-plans.sh`)
+
+To execute every transmitter + receiver plan and aggregate the results into a
+single Markdown summary under `results/`:
+
+```bash
+./run-all-plans.sh
+# or, filter to a subset by substring match on the plan spec:
+PLANS_FILTER='transmitter' ./run-all-plans.sh
+PLANS_FILTER='receiver-caep' ./run-all-plans.sh
+```
+
+The aggregator writes `results/run-<UTC-ts>.md` (the table) plus one
+`results/run-<UTC-ts>-<plan-slug>.log` per plan. It never short-circuits on a
+failing plan — every plan in the matrix runs so a single regression does not
+hide the rest. Each per-plan run still drops a signed `.zip` into `results/`
+(the OpenID Foundation submission artifact). All env knobs above are
+forwarded to the underlying per-plan scripts.
+
 ## Interpreting results
 
 - The transmitter plan's **negative modules** (invalid token, unknown stream id,
   malformed JSON, duplicate config) expect goSignals to *reject* the request —
   those rejections are **passes**.
 - Items the suite tags as expected warnings/skips are not failures.
+
+Per-run reports land under `results/`. Latest: [`run-2026-06-17.md`](results/run-2026-06-17.md).
 
 ## Teardown
 
@@ -180,5 +241,9 @@ Each run starts from clean in-database state (the `-v` drops the Mongo volume).
 | `Dockerfile.conformance` | multi-stage source build used by the override |
 | `gosignals-conformance.env` | goSignalsServer environment |
 | `bootstrap-token.sh` | mint the suite's access token, template the tx config |
+| `trigger-caep.sh` | inject CAEP events during a CAEP-interop plan window |
+| `run-plan.sh` | run one **transmitter** plan against a freshly-wiped SUT |
+| `run-receiver-plan.sh` | run one **receiver** plan + drive CLI create/delete cycles |
+| `run-all-plans.sh` | full matrix runner + aggregate Markdown summary |
 | `suite-configs/ssf-transmitter-gosignals.json` | suite config (token placeholder) |
 | `suite-configs/ssf-receiver-gosignals.json` | suite config for receiver plans |

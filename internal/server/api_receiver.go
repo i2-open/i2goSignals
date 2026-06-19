@@ -45,18 +45,19 @@ type ClientPollStream struct {
 }
 
 type ReceiverPushStream struct {
-	mu          sync.RWMutex
-	sa          *SignalsApplication
-	stream      *model.StreamStateRecord
-	ctx         context.Context
-	cancel      context.CancelFunc
-	active      bool
-	statusUrl   string
-	verifyUrl   string
-	eventChan   chan struct{}
-	lastEventAt time.Time
-	verifying   bool
-	verifyState string
+	mu                       sync.RWMutex
+	sa                       *SignalsApplication
+	stream                   *model.StreamStateRecord
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	active                   bool
+	statusUrl                string
+	verifyUrl                string
+	eventChan                chan struct{}
+	lastEventAt              time.Time
+	verifying                bool
+	verifyState              string
+	verifyOnEstablishPending bool
 }
 
 /*
@@ -258,7 +259,21 @@ func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream
 		serverLog.Error("RCV: Failed to get client for server", "alias", alias, "error", err)
 	}
 
-	// 3. Fallback for Polling Receiver (legacy delivery method auth)
+	// 3. Per-stream transmitter-TLS settings (no TxAlias / no TxToken): honor
+	// TxTLSSkipVerify / TxTLSCertificate set on the stream itself. The conformance
+	// suite's nginx serves a self-signed cert with no SAN, so verify/status calls
+	// from a receiver registered with neither TxAlias nor TxToken (the suite case)
+	// would otherwise fail TLS verification. Mirrors getHTTPClientForWellKnownEndpoint.
+	if conf.TxTLSSkipVerify || conf.TxTLSCertificate != "" {
+		srv := &model.Server{TLSSkipVerify: conf.TxTLSSkipVerify, TLSCertificate: conf.TxTLSCertificate}
+		client, closeClient, err := oauthClient.GetClientForServer(ctx, srv)
+		if err == nil {
+			return client, "", closeClient, nil
+		}
+		serverLog.Warn("RCV: failed to build TLS-skip client for stream; falling back", "sid", conf.Id, "error", err)
+	}
+
+	// 4. Fallback for Polling Receiver (legacy delivery method auth)
 	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
 		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
 		client := &http.Client{}
@@ -575,13 +590,14 @@ func (sa *SignalsApplication) handleClientPushReceiver(streamState *model.Stream
 		ctx, cancel := context.WithCancel(context.Background())
 
 		ps = &ReceiverPushStream{
-			sa:          sa,
-			stream:      streamState,
-			active:      true,
-			ctx:         ctx,
-			cancel:      cancel,
-			eventChan:   make(chan struct{}, 1),
-			lastEventAt: time.Now(),
+			sa:                       sa,
+			stream:                   streamState,
+			active:                   true,
+			ctx:                      ctx,
+			cancel:                   cancel,
+			eventChan:                make(chan struct{}, 1),
+			lastEventAt:              time.Now(),
+			verifyOnEstablishPending: true,
 		}
 		sa.pushClients[streamState.StreamConfiguration.Id] = ps
 		serverLog.Info("PUSH-RCV: Initialized push receiver monitoring", "sid", streamState.StreamConfiguration.Id)
@@ -592,8 +608,32 @@ func (sa *SignalsApplication) handleClientPushReceiver(streamState *model.Stream
 		return ps
 	}
 	ps.mu.Lock()
+	priorRemoteStreamId := ""
+	if ps.stream != nil && ps.stream.StreamConfiguration.RemoteStreamId != nil {
+		priorRemoteStreamId = *ps.stream.StreamConfiguration.RemoteStreamId
+	}
+	newRemoteStreamId := ""
+	if streamState.StreamConfiguration.RemoteStreamId != nil {
+		newRemoteStreamId = *streamState.StreamConfiguration.RemoteStreamId
+	}
 	ps.stream = streamState
+	// Fire deferred verify-on-establish once the CLI back-patch persists a
+	// non-empty RemoteStreamId. Prevents the original race where the very-first
+	// verify went out with our local sid and got "Streams not found" from the
+	// conformance suite.
+	fireDeferredVerify := false
+	if services.RcvVerifyOnEstablishEnabled() &&
+		ps.verifyOnEstablishPending &&
+		priorRemoteStreamId == "" &&
+		newRemoteStreamId != "" {
+		ps.verifyOnEstablishPending = false
+		fireDeferredVerify = true
+	}
 	ps.mu.Unlock()
+	if fireDeferredVerify {
+		serverLog.Info("PUSH-RCV: Firing deferred verify-on-establish after RemoteStreamId arrival", "sid", streamState.StreamConfiguration.Id, "remote_sid", newRemoteStreamId)
+		go ps.initiateVerification()
+	}
 	return ps
 }
 
@@ -665,6 +705,38 @@ func (rps *ReceiverPushStream) monitorPushStream() {
 
 	warnLogged := false
 	errorLogged := false
+
+	// Verify-on-establish (I2SIG_RCV_VERIFY_ON_ESTABLISH): one-shot /verify call
+	// at stream startup so the OpenID SSF receiver conformance plan observes a
+	// receiver-initiated verification before its 240s wait_for_state window.
+	// Without this, the periodic ticker only fires verify after MinVerificationInterval
+	// (default 300s). getVerifyEndpoint resolves through server registry, SSF
+	// well-known, or status-URL transform — so we don't require ssfEnabled here;
+	// initiateVerification early-returns harmlessly if no endpoint can be resolved.
+	//
+	// Gate the immediate fire on RemoteStreamId being non-empty: if the CLI
+	// hasn't back-patched the publisher-assigned stream_id yet, firing now would
+	// POST /verify quoting our local sid and the conformance suite would return
+	// "Streams not found", invalidating its registration. We leave the
+	// verifyOnEstablishPending flag set so handleClientPushReceiver fires the
+	// verify once the back-patch arrives.
+	if services.RcvVerifyOnEstablishEnabled() {
+		rps.mu.RLock()
+		remoteSid := ""
+		if rps.stream.StreamConfiguration.RemoteStreamId != nil {
+			remoteSid = *rps.stream.StreamConfiguration.RemoteStreamId
+		}
+		sid := rps.stream.StreamConfiguration.Id
+		rps.mu.RUnlock()
+		if remoteSid != "" {
+			rps.mu.Lock()
+			rps.verifyOnEstablishPending = false
+			rps.mu.Unlock()
+			go rps.initiateVerification()
+		} else {
+			serverLog.Info("PUSH-RCV: Deferring verify-on-establish until RemoteStreamId is back-patched", "sid", sid)
+		}
+	}
 
 	for {
 		select {
@@ -808,6 +880,21 @@ func (rps *ReceiverPushStream) getVerifyEndpoint() string {
 		}
 	}
 
+	// Iss-derived discovery: when the receiver was registered without an
+	// explicit TxWellKnownUrl or TxAlias (the conformance suite's emulated
+	// transmitter never round-trips one), insert the well-known component
+	// between the iss authority and path per RFC 8615 / SSF §7.2 and try a
+	// direct SSF metadata fetch.
+	if rps.stream.StreamConfiguration.Iss != "" {
+		if wkUrl, err := wellKnownSupport.InsertWellKnownURL(rps.stream.StreamConfiguration.Iss, wellKnownSupport.SSFConfigurationPath); err == nil && wkUrl != "" {
+			client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+			if txConfig, err := wellKnownSupport.FetchSSFConfiguration(rps.ctx, client, wkUrl); err == nil && txConfig.VerificationEndpoint != "" {
+				rps.verifyUrl = txConfig.VerificationEndpoint
+				return rps.verifyUrl
+			}
+		}
+	}
+
 	// Fallback calculation
 	statusUrl := rps.getStatusEndpointLocked()
 	if statusUrl != "" {
@@ -836,13 +923,20 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 		return rps.statusUrl
 	}
 
+	// Remote calls must reference the TRANSMITTER's stream_id (remote_stream_id),
+	// not our local id — they identify different streams on each side.
+	remoteId := rps.stream.StreamConfiguration.Id
+	if rid := rps.stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
+		remoteId = *rid
+	}
+
 	// Using goSsfUtils if server is available
 	server, _ := rps.sa.getServerForStream(rps.ctx, rps.stream)
 	if server != nil {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		endpoint, err := goSsfUtils.GetStatusEndpoint(rps.ctx, client, server)
 		if err == nil && endpoint != "" {
-			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, rps.stream.StreamConfiguration.Id)
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(endpoint, remoteId)
 			return rps.statusUrl
 		}
 	}
@@ -851,8 +945,19 @@ func (rps *ReceiverPushStream) getStatusEndpointLocked() string {
 		client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
 		txConfig, err := wellKnownSupport.FetchSSFConfiguration(rps.ctx, client, *rps.stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil && txConfig.StatusEndpoint != "" {
-			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, rps.stream.StreamConfiguration.Id)
+			rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, remoteId)
 			return rps.statusUrl
+		}
+	}
+
+	// Iss-derived discovery (see getVerifyEndpoint for rationale).
+	if rps.stream.StreamConfiguration.Iss != "" {
+		if wkUrl, err := wellKnownSupport.InsertWellKnownURL(rps.stream.StreamConfiguration.Iss, wellKnownSupport.SSFConfigurationPath); err == nil && wkUrl != "" {
+			client := rps.sa.getHTTPClientForWellKnownEndpoint(rps.ctx, rps.stream)
+			if txConfig, err := wellKnownSupport.FetchSSFConfiguration(rps.ctx, client, wkUrl); err == nil && txConfig.StatusEndpoint != "" {
+				rps.statusUrl = goSsfUtils.AddStreamIdToUrl(txConfig.StatusEndpoint, remoteId)
+				return rps.statusUrl
+			}
 		}
 	}
 	return ""

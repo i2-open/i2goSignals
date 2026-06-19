@@ -117,6 +117,95 @@ issuer's OpenID configuration, then runs OAuth authorization-code + PKCE
 Sessions are stored per-issuer in `credentials.json`; see
 [`docs/cli_login.md`](docs/cli_login.md).
 
+### Local issuer / Foreign issuer
+
+Two classes of SSF issuer, distinguished by whether the issuer's root
+(`scheme://host[:port]`) equals the server's own base URL.
+
+- **Local issuer** — an issuer goSignals itself *publishes* (signs SETs
+  as). Its root is the server base URL, so it is addressed by its **path
+  component**: SSF discovery is served at the §7.2 insert path
+  (`/.well-known/ssf-configuration/<path>`), the discovery `issuer` and
+  the signed `iss` are the full URL, and `jwks_uri` points at a clean
+  `…/jwks/<path>` served by goSignals.
+- **Foreign issuer** — an issuer published by some other entity that
+  goSignals only *relays*. In forward mode a relayed SET keeps the
+  original publisher's `iss`, so the downstream receiver must verify
+  against that publisher's keys — goSignals references the **original
+  publishing entity** verbatim and never serves transmitter discovery on
+  its behalf.
+
+The split exists because SSF §7.2.4 binds `issuer` == fetch-URL == SET
+`iss`, and that binding belongs to whoever actually published the SET.
+See [`docs/adr/0023-local-issuer-addressing.md`](docs/adr/0023-local-issuer-addressing.md).
+
+### SSF stream-create acceptance: strict / flexible / goSignals
+
+Three categories of SSF **transmitter**, from the perspective of a Receiver
+registering a stream (SSF §8.1.1 / §8.1.1.1):
+
+- **Strict-SSF transmitter** — enforces §8.1.1.1: `iss`/`aud`/`issuerJWKSUrl`
+  are Transmitter-Supplied only. The Receiver MUST NOT send them; the
+  transmitter assigns and returns them. The OpenID conformance suite is the
+  canonical example.
+- **Flexible (agnostic) SSF transmitter** — accepts operator-asserted
+  `iss`/`aud` when present, auto-generates them when absent. goSignals itself
+  is flexible, and we expect most real SSF servers to be.
+- **goSignals (cluster) transmitter** — a sister goSignals node
+  (`Server.Type == gosignals`). Always flexible; the operator-asserted
+  `iss`/`aud` carry the cluster-federation routing intent.
+
+There is no reliable discovery signal separating strict from flexible
+(goSignals advertises `spec_version: 1_0` exactly as a strict server would).
+The Receiver therefore **declares** the posture per-server via an operator
+flag (`add server --strict-ssf`, persisted as `StrictSsf`); the default is
+flexible. A strict transmitter that *rejects* an asserted `iss`/`aud` is
+itself the proof of strictness. `StrictSsf` is carried on both the CLI
+`SsfServer` and the shared `model.Server`, so the server-side `TxAlias`
+receiver-create knows the posture of the transmitter it is registering
+against.
+
+### Presence-based acceptance
+
+How goSignals-**as-transmitter** decides whether to honor `iss`/`aud` on an
+inbound stream-create: **if the Receiver supplied them, honor them**
+(cluster-federation / flexible); **if absent, auto-generate.** No mode flag —
+the request body picks the path, so one server serves strict external
+receivers and cluster sisters simultaneously.
+
+### Transmitter-assigned iss/aud
+
+What goSignals auto-generates on the §8.1.1.1 path: `iss` = the server's
+advertised issuer (`GetDefIssuer()`; a per-tenant local issuer once the
+create endpoint becomes issuer-aware), because §8.1.1.1 requires the
+Receiver to confirm `iss` equals the issuer it discovered the Transmitter
+Configuration from — a per-stream issuer would fail that check. `jwks_uri`
+is that issuer's existing JWKS endpoint (ADR 0023). `aud` is a
+freshly-generated, immutable (§8.1.1: "cannot be updated") per-Receiver
+identifier in URI form.
+
+### Re-sign (PB) routing and identity rules
+
+How `RouteMode` and the `EventSource` selector interact at the matcher
+(`EventService.MatchesStream`), which today filters only on
+`(iss, aud, event-type)` and must be extended to honor both axes:
+
+- **The routing selector is `EventSource`** — not `RemoteStreamId`, which is
+  the *protocol pairing pointer* connecting stream halves for delete-cascade.
+  `AUDIENCE` selects by `aud`; `EXPLICIT` selects by
+  `event.Sid ∈ SourceStreamIds`; `DIRECT` is not fanned in.
+- **`iss` is a selection constraint only in Forward mode.** A forwarded SET
+  keeps its original signature, so its `iss` must match what the downstream
+  validates against. In **Publish mode goSignals re-signs under its own
+  `iss`**, so the inbound `iss` is irrelevant to selection — the matcher must
+  *not* require it. A strict transmitter is therefore **PB + EXPLICIT**,
+  selecting purely on source SID + event-type.
+- **`jti` is preserved across the PB re-sign** — goSignals re-signs the
+  stored token, changing `iss`/`aud`/`iat`/`kid` but not `jti`. This keeps
+  ADR 0017's jti-only dedup and SSTP crash-recovery idempotency intact across
+  the hop. `txn` (RFC 8417 §2.2) is the cross-hop audit linkage and is
+  likewise preserved; never `act` (an access-token claim, not a SET claim).
+
 ### Persistence record
 
 `*dbProviders.Persistence` — the composition root returned by

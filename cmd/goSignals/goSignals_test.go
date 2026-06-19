@@ -702,14 +702,26 @@ func (suite *toolSuite) Test9_GenAndPoll() {
 	// server2Addr := suite.servers[1].server.Addr
 	server1Addr := suite.servers[0].server.Addr
 
-	// reset existing configuration
+	// Snapshot alias lists before iterating: `delete stream` mutates the same
+	// cli.Data.Servers[*].Streams maps we're ranging over, and after commit
+	// 722419c (SSF §8.1.1.5) deleting a receiver also cascades a DELETE to the
+	// transmitter, so deleting test2server's receiver-side streams here also
+	// removes the matching scimPoll / scimMisc-pub on test1server. Best-effort
+	// cleanup: tolerate the cascade-already-gone error since the desired end
+	// state (no streams on either server) is reached either way.
+	test2Aliases := make([]string, 0, len(suite.pd.cli.Data.Servers["test2server"].Streams))
 	for alias := range suite.pd.cli.Data.Servers["test2server"].Streams {
-		_, err := suite.executeCommand("delete stream "+alias, true)
-		assert.Nil(suite.T(), err, "Check no error deleting "+alias)
+		test2Aliases = append(test2Aliases, alias)
 	}
+	test1Aliases := make([]string, 0, len(suite.pd.cli.Data.Servers["test1server"].Streams))
 	for alias := range suite.pd.cli.Data.Servers["test1server"].Streams {
-		_, err := suite.executeCommand("delete stream "+alias, true)
-		assert.Nil(suite.T(), err, "Check no error deleting "+alias)
+		test1Aliases = append(test1Aliases, alias)
+	}
+	for _, alias := range test2Aliases {
+		_, _ = suite.executeCommand("delete stream "+alias, true)
+	}
+	for _, alias := range test1Aliases {
+		_, _ = suite.executeCommand("delete stream "+alias, true)
 	}
 
 	testLog.Println("  Waiting for deletions to settle out...")

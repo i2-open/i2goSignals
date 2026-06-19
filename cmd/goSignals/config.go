@@ -41,6 +41,15 @@ type SsfServer struct {
 	// secret is NEVER stored here or in config.json; it is staged in
 	// ConfigData.oauthSecrets (in-memory only) or supplied at use time.
 	OAuthClientConfig *model.OAuthClientConfig `json:",omitempty"`
+	// StrictSsf marks this server as a strict-spec SSF transmitter (SSF §8.1.1.1):
+	// the CLI MUST NOT include transmitter-owned fields (iss, aud, issuerJWKSUrl)
+	// in publisher-leg POSTs to this server. goSignals-as-transmitter accepts
+	// those fields as an operator convenience (lets the receiver-CLI tell the
+	// transmitter what iss/aud to assert on outbound SETs); strict transmitters
+	// like the OpenID conformance suite reject them with HTTP 400. Set via
+	// `add server --strict-ssf`. Default false preserves the goSignals-to-
+	// goSignals cluster semantics.
+	StrictSsf bool `json:",omitempty"`
 }
 
 type Stream struct {
@@ -305,6 +314,15 @@ func (c *ConfigData) checkConfigPath(g *Globals) error {
 			// it as an explicit config file path (GH #143).
 			if info, statErr := os.Stat(configPath); (statErr == nil && info.IsDir()) || filepath.Ext(configPath) == "" {
 				configPath = filepath.Join(configPath, ConfigFile)
+			}
+			// Match the default-path branch below: create the parent dir if
+			// missing so a fresh GOSIGNALS_HOME works on first use.
+			if dir := filepath.Dir(configPath); dir != "" {
+				if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+					if mkErr := os.MkdirAll(dir, 0770); mkErr != nil {
+						return mkErr
+					}
+				}
 			}
 			g.ConfigFile = configPath
 			return nil
