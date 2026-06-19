@@ -1067,14 +1067,15 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 // those fields on the publisher reg from the local receive stream's cached
 // config; valid as local state but illegal on the wire.
 //
-// For receiver-side registrations (Delivery.method = Receive*), Iss and
-// IssuerJWKSUrl identify the FOREIGN transmitter the local SUT will receive
-// from — the SUT needs them to discover the transmitter's SSF endpoints
-// (verification, status) for stream management. Preserve them in that case.
+// For receiver-side registrations (Delivery.method = Receive*), Iss, Aud, and
+// IssuerJWKSUrl describe the FOREIGN transmitter the local SUT will receive
+// from — the SUT needs Iss/IssuerJWKSUrl to discover the transmitter's SSF
+// endpoints (verification, status) for stream management, and Aud as the
+// expected audience to validate against inbound SETs' aud claim. Preserve
+// them in that case.
 func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfiguration {
     wire := reg.DeepCopy()
     wire.Id = ""
-    wire.Aud = nil
     wire.EventsSupported = nil
     wire.EventsDelivered = nil
     wire.MinVerificationInterval = 0
@@ -1085,6 +1086,7 @@ func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfigu
     }
     isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
     if !isReceiverSide {
+        wire.Aud = nil
         wire.Iss = ""
         wire.IssuerJWKSUrl = ""
     }
