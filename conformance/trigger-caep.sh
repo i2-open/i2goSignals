@@ -144,6 +144,46 @@ main() {
 
     local token="$BOOTSTRAP_TOKEN"
     log "using bootstrap bearer for /trigger-event (key scope)"
+
+    # Module-active gate: previously the script's only gates were stream age
+    # (>=N seconds) and pendingEvents==0. Both fail when a NON-caep-interop
+    # CAEP module (e.g. verification-error-push-no-auth) holds the newest
+    # CAEP-subscribed stream: its stream is plenty old, and pendingEvents
+    # drops to 0 between the SUT's push retries. trigger-caep.sh then fires
+    # device-compliance-change / credential-change / session-revoked events
+    # with sub_id={format:"opaque",id:"valid"} into that stream — the SUT
+    # dutifully pushes them to the suite's shared /ssf-push endpoint, and
+    # the active test's "next push must be a verification SET with state
+    # echoed" assertion sees our CAEP event instead and fails.
+    #
+    # Fix: gate ALL firing on observing the suite's TAP signal that
+    # caep-interop is the active module. The suite emits one of:
+    #   "Running test module: openid-ssf-transmitter-stream-caep-interop[...]"
+    #   "Running test module: openid-ssf-receiver-stream-caep-interop[...]"
+    # in its runner stdout. run-plan.sh / run-receiver-plan.sh now tee that
+    # stream to TRIGGER_TAP_FILE; we tail it here. Until we see caep-interop,
+    # we hold off entirely. Once seen, we proceed with the age + pending
+    # heuristics as before (they're still useful for the verify-in-progress
+    # phase of caep-interop itself).
+    if [[ -n "${TRIGGER_TAP_FILE:-}" ]]; then
+        local tap_wait_deadline=$(( SECONDS + TRIGGER_WINDOW ))
+        log "waiting for caep-interop module signal in $TRIGGER_TAP_FILE..."
+        while (( SECONDS < tap_wait_deadline )); do
+            if [[ -f "$TRIGGER_TAP_FILE" ]] && \
+                grep -q "Running test module:.*stream-caep-interop" "$TRIGGER_TAP_FILE" 2>/dev/null; then
+                log "caep-interop module is now active — beginning trigger discovery"
+                break
+            fi
+            sleep 1
+        done
+        if [[ -f "$TRIGGER_TAP_FILE" ]] && \
+            ! grep -q "Running test module:.*stream-caep-interop" "$TRIGGER_TAP_FILE" 2>/dev/null; then
+            log "TRIGGER_TAP_FILE never signaled caep-interop — exiting clean (other modules complete on their own)"
+            return 0
+        fi
+    else
+        log "TRIGGER_TAP_FILE unset — falling back to legacy age+pending heuristic (may pollute non-interop modules)"
+    fi
     log "watching ${MONGO_DB}.streams for an age>=${STREAM_MIN_AGE_SECS}s CAEP stream (up to ${TRIGGER_WINDOW}s)..."
 
     local deadline=$(( SECONDS + TRIGGER_WINDOW ))

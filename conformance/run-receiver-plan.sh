@@ -459,6 +459,21 @@ EOF
 
     exec 3< <(tail -F -n +1 "$RUNNER_TAP" 2>/dev/null)
 
+    # Defensive rescan cadence. Observed in 2026-06-18 rx-caep-poll run: the
+    # streaming read loop silently skipped one specific WAITING transition
+    # (test_id dOAYQCj89IBh3IJ for receiver-stream-verification), even though
+    # the line was in the TAP file and the regex matches it in standalone bash.
+    # Root cause uncertain (likely a tail -F / read -t race during the prior
+    # module's docker-exec delete). The suite then timed out that module after
+    # 250s and the next module's setup tripped an "alias conflict" interrupt.
+    # Mitigation: every RX_RESCAN_INTERVAL seconds, sweep the TAP file end-to-
+    # end and fire issue_create_for_module on any module-id that has WAITING
+    # logged but hasn't been seen_mods'd. seen_mods is the same dedup the
+    # streaming path uses, so this never double-fires.
+    local RX_RESCAN_INTERVAL="${RX_RESCAN_INTERVAL:-15}"
+    local last_rescan=$SECONDS
+    local rescan_test_name=""
+
     while (( SECONDS < deadline )); do
         local line=""
         if IFS= read -r -t 2 -u 3 line; then
@@ -472,6 +487,27 @@ EOF
                     echo "[$(date +%H:%M:%S)] module=$mod terminal=$state" >>"$DRIVER_LOG"
                     end_current
                 fi
+            fi
+        fi
+
+        # Periodic catch-up: walk the full TAP from the start and fire any
+        # missed WAITING transitions. Only does work when something is actually
+        # missing (seen_mods dedup) — cheap when caught up.
+        if (( SECONDS - last_rescan >= RX_RESCAN_INTERVAL )); then
+            last_rescan=$SECONDS
+            if [[ -f "$RUNNER_TAP" ]]; then
+                rescan_test_name=""
+                while IFS= read -r rescan_line; do
+                    if [[ "$rescan_line" =~ Running\ test\ module:\ ([A-Za-z0-9_-]+) ]]; then
+                        rescan_test_name="${BASH_REMATCH[1]}"
+                    elif [[ "$rescan_line" =~ module\ id\ ([A-Za-z0-9]+)\ status\ changed\ to\ WAITING ]]; then
+                        local rescan_mod="${BASH_REMATCH[1]}"
+                        if [[ -z "${seen_mods[$rescan_mod]:-}" ]]; then
+                            echo "[$(date +%H:%M:%S)] rescan: catching missed WAITING for module=$rescan_mod test=$rescan_test_name" >>"$DRIVER_LOG"
+                            issue_create_for_module "$rescan_mod" "$rescan_test_name"
+                        fi
+                    fi
+                done <"$RUNNER_TAP"
             fi
         fi
         # Drive the per-module timeline:

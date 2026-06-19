@@ -102,14 +102,24 @@ cleanup_trigger() {
 }
 trap cleanup_trigger EXIT INT TERM
 
+# Per-run TAP file — receives a live tee of the suite runner's stdout/stderr.
+# trigger-caep.sh tails this to gate firing on the "Running test module:
+# ...stream-caep-interop" signal — without it, the trigger would fire CAEP
+# events into whichever earlier CAEP-subscribed module currently held the
+# newest stream (e.g. verification-error-push-no-auth), polluting that
+# module's "next push is the verification SET" assertion.
+RUNNER_TAP="$SCRIPT_DIR/results/runner-tap-tx-$(date -u +%Y%m%dT%H%M%SZ).log"
+: >"$RUNNER_TAP"
+
 if [[ "$PLAN_SPEC" == *caep* ]]; then
     echo "==> CAEP plan detected — launching trigger-caep.sh in background"
-    TRIGGER_LOG="$SCRIPT_DIR/results/trigger-caep-$(date -u +%Y%m%dT%H%M%SZ).log" \
+    TRIGGER_TAP_FILE="$RUNNER_TAP" \
+        TRIGGER_LOG="$SCRIPT_DIR/results/trigger-caep-$(date -u +%Y%m%dT%H%M%SZ).log" \
         "$SCRIPT_DIR/trigger-caep.sh" &
     TRIGGER_PID=$!
 fi
 
-echo "==> Running plan: $PLAN_SPEC"
+echo "==> Running plan: $PLAN_SPEC (runner tap: $RUNNER_TAP)"
 cd "$SUITE_REPO"
 CONFORMANCE_DEV_MODE=1 \
     CONFORMANCE_SERVER="$SUITE_URL" \
@@ -117,6 +127,6 @@ CONFORMANCE_DEV_MODE=1 \
     --export-dir "$SCRIPT_DIR/results" \
     $EXTRA_RUNNER_ARGS \
     "$PLAN_SPEC" \
-    "$CONFIG_PATH"
+    "$CONFIG_PATH" 2>&1 | tee "$RUNNER_TAP"
 
-echo "==> Done: $PLAN_SPEC"
+echo "==> Done: $PLAN_SPEC (runner tap: $RUNNER_TAP)"
