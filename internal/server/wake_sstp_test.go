@@ -66,10 +66,10 @@ func (rr *recordingRouter) RemoveStream(string)                        {}
 func (rr *recordingRouter) HandleEvent(*goSet.SecurityEventToken, string, string) error {
 	return nil
 }
-func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.AgEventRecord, error) {
+func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
 	return nil, nil
 }
-func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.AgEventRecord, error) {
+func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.EventRecord, error) {
 	return nil, nil
 }
 func (rr *recordingRouter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {

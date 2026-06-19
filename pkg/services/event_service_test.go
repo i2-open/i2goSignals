@@ -18,23 +18,23 @@ import (
 type fakeEventDAO struct {
 	insertErr   error
 	insertCalls int
-	stored      map[string]*model.AgEventRecord
+	stored      map[string]*model.EventRecord
 	// firstSeen is set by Insert from the record argument and returned by
 	// FindByJTI — this lets the test assert that addEvent returns the
 	// already-stored record, not the new one.
-	firstSeen *model.AgEventRecord
+	firstSeen *model.EventRecord
 	// findErr, if set, makes FindByJTI return (nil, findErr) so the
 	// "dup detected then lookup fails" edge can be exercised.
 	findErr error
 }
 
-func (f *fakeEventDAO) Insert(_ context.Context, record *model.AgEventRecord) error {
+func (f *fakeEventDAO) Insert(_ context.Context, record *model.EventRecord) error {
 	f.insertCalls++
 	if f.insertErr != nil {
 		return f.insertErr
 	}
 	if f.stored == nil {
-		f.stored = make(map[string]*model.AgEventRecord)
+		f.stored = make(map[string]*model.EventRecord)
 	}
 	if f.firstSeen == nil {
 		f.firstSeen = record
@@ -43,7 +43,7 @@ func (f *fakeEventDAO) Insert(_ context.Context, record *model.AgEventRecord) er
 	return nil
 }
 
-func (f *fakeEventDAO) FindByJTI(_ context.Context, jti string) (*model.AgEventRecord, error) {
+func (f *fakeEventDAO) FindByJTI(_ context.Context, jti string) (*model.EventRecord, error) {
 	if f.findErr != nil {
 		return nil, f.findErr
 	}
@@ -56,11 +56,11 @@ func (f *fakeEventDAO) FindByJTI(_ context.Context, jti string) (*model.AgEventR
 	return nil, nil
 }
 
-func (f *fakeEventDAO) FindByJTIs(_ context.Context, _ []string) ([]*model.AgEventRecord, error) {
+func (f *fakeEventDAO) FindByJTIs(_ context.Context, _ []string) ([]*model.EventRecord, error) {
 	return nil, nil
 }
 
-func (f *fakeEventDAO) FindByTimeRange(_ context.Context, _ time.Time, _ *time.Time, _ func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
+func (f *fakeEventDAO) FindByTimeRange(_ context.Context, _ time.Time, _ *time.Time, _ func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
 	return nil, nil
 }
 
@@ -94,7 +94,7 @@ func newTokenWithJTI(jti string) *goSet.SecurityEventToken {
 // FindByJTI and returns (existingRec, ErrDuplicateJTI) — never (nil, err)
 // and never the new in-flight record.
 func TestAddEvent_DuplicateReturnsExistingRecord(t *testing.T) {
-	existing := &model.AgEventRecord{
+	existing := &model.EventRecord{
 		Jti:      "dup-jti",
 		Original: `{"first":true}`,
 		Sid:      "stream-1",
@@ -139,7 +139,7 @@ func TestAddEvent_HappyPathReturnsNewRecord(t *testing.T) {
 // shared addEvent path through the Operational=true variant. The dup
 // short-circuit must behave identically.
 func TestAddOperationalEvent_DuplicateReturnsExistingRecord(t *testing.T) {
-	existing := &model.AgEventRecord{
+	existing := &model.EventRecord{
 		Jti:         "op-dup-jti",
 		Original:    `{"first":true}`,
 		Sid:         "stream-2",

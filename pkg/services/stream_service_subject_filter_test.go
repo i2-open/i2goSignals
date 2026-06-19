@@ -567,7 +567,7 @@ func TestStreamService_DefaultAllStreamDeliversUnfilteredEvent(t *testing.T) {
     require.Equal(t, model.DefaultSubjectsAll, state.DefaultSubjects)
 
     // A non-operational event whose subject matches no filter entry.
-    ev := &model.AgEventRecord{Operational: false}
+    ev := &model.EventRecord{Operational: false}
     ev.Event.SubjectId = &goSet.SubjectIdentifier{Format: "opaque"}
     ev.Event.SubjectId.Id = "user-with-no-filter-entry"
 

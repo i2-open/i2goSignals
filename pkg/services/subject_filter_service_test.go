@@ -32,8 +32,8 @@ func allStream(id string) *model.StreamStateRecord {
 }
 
 // eventFor builds an event record carrying the given subject.
-func eventFor(subject *goSet.SubjectIdentifier) *model.AgEventRecord {
-	return &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+func eventFor(subject *goSet.SubjectIdentifier) *model.EventRecord {
+	return &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
 }
 
 // TestSubjectFilterService_NoneStream_DeliversAfterAdd is the tracer bullet for

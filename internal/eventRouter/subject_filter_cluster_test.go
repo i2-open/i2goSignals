@@ -114,7 +114,7 @@ func TestNotifySubjectFilterChange_LocalOwnerInvalidatesWithoutHop(t *testing.T)
     require.True(t, acquired)
 
     subject := emailSubjectFor("alice@example.com")
-    event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+    event := &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
 
     // The owner caches a "drop" decision (NONE stream, empty filter).
     require.False(t, h.routerFilter.Allows(ctx, stream, event),

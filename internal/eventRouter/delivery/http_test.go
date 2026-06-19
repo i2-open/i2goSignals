@@ -60,8 +60,8 @@ func newForwardStream(endpointURL string) *model.StreamStateRecord {
 	}
 }
 
-func newEventRecord() *model.AgEventRecord {
-	return &model.AgEventRecord{
+func newEventRecord() *model.EventRecord {
+	return &model.EventRecord{
 		Jti:      "jti-test",
 		Original: "raw-token-string",
 		Event:    goSet.SecurityEventToken{},

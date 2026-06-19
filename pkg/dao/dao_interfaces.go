@@ -57,10 +57,10 @@ type EventDAO interface {
     // ErrDuplicateJTI when the JTI already exists, and MUST NOT overwrite the
     // existing record. Callers MUST handle ErrDuplicateJTI; the existing
     // record is retrievable via FindByJTI(jti).
-    Insert(ctx context.Context, record *model.AgEventRecord) error
-    FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error)
-    FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error)
-    FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error)
+    Insert(ctx context.Context, record *model.EventRecord) error
+    FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error)
+    FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error)
+    FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
 
     // Pending events
     AddPending(ctx context.Context, jti string, streamID string) error

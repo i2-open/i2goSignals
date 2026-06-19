@@ -141,7 +141,7 @@ func (suite *SubjectFilteringSuite) TestAddSubjectReturns200() {
 	require.NoError(t, err)
 	subject := &goSet.SubjectIdentifier{Format: "email"}
 	subject.AddEmail("alice@example.com")
-	event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+	event := &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
 	assert.True(t, instance.persistence.SubjectFilterService.Allows(context.Background(), state, event),
 		"after Add Subject the NONE stream must deliver the added subject")
 }

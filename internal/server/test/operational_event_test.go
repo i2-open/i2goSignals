@@ -51,10 +51,10 @@ func TestMatchesStreamRejectsUnsubscribedOperationalTypes(t *testing.T) {
 		},
 	}
 
-	verifyEvent := &model.AgEventRecord{
+	verifyEvent := &model.EventRecord{
 		Types: []string{"https://schemas.openid.net/secevent/ssf/event-type/verification"},
 	}
-	streamUpdatedEvent := &model.AgEventRecord{
+	streamUpdatedEvent := &model.EventRecord{
 		Types: []string{"https://schemas.openid.net/secevent/ssf/event-type/stream-updated"},
 	}
 
@@ -86,7 +86,7 @@ func TestResetEventStreamExcludesOperationalEvents(t *testing.T) {
 	streamState, err := instance.GetStreamState(stream.Id)
 	require.NoError(t, err)
 	resetDate := time.Now().Add(-1 * time.Hour)
-	err = instance.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.AgEventRecord) bool {
+	err = instance.ResetEventStream(stream.Id, "", &resetDate, func(rec *model.EventRecord) bool {
 		if rec.Operational {
 			return false
 		}

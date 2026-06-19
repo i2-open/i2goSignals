@@ -6,8 +6,8 @@ import (
     "github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
-// AgEventRecord is stored in MongoProvider.eventCol
-type AgEventRecord struct {
+// EventRecord is stored in MongoProvider.eventCol
+type EventRecord struct {
     // Id        bson.ObjectID       `json:"id" bson:"_id"`
     Jti string `json:"jti" bson:"jti"`
 

@@ -53,7 +53,7 @@ func TestSstpHTTPAdapter_PostsSetsAndParsesAck(t *testing.T) {
 	adapter := NewSstpHTTPAdapter(srv.Client())
 	out := adapter.DeliverSstp(context.Background(), SstpRequest{
 		Stream: sstpPairRecord(srv.URL),
-		Events: []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+		Events: []*model.EventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
 	})
 
 	assert.Equal(t, goSetSstp.ClassOK, out.Classification.Class)
@@ -83,7 +83,7 @@ func TestSstpHTTPAdapter_ReturnEventsFalseOnWire(t *testing.T) {
 	adapter := NewSstpHTTPAdapter(srv.Client())
 	out := adapter.DeliverSstp(context.Background(), SstpRequest{
 		Stream:       sstpPairRecord(srv.URL),
-		Events:       []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+		Events:       []*model.EventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
 		ReturnEvents: goSetSstp.BoolPtr(false),
 	})
 
@@ -152,7 +152,7 @@ func TestSstpHTTPAdapter_200GarbageBodyIsTransientNotAcked(t *testing.T) {
 	adapter := NewSstpHTTPAdapter(srv.Client())
 	out := adapter.DeliverSstp(context.Background(), SstpRequest{
 		Stream: sstpPairRecord(srv.URL),
-		Events: []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+		Events: []*model.EventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
 	})
 
 	assert.Equal(t, goSetSstp.ClassTransient, out.Classification.Class,
@@ -172,7 +172,7 @@ func TestSstpHTTPAdapter_200EmptyBodyIsOK(t *testing.T) {
 	adapter := NewSstpHTTPAdapter(srv.Client())
 	out := adapter.DeliverSstp(context.Background(), SstpRequest{
 		Stream: sstpPairRecord(srv.URL),
-		Events: []*model.AgEventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
+		Events: []*model.EventRecord{{Jti: "jti-1", Original: "signed.set.value"}},
 	})
 
 	assert.Equal(t, goSetSstp.ClassOK, out.Classification.Class,

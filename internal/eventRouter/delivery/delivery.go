@@ -32,7 +32,7 @@ type PushDelivery interface {
 // verbatim).
 type PushRequest struct {
 	Stream *model.StreamStateRecord
-	Event  *model.AgEventRecord
+	Event  *model.EventRecord
 	Key    *rsa.PrivateKey
 	Kid    string
 }

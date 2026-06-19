@@ -43,7 +43,7 @@ type SstpDelivery interface {
 // Event.Original verbatim).
 type SstpRequest struct {
 	Stream *model.StreamStateRecord
-	Events []*model.AgEventRecord
+	Events []*model.EventRecord
 	Key    *rsa.PrivateKey
 	Kid    string
 
@@ -183,7 +183,7 @@ func (a *SstpHTTPAdapter) buildSets(req SstpRequest) map[string]string {
 // signOne signs a single event SET with the pair's issuer key. Returns ("", false)
 // when the key is missing or signing fails so the caller skips the JTI rather than
 // emitting an unsigned SET.
-func signOne(req SstpRequest, ev *model.AgEventRecord) (string, bool) {
+func signOne(req SstpRequest, ev *model.EventRecord) (string, bool) {
 	if req.Key == nil {
 		return "", false
 	}

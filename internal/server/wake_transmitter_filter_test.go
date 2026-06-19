@@ -37,7 +37,7 @@ func TestWakeTransmitter_FilterChangeInvalidatesCache(t *testing.T) {
     stream.StreamConfiguration.Id = sid
     subject := &goSet.SubjectIdentifier{Format: "email"}
     subject.AddEmail("alice@example.com")
-    event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+    event := &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
 
     // The lease owner caches a "drop" decision (NONE stream, empty filter).
     require.False(t, ownerSvc.Allows(ctx, stream, event))

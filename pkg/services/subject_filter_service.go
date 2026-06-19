@@ -208,7 +208,7 @@ func (s *SubjectFilterService) InvalidateCache(streamID string) {
 // Allows reports whether event should be delivered to stream under its subject
 // filter. Operational events and a server-wide disabled feature always pass;
 // otherwise the decision is delegated to Selects.
-func (s *SubjectFilterService) Allows(ctx context.Context, stream *model.StreamStateRecord, event *model.AgEventRecord) bool {
+func (s *SubjectFilterService) Allows(ctx context.Context, stream *model.StreamStateRecord, event *model.EventRecord) bool {
     if !SubjectFilteringEnabled() || event == nil || event.Operational {
         return true
     }

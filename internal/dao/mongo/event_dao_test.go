@@ -81,14 +81,14 @@ func TestEventDAOMongoSuite(t *testing.T) {
 // interfaces.ErrDuplicateJTI; FindByJTI continues to return the FIRST record.
 func (s *EventDAOMongoSuite) TestInsert_DuplicateJTI() {
     ctx := context.Background()
-    first := &model.AgEventRecord{
+    first := &model.EventRecord{
         Jti:      "dup-jti",
         Original: `{"jti":"dup-jti","first":true}`,
         SortTime: time.Now(),
     }
     s.Require().NoError(s.dao.Insert(ctx, first))
 
-    second := &model.AgEventRecord{
+    second := &model.EventRecord{
         Jti:      "dup-jti",
         Original: `{"jti":"dup-jti","second":true}`,
         SortTime: time.Now(),
@@ -106,8 +106,8 @@ func (s *EventDAOMongoSuite) TestInsert_DuplicateJTI() {
 // TestInsert_DistinctJTIs: two distinct JTIs both succeed.
 func (s *EventDAOMongoSuite) TestInsert_DistinctJTIs() {
     ctx := context.Background()
-    a := &model.AgEventRecord{Jti: "jti-a", SortTime: time.Now()}
-    b := &model.AgEventRecord{Jti: "jti-b", SortTime: time.Now()}
+    a := &model.EventRecord{Jti: "jti-a", SortTime: time.Now()}
+    b := &model.EventRecord{Jti: "jti-b", SortTime: time.Now()}
     s.Require().NoError(s.dao.Insert(ctx, a))
     s.Require().NoError(s.dao.Insert(ctx, b))
 }
@@ -130,7 +130,7 @@ func (s *EventDAOMongoSuite) TestInsert_ConcurrentDuplicates() {
         go func() {
             defer wg.Done()
             <-start
-            rec := &model.AgEventRecord{Jti: "race-jti", SortTime: time.Now()}
+            rec := &model.EventRecord{Jti: "race-jti", SortTime: time.Now()}
             err := s.dao.Insert(ctx, rec)
             switch {
             case err == nil:

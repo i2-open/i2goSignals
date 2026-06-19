@@ -49,7 +49,7 @@ func TestNotifyingDAOs_TriggerOnEverySuccessfulMutation(t *testing.T) {
     expected++
 
     // EventDAO: Insert, AddPending, RemovePending, MarkDelivered, ClearPendingForStream
-    rec := &model.AgEventRecord{Jti: "j1"}
+    rec := &model.EventRecord{Jti: "j1"}
     assert.NoError(t, eventDAO.Insert(ctx, rec))
     expected++
     assert.NoError(t, eventDAO.AddPending(ctx, "j1", "s1"))

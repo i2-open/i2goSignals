@@ -98,7 +98,7 @@ func newNotifyingEventDAO(inner interfaces.EventDAO, notify func()) *notifyingEv
 	return &notifyingEventDAO{inner: inner, notify: notify}
 }
 
-func (d *notifyingEventDAO) Insert(ctx context.Context, record *model.AgEventRecord) error {
+func (d *notifyingEventDAO) Insert(ctx context.Context, record *model.EventRecord) error {
 	if err := d.inner.Insert(ctx, record); err != nil {
 		return err
 	}
@@ -106,15 +106,15 @@ func (d *notifyingEventDAO) Insert(ctx context.Context, record *model.AgEventRec
 	return nil
 }
 
-func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error) {
+func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	return d.inner.FindByJTI(ctx, jti)
 }
 
-func (d *notifyingEventDAO) FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error) {
+func (d *notifyingEventDAO) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
 	return d.inner.FindByJTIs(ctx, jtis)
 }
 
-func (d *notifyingEventDAO) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
+func (d *notifyingEventDAO) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
 	return d.inner.FindByTimeRange(ctx, from, to, filter)
 }
 

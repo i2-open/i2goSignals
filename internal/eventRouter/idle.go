@@ -41,8 +41,8 @@ func LoadIdleVerifyInterval() time.Duration {
 //   - the push-side T3 idle keepalive in runPushLoop.
 //
 // Both call paths produce identical persisted records: the only difference is who triggered the
-// generation. Returns the persisted AgEventRecord (with Operational=true) on success.
-func (r *router) GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error) {
+// generation. Returns the persisted EventRecord (with Operational=true) on success.
+func (r *router) GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error) {
     // Resolve the per-direction StreamConfiguration so verify targets the
     // outbound side of whichever direction the SID names (Q40). For an SSTP
     // pair's rx-side SID this returns the inbound direction's iss/aud; for a

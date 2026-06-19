@@ -14,8 +14,8 @@ const (
 	typeAcctEnabled  = "https://schemas.openid.net/secevent/risc/event-type/account-enabled"
 )
 
-func newEvent(iss string, aud []string, types ...string) *model.AgEventRecord {
-	return &model.AgEventRecord{
+func newEvent(iss string, aud []string, types ...string) *model.EventRecord {
+	return &model.EventRecord{
 		Event: goSet.SecurityEventToken{
 			RegisteredClaims: jwt.RegisteredClaims{
 				Issuer:   iss,

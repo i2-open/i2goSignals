@@ -562,11 +562,11 @@ func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer
 
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to flush,
 // skipping any that have since been deleted.
-func (r *router) resolveSstpEventsByJti(jtis []string) []*model.AgEventRecord {
+func (r *router) resolveSstpEventsByJti(jtis []string) []*model.EventRecord {
 	if len(jtis) == 0 {
 		return nil
 	}
-	events := make([]*model.AgEventRecord, 0, len(jtis))
+	events := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
 		rec := r.eventService.GetEventRecord(r.ctx, jti)
 		if rec == nil {
@@ -590,14 +590,14 @@ func (r *router) resolveSstpEventsByJti(jtis []string) []*model.AgEventRecord {
 // re-drained and retried on a later cycle. Returns the number of acked (and
 // counted) events. This mirrors the SSTP-server runner's inbound-Ack consumption
 // (runner_sstp_server.go) and the RFC8936 poll path (event_router.go ~1035).
-func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.AgEventRecord, fencingToken int64) int {
+func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord, fencingToken int64) int {
 	sid := stream.StreamConfiguration.Id
 	pairId := stream.PairId
 	if len(sent) == 0 {
 		return 0
 	}
 
-	sentByJti := make(map[string]*model.AgEventRecord, len(sent))
+	sentByJti := make(map[string]*model.EventRecord, len(sent))
 	for _, ev := range sent {
 		sentByJti[ev.Jti] = ev
 	}
@@ -650,7 +650,7 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 }
 
 // releaseSstpEventClaims releases the in-flight claim on every JTI in events.
-func (r *router) releaseSstpEventClaims(pairId string, events []*model.AgEventRecord) {
+func (r *router) releaseSstpEventClaims(pairId string, events []*model.EventRecord) {
 	if len(events) == 0 {
 		return
 	}
@@ -664,7 +664,7 @@ func (r *router) releaseSstpEventClaims(pairId string, events []*model.AgEventRe
 // releaseUnresolvedSstpClaims releases the claim on any claimed JTI that did NOT
 // resolve to an event record (deleted between claim and resolve), so a vanished
 // event never holds a permanent claim that would block an unrelated re-add.
-func (r *router) releaseUnresolvedSstpClaims(pairId string, claimed []string, resolved []*model.AgEventRecord) {
+func (r *router) releaseUnresolvedSstpClaims(pairId string, claimed []string, resolved []*model.EventRecord) {
 	if len(claimed) == len(resolved) {
 		return
 	}

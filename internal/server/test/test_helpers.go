@@ -105,7 +105,7 @@ func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {
 	return instance.eventSvc().GetEvent(context.Background(), jti)
 }
 
-func (instance *ssfInstance) GetEventRecord(jti string) *model.AgEventRecord {
+func (instance *ssfInstance) GetEventRecord(jti string) *model.EventRecord {
 	return instance.eventSvc().GetEventRecord(context.Background(), jti)
 }
 
@@ -114,7 +114,7 @@ func (instance *ssfInstance) ClearPending(streamId string) error {
 	return err
 }
 
-func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.AgEventRecord) bool) error {
+func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
 	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }
 

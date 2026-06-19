@@ -78,7 +78,7 @@ func (d *EventDAOMongo) deliveredColLoad() (*mongo.Collection, error) {
     return c, nil
 }
 
-func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord) error {
+func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) error {
     c, err := d.eventColLoad()
     if err != nil {
         return err
@@ -100,13 +100,13 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.AgEventRecord)
     return err
 }
 
-func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.AgEventRecord, error) {
+func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
     c, err := d.eventColLoad()
     if err != nil {
         return nil, err
     }
     filter := bson.M{"jti": jti}
-    var res model.AgEventRecord
+    var res model.EventRecord
     cursor := c.FindOne(ctx, filter)
     err = cursor.Decode(&res)
     if err != nil {
@@ -119,7 +119,7 @@ func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.AgEve
     return &res, nil
 }
 
-func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.AgEventRecord, error) {
+func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
     c, err := d.eventColLoad()
     if err != nil {
         return nil, err
@@ -131,7 +131,7 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
         return nil, err
     }
 
-    var records []*model.AgEventRecord
+    var records []*model.EventRecord
     err = cursor.All(ctx, &records)
     if err != nil {
         eLog.Error("Error parsing event records", "error", err)
@@ -140,7 +140,7 @@ func (d *EventDAOMongo) FindByJTIs(ctx context.Context, jtis []string) ([]*model
     return records, nil
 }
 
-func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.AgEventRecord) bool) ([]*model.AgEventRecord, error) {
+func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error) {
     c, err := d.eventColLoad()
     if err != nil {
         return nil, err
@@ -166,7 +166,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
         return nil, err
     }
 
-    var allRecords []*model.AgEventRecord
+    var allRecords []*model.EventRecord
     err = cursor.All(ctx, &allRecords)
     if err != nil {
         eLog.Error("Error parsing events", "error", err)
@@ -178,7 +178,7 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
     }
 
     // Apply custom filter
-    var filtered []*model.AgEventRecord
+    var filtered []*model.EventRecord
     for _, rec := range allRecords {
         if filter(rec) {
             filtered = append(filtered, rec)

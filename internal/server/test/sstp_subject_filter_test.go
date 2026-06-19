@@ -128,7 +128,7 @@ func TestSstpSubjectFilter(t *testing.T) {
         require.NoError(t, err)
         subject := &goSet.SubjectIdentifier{Format: "email"}
         subject.AddEmail("carol@example.com")
-        event := &model.AgEventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
+        event := &model.EventRecord{Event: goSet.SecurityEventToken{SubjectId: subject}}
         assert.True(t, instance.persistence.SubjectFilterService.Allows(context.Background(), state, event),
             "after Add Subject on txSid the SSTP pair's outbound filter must deliver the added subject")
     })

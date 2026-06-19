@@ -23,7 +23,7 @@ func TestEventDAOMemory_Insert(t *testing.T) {
 	}
 	event.ID = "test-jti"
 
-	record := &model.AgEventRecord{
+	record := &model.EventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		Original: `{"jti":"test-jti"}`,
@@ -56,7 +56,7 @@ func TestEventDAOMemory_Insert_DuplicateJTI(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	first := &model.AgEventRecord{
+	first := &model.EventRecord{
 		Jti:      "dup-jti",
 		Original: `{"jti":"dup-jti","first":true}`,
 		SortTime: time.Now(),
@@ -65,7 +65,7 @@ func TestEventDAOMemory_Insert_DuplicateJTI(t *testing.T) {
 		t.Fatalf("first Insert failed: %v", err)
 	}
 
-	second := &model.AgEventRecord{
+	second := &model.EventRecord{
 		Jti:      "dup-jti",
 		Original: `{"jti":"dup-jti","second":true}`,
 		SortTime: time.Now(),
@@ -97,8 +97,8 @@ func TestEventDAOMemory_Insert_DistinctJTIs(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 
-	a := &model.AgEventRecord{Jti: "jti-a", SortTime: time.Now()}
-	b := &model.AgEventRecord{Jti: "jti-b", SortTime: time.Now()}
+	a := &model.EventRecord{Jti: "jti-a", SortTime: time.Now()}
+	b := &model.EventRecord{Jti: "jti-b", SortTime: time.Now()}
 
 	if err := dao.Insert(ctx, a); err != nil {
 		t.Fatalf("Insert(a) failed: %v", err)
@@ -134,7 +134,7 @@ func TestEventDAOMemory_Insert_ConcurrentDuplicates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			rec := &model.AgEventRecord{
+			rec := &model.EventRecord{
 				Jti:      "race-jti",
 				SortTime: time.Now(),
 			}
@@ -173,7 +173,7 @@ func TestEventDAOMemory_FindByJTIs(t *testing.T) {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 		event.ID = jti
 
-		record := &model.AgEventRecord{
+		record := &model.EventRecord{
 			Jti:      jti,
 			Event:    *event,
 			Original: `{"jti":"` + jti + `"}`,
@@ -201,7 +201,7 @@ func TestEventDAOMemory_AddPending(t *testing.T) {
 	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 	event.ID = "test-jti"
 
-	record := &model.AgEventRecord{
+	record := &model.EventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		SortTime: time.Now(),
@@ -242,7 +242,7 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 	event.ID = "test-jti"
 
-	record := &model.AgEventRecord{
+	record := &model.EventRecord{
 		Jti:      event.ID,
 		Event:    *event,
 		SortTime: time.Now(),
@@ -303,7 +303,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 		jti := ids.NewObjectID()
 		event.ID = jti
 
-		record := &model.AgEventRecord{
+		record := &model.EventRecord{
 			Jti:      jti,
 			Event:    *event,
 			SortTime: time.Now(),
@@ -352,7 +352,7 @@ func TestEventDAOMemory_FindByTimeRange(t *testing.T) {
 		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
 		event.ID = e.jti
 
-		record := &model.AgEventRecord{
+		record := &model.EventRecord{
 			Jti:      e.jti,
 			Event:    *event,
 			SortTime: e.time,
@@ -393,7 +393,7 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 		jti := ids.NewObjectID()
 		event.ID = jti
 
-		record := &model.AgEventRecord{
+		record := &model.EventRecord{
 			Jti:      jti,
 			Event:    *event,
 			SortTime: time.Now(),

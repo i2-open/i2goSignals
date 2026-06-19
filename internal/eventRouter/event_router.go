@@ -45,11 +45,11 @@ type EventRouter interface {
 	// to the target stream's pending list, bypassing the MatchesStream predicate. Operational events
 	// are point-to-point SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify,
 	// stream-updated).
-	SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error)
+	SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.EventRecord, error)
 	// GenerateVerifyEvent creates an SSF verification SET scoped to the target stream's iss/aud,
 	// persists it as an operational event, and submits it to the target stream's pending list.
 	// Used by both the operator-triggered API handler and the push-side T3 idle keepalive.
-	GenerateVerifyEvent(sid string, state string) (*model.AgEventRecord, error)
+	GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
 	// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId:
@@ -838,7 +838,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 //   - SSTP-server (responder) pairs: when the event matches, broadcast
 //     wake-sstp-server to active nodes (the server side takes no lease, so any node
 //     may be holding the long-poll) and wake the local long-poll buffer.
-func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
+func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord) {
 	for pairId, pair := range r.sstpClientStreams {
 		if !r.eventService.MatchesStream(&pair, event) {
 			continue
@@ -887,7 +887,7 @@ func (r *router) routeEventToSstpPairsLocked(event *model.AgEventRecord) {
 // the target stream's pending list. It bypasses the MatchesStream predicate (operational events are
 // point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
-func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.AgEventRecord, error) {
+func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.EventRecord, error) {
 	// SSTP-aware resolution: an operational event keyed on the rx-side SID of an
 	// SSTP pair must still find the (single) pair record, whose document _id is
 	// the tx-side SID, not the rx-side SID (Q40).
@@ -1594,7 +1594,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 // path (slice 2) AND carries the SSF verification event-type. Used at push time to attribute
 // the outcome to push_idle_verify_total{outcome=acked|failed}. In production this is dominated
 // by T3 idle keepalives; operator-triggered verifies (rare) also pass through this branch.
-func isOperationalVerify(rec *model.AgEventRecord) bool {
+func isOperationalVerify(rec *model.EventRecord) bool {
 	if rec == nil || !rec.Operational {
 		return false
 	}

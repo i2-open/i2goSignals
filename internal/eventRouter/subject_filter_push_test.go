@@ -107,7 +107,7 @@ func (h *filterPushHarness) addPendingEvent(t *testing.T, sid string, subject *g
     token.SubjectId = subject
 
     ctx := context.Background()
-    var rec *model.AgEventRecord
+    var rec *model.EventRecord
     var err error
     if operational {
         rec, err = h.eventService.AddOperationalEvent(ctx, token, sid, "")
