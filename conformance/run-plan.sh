@@ -70,8 +70,11 @@ mkdir -p "$SCRIPT_DIR/results"
 echo "==> Wiping SUT state (docker compose down -v)"
 docker compose "${COMPOSE_ARGS[@]}" down -v >/dev/null
 
-echo "==> Starting SUT (docker compose up -d)"
-docker compose "${COMPOSE_ARGS[@]}" up -d >/dev/null
+echo "==> Starting SUT (docker compose up -d --build)"
+# --build forces a rebuild of the gosignals image from the current working tree
+# every run (the build override pins :conformance-dev). Without this, a stale
+# image silently fails to pick up branch fixes. See feedback_verify_deploy_image.md.
+docker compose "${COMPOSE_ARGS[@]}" up -d --build >/dev/null
 
 echo "==> Waiting for SUT to publish SSF metadata at $SUT_READY_URL"
 for ((i = 1; i <= SUT_READY_TRIES; i++)); do

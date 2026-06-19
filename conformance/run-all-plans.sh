@@ -31,6 +31,12 @@ TS_HUMAN="$(date -u +%Y-%m-%dT%H%M%SZ)"
 SUMMARY="$SCRIPT_DIR/results/run-${TS_HUMAN}.md"
 mkdir -p "$SCRIPT_DIR/results"
 
+# Prune per-plan logs and summary markdowns older than RESULTS_RETAIN_DAYS days.
+# Without this, results/ grows unbounded and the FAILED grep in the aggregator
+# below can re-match stale logs the next time someone audits the dir.
+RESULTS_RETAIN_DAYS="${RESULTS_RETAIN_DAYS:-14}"
+find "$SCRIPT_DIR/results" -maxdepth 1 -type f \( -name 'run-*' -o -name 'rx-driver-*' -o -name 'runner-tap-*' -o -name 'trigger-caep-*' \) -mtime "+${RESULTS_RETAIN_DAYS}" -delete 2>/dev/null || true
+
 PLANS_FILTER="${PLANS_FILTER:-}"
 
 # (script, plan-spec) pairs. Keep transmitter plans first so a clean run
@@ -40,6 +46,9 @@ PLANS=(
     "run-plan.sh|openid-ssf-transmitter-test-plan[ssf_delivery_mode=poll][ssf_server_metadata=discovery][ssf_auth_mode=static]"
     "run-plan.sh|openid-ssf-transmitter-caep-test-plan[ssf_delivery_mode=push][ssf_server_metadata=discovery][ssf_auth_mode=static]"
     "run-plan.sh|openid-ssf-transmitter-caep-test-plan[ssf_delivery_mode=poll][ssf_server_metadata=discovery][ssf_auth_mode=static]"
+    # Receiver plans accept only ssf_delivery_mode and ssf_profile variants —
+    # ssf_auth_mode is transmitter-side only. The suite rejects [ssf_auth_mode=...]
+    # on receiver plans with "Unknown variant parameter(s)".
     "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=push]"
     "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=poll]"
     "run-receiver-plan.sh|openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=push]"

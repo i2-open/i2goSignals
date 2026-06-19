@@ -112,7 +112,10 @@ if [[ -z "$BASE_ALIAS" ]]; then
     exit 1
 fi
 RX_ALIAS="${BASE_ALIAS}-$(date -u +%H%M%S)"
-RUNTIME_CONFIG="$SCRIPT_DIR/suite-configs/.${BASE_ALIAS}.runtime.json"
+# Templated suite-config: generated per run, removed on exit. A fixed path under
+# suite-configs/ leaves stale aliases on disk after aborts while the suite still
+# holds them INTERRUPTED for ~3 min.
+RUNTIME_CONFIG="$(mktemp -t "ssf-rx-runtime.XXXXXX.json")"
 sed -E \
     -e "s|\"alias\"[[:space:]]*:[[:space:]]*\"[^\"]+\"|\"alias\": \"$RX_ALIAS\"|" \
     -e "s|/test/a/$BASE_ALIAS|/test/a/$RX_ALIAS|g" \
@@ -126,24 +129,22 @@ mkdir -p "$SCRIPT_DIR/results"
 echo "==> Wiping SUT state (docker compose down -v)"
 docker compose "${COMPOSE_ARGS[@]}" down -v >/dev/null
 
-# Poll-mode-only override: the SUT-side ExerciseReceiverManagement
-# (I2SIG_RCV_MANAGEMENT_EXERCISE in gosignals-conformance.env) issues a
-# read/update/replace/status-update round against the transmitter at stream
-# establishment. In poll mode those /streams calls land on the suite's
-# per-module state machine concurrently with the SUT's long-poll traffic on
-# /events, and the suite NPEs in OIDSSFHandleAuthorizationHeader (env state
-# for one in-flight condition not yet populated when a second request lands).
-# Push-mode receiver-plan exercises the same management-API surface cleanly,
-# so disabling it for poll mode loses no coverage. The compose file's
-# `environment:` entry for I2SIG_RCV_MANAGEMENT_EXERCISE forwards this shell
-# var to the container, overriding the env_file's default of true.
-if [[ "$DELIVERY_MODE" == "poll" ]]; then
-    export I2SIG_RCV_MANAGEMENT_EXERCISE=false
-    echo "==> Poll mode: disabling SUT-side I2SIG_RCV_MANAGEMENT_EXERCISE (push variant covers /streams round)"
-fi
+# Keep the SUT-side ExerciseReceiverManagement enabled in both delivery modes.
+# The SUT's runPollLoop fires the GET / PATCH / PUT / POST-status round once,
+# sequentially, BEFORE the long-poll opens (api_receiver.go:runPollLoop), so
+# those /streams calls never race the SUT's own /events traffic. The bash-side
+# do_exercise_management still skips in poll mode (function below) to avoid
+# doubling up with the SUT's own exercise — that double-fire was the original
+# source of the OIDSSFHandleAuthorizationHeader NPE the prior override worked
+# around. With the bash-side path already gated, the SUT-side exercise is the
+# only management traffic the suite sees, and the happypath / stream-status-
+# update modules can observe the required receiver-initiated verbs.
 
-echo "==> Starting SUT (docker compose up -d)"
-docker compose "${COMPOSE_ARGS[@]}" up -d >/dev/null
+echo "==> Starting SUT (docker compose up -d --build)"
+# --build forces a rebuild of the gosignals image from the current working tree
+# every run (the build override pins :conformance-dev). Without this, a stale
+# image silently fails to pick up branch fixes. See feedback_verify_deploy_image.md.
+docker compose "${COMPOSE_ARGS[@]}" up -d --build >/dev/null
 
 echo "==> Waiting for SUT to publish SSF metadata at $SUT_READY_URL"
 for ((i = 1; i <= SUT_READY_TRIES; i++)); do
@@ -185,6 +186,7 @@ cleanup_driver() {
         kill "$DRIVER_PID" 2>/dev/null || true
         wait "$DRIVER_PID" 2>/dev/null || true
     fi
+    [[ -n "${RUNTIME_CONFIG:-}" && -f "$RUNTIME_CONFIG" ]] && rm -f "$RUNTIME_CONFIG"
 }
 trap cleanup_driver EXIT INT TERM
 
