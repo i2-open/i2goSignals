@@ -1057,22 +1057,31 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 	return true, eat.IsScopeMatch([]string{authSupport.ScopeStreamAdmin})
 }
 
-// stripTransmitterSupplied returns a copy of reg with Read-Only / transmitter-
-// supplied properties cleared. SSF §7.1.1 limits a receiver's CREATE/PATCH/PUT
-// bodies to Receiver-Supplied properties (events_requested, delivery,
-// description, format, receiverJWKSUrl); strict transmitters (e.g. the OpenID
-// conformance suite) reject requests that include stream_id, iss, aud,
-// events_supported, events_delivered, min_verification_interval, or
-// inactivity_timeout. The goSignals-to-goSignals connection flow populates
-// those fields on the publisher reg from the local receive stream's cached
-// config; valid as local state but illegal on the wire.
+// stripTransmitterSupplied returns a copy of reg with the fields the local SUT
+// MUST assign itself cleared, so the CLI never pre-populates them on the wire:
+// stream_id (transmitter-assigned), events_supported / events_delivered
+// (derived from the SUT's static event catalog ∩ events_requested),
+// min_verification_interval and inactivity_timeout (server-side policy). The
+// goSignals-to-goSignals connection flow can carry these from the local
+// receive stream's cached config; valid as local state but illegal on the wire.
 //
-// For receiver-side registrations (Delivery.method = Receive*), Iss, Aud, and
-// IssuerJWKSUrl describe the FOREIGN transmitter the local SUT will receive
-// from — the SUT needs Iss/IssuerJWKSUrl to discover the transmitter's SSF
-// endpoints (verification, status) for stream management, and Aud as the
-// expected audience to validate against inbound SETs' aud claim. Preserve
-// them in that case.
+// Iss, Aud, and IssuerJWKSUrl are deliberately PRESERVED on both paths:
+//   - Transmitter-side (Delivery.method = DeliveryPush/Poll/Sstp): the operator
+//     is asserting them via --iss / --aud / --iss-jwks-url. The local SUT,
+//     becoming the transmitter, MUST honor that intent (without it, the SUT
+//     falls back to its default issuer alias and silently drops the operator's
+//     configured audience).
+//   - Receiver-side (Delivery.method = Receive*): these describe the FOREIGN
+//     transmitter the local SUT will receive from. The SUT needs Iss /
+//     IssuerJWKSUrl to discover the transmitter's SSF endpoints (verification,
+//     status) for stream management, and Aud as the expected audience to
+//     validate against inbound SETs' aud claim (RFC 8417 §2.2).
+//
+// In both cases, executeCreateRequest targets the operator's LOCAL SUT — not a
+// foreign transmitter. Outbound calls FROM the SUT to a foreign transmitter
+// (cascade DELETE, well-known discovery, etc.) are constructed inside the SUT
+// and apply their own SSF §7.1.1 wire cleanup; the CLI's only job is to convey
+// operator intent faithfully.
 func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfiguration {
     wire := reg.DeepCopy()
     wire.Id = ""
@@ -1080,16 +1089,6 @@ func stripTransmitterSupplied(reg model.StreamConfiguration) model.StreamConfigu
     wire.EventsDelivered = nil
     wire.MinVerificationInterval = 0
     wire.InactivityTimeout = 0
-    method := ""
-    if reg.Delivery != nil {
-        method = reg.Delivery.GetMethod()
-    }
-    isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
-    if !isReceiverSide {
-        wire.Aud = nil
-        wire.Iss = ""
-        wire.IssuerJWKSUrl = ""
-    }
     return wire
 }
 
