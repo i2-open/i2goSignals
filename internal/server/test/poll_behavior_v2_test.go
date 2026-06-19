@@ -420,7 +420,7 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_DELAY", "0.05") // 50ms base
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "3")
 	t.Setenv("I2SIG_POLL_RETRY_BACKOFF_FACTOR", "1.0") // disable exponential growth for predictability
-	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "1.0")     // cap
+	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "1.0")      // cap
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/jwks" {
@@ -480,4 +480,3 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	assert.Contains(t, finalState.ErrorMsg, "Stream disabled after 3 forbidden (403)")
 	assert.Contains(t, finalState.ErrorMsg, "scope")
 }
-

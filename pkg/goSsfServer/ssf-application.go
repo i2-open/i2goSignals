@@ -9,18 +9,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -38,24 +38,24 @@ type SsfApplication struct {
 	SubjectFilterService *services.SubjectFilterService
 	SubjectRelayService  *services.SubjectRelayService
 	Server               *http.Server
-	Handler       http.Handler
-	EventRouter   eventRouter.EventRouter
-	BaseUrl       *url.URL
-	HostName      string
-	DefIssuer     string
-	AdminRole     string
-	Auth          *authSupport.AuthIssuer
-	mu            sync.RWMutex
-	NodeID        string
-	StartedAt     time.Time
+	Handler              http.Handler
+	EventRouter          eventRouter.EventRouter
+	BaseUrl              *url.URL
+	HostName             string
+	DefIssuer            string
+	AdminRole            string
+	Auth                 *authSupport.AuthIssuer
+	mu                   sync.RWMutex
+	NodeID               string
+	StartedAt            time.Time
 }
 
-func (sa *SsfApplication) GetStreamService() *services.StreamService  { return sa.StreamService }
-func (sa *SsfApplication) GetKeyService() *services.KeyService        { return sa.KeyService }
-func (sa *SsfApplication) GetEventService() *services.EventService    { return sa.EventService }
-func (sa *SsfApplication) GetClientService() *services.ClientService  { return sa.ClientService }
-func (sa *SsfApplication) GetServerService() *services.ServerService  { return sa.ServerService }
-func (sa *SsfApplication) GetTokenService() *services.TokenService    { return sa.TokenService }
+func (sa *SsfApplication) GetStreamService() *services.StreamService { return sa.StreamService }
+func (sa *SsfApplication) GetKeyService() *services.KeyService       { return sa.KeyService }
+func (sa *SsfApplication) GetEventService() *services.EventService   { return sa.EventService }
+func (sa *SsfApplication) GetClientService() *services.ClientService { return sa.ClientService }
+func (sa *SsfApplication) GetServerService() *services.ServerService { return sa.ServerService }
+func (sa *SsfApplication) GetTokenService() *services.TokenService   { return sa.TokenService }
 func (sa *SsfApplication) GetSubjectFilterService() *services.SubjectFilterService {
 	return sa.SubjectFilterService
 }

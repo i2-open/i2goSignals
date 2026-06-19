@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -123,11 +123,11 @@ func TestEventDAOMemory_Insert_ConcurrentDuplicates(t *testing.T) {
 
 	const goroutines = 50
 	var (
-		wg       sync.WaitGroup
-		ok       atomic.Int32
-		dup      atomic.Int32
-		other    atomic.Int32
-		start    = make(chan struct{})
+		wg    sync.WaitGroup
+		ok    atomic.Int32
+		dup   atomic.Int32
+		other atomic.Int32
+		start = make(chan struct{})
 	)
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {

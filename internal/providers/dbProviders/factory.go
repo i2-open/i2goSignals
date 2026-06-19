@@ -8,8 +8,8 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/services"
 )
 
 var factoryLog = logger.Sub("dbProviders")

@@ -8,18 +8,18 @@
 package ids
 
 import (
-    "crypto/rand"
-    "encoding/hex"
+	"crypto/rand"
+	"encoding/hex"
 )
 
 // NewObjectID returns a 24-character hex string suitable as a primary key.
 // The format matches MongoDB ObjectID hex but is generated from crypto/rand.
 func NewObjectID() string {
-    var b [12]byte
-    if _, err := rand.Read(b[:]); err != nil {
-        // crypto/rand.Read on standard platforms cannot fail; if it does
-        // the host is in an unrecoverable state. Panic is the only sane response.
-        panic("ids: crypto/rand failed: " + err.Error())
-    }
-    return hex.EncodeToString(b[:])
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand.Read on standard platforms cannot fail; if it does
+		// the host is in an unrecoverable state. Panic is the only sane response.
+		panic("ids: crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
 }

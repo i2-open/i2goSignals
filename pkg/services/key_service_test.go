@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/stretchr/testify/suite"
 )
 

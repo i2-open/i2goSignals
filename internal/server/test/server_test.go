@@ -18,10 +18,10 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -453,7 +453,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	   time.Sleep(time.Millisecond * 500)
 	   // After PUT reset request
 	   require.Eventually(suite.T(), func() bool {
-	       jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(), 
+	       jtis, more := suite.servers[0].app.EventService.GetEventIds(context.Background(),
 	           suite.servers[0].stream.Id,
 	           model.PollParameters{ReturnImmediately: true},
 	       )

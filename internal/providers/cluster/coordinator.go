@@ -8,9 +8,9 @@
 package cluster
 
 import (
-    "time"
+	"time"
 
-    "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 // ClusterCoordinator owns lease and node-registry semantics. It is the only
@@ -26,29 +26,29 @@ import (
 //   - GetActiveNodes/GetActiveNodeCount filter to nodes whose LastSeenAt is
 //     within the active-window (60s by convention).
 type ClusterCoordinator interface {
-    // TryAcquireOrRenewLease atomically acquires the lease if it is
-    // expired/unowned, or renews it if already owned by nodeId. Returns
-    // (acquired=true, fencingToken) only when this node is (or remains) owner.
-    TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (acquired bool, fencingToken int64, err error)
+	// TryAcquireOrRenewLease atomically acquires the lease if it is
+	// expired/unowned, or renews it if already owned by nodeId. Returns
+	// (acquired=true, fencingToken) only when this node is (or remains) owner.
+	TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (acquired bool, fencingToken int64, err error)
 
-    // ReleaseLeaseIfOwned clears the lease iff it is owned by nodeId.
-    ReleaseLeaseIfOwned(resource string, nodeId string) error
+	// ReleaseLeaseIfOwned clears the lease iff it is owned by nodeId.
+	ReleaseLeaseIfOwned(resource string, nodeId string) error
 
-    // GetLeaseOwner returns the current owner, expiry, and fencing token for
-    // a resource. Returns ("", zeroTime, 0, nil) when no lease exists.
-    GetLeaseOwner(resource string) (ownerNodeId string, leaseUntil time.Time, fencingToken int64, err error)
+	// GetLeaseOwner returns the current owner, expiry, and fencing token for
+	// a resource. Returns ("", zeroTime, 0, nil) when no lease exists.
+	GetLeaseOwner(resource string) (ownerNodeId string, leaseUntil time.Time, fencingToken int64, err error)
 
-    // RegisterNode upserts the calling node's heartbeat and metadata.
-    RegisterNode(node model.ClusterNode) error
+	// RegisterNode upserts the calling node's heartbeat and metadata.
+	RegisterNode(node model.ClusterNode) error
 
-    // GetActiveNodeCount returns the count of nodes heartbeated within the
-    // active window.
-    GetActiveNodeCount() (int64, error)
+	// GetActiveNodeCount returns the count of nodes heartbeated within the
+	// active window.
+	GetActiveNodeCount() (int64, error)
 
-    // GetActiveNodes returns nodes heartbeated within the active window.
-    GetActiveNodes() ([]model.ClusterNode, error)
+	// GetActiveNodes returns nodes heartbeated within the active window.
+	GetActiveNodes() ([]model.ClusterNode, error)
 
-    // GetNode returns the node with the given id. Returns (nil, nil) when
-    // not found.
-    GetNode(nodeId string) (*model.ClusterNode, error)
+	// GetNode returns the node with the given id. Returns (nil, nil) when
+	// not found.
+	GetNode(nodeId string) (*model.ClusterNode, error)
 }

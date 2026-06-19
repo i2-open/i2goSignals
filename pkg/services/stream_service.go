@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -58,7 +58,7 @@ func (s *StreamService) SetSubjectFilterService(svc *SubjectFilterService) {
 // Server before delegating to the rest of the pipeline. Lifted out of the
 // provider façade as part of PRD #39 PR 4.
 func (s *StreamService) SetServerService(svc *ServerService) {
-    s.serverService = svc
+	s.serverService = svc
 }
 
 // SetSubjectRelayService wires in the SubjectRelayService so that
@@ -66,7 +66,7 @@ func (s *StreamService) SetServerService(svc *ServerService) {
 // mode against its upstream (PRD #89 #95). Optional: when unset, validation is
 // skipped.
 func (s *StreamService) SetSubjectRelayService(svc *SubjectRelayService) {
-    s.subjectRelayService = svc
+	s.subjectRelayService = svc
 }
 
 // validateSubjectFilterMode rejects or warns on a transmitter stream's
@@ -74,17 +74,17 @@ func (s *StreamService) SetSubjectRelayService(svc *SubjectRelayService) {
 // no-op when subject filtering is disabled server-wide, no mode is set, or the
 // relay service is unwired.
 func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *model.StreamStateRecord) error {
-    if !SubjectFilteringEnabled() || rec.SubjectFilterMode == "" || s.subjectRelayService == nil {
-        return nil
-    }
-    verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
-    if verdict.Err != nil {
-        return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
-    }
-    if verdict.Warn != "" {
-        ssLog.Warn(verdict.Warn, "stream_id", rec.StreamConfiguration.Id, "mode", rec.SubjectFilterMode)
-    }
-    return nil
+	if !SubjectFilteringEnabled() || rec.SubjectFilterMode == "" || s.subjectRelayService == nil {
+		return nil
+	}
+	verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
+	if verdict.Err != nil {
+		return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
+	}
+	if verdict.Warn != "" {
+		ssLog.Warn(verdict.Warn, "stream_id", rec.StreamConfiguration.Id, "mode", rec.SubjectFilterMode)
+	}
+	return nil
 }
 
 // validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
@@ -93,10 +93,10 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 // value is checked here — the WARN-and-drop for a receiver stream is the
 // caller's responsibility, since the rejection must be field-shape only.
 func validateSubjectRemovalGrace(grace int) error {
-    if grace < 0 {
-        return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
-    }
-    return nil
+	if grace < 0 {
+		return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
+	}
+	return nil
 }
 
 // applyRemovalGraceOverride copies a non-zero SSF §9.3 grace override from the
@@ -104,16 +104,16 @@ func validateSubjectRemovalGrace(grace int) error {
 // dropped with a WARN (PRD #97 issue #98). The request value has already been
 // shape-checked by validateSubjectRemovalGrace.
 func applyRemovalGraceOverride(streamRec *model.StreamStateRecord, requested int) {
-    if requested == 0 {
-        return
-    }
-    if streamRec.IsReceiver() {
-        ssLog.Warn("subject_removal_grace_seconds ignored on a receiver stream",
-            "stream_id", streamRec.StreamConfiguration.Id,
-            "value", requested)
-        return
-    }
-    streamRec.SubjectRemovalGraceSeconds = requested
+	if requested == 0 {
+		return
+	}
+	if streamRec.IsReceiver() {
+		ssLog.Warn("subject_removal_grace_seconds ignored on a receiver stream",
+			"stream_id", streamRec.StreamConfiguration.Id,
+			"value", requested)
+		return
+	}
+	streamRec.SubjectRemovalGraceSeconds = requested
 }
 
 // validateEventSource enforces the ADR 0004 event_source.type rules against a
@@ -124,28 +124,28 @@ func applyRemovalGraceOverride(streamRec *model.StreamStateRecord, requested int
 // drop for receiver streams is handled by applyEventSource before this runs, so
 // a receiver stream never reaches this validation with a non-nil EventSource.
 func validateEventSource(es *model.EventSource, mode string) error {
-    if es == nil {
-        return nil
-    }
-    if es.Type == model.EventSourceExplicit {
-        // R2: EXPLICIT must name at least one upstream stream.
-        if len(es.SourceStreamIds) == 0 {
-            return fmt.Errorf("invalid event_source: type EXPLICIT requires a non-empty source_stream_ids")
-        }
-        return nil
-    }
-    // R3: source_stream_ids is only meaningful for EXPLICIT. Every non-EXPLICIT
-    // type — DIRECT, AUDIENCE, and the unset/empty silent-AUDIENCE default —
-    // must leave it empty.
-    if len(es.SourceStreamIds) > 0 {
-        return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
-    }
-    // R1: a DIRECT stream has no SSF upstream to relay Add/Remove to.
-    if es.Type == model.EventSourceDirect &&
-        (mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid) {
-        return fmt.Errorf("invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", mode)
-    }
-    return nil
+	if es == nil {
+		return nil
+	}
+	if es.Type == model.EventSourceExplicit {
+		// R2: EXPLICIT must name at least one upstream stream.
+		if len(es.SourceStreamIds) == 0 {
+			return fmt.Errorf("invalid event_source: type EXPLICIT requires a non-empty source_stream_ids")
+		}
+		return nil
+	}
+	// R3: source_stream_ids is only meaningful for EXPLICIT. Every non-EXPLICIT
+	// type — DIRECT, AUDIENCE, and the unset/empty silent-AUDIENCE default —
+	// must leave it empty.
+	if len(es.SourceStreamIds) > 0 {
+		return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
+	}
+	// R1: a DIRECT stream has no SSF upstream to relay Add/Remove to.
+	if es.Type == model.EventSourceDirect &&
+		(mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid) {
+		return fmt.Errorf("invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", mode)
+	}
+	return nil
 }
 
 // applyEventSource copies the requested event_source descriptor onto streamRec.
@@ -154,16 +154,16 @@ func validateEventSource(es *model.EventSource, mode string) error {
 // ADR 0004 issue #117). Mirrors applyRemovalGraceOverride. A nil request is a
 // no-op so an UpdateStream that does not touch event_source leaves it intact.
 func applyEventSource(streamRec *model.StreamStateRecord, requested *model.EventSource) {
-    if requested == nil {
-        return
-    }
-    if streamRec.IsReceiver() {
-        ssLog.Warn("event_source ignored on a receiver stream",
-            "stream_id", streamRec.StreamConfiguration.Id)
-        streamRec.EventSource = nil
-        return
-    }
-    streamRec.EventSource = requested
+	if requested == nil {
+		return
+	}
+	if streamRec.IsReceiver() {
+		ssLog.Warn("event_source ignored on a receiver stream",
+			"stream_id", streamRec.StreamConfiguration.Id)
+		streamRec.EventSource = nil
+		return
+	}
+	streamRec.EventSource = requested
 }
 
 // StreamServiceConfig carries the operator-tunable stream knobs that were
@@ -228,32 +228,32 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 // knobs (subject-filtering fields) can be supplied alongside the SSF
 // wire-format configuration without leaking into it.
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamStateRecord, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
-    // Resolve tx_alias → Server when the caller didn't pre-resolve it. This
-    // logic was previously in BaseProvider.CreateStream; it lives here now
-    // so the provider façade can be a pass-through.
-    if txServer == nil && request.TxAlias != nil && *request.TxAlias != "" && s.serverService != nil {
-        resolved, err := s.serverService.GetServerByAlias(ctx, *request.TxAlias)
-        if err != nil {
-            return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
-        }
-        txServer = resolved
-    }
+	// Resolve tx_alias → Server when the caller didn't pre-resolve it. This
+	// logic was previously in BaseProvider.CreateStream; it lives here now
+	// so the provider façade can be a pass-through.
+	if txServer == nil && request.TxAlias != nil && *request.TxAlias != "" && s.serverService != nil {
+		resolved, err := s.serverService.GetServerByAlias(ctx, *request.TxAlias)
+		if err != nil {
+			return model.StreamConfiguration{}, errors.New("unknown tx_alias provided")
+		}
+		txServer = resolved
+	}
 
-    // Normalise IssuerJWKSUrl == "NONE" (any case) to the empty string. SCIM
-    // servers signal "key is internal to this server" via "NONE"; downstream
-    // code expects an empty value.
-    if strings.EqualFold(request.IssuerJWKSUrl, "NONE") {
-        request.IssuerJWKSUrl = ""
-    }
+	// Normalise IssuerJWKSUrl == "NONE" (any case) to the empty string. SCIM
+	// servers signal "key is internal to this server" via "NONE"; downstream
+	// code expects an empty value.
+	if strings.EqualFold(request.IssuerJWKSUrl, "NONE") {
+		request.IssuerJWKSUrl = ""
+	}
 
-    // Validate goSignals-specific knobs before any state is mutated. The SSF
-    // §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
-    // event-source pipeline a few lines below.
-    if err := validateSubjectRemovalGrace(request.SubjectRemovalGraceSeconds); err != nil {
-        return model.StreamConfiguration{}, err
-    }
+	// Validate goSignals-specific knobs before any state is mutated. The SSF
+	// §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
+	// event-source pipeline a few lines below.
+	if err := validateSubjectRemovalGrace(request.SubjectRemovalGraceSeconds); err != nil {
+		return model.StreamConfiguration{}, err
+	}
 
-    mid := bson.NewObjectID()
+	mid := bson.NewObjectID()
 
 	// var authCtx authSupport.AuthContext
 	// authCtx = ctx.Value(authSupport.AuthContextKey).(authSupport.AuthContext)

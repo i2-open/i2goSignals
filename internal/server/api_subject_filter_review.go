@@ -1,22 +1,22 @@
 package server
 
 import (
-    "encoding/json"
-    "net/http"
-    "time"
+	"encoding/json"
+	"net/http"
+	"time"
 
-    "github.com/i2-open/i2goSignals/pkg/services"
-    "github.com/i2-open/i2goSignals/pkg/authSupport"
-    "github.com/i2-open/i2goSignals/pkg/goSet"
-    model "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 // subjectFilterReviewRequest is the body of POST /subject-filter/review (PRD
 // #97 issue #101). stream_id is required; subject is optional — when present
 // the response includes a point-lookup result.
 type subjectFilterReviewRequest struct {
-    StreamId string                   `json:"stream_id"`
-    Subject  *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	StreamId string                   `json:"stream_id"`
+	Subject  *goSet.SubjectIdentifier `json:"subject,omitempty"`
 }
 
 // subjectFilterReviewResponse is the wire-format admin review of a stream's
@@ -25,37 +25,37 @@ type subjectFilterReviewRequest struct {
 // types in pkg/services are translated to this shape so the wire format does
 // not move when internal types refactor.
 type subjectFilterReviewResponse struct {
-    StreamId                   string                           `json:"stream_id"`
-    Mode                       string                           `json:"mode,omitempty"`
-    DefaultSubjects            string                           `json:"default_subjects,omitempty"`
-    EventSource                *model.EventSource               `json:"event_source"`
-    SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
-    PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
-    Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
-    Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
-    Lookup                     *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
+	StreamId                   string                           `json:"stream_id"`
+	Mode                       string                           `json:"mode,omitempty"`
+	DefaultSubjects            string                           `json:"default_subjects,omitempty"`
+	EventSource                *model.EventSource               `json:"event_source"`
+	SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
+	PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
+	Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
+	Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
+	Lookup                     *subjectFilterReviewLookupResult `json:"lookup,omitempty"`
 }
 
 type subjectFilterReviewCounts struct {
-    Total   int64 `json:"total"`
-    Pending int64 `json:"pending"`
+	Total   int64 `json:"total"`
+	Pending int64 `json:"pending"`
 }
 
 type subjectFilterReviewEntry struct {
-    Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
-    CanonicalKey string                   `json:"canonical_key"`
-    Kind         string                   `json:"kind"`
-    EnforceAt    time.Time                `json:"enforce_at"`
+	Subject      *goSet.SubjectIdentifier `json:"subject,omitempty"`
+	CanonicalKey string                   `json:"canonical_key"`
+	Kind         string                   `json:"kind"`
+	EnforceAt    time.Time                `json:"enforce_at"`
 }
 
 type subjectFilterReviewLookupResult struct {
-    Subject      *goSet.SubjectIdentifier `json:"subject"`
-    Found        bool                     `json:"found"`
-    Kind         string                   `json:"kind,omitempty"`
-    CanonicalKey string                   `json:"canonical_key,omitempty"`
-    EnforceAt    time.Time                `json:"enforce_at,omitempty"`
-    Pending      bool                     `json:"pending,omitempty"`
-    Delivers     bool                     `json:"delivers"`
+	Subject      *goSet.SubjectIdentifier `json:"subject"`
+	Found        bool                     `json:"found"`
+	Kind         string                   `json:"kind,omitempty"`
+	CanonicalKey string                   `json:"canonical_key,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	Pending      bool                     `json:"pending,omitempty"`
+	Delivers     bool                     `json:"delivers"`
 }
 
 // ReviewSubjectFilter handles POST /subject-filter/review (PRD #97 issue #101):
@@ -83,113 +83,113 @@ type subjectFilterReviewLookupResult struct {
 //     stream.
 //   - 500 Internal Server Error: DAO or serialization error.
 func (sa *SignalsApplication) ReviewSubjectFilter(w http.ResponseWriter, r *http.Request) {
-    ReviewSubjectFilterHandler(sa, w, r)
+	ReviewSubjectFilterHandler(sa, w, r)
 }
 
 func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-    if !services.SubjectFilteringEnabled() {
-        // The feature is disabled server-wide; the §9 layer is inert per the
-        // PRD's "disabled by default" stance.
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if !services.SubjectFilteringEnabled() {
+		// The feature is disabled server-wide; the §9 layer is inert per the
+		// PRD's "disabled by default" stance.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{
-        authSupport.ScopeStreamAdmin,
-        authSupport.ScopeStreamMgmt,
-        authSupport.ScopeRoot,
-    })
-    if status != http.StatusOK {
-        w.WriteHeader(status)
-        return
-    }
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{
+		authSupport.ScopeStreamAdmin,
+		authSupport.ScopeStreamMgmt,
+		authSupport.ScopeRoot,
+	})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
 
-    var req subjectFilterReviewRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        w.WriteHeader(http.StatusBadRequest)
-        return
-    }
-    if req.StreamId == "" {
-        w.WriteHeader(http.StatusBadRequest)
-        return
-    }
-    // A stream-bound token (mgmt) must match the requested stream; an admin
-    // token has no stream binding and authorizes targeting any stream.
-    if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
-        w.WriteHeader(http.StatusForbidden)
-        return
-    }
+	var req subjectFilterReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if req.StreamId == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	// A stream-bound token (mgmt) must match the requested stream; an admin
+	// token has no stream binding and authorizes targeting any stream.
+	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
-    stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
-    if err != nil {
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	stream, err := sa.GetStreamService().GetStreamState(r.Context(), req.StreamId)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    filterSvc := sa.GetSubjectFilterService()
-    if filterSvc == nil {
-        w.WriteHeader(http.StatusNotFound)
-        return
-    }
+	filterSvc := sa.GetSubjectFilterService()
+	if filterSvc == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-    review, err := filterSvc.Review(r.Context(), stream, req.Subject)
-    if err != nil {
-        serverLog.Error("Subject filter review failed", "sid", req.StreamId, "error", err)
-        w.WriteHeader(http.StatusInternalServerError)
-        return
-    }
+	review, err := filterSvc.Review(r.Context(), stream, req.Subject)
+	if err != nil {
+		serverLog.Error("Subject filter review failed", "sid", req.StreamId, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
-    body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review))
-    if err != nil {
-        w.WriteHeader(http.StatusInternalServerError)
-        return
-    }
-    w.WriteHeader(http.StatusOK)
-    _, _ = w.Write(body)
+	body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // buildSubjectFilterReviewResponse translates the service-layer review into
 // the wire-format response. Kept separate so the JSON contract is one tested
 // adapter and the service stays free of HTTP concerns.
 func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview) subjectFilterReviewResponse {
-    out := subjectFilterReviewResponse{
-        StreamId:                   stream.StreamConfiguration.Id,
-        Mode:                       stream.SubjectFilterMode,
-        DefaultSubjects:            stream.DefaultSubjects,
-        EventSource:                effectiveEventSource(stream.EventSource),
-        SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
-        PassthruNoLocalFilter:      review.NoLocalFilter,
-    }
-    if review.Counts != nil {
-        out.Counts = &subjectFilterReviewCounts{
-            Total:   review.Counts.Total,
-            Pending: review.Counts.Pending,
-        }
-    }
-    if len(review.Pending) > 0 {
-        out.Pending = make([]subjectFilterReviewEntry, 0, len(review.Pending))
-        for _, e := range review.Pending {
-            out.Pending = append(out.Pending, subjectFilterReviewEntry{
-                Subject:      e.Subject,
-                CanonicalKey: e.CanonicalKey,
-                Kind:         e.Kind,
-                EnforceAt:    e.EnforceAt,
-            })
-        }
-    }
-    if review.Lookup != nil {
-        out.Lookup = &subjectFilterReviewLookupResult{
-            Subject:      review.Lookup.Subject,
-            Found:        review.Lookup.Found,
-            Kind:         review.Lookup.Kind,
-            CanonicalKey: review.Lookup.CanonicalKey,
-            EnforceAt:    review.Lookup.EnforceAt,
-            Pending:      review.Lookup.Pending,
-            Delivers:     review.Lookup.Delivers,
-        }
-    }
-    return out
+	out := subjectFilterReviewResponse{
+		StreamId:                   stream.StreamConfiguration.Id,
+		Mode:                       stream.SubjectFilterMode,
+		DefaultSubjects:            stream.DefaultSubjects,
+		EventSource:                effectiveEventSource(stream.EventSource),
+		SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
+		PassthruNoLocalFilter:      review.NoLocalFilter,
+	}
+	if review.Counts != nil {
+		out.Counts = &subjectFilterReviewCounts{
+			Total:   review.Counts.Total,
+			Pending: review.Counts.Pending,
+		}
+	}
+	if len(review.Pending) > 0 {
+		out.Pending = make([]subjectFilterReviewEntry, 0, len(review.Pending))
+		for _, e := range review.Pending {
+			out.Pending = append(out.Pending, subjectFilterReviewEntry{
+				Subject:      e.Subject,
+				CanonicalKey: e.CanonicalKey,
+				Kind:         e.Kind,
+				EnforceAt:    e.EnforceAt,
+			})
+		}
+	}
+	if review.Lookup != nil {
+		out.Lookup = &subjectFilterReviewLookupResult{
+			Subject:      review.Lookup.Subject,
+			Found:        review.Lookup.Found,
+			Kind:         review.Lookup.Kind,
+			CanonicalKey: review.Lookup.CanonicalKey,
+			EnforceAt:    review.Lookup.EnforceAt,
+			Pending:      review.Lookup.Pending,
+			Delivers:     review.Lookup.Delivers,
+		}
+	}
+	return out
 }
 
 // effectiveEventSource resolves a stream's stored EventSource to the value the
@@ -198,10 +198,10 @@ func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *s
 // behaves as audience matching), so it resolves to {"type":"AUDIENCE"} rather
 // than being omitted. A non-nil descriptor is surfaced unchanged.
 func effectiveEventSource(es *model.EventSource) *model.EventSource {
-    if es == nil {
-        return &model.EventSource{Type: model.EventSourceAudience}
-    }
-    return es
+	if es == nil {
+		return &model.EventSource{Type: model.EventSourceAudience}
+	}
+	return es
 }
 
 // effectiveRemovalGrace resolves the SSF §9.3 grace seconds surfaced by the
@@ -209,8 +209,8 @@ func effectiveEventSource(es *model.EventSource) *model.EventSource {
 // I2SIG_SUBJECT_REMOVAL_GRACE default. Mirrors SubjectFilterService.resolveGrace
 // so the review reports the same effective value the service enforces.
 func effectiveRemovalGrace(perStream int) int {
-    if perStream > 0 {
-        return perStream
-    }
-    return services.SubjectRemovalGraceDefaultSeconds()
+	if perStream > 0 {
+		return perStream
+	}
+	return services.SubjectRemovalGraceDefaultSeconds()
 }

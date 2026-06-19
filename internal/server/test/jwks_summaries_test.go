@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )

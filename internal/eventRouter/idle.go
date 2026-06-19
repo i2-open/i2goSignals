@@ -1,11 +1,11 @@
 package eventRouter
 
 import (
-    "fmt"
-    "time"
+	"fmt"
+	"time"
 
-    "github.com/i2-open/i2goSignals/pkg/goSet/events"
-    "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/goSet/events"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 // idleVerifyEnvVar is the env var that controls T3 idle-keepalive cadence. Slice 8 documents
@@ -29,7 +29,7 @@ const defaultIdleVerifyInterval = 5 * time.Minute
 // LoadIdleVerifyInterval returns the configured T3 idle-keepalive cadence. A non-positive
 // value (including the explicit "0" override) disables idle generation in runPushLoop.
 func LoadIdleVerifyInterval() time.Duration {
-    return parseDurationEnv(idleVerifyEnvVar, idleVerifyEnvVarLegacy, defaultIdleVerifyInterval)
+	return parseDurationEnv(idleVerifyEnvVar, idleVerifyEnvVarLegacy, defaultIdleVerifyInterval)
 }
 
 // GenerateVerifyEvent persists an SSF verification SET (per OpenID SSF §8.1.4.2) scoped to the
@@ -43,19 +43,19 @@ func LoadIdleVerifyInterval() time.Duration {
 // Both call paths produce identical persisted records: the only difference is who triggered the
 // generation. Returns the persisted EventRecord (with Operational=true) on success.
 func (r *router) GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error) {
-    // Resolve the per-direction StreamConfiguration so verify targets the
-    // outbound side of whichever direction the SID names (Q40). For an SSTP
-    // pair's rx-side SID this returns the inbound direction's iss/aud; for a
-    // plain stream (or the tx side) it returns the primary StreamConfiguration.
-    cfg, err := r.streamService.GetStreamConfigBySID(r.ctx, sid)
-    if err != nil {
-        return nil, fmt.Errorf("GenerateVerifyEvent: lookup stream %s: %w", sid, err)
-    }
-    if cfg == nil {
-        return nil, fmt.Errorf("GenerateVerifyEvent: stream not found: %s", sid)
-    }
-    set := events.CreateVerifyEvent(sid, state, cfg.Iss, cfg.Aud)
-    return r.SubmitOperationalEvent(sid, set, "")
+	// Resolve the per-direction StreamConfiguration so verify targets the
+	// outbound side of whichever direction the SID names (Q40). For an SSTP
+	// pair's rx-side SID this returns the inbound direction's iss/aud; for a
+	// plain stream (or the tx side) it returns the primary StreamConfiguration.
+	cfg, err := r.streamService.GetStreamConfigBySID(r.ctx, sid)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateVerifyEvent: lookup stream %s: %w", sid, err)
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("GenerateVerifyEvent: stream not found: %s", sid)
+	}
+	set := events.CreateVerifyEvent(sid, state, cfg.Iss, cfg.Aud)
+	return r.SubmitOperationalEvent(sid, set, "")
 }
 
 // resetIdleTimer drains any pending tick before resetting so callers don't fire spuriously
@@ -63,14 +63,14 @@ func (r *router) GenerateVerifyEvent(sid string, state string) (*model.EventReco
 // semantics make the drain a no-op in our specific call sites — but it costs nothing and
 // makes the call safe regardless of who else might have raced to read t.C.
 func resetIdleTimer(t *time.Timer, d time.Duration) {
-    if t == nil || d <= 0 {
-        return
-    }
-    if !t.Stop() {
-        select {
-        case <-t.C:
-        default:
-        }
-    }
-    t.Reset(d)
+	if t == nil || d <= 0 {
+		return
+	}
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }

@@ -1,8 +1,8 @@
 package server
 
 import (
-    "os"
-    "testing"
+	"os"
+	"testing"
 )
 
 // TestMain disables the SignalsApplication graceful-drain for this package's
@@ -11,8 +11,8 @@ import (
 // servers, so the default adds tens of seconds of pure waiting. An operator who
 // sets the env explicitly is respected.
 func TestMain(m *testing.M) {
-    if os.Getenv("I2SIG_SHUTDOWN_DRAIN") == "" {
-        _ = os.Setenv("I2SIG_SHUTDOWN_DRAIN", "0")
-    }
-    os.Exit(m.Run())
+	if os.Getenv("I2SIG_SHUTDOWN_DRAIN") == "" {
+		_ = os.Setenv("I2SIG_SHUTDOWN_DRAIN", "0")
+	}
+	os.Exit(m.Run())
 }

@@ -77,10 +77,10 @@ func (s *ServerService) CreateServer(ctx context.Context, server *model.Server) 
 //
 // Discovery ladder (runs for OAuth-client / token / IAT modes):
 //
-//	1. SSF discovery parses AND has gosignals_version -> gosignals
-//	2. SSF discovery parses, but no gosignals_version  -> ssf
-//	3. No SSF discovery, but PRM resolves              -> ssf (harvest endpoints)
-//	4. Nothing resolves                                -> gosignals (provenance)
+//  1. SSF discovery parses AND has gosignals_version -> gosignals
+//  2. SSF discovery parses, but no gosignals_version  -> ssf
+//  3. No SSF discovery, but PRM resolves              -> ssf (harvest endpoints)
+//  4. Nothing resolves                                -> gosignals (provenance)
 //
 // SPIFFE skips the ladder and stays gosignals by provenance (closed trust
 // domain, never a foreign SSF peer; avoids a handshake just to classify).

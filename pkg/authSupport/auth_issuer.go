@@ -113,7 +113,7 @@ type AuthIssuer struct {
 	PublicKey    *keyfunc.JWKS
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
-	OAuthServer  []string                 // OAuth Authorization Server identifiers
+	OAuthServer  []string     // OAuth Authorization Server identifiers
 	TokenTracker TokenTracker // Tracker for revocation
 	// OAuthServersLookup supplies the raw, comma-separated OAuth Authorization
 	// Server discovery endpoints. Production wiring sets this from the
@@ -432,53 +432,53 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 // binding only. Authorization must go through AuthContext.HasScope /
 // IsAuthorizedForStream, never a bare authCtx.Eat check (nil for OAuth/STS).
 func (a *AuthIssuer) IssueSstpPairToken(txSid string, rxSid string, projectId string, admin bool, session *AuthContext) (string, error) {
-    exp := time.Now().AddDate(0, 0, 90)
+	exp := time.Now().AddDate(0, 0, 90)
 
-    a.mu.RLock()
-    issuer := a.TokenIssuer
-    kid := a.TokenKid
-    if kid == "" {
-        kid = issuer
-    }
-    privateKey := a.PrivateKey
-    a.mu.RUnlock()
+	a.mu.RLock()
+	issuer := a.TokenIssuer
+	kid := a.TokenKid
+	if kid == "" {
+		kid = issuer
+	}
+	privateKey := a.PrivateKey
+	a.mu.RUnlock()
 
-    scopes := []string{ScopeStreamMgmt, ScopeEventDelivery}
-    if admin {
-        scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery}
-    }
+	scopes := []string{ScopeStreamMgmt, ScopeEventDelivery}
+	if admin {
+		scopes = []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery}
+	}
 
-    eat := EventAuthToken{
-        StreamIds: []string{txSid, rxSid},
-        ProjectId: projectId,
-        Roles:     scopes,
-        RegisteredClaims: jwt.RegisteredClaims{
-            IssuedAt:  jwt.NewNumericDate(time.Now()),
-            ExpiresAt: jwt.NewNumericDate(exp),
-            Audience:  []string{issuer},
-            Issuer:    issuer,
-            ID:        goSet.GenerateJti(),
-        },
-    }
+	eat := EventAuthToken{
+		StreamIds: []string{txSid, rxSid},
+		ProjectId: projectId,
+		Roles:     scopes,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(exp),
+			Audience:  []string{issuer},
+			Issuer:    issuer,
+			ID:        goSet.GenerateJti(),
+		},
+	}
 
-    // The pair bearer's lineage parent is the stream-client token that authorized
-    // the pair create (the issuing session's EAT), mirroring IssueStreamToken.
-    parentJTI := ""
-    if session != nil && session.Eat != nil {
-        eat.ClientId = session.Eat.ClientId
-        eat.Subject, _ = session.Eat.GetSubject()
-        parentJTI = session.Eat.ID
-    }
+	// The pair bearer's lineage parent is the stream-client token that authorized
+	// the pair create (the issuing session's EAT), mirroring IssueStreamToken.
+	parentJTI := ""
+	if session != nil && session.Eat != nil {
+		eat.ClientId = session.Eat.ClientId
+		eat.Subject, _ = session.Eat.GetSubject()
+		parentJTI = session.Eat.ID
+	}
 
-    token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-    token.Header["typ"] = "jwt"
-    token.Header["kid"] = kid
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
+	token.Header["typ"] = "jwt"
+	token.Header["kid"] = kid
 
-    signed, err := token.SignedString(privateKey)
-    if err == nil && a.TokenTracker != nil {
-        _ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
-    }
-    return signed, err
+	signed, err := token.SignedString(privateKey)
+	if err == nil && a.TokenTracker != nil {
+		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
+	}
+	return signed, err
 }
 
 func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session *AuthContext) (string, error) {

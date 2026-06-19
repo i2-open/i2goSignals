@@ -1,9 +1,9 @@
 package model
 
 import (
-    "time"
+	"time"
 
-    "github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
 
 // Subject kinds for a SubjectFilterEntry, mirroring subjectid.SubjectKind. The
@@ -11,9 +11,9 @@ import (
 // indexed canonical-key membership, complex subjects by a linear field-wise
 // scan.
 const (
-    SubjectKindSimple  = "simple"
-    SubjectKindComplex = "complex"
-    SubjectKindAliases = "aliases"
+	SubjectKindSimple  = "simple"
+	SubjectKindComplex = "complex"
+	SubjectKindAliases = "aliases"
 )
 
 // SubjectFilterEntry is one row of a stream's SSF §8.1.3 subject filter: a
@@ -25,17 +25,17 @@ const (
 // indexed lookup key for simple-subject membership. Verified is stored for
 // audit only and has no effect on filtering.
 type SubjectFilterEntry struct {
-    StreamId     string                   `json:"stream_id" bson:"stream_id"`
-    CanonicalKey string                   `json:"canonical_key" bson:"canonical_key"`
-    Kind         string                   `json:"kind" bson:"kind"`
-    Subject      *goSet.SubjectIdentifier `json:"subject" bson:"subject"`
-    Verified     bool                     `json:"verified,omitempty" bson:"verified,omitempty"`
+	StreamId     string                   `json:"stream_id" bson:"stream_id"`
+	CanonicalKey string                   `json:"canonical_key" bson:"canonical_key"`
+	Kind         string                   `json:"kind" bson:"kind"`
+	Subject      *goSet.SubjectIdentifier `json:"subject" bson:"subject"`
+	Verified     bool                     `json:"verified,omitempty" bson:"verified,omitempty"`
 
-    // EnforceAt is the SSF §9.3 removal-grace deadline (PRD #97 issue #99).
-    // A zero value means the entry is fully active under its baseline. A
-    // non-zero value means the entry's delivery-stopping effect is deferred
-    // until now ≥ EnforceAt — until then the subject keeps delivering. Only
-    // pending-removal entries carry it, so the Mongo index on enforce_at is
-    // sparse/partial.
-    EnforceAt time.Time `json:"enforce_at,omitempty" bson:"enforce_at,omitempty"`
+	// EnforceAt is the SSF §9.3 removal-grace deadline (PRD #97 issue #99).
+	// A zero value means the entry is fully active under its baseline. A
+	// non-zero value means the entry's delivery-stopping effect is deferred
+	// until now ≥ EnforceAt — until then the subject keeps delivering. Only
+	// pending-removal entries carry it, so the Mongo index on enforce_at is
+	// sparse/partial.
+	EnforceAt time.Time `json:"enforce_at,omitempty" bson:"enforce_at,omitempty"`
 }

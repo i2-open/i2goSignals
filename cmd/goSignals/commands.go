@@ -1087,25 +1087,25 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 // Receiver-side bodies are never additionally stripped — they go to the local
 // SUT, which owns its own SSF wire cleanup on outbound calls.
 func stripTransmitterSupplied(reg model.StreamConfiguration, strict bool) model.StreamConfiguration {
-    wire := reg.DeepCopy()
-    wire.Id = ""
-    wire.EventsSupported = nil
-    wire.EventsDelivered = nil
-    wire.MinVerificationInterval = 0
-    wire.InactivityTimeout = 0
-    if strict {
-        method := ""
-        if reg.Delivery != nil {
-            method = reg.Delivery.GetMethod()
-        }
-        isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
-        if !isReceiverSide {
-            wire.Aud = nil
-            wire.Iss = ""
-            wire.IssuerJWKSUrl = ""
-        }
-    }
-    return wire
+	wire := reg.DeepCopy()
+	wire.Id = ""
+	wire.EventsSupported = nil
+	wire.EventsDelivered = nil
+	wire.MinVerificationInterval = 0
+	wire.InactivityTimeout = 0
+	if strict {
+		method := ""
+		if reg.Delivery != nil {
+			method = reg.Delivery.GetMethod()
+		}
+		isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
+		if !isReceiverSide {
+			wire.Aud = nil
+			wire.Iss = ""
+			wire.IssuerJWKSUrl = ""
+		}
+	}
+	return wire
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
@@ -2154,23 +2154,23 @@ type SetCmd struct {
 // omitted so the transmitter applies a true partial update. Transmitter-
 // Supplied fields are stripped (see stripTransmitterSupplied).
 type PatchStreamConfigCmd struct {
-    Alias       string   `arg:"" help:"Alias of stream to be patched"`
-    Description string   `optional:"" help:"Set the description"`
-    Events      []string `optional:"" short:"e" sep:"," help:"Replace events_requested with this list"`
-    RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
-    Format      string   `optional:"" short:"f" help:"Set the subject format"`
+	Alias       string   `arg:"" help:"Alias of stream to be patched"`
+	Description string   `optional:"" help:"Set the description"`
+	Events      []string `optional:"" short:"e" sep:"," help:"Replace events_requested with this list"`
+	RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+	Format      string   `optional:"" short:"f" help:"Set the subject format"`
 }
 
 func (p *PatchStreamConfigCmd) Run(cli *CLI) error {
-    return sendStreamMutation(cli, http.MethodPatch, p.Alias, p.Description, p.Events, p.RJwksUrl, p.Format, false)
+	return sendStreamMutation(cli, http.MethodPatch, p.Alias, p.Description, p.Events, p.RJwksUrl, p.Format, false)
 }
 
 type PatchStreamCmd struct {
-    Config PatchStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PATCH a partial Receiver-Supplied stream config"`
+	Config PatchStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PATCH a partial Receiver-Supplied stream config"`
 }
 
 type PatchCmd struct {
-    Stream PatchStreamCmd `cmd:"" help:"Send a partial-update (PATCH) request to a transmitter"`
+	Stream PatchStreamCmd `cmd:"" help:"Send a partial-update (PATCH) request to a transmitter"`
 }
 
 // ReplaceStreamConfigCmd issues a non-interactive PUT against the transmitter's
@@ -2179,23 +2179,23 @@ type PatchCmd struct {
 // to the locally-cached stream config so the replace is well-formed. Used by
 // the conformance receiver-plan driver to exercise the replace path.
 type ReplaceStreamConfigCmd struct {
-    Alias       string   `arg:"" help:"Alias of stream to be replaced"`
-    Description string   `optional:"" help:"Set the description (defaults to existing)"`
-    Events      []string `optional:"" short:"e" sep:"," help:"Set events_requested (defaults to existing)"`
-    RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
-    Format      string   `optional:"" short:"f" help:"Set the subject format"`
+	Alias       string   `arg:"" help:"Alias of stream to be replaced"`
+	Description string   `optional:"" help:"Set the description (defaults to existing)"`
+	Events      []string `optional:"" short:"e" sep:"," help:"Set events_requested (defaults to existing)"`
+	RJwksUrl    string   `optional:"" short:"r" help:"Set the receiverJWKSUrl"`
+	Format      string   `optional:"" short:"f" help:"Set the subject format"`
 }
 
 func (rp *ReplaceStreamConfigCmd) Run(cli *CLI) error {
-    return sendStreamMutation(cli, http.MethodPut, rp.Alias, rp.Description, rp.Events, rp.RJwksUrl, rp.Format, true)
+	return sendStreamMutation(cli, http.MethodPut, rp.Alias, rp.Description, rp.Events, rp.RJwksUrl, rp.Format, true)
 }
 
 type ReplaceStreamCmd struct {
-    Config ReplaceStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PUT a full Receiver-Supplied stream config"`
+	Config ReplaceStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"PUT a full Receiver-Supplied stream config"`
 }
 
 type ReplaceCmd struct {
-    Stream ReplaceStreamCmd `cmd:"" help:"Send a full-replace (PUT) request to a transmitter"`
+	Stream ReplaceStreamCmd `cmd:"" help:"Send a full-replace (PUT) request to a transmitter"`
 }
 
 // sendStreamMutation builds and sends a PATCH or PUT against
@@ -2209,88 +2209,88 @@ type ReplaceCmd struct {
 // fields will not be sent on the wire. No interactive prompt: this is meant
 // to be driven from scripts.
 func sendStreamMutation(cli *CLI, method, alias, description string, events []string, rJwks, format string, inheritFromCache bool) error {
-    streamConfig, server := cli.Data.GetStreamAndServer(alias)
-    if streamConfig == nil {
-        return fmt.Errorf("stream alias %q not found", alias)
-    }
-    if server == nil || server.ServerConfiguration.ConfigurationEndpoint == "" {
-        return fmt.Errorf("no configuration_endpoint known for server hosting stream %q", alias)
-    }
+	streamConfig, server := cli.Data.GetStreamAndServer(alias)
+	if streamConfig == nil {
+		return fmt.Errorf("stream alias %q not found", alias)
+	}
+	if server == nil || server.ServerConfiguration.ConfigurationEndpoint == "" {
+		return fmt.Errorf("no configuration_endpoint known for server hosting stream %q", alias)
+	}
 
-    body := map[string]any{"stream_id": streamConfig.Id}
-    // PUT (replace) seeds Receiver-Supplied fields from the cached config so
-    // unset flags carry through, matching SSF §8.1.1.4 full-replace semantics.
-    // PATCH (inheritFromCache=false) sends only explicitly-set fields.
-    if inheritFromCache {
-        cached, err := cli.Data.GetStreamConfig(alias)
-        if err != nil {
-            return fmt.Errorf("could not load cached stream config for %q: %w", alias, err)
-        }
-        if cached.Description != "" {
-            body["description"] = cached.Description
-        }
-        if len(cached.EventsRequested) > 0 {
-            body["events_requested"] = cached.EventsRequested
-        }
-        if cached.ReceiverJWKSUrl != "" {
-            body["receiverJWKSUrl"] = cached.ReceiverJWKSUrl
-        }
-        if cached.Format != "" {
-            body["format"] = cached.Format
-        }
-        if cached.Delivery != nil {
-            body["delivery"] = cached.Delivery
-        }
-    }
-    if description != "" {
-        body["description"] = description
-    }
-    if len(events) > 0 {
-        body["events_requested"] = events
-    }
-    if rJwks != "" {
-        body["receiverJWKSUrl"] = rJwks
-    }
-    if format != "" {
-        body["format"] = format
-    }
+	body := map[string]any{"stream_id": streamConfig.Id}
+	// PUT (replace) seeds Receiver-Supplied fields from the cached config so
+	// unset flags carry through, matching SSF §8.1.1.4 full-replace semantics.
+	// PATCH (inheritFromCache=false) sends only explicitly-set fields.
+	if inheritFromCache {
+		cached, err := cli.Data.GetStreamConfig(alias)
+		if err != nil {
+			return fmt.Errorf("could not load cached stream config for %q: %w", alias, err)
+		}
+		if cached.Description != "" {
+			body["description"] = cached.Description
+		}
+		if len(cached.EventsRequested) > 0 {
+			body["events_requested"] = cached.EventsRequested
+		}
+		if cached.ReceiverJWKSUrl != "" {
+			body["receiverJWKSUrl"] = cached.ReceiverJWKSUrl
+		}
+		if cached.Format != "" {
+			body["format"] = cached.Format
+		}
+		if cached.Delivery != nil {
+			body["delivery"] = cached.Delivery
+		}
+	}
+	if description != "" {
+		body["description"] = description
+	}
+	if len(events) > 0 {
+		body["events_requested"] = events
+	}
+	if rJwks != "" {
+		body["receiverJWKSUrl"] = rJwks
+	}
+	if format != "" {
+		body["format"] = format
+	}
 
-    bodyBytes, err := json.MarshalIndent(body, "", " ")
-    if err != nil {
-        return err
-    }
+	bodyBytes, err := json.MarshalIndent(body, "", " ")
+	if err != nil {
+		return err
+	}
 
-    reqUrl := server.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamConfig.Id
-    req, err := http.NewRequest(method, reqUrl, bytes.NewReader(bodyBytes))
-    if err != nil {
-        return err
-    }
-    req.Header.Set("Content-Type", "application/json")
-    bearer, err := serverBearer(&cli.Globals, server)
-    if err != nil {
-        return err
-    }
-    if bearer != "" {
-        req.Header.Set("Authorization", "Bearer "+bearer)
-    }
+	reqUrl := server.ServerConfiguration.ConfigurationEndpoint + "?stream_id=" + streamConfig.Id
+	req, err := http.NewRequest(method, reqUrl, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 
-    client := getHttpClient(0)
-    defer client.CloseIdleConnections()
-    resp, err := client.Do(req)
-    defer httpSupport.HandleRespClose(resp)
-    if err != nil {
-        return err
-    }
-    respBytes, _ := io.ReadAll(resp.Body)
-    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-        return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
-    }
-    cli.Data.ResetStreamConfig(alias)
-    fmt.Printf("%s %s ok (%s)\n", method, alias, resp.Status)
-    if len(respBytes) > 0 {
-        fmt.Println(string(respBytes))
-    }
-    return nil
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
+	}
+	cli.Data.ResetStreamConfig(alias)
+	fmt.Printf("%s %s ok (%s)\n", method, alias, resp.Status)
+	if len(respBytes) > 0 {
+		fmt.Println(string(respBytes))
+	}
+	return nil
 }
 
 func ConfirmProceed(msg string) bool {

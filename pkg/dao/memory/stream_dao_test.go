@@ -248,4 +248,3 @@ func TestStreamDAOMemory_UpdateRemoteAddress(t *testing.T) {
 		t.Errorf("expected Forwarded 203.0.113.1, got %s", retrieved.RemoteAddress.Forwarded)
 	}
 }
-

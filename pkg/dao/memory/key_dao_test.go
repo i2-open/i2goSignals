@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/stretchr/testify/suite"
 )
 

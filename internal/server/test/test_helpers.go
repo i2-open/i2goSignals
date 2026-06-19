@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
-	"github.com/i2-open/i2goSignals/pkg/services"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -50,12 +50,22 @@ type ssfInstance struct {
 // streamSvc/keySvc/eventSvc/serverSvc are convenience accessors so test code
 // can write `instance.streamSvc().GetStreamState(ctx, id)` without piping
 // through the persistence struct each time.
-func (instance *ssfInstance) streamSvc() *services.StreamService { return instance.persistence.StreamService }
-func (instance *ssfInstance) keySvc() *services.KeyService       { return instance.persistence.KeyService }
-func (instance *ssfInstance) eventSvc() *services.EventService   { return instance.persistence.EventService }
-func (instance *ssfInstance) serverSvc() *services.ServerService { return instance.persistence.ServerService }
-func (instance *ssfInstance) clientSvc() *services.ClientService { return instance.persistence.ClientService }
-func (instance *ssfInstance) tokenSvc() *services.TokenService   { return instance.persistence.TokenService }
+func (instance *ssfInstance) streamSvc() *services.StreamService {
+	return instance.persistence.StreamService
+}
+func (instance *ssfInstance) keySvc() *services.KeyService { return instance.persistence.KeyService }
+func (instance *ssfInstance) eventSvc() *services.EventService {
+	return instance.persistence.EventService
+}
+func (instance *ssfInstance) serverSvc() *services.ServerService {
+	return instance.persistence.ServerService
+}
+func (instance *ssfInstance) clientSvc() *services.ClientService {
+	return instance.persistence.ClientService
+}
+func (instance *ssfInstance) tokenSvc() *services.TokenService {
+	return instance.persistence.TokenService
+}
 
 // The methods below preserve the call shape that test files used to reach
 // through `instance.provider.X` so the per-test diff is mechanical. Each
@@ -129,7 +139,6 @@ func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {
 func (instance *ssfInstance) ListSummaries() ([]daoInterfaces.KeySummary, error) {
 	return instance.keySvc().ListSummaries(context.Background())
 }
-
 
 func (instance *ssfInstance) GetPollUrl(stream model.StreamConfiguration) string {
 	if stream.Delivery == nil || stream.Delivery.PollTransmitMethod == nil {

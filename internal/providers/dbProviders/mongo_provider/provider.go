@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider/watchtokens"
-	"github.com/i2-open/i2goSignals/pkg/services"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -115,14 +115,14 @@ type MongoProvider struct {
 	ssefDb *mongo.Database
 
 	// Collections
-	streamCol    *mongo.Collection
-	keyCol       *mongo.Collection
-	eventCol     *mongo.Collection
-	pendingCol   *mongo.Collection
-	deliveredCol *mongo.Collection
-	clientCol    *mongo.Collection
-	leaseCol     *mongo.Collection
-	nodeCol      *mongo.Collection
+	streamCol        *mongo.Collection
+	keyCol           *mongo.Collection
+	eventCol         *mongo.Collection
+	pendingCol       *mongo.Collection
+	deliveredCol     *mongo.Collection
+	clientCol        *mongo.Collection
+	leaseCol         *mongo.Collection
+	nodeCol          *mongo.Collection
 	serverCol        *mongo.Collection
 	tokenCol         *mongo.Collection
 	subjectFilterCol *mongo.Collection
@@ -216,7 +216,7 @@ func (m *MongoProvider) GetKeyDAO() interfaces.KeyDAO { return m.keyDAO }
 // Coordinator returns the MongoCoordinator owning lease and node-registry
 // state. Always non-nil after Open / initServices.
 func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
-    return m.coordinator
+	return m.coordinator
 }
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
@@ -281,37 +281,37 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		return err
 	}
 
-    // Rebind the existing DAOs in place. The DAOs are created once by
-    // initServices with nil collections; here we point them at the
-    // collections from the freshly-(re)connected database. Services hold
-    // the same DAO instances so they immediately see the new collections.
-    m.streamDAO.SetCollection(m.streamCol)
-    m.eventDAO.SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
-    m.keyDAO.SetCollection(m.keyCol)
-    m.clientDAO.SetCollection(m.clientCol)
-    m.serverDAO.SetCollection(m.serverCol)
-    m.tokenDAO.SetCollection(m.tokenCol)
-    m.subjectFilterDAO.SetCollection(m.subjectFilterCol)
+	// Rebind the existing DAOs in place. The DAOs are created once by
+	// initServices with nil collections; here we point them at the
+	// collections from the freshly-(re)connected database. Services hold
+	// the same DAO instances so they immediately see the new collections.
+	m.streamDAO.SetCollection(m.streamCol)
+	m.eventDAO.SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
+	m.keyDAO.SetCollection(m.keyCol)
+	m.clientDAO.SetCollection(m.clientCol)
+	m.serverDAO.SetCollection(m.serverCol)
+	m.tokenDAO.SetCollection(m.tokenCol)
+	m.subjectFilterDAO.SetCollection(m.subjectFilterCol)
 
-    // Initialize token keys against the existing keyService so a slow
-    // reconnect doesn't leave the AuthIssuer with a nil PublicKey.
-    err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
-    if err != nil {
-        return err
-    }
+	// Initialize token keys against the existing keyService so a slow
+	// reconnect doesn't leave the AuthIssuer with a nil PublicKey.
+	err = m.keyService.InitializeTokenKey(ctx, m.DefaultIssuer)
+	if err != nil {
+		return err
+	}
 
-    // Services are constructed once at startup (initServices). After a
-    // (re)connect we keep the same services and only rebind DAO
-    // collections (above). This is the swap-on-reconnect kill point.
-    m.dbInit = true
+	// Services are constructed once at startup (initServices). After a
+	// (re)connect we keep the same services and only rebind DAO
+	// collections (above). This is the swap-on-reconnect kill point.
+	m.dbInit = true
 
-    // Load receiver streams against the same StreamService instance we
-    // wired up at startup.
-    if m.streamService.LoadReceiverStreams(ctx) == nil {
-        pLog.Warn("No receiver streams loaded during initialization")
-    }
+	// Load receiver streams against the same StreamService instance we
+	// wired up at startup.
+	if m.streamService.LoadReceiverStreams(ctx) == nil {
+		pLog.Warn("No receiver streams loaded during initialization")
+	}
 
-    return nil
+	return nil
 }
 
 // eventJtiIndexName is the fixed name for the sparse-unique JTI index on
@@ -406,22 +406,22 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 // of range for Mongo's int32 expireAfterSeconds. The bounds are checked BEFORE
 // narrowing to int32 so a value above math.MaxInt32 cannot wrap to a negative.
 func tokenRetentionSeconds() int32 {
-    val := os.Getenv(CEnvTokenRetention)
-    if val == "" {
-        return CDefTokenRetentionSeconds
-    }
-    parsed, err := strconv.Atoi(val)
-    if err != nil {
-        pLog.Warn("Invalid integer; falling back to default token retention",
-            "env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
-        return CDefTokenRetentionSeconds
-    }
-    if parsed < 0 || parsed > math.MaxInt32 {
-        pLog.Warn("Value out of range (0..MaxInt32); falling back to default token retention",
-            "env", CEnvTokenRetention, "value", parsed, "max", int(math.MaxInt32), "default", CDefTokenRetentionSeconds)
-        return CDefTokenRetentionSeconds
-    }
-    return int32(parsed)
+	val := os.Getenv(CEnvTokenRetention)
+	if val == "" {
+		return CDefTokenRetentionSeconds
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		pLog.Warn("Invalid integer; falling back to default token retention",
+			"env", CEnvTokenRetention, "value", val, "default", CDefTokenRetentionSeconds)
+		return CDefTokenRetentionSeconds
+	}
+	if parsed < 0 || parsed > math.MaxInt32 {
+		pLog.Warn("Value out of range (0..MaxInt32); falling back to default token retention",
+			"env", CEnvTokenRetention, "value", parsed, "max", int(math.MaxInt32), "default", CDefTokenRetentionSeconds)
+		return CDefTokenRetentionSeconds
+	}
+	return int32(parsed)
 }
 
 // ensureTokenTTLIndex reconciles the token collection's TTL index to the
@@ -433,14 +433,14 @@ func tokenRetentionSeconds() int32 {
 //
 // TTL is Mongo-only; the memory provider intentionally has no equivalent.
 func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int32) error {
-    if m.tokenTTLEnsured {
-        return nil
-    }
-    if err := m.reconcileTokenTTLIndex(ctx, expireAfter); err != nil {
-        return err
-    }
-    m.tokenTTLEnsured = true
-    return nil
+	if m.tokenTTLEnsured {
+		return nil
+	}
+	if err := m.reconcileTokenTTLIndex(ctx, expireAfter); err != nil {
+		return err
+	}
+	m.tokenTTLEnsured = true
+	return nil
 }
 
 // reconcileTokenTTLIndex makes the token collection's TTL index match the
@@ -452,59 +452,59 @@ func (m *MongoProvider) ensureTokenTTLIndex(ctx context.Context, expireAfter int
 //   - exists, different  -> collMod the index in place (no drop/recreate, so no
 //     collection migration is needed to change retention on a live deployment)
 func (m *MongoProvider) reconcileTokenTTLIndex(ctx context.Context, expireAfter int32) error {
-    if m.tokenCol == nil {
-        return errors.New("token collection not initialized")
-    }
+	if m.tokenCol == nil {
+		return errors.New("token collection not initialized")
+	}
 
-    specs, err := m.tokenCol.Indexes().ListSpecifications(ctx, nil)
-    if err != nil {
-        pLog.Error("Error listing token collection indexes", "error", err)
-        return err
-    }
+	specs, err := m.tokenCol.Indexes().ListSpecifications(ctx, nil)
+	if err != nil {
+		pLog.Error("Error listing token collection indexes", "error", err)
+		return err
+	}
 
-    var existing *int32
-    for _, s := range specs {
-        if s.Name == tokenTTLIndexName {
-            existing = s.ExpireAfterSeconds
-            break
-        }
-    }
+	var existing *int32
+	for _, s := range specs {
+		if s.Name == tokenTTLIndexName {
+			existing = s.ExpireAfterSeconds
+			break
+		}
+	}
 
-    if existing == nil {
-        ttlIndex := mongo.IndexModel{
-            Keys: bson.D{{Key: "exp", Value: 1}},
-            Options: options.Index().
-                SetName(tokenTTLIndexName).
-                SetExpireAfterSeconds(expireAfter),
-        }
-        if _, err = m.tokenCol.Indexes().CreateOne(ctx, ttlIndex); err != nil {
-            pLog.Error("Error creating token TTL index", "error", err)
-            return err
-        }
-        pLog.Info("Created token TTL index", "index", tokenTTLIndexName, "expireAfterSeconds", expireAfter)
-        return nil
-    }
+	if existing == nil {
+		ttlIndex := mongo.IndexModel{
+			Keys: bson.D{{Key: "exp", Value: 1}},
+			Options: options.Index().
+				SetName(tokenTTLIndexName).
+				SetExpireAfterSeconds(expireAfter),
+		}
+		if _, err = m.tokenCol.Indexes().CreateOne(ctx, ttlIndex); err != nil {
+			pLog.Error("Error creating token TTL index", "error", err)
+			return err
+		}
+		pLog.Info("Created token TTL index", "index", tokenTTLIndexName, "expireAfterSeconds", expireAfter)
+		return nil
+	}
 
-    if *existing == expireAfter {
-        return nil
-    }
+	if *existing == expireAfter {
+		return nil
+	}
 
-    // Adjust in place via collMod rather than drop+recreate.
-    cmd := bson.D{
-        {Key: "collMod", Value: CDbTokens},
-        {Key: "index", Value: bson.D{
-            {Key: "name", Value: tokenTTLIndexName},
-            {Key: "expireAfterSeconds", Value: expireAfter},
-        }},
-    }
-    if err = m.ssefDb.RunCommand(ctx, cmd).Err(); err != nil {
-        pLog.Error("Error adjusting token TTL index via collMod",
-            "from", *existing, "to", expireAfter, "error", err)
-        return err
-    }
-    pLog.Info("Adjusted token TTL index expireAfterSeconds",
-        "index", tokenTTLIndexName, "from", *existing, "to", expireAfter)
-    return nil
+	// Adjust in place via collMod rather than drop+recreate.
+	cmd := bson.D{
+		{Key: "collMod", Value: CDbTokens},
+		{Key: "index", Value: bson.D{
+			{Key: "name", Value: tokenTTLIndexName},
+			{Key: "expireAfterSeconds", Value: expireAfter},
+		}},
+	}
+	if err = m.ssefDb.RunCommand(ctx, cmd).Err(); err != nil {
+		pLog.Error("Error adjusting token TTL index via collMod",
+			"from", *existing, "to", expireAfter, "error", err)
+		return err
+	}
+	pLog.Info("Adjusted token TTL index expireAfterSeconds",
+		"index", tokenTTLIndexName, "from", *existing, "to", expireAfter)
+	return nil
 }
 
 func (m *MongoProvider) Check() error {
@@ -796,29 +796,29 @@ func (m *MongoProvider) Close() error {
 // Cluster pass-throughs retained for the lease/cluster integration tests
 // under mongo_provider/test/. Production callers use Persistence.Coordinator.
 func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
-    return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
+	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 
 func (m *MongoProvider) ReleaseLeaseIfOwned(resource string, nodeId string) error {
-    return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
+	return m.coordinator.ReleaseLeaseIfOwned(resource, nodeId)
 }
 
 func (m *MongoProvider) RegisterNode(node model.ClusterNode) error {
-    return m.coordinator.RegisterNode(node)
+	return m.coordinator.RegisterNode(node)
 }
 
 func (m *MongoProvider) GetActiveNodeCount() (int64, error) {
-    return m.coordinator.GetActiveNodeCount()
+	return m.coordinator.GetActiveNodeCount()
 }
 
 func (m *MongoProvider) GetActiveNodes() ([]model.ClusterNode, error) {
-    return m.coordinator.GetActiveNodes()
+	return m.coordinator.GetActiveNodes()
 }
 
 func (m *MongoProvider) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
-    return m.coordinator.GetLeaseOwner(resource)
+	return m.coordinator.GetLeaseOwner(resource)
 }
 
 func (m *MongoProvider) GetNode(nodeId string) (*model.ClusterNode, error) {
-    return m.coordinator.GetNode(nodeId)
+	return m.coordinator.GetNode(nodeId)
 }
