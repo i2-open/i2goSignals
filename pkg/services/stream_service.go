@@ -535,7 +535,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 			defer closeClient()
 
 			ssLog.Debug("Submitting POLL stream registration request to transmitter...")
-			reqBody, err := json.Marshal(transmitStreamReq)
+			// When the resolved transmitter is marked strict (SSF §8.1.1.1) strip
+			// the transmitter-owned iss/aud/issuerJWKSUrl from this publisher-leg
+			// POST. The shared helper also clears Read-Only fields on every body.
+			wireReq := model.StripTransmitterSupplied(transmitStreamReq, txServer != nil && txServer.StrictSsf)
+			reqBody, err := json.Marshal(wireReq)
 			if err != nil {
 				return model.StreamConfiguration{}, fmt.Errorf("failed to marshal registration request: %v", err)
 			}
@@ -816,8 +820,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		ssLog.Debug("Submitting PUSH stream registration request to transmitter...")
 
 		// Submit the creation request to the transmitter's ConfigurationEndpoint.
+		// When the resolved transmitter is marked strict (SSF §8.1.1.1) strip the
+		// transmitter-owned iss/aud/issuerJWKSUrl from this publisher-leg POST.
+		// The shared helper also clears Read-Only fields on every body.
+		wireReq := model.StripTransmitterSupplied(transmitStreamReq, txServer != nil && txServer.StrictSsf)
 		var reqBody []byte
-		reqBody, err = json.Marshal(transmitStreamReq)
+		reqBody, err = json.Marshal(wireReq)
 		if err != nil {
 			if cleanupErr := s.DeleteStream(ctx, config.Id); cleanupErr != nil {
 				ssLog.Error("failed to delete stream during cleanup", "id", config.Id, "error", cleanupErr)

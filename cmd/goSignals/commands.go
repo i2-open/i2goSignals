@@ -1087,25 +1087,7 @@ func clientTokenHasAdminScope(bearer string) (known bool, hasAdmin bool) {
 // Receiver-side bodies are never additionally stripped — they go to the local
 // SUT, which owns its own SSF wire cleanup on outbound calls.
 func stripTransmitterSupplied(reg model.StreamConfiguration, strict bool) model.StreamConfiguration {
-	wire := reg.DeepCopy()
-	wire.Id = ""
-	wire.EventsSupported = nil
-	wire.EventsDelivered = nil
-	wire.MinVerificationInterval = 0
-	wire.InactivityTimeout = 0
-	if strict {
-		method := ""
-		if reg.Delivery != nil {
-			method = reg.Delivery.GetMethod()
-		}
-		isReceiverSide := method == model.ReceivePush || method == model.ReceivePoll || method == model.ReceiveSstp
-		if !isReceiverSide {
-			wire.Aud = nil
-			wire.Iss = ""
-			wire.IssuerJWKSUrl = ""
-		}
-	}
-	return wire
+	return model.StripTransmitterSupplied(reg, strict)
 }
 
 func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfiguration, server *SsfServer, typeDescription string, connectAlias string) (*model.StreamConfiguration, error) {
@@ -1121,6 +1103,26 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	}
 
 	wire := stripTransmitterSupplied(reg, server.StrictSsf)
+
+	// Warn-and-drop: when registering against a strict server (SSF §8.1.1.1)
+	// the publisher-leg POST cannot carry operator-asserted iss/aud — they are
+	// transmitter-owned. If the operator passed --iss/--aud and the strip
+	// actually removed them, tell them so the silent omission isn't surprising.
+	if server.StrictSsf {
+		var dropped []string
+		if reg.Iss != "" && wire.Iss == "" {
+			dropped = append(dropped, "iss")
+		}
+		if len(reg.Aud) > 0 && len(wire.Aud) == 0 {
+			dropped = append(dropped, "aud")
+		}
+		if reg.IssuerJWKSUrl != "" && wire.IssuerJWKSUrl == "" {
+			dropped = append(dropped, "issuerJWKSUrl")
+		}
+		if len(dropped) > 0 {
+			fmt.Printf("Warning: server %q is marked strict-ssf; dropping transmitter-owned value(s) %s from the registration request (SSF §8.1.1.1)\n", server.Alias, strings.Join(dropped, ", "))
+		}
+	}
 
 	regBytes, err := json.MarshalIndent(&wire, "", " ")
 	if err != nil {
