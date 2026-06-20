@@ -155,6 +155,55 @@ func (s *ApiServerCrudTestSuite) TestServerCRUD() {
 	s.Equal(http.StatusNotFound, resp.StatusCode)
 }
 
+// TestServerUpdateStrictSsf drives the real PUT /server/{alias} handler to
+// confirm an operator can flip the strict posture after creation: a server
+// created flexible (default false) flips to true via update and reads back true.
+// See PRD #196 done-means 18 and ADR 0024 (operator-declared correction path).
+func (s *ApiServerCrudTestSuite) TestServerUpdateStrictSsf() {
+	// 1. Create a server with strict defaulting off.
+	token := "valid-token"
+	server := model.Server{
+		Alias:       "strict-crud-server",
+		Type:        model.ServerTypeGosignals,
+		Host:        s.ssfServer.URL,
+		ClientToken: &token,
+	}
+	body, _ := json.Marshal(server)
+	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/server", bytes.NewBuffer(body))
+	req.Header.Set("Authorization", "Bearer "+s.iat)
+	resp, err := http.DefaultClient.Do(req)
+	s.NoError(err)
+	s.Equal(http.StatusCreated, resp.StatusCode)
+	var created model.Server
+	err = json.NewDecoder(resp.Body).Decode(&created)
+	s.NoError(err)
+	s.False(created.StrictSsf, "newly added server defaults to flexible")
+
+	// 2. Flip the strict flag on via update.
+	created.StrictSsf = true
+	updateBody, _ := json.Marshal(created)
+	req, _ = http.NewRequest(http.MethodPut, s.ts.URL+"/server/strict-crud-server", bytes.NewBuffer(updateBody))
+	req.Header.Set("Authorization", "Bearer "+s.iat)
+	resp, err = http.DefaultClient.Do(req)
+	s.NoError(err)
+	s.Equal(http.StatusOK, resp.StatusCode)
+	var updated model.Server
+	err = json.NewDecoder(resp.Body).Decode(&updated)
+	s.NoError(err)
+	s.True(updated.StrictSsf, "StrictSsf should read back true after update")
+
+	// 3. Confirm persistence via GET.
+	req, _ = http.NewRequest(http.MethodGet, s.ts.URL+"/server/strict-crud-server", nil)
+	req.Header.Set("Authorization", "Bearer "+s.iat)
+	resp, err = http.DefaultClient.Do(req)
+	s.NoError(err)
+	s.Equal(http.StatusOK, resp.StatusCode)
+	var fetched model.Server
+	err = json.NewDecoder(resp.Body).Decode(&fetched)
+	s.NoError(err)
+	s.True(fetched.StrictSsf, "flipped StrictSsf should persist")
+}
+
 func TestApiServerCrudSuite(t *testing.T) {
 	suite.Run(t, new(ApiServerCrudTestSuite))
 }
