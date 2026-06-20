@@ -32,6 +32,33 @@ const CSubjectFmt = "opaque"
 const ErrorInvalidProject = "invalid project_id - invalid token"
 const ErrorInvalidDeliveryMethod = "cannot change delivery method"
 
+// CMintedAudPrefix is the URN namespace for a transmitter-assigned audience
+// (ADR 0024). When a strict SSF receiver registers a transmitter stream without
+// asserting aud, goSignals mints a fixed, immutable, opaque, URI-shaped audience
+// under this prefix, stable for the stream's lifetime.
+const CMintedAudPrefix = "urn:i2-open:ssf:aud:"
+
+// isTransmitterMethod reports whether a delivery method denotes a transmit-side
+// (RFC8935/RFC8936) stream for which goSignals is the SSF transmitter. The empty
+// "DEFAULT" method (a bare/poll create) is treated as transmit-side, matching the
+// DeliveryPoll/DEFAULT handling below.
+func isTransmitterMethod(method string) bool {
+	switch method {
+	case model.DeliveryPush, model.DeliveryPoll, "DEFAULT":
+		return true
+	default:
+		return false
+	}
+}
+
+// mintStreamAud generates a fixed, immutable, opaque, URI-shaped audience for a
+// transmitter-assigned stream (ADR 0024). It is JTI-like (a ksuid) so it is
+// globally unique and carries no caller-identifying information; the value is
+// persisted on the stream and is stable for the stream's lifetime.
+func mintStreamAud() string {
+	return CMintedAudPrefix + goSet.GenerateJti()
+}
+
 type StreamService struct {
 	streamDAO               interfaces.StreamDAO
 	keyService              *KeyService
@@ -316,13 +343,24 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	config.Aud = request.Aud
 	// aud identifies the Event Receiver(s); it is Read-Only / transmitter-asserted
 	// (SSF 1.0 §7.1.1) and is echoed into every SET's aud claim, so the transmitter
-	// must populate it even when the receiver asserts none. Resolve the most specific
-	// stable receiver identity available: the registered client_id for a locally
-	// issued token, falling back to the project id — always present, and the only
-	// identity an OAuth/STS caller carries (it has no local EAT). A receiver that
-	// needs a specific audience (e.g. a domain) sets it in the request.
+	// must populate it even when the receiver asserts none. Acceptance is
+	// presence-based (ADR 0024): honor a caller-asserted aud verbatim; mint one
+	// only when absent.
 	if len(config.Aud) == 0 {
-		if authCtx != nil && authCtx.Eat != nil && authCtx.Eat.ClientId != "" {
+		if isTransmitterMethod(request.Delivery.GetMethod()) {
+			// Transmitter-assigned aud (ADR 0024): a strict SSF receiver (e.g. the
+			// conformance suite) registers without asserting aud and expects the
+			// transmitter to supply one (SSF §8.1.1.1). Mint a fixed, immutable,
+			// opaque, URI-shaped identifier once at creation; it is persisted on the
+			// stream and stable for its lifetime, doubling as the AUDIENCE routing
+			// handle (slice 2). It is deliberately opaque — it does NOT leak the
+			// caller's client_id or project_id.
+			config.Aud = []string{mintStreamAud()}
+		} else if authCtx != nil && authCtx.Eat != nil && authCtx.Eat.ClientId != "" {
+			// Receiver streams connect to a foreign transmitter; the most specific
+			// stable local identity is the registered client_id of a locally issued
+			// token, falling back to the project id (the only identity an OAuth/STS
+			// caller carries, having no local EAT).
 			config.Aud = []string{authCtx.Eat.ClientId}
 		} else if projectID != "" {
 			config.Aud = []string{projectID}
@@ -648,6 +686,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	} else if defaultTxJwksUrl != "" {
 		ssLog.Debug("Configuring for JWKS Url based on transmitter discovery", "url", defaultTxJwksUrl)
 		config.IssuerJWKSUrl = defaultTxJwksUrl
+	} else if isTransmitterMethod(config.Delivery.GetMethod()) && config.Iss == s.defaultIssuer {
+		// Transmitter-assigned identity (ADR 0024 / ADR 0023 local-issuer
+		// addressing): when goSignals is the SSF transmitter and iss is the
+		// advertised issuer, jwks_uri derives from that issuer — the same
+		// /jwks.json the .well-known transmitter metadata advertises — so a strict
+		// receiver can fetch keys and verify delivered SETs. A caller-asserted
+		// foreign iss is left untouched (it is not our key location).
+		config.IssuerJWKSUrl = s.getFullUrl("/jwks.json")
 	} else {
 		method := config.Delivery.GetMethod()
 		if (method == model.ReceivePoll || method == model.ReceivePush) && config.Iss != "" {
