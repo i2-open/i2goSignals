@@ -172,35 +172,109 @@ func (s *EventService) WatchPending(ctx context.Context, callback func(jti strin
 }
 
 // MatchesStream reports whether event should be routed to stream based on
-// direction, issuer, audience, and event-type filters. Empty stream.Iss or
-// empty event.Event.Issuer is treated as a wildcard. A receiver stream in
-// RouteModeImport short-circuits to false (the event is consumed locally,
-// not re-delivered). The predicate is pure: it touches no DAO state.
+// the stream's EventSource routing axis (ADR 0004), issuer, audience, and
+// event-type filters. The predicate is pure: it touches no DAO state.
+//
+// EventSource branches (a nil EventSource resolves to effective DIRECT for
+// routing, issue #199):
+//   - DIRECT — the historical (iss, aud, event-type) filter, unchanged.
+//   - AUDIENCE — the stream's own aud is the routing handle; the inbound
+//     event's aud is NOT required to equal it (a minted/transmitter-assigned
+//     aud must still route). The iss and event-type filters still apply.
+//   - EXPLICIT — match when the inbound event's origin stream id
+//     (EventRecord.Sid) is named in EventSource.SourceStreamIds. The
+//     event-type filter still applies; the aud filter is not consulted.
+//
+// Issuer rule: iss matching is mandatory for RouteModeForward (FW) and ignored
+// for RouteModePublish (PB). Other route modes (and unset) keep the historical
+// "constrained iss with empty-as-wildcard" behavior.
+//
+// A receiver stream in RouteModeImport short-circuits to false (the event is
+// consumed locally, not re-delivered). RemoteStreamId is a pairing pointer, not
+// a routing selector, and is never consulted here.
 func (s *EventService) MatchesStream(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	if stream.IsReceiver() && stream.GetRouteMode() == model.RouteModeImport {
 		return false
 	}
 
-	if stream.Iss != "" {
-		compIss := event.Event.Issuer
-		if compIss != "" && !strings.EqualFold(stream.Iss, compIss) {
+	esType := effectiveEventSourceType(stream)
+
+	if !matchesIss(stream, event) {
+		return false
+	}
+
+	switch esType {
+	case model.EventSourceExplicit:
+		if !explicitSourceMatches(stream, event) {
+			return false
+		}
+	case model.EventSourceAudience:
+		// The stream's aud is the routing handle; the inbound event's aud is
+		// not required to equal it. Only the event-type filter remains.
+	default: // DIRECT or unset/nil — historical aud filter.
+		if !matchesAud(stream, event) {
 			return false
 		}
 	}
 
-	if len(stream.Aud) > 0 {
-		audMatch := false
-		for _, value := range stream.Aud {
-			if len(event.Event.Audience) == 0 || slices.Contains([]string(event.Event.Audience), value) {
-				audMatch = true
-				break
-			}
-		}
-		if !audMatch {
-			return false
+	return matchesEventType(stream, event)
+}
+
+// effectiveEventSourceType resolves the stream's EventSource type for routing.
+// A nil EventSource resolves to DIRECT (issue #199); an empty Type tag likewise
+// routes as DIRECT here.
+func effectiveEventSourceType(stream *model.StreamStateRecord) string {
+	if stream.EventSource == nil || stream.EventSource.Type == "" {
+		return model.EventSourceDirect
+	}
+	return stream.EventSource.Type
+}
+
+// matchesIss applies the issuer filter. iss is mandatory for FW and ignored for
+// PB; any other mode keeps the historical "constrained iss, empty-as-wildcard"
+// rule (empty stream.Iss or empty event issuer is a wildcard).
+func matchesIss(stream *model.StreamStateRecord, event *model.EventRecord) bool {
+	if stream.GetRouteMode() == model.RouteModePublish {
+		return true
+	}
+	if stream.Iss == "" {
+		return true
+	}
+	compIss := event.Event.Issuer
+	if compIss == "" {
+		// Empty event issuer is a wildcard except in FW, where iss matching is
+		// mandatory and a missing issuer cannot satisfy it.
+		return stream.GetRouteMode() != model.RouteModeForward
+	}
+	return strings.EqualFold(stream.Iss, compIss)
+}
+
+// matchesAud applies the historical audience filter: an empty stream.Aud is a
+// wildcard, and an empty event audience matches any constrained stream.
+func matchesAud(stream *model.StreamStateRecord, event *model.EventRecord) bool {
+	if len(stream.Aud) == 0 {
+		return true
+	}
+	for _, value := range stream.Aud {
+		if len(event.Event.Audience) == 0 || slices.Contains([]string(event.Event.Audience), value) {
+			return true
 		}
 	}
+	return false
+}
 
+// explicitSourceMatches reports whether the inbound event's origin stream id is
+// named in the stream's EventSource.SourceStreamIds (EXPLICIT routing).
+func explicitSourceMatches(stream *model.StreamStateRecord, event *model.EventRecord) bool {
+	if stream.EventSource == nil {
+		return false
+	}
+	return slices.Contains(stream.EventSource.SourceStreamIds, event.Sid)
+}
+
+// matchesEventType reports whether any of the event's types is in the stream's
+// EventsDelivered set (case-insensitive).
+func matchesEventType(stream *model.StreamStateRecord, event *model.EventRecord) bool {
 	for _, eventType := range event.Types {
 		for _, streamType := range stream.EventsDelivered {
 			if strings.EqualFold(eventType, streamType) {
