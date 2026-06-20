@@ -61,6 +61,13 @@ type Server struct {
 	OfflineError        string `json:"OfflineError"`             // OfflineError is the error message if the server is offline
 	TLSCertificate      string `json:"TLSCertificate,omitempty"` // PEM-encoded certificate for self-signed cert support
 	TLSSkipVerify       bool   `json:"TLSSkipVerify,omitempty"`  // If true, skip certificate verification (not recommended for production)
+	// StrictSsf records the operator-declared strict posture for this peer. When
+	// true, the receiver-side create-stream handler strips Transmitter-Supplied
+	// values (iss/aud/issuerJWKSUrl) before POSTing, per SSF §8.1.1.1. The zero
+	// value (false = flexible) is the default for newly added servers, so
+	// goSignals-to-goSignals cluster federation keeps asserting operator-supplied
+	// identity unchanged. Operator-declared only; never auto-detected (ADR 0024).
+	StrictSsf bool `bson:"strictSsf,omitempty" json:"strictSsf,omitempty"`
 }
 
 type OAuthClientConfig struct {

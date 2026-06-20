@@ -484,6 +484,46 @@ func (s *ServerServiceTestSuite) TestCreateServer_PersistsDiscoveredConfiguratio
 	s.Equal("1.0.0", retrieved.ServerConfiguration.GoSignalsVersion)
 }
 
+// TestStrictSsfRoundTrip proves CreateServer/UpdateServer carry the
+// operator-declared StrictSsf posture through the service layer: create true
+// reads back true, default-off reads back false, and an update can flip it.
+// See PRD #196 done-means 16/17/18, ADR 0024 (operator-declared, never inferred).
+func (s *ServerServiceTestSuite) TestStrictSsfRoundTrip() {
+	token := "valid-token"
+
+	// Create with StrictSsf=true; it must persist.
+	strict := &model.Server{
+		Alias:       "strict-svc",
+		Type:        model.ServerTypeGosignals,
+		Host:        s.ssfServer.URL,
+		ClientToken: &token,
+		StrictSsf:   true,
+	}
+	s.NoError(s.service.CreateServer(s.T().Context(), strict))
+	retrieved, err := s.service.GetServerByAlias(s.T().Context(), "strict-svc")
+	s.NoError(err)
+	s.True(retrieved.StrictSsf, "StrictSsf=true should persist on create")
+
+	// Default-off: created without the flag reads back false.
+	flexible := &model.Server{
+		Alias:       "flexible-svc",
+		Type:        model.ServerTypeGosignals,
+		Host:        s.ssfServer.URL,
+		ClientToken: &token,
+	}
+	s.NoError(s.service.CreateServer(s.T().Context(), flexible))
+	retrievedFlex, err := s.service.GetServerByAlias(s.T().Context(), "flexible-svc")
+	s.NoError(err)
+	s.False(retrievedFlex.StrictSsf, "StrictSsf should default to false (flexible)")
+
+	// Flip flexible -> strict via UpdateServer.
+	retrievedFlex.StrictSsf = true
+	s.NoError(s.service.UpdateServer(s.T().Context(), retrievedFlex))
+	afterUpdate, err := s.service.GetServerByAlias(s.T().Context(), "flexible-svc")
+	s.NoError(err)
+	s.True(afterUpdate.StrictSsf, "UpdateServer should carry the flipped StrictSsf")
+}
+
 func TestServerServiceSuite(t *testing.T) {
 	suite.Run(t, new(ServerServiceTestSuite))
 }
