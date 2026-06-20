@@ -38,7 +38,7 @@ READY_TRIES ?= 60
 .DEFAULT_GOAL := help
 .PHONY: help all ready full test \
         suite suite-pull suite-build suite-up suite-down refresh-suite \
-        sut sut-down net-check wait-suite wait-sut \
+        sut sut-down net-check wait-suite wait-sut archive-run \
         down clean status
 
 help: ## List targets
@@ -50,13 +50,13 @@ help: ## List targets
 	@echo "SUITE_URL =$(SUITE_URL)   SUT_URL=$(SUT_URL)"
 
 # ---- top-level flows -------------------------------------------------------
-all: ready test ## Deploy suite + SUT, verify networking, then run the full matrix
+all: ready test archive-run ## Deploy suite + SUT, verify networking, run the matrix, then archive the run
 
 ready: suite-up sut wait-sut net-check ## Deploy + verify everything is reachable (no tests)
 	@echo "==> READY: suite up (networking patched), SUT up, suite can reach SUT."
 	@echo "    Run the matrix with:  make test"
 
-full: refresh-suite sut wait-sut net-check test ## Pull+rebuild the suite jar, then deploy & run everything
+full: refresh-suite sut wait-sut net-check test archive-run ## Pull+rebuild the suite jar, then deploy, run everything, and archive the run
 
 # ---- the OpenID conformance suite -----------------------------------------
 suite: suite-up ## Bring the suite up with the networking overlay (no rebuild)
@@ -119,6 +119,10 @@ wait-sut: ## Block until the SUT publishes SSF metadata on :9443
 test: ## Run the full plan matrix (run-all-plans.sh; honors PLANS_FILTER)
 	@echo "==> Running conformance matrix (PLANS_FILTER='$(PLANS_FILTER)')"
 	PLANS_FILTER='$(PLANS_FILTER)' SUITE_REPO="$(SUITE_REPO)" ./run-all-plans.sh
+
+# ---- archive the run -------------------------------------------------------
+archive-run: ## Zip the last run's artifacts into results/, leaving just a copy of the summary
+	@./archive-run.sh
 
 # ---- teardown / status -----------------------------------------------------
 down: sut-down ## Stop the SUT (leaves the suite running)
