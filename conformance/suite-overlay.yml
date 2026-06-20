@@ -1,0 +1,28 @@
+# Compose overlay for the OpenID conformance suite's docker-compose-dev.yml.
+#
+# WHY THIS EXISTS
+# The suite, when run in Docker (its docker-compose-dev.yml), fetches the SUT's
+# transmitter metadata at https://localhost.emobix.co.uk:9443/.well-known/...
+# `localhost.emobix.co.uk` is real public DNS that resolves to 127.0.0.1. Inside
+# the suite's `server` container that 127.0.0.1 is the CONTAINER's own loopback,
+# not the host — so the SUT (published on the host at 127.0.0.1:9443) is
+# invisible and EVERY transmitter module interrupts at the first condition
+# `OIDSSFGetDynamicTransmitterConfiguration` with "Connection refused".
+#
+# THE FIX
+# Map localhost.emobix.co.uk to the Docker host gateway inside the server
+# container. On Docker Desktop the host gateway (192.168.65.254) reaches host
+# loopback-published ports, so :9443 (SUT) AND :8443 (the suite's own nginx)
+# both resolve correctly. This mirrors the SUT side, which already uses
+# `extra_hosts: localhost.emobix.co.uk:host-gateway` for the reverse (PUSH)
+# direction. See README.md "Networking" and the conformance/Makefile net-check.
+#
+# Layer it over the suite compose (run from this repo's conformance/ dir):
+#   docker compose -p openid-conformance-suite \
+#     --project-directory "$SUITE_REPO" \
+#     -f "$SUITE_REPO/docker-compose-dev.yml" \
+#     -f suite-overlay.yml up -d
+services:
+  server:
+    extra_hosts:
+      - "localhost.emobix.co.uk:host-gateway"

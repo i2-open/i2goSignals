@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -323,6 +327,217 @@ func TestHTTPAdapter_RFC8935DeliveryErrParsed(t *testing.T) {
 	assert.Equal(t, goSetPush.ClassRFC8935Error, out.Classification.Class)
 	assert.Equal(t, "invalid_audience", out.Classification.RFC8935ErrCode)
 	assert.Equal(t, "aud mismatch", out.Classification.RFC8935Description)
+}
+
+// newPublishStreamWithIdentity builds a PB-mode stream with caller-supplied iss/aud so
+// concurrent fan-out tests can assert each stream re-signs under its own identity.
+func newPublishStreamWithIdentity(id, iss string, aud []string, endpointURL string) *model.StreamStateRecord {
+	return &model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        id,
+			Iss:       iss,
+			Aud:       aud,
+			RouteMode: model.RouteModePublish,
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PushTransmitMethod: &model.PushTransmitMethod{
+					Method:      model.DeliveryPush,
+					EndpointUrl: endpointURL,
+				},
+			},
+		},
+	}
+}
+
+// newSourceEventRecord builds the shared, stored event a PB re-sign reads from. It carries
+// a source iss/aud (which PB must overwrite per stream), a jti and txn (which PB must
+// preserve verbatim), and a fixed iat (so we can prove iat is refreshed, not preserved).
+func newSourceEventRecord() *model.EventRecord {
+	return &model.EventRecord{
+		Jti:      "jti-source-1",
+		Original: "raw-token-string",
+		Types:    []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+		Event: goSet.SecurityEventToken{
+			RegisteredClaims: jwt.RegisteredClaims{
+				ID:       "jti-source-1",
+				Issuer:   "https://source-issuer.example.com",
+				Audience: jwt.ClaimStrings{"https://source-audience.example.com"},
+				IssuedAt: jwt.NewNumericDate(time.Unix(1000, 0)),
+			},
+			TransactionId: "txn-source-1",
+			Events: map[string]interface{}{
+				"https://schemas.openid.net/secevent/risc/event-type/account-disabled": map[string]interface{}{},
+			},
+		},
+	}
+}
+
+// captureBody returns a receiver that records every POST body it sees and replies 202.
+func captureBody(bodies *[]string, mu *sync.Mutex) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		*bodies = append(*bodies, string(b))
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+func TestHTTPAdapter_PBReSignPreservesJtiAndTxn(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	receiver := httptest.NewServer(captureBody(&bodies, &mu))
+	defer receiver.Close()
+
+	stream := newPublishStreamWithIdentity(
+		"stream-pb-1",
+		"https://stream-issuer.example.com",
+		[]string{"https://stream-audience.example.com"},
+		receiver.URL+"/events",
+	)
+	key, kid := newTestKey(t)
+	adapter := NewHTTPAdapter(nil, nil)
+
+	out := adapter.Deliver(context.Background(), PushRequest{
+		Stream: stream,
+		Event:  newSourceEventRecord(),
+		Key:    key,
+		Kid:    kid,
+	})
+	require.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
+	require.Len(t, bodies, 1, "receiver must see exactly one signed SET")
+
+	parsed, err := goSet.Parse(bodies[0], nil)
+	require.NoError(t, err, "the pushed PB token must be a parseable SET")
+
+	assert.Equal(t, "jti-source-1", parsed.ID, "PB re-sign must preserve jti verbatim (ADR 0017)")
+	assert.Equal(t, "txn-source-1", parsed.TransactionId, "PB re-sign must preserve txn verbatim")
+	assert.Equal(t, "https://stream-issuer.example.com", parsed.Issuer, "PB re-sign must use the stream's iss")
+	assert.Equal(t, jwt.ClaimStrings{"https://stream-audience.example.com"}, parsed.Audience, "PB re-sign must use the stream's aud")
+	require.NotNil(t, parsed.IssuedAt)
+	assert.True(t, parsed.IssuedAt.After(time.Unix(1000, 0)), "PB re-sign must refresh iat, not preserve the source iat")
+}
+
+func TestHTTPAdapter_PBReSignDoesNotMutateSharedEvent(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer receiver.Close()
+
+	stream := newPublishStreamWithIdentity(
+		"stream-pb-1",
+		"https://stream-issuer.example.com",
+		[]string{"https://stream-audience.example.com"},
+		receiver.URL+"/events",
+	)
+	key, kid := newTestKey(t)
+	adapter := NewHTTPAdapter(nil, nil)
+
+	event := newSourceEventRecord()
+	out := adapter.Deliver(context.Background(), PushRequest{
+		Stream: stream,
+		Event:  event,
+		Key:    key,
+		Kid:    kid,
+	})
+	require.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
+
+	// The stored/shared event must be untouched: PB copies before mutating.
+	assert.Equal(t, "https://source-issuer.example.com", event.Event.Issuer, "shared event iss must not be mutated by PB re-sign")
+	assert.Equal(t, jwt.ClaimStrings{"https://source-audience.example.com"}, event.Event.Audience, "shared event aud must not be mutated by PB re-sign")
+	assert.Equal(t, "", event.Event.Kid, "shared event kid must not be mutated by PB re-sign")
+	require.NotNil(t, event.Event.IssuedAt)
+	assert.Equal(t, int64(1000), event.Event.IssuedAt.Unix(), "shared event iat must not be mutated by PB re-sign")
+	assert.Equal(t, "jti-source-1", event.Event.ID, "shared event jti must be intact")
+	assert.Equal(t, "txn-source-1", event.Event.TransactionId, "shared event txn must be intact")
+}
+
+func TestHTTPAdapter_ConcurrentFanOutNoSharedMutation(t *testing.T) {
+	// Production-wiring AC: two PB streams with distinct iss/aud share ONE EventRecord
+	// and re-sign concurrently. Each receiver must see a SET signed under its own stream's
+	// identity (no cross-stream leak), jti+txn preserved, and -race must report no data race
+	// on the shared event.
+	var muA, muB sync.Mutex
+	var bodiesA, bodiesB []string
+	recvA := httptest.NewServer(captureBody(&bodiesA, &muA))
+	defer recvA.Close()
+	recvB := httptest.NewServer(captureBody(&bodiesB, &muB))
+	defer recvB.Close()
+
+	streamA := newPublishStreamWithIdentity("stream-A", "https://issuer-A.example.com", []string{"https://aud-A.example.com"}, recvA.URL+"/events")
+	streamB := newPublishStreamWithIdentity("stream-B", "https://issuer-B.example.com", []string{"https://aud-B.example.com"}, recvB.URL+"/events")
+
+	keyA, _ := newTestKey(t)
+	keyB, _ := newTestKey(t)
+	adapter := NewHTTPAdapter(nil, nil)
+
+	// One shared, stored event fanned out to both streams.
+	shared := newSourceEventRecord()
+
+	const iterations = 25
+	var wg sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			out := adapter.Deliver(context.Background(), PushRequest{Stream: streamA, Event: shared, Key: keyA, Kid: "kid-A"})
+			assert.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
+		}()
+		go func() {
+			defer wg.Done()
+			out := adapter.Deliver(context.Background(), PushRequest{Stream: streamB, Event: shared, Key: keyB, Kid: "kid-B"})
+			assert.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
+		}()
+	}
+	wg.Wait()
+
+	muA.Lock()
+	defer muA.Unlock()
+	muB.Lock()
+	defer muB.Unlock()
+	require.Len(t, bodiesA, iterations)
+	require.Len(t, bodiesB, iterations)
+
+	for _, body := range bodiesA {
+		parsed, err := goSet.Parse(body, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "https://issuer-A.example.com", parsed.Issuer, "stream A receiver must only ever see stream A's iss")
+		assert.Equal(t, jwt.ClaimStrings{"https://aud-A.example.com"}, parsed.Audience, "stream A receiver must only ever see stream A's aud")
+		assert.Equal(t, "jti-source-1", parsed.ID, "jti must be preserved across fan-out")
+		assert.Equal(t, "txn-source-1", parsed.TransactionId, "txn must be preserved across fan-out")
+	}
+	for _, body := range bodiesB {
+		parsed, err := goSet.Parse(body, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "https://issuer-B.example.com", parsed.Issuer, "stream B receiver must only ever see stream B's iss")
+		assert.Equal(t, jwt.ClaimStrings{"https://aud-B.example.com"}, parsed.Audience, "stream B receiver must only ever see stream B's aud")
+		assert.Equal(t, "jti-source-1", parsed.ID, "jti must be preserved across fan-out")
+		assert.Equal(t, "txn-source-1", parsed.TransactionId, "txn must be preserved across fan-out")
+	}
+
+	// The shared, stored event must remain pristine after all the concurrent re-signs.
+	assert.Equal(t, "https://source-issuer.example.com", shared.Event.Issuer, "shared event iss must survive concurrent fan-out untouched")
+	assert.Equal(t, jwt.ClaimStrings{"https://source-audience.example.com"}, shared.Event.Audience, "shared event aud must survive concurrent fan-out untouched")
+	assert.Equal(t, "", shared.Event.Kid, "shared event kid must survive concurrent fan-out untouched")
+}
+
+func TestHTTPAdapter_ForwardEmitsOriginalBytesVerbatim(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	receiver := httptest.NewServer(captureBody(&bodies, &mu))
+	defer receiver.Close()
+
+	stream := newForwardStream(receiver.URL + "/events")
+	event := newSourceEventRecord()
+	event.Original = "forward.original.token.bytes"
+	adapter := NewHTTPAdapter(nil, nil)
+
+	out := adapter.Deliver(context.Background(), PushRequest{
+		Stream: stream,
+		Event:  event,
+	})
+	require.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
+	require.Len(t, bodies, 1)
+	assert.Equal(t, "forward.original.token.bytes", bodies[0], "FW mode must emit Event.Original verbatim (no re-sign)")
 }
 
 func TestHTTPAdapter_SuccessReturnsAccepted(t *testing.T) {
