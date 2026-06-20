@@ -115,7 +115,15 @@ func (a *HTTPAdapter) tokenString(req PushRequest) string {
 	if cfg.RouteMode == model.RouteModeForward {
 		return req.Event.Original
 	}
-	token := &req.Event.Event
+	// PB/IM re-sign: copy the stored event token before mutating iss/aud/iat/kid so
+	// concurrent multi-stream fan-out cannot race on or corrupt the shared in-memory
+	// event (PRD #196 #200). The copy is a value copy of the SecurityEventToken: every
+	// field touched below is reassigned (slice/pointer headers replaced, not mutated
+	// through shared backing storage), so the source event's iss/aud/iat/kid stay
+	// pristine. jti (RegisteredClaims.ID) and txn (TransactionId) are carried over by
+	// the copy and never touched, so they are preserved verbatim across the hop
+	// (ADR 0017 — jti is the dedup key).
+	token := req.Event.Event
 	token.Issuer = cfg.Iss
 	token.Audience = cfg.Aud
 	token.IssuedAt = jwt.NewNumericDate(time.Now())
