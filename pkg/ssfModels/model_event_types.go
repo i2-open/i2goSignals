@@ -32,7 +32,7 @@ const (
 	EventScimDelete       = "urn:ietf:params:scim:event:prov:delete"
 	EventScimActivate     = "urn:ietf:params:scim:event:prov:activate"
 	EventScimDeactivate   = "urn:ietf:params:scim:event:prov:deactivate"
-	EventScimAsyncResp    = "urn:ietf:params:scim:event:misc:asyncResp"
+	EventScimAsyncResp    = "urn:ietf:params:scim:event:misc:asyncresp"
 )
 
 func GetSupportedEvents() []string {

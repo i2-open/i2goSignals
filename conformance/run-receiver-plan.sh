@@ -160,6 +160,15 @@ for ((i = 1; i <= SUT_READY_TRIES; i++)); do
     sleep 1
 done
 
+# Preflight: the receiver flow needs the suite up and reachable (the SUT
+# registers/pushes/polls against it via host-gateway). Catch a down suite here
+# rather than after a long per-module timeout.
+echo "==> Preflight: conformance suite reachable at $SUITE_URL ?"
+if ! curl -sk -o /dev/null --max-time 5 "$SUITE_URL"; then
+    echo "ERROR: conformance suite not reachable at $SUITE_URL — start it with 'make suite-up'." >&2
+    exit 1
+fi
+
 # Mint a stream+event-scoped bearer the CLI presents to the SUT itself when it
 # registers the local-side half of the connection (see `add server local` below).
 # bootstrap-token.sh prints the token on the line after "Access token:".

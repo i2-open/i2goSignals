@@ -31,6 +31,14 @@ TS_HUMAN="$(date -u +%Y-%m-%dT%H%M%SZ)"
 SUMMARY="$SCRIPT_DIR/results/run-${TS_HUMAN}.md"
 mkdir -p "$SCRIPT_DIR/results"
 
+# Accumulator for the Findings section: one TSV row per non-PASS condition,
+# harvested from each plan's signed export and rendered (deduped) after the whole
+# matrix runs. This is what turns the bare P/W/R/F counts in the table into the
+# actual "here is the warning/error" list, so reading the summary no longer means
+# diving into per-plan logs or zips.
+FINDINGS_TSV="$(mktemp -t ssf-findings.XXXXXX)"
+trap 'rm -f "$FINDINGS_TSV"' EXIT
+
 # Prune per-plan logs and summary markdowns older than RESULTS_RETAIN_DAYS days.
 # Without this, results/ grows unbounded and the FAILED grep in the aggregator
 # below can re-match stale logs the next time someone audits the dir.
@@ -46,13 +54,15 @@ PLANS=(
     "run-plan.sh|openid-ssf-transmitter-test-plan[ssf_delivery_mode=poll][ssf_server_metadata=discovery][ssf_auth_mode=static]"
     "run-plan.sh|openid-ssf-transmitter-caep-test-plan[ssf_delivery_mode=push][ssf_server_metadata=discovery][ssf_auth_mode=static]"
     "run-plan.sh|openid-ssf-transmitter-caep-test-plan[ssf_delivery_mode=poll][ssf_server_metadata=discovery][ssf_auth_mode=static]"
-    # Receiver plans accept only ssf_delivery_mode and ssf_profile variants —
-    # ssf_auth_mode is transmitter-side only. The suite rejects [ssf_auth_mode=...]
-    # on receiver plans with "Unknown variant parameter(s)".
-    "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=push]"
-    "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=poll]"
-    "run-receiver-plan.sh|openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=push]"
-    "run-receiver-plan.sh|openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=poll]"
+    # Receiver plans now require ssf_auth_mode (suite >= v5.1.45 added SsfAuthMode +
+    # ClientAuthType to the receiver modules). With ssf_auth_mode=static the suite
+    # marks client_auth_type "not applicable" (the receiver presents a pre-shared
+    # bearer), so it is NOT specified. Omitting ssf_auth_mode fails plan creation
+    # with "requires a value for variant 'client_auth_type'" (no export produced).
+    "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=push][ssf_auth_mode=static]"
+    "run-receiver-plan.sh|openid-ssf-receiver-test-plan[ssf_delivery_mode=poll][ssf_auth_mode=static]"
+    "run-receiver-plan.sh|openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=push][ssf_auth_mode=static]"
+    "run-receiver-plan.sh|openid-ssf-receiver-caep-test-plan[ssf_delivery_mode=poll][ssf_auth_mode=static]"
 )
 
 # Score one plan by reading the suite's signed export zip — the only authoritative
@@ -124,6 +134,42 @@ score_plan_zip() {
     echo "${plan_status}|${counts}"
 }
 
+# Harvest every non-PASS condition from a plan's export zip into the global
+# FINDINGS_TSV accumulator. One row per condition:
+#   <plan-label> <module> <result> <condition> <requirements> <message>
+# Module-level INTERRUPTED is annotated onto the result (e.g. FAILURE/INTERRUPTED)
+# so a systemic break (all modules dying at the same condition) is obvious. The
+# message has tabs/newlines/pipes squashed so it stays one clean Markdown cell.
+#
+# Args: $1 = zip path, $2 = compact plan label
+collect_findings() {
+    local zip="$1" label="$2"
+    local workdir
+    workdir="$(mktemp -d)"
+    if ! unzip -q "$zip" -d "$workdir" 2>/dev/null; then
+        rm -rf "$workdir"
+        return
+    fi
+    local json
+    for json in "$workdir"/test-log-*.json; do
+        [[ -f "$json" ]] || continue
+        jq -r --arg label "$label" '
+            .testInfo.testName as $m
+            | (.testInfo.status // "") as $st
+            | .results[]?
+            | select(.result? and (.result | test("^(FAILURE|WARNING|REVIEW)$")))
+            | [ $label,
+                ($m // "?"),
+                (if $st == "INTERRUPTED" then .result + "/INTERRUPTED" else .result end),
+                (.src // "-"),
+                ((.requirements // []) | join(", ")),
+                ((.msg // "") | gsub("[\r\n\t|]"; " "))
+              ] | @tsv
+        ' "$json" 2>/dev/null >>"$FINDINGS_TSV"
+    done
+    rm -rf "$workdir"
+}
+
 # Find the newest zip in results/ matching the plan's test-plan name. The
 # suite drops one zip per `run-test-plan.py` invocation, so a snapshot-and-
 # diff against the pre-run zip list reliably picks the export this run
@@ -185,6 +231,15 @@ for entry in "${PLANS[@]}"; do
     slug="$(echo "$plan" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//')"
     log="$SCRIPT_DIR/results/run-${TS_HUMAN}-${slug}.log"
 
+    # Compact, cross-referenceable label for the Findings section. The matrix
+    # table above maps this same #index to the full plan spec.
+    fam="tx"; [[ "$plan" == *receiver* ]] && fam="rx"
+    [[ "$plan" == *caep* ]] && fam="${fam}-caep"
+    dmode="?"
+    [[ "$plan" == *ssf_delivery_mode=push* ]] && dmode="push"
+    [[ "$plan" == *ssf_delivery_mode=poll* ]] && dmode="poll"
+    plan_label="#${i} ${fam}[${dmode}]"
+
     echo
     echo "================================================================"
     echo " [$i/${#PLANS[@]}] $script $plan"
@@ -203,6 +258,7 @@ for entry in "${PLANS[@]}"; do
     counts=""
     if [[ -n "$zip_path" && -f "$zip_path" ]]; then
         IFS='|' read -r status counts < <(score_plan_zip "$zip_path")
+        collect_findings "$zip_path" "$plan_label"
     else
         status="FAIL"
         counts="no-export"
@@ -222,6 +278,25 @@ for entry in "${PLANS[@]}"; do
     esac
     echo "| $i | $script | \`$plan\` | $status | $counts | [\`$(basename "$log")\`]($(basename "$log")) |" >>"$SUMMARY"
 done
+
+{
+    echo
+    echo "## Findings"
+    echo
+    if [[ -s "$FINDINGS_TSV" ]]; then
+        echo "Every non-PASS condition across all plans — the actual warnings,"
+        echo "reviews, and failures behind the counts above, taken from each plan's"
+        echo "signed export. The Plan column's #index matches the table at the top."
+        echo
+        echo "| Plan | Module | Result | Condition | Requirements | Message |"
+        echo "|---|---|---|---|---|---|"
+        sort -u "$FINDINGS_TSV" | while IFS=$'\t' read -r f_plan f_mod f_res f_cond f_req f_msg; do
+            echo "| $f_plan | $f_mod | $f_res | \`$f_cond\` | $f_req | $f_msg |"
+        done
+    else
+        echo "None — every module passed (no warnings, reviews, failures, or interruptions)."
+    fi
+} >>"$SUMMARY"
 
 {
     echo

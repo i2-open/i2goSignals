@@ -90,6 +90,12 @@ for ((i = 1; i <= SUT_READY_TRIES; i++)); do
     sleep 1
 done
 
+echo "==> Preflight: can the conformance suite reach this SUT?"
+# Guards against the silent networking break that makes every transmitter
+# module interrupt at OIDSSFGetDynamicTransmitterConfiguration. See
+# check-suite-reaches-sut.sh and README.md "Networking".
+"$SCRIPT_DIR/check-suite-reaches-sut.sh"
+
 echo "==> Minting bearer token and templating suite config"
 "$SCRIPT_DIR/bootstrap-token.sh" >/dev/null
 
