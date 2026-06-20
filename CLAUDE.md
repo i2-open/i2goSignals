@@ -103,8 +103,8 @@ Other `cmd/` binaries are tools: `cluster-monitor`, `genTlsKeys`, `healthcheck`,
 
 `internal/eventRouter/event_router.go` owns all in-flight delivery. For each stream it maintains a `*buffer.EventPushBuffer` or `*buffer.EventPollBuffer` (`internal/eventRouter/buffer/`). Key flows:
 
-- **Inbound** (`HandleEvent`) persists the event, then matches it against every registered push/poll stream via `StreamEventMatch` (issuer/audience/event-type filtering).
-- **Push** (`PushStreamHandler` → `runPushLoop` → `pushEvent` → `goSetPush.PushSET`) wraps the loop in a MongoDB lease (`push-transmitter:<sid>`). Failed pushes leave the JTI unacked; recovery is implicit via the `backfillTicker` (default 1s) which re-reads pending JTIs only when the buffer is empty. RFC8935 `DeliveryErr` (HTTP 400 with parsed body) pauses the stream; transport errors and other HTTP statuses are not paused and not logged at the router layer.
+- **Inbound** (`HandleEvent`) persists the event, then matches it against every registered push/poll stream via the `EventService.MatchesStream` predicate (issuer/audience/event-type filtering).
+- **Push** (`PushStreamHandler` → `runPushLoop` → `prepareAndSendEvent` → the `delivery.PushDelivery` seam, `delivery/http.go` → `goSetPush.PushSET`) wraps the loop in a MongoDB lease (`push-transmitter:<sid>`). Failed pushes leave the JTI unacked; recovery is implicit via the `backfillTicker` (default 1s) which re-reads pending JTIs only when the buffer is empty. RFC8935 `DeliveryErr` (HTTP 400 with parsed body) pauses the stream; transport errors and other HTTP statuses are not paused and not logged at the router layer.
 - **Poll** (`PollStreamHandler`) reads from the poll buffer in response to receiver poll requests, signs the SETs (or forwards raw, depending on `RouteMode`), and acks on the next request.
 - **Cluster wake-ups** — when a router receives an event whose stream's transmitter lease is held by a *different* node, it sends `POST /_cluster/wake-transmitter` to that node so the owner can pull the new event from Mongo immediately. Authenticated via shared HMAC (`I2SIG_CLUSTER_INTERNAL_TOKEN`) or SPIFFE mTLS when configured.
 
