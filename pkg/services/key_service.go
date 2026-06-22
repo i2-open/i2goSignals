@@ -119,6 +119,32 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 	return privateKey, nil
 }
 
+// EnsureSigningKey idempotently guarantees a "sig" key pair exists for keyName,
+// creating one only when it is genuinely absent. It is the restart-safe
+// provisioning primitive for an administrator-declared SSF issuer (strict mode,
+// see goSsfServer.ProvisionStrictMode): unlike InitializeTokenKey — which seeds
+// the default-issuer key only on first init and short-circuits once the token
+// key already exists — EnsureSigningKey re-checks on every call, so an issuer
+// added to an established deployment, or present only after a restart, is still
+// backed by a signing key. It returns true when a new key was created.
+//
+// A transient DAO failure (anything other than ErrKeyNotFound) is returned
+// rather than masked, so the caller surfaces it instead of inserting a duplicate
+// key against a flaky backend (the same discipline InitializeTokenKey uses).
+func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, projectId string) (bool, error) {
+	key, _, err := s.GetPrivateKeyWithKeyname(ctx, keyName)
+	if err == nil && key != nil {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, err)
+	}
+	if _, err := s.CreateKeyPair(ctx, keyName, "sig", projectId); err != nil {
+		return false, fmt.Errorf("failed to create signing key %q: %w", keyName, err)
+	}
+	return true, nil
+}
+
 // RotateKey generates a new key pair for keyName with a unique kid.
 func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId string) (*rsa.PrivateKey, string, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

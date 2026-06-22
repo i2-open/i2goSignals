@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	ssf "github.com/i2-open/i2goSignals/pkg/goSsfServer"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -92,6 +94,18 @@ func main() {
 	mLog.Info("Base URL", "url", baseUrl)
 
 	ssfApplication := ssf.StartServer(":"+port, persistence, baseUrl)
+
+	// Strict-spec SSF transmitter posture (SSF 1.0 §8.1.1.1). When I2SIG_STRICT_SSF
+	// is set, the server must be backed by an administrator-declared issuer whose
+	// signing key exists before it advertises discovery metadata; refuse to start
+	// otherwise rather than serve an issuer it cannot sign for.
+	if services.StrictSsfEnabled() {
+		if err := ssfApplication.ProvisionStrictMode(context.Background()); err != nil {
+			mLog.Error("Fatal: strict SSF mode misconfigured", "error", err)
+			os.Exit(-1)
+		}
+	}
+
 	closer, tlsMode, err := tlsSupport.InitTransportLayerSecurity(ssfApplication.Server)
 	if err != nil {
 		mLog.Error("Fatal: Unable to initialize TLS mode", "error", err)
