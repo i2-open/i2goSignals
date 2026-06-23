@@ -364,8 +364,7 @@ func (s *ServerServiceTestSuite) TestCreateServer_OAuthClientGosignalsPeer_NotMi
 }
 
 // TestCreateServer_ExternalRfc8935NoSsfDiscovery_PrmFallback is step 3: a peer
-// with no SSF discovery but a resolvable PRM is classified ssf, and its
-// authorization_servers are harvested onto ServerConfiguration.
+// with no SSF discovery but a resolvable PRM is classified ssf.
 func (s *ServerServiceTestSuite) TestCreateServer_ExternalRfc8935NoSsfDiscovery_PrmFallback() {
 	var asURL string
 	prmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -410,8 +409,6 @@ func (s *ServerServiceTestSuite) TestCreateServer_ExternalRfc8935NoSsfDiscovery_
 	retrieved, err := s.service.GetServerByAlias(s.T().Context(), "external-rfc8935")
 	s.NoError(err)
 	s.Equal(model.ServerTypeSsf, retrieved.Type)
-	s.Require().NotNil(retrieved.ServerConfiguration)
-	s.Equal([]string{asURL}, retrieved.ServerConfiguration.AuthorizationServers)
 }
 
 // TestCreateServer_UnreachablePeerTokenMode_FallsBackGosignals is step 4: a

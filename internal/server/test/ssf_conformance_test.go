@@ -226,13 +226,6 @@ func (suite *SSFConformanceSuite) TestSupportedScopes() {
 	var config model.TransmitterConfiguration
 	_ = json.Unmarshal(body, &config)
 
-	if len(config.ScopesSupported) > 0 {
-		// Roles should be non-empty strings
-		for _, scope := range config.ScopesSupported {
-			assert.NotEmpty(t, scope, "Each scope should be a non-empty string")
-		}
-	}
-
 	if len(config.SupportedScopes) > 0 {
 		// SupportedScopes maps endpoints to required scopes
 		for endpoint, scopes := range config.SupportedScopes {

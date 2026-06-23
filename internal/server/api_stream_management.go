@@ -959,9 +959,9 @@ func getTransmitterConfig(sa SsfApplicationInterface) *model.TransmitterConfigur
 			{SpecUrn: constants.BearerAuth},
 			{SpecUrn: constants.RFC6749},
 		},
-		AuthorizationServers:   sa.GetAuth().GetOAuthServers(),
-		ScopesSupported:        []string{authSupport.ScopeEventDelivery, authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt, authSupport.ScopeRegister},
-		BearerMethodsSupported: []string{"header"},
+		// OAuth authorization_servers / scopes_supported / bearer_methods_supported
+		// are advertised via RFC 9728 Protected Resource Metadata
+		// (/.well-known/oauth-protected-resource), not in the SSF discovery doc.
 
 		GoSignalsVersion: goVersion,
 		SpecVersion:      constants.SSF_VERSION,

@@ -106,15 +106,12 @@ func (s *ServerService) resolveServerType(ctx context.Context, server *model.Ser
 		return model.ServerTypeSsf
 	}
 
-	// Step 3: No (parseable) SSF discovery -> try PRM. An external RFC8935/8936
-	// server is ssf; harvest its overlapping metadata into ServerConfiguration.
+	// Step 3: No (parseable) SSF discovery -> try PRM. A resolvable RFC 9728
+	// Protected Resource Metadata document means an external RFC8935/8936 server,
+	// which we classify as ssf. The OAuth metadata it advertises
+	// (authorization_servers etc.) is consumed directly from PRM by the CLI/OAuth
+	// client at login time, so there is nothing to harvest onto ServerConfiguration.
 	if prm, err := wellKnownSupport.FetchProtectedResourceMetadata(ctx, client, server.Host); err == nil && prm != nil {
-		if server.ServerConfiguration == nil {
-			server.ServerConfiguration = &model.TransmitterConfiguration{}
-		}
-		server.ServerConfiguration.AuthorizationServers = prm.AuthorizationServers
-		server.ServerConfiguration.ScopesSupported = prm.ScopesSupported
-		server.ServerConfiguration.BearerMethodsSupported = prm.BearerMethodsSupported
 		return model.ServerTypeSsf
 	}
 
