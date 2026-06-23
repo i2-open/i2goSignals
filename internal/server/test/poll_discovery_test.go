@@ -51,6 +51,13 @@ func TestPollStatusDiscovery(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(model.PollResponse{Sets: make(map[string]string)})
 			return
 		}
+		// This transmitter serves only the legacy sse-configuration; every other
+		// path — including the spec ssf-configuration the client tries first — is
+		// absent. Return a real 404 (not Go's default 200-empty) so the client's
+		// ssf→sse fallback engages exactly as it must against a legacy-only
+		// transmitter: the fallback is gated on a primary 404, not on a decode
+		// error (GH #209).
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts_final.Close()
 

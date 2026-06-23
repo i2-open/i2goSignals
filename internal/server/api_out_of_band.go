@@ -1572,20 +1572,13 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	// ADR 0023 (local-issuer addressing): a local issuer is addressed by its path
 	// component and stored under the reconstructed full URL (baseURL + "/" +
-	// <captured path>). Resolve that local issuer first; fall back to the captured
-	// value as-is for a legacy/foreign keyName (which references the original
-	// publishing entity verbatim — do not fold foreign issuers into the local
-	// scheme, that would break the SSF §7.2.4 binding for relayed SETs).
-	lookupName := keyName
-	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
-		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + keyName
-		if checkKeyNameExists(sa, localIss) {
-			lookupName = localIss
-		}
-	}
-
+	// <captured path>); a legacy/foreign keyName references the original
+	// publishing entity verbatim. resolveIssuerKeyName performs that
+	// local-rooted-then-bare lookup — the same resolution §7.2.1 discovery uses,
+	// so JWKS and discovery accept an identical set of issuer segments (GH #209).
+	lookupName, exists := resolveIssuerKeyName(sa, keyName)
 	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), lookupName)
-	if jsonKey == nil || !checkKeyNameExists(sa, lookupName) {
+	if !exists || jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -1631,4 +1624,26 @@ func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {
 	// Check for existing key
 	keyNames, _ := sa.GetKeyService().ListKeyNames(context.Background())
 	return slices.Contains(keyNames, keyName)
+}
+
+// resolveIssuerKeyName resolves a discovery/JWKS path segment to the registered
+// signing-key name it addresses, using ADR 0023 local-rooted-then-bare lookup:
+// it prefers the base-rooted local issuer (baseURL + "/" + segment) when a key
+// is registered under that name, otherwise the bare segment (a foreign/legacy
+// issuer referenced verbatim — folding it into the local scheme would break the
+// SSF §7.2.4 binding for relayed SETs). It returns the resolved key name and
+// whether a key is actually registered under it; when neither resolves it
+// returns the bare segment with false so callers 404. JWKS serving and §7.2.1
+// discovery share this so they accept the exact same set of issuer segments.
+func resolveIssuerKeyName(sa SsfApplicationInterface, segment string) (string, bool) {
+	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
+		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + segment
+		if checkKeyNameExists(sa, localIss) {
+			return localIss, true
+		}
+	}
+	if checkKeyNameExists(sa, segment) {
+		return segment, true
+	}
+	return segment, false
 }

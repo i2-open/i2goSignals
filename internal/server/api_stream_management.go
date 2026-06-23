@@ -1022,29 +1022,26 @@ func WellKnownSsfConfigurationIssuerGetHandler(sa SsfApplicationInterface, w htt
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	// ADR 0023 (local-issuer addressing): an issuer rooted at the server base
-	// URL is addressed by its path component. Reconstruct the full issuer URL
-	// (baseURL + "/" + <captured path>) — this is the keyName the signing key is
-	// stored under, and per SSF §7.2.4 it must be echoed verbatim as `issuer`.
-	// Do NOT collapse this into a uniform /jwks/<urlencoded-issuer> scheme: that
-	// would break the §7.2.4 binding for relayed (foreign) issuers (see ADR 0023
-	// "Considered alternatives").
-	baseUrl := sa.GetBaseUrl()
-	fullIss := strings.TrimRight(baseUrl.String(), "/") + "/" + issuerPath
-
-	// Validate the issuer: only serve discovery for a known local signing key.
-	// Unknown issuers return 404 rather than synthesizing metadata. (GetPublicJWKS
-	// returns a non-nil empty keyset for unknown names, so test for a stored key.)
-	if !checkKeyNameExists(sa, fullIss) {
-		serverLog.Debug(fmt.Sprintf("Unknown issuer for discovery: %s", fullIss))
+	// Resolve the captured path to the registered signing-key name it addresses,
+	// using the same local-rooted-then-bare lookup the JWKS handler uses (GH
+	// #209): a base-rooted local issuer (ADR 0023) resolves to baseURL + "/" +
+	// <path>, a foreign/legacy issuer to its bare registered name. Per SSF §7.2.4
+	// the resolved name is echoed verbatim as `issuer` (it MUST equal the `iss` of
+	// SETs that issuer signs). Unknown issuers return 404 rather than synthesizing
+	// metadata. Discovery and JWKS share resolveIssuerKeyName so any segment that
+	// serves a key at /jwks/<path> also discovers here.
+	resolvedIss, exists := resolveIssuerKeyName(sa, issuerPath)
+	if !exists {
+		serverLog.Debug(fmt.Sprintf("Unknown issuer for discovery: %s", issuerPath))
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
+	baseUrl := sa.GetBaseUrl()
 	jwksUri, _ := baseUrl.Parse("/jwks/" + issuerPath)
 	config := getTransmitterConfig(sa)
 	config.JwksUri = jwksUri.String()
-	config.Issuer = fullIss
+	config.Issuer = resolvedIss
 
 	resp, _ := json.Marshal(config)
 	w.WriteHeader(http.StatusOK)

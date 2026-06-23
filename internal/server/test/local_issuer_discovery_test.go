@@ -185,6 +185,54 @@ func (suite *LocalIssuerDiscoverySuite) TestCreateLocalIssuerKeyViaHttp() {
 	_ = jresp.Body.Close()
 }
 
+// GH #209: discovery must resolve a foreign issuer the same way JWKS does —
+// local-rooted-then-bare. An issuer registered under its bare name (not
+// baseURL-rooted) serves keys at /jwks/<name>; SSF §7.2.1 discovery for that
+// same segment must return 200 and echo the bare name verbatim as `issuer`
+// (§7.2.4: it MUST equal the `iss` of SETs that issuer signs), never the
+// base-rooted form.
+func (suite *LocalIssuerDiscoverySuite) TestForeignIssuerDiscovery() {
+	t := suite.T()
+	base := suite.instance.ts.URL
+	// A foreign issuer stored under an opaque bare name, NOT baseURL-rooted.
+	foreignName := "cluster.scim.example.com"
+	suite.createIssuerKey(foreignName)
+
+	resp, config := suite.getDiscovery(foreignName)
+	assert.Equal(t, http.StatusOK, resp.StatusCode,
+		"a registered foreign issuer must discover, not 404")
+	assert.Equal(t, foreignName, config.Issuer,
+		"issuer must be the bare registered name echoed verbatim (SSF §7.2.4), not base-rooted")
+	assert.Equal(t, base+"/jwks/"+foreignName, config.JwksUri,
+		"jwks_uri must be the bare-segment /jwks path the JWKS handler serves")
+}
+
+// GH #209 acceptance: discovery issuer resolution and JWKS issuer resolution
+// must accept the same set of issuer segments — no issuer that serves a key at
+// /jwks/<segment> may 404 at /.well-known/ssf-configuration/<segment>. Asserted
+// across both a base-rooted local issuer and a bare foreign issuer.
+func (suite *LocalIssuerDiscoverySuite) TestDiscoveryJwksSegmentParity() {
+	t := suite.T()
+	base := suite.instance.ts.URL
+	segments := map[string]string{
+		"parity-local":   base + "/parity-local", // base-rooted local issuer (ADR 0023)
+		"parity.foreign": "parity.foreign",       // bare foreign issuer
+	}
+	for segment, fullName := range segments {
+		suite.createIssuerKey(fullName)
+
+		jresp, err := http.Get(base + "/jwks/" + segment)
+		require.NoError(t, err)
+		_ = jresp.Body.Close()
+		require.Equal(t, http.StatusOK, jresp.StatusCode,
+			"JWKS must resolve segment %q", segment)
+
+		dresp, _ := suite.getDiscovery(segment)
+		assert.Equal(t, http.StatusOK, dresp.StatusCode,
+			"discovery must resolve any segment JWKS resolves (segment %q)", segment)
+	}
+}
+
 // JwksJsonIssuerHandler legacy fallback: a foreign/legacy keyName that is not a
 // reconstructable local issuer still resolves by its stored name as-is.
 func (suite *LocalIssuerDiscoverySuite) TestJwksLegacyFallback() {

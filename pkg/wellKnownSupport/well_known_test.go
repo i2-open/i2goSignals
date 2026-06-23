@@ -106,6 +106,62 @@ func (suite *WellKnownSupportTestSuite) TestFetchSSFConfigurationFallback() {
 	suite.Equal(config.Issuer, res.Issuer)
 }
 
+// GH #209 problem 2: the legacy sse-configuration fallback must engage ONLY on a
+// primary 404. A non-404 status (here 500) surfaces directly from the
+// ssf-configuration attempt and must NOT trigger an sse-configuration request.
+func (suite *WellKnownSupportTestSuite) TestFetchSSFConfigurationNon404NoFallback() {
+	var sseRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == SSEConfigurationPath {
+			sseRequested = true
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := FetchSSFConfiguration(context.Background(), server.Client(), server.URL)
+	suite.Error(err)
+	suite.False(sseRequested, "must not fall back to sse-configuration on a non-404 primary error")
+	suite.Contains(err.Error(), "ssf-configuration", "surfaced error must name the ssf-configuration attempt")
+	suite.Contains(err.Error(), "500", "surfaced error must carry the primary status")
+}
+
+// GH #209 problem 2: a primary attempt that returns 200 with an undecodable body
+// is a decode error, not a 404 — the fallback must not engage, and the decode
+// error surfaces from the ssf-configuration attempt.
+func (suite *WellKnownSupportTestSuite) TestFetchSSFConfigurationDecodeErrorNoFallback() {
+	var sseRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == SSEConfigurationPath {
+			sseRequested = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, "this is not json")
+	}))
+	defer server.Close()
+
+	_, err := FetchSSFConfiguration(context.Background(), server.Client(), server.URL)
+	suite.Error(err)
+	suite.False(sseRequested, "a decode error must not trigger the sse-configuration fallback")
+	suite.Contains(err.Error(), "ssf-configuration", "decode error must reference the ssf-configuration attempt")
+}
+
+// GH #209 problem 2: when the spec endpoint 404s and the legacy fallback also
+// fails, the surfaced error must still carry the primary ssf-configuration
+// failure — never present only the fabricated sse-configuration URL the operator
+// originally saw.
+func (suite *WellKnownSupportTestSuite) TestFetchSSFConfigurationFallbackPreservesPrimary() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	_, err := FetchSSFConfiguration(context.Background(), server.Client(), server.URL)
+	suite.Error(err)
+	suite.Contains(err.Error(), SSFConfigurationPath,
+		"a failed fallback must still surface the primary ssf-configuration attempt")
+}
+
 func (suite *WellKnownSupportTestSuite) TestFetchOpenIDConfiguration() {
 	config := &OIDCConfiguration{
 		Issuer:  "https://example.com",
