@@ -253,6 +253,66 @@ func (s *KeyServiceTestSuite) TestIssuedTokenValidatesAfterRotation() {
 	s.NotNil(claims)
 }
 
+// TestEnsureSigningKey_CreatesThenIdempotent verifies the strict-mode
+// provisioning primitive: the first call mints the issuer's signing key
+// (created=true) and a second call is a no-op (created=false) reusing the same
+// stored key. This is the restart-safe behavior InitializeTokenKey lacks.
+func (s *KeyServiceTestSuite) TestEnsureSigningKey_CreatesThenIdempotent() {
+	ctx := context.Background()
+	svc, _ := s.newService("DEFAULT")
+	const issuer = "https://localhost.emobix.co.uk:9443/issuer1"
+
+	created, err := svc.EnsureSigningKey(ctx, issuer, "")
+	s.Require().NoError(err)
+	s.True(created, "first EnsureSigningKey must create the key")
+
+	key1, _, err := svc.GetPrivateKeyWithKeyname(ctx, issuer)
+	s.Require().NoError(err)
+	s.Require().NotNil(key1)
+
+	created, err = svc.EnsureSigningKey(ctx, issuer, "")
+	s.Require().NoError(err)
+	s.False(created, "second EnsureSigningKey must be a no-op")
+
+	key2, _, err := svc.GetPrivateKeyWithKeyname(ctx, issuer)
+	s.Require().NoError(err)
+	s.Equal(key1.D, key2.D, "the stored signing key must be reused, not regenerated")
+}
+
+// TestEnsureSigningKey_SurvivesReconnect simulates a restart: a fresh KeyService
+// over the same DAO must see the persisted key and NOT recreate it. This is the
+// gap InitializeTokenKey leaves (it skips the default-issuer key once the token
+// key already exists).
+func (s *KeyServiceTestSuite) TestEnsureSigningKey_SurvivesReconnect() {
+	ctx := context.Background()
+	_, dao := s.newService("DEFAULT")
+	const issuer = "https://localhost.emobix.co.uk:9443/issuer1"
+
+	svc1 := NewKeyService(dao, "DEFAULT", nil, nil)
+	created, err := svc1.EnsureSigningKey(ctx, issuer, "")
+	s.Require().NoError(err)
+	s.True(created)
+
+	// New service instance, same backing store (server reconnect).
+	svc2 := NewKeyService(dao, "DEFAULT", nil, nil)
+	created, err = svc2.EnsureSigningKey(ctx, issuer, "")
+	s.Require().NoError(err)
+	s.False(created, "an existing persisted key must not be recreated after reconnect")
+}
+
+// TestEnsureSigningKey_TransientErrorPropagates verifies a non-ErrKeyNotFound
+// DAO failure is surfaced (and no key is created), mirroring InitializeTokenKey's
+// fail-loud discipline so a flaky backend never causes a duplicate insert.
+func (s *KeyServiceTestSuite) TestEnsureSigningKey_TransientErrorPropagates() {
+	ctx := context.Background()
+	dao := &failingFindLatestKeyDAO{KeyDAO: memory.NewKeyDAO()}
+	svc := NewKeyService(dao, "DEFAULT", nil, nil)
+
+	created, err := svc.EnsureSigningKey(ctx, "https://issuer.example.com", "")
+	s.Error(err, "a transient FindLatest failure must propagate")
+	s.False(created)
+}
+
 func TestKeyServiceSuite(t *testing.T) {
 	suite.Run(t, new(KeyServiceTestSuite))
 }

@@ -86,6 +86,55 @@ func (sa *SsfApplication) GetDefIssuer() string {
 	return sa.DefIssuer
 }
 
+// ProvisionStrictMode prepares the standalone goSsfServer to act as a
+// strict-spec SSF transmitter — the way an administrator stands up a true SSF
+// server and the OpenID conformance suite expects one. main invokes it on
+// startup when services.StrictSsfEnabled() is true; the returned error MUST be
+// treated as fatal, because the server must not begin advertising an issuer it
+// cannot sign for. This posture is scoped to goSsfServer (the SSF-server
+// simulator) and does not alter the stream-management API. See ADR 0025.
+//
+// It does two things:
+//
+//  1. Requires an administrator-declared issuer. I2SIG_ISSUER_DEFAULT must be set
+//     to an absolute http(s) URL. The base-URL / "DEFAULT" fallback that the
+//     default mode accepts is refused — in strict mode the operator declares the
+//     issuer explicitly, the way the conformance harness configures it.
+//
+//  2. Idempotently provisions that issuer's SET-signing key
+//     (KeyService.EnsureSigningKey) so the issuer-specific discovery endpoint
+//     (/.well-known/ssf-configuration/<path>, RFC 8615 path insertion) resolves,
+//     /jwks/<path> serves the public keyset, and emitted SETs are signed under the
+//     same issuer. This binds iss == discovery issuer == JWKS key name (ADR 0023)
+//     and is restart-safe (unlike InitializeTokenKey, which seeds the issuer key
+//     only on first init).
+func (sa *SsfApplication) ProvisionStrictMode(ctx context.Context) error {
+	issuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", "I2SIG_ISSUER")
+	if issuer == "" || issuer == "DEFAULT" {
+		return fmt.Errorf("strict SSF mode (I2SIG_STRICT_SSF) requires I2SIG_ISSUER_DEFAULT to be set to the transmitter's issuer URL; refusing the base-URL / DEFAULT fallback")
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("strict SSF mode: I2SIG_ISSUER_DEFAULT %q must be an absolute http(s) issuer URL", issuer)
+	}
+	if sa.KeyService == nil {
+		return fmt.Errorf("strict SSF mode: key service unavailable, cannot provision issuer %q", issuer)
+	}
+
+	// DefIssuer is resolved from the same lookup in NewApplication; provisioning
+	// the key under it guarantees the key name matches exactly what discovery
+	// advertises and what WellKnownSsfConfigurationIssuerGet reconstructs.
+	created, err := sa.KeyService.EnsureSigningKey(ctx, sa.DefIssuer, "")
+	if err != nil {
+		return fmt.Errorf("strict SSF mode: provisioning signing key for issuer %q: %w", sa.DefIssuer, err)
+	}
+
+	serverLog.Info("Strict SSF transmitter mode enabled",
+		"issuer", sa.DefIssuer,
+		"signing_key_created", created)
+	return nil
+}
+
 func (sa *SsfApplication) CloseReceiver(_ string) {
 	// SSF-only server does not implement receivers
 }
