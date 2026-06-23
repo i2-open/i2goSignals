@@ -1,6 +1,9 @@
 package wellKnownSupport
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestEvaluateIssuerBinding pins the SSF §7.2.4 issuer↔discovery-location
 // decision table that both the CLI `add server` and the server-side receiver
@@ -62,6 +65,68 @@ func TestEvaluateIssuerBinding(t *testing.T) {
 				t.Fatalf("expected no warning for a consistent binding, got %q", warn)
 			}
 		})
+	}
+}
+
+// TestIssuerMatchesLocation pins the policy-free primitive the visibility-only
+// admin discover probe (i2goSignalsAdmin#241) consumes directly: it reports the
+// bare §7.2.4 fact with no warn/fail decision attached. Same normalization
+// contract as EvaluateIssuerBinding, but a pure bool — no strict argument, so a
+// consumer with no committed StrictSsf posture never has to pass a meaningless
+// strict=false to dodge an error branch.
+func TestIssuerMatchesLocation(t *testing.T) {
+	const loc = "https://tr.example.com/issuer1"
+
+	tests := []struct {
+		name     string
+		issuer   string
+		location string
+		want     bool
+	}{
+		{"identical", loc, loc, true},
+		{"trailing-slash-on-issuer", "https://tr.example.com/issuer1/", loc, true},
+		{"trailing-slash-on-location", loc, "https://tr.example.com/issuer1/", true},
+		{"host-case-insensitive", "https://TR.Example.COM/issuer1", loc, true},
+		{"scheme-case-insensitive", "HTTPS://tr.example.com/issuer1", loc, true},
+		{"host-only", "https://tr.example.com", "https://tr.example.com", true},
+		{"different-host", "https://evil.example.com/issuer1", loc, false},
+		{"different-path", "https://tr.example.com/issuer2", loc, false},
+		{"path-case-differs", "https://tr.example.com/Issuer1", loc, false},
+		{"empty-issuer", "", loc, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IssuerMatchesLocation(tc.issuer, tc.location); got != tc.want {
+				t.Fatalf("IssuerMatchesLocation(%q,%q) = %v, want %v", tc.issuer, tc.location, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIssuerBindingDetail verifies the policy-free message helper: it returns ""
+// exactly on a consistent binding and a non-empty description on a mismatch,
+// without ever deciding warn-vs-fail. EvaluateIssuerBinding is built on top of
+// it, so this also guards the message the enforcement callers surface.
+func TestIssuerBindingDetail(t *testing.T) {
+	const loc = "https://tr.example.com/issuer1"
+
+	if d := IssuerBindingDetail(loc, loc); d != "" {
+		t.Fatalf("consistent binding must yield empty detail, got %q", d)
+	}
+	// A mismatch describes both sides and stays policy-free (no warn/fail verb).
+	d := IssuerBindingDetail("https://evil.example.com/issuer1", loc)
+	if d == "" {
+		t.Fatal("mismatch must yield a non-empty detail string")
+	}
+	for _, want := range []string{"evil.example.com", "tr.example.com", "jwks_uri is free-form"} {
+		if !strings.Contains(d, want) {
+			t.Fatalf("detail %q missing expected substring %q", d, want)
+		}
+	}
+	// An empty advertised issuer is itself a §7.2.4 violation; detail must say so.
+	if d := IssuerBindingDetail("", loc); !strings.Contains(d, "(none advertised)") {
+		t.Fatalf("empty-issuer detail must note none advertised, got %q", d)
 	}
 }
 

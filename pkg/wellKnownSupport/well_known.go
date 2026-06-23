@@ -132,16 +132,45 @@ func normalizeIssuerURL(raw string) string {
 	return u.String()
 }
 
-// issuerMatchesLocation reports whether a transmitter's advertised metadata
+// IssuerMatchesLocation reports whether a transmitter's advertised metadata
 // issuer is consistent with the location its discovery document was retrieved
-// from. An empty metadataIssuer never matches (the transmitter advertised no
-// issuer, which is itself a §7.2.4 violation).
-func issuerMatchesLocation(metadataIssuer, discoveryLocation string) bool {
+// from — the bare SSF §7.2.4 fact, with NO enforcement policy attached.
+// Comparison is scheme/host case-insensitive and ignores a single trailing
+// slash (the path stays case-sensitive per RFC 3986). An empty metadataIssuer
+// never matches (the transmitter advertised no issuer, which is itself a
+// §7.2.4 violation).
+//
+// This is the policy-free primitive: callers that must only *surface* a
+// mismatch (e.g. a pre-registration discovery probe where no StrictSsf posture
+// is committed yet) use this directly and decide their own warn/render
+// behavior, rather than calling EvaluateIssuerBinding with a meaningless
+// strict=false purely to dodge its error branch. jwks_uri is intentionally not
+// a parameter: it is free-form and must never be coupled to iss/issuer.
+func IssuerMatchesLocation(metadataIssuer, discoveryLocation string) bool {
 	mi := normalizeIssuerURL(metadataIssuer)
 	if mi == "" {
 		return false
 	}
 	return mi == normalizeIssuerURL(discoveryLocation)
+}
+
+// IssuerBindingDetail returns a human-readable description of an SSF §7.2.4
+// issuer↔discovery-location mismatch, WITHOUT deciding warn-vs-fail. It returns
+// "" exactly when IssuerMatchesLocation reports true (a consistent binding has
+// nothing to describe). Like IssuerMatchesLocation this is policy-free: a
+// visibility-only consumer renders this string in its own dialog copy, while
+// the enforcement callers go through EvaluateIssuerBinding.
+func IssuerBindingDetail(metadataIssuer, discoveryLocation string) string {
+	if IssuerMatchesLocation(metadataIssuer, discoveryLocation) {
+		return ""
+	}
+	advertised := metadataIssuer
+	if strings.TrimSpace(advertised) == "" {
+		advertised = "(none advertised)"
+	}
+	return fmt.Sprintf(
+		"SSF §7.2.4 issuer binding mismatch: transmitter discovery document advertises issuer %q but was retrieved from %q; these MUST match to prevent transmitter impersonation (jwks_uri is free-form and is not part of this check)",
+		advertised, discoveryLocation)
 }
 
 // EvaluateIssuerBinding checks the SSF §7.2.4 issuer↔discovery-location binding:
@@ -168,16 +197,10 @@ func issuerMatchesLocation(metadataIssuer, discoveryLocation string) bool {
 //   - strict == false -> (warning, nil): the caller logs the warning and
 //     continues (the flexible default; the binding is advisory).
 func EvaluateIssuerBinding(metadataIssuer, discoveryLocation string, strict bool) (string, error) {
-	if issuerMatchesLocation(metadataIssuer, discoveryLocation) {
+	detail := IssuerBindingDetail(metadataIssuer, discoveryLocation)
+	if detail == "" {
 		return "", nil
 	}
-	advertised := metadataIssuer
-	if strings.TrimSpace(advertised) == "" {
-		advertised = "(none advertised)"
-	}
-	detail := fmt.Sprintf(
-		"SSF §7.2.4 issuer binding mismatch: transmitter discovery document advertises issuer %q but was retrieved from %q; these MUST match to prevent transmitter impersonation (jwks_uri is free-form and is not part of this check)",
-		advertised, discoveryLocation)
 	if strict {
 		return "", errors.New(detail)
 	}
