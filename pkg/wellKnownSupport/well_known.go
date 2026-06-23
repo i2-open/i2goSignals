@@ -432,3 +432,24 @@ func FetchOpenIDConfiguration(ctx context.Context, client *http.Client, baseURL 
 func FetchProtectedResourceMetadata(ctx context.Context, client *http.Client, baseURL string) (*model.ProtectedResourceMetadata, error) {
 	return FetchWellKnown[model.ProtectedResourceMetadata](ctx, client, baseURL, OAuthProtectedResourcePath)
 }
+
+// FetchOAuthAuthorizationServerRaw retrieves an authorization server's RFC 8414
+// metadata document verbatim (as raw JSON). It tries the
+// oauth-authorization-server document first and falls back to the OpenID Provider
+// openid-configuration (an OAuth AS commonly serves both, e.g. Keycloak). The
+// bytes are returned unmodified — using json.RawMessage so no field is dropped —
+// so callers that reflect the document (a discovery proxy) preserve every field
+// of the real authorization server. On failure the returned error carries the
+// primary oauth-authorization-server attempt, with the openid-configuration
+// fallback noted, mirroring FetchSSFConfiguration's non-masking discipline.
+func FetchOAuthAuthorizationServerRaw(ctx context.Context, client *http.Client, baseURL string) (json.RawMessage, error) {
+	raw, primaryErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OAuthAuthorizationServerPath)
+	if primaryErr == nil {
+		return *raw, nil
+	}
+	raw, fallbackErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OpenIDConfigurationPath)
+	if fallbackErr == nil {
+		return *raw, nil
+	}
+	return nil, fmt.Errorf("%w (openid-configuration fallback also failed: %v)", primaryErr, fallbackErr)
+}

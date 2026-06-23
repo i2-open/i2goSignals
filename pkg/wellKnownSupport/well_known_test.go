@@ -204,6 +204,66 @@ func (suite *WellKnownSupportTestSuite) TestFetchProtectedResourceMetadata() {
 	suite.Equal(config.AuthorizationServers, res.AuthorizationServers)
 }
 
+// FetchOAuthAuthorizationServerRaw returns the upstream RFC 8414 document
+// verbatim — including fields not modeled by OIDCConfiguration — so a proxy can
+// reflect the real authorization server losslessly.
+func (suite *WellKnownSupportTestSuite) TestFetchOAuthAuthorizationServerRaw() {
+	body := `{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","x_custom":"keep-me"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == OAuthAuthorizationServerPath {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, body)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	raw, err := FetchOAuthAuthorizationServerRaw(context.Background(), server.Client(), server.URL)
+	suite.NoError(err)
+	var parsed map[string]interface{}
+	suite.NoError(json.Unmarshal(raw, &parsed))
+	suite.Equal("https://as.example.com", parsed["issuer"])
+	suite.Equal("keep-me", parsed["x_custom"], "unmodeled fields must survive verbatim")
+}
+
+// When oauth-authorization-server is absent (404), the OpenID Provider
+// openid-configuration is reflected instead (Keycloak commonly serves only it).
+func (suite *WellKnownSupportTestSuite) TestFetchOAuthAuthorizationServerRawFallback() {
+	body := `{"issuer":"https://op.example.com","token_endpoint":"https://op.example.com/token"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == OpenIDConfigurationPath {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, body)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	raw, err := FetchOAuthAuthorizationServerRaw(context.Background(), server.Client(), server.URL)
+	suite.NoError(err)
+	var parsed map[string]interface{}
+	suite.NoError(json.Unmarshal(raw, &parsed))
+	suite.Equal("https://op.example.com", parsed["issuer"])
+}
+
+// When neither document resolves, the error carries the primary
+// oauth-authorization-server attempt with the fallback noted.
+func (suite *WellKnownSupportTestSuite) TestFetchOAuthAuthorizationServerRawBothFail() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	_, err := FetchOAuthAuthorizationServerRaw(context.Background(), server.Client(), server.URL)
+	suite.Error(err)
+	suite.Contains(err.Error(), OAuthAuthorizationServerPath,
+		"error must surface the primary oauth-authorization-server attempt")
+	suite.Contains(err.Error(), "openid-configuration",
+		"error must note the openid-configuration fallback")
+}
+
 func (suite *WellKnownSupportTestSuite) TestFetchWellKnownError() {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
