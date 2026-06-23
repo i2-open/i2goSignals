@@ -113,6 +113,77 @@ func InsertWellKnownURL(baseURL string, wellKnownPath string) (string, error) {
 	return u.String(), nil
 }
 
+// normalizeIssuerURL canonicalizes an issuer/location URL for the SSF §7.2.4
+// binding comparison: scheme and host are lowercased (RFC 3986 case-insensitive
+// components) and a single trailing slash is trimmed. The path is left
+// case-sensitive. An empty/blank input normalizes to "".
+func normalizeIssuerURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return strings.ToLower(strings.TrimRight(s, "/"))
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
+}
+
+// issuerMatchesLocation reports whether a transmitter's advertised metadata
+// issuer is consistent with the location its discovery document was retrieved
+// from. An empty metadataIssuer never matches (the transmitter advertised no
+// issuer, which is itself a §7.2.4 violation).
+func issuerMatchesLocation(metadataIssuer, discoveryLocation string) bool {
+	mi := normalizeIssuerURL(metadataIssuer)
+	if mi == "" {
+		return false
+	}
+	return mi == normalizeIssuerURL(discoveryLocation)
+}
+
+// EvaluateIssuerBinding checks the SSF §7.2.4 issuer↔discovery-location binding:
+// the `issuer` advertised inside a transmitter's discovery document MUST equal
+// the location that document was retrieved from (the host + issuer path the
+// .well-known/ssf-configuration URL was built from), to prevent transmitter
+// impersonation. It is the symmetric counterpart of the OpenID conformance
+// suite's OIDSSFCheckTransmitterMetadataIssuer.
+//
+// jwks_uri is intentionally NOT a parameter: it is free-form (any HTTPS URL
+// serving the issuer's keys) and must never be required to equal iss/issuer.
+// Keeping it out of this signature structurally prevents anyone from coupling
+// the two.
+//
+// Comparison is scheme/host case-insensitive and ignores a single trailing
+// slash (the path stays case-sensitive per RFC 3986). On a consistent binding
+// it returns ("", nil). On a mismatch the behavior is keyed off the peer's
+// operator-declared strict posture (model.Server.StrictSsf / the CLI's
+// --strict-ssf — NOT the goSsfServer-only I2SIG_STRICT_SSF env flag):
+//
+//   - strict == true  -> ("", error): abort. The peer claims to be a strict,
+//     properly-administered SSF transmitter, so a mismatch is an impersonation
+//     or misconfiguration signal that must not be recorded.
+//   - strict == false -> (warning, nil): the caller logs the warning and
+//     continues (the flexible default; the binding is advisory).
+func EvaluateIssuerBinding(metadataIssuer, discoveryLocation string, strict bool) (string, error) {
+	if issuerMatchesLocation(metadataIssuer, discoveryLocation) {
+		return "", nil
+	}
+	advertised := metadataIssuer
+	if strings.TrimSpace(advertised) == "" {
+		advertised = "(none advertised)"
+	}
+	detail := fmt.Sprintf(
+		"SSF §7.2.4 issuer binding mismatch: transmitter discovery document advertises issuer %q but was retrieved from %q; these MUST match to prevent transmitter impersonation (jwks_uri is free-form and is not part of this check)",
+		advertised, discoveryLocation)
+	if strict {
+		return "", errors.New(detail)
+	}
+	return detail, nil
+}
+
 // BuildWellKnownURLs generates candidate URLs for a well-known endpoint.
 // It follows RFC 8414 logic for inserting .well-known and also handles simple appending.
 func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) {
