@@ -47,6 +47,10 @@ func mockStrictTransmitter(t *testing.T, strict bool, captured *model.StreamConf
 
 	ts := httptest.NewServer(mux)
 	transmitterConfig.ConfigurationEndpoint = ts.URL + "/streams"
+	// A properly-administered strict transmitter advertises issuer == the
+	// location its discovery document is served from (SSF §7.2.4); bind it so
+	// this stripping-focused test isn't tripped by the issuer-binding check.
+	transmitterConfig.Issuer = ts.URL
 
 	token := "test-token"
 	server := &model.Server{

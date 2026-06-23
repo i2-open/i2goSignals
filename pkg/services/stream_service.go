@@ -413,6 +413,19 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		if txConfig.ConfigurationEndpoint == "" {
 			return model.StreamConfiguration{}, errors.New("transmitter configuration missing configuration_endpoint")
 		}
+		// SSF §7.2.4 issuer binding: the transmitter's advertised issuer must
+		// equal the location its discovery document was retrieved from
+		// (txServer.Host). jwks_uri stays free-form and is not part of this
+		// check. A strict peer (txServer.StrictSsf — the per-peer posture, NOT
+		// the goSsfServer-only I2SIG_STRICT_SSF env flag) aborts on a mismatch;
+		// a flexible peer only warns. The inline static TxWellKnownUrl path
+		// synthesizes txServer without StrictSsf, so it defaults to the flexible
+		// warn-and-continue branch.
+		if warn, berr := wellKnownSupport.EvaluateIssuerBinding(txConfig.Issuer, txServer.Host, txServer.StrictSsf); berr != nil {
+			return model.StreamConfiguration{}, berr
+		} else if warn != "" {
+			ssLog.Warn(warn, "tx-host", txServer.Host, "advertised-issuer", txConfig.Issuer)
+		}
 		defaultTxJwksUrl = txConfig.JwksUri
 	}
 

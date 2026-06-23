@@ -184,6 +184,18 @@ func (as *AddServerCmd) Run(c *CLI) error {
 	}
 	server.ServerConfiguration = &transmitterConfiguration
 
+	// SSF §7.2.4 issuer binding: the issuer advertised in the discovery document
+	// must equal the location it was retrieved from (server.Host carries any
+	// HTTP-fallback scheme change). jwks_uri is free-form and not checked. A
+	// strict-spec transmitter (--strict-ssf) must bind exactly or the add aborts;
+	// a flexible peer only warns. Keyed off the per-server StrictSsf posture, NOT
+	// the goSsfServer-only I2SIG_STRICT_SSF env flag.
+	if warn, berr := wellKnownSupport.EvaluateIssuerBinding(transmitterConfiguration.Issuer, server.Host, as.StrictSsf); berr != nil {
+		return berr
+	} else if warn != "" {
+		fmt.Println("Warning: " + warn)
+	}
+
 	// `add server` is connect-only: it performs SSF discovery and records the
 	// server without minting any credential. Interactive auth happens later via
 	// `login <alias>` (PKCE). The --iat/--token/--client-secret/--bootstrap
