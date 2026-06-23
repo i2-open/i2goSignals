@@ -261,6 +261,30 @@ func BuildWellKnownURLs(baseURL string, wellKnownPath string) ([]string, error) 
 	return candidates, nil
 }
 
+// HTTPStatusError is returned by Fetch and CheckWellKnown when a well-known
+// endpoint responds with a non-2xx HTTP status. It carries the status code so
+// callers can branch on it programmatically — e.g. falling back to a legacy
+// discovery path only on a 404 (endpoint absent) and surfacing every other
+// status directly, rather than masking the primary attempt (GH #209).
+type HTTPStatusError struct {
+	URL        string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("request to %s failed with status %d: %s", e.URL, e.StatusCode, e.Body)
+}
+
+// isNotFound reports whether err's chain carries an HTTPStatusError with a 404
+// status — the only condition under which the legacy sse-configuration fallback
+// may engage. A transport error, decode error, or any non-404 status returns
+// false so the primary error surfaces unmasked.
+func isNotFound(err error) bool {
+	var statusErr *HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
+}
+
 // FetchWellKnown retrieves and decodes a well-known configuration from the given baseURL.
 // It uses both insertion and appending strategies to find the endpoint.
 func FetchWellKnown[T any](ctx context.Context, client *http.Client, baseURL string, wellKnownPath string) (*T, error) {
@@ -304,7 +328,7 @@ func Fetch[T any](ctx context.Context, client *http.Client, targetURL string) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("request to %s failed with status %d: %s", targetURL, resp.StatusCode, string(body))
+		return nil, &HTTPStatusError{URL: targetURL, StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	var result T
@@ -344,7 +368,7 @@ func CheckWellKnown(ctx context.Context, client *http.Client, baseURL string, we
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("request to %s failed with status %d: %s", targetURL, resp.StatusCode, string(body))
+			lastErr = &HTTPStatusError{URL: targetURL, StatusCode: resp.StatusCode, Body: string(body)}
 			continue
 		}
 		_ = resp.Body.Close()
@@ -355,25 +379,48 @@ func CheckWellKnown(ctx context.Context, client *http.Client, baseURL string, we
 	return fmt.Errorf("could not reach well-known configuration at %s: %w", baseURL, lastErr)
 }
 
-// CheckSSFConfiguration verifies that an SSF configuration exists and is reachable.
+// CheckSSFConfiguration verifies that an SSF configuration exists and is
+// reachable. It probes the spec ssf-configuration path first and falls back to
+// the legacy sse-configuration path ONLY when the spec endpoint is absent (HTTP
+// 404) — never on a transport error, decode error, or other non-404 status,
+// which surface directly. If the fallback also fails, the returned error still
+// carries the primary ssf-configuration failure so the operator is never shown
+// only a fabricated sse-configuration URL (GH #209).
 func CheckSSFConfiguration(ctx context.Context, client *http.Client, baseURL string) error {
-	err := CheckWellKnown(ctx, client, baseURL, SSFConfigurationPath)
-	if err != nil {
-		// Try fallback to sse-configuration
-		err = CheckWellKnown(ctx, client, baseURL, SSEConfigurationPath)
+	primaryErr := CheckWellKnown(ctx, client, baseURL, SSFConfigurationPath)
+	if primaryErr == nil {
+		return nil
 	}
-	return err
+	if !isNotFound(primaryErr) {
+		return primaryErr
+	}
+	if fallbackErr := CheckWellKnown(ctx, client, baseURL, SSEConfigurationPath); fallbackErr == nil {
+		return nil
+	} else {
+		return fmt.Errorf("%w (legacy sse-configuration fallback also failed: %v)", primaryErr, fallbackErr)
+	}
 }
 
-// FetchSSFConfiguration retrieves the SSF configuration.
+// FetchSSFConfiguration retrieves the SSF configuration. It fetches the spec
+// ssf-configuration path first and falls back to the legacy sse-configuration
+// path ONLY when the spec endpoint is absent (HTTP 404); a transport error,
+// decode error, or other non-404 status surfaces directly from the primary
+// attempt. If the fallback also fails, the returned error still carries the
+// primary ssf-configuration failure rather than a fabricated sse-configuration
+// URL (GH #209).
 func FetchSSFConfiguration(ctx context.Context, client *http.Client, baseURL string) (*model.TransmitterConfiguration, error) {
-	// SSF spec uses /ssf-configuration, but some use /sse-configuration
-	res, err := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSFConfigurationPath)
-	if err != nil {
-		// Try fallback to sse-configuration
-		res, err = FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSEConfigurationPath)
+	res, primaryErr := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSFConfigurationPath)
+	if primaryErr == nil {
+		return res, nil
 	}
-	return res, err
+	if !isNotFound(primaryErr) {
+		return res, primaryErr
+	}
+	res, fallbackErr := FetchWellKnown[model.TransmitterConfiguration](ctx, client, baseURL, SSEConfigurationPath)
+	if fallbackErr == nil {
+		return res, nil
+	}
+	return res, fmt.Errorf("%w (legacy sse-configuration fallback also failed: %v)", primaryErr, fallbackErr)
 }
 
 // FetchOpenIDConfiguration retrieves the OpenID configuration.
@@ -384,4 +431,25 @@ func FetchOpenIDConfiguration(ctx context.Context, client *http.Client, baseURL 
 // FetchProtectedResourceMetadata retrieves the Protected Resource Metadata (RFC 9728).
 func FetchProtectedResourceMetadata(ctx context.Context, client *http.Client, baseURL string) (*model.ProtectedResourceMetadata, error) {
 	return FetchWellKnown[model.ProtectedResourceMetadata](ctx, client, baseURL, OAuthProtectedResourcePath)
+}
+
+// FetchOAuthAuthorizationServerRaw retrieves an authorization server's RFC 8414
+// metadata document verbatim (as raw JSON). It tries the
+// oauth-authorization-server document first and falls back to the OpenID Provider
+// openid-configuration (an OAuth AS commonly serves both, e.g. Keycloak). The
+// bytes are returned unmodified — using json.RawMessage so no field is dropped —
+// so callers that reflect the document (a discovery proxy) preserve every field
+// of the real authorization server. On failure the returned error carries the
+// primary oauth-authorization-server attempt, with the openid-configuration
+// fallback noted, mirroring FetchSSFConfiguration's non-masking discipline.
+func FetchOAuthAuthorizationServerRaw(ctx context.Context, client *http.Client, baseURL string) (json.RawMessage, error) {
+	raw, primaryErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OAuthAuthorizationServerPath)
+	if primaryErr == nil {
+		return *raw, nil
+	}
+	raw, fallbackErr := FetchWellKnown[json.RawMessage](ctx, client, baseURL, OpenIDConfigurationPath)
+	if fallbackErr == nil {
+		return *raw, nil
+	}
+	return nil, fmt.Errorf("%w (openid-configuration fallback also failed: %v)", primaryErr, fallbackErr)
 }

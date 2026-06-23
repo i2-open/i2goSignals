@@ -26,6 +26,8 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
+	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -812,6 +814,103 @@ func ProtectedResourceMetadataHandler(sa SsfApplicationInterface, w http.Respons
 	_, _ = w.Write(resp)
 }
 
+// WellKnownOAuthAuthorizationServer serves RFC 8414 OAuth 2.0 Authorization
+// Server Metadata.
+//
+// goSignals is a resource server that delegates the OAuth authorization/token
+// grant to an external authorization server (ADR 0001). When such a server is
+// configured (GetOAuthServers, e.g. Keycloak) this endpoint REFLECTS that
+// server's metadata verbatim — a discovery proxy so a client learns the real
+// AS's issuer, authorization and token endpoints rather than a synthesized view.
+// When no external authorization server is configured it advertises goSignals'
+// own partial AS surface (introspection/revocation/registration + jwks), which is
+// all goSignals implements directly.
+//
+// The optional {issuer} path segment is resolved the same local-rooted-then-bare
+// way SSF §7.2.1 discovery and JWKS serving resolve it (GH #209): a path-bearing
+// variant must address a registered issuer or 404 — it never synthesizes metadata
+// for an unknown issuer. The bare endpoint describes the default issuer.
+func (sa *SignalsApplication) WellKnownOAuthAuthorizationServer(w http.ResponseWriter, r *http.Request) {
+	WellKnownOAuthAuthorizationServerHandler(sa, w, r)
+}
+
+func WellKnownOAuthAuthorizationServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	issuerPath, _ := url.QueryUnescape(vars["issuer"])
+	serverLog.Debug(fmt.Sprintf("GET WellKnownOAuthAuthorizationServer/%s", issuerPath))
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	baseUrl := sa.GetBaseUrl()
+	resolvedIss := sa.GetDefIssuer()
+	jwksUri, _ := baseUrl.Parse("/jwks.json")
+	if issuerPath != "" {
+		name, exists := resolveIssuerKeyName(sa, issuerPath)
+		if !exists {
+			serverLog.Debug(fmt.Sprintf("Unknown issuer for oauth-authorization-server: %s", issuerPath))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		resolvedIss = name
+		jwksUri, _ = baseUrl.Parse("/jwks/" + issuerPath)
+	}
+
+	// Proxy: when an external authorization server is configured, reflect ITS
+	// metadata verbatim so the client talks to the real AS (e.g. Keycloak). If the
+	// configured server is unreachable, surface a 502 rather than fall back to the
+	// self-document — claiming to be the AS when we are not would be misleading.
+	if servers := sa.GetAuth().GetOAuthServers(); len(servers) > 0 {
+		raw, err := fetchUpstreamAuthorizationServerMetadata(r.Context(), servers[0])
+		if err != nil {
+			serverLog.Warn("oauth-authorization-server proxy fetch failed", "as", servers[0], "error", err.Error())
+			http.Error(w, fmt.Sprintf("configured authorization server %s metadata unavailable: %v", servers[0], err), http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
+
+	// No external AS: advertise goSignals' own partial authorization-server surface.
+	resp, _ := json.Marshal(buildAuthorizationServerMetadata(sa, resolvedIss, jwksUri.String()))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// buildAuthorizationServerMetadata assembles the partial RFC 8414 metadata that
+// describes goSignals itself when no external authorization server is configured.
+// It advertises only the token-management endpoints goSignals truly implements
+// (introspection/revocation/registration) plus its JWKS and supported scopes,
+// never an authorization_endpoint or token_endpoint.
+func buildAuthorizationServerMetadata(sa SsfApplicationInterface, issuer, jwksUri string) model.AuthorizationServerMetadata {
+	baseUrl := sa.GetBaseUrl()
+	introspect, _ := baseUrl.Parse("/introspect")
+	revoke, _ := baseUrl.Parse("/revoke")
+	register, _ := baseUrl.Parse("/register")
+	return model.AuthorizationServerMetadata{
+		Issuer:                issuer,
+		JwksUri:               jwksUri,
+		IntrospectionEndpoint: introspect.String(),
+		RevocationEndpoint:    revoke.String(),
+		RegistrationEndpoint:  register.String(),
+		ScopesSupported: []string{
+			authSupport.ScopeEventDelivery, authSupport.ScopeStreamMgmt,
+			authSupport.ScopeStreamAdmin, authSupport.ScopeRegister, authSupport.ScopeKey,
+		},
+	}
+}
+
+// fetchUpstreamAuthorizationServerMetadata retrieves the configured external
+// authorization server's RFC 8414 metadata verbatim (raw JSON), trying the
+// oauth-authorization-server document first and falling back to the OpenID
+// Provider openid-configuration (Keycloak serves both). The bytes are returned
+// unmodified so the proxy reflects the real AS without lossy re-marshaling.
+func fetchUpstreamAuthorizationServerMetadata(ctx context.Context, asBaseUrl string) (json.RawMessage, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	tlsSupport.CheckCaInstalled(client)
+	return wellKnownSupport.FetchOAuthAuthorizationServerRaw(ctx, client, asBaseUrl)
+}
+
 // cliClientId resolves the recommended public OAuth client_id advertised to
 // interactive clients (the goSignals CLI). Sourced from I2SIG_CLI_CLIENT_ID,
 // defaulting to "gosignals-cli".
@@ -1572,20 +1671,13 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	// ADR 0023 (local-issuer addressing): a local issuer is addressed by its path
 	// component and stored under the reconstructed full URL (baseURL + "/" +
-	// <captured path>). Resolve that local issuer first; fall back to the captured
-	// value as-is for a legacy/foreign keyName (which references the original
-	// publishing entity verbatim — do not fold foreign issuers into the local
-	// scheme, that would break the SSF §7.2.4 binding for relayed SETs).
-	lookupName := keyName
-	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
-		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + keyName
-		if checkKeyNameExists(sa, localIss) {
-			lookupName = localIss
-		}
-	}
-
+	// <captured path>); a legacy/foreign keyName references the original
+	// publishing entity verbatim. resolveIssuerKeyName performs that
+	// local-rooted-then-bare lookup — the same resolution §7.2.1 discovery uses,
+	// so JWKS and discovery accept an identical set of issuer segments (GH #209).
+	lookupName, exists := resolveIssuerKeyName(sa, keyName)
 	jsonKey := sa.GetKeyService().GetPublicJWKS(r.Context(), lookupName)
-	if jsonKey == nil || !checkKeyNameExists(sa, lookupName) {
+	if !exists || jsonKey == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -1631,4 +1723,26 @@ func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {
 	// Check for existing key
 	keyNames, _ := sa.GetKeyService().ListKeyNames(context.Background())
 	return slices.Contains(keyNames, keyName)
+}
+
+// resolveIssuerKeyName resolves a discovery/JWKS path segment to the registered
+// signing-key name it addresses, using ADR 0023 local-rooted-then-bare lookup:
+// it prefers the base-rooted local issuer (baseURL + "/" + segment) when a key
+// is registered under that name, otherwise the bare segment (a foreign/legacy
+// issuer referenced verbatim — folding it into the local scheme would break the
+// SSF §7.2.4 binding for relayed SETs). It returns the resolved key name and
+// whether a key is actually registered under it; when neither resolves it
+// returns the bare segment with false so callers 404. JWKS serving and §7.2.1
+// discovery share this so they accept the exact same set of issuer segments.
+func resolveIssuerKeyName(sa SsfApplicationInterface, segment string) (string, bool) {
+	if baseUrl := sa.GetBaseUrl(); baseUrl != nil {
+		localIss := strings.TrimRight(baseUrl.String(), "/") + "/" + segment
+		if checkKeyNameExists(sa, localIss) {
+			return localIss, true
+		}
+	}
+	if checkKeyNameExists(sa, segment) {
+		return segment, true
+	}
+	return segment, false
 }

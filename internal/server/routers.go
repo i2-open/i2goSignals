@@ -412,6 +412,27 @@ func (h *HttpRouter) getRoutes() Routes {
 			h.sa.ProtectedResourceMetadata,
 			false,
 		},
+
+		// RFC 8414 OAuth 2.0 Authorization Server Metadata. The bare endpoint
+		// describes the default issuer; the {issuer:.+} variant captures a
+		// multi-segment local issuer path (ADR 0023) and resolves it the same
+		// local-rooted-then-bare way ssf-configuration/JWKS do (GH #209). When an
+		// external authorization server is configured the handler reflects its
+		// metadata verbatim (a discovery proxy).
+		Route{
+			"WellKnownOAuthAuthorizationServer",
+			http.MethodGet,
+			"/.well-known/oauth-authorization-server",
+			h.sa.WellKnownOAuthAuthorizationServer,
+			false,
+		},
+		Route{
+			"WellKnownOAuthAuthorizationServerIssuer",
+			http.MethodGet,
+			"/.well-known/oauth-authorization-server/{issuer:.+}",
+			h.sa.WellKnownOAuthAuthorizationServer,
+			false,
+		},
 		Route{
 			"Introspect",
 			http.MethodPost,
