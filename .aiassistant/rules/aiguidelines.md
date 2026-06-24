@@ -29,7 +29,7 @@ apply: always
 - **Race**: When testing concurrent code, use `go test -race` to detect potential race conditions, but ensure reasonable timeouts or lock detections to ensure tests finish within 5 minutes.
 
 #### Coding Standards
-- **Logging**: Use the internal logging package (`github.com/i2-open/i2goSignals/internal/logger`) which uses `slog`. Use `logger.Sub("Component")` to create sub-loggers for specific components.
+- **Logging**: Use the logging package (`github.com/i2-open/i2goSignals/pkg/logger`) which uses `slog`. Use `logger.Sub("Component")` to create sub-loggers for specific components.
 - **Database**: When interacting with MongoDB, follow existing patterns in `internal/providers/dbProviders/mongo_provider`.
 - **Go Version**: The project uses Go 1.25. Ensure all code is compatible.
 - **Error Handling**: Use standard Go error handling. Wrap errors with context where appropriate.

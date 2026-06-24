@@ -173,7 +173,7 @@ to know two things: the *shape* of each log line, and which fields are
 guaranteed to be there.
 
 When the environment variable `LOG_FORMAT=json` is set, every record
-written by `internal/logger` (which means every package that uses
+written by `pkg/logger` (which means every package that uses
 `logger.Sub(...)`) is emitted as a single line of JSON on stdout. One
 self-contained JSON object per line, separated by newlines — a format
 that every mainstream log collector understands natively.
