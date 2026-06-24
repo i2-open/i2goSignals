@@ -144,6 +144,11 @@ type TokenDAO interface {
 	Insert(ctx context.Context, record *model.TokenRecord) error
 	FindByJTI(ctx context.Context, jti string) (*model.TokenRecord, error)
 	Revoke(ctx context.Context, jti string) error
+	// RevokeAt stamps revoked_at to a caller-supplied instant. A future instant
+	// implements rotate-on-GET deferred revocation (ADR 0022 §2): the old bearer
+	// stays valid until the grace elapses. A now/past instant revokes
+	// immediately, matching Revoke.
+	RevokeAt(ctx context.Context, jti string, at time.Time) error
 	// RecordRedemption captures a token redemption: it increments
 	// redemption_count and overwrites last_redemption_ip/last_redemption_at.
 	// Per ADR 0007 this is the "where is it used" signal (not issuance).

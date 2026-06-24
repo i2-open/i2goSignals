@@ -135,11 +135,22 @@ func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) 
 		}
 		return false, err
 	}
-	return !record.RevokedAt.IsZero(), nil
+	// Deferred revocation (ADR 0022 §2): a token is revoked only once revoked_at
+	// is in the past. A future-dated revoked_at (a rotation grace window) is not
+	// yet revoked, so the old bearer keeps validating during the window.
+	return record.IsRevoked(), nil
 }
 
 func (s *TokenService) RevokeToken(ctx context.Context, jti string) error {
 	return s.dao.Revoke(ctx, jti)
+}
+
+// RevokeTokenAt stamps the token's revoked_at to a caller-supplied instant. A
+// future instant defers revocation (rotate-on-GET grace window, ADR 0022 §2):
+// the old bearer keeps validating until the instant elapses. A now/past instant
+// revokes immediately, matching RevokeToken.
+func (s *TokenService) RevokeTokenAt(ctx context.Context, jti string, at time.Time) error {
+	return s.dao.RevokeAt(ctx, jti, at)
 }
 
 // FindByJTI returns the tracked token record for a JTI, or (nil, nil) when no

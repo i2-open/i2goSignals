@@ -424,7 +424,12 @@ func (sa *SignalsApplication) StreamGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin})
+	// The credential holder (a delivery EAT) must be able to read its OWN
+	// stream's config so it can rotate-on-GET, so event-delivery scope is accepted
+	// alongside the management/admin scopes (ADR 0022 — the narrow data-plane
+	// carve-out: a delivery token may read only its own stream's config; the EAT's
+	// stream binding, enforced by ValidateAuthorizationAny, confines it).
+	authCtx, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamMgmt, authSupport.ScopeStreamAdmin, authSupport.ScopeEventDelivery})
 
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -436,7 +441,19 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 		return
 	}
 
-	config, err := sa.GetStreamService().GetStream(r.Context(), authCtx.StreamId)
+	// Rotate-on-GET (ADR 0022 §1): when the caller proves possession of the
+	// stream's current server-issued bearer (and the gate is on), mint a
+	// replacement, persist it, and return the LIVE new value below. reveal is also
+	// true on the lost-response recovery re-read (ADR 0022 §2), which returns the
+	// same current bearer live. Any other authorized reader gets the masked value.
+	// presentedEat is the validated local EAT (nil for an OAuth/STS caller, which
+	// never rotates).
+	var presentedEat *authSupport.EventAuthToken
+	if authCtx != nil {
+		presentedEat = authCtx.Eat
+	}
+	rec, reveal, err := sa.GetStreamService().RotateBearerOnGet(
+		r.Context(), authCtx.StreamId, r.Header.Get("Authorization"), presentedEat, sa.GetTokenService())
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -445,7 +462,16 @@ func StreamGetHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 	serverLog.Debug(fmt.Sprintf("Stream Config Get Request %s", authCtx.StreamId))
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	resp, err := json.Marshal(adjustBaseUrl(sa, *config))
+	// When reveal is set, return the LIVE config (the new/current bearer — one of
+	// its two live appearances). Otherwise mask every credential field
+	// unconditionally (ADR 0022 §3) — masking applies to a deep copy, never the
+	// stored record.
+	config := rec.StreamConfiguration
+	if !reveal {
+		config = config.MaskCredentials()
+	}
+
+	resp, err := json.Marshal(adjustBaseUrl(sa, config))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -740,6 +766,15 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		http.Error(w, "Stream identifier not authorized", http.StatusForbidden)
 		return
 	}
+
+	// Read-edit-write protection (ADR 0022 §3): credentials are masked to the
+	// sentinel on every read, so an UPDATE body that echoes a masked credential
+	// must NOT clobber the stored live value. Restore any sentinel-marked
+	// credential field from the stored record before the update is applied.
+	if stored, sErr := sa.GetStreamService().GetStreamState(r.Context(), streamId); sErr == nil && stored != nil {
+		jsonRequest.MergeUnchangedCredentials(stored)
+	}
+
 	resetJti := jsonRequest.ResetJti
 	resetDate := jsonRequest.ResetDate
 

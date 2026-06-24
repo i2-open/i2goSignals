@@ -332,6 +332,14 @@ func (d *notifyingTokenDAO) Revoke(ctx context.Context, jti string) error {
 	return nil
 }
 
+func (d *notifyingTokenDAO) RevokeAt(ctx context.Context, jti string, at time.Time) error {
+	if err := d.inner.RevokeAt(ctx, jti, at); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
 func (d *notifyingTokenDAO) RecordRedemption(ctx context.Context, jti string, ip string, at time.Time) error {
 	if err := d.inner.RecordRedemption(ctx, jti, ip, at); err != nil {
 		return err

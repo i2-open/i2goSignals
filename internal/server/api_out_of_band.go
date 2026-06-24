@@ -966,7 +966,11 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	result := make([]model.StreamStateRecord, 0)
 	for _, stream := range mapStreams {
 		if projectId == "" || stream.ProjectId == projectId {
-			result = append(result, adjustStateBaseUrl(sa, stream))
+			// Mask every credential before it leaves the server (ADR 0022 §3): this
+			// state-listing surface must never surface a live bearer. MaskCredentials
+			// works on a deep copy, so the in-memory record is untouched.
+			adjusted := adjustStateBaseUrl(sa, stream)
+			result = append(result, *adjusted.MaskCredentials())
 		}
 	}
 
@@ -1021,7 +1025,10 @@ func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	serverLog.Debug("GetStreamState:", "returned", config.StreamConfiguration.Id)
 
-	resp, err := json.Marshal(config)
+	// Mask every credential (ADR 0022 §3): this state read surface must never
+	// surface a live bearer. MaskCredentials returns a deep copy, leaving the
+	// stored record untouched.
+	resp, err := json.Marshal(config.MaskCredentials())
 	if err != nil {
 		serverLog.Error("Internal error GetStreamState:", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)

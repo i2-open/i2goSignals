@@ -126,11 +126,15 @@ func (d *TokenDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.Token
 }
 
 func (d *TokenDAOMongo) Revoke(ctx context.Context, jti string) error {
+	return d.RevokeAt(ctx, jti, time.Now().UTC())
+}
+
+func (d *TokenDAOMongo) RevokeAt(ctx context.Context, jti string, at time.Time) error {
 	c, err := d.col()
 	if err != nil {
 		return err
 	}
-	_, err = c.UpdateOne(ctx, bson.M{"_id": ToFlexibleID(jti)}, bson.M{"$set": bson.M{"revoked_at": time.Now().UTC()}})
+	_, err = c.UpdateOne(ctx, bson.M{"_id": ToFlexibleID(jti)}, bson.M{"$set": bson.M{"revoked_at": at.UTC()}})
 	if err != nil {
 		tLog.Error("Error revoking token record", "jti", jti, "error", err)
 	}
