@@ -61,18 +61,31 @@ type TokenListEntry struct {
 	LastSeenIP string `json:"last_seen_ip,omitempty"`
 }
 
+// IsRevoked reports whether the token is currently revoked. Per ADR 0022 §2
+// (deferred revocation for rotate-on-GET) a token is revoked only when
+// RevokedAt is SET and IN THE PAST. Admin revocation stamps RevokedAt = now, so
+// it reads as revoked immediately (unchanged behavior). Rotation stamps
+// RevokedAt = now + grace (a future instant); the old bearer keeps validating
+// until that instant elapses, which is the lost-response recovery window.
+func (r TokenRecord) IsRevoked() bool {
+	return !r.RevokedAt.IsZero() && !r.RevokedAt.After(time.Now())
+}
+
 // IsActive reports whether the token is currently live: neither revoked nor
 // expired. This is the single source of truth for token liveness, shared by
 // introspection, the list filter, and the CLI, so the three cannot diverge.
+// A future-dated RevokedAt (a rotation grace window, ADR 0022 §2) still reads as
+// active until the grace elapses.
 func (r TokenRecord) IsActive() bool {
-	return r.RevokedAt.IsZero() && (r.ExpiresAt.IsZero() || r.ExpiresAt.After(time.Now()))
+	return !r.IsRevoked() && (r.ExpiresAt.IsZero() || r.ExpiresAt.After(time.Now()))
 }
 
 // State returns the human-readable lifecycle state of the token: "revoked"
-// (RevokedAt set, taking precedence), "expired" (ExpiresAt in the past), else
-// "active". Consistent with IsActive.
+// (RevokedAt set and in the past, taking precedence), "expired" (ExpiresAt in
+// the past), else "active". A future-dated RevokedAt (rotation grace, ADR 0022
+// §2) is not yet "revoked". Consistent with IsActive.
 func (r TokenRecord) State() string {
-	if !r.RevokedAt.IsZero() {
+	if r.IsRevoked() {
 		return "revoked"
 	}
 	if !r.ExpiresAt.IsZero() && r.ExpiresAt.Before(time.Now()) {

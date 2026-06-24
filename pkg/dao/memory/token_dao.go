@@ -39,13 +39,17 @@ func (d *TokenDAOMemory) FindByJTI(ctx context.Context, jti string) (*model.Toke
 }
 
 func (d *TokenDAOMemory) Revoke(ctx context.Context, jti string) error {
+	return d.RevokeAt(ctx, jti, time.Now().UTC())
+}
+
+func (d *TokenDAOMemory) RevokeAt(ctx context.Context, jti string, at time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	record, ok := d.tokens[jti]
 	if !ok {
 		return errors.New("token not found")
 	}
-	record.RevokedAt = time.Now().UTC()
+	record.RevokedAt = at.UTC()
 	return nil
 }
 
