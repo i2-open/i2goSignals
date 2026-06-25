@@ -90,8 +90,25 @@ func (sa *SignalsApplication) Index(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "Hello %s", test)
 }
 
+// getRoutes returns the full gateway route table: the always-on peer set
+// followed by the admin families. The split into peerRoutes()/adminRoutes() is
+// the issue #215 enabler — the pkg/goSignalsServer admin-surface wrapper mounts
+// only the admin subset, while an enterprise REST-coexistence binary registers
+// the admin families conditionally and always serves the peer set (PRD #164,
+// enterprise ADR 0009). This concatenation must stay a pure partition: every
+// route is in exactly one subset and getRoutes() is their union.
 func (h *HttpRouter) getRoutes() Routes {
-	routes := Routes{
+	return append(h.peerRoutes(), h.adminRoutes()...)
+}
+
+// peerRoutes is the always-on, peer-facing route set (issue #215 Q16 exclusion
+// list): discovery (/.well-known/*), health, OAuth (/introspect, /revoke,
+// /token), event delivery (/poll, /events, /verification), JWKS serving, SSTP
+// transport, cluster wake-ups, and bootstrap (/iat, /register). These are NOT
+// mounted by the pkg/goSignalsServer admin-surface wrapper and are unaffected by
+// the enterprise REST-admin flag — they always register.
+func (h *HttpRouter) peerRoutes() Routes {
+	return Routes{
 		Route{
 			"Index",
 			"GET",
@@ -139,6 +156,175 @@ func (h *HttpRouter) getRoutes() Routes {
 			false,
 		},
 
+		Route{
+			"VerificationRequest",
+			http.MethodPost,
+			"/verification",
+			h.sa.VerificationRequest,
+			false,
+		},
+
+		Route{
+			"VerificationRequestSSF",
+			http.MethodPost,
+			"/verify",
+			h.sa.VerificationRequest,
+			false,
+		},
+
+		Route{
+			"WellKnownSsfConfigurationGet",
+			http.MethodGet,
+			"/.well-known/ssf-configuration",
+			h.sa.WellKnownSsfConfigurationGet,
+			false,
+		},
+
+		// ADR 0023: capture a multi-segment issuer path so a local issuer carrying
+		// a path component (e.g. /tenants/acme) resolves, not just a single segment.
+		Route{
+			"WellKnownSsfConfigurationIssuerGet",
+			http.MethodGet,
+			"/.well-known/ssf-configuration/{issuer:.+}",
+			h.sa.WellKnownSsfConfigurationIssuerGet,
+			false,
+		},
+
+		Route{
+			"JwksJson",
+			http.MethodGet,
+			"/jwks.json",
+			h.sa.JwksJson,
+			false,
+		},
+
+		// ADR 0023: multi-segment keyName so a local issuer's clean jwks_uri
+		// (baseURL + /jwks/<path>) resolves. The {keyName:.+} pattern requires the
+		// /jwks/ prefix and so does not shadow the literal GET /jwks.json (no
+		// trailing slash) above; it is GET-only and so does not shadow the
+		// POST /jwks/{keyName} create route either.
+		Route{
+			"JwksJsonTenant",
+			http.MethodGet,
+			"/jwks/{keyName:.+}",
+			h.sa.JwksJsonIssuer,
+			false,
+		},
+
+		Route{
+			"PollEvents",
+			http.MethodPost,
+			"/poll/{id}",
+			h.sa.PollEvents,
+			false,
+		},
+
+		// SSTP is registered without a method restriction so that any non-POST
+		// method on /sstp/{id} reaches the handler and returns an explicit 405
+		// (gorilla/mux otherwise 404s an unmatched method on a method-pinned
+		// route). The handler enforces POST-only (PRD #154 Q19, Q21.a).
+		Route{
+			"ReceiveSstpEvent",
+			"",
+			"/sstp/{id}",
+			h.sa.ReceiveSstpEvent,
+			false,
+		},
+
+		Route{
+			"WakeTransmitter",
+			http.MethodPost,
+			"/_cluster/wake-transmitter",
+			h.sa.WakeTransmitter,
+			false,
+		},
+
+		// SSTP cluster wake-up routes (PRD #154 Q11.1, Q11.2, #167). Kept separate
+		// from wake-transmitter for telemetry separation; same SPIFFE/HMAC auth.
+		Route{
+			"WakeSstpClient",
+			http.MethodPost,
+			"/_cluster/wake-sstp-client",
+			h.sa.WakeSstpClient,
+			false,
+		},
+		Route{
+			"WakeSstpServer",
+			http.MethodPost,
+			"/_cluster/wake-sstp-server",
+			h.sa.WakeSstpServer,
+			false,
+		},
+
+		Route{
+			"ProtectedResourceMetadata",
+			http.MethodGet,
+			"/.well-known/oauth-protected-resource",
+			h.sa.ProtectedResourceMetadata,
+			false,
+		},
+
+		// RFC 8414 OAuth 2.0 Authorization Server Metadata. The bare endpoint
+		// describes the default issuer; the {issuer:.+} variant captures a
+		// multi-segment local issuer path (ADR 0023) and resolves it the same
+		// local-rooted-then-bare way ssf-configuration/JWKS do (GH #209). When an
+		// external authorization server is configured the handler reflects its
+		// metadata verbatim (a discovery proxy).
+		Route{
+			"WellKnownOAuthAuthorizationServer",
+			http.MethodGet,
+			"/.well-known/oauth-authorization-server",
+			h.sa.WellKnownOAuthAuthorizationServer,
+			false,
+		},
+		Route{
+			"WellKnownOAuthAuthorizationServerIssuer",
+			http.MethodGet,
+			"/.well-known/oauth-authorization-server/{issuer:.+}",
+			h.sa.WellKnownOAuthAuthorizationServer,
+			false,
+		},
+		Route{
+			"Introspect",
+			http.MethodPost,
+			"/introspect",
+			h.sa.IntrospectHandler,
+			false,
+		},
+		Route{
+			"Revoke",
+			http.MethodPost,
+			"/revoke",
+			h.sa.RevokeHandler,
+			false,
+		},
+		Route{
+			"TokenRevoke",
+			http.MethodDelete,
+			"/token/{jti}",
+			h.sa.TokenRevokeHandler,
+			false,
+		},
+		Route{
+			"TokenList",
+			http.MethodGet,
+			"/token",
+			h.sa.TokenListHandler,
+			false,
+		},
+	}
+}
+
+// adminRoutes is the admin-family route set (issue #215 Scope §1): stream /
+// server / key / issuer CRUD plus the subject-management family (/add-subject,
+// /remove-subject, /subject-filter/review, /status, /states, /state). These are
+// the routes the pkg/goSignalsServer wrapper binds and mounts, and the routes an
+// enterprise REST-coexistence binary registers only when its admin flag is on
+// (PRD #164). The set is bound directly to a *SignalsApplication's handler
+// methods, so it is reusable both here (full in-binary gateway) and from the
+// wrapper's AdminRouteTable.
+func (h *HttpRouter) adminRoutes() Routes {
+	return Routes{
 		Route{
 			"AddSubject",
 			http.MethodPost,
@@ -268,39 +454,6 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"VerificationRequest",
-			http.MethodPost,
-			"/verification",
-			h.sa.VerificationRequest,
-			false,
-		},
-
-		Route{
-			"VerificationRequestSSF",
-			http.MethodPost,
-			"/verify",
-			h.sa.VerificationRequest,
-			false,
-		},
-
-		Route{
-			"WellKnownSsfConfigurationGet",
-			http.MethodGet,
-			"/.well-known/ssf-configuration",
-			h.sa.WellKnownSsfConfigurationGet,
-			false,
-		},
-
-		// ADR 0023: capture a multi-segment issuer path so a local issuer carrying
-		// a path component (e.g. /tenants/acme) resolves, not just a single segment.
-		Route{
-			"WellKnownSsfConfigurationIssuerGet",
-			http.MethodGet,
-			"/.well-known/ssf-configuration/{issuer:.+}",
-			h.sa.WellKnownSsfConfigurationIssuerGet,
-			false,
-		},
-		Route{
 			"CreateKey",
 			http.MethodPost,
 			"/key/{keyName}",
@@ -324,14 +477,6 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"JwksJson",
-			http.MethodGet,
-			"/jwks.json",
-			h.sa.JwksJson,
-			false,
-		},
-
-		Route{
 			"JwksIssuers",
 			http.MethodGet,
 			"/issuers",
@@ -346,121 +491,16 @@ func (h *HttpRouter) getRoutes() Routes {
 			HandlerFunc: h.sa.GetSummaries,
 			IsIdQuery:   false,
 		},
-
-		// ADR 0023: multi-segment keyName so a local issuer's clean jwks_uri
-		// (baseURL + /jwks/<path>) resolves. The {keyName:.+} pattern requires the
-		// /jwks/ prefix and so does not shadow the literal GET /jwks.json (no
-		// trailing slash) above; it is GET-only and so does not shadow the
-		// POST /jwks/{keyName} create route either.
-		Route{
-			"JwksJsonTenant",
-			http.MethodGet,
-			"/jwks/{keyName:.+}",
-			h.sa.JwksJsonIssuer,
-			false,
-		},
-
-		Route{
-			"PollEvents",
-			http.MethodPost,
-			"/poll/{id}",
-			h.sa.PollEvents,
-			false,
-		},
-
-		// SSTP is registered without a method restriction so that any non-POST
-		// method on /sstp/{id} reaches the handler and returns an explicit 405
-		// (gorilla/mux otherwise 404s an unmatched method on a method-pinned
-		// route). The handler enforces POST-only (PRD #154 Q19, Q21.a).
-		Route{
-			"ReceiveSstpEvent",
-			"",
-			"/sstp/{id}",
-			h.sa.ReceiveSstpEvent,
-			false,
-		},
-
-		Route{
-			"WakeTransmitter",
-			http.MethodPost,
-			"/_cluster/wake-transmitter",
-			h.sa.WakeTransmitter,
-			false,
-		},
-
-		// SSTP cluster wake-up routes (PRD #154 Q11.1, Q11.2, #167). Kept separate
-		// from wake-transmitter for telemetry separation; same SPIFFE/HMAC auth.
-		Route{
-			"WakeSstpClient",
-			http.MethodPost,
-			"/_cluster/wake-sstp-client",
-			h.sa.WakeSstpClient,
-			false,
-		},
-		Route{
-			"WakeSstpServer",
-			http.MethodPost,
-			"/_cluster/wake-sstp-server",
-			h.sa.WakeSstpServer,
-			false,
-		},
-
-		Route{
-			"ProtectedResourceMetadata",
-			http.MethodGet,
-			"/.well-known/oauth-protected-resource",
-			h.sa.ProtectedResourceMetadata,
-			false,
-		},
-
-		// RFC 8414 OAuth 2.0 Authorization Server Metadata. The bare endpoint
-		// describes the default issuer; the {issuer:.+} variant captures a
-		// multi-segment local issuer path (ADR 0023) and resolves it the same
-		// local-rooted-then-bare way ssf-configuration/JWKS do (GH #209). When an
-		// external authorization server is configured the handler reflects its
-		// metadata verbatim (a discovery proxy).
-		Route{
-			"WellKnownOAuthAuthorizationServer",
-			http.MethodGet,
-			"/.well-known/oauth-authorization-server",
-			h.sa.WellKnownOAuthAuthorizationServer,
-			false,
-		},
-		Route{
-			"WellKnownOAuthAuthorizationServerIssuer",
-			http.MethodGet,
-			"/.well-known/oauth-authorization-server/{issuer:.+}",
-			h.sa.WellKnownOAuthAuthorizationServer,
-			false,
-		},
-		Route{
-			"Introspect",
-			http.MethodPost,
-			"/introspect",
-			h.sa.IntrospectHandler,
-			false,
-		},
-		Route{
-			"Revoke",
-			http.MethodPost,
-			"/revoke",
-			h.sa.RevokeHandler,
-			false,
-		},
-		Route{
-			"TokenRevoke",
-			http.MethodDelete,
-			"/token/{jti}",
-			h.sa.TokenRevokeHandler,
-			false,
-		},
-		Route{
-			"TokenList",
-			http.MethodGet,
-			"/token",
-			h.sa.TokenListHandler,
-			false,
-		},
 	}
-	return routes
+}
+
+// AdminRouteTable returns the admin-family Routes (issue #215 Scope §1) bound to
+// this application's handler methods. It is the seam the pkg/goSignalsServer
+// admin-surface wrapper mounts: the wrapper builds a *SignalsApplication from
+// public service handles (NewAdminApplication) and asks for its admin routes,
+// reusing the exact handler bodies the full gateway runs (byte-identical
+// behavior, no re-implementation). Peer routes are deliberately excluded.
+func (sa *SignalsApplication) AdminRouteTable() Routes {
+	h := &HttpRouter{sa: sa}
+	return h.adminRoutes()
 }
