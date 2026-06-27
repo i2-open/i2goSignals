@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -61,6 +62,11 @@ type EventRouter interface {
 	SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
+	// RegisterMeteringObserver installs the subject-carrying metering observer
+	// (issue #218). It is distinct from SetEventCounter — the Prometheus path is
+	// untouched — and fires once per routed event (ingress and each egress) with
+	// the event's {stream_urn, direction, subject}.
+	RegisterMeteringObserver(observer MeteringObserver)
 	PreInitializeCounter(stream *model.StreamStateRecord)
 	GetPushStreamCnt() float64
 	GetPollStreamCnt() float64
@@ -137,7 +143,11 @@ type router struct {
 	pushDelivery         delivery.PushDelivery
 	sstpDelivery         delivery.SstpDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
-	stats                statsTracker
+	// meteringObserver holds the optional subject-carrying metering observer
+	// (issue #218), read lock-free on the routing path. Distinct from the
+	// Prometheus counters above; nil unless an embedder registers one.
+	meteringObserver atomic.Pointer[meteringObserverHolder]
+	stats            statsTracker
 
 	httpClient          *http.Client
 	clusterSecret       string
@@ -761,6 +771,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		return err
 	}
 	r.IncrementCounter(streamState, eventToken, true)
+	r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventToken)
 
 	// SSTP-server inbound is terminal: the rx side imports the SET for local
 	// consumption (RouteModeImport). It is not fanned out to RFC8935/RFC8936
@@ -783,6 +794,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		if r.eventService.MatchesStream(&stream, event) {
 
 			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
+			r.observeMeteredEvent(stream.StreamConfiguration.Id, DirectionEgress, eventToken)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
 			err = r.eventService.AddEventToStream(r.ctx, event.Jti, stream.Id.Hex())
@@ -810,6 +822,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 
 		if r.eventService.MatchesStream(&pollStream, event) {
 			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
+			r.observeMeteredEvent(pollStream.StreamConfiguration.Id, DirectionEgress, eventToken)
 
 			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
 			err = r.eventService.AddEventToStream(r.ctx, event.Jti, pollStream.Id.Hex())
@@ -849,6 +862,7 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord) {
 		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
 		// (not even backfill-recoverable). AddEvent only Insert()s the token.
 		txSid := pair.StreamConfiguration.Id
+		r.observeMeteredEvent(txSid, DirectionEgress, &event.Event)
 		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
 			eventLogger.Error("ROUTER: Error adding event to SSTP-client pair", "pairId", pairId, "sid", txSid, "jti", event.Jti, "error", err)
 		}
@@ -872,6 +886,7 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord) {
 		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
 		// server takes no client lease — every node may serve the long-poll — so we do
 		// not gate this on lease ownership.
+		r.observeMeteredEvent(txSid, DirectionEgress, &event.Event)
 		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
 			eventLogger.Error("ROUTER: Error adding event to SSTP-server pair", "sid", txSid, "jti", event.Jti, "error", err)
 		}
