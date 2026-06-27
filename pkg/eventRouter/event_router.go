@@ -2,7 +2,9 @@
 // business-stream event router. It re-exports the minimal construct-and-drive
 // API plus the subject-carrying metering observer hook so an out-of-tree
 // superset (the enterprise edition, enterprise#86) can embed and meter the
-// router without importing internal/ (issue #218).
+// router without importing internal/ (issue #218). Embedders enter through
+// OpenPersistence — the composition-root opener that yields Deps's services +
+// Coordinator — then NewBusinessRouter and RegisterMeteringObserver.
 //
 // Boundary note — reconciles PRD #50 / PR #54. PR #54 deliberately kept the
 // router in internal/eventRouter to restore the pkg/internal seam. This facade
@@ -17,6 +19,7 @@ package eventRouter
 
 import (
 	internalrouter "github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -43,7 +46,28 @@ type MeteringObserver = internalrouter.MeteringObserver
 // Deps is the dependency bundle NewBusinessRouter needs. The embedder populates
 // the exported service fields (pkg/services) and supplies a Coordinator value
 // obtained from the persistence layer — it never has to name an internal/ type.
+// OpenPersistence is the composition-root entry an out-of-tree embedder calls to
+// obtain those Coordinator + service values without importing internal/.
 type Deps = internalrouter.RouterDeps
+
+// OpenPersistence is the composition-root opener an out-of-tree embedder uses to
+// stand up the business-stream bundle (per-domain services + cluster coordinator
+// + lifecycle storage) and feed Deps — naming only this exported package. It is
+// a thin pass-through to the persistence factory: detect storeURL ("memorydb:"
+// or a Mongo URL) and return the bundle. The returned *dbProviders.Persistence
+// exposes the exported fields an embedder needs — StreamService, KeyService,
+// EventService and Coordinator for Deps, plus the Storage handle to Close on
+// shutdown. (Returning the internal Persistence type in an exported signature
+// matches the repo's existing posture: pkg/goSsfServer.NewApplication already
+// accepts *dbProviders.Persistence; an external module consumes it via :=
+// inference + exported-field access.)
+//
+// This re-export is the #218 seam closure: without it the construct-and-drive
+// surface above is unsatisfiable out-of-tree, because dbProviders is internal/
+// and a separate Go module (enterprise#87) physically cannot import it.
+func OpenPersistence(storeURL, dbName string) (*dbProviders.Persistence, error) {
+	return dbProviders.OpenPersistence(storeURL, dbName)
+}
 
 // BusinessRouter is the minimal construct-and-drive surface an embedder uses:
 // feed inbound events, sync stream state, register the metering observer, and
