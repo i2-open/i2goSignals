@@ -80,6 +80,7 @@ func (rr *recordingRouter) SstpServerHandler(context.Context, string, goSetSstp.
 }
 func (rr *recordingRouter) Shutdown()                                                      {}
 func (rr *recordingRouter) SetEventCounter(*prometheus.CounterVec, *prometheus.CounterVec) {}
+func (rr *recordingRouter) RegisterMeteringObserver(eventRouter.MeteringObserver)          {}
 func (rr *recordingRouter) PreInitializeCounter(*model.StreamStateRecord)                  {}
 func (rr *recordingRouter) GetPushStreamCnt() float64                                      { return 0 }
 func (rr *recordingRouter) GetPollStreamCnt() float64                                      { return 0 }

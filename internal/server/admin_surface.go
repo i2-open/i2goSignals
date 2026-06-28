@@ -160,6 +160,10 @@ func (a *adminRouterAdapter) SetEventCounter(*prometheus.CounterVec, *prometheus
 	a.unsupported("SetEventCounter")
 }
 
+func (a *adminRouterAdapter) RegisterMeteringObserver(eventRouter.MeteringObserver) {
+	a.unsupported("RegisterMeteringObserver")
+}
+
 func (a *adminRouterAdapter) PreInitializeCounter(*model.StreamStateRecord) {
 	a.unsupported("PreInitializeCounter")
 }
