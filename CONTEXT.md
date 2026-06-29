@@ -565,6 +565,30 @@ their tests) lives in `internal/server`. `pkg/goSignals/` retains only
 genuinely library-shaped contents: the OpenAPI client (`api/`), the
 swagger UI assets (`swagger-ui/`, `swagger.go`), and the `Dockerfile`.
 
+**`pkg/goSignalsServer` (product export) vs `pkg/goSsfServer` (spec server).**
+`goSignals` — served by `cmd/goSignalsServer` over `internal/server.SignalsApplication` —
+is the primary product: a strategic gateway that is a *superset* of SSF (receivers,
+cross-protocol SET routing, MongoDB-lease clustering, subject filtering, admin CRUD).
+`pkg/goSignalsServer` is that product's pkg-importable *export surface* for out-of-tree
+consumers (the enterprise REST-coexistence binary — #215, ADR 0027); today it exports
+only the admin handler set (`NewAdminSurface`/`AdminRoutes()`) with a stub event router —
+the peer/event plane is served by the binary directly. `pkg/goSsfServer` is a *separate*,
+minimal, SSF-spec-only server for inter-op testing and event generation that deliberately
+omits the product's extended functionality (e.g. receivers). **Caution:** `pkg/goSignalsServer`'s admin
+export carries only a *stub* event router (`adminRouterAdapter` panics on every
+event method) — it cannot host an event-plane seam; a live `EventRouter` exists
+only on the in-binary gateway and the `goSsfServer` test server. The Slice-15
+metering event-observer (#217) was therefore closed not-planned: its
+`AdminSurfaceConfig.EventObserver` rides that stub router and observes nothing.
+Where the community *does* meter is the live `EventRouter`, **transport-agnostically**:
+`IncrementCounter` tags every business SET — push, poll, and SSTP alike, the
+transport carried only as a `tfr` label — into the `events_in_total` /
+`events_out_total` Prometheus counters and exposes them at `/metrics`
+(`internal/server/prometheus.go:363`, `routers.go:76`). Event-throughput metering
+is therefore a *scrape of that existing surface*, not a new hook; the one piece it
+cannot supply is distinct-subject MAS, which is not a counter and needs per-event
+subject visibility wherever subjects are seen.
+
 Known debt: `pkg/goSsfServer/ssf-application.go` (a demo receiver)
 imports `internal/server`, crossing the `pkg/` → `internal/` boundary.
 Reabsorbing `pkg/goSsfServer` into `internal/` (or `cmd/goSsfServer/`)
