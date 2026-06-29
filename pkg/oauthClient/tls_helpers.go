@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // CertificateInfo holds displayable information about a TLS certificate
@@ -163,31 +166,38 @@ func parseHostPort(urlStr string) (string, string, error) {
 // GetTlsConfigForServer returns a TLS configuration for the given server and allows support of a self-signed key or
 // administrative override to skip verification
 func GetTlsConfigForServer(server *model.Server) *tls.Config {
+	// Build the TLS config seeded with the global CA pool (system roots + ca-cert.pem).
+	tlsConfig := &tls.Config{
+		RootCAs: tlsSupport.GetGlobalCertPool("AUTH_CA_CERT"),
+	}
+
+	// Check global AUTH_DEBUG override
+	v := strings.ToLower(os.Getenv("AUTH_DEBUG"))
+	if v == "1" || v == "true" || v == "yes" || v == "on" {
+		tlsConfig.InsecureSkipVerify = true
+	}
+
 	if server == nil {
-		return &tls.Config{}
+		return tlsConfig
 	}
 
-	// If no custom TLS config needed, return default client
+	// If no custom TLS config needed, return config (already has global CA pool)
 	if server.TLSCertificate == "" && !server.TLSSkipVerify {
-		return &tls.Config{}
+		return tlsConfig
 	}
-
-	// Build custom TLS config
-	tlsConfig := &tls.Config{}
 
 	if server.TLSSkipVerify {
 		tlsConfig.InsecureSkipVerify = true
 		clientLog.Warn("Using InsecureSkipVerify for server", "alias", server.Alias)
 	} else if server.TLSCertificate != "" {
-		// Create a cert pool with the stored certificate
-		certPool, err := CreateCertPool(server.TLSCertificate)
-		if err != nil {
-			clientLog.Error("Failed to create cert pool, falling back to default",
-				"alias", server.Alias, "error", err)
-			return tlsConfig
+		// APPEND the custom certificate to the already-initialized global RootCAs
+		// pool (do not replace it, so system/global trust is retained).
+		if !tlsConfig.RootCAs.AppendCertsFromPEM([]byte(server.TLSCertificate)) {
+			clientLog.Error("Failed to add certificate to pool, falling back to default",
+				"alias", server.Alias)
+		} else {
+			clientLog.Debug("Using custom certificate (added to global pool) for server", "alias", server.Alias)
 		}
-		tlsConfig.RootCAs = certPool
-		clientLog.Debug("Using custom certificate for server", "alias", server.Alias)
 	}
 
 	return tlsConfig
