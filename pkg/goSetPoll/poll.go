@@ -80,6 +80,12 @@ type ReceiverConfig struct {
 	// ExpectedAudiences is the list of acceptable "aud" values. Empty skips validation.
 	ExpectedAudiences []string
 
+	// RequireSignature makes signature verification of pulled SETs mandatory (#184
+	// signing-only posture): a SET is rejected with jws_signature_failed when no JWKS
+	// is available to verify it or when verification fails. When false (default),
+	// verification is conditional on JWKS being non-nil (prior behavior).
+	RequireSignature bool
+
 	// HTTPClient is an optional custom HTTP client. If nil, a default is used.
 	HTTPClient *http.Client
 

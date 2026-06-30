@@ -53,6 +53,16 @@ type StreamConfiguration struct {
 
 	RouteMode string `json:"route_mode,omitempty" bson:"route_mode,omitempty"` // Is one of RouteModeImport, RouteModeForward or RouteModePublish
 
+	// SigningOnly is a goSignals business-stream receive posture (#184): when true,
+	// the SET's JWS signature — not a transport bearer — is the trust gate. A bearer
+	// becomes optional on the receive transports (push, poll-as-receiver, SSTP), but
+	// any bearer that IS presented must still be valid, and signature verification of
+	// inbound SETs becomes mandatory. Defaults to false (bearer-always, unchanged). It
+	// MUST NOT be inferred from "issuer is configured": stream-create requires both Iss
+	// and IssuerJWKSUrl when this is true, as the configured issuer's JWKS is the only
+	// trust anchor a signing-only stream has.
+	SigningOnly bool `json:"signingOnly,omitempty" bson:"signing_only,omitempty"`
+
 	// TxWellKnownUrl Used to record the well-known endpoint for the SSF transmitter. Used by receivers to discover the transmitter's configuration and capabilities.
 	// When creating a receiver, providing a value without endpoint values for Delivery (other than method) will cause i2goSignals to initiate an SSF registration with the transmitter.
 	TxWellKnownUrl *string `json:"tx_well_known_url,omitempty" bson:"tx_well_known_url,omitempty"`

@@ -69,12 +69,21 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		return
 	}
 
+	// Signing-only posture (#184): a business SSTP pair may gate trust on each SET's
+	// JWS signature rather than the stream-scoped bearer, so the bearer becomes
+	// optional when the rx-side stream is signing-only AND none was presented. A
+	// bearer that IS presented is still held to the full check, so the gate is
+	// enforced whenever an Authorization header is present or the stream is not
+	// signing-only — leaving flag-off pairs byte-for-byte unchanged.
+	signingOnly := rec.SstpInbound != nil && rec.SstpInbound.SigningOnly
+	bearerPresented := r.Header.Get("Authorization") != ""
+
 	// Defense-in-depth authorization. The bearer carries StreamIds=[txSid, rxSid]
 	// (the internal pair SIDs), NOT the PairId on the path. We resolve the actual
 	// SIDs from the record and verify the token authorizes at least one of them for
 	// the event scope, via AuthContext.IsAuthorizedForStream (never a bare
 	// authCtx.Eat check, which is nil for OAuth/STS callers) (PRD #154 Q19, Q42).
-	if !sstpAuthorized(sa, r, rec) {
+	if (bearerPresented || !signingOnly) && !sstpAuthorized(sa, r, rec) {
 		writeSstpError(w, http.StatusUnauthorized, goSetPush.ErrAuthenticationFailed,
 			"The authorization was not valid for this SSTP pair")
 		return
@@ -106,6 +115,9 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 			rxCfg.ExpectedIssuer = rec.SstpInbound.Iss
 			rxCfg.ExpectedAudiences = rec.SstpInbound.Aud
 			rxCfg.JWKS = sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), rec.SstpInbound.Id)
+			// Signing-only (#184): make signature verification of each inbound SET
+			// mandatory so a per-JTI jws_signature_failed is reported via setErrs.
+			rxCfg.RequireSignature = rec.SstpInbound.SigningOnly
 		}
 		parsedIn, parseErrs = parseSstpInboundSets(inbound, rxCfg)
 	}

@@ -169,6 +169,128 @@ func TestParseReceivedSET_SkipAudienceValidation(t *testing.T) {
 	require.NotNil(t, result)
 }
 
+// jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
+// goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to the
+// issuer). This lets a verifying parse resolve the key for a signed SET.
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *keyfunc.JWKS {
+	t.Helper()
+	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
+	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{issuer: givenKey})
+}
+
+// --- Signing-only receive posture (#184): RequireSignature ---
+
+// A valid signature with a matching JWKS is accepted under RequireSignature.
+func TestParseReceivedSET_RequireSignature_ValidAccepted(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	assert.Nil(t, deliveryErr)
+	require.NotNil(t, result)
+	assert.Equal(t, iss, result.Token.Issuer)
+}
+
+// A SET signed by a key that does not match the issuer's JWKS is rejected with
+// jws_signature_failed (the RFC8935 §2.4 rotate-and-retry signal) — not the
+// generic invalid_request used when signatures are optional.
+func TestParseReceivedSET_RequireSignature_BadSignatureRejected(t *testing.T) {
+	signKey := generateTestKey(t)
+	otherKey := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, signKey)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, otherKey), // wrong public key for this kid
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrJwsSignatureFailed, deliveryErr.ErrCode)
+}
+
+// Under RequireSignature a missing trust anchor (nil JWKS) is a hard reject: the
+// SET must NOT be accepted unverified. This is the core difference from the
+// default posture, where a nil JWKS skips verification.
+func TestParseReceivedSET_RequireSignature_NoJWKSRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, iss, aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              nil,
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrJwsSignatureFailed, deliveryErr.ErrCode)
+}
+
+// An issuer mismatch is reported as invalid_issuer (a trust failure, not a
+// signature failure) and is detected before signature verification, so a sender
+// does not pointlessly rotate keys.
+func TestParseReceivedSET_RequireSignature_WrongIssuerRejected(t *testing.T) {
+	key := generateTestKey(t)
+	aud := []string{"https://audience.example.com"}
+	tokenString := createTestSET(t, "https://attacker.example.com", aud, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, "https://attacker.example.com", key),
+		ExpectedIssuer:    "https://issuer.example.com",
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrInvalidIssuer, deliveryErr.ErrCode)
+}
+
+// aud validation still runs (and runs before signature verification) under the
+// signing-only posture.
+func TestParseReceivedSET_RequireSignature_AudMismatchRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://other.example.com"}, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: []string{"https://audience.example.com"},
+		RequireSignature:  true,
+	}
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	require.NotNil(t, deliveryErr)
+	assert.Nil(t, result)
+	assert.Equal(t, ErrInvalidAudience, deliveryErr.ErrCode)
+}
+
 func TestWriteDeliveryError(t *testing.T) {
 	w := httptest.NewRecorder()
 	WriteDeliveryError(w, ErrInvalidIssuer, "The SET Issuer is invalid.")

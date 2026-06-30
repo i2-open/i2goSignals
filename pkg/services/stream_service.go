@@ -280,6 +280,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
+	// Signing-only receive posture guardrail (#184): a stream that gates trust on
+	// the SET's JWS signature (rather than a transport bearer) MUST carry an explicit
+	// trust anchor — the issuer it trusts plus where that issuer's keys live. We
+	// validate the request as supplied (before Iss is defaulted to the local issuer),
+	// so signingOnly can never be silently enabled without a real trust anchor.
+	if request.SigningOnly && (request.Iss == "" || request.IssuerJWKSUrl == "") {
+		return model.StreamConfiguration{}, errors.New("signingOnly requires both iss and issuerJWKSUrl to be configured")
+	}
+
 	mid := bson.NewObjectID()
 
 	// var authCtx authSupport.AuthContext
@@ -376,6 +385,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
+	config.SigningOnly = request.SigningOnly
 	config.TxWellKnownUrl = request.TxWellKnownUrl
 	if transmitAlias != "" {
 		config.TxAlias = &transmitAlias
@@ -1095,6 +1105,17 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		if configReq.InactivityTimeout > 0 {
 			config.InactivityTimeout = configReq.InactivityTimeout
 		}
+	}
+
+	// Signing-only posture (#184) is settable on receiver streams via update; it is a
+	// no-op on transmitter streams. Apply the same trust-anchor guardrail as create:
+	// the resulting stream must name both an issuer and a JWKS URL when signing-only.
+	switch config.Delivery.GetMethod() {
+	case model.ReceivePoll, model.ReceivePush:
+		config.SigningOnly = configReq.SigningOnly
+	}
+	if config.SigningOnly && (config.Iss == "" || config.IssuerJWKSUrl == "") {
+		return nil, errors.New("signingOnly requires both iss and issuerJWKSUrl to be configured")
 	}
 
 	streamRec.StreamConfiguration = *config

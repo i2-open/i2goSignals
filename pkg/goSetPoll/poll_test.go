@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/stretchr/testify/assert"
@@ -275,6 +276,102 @@ func TestPoll_WithValidSETs(t *testing.T) {
 	assert.Empty(t, parsed.Errors)
 	assert.Contains(t, parsed.ParsedSETs, jti1)
 	assert.Contains(t, parsed.ParsedSETs, jti2)
+}
+
+// jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"
+// goSet.JWS emits when SecurityEventToken.Kid is empty (it falls back to iss).
+func jwksForKey(t *testing.T, issuer string, key *rsa.PrivateKey) *keyfunc.JWKS {
+	t.Helper()
+	givenKey := keyfunc.NewGivenRSA(&key.PublicKey, keyfunc.GivenKeyOptions{})
+	return keyfunc.NewGiven(map[string]keyfunc.GivenKey{issuer: givenKey})
+}
+
+// --- Signing-only poll posture (#184): RequireSignature ---
+
+// Under RequireSignature, a pulled SET with no JWKS available to verify against
+// is rejected (jws_signature_failed) rather than accepted unverified. This is the
+// poll-as-receiver mandatory-verification rule: not conditional on JWKS != nil.
+func TestPoll_RequireSignature_NoJWKSRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		EndpointURL:       server.URL,
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs)
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "jws_signature_failed", parsed.Errors[jti1].Error)
+}
+
+// A validly-signed SET with a matching JWKS is accepted under RequireSignature.
+func TestPoll_RequireSignature_ValidAccepted(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.Errors)
+	require.Contains(t, parsed.ParsedSETs, jti1)
+}
+
+// A SET whose signature does not verify against the configured JWKS is rejected
+// with jws_signature_failed under RequireSignature.
+func TestPoll_RequireSignature_BadSignatureRejected(t *testing.T) {
+	signKey := generateTestKey(t)
+	otherKey := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	aud := []string{"https://aud.example.com"}
+	jti1, token1 := createTestSET(t, iss, aud, signKey)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, otherKey), // wrong public key
+		ExpectedIssuer:    iss,
+		ExpectedAudiences: aud,
+		RequireSignature:  true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs)
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "jws_signature_failed", parsed.Errors[jti1].Error)
 }
 
 func TestPoll_IssuerValidationError(t *testing.T) {

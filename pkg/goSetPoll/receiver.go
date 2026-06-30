@@ -98,8 +98,31 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 	}
 
 	for jti, setString := range rawResp.Sets {
+		// Signing-only poll posture (#184): verification of pulled SETs is mandatory.
+		// Without a trust anchor we cannot verify, so the SET is rejected rather than
+		// accepted unverified. Signature failures are expected peer events (WARN).
+		if config.RequireSignature && config.JWKS == nil {
+			log.Warn("RFC8936: SET signature required but no JWKS available to verify (signing-only)", "jti", jti)
+			result.Errors[jti] = SetErrType{
+				Error:       "jws_signature_failed",
+				Description: "The SET signature could not be validated.",
+			}
+			continue
+		}
+
 		token, err := goSet.Parse(setString, config.JWKS)
 		if err != nil {
+			// When verifying against a JWKS under the signing-only posture, a parse
+			// failure is a bad signature → jws_signature_failed (the RFC8935 §2.4
+			// rotate-and-retry signal). Otherwise the prior invalid_request is kept.
+			if config.RequireSignature && config.JWKS != nil {
+				log.Warn("RFC8936: SET signature verification failed (signing-only)", "jti", jti, "error", err)
+				result.Errors[jti] = SetErrType{
+					Error:       "jws_signature_failed",
+					Description: "The SET signature could not be validated.",
+				}
+				continue
+			}
 			log.Warn("RFC8936: SET parsing error", "jti", jti, "error", err)
 			result.Errors[jti] = SetErrType{
 				Error:       "invalid_request",
