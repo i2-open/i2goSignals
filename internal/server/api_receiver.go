@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
@@ -1550,6 +1551,9 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			JWKS:              jwks,
 			ExpectedIssuer:    ps.stream.Iss,
 			ExpectedAudiences: ps.stream.Aud,
+			// Signing-only (#184): make verification of pulled SETs mandatory so a
+			// nil JWKS rejects rather than silently accepting unsigned events.
+			RequireSignature: ps.stream.SigningOnly,
 		})
 
 		if err != nil {
@@ -1806,6 +1810,16 @@ func (sa *SignalsApplication) ReceivePushEvent(w http.ResponseWriter, r *http.Re
 func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
 	authContext, status := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeEventDelivery})
 	if status != http.StatusOK || authContext == nil {
+		// Bearer missing or invalid. Signing-only posture (#184): a business stream
+		// may gate trust on the SET's JWS signature rather than a transport bearer, so
+		// when NO bearer is presented we resolve the stream from the route's {id} and
+		// fall through to the per-SET signature check below. A bearer that IS presented
+		// must still pass the normal stream+scope check, so a presented-but-invalid
+		// bearer is rejected here at the request level exactly as before.
+		if sid, ok := resolveSigningOnlyPush(sa, r); ok {
+			receivePushForStream(sa, w, r, sid)
+			return
+		}
 		if status == http.StatusForbidden {
 
 			goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain the required stream identifier or scope")
@@ -1820,10 +1834,39 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrAccessDenied, "The authorization did not contain a stream identifier")
 		return
 	}
+	receivePushForStream(sa, w, r, sid)
+}
+
+// resolveSigningOnlyPush returns the path-addressed stream id when a push request is
+// eligible for the signing-only posture (#184): no bearer was presented AND the stream
+// named on the route ({id}) is signing-only. A presented bearer is never bypassed — it
+// must pass the normal stream+scope check — so this returns ok=false whenever an
+// Authorization header is present, leaving the caller to reject it at the request level.
+func resolveSigningOnlyPush(sa SsfApplicationInterface, r *http.Request) (string, bool) {
+	if r.Header.Get("Authorization") != "" {
+		return "", false
+	}
+	pathId := mux.Vars(r)["id"]
+	if pathId == "" {
+		return "", false
+	}
+	st, err := sa.GetStreamService().GetStreamState(r.Context(), pathId)
+	if err != nil || st == nil || !st.SigningOnly {
+		return "", false
+	}
+	return pathId, true
+}
+
+// receivePushForStream runs the RFC8935 receive pipeline for an already-authorized
+// stream: resolve state, refresh the peer address, parse+validate the SET, drive push
+// monitoring/verification, and route the event. Under the stream's signing-only posture
+// (#184) signature verification is mandatory (RequireSignature); otherwise the behavior
+// is unchanged.
+func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, sid string) {
 	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), sid)
 	if streamState == nil || err != nil {
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
-		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+authContext.StreamId+" could not be located or was deleted")
+		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+sid+" could not be located or was deleted")
 		return
 	}
 
@@ -1838,6 +1881,7 @@ func ReceivePushEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		JWKS:              jwksKey,
 		ExpectedIssuer:    streamState.Iss,
 		ExpectedAudiences: streamState.Aud,
+		RequireSignature:  streamState.SigningOnly,
 	})
 	if deliveryErr != nil {
 		goSetPush.WriteDeliveryError(w, deliveryErr.ErrCode, deliveryErr.Description)

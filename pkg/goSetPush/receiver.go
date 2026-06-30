@@ -98,16 +98,37 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 		}
 	}
 
-	// Now verify the signature if a JWKS is configured
+	// Verify the signature. With a JWKS configured we always verify. Under the
+	// signing-only posture (RequireSignature, #184) the JWS signature is the trust
+	// gate, so a verify failure is jws_signature_failed (the RFC8935 §2.4
+	// rotate-and-retry signal) and a missing trust anchor (nil JWKS) is itself a
+	// hard reject — the SET must never be accepted unverified. Without the posture
+	// the prior behavior is preserved: a nil JWKS skips verification and a verify
+	// failure is invalid_request. Issuer mismatch was already handled above, so a
+	// failure here is a bad signature, not a trust failure. Signature failures are
+	// expected peer events, hence WARN, not ERROR (CONTEXT.md log-level policy).
 	token := unverified
 	if config.JWKS != nil {
 		token, err = goSet.Parse(tokenString, config.JWKS)
 		if err != nil {
+			if config.RequireSignature {
+				log.Warn("RFC8935: SET signature verification failed (signing-only)", "error", err)
+				return nil, &DeliveryErr{
+					ErrCode:     ErrJwsSignatureFailed,
+					Description: "The SET signature could not be validated.",
+				}
+			}
 			log.Warn("RFC8935: Error validating SET token signature", "error", err)
 			return nil, &DeliveryErr{
 				ErrCode:     ErrInvalidRequest,
 				Description: "The request could not be parsed as a SET.",
 			}
+		}
+	} else if config.RequireSignature {
+		log.Warn("RFC8935: SET signature required but no JWKS available to verify (signing-only)")
+		return nil, &DeliveryErr{
+			ErrCode:     ErrJwsSignatureFailed,
+			Description: "The SET signature could not be validated.",
 		}
 	}
 

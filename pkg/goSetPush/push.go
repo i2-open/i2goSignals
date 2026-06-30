@@ -56,6 +56,12 @@ type ReceiverConfig struct {
 	// ExpectedAudiences is the list of acceptable "aud" values. If empty, audience validation is skipped.
 	ExpectedAudiences []string
 
+	// RequireSignature makes JWS signature verification mandatory (#184 signing-only
+	// posture): the SET is rejected with jws_signature_failed if no JWKS is available
+	// to verify against or if verification fails. When false (default) behavior is
+	// unchanged — a nil JWKS skips verification and a verify failure is invalid_request.
+	RequireSignature bool
+
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger
 }
