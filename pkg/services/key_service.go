@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v2"
@@ -20,6 +21,14 @@ import (
 )
 
 var ksLog = logger.Sub("KEY_SERVICE")
+
+// ErrKeyStatusInvalid is returned by SetKeyStatus when the requested status is
+// not one of active/suspended/revoked. The HTTP surface maps it to 400.
+var ErrKeyStatusInvalid = errors.New("invalid key status; must be active, suspended, or revoked")
+
+// ErrKeyStatusTerminal is returned when a transition would move a record away
+// from the terminal revoked state. The HTTP surface maps it to 400.
+var ErrKeyStatusTerminal = errors.New("key is revoked (terminal); cannot transition to another status")
 
 type KeyService struct {
 	keyDAO      interfaces.KeyDAO
@@ -268,15 +277,15 @@ func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (*rsa.Pr
 	return key, err
 }
 
-// GetPrivateKeyWithKeyname retrieves the latest private key and its kid for keyName.
+// GetPrivateKeyWithKeyname retrieves the latest ACTIVE private key and its kid
+// for keyName. Suspended and revoked records are never signing candidates. When
+// keyName has records but none are active, it logs a loud ERROR naming the
+// issuer and the remedy, and returns ErrKeyNotFound — there is deliberately no
+// fallback to an older inactive kid and no auto-rotation (ADR 0028).
 func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (*rsa.PrivateKey, string, error) {
-	rec, err := s.keyDAO.FindLatestByKeyName(ctx, keyName)
+	rec, err := s.findLatestActiveSigningRec(ctx, keyName)
 	if err != nil {
 		return nil, "", err
-	}
-
-	if len(rec.KeyBytes) == 0 {
-		return nil, "", errors.New("no private key found for: " + keyName)
 	}
 
 	key, err := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
@@ -292,6 +301,172 @@ func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName strin
 	return key, kid, nil
 }
 
+// findLatestActiveSigningRec returns the newest active record for keyName that
+// carries private-key material. It returns ErrKeyNotFound when none qualifies,
+// logging a loud ERROR (issuer + remedy) whenever the only candidates were
+// filtered out because they are suspended or revoked.
+func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName string) (*interfaces.JwkKeyRec, error) {
+	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
+	if err != nil {
+		return nil, err
+	}
+
+	var latest *interfaces.JwkKeyRec
+	sawInactiveSigningKey := false
+	for _, rec := range recs {
+		if len(rec.KeyBytes) == 0 {
+			continue // public/external-only record has no private material to sign with
+		}
+		if !rec.IsActive() {
+			sawInactiveSigningKey = true
+			continue
+		}
+		if latest == nil || rec.Id > latest.Id {
+			latest = rec
+		}
+	}
+
+	if latest == nil {
+		if sawInactiveSigningKey {
+			ksLog.Error("No active signing key for issuer; all signing keys are suspended or revoked",
+				"issuer", keyName,
+				"remedy", "rotate a new key or reactivate a suspended key")
+		}
+		return nil, interfaces.ErrKeyNotFound
+	}
+	return latest, nil
+}
+
+// hasActiveSigningKey reports whether keyName retains at least one active record
+// with private-key material — used to decide the no-active-key warning.
+func (s *KeyService) hasActiveSigningKey(ctx context.Context, keyName string) bool {
+	rec, err := s.findLatestActiveSigningRec(ctx, keyName)
+	return err == nil && rec != nil
+}
+
+// SetKeyStatus applies a lifecycle transition to the record(s) under keyName.
+// When kid is non-empty only that record is affected and it must belong to
+// keyName (otherwise ErrKeyNotFound). Transition rules (ADR 0028):
+//   - status must be active/suspended/revoked (else ErrKeyStatusInvalid).
+//   - revoked is terminal: a target already revoked may only be re-asserted
+//     revoked (idempotent); any other requested status yields ErrKeyStatusTerminal.
+//   - active clears SuspendedAt (reactivation); revoked/suspended are not signing
+//     candidates thereafter.
+//
+// It returns the refreshed KeySummary and a non-empty warning when the
+// transition leaves keyName with zero active signing keys (the operation still
+// succeeds — subsequent signing attempts fail loudly, no auto-rotation).
+func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid string, status string) (*interfaces.KeySummary, string, error) {
+	switch status {
+	case interfaces.KeyStatusActive, interfaces.KeyStatusSuspended, interfaces.KeyStatusRevoked:
+	default:
+		return nil, "", ErrKeyStatusInvalid
+	}
+
+	// Resolve the target records and enforce the kid-belongs-to-keyName rule.
+	var targets []*interfaces.JwkKeyRec
+	if kid != "" {
+		rec, err := s.keyDAO.FindByKid(ctx, kid)
+		if err != nil {
+			return nil, "", err // ErrKeyNotFound propagates as 404
+		}
+		if rec.KeyName != keyName {
+			return nil, "", interfaces.ErrKeyNotFound
+		}
+		targets = []*interfaces.JwkKeyRec{rec}
+	} else {
+		recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(recs) == 0 {
+			return nil, "", interfaces.ErrKeyNotFound
+		}
+		targets = recs
+	}
+
+	// Terminal guard: a revoked record may only be re-asserted revoked.
+	for _, rec := range targets {
+		if rec.IsRevoked() && status != interfaces.KeyStatusRevoked {
+			return nil, "", ErrKeyStatusTerminal
+		}
+	}
+
+	now := time.Now().UTC()
+	var suspendedAt, revokedAt *time.Time
+	switch status {
+	case interfaces.KeyStatusActive:
+		zero := time.Time{}
+		suspendedAt = &zero // reactivation clears suspension
+	case interfaces.KeyStatusSuspended:
+		suspendedAt = &now
+	case interfaces.KeyStatusRevoked:
+		revokedAt = &now // write-once in the DAO
+	}
+
+	if _, err := s.keyDAO.SetKeyStatus(ctx, keyName, kid, suspendedAt, revokedAt); err != nil {
+		return nil, "", err
+	}
+
+	// Keep the token-issuer signing key and verification JWKS consistent with
+	// the new statuses (drop revoked from verification, re-select the signing
+	// key, or surface the no-active-key condition).
+	if keyName == s.tokenIssuer {
+		s.refreshTokenIssuerKey(ctx)
+	}
+
+	summary, err := s.keyDAO.KeySummary(ctx, keyName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	warning := ""
+	if !s.hasActiveSigningKey(ctx, keyName) {
+		warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
+		ksLog.Warn(warning, "issuer", keyName)
+	}
+	return summary, warning, nil
+}
+
+// refreshTokenIssuerKey re-derives the cached token signing key and verification
+// JWKS after a status change on the token issuer's keyName. If an active signing
+// key remains it becomes the signing key; otherwise the verification JWKS is
+// rebuilt (dropping any revoked kid) and a loud ERROR is logged — the cached
+// signing key is left in place so the failure surfaces on the next issuance
+// rather than silently continuing to sign under a retired kid.
+func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
+	rec, err := s.findLatestActiveSigningRec(ctx, s.tokenIssuer)
+	if err != nil {
+		if jwks := s.buildAuthJWKS(ctx, s.tokenIssuer, nil, ""); jwks != nil {
+			s.tokenPubKey = jwks
+			s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, jwks)
+		}
+		ksLog.Error("Token issuer has no active signing key after status change",
+			"issuer", s.tokenIssuer,
+			"remedy", "rotate a new key or reactivate a suspended key")
+		return
+	}
+
+	key, kerr := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
+	if kerr != nil {
+		ksLog.Error("Failed to parse re-selected token signing key", "issuer", s.tokenIssuer, "error", kerr)
+		return
+	}
+	kid := rec.Kid
+	if kid == "" {
+		kid = rec.KeyName
+	}
+	jwks := s.buildAuthJWKS(ctx, s.tokenIssuer, key, kid)
+	if jwks == nil {
+		ksLog.Error("Failed to rebuild JWKS after token issuer status change", "issuer", s.tokenIssuer)
+		return
+	}
+	s.tokenKey = key
+	s.tokenKid = kid
+	s.tokenPubKey = jwks
+	s.authIssuer.UpdateTokenKey(s.tokenIssuer, kid, key, jwks)
+}
+
 // GetPublicJWKS returns the JWKS JSON for the public keys associated with keyName.
 func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.RawMessage {
 	keys, err := s.keyDAO.FindByKeyName(ctx, keyName)
@@ -303,6 +478,11 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 	jwkstore := jwkset.NewMemoryStorage()
 
 	for _, rec := range keys {
+		// Revoked keys are excluded from JWKS immediately; suspended keys stay
+		// published so already-issued tokens still verify (ADR 0028).
+		if rec.IsRevoked() {
+			continue
+		}
 		var jwkSet jwkset.JWK
 		var err error
 		if rec.ReceiverJwksUrl != "" {
@@ -417,6 +597,11 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
 	for _, rec := range keys {
+		// Revoked keys are excluded from verification immediately; suspended
+		// keys remain so already-issued tokens still verify (ADR 0028).
+		if rec.IsRevoked() {
+			continue
+		}
 		pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
 		if err != nil {
 			ksLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)

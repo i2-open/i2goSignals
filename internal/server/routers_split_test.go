@@ -74,7 +74,7 @@ func TestAdminRoutesMembership(t *testing.T) {
 		"StreamCreate", "CreateServer", "ServerList", "ServerGet", "ServerUpdate",
 		"ServerDelete", "StreamReplace", "StreamPatch", "UpdateStatus", "GetStatus",
 		"AddSubject", "RemoveSubject", "ReviewSubjectFilter", "CreateKey",
-		"CreateKeyLegacy", "KeyDelete", "JwksIssuers", "JwksSummaries",
+		"CreateKeyLegacy", "KeyStatus", "JwksIssuers", "JwksSummaries",
 	}
 	sort.Strings(wantAdmin)
 

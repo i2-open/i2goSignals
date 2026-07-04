@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
@@ -28,6 +29,10 @@ type keyDoc struct {
 	KeyBytes        []byte        `bson:"key_bytes"`
 	PubKeyBytes     []byte        `bson:"pub_jwks"`
 	ReceiverJwksUrl string        `bson:"receiver_jwks_url"`
+	// Lifecycle timestamps (ADR 0028). omitzero keeps them absent from
+	// pre-existing documents, which decode as the zero time => active.
+	SuspendedAt time.Time `bson:"suspended_at,omitzero"`
+	RevokedAt   time.Time `bson:"revoked_at,omitzero"`
 }
 
 func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
@@ -41,6 +46,8 @@ func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
 		KeyBytes:        d.KeyBytes,
 		PubKeyBytes:     d.PubKeyBytes,
 		ReceiverJwksUrl: d.ReceiverJwksUrl,
+		SuspendedAt:     d.SuspendedAt,
+		RevokedAt:       d.RevokedAt,
 	}
 }
 
@@ -59,6 +66,8 @@ func recToDoc(rec *interfaces.JwkKeyRec) (*keyDoc, error) {
 		KeyBytes:        rec.KeyBytes,
 		PubKeyBytes:     rec.PubKeyBytes,
 		ReceiverJwksUrl: rec.ReceiverJwksUrl,
+		SuspendedAt:     rec.SuspendedAt,
+		RevokedAt:       rec.RevokedAt,
 	}, nil
 }
 
@@ -243,6 +252,64 @@ func (d *KeyDAOMongo) DeleteByKeyName(ctx context.Context, keyName string) error
 	return nil
 }
 
+func (d *KeyDAOMongo) SetKeyStatus(ctx context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
+	c, err := d.col()
+	if err != nil {
+		return 0, err
+	}
+
+	filter := bson.M{"key_name": keyName}
+	if kid != "" {
+		filter["kid"] = kid
+	}
+
+	set := bson.M{}
+	if suspendedAt != nil {
+		set["suspended_at"] = *suspendedAt
+	}
+
+	total := 0
+	if len(set) > 0 {
+		res, err := c.UpdateMany(ctx, filter, bson.M{"$set": set})
+		if err != nil {
+			kLog.Error("Error updating key status", "keyName", keyName, "kid", kid, "error", err)
+			return 0, err
+		}
+		total = int(res.MatchedCount)
+	}
+
+	// RevokedAt is write-once: only stamp records that do not already carry one.
+	if revokedAt != nil {
+		revFilter := bson.M{"key_name": keyName, "revoked_at": bson.M{"$in": bson.A{nil, time.Time{}}}}
+		if kid != "" {
+			revFilter["kid"] = kid
+		}
+		res, err := c.UpdateMany(ctx, revFilter, bson.M{"$set": bson.M{"revoked_at": *revokedAt}})
+		if err != nil {
+			kLog.Error("Error revoking key", "keyName", keyName, "kid", kid, "error", err)
+			return 0, err
+		}
+		if len(set) == 0 {
+			// No suspension change was requested, so the matched count for this
+			// operation is our best measure of affected records. When some are
+			// already revoked (excluded by revFilter) fall back to a plain match.
+			total = int(res.MatchedCount)
+			if total == 0 {
+				cnt, cerr := c.CountDocuments(ctx, filter)
+				if cerr != nil {
+					return 0, cerr
+				}
+				total = int(cnt)
+			}
+		}
+	}
+
+	if total == 0 {
+		return 0, interfaces.ErrKeyNotFound
+	}
+	return total, nil
+}
+
 func (d *KeyDAOMongo) ListKids(ctx context.Context) ([]string, error) {
 	c, err := d.col()
 	if err != nil {
@@ -310,11 +377,14 @@ func (d *KeyDAOMongo) KeySummary(ctx context.Context, keyName string) (*interfac
 	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
 	firstKey := recs[0]
 	var kids []string
+	var states []interfaces.KeyState
 	for _, rec := range recs {
 		kids = append(kids, rec.Kid)
+		states = append(states, rec.ToKeyState())
 	}
 	summary := firstKey.ToSummary()
 	summary.Kids = kids
+	summary.KeyStates = states
 	summary.Rotations = len(recs) - 1
 	return &summary, nil
 }

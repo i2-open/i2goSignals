@@ -2157,8 +2157,93 @@ type SetStreamCmd struct {
 	Config SetStreamConfigCmd `cmd:"" aliases:"configuration,c" help:"Modify stream configuration"`
 }
 
+// SetKeyStatusCmd is a thin wrapper over POST /key/{keyName}/status: it sets the
+// lifecycle status (active|suspended|revoked) of an issuer key. Unlike a delete,
+// the key material and audit trail are retained (community ADR 0028). Omitting
+// --kid applies the transition to every record under the keyName.
+type SetKeyStatusCmd struct {
+	Alias   string `arg:"" required:"" help:"The alias of the server holding the key."`
+	KeyName string `arg:"" required:"" help:"The keyName / issuer whose key status is being changed."`
+	Status  string `required:"" short:"m" enum:"active,suspended,revoked,a,s,r" help:"New status: active, suspended, or revoked."`
+	Kid     string `optional:"" help:"Restrict the change to a single kid; omit to affect all records under the keyName."`
+}
+
+func (c *SetKeyStatusCmd) Run(cli *CLI) error {
+	status := c.Status
+	switch c.Status {
+	case "a", "active":
+		status = "active"
+	case "s", "suspended":
+		status = "suspended"
+	case "r", "revoked":
+		status = "revoked"
+	}
+
+	server, err := cli.Data.GetServer(c.Alias)
+	if err != nil {
+		return err
+	}
+	hostUrl, err := url.Parse(server.Host)
+	if err != nil {
+		return err
+	}
+	// Percent-encode the keyName into a single path segment (matches the
+	// CreateKey addressing convention, ADR 0023): the server runs with
+	// UseEncodedPath() and url.QueryUnescape's it back.
+	statusUrl := *hostUrl
+	statusUrl.Path = "/key/" + c.KeyName + "/status"
+	statusUrl.RawPath = "/key/" + url.QueryEscape(c.KeyName) + "/status"
+
+	reqBody := model.SetKeyStatusRequest{Status: status, Kid: c.Kid}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, statusUrl.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bearer, err := serverBearer(&cli.Globals, server)
+	if err != nil {
+		return err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	} else {
+		fmt.Println(fmt.Sprintf("No admin token for %s; request will likely be rejected.", server.Alias))
+	}
+
+	client := getHttpClient(0)
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return err
+	}
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(respBytes))
+	}
+
+	fmt.Println("Updated key status:")
+	fmt.Println(string(respBytes))
+
+	var parsed struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(respBytes, &parsed); err == nil && parsed.Warning != "" {
+		fmt.Println("WARNING: " + parsed.Warning)
+	}
+	return nil
+}
+
+type SetKeyCmd struct {
+	Status SetKeyStatusCmd `cmd:"" help:"Set the lifecycle status (active|suspended|revoked) of an issuer key."`
+}
+
 type SetCmd struct {
 	Stream        SetStreamCmd        `cmd:"" help:"Change settings on a stream"`
+	Key           SetKeyCmd           `cmd:"" help:"Change the lifecycle status of an issuer key (revoke/suspend/reactivate)."`
 	SubjectFilter SetSubjectFilterCmd `cmd:"" aliases:"sf" help:"Change a stream's subject-filter configuration."`
 }
 
