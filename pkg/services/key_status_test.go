@@ -187,3 +187,95 @@ func (s *KeyStatusSuite) TestPartialSuspendKeepsActiveInPublicJWKS() {
 	s.True(slices.Contains(kids, "iss"))
 	s.True(slices.Contains(kids, newKid), "suspended kid still published")
 }
+
+// TestKeyNameWideSuspendSkipsRevokedSibling: a keyName-wide suspend must apply to
+// the remaining active kid rather than being blocked by an already-revoked
+// sibling (revoked stays terminal). Regression for the terminal-guard over-reach.
+func (s *KeyStatusSuite) TestKeyNameWideSuspendSkipsRevokedSibling() {
+	ctx := context.Background()
+	svc := s.svc()
+	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "") // kid "iss"
+	s.Require().NoError(err)
+	_, newKid, err := svc.RotateKey(ctx, "iss", "") // second active kid
+	s.Require().NoError(err)
+
+	// Revoke only the older kid.
+	_, _, err = svc.SetKeyStatus(ctx, "iss", "iss", interfaces.KeyStatusRevoked)
+	s.Require().NoError(err)
+
+	// keyName-wide suspend: not blocked by the revoked sibling.
+	summary, _, err := svc.SetKeyStatus(ctx, "iss", "", interfaces.KeyStatusSuspended)
+	s.Require().NoError(err)
+
+	byKid := map[string]string{}
+	for _, ks := range summary.KeyStates {
+		byKid[ks.Kid] = ks.Status
+	}
+	s.Equal(interfaces.KeyStatusRevoked, byKid["iss"], "revoked sibling stays terminal")
+	s.Equal(interfaces.KeyStatusSuspended, byKid[newKid], "active kid gets suspended")
+}
+
+// TestEnsureSigningKeyDoesNotRemintSuspended: EnsureSigningKey must respect a
+// deliberate suspend/revoke and NOT silently mint a fresh active key over it.
+func (s *KeyStatusSuite) TestEnsureSigningKeyDoesNotRemintSuspended() {
+	ctx := context.Background()
+	svc := s.svc()
+	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "")
+	s.Require().NoError(err)
+	_, _, err = svc.SetKeyStatus(ctx, "iss", "", interfaces.KeyStatusSuspended)
+	s.Require().NoError(err)
+
+	created, err := svc.EnsureSigningKey(ctx, "iss", "")
+	s.Require().NoError(err)
+	s.False(created, "must not mint a fresh key over a deliberately suspended one")
+	_, _, err = svc.GetPrivateKeyWithKeyname(ctx, "iss")
+	s.ErrorIs(err, interfaces.ErrKeyNotFound, "suspend stays respected")
+}
+
+// TestEnsureSigningKeyCreatesWhenAbsent: the genuinely-absent case still mints.
+func (s *KeyStatusSuite) TestEnsureSigningKeyCreatesWhenAbsent() {
+	ctx := context.Background()
+	svc := s.svc()
+	created, err := svc.EnsureSigningKey(ctx, "brand-new", "")
+	s.Require().NoError(err)
+	s.True(created)
+	_, _, err = svc.GetPrivateKeyWithKeyname(ctx, "brand-new")
+	s.Require().NoError(err)
+}
+
+// TestRevokeTokenIssuerDropsFromAuthJWKSAndClearsSigning: revoking the token
+// issuer's only key must drop the revoked kid from the verification JWKS and
+// clear the cached signing key so the next issuance fails loudly.
+func (s *KeyStatusSuite) TestRevokeTokenIssuerDropsFromAuthJWKSAndClearsSigning() {
+	ctx := context.Background()
+	svc := s.svc() // token issuer "DEFAULT", kid "DEFAULT"
+	s.Require().Contains(svc.GetAuthValidatorPubKey().KIDs(), "DEFAULT")
+	s.Require().NotNil(svc.tokenKey)
+
+	_, _, err := svc.SetKeyStatus(ctx, "DEFAULT", "", interfaces.KeyStatusRevoked)
+	s.Require().NoError(err)
+
+	s.NotContains(svc.GetAuthValidatorPubKey().KIDs(), "DEFAULT",
+		"revoked token-issuer kid must stop verifying")
+	s.Nil(svc.tokenKey, "signing key cleared, not re-registered under the revoked kid")
+}
+
+// TestRevokeTokenIssuerActiveKidKeepsSuspendedSibling: when the active token kid
+// is revoked but a suspended sibling remains, the verification JWKS drops the
+// revoked kid, keeps the suspended one, and the signing key is not re-registered
+// to the revoked kid.
+func (s *KeyStatusSuite) TestRevokeTokenIssuerActiveKidKeepsSuspendedSibling() {
+	ctx := context.Background()
+	svc := s.svc()                                      // kid "DEFAULT" active
+	_, newKid, err := svc.RotateKey(ctx, "DEFAULT", "") // newKid becomes active signer
+	s.Require().NoError(err)
+	_, _, err = svc.SetKeyStatus(ctx, "DEFAULT", "DEFAULT", interfaces.KeyStatusSuspended)
+	s.Require().NoError(err)
+	_, _, err = svc.SetKeyStatus(ctx, "DEFAULT", newKid, interfaces.KeyStatusRevoked)
+	s.Require().NoError(err)
+
+	kids := svc.GetAuthValidatorPubKey().KIDs()
+	s.NotContains(kids, newKid, "revoked kid dropped from verification")
+	s.Contains(kids, "DEFAULT", "suspended sibling stays published for verification")
+	s.Nil(svc.tokenKey, "no active signing key → signing cleared")
+}

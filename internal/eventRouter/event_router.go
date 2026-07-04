@@ -1621,6 +1621,21 @@ func isOperationalVerify(rec *model.EventRecord) bool {
 	return false
 }
 
+// InvalidateIssuerKey flushes the cached private signing key for issuer so the
+// next delivery reloads it from the KeyService. The key-status handler calls this
+// after a revoke/suspend/reactivate (POST /key/{keyName}/status) so the router
+// stops signing outbound SETs under a retired kid without waiting for an RFC8935
+// §2.4 jws_signature_failed callback (ADR 0028). A no-op for the empty issuer.
+func (r *router) InvalidateIssuerKey(issuer string) {
+	if issuer == "" {
+		return
+	}
+	r.mu.Lock()
+	delete(r.issuerKeys, issuer)
+	delete(r.issuerKids, issuer)
+	r.mu.Unlock()
+}
+
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
 // on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
 // reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.

@@ -537,6 +537,18 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
+	// Flush the event router's cached signing key for this issuer so outbound SET
+	// signing stops using a just-revoked/suspended kid. SetKeyStatus already
+	// refreshed the auth-plane key; the event plane caches issuer keys separately
+	// and is only otherwise flushed on an RFC8935 jws_signature_failed callback.
+	// The real router implements InvalidateIssuerKey; the admin-route surface,
+	// which holds no key cache, does not — hence the capability check (ADR 0028).
+	if er := sa.GetEventRouter(); er != nil {
+		if inv, ok := er.(interface{ InvalidateIssuerKey(string) }); ok {
+			inv.InvalidateIssuerKey(keyName)
+		}
+	}
+
 	resp := KeyStatusResponse{Warning: warning}
 	if summary != nil {
 		resp.Summary = summary.AdjustBase(sa.GetBaseUrl())

@@ -148,6 +148,21 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, err)
 	}
+	// ErrKeyNotFound is ambiguous here: keyName may have no signing material at
+	// all, or it may have a signing key an operator deliberately suspended/revoked.
+	// Refuse to mint a fresh active key over a disabled one — silently recreating
+	// it would resurrect the signing the operator just stopped (ADR 0028: no
+	// auto-rotation, no fallback to an inactive kid).
+	recs, ferr := s.keyDAO.FindByKeyName(ctx, keyName)
+	if ferr != nil {
+		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, ferr)
+	}
+	if _, sawInactive := latestActiveSigningRec(recs); sawInactive {
+		ksLog.Warn("Signing key exists but is suspended or revoked; not creating a replacement",
+			"keyName", keyName,
+			"remedy", "rotate a new key or reactivate the suspended key")
+		return false, nil
+	}
 	if _, err := s.CreateKeyPair(ctx, keyName, "sig", projectId); err != nil {
 		return false, fmt.Errorf("failed to create signing key %q: %w", keyName, err)
 	}
@@ -287,17 +302,22 @@ func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName strin
 	if err != nil {
 		return nil, "", err
 	}
+	return parseSigningRec(rec)
+}
 
+// parseSigningRec parses a record's PKCS1 private key and derives its kid,
+// falling back to the keyName when the record carries no explicit kid. It is the
+// single signing-key materialization path shared by GetPrivateKeyWithKeyname and
+// the token-issuer refresh so the two can never diverge (ADR 0028).
+func parseSigningRec(rec *interfaces.JwkKeyRec) (*rsa.PrivateKey, string, error) {
 	key, err := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
 	if err != nil {
 		return nil, "", err
 	}
-
 	kid := rec.Kid
 	if kid == "" {
 		kid = rec.KeyName
 	}
-
 	return key, kid, nil
 }
 
@@ -311,21 +331,7 @@ func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName str
 		return nil, err
 	}
 
-	var latest *interfaces.JwkKeyRec
-	sawInactiveSigningKey := false
-	for _, rec := range recs {
-		if len(rec.KeyBytes) == 0 {
-			continue // public/external-only record has no private material to sign with
-		}
-		if !rec.IsActive() {
-			sawInactiveSigningKey = true
-			continue
-		}
-		if latest == nil || rec.Id > latest.Id {
-			latest = rec
-		}
-	}
-
+	latest, sawInactiveSigningKey := latestActiveSigningRec(recs)
 	if latest == nil {
 		if sawInactiveSigningKey {
 			ksLog.Error("No active signing key for issuer; all signing keys are suspended or revoked",
@@ -337,11 +343,27 @@ func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName str
 	return latest, nil
 }
 
-// hasActiveSigningKey reports whether keyName retains at least one active record
-// with private-key material — used to decide the no-active-key warning.
-func (s *KeyService) hasActiveSigningKey(ctx context.Context, keyName string) bool {
-	rec, err := s.findLatestActiveSigningRec(ctx, keyName)
-	return err == nil && rec != nil
+// latestActiveSigningRec picks the newest active record carrying private-key
+// material from recs. sawInactive reports whether at least one signing-capable
+// record was skipped solely because it is suspended or revoked — this
+// distinguishes "this keyName has a signing key that is currently disabled" from
+// "this keyName has no signing material at all" (e.g. a verification-only
+// external record). Pure: no I/O and no logging, so callers that use it as a
+// predicate incur no side effects (ADR 0028).
+func latestActiveSigningRec(recs []*interfaces.JwkKeyRec) (latest *interfaces.JwkKeyRec, sawInactive bool) {
+	for _, rec := range recs {
+		if len(rec.KeyBytes) == 0 {
+			continue // public/external-only record has no private material to sign with
+		}
+		if !rec.IsActive() {
+			sawInactive = true
+			continue
+		}
+		if latest == nil || rec.Id > latest.Id {
+			latest = rec
+		}
+	}
+	return latest, sawInactive
 }
 
 // SetKeyStatus applies a lifecycle transition to the record(s) under keyName.
@@ -385,9 +407,22 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 		targets = recs
 	}
 
-	// Terminal guard: a revoked record may only be re-asserted revoked.
-	for _, rec := range targets {
-		if rec.IsRevoked() && status != interfaces.KeyStatusRevoked {
+	// Terminal guard: revoked is terminal, so a move away from revoked is refused
+	// only when NO target can actually transition — an explicitly targeted revoked
+	// kid, or a keyName-wide op whose every record is already revoked. When a
+	// keyName-wide op still has at least one non-revoked record, the already-revoked
+	// siblings are left untouched in their terminal state and the transition applies
+	// to the rest; revoked wins over any stamp later written to those records, so the
+	// op is a no-op on them (ADR 0028).
+	if status != interfaces.KeyStatusRevoked {
+		allRevoked := true
+		for _, rec := range targets {
+			if !rec.IsRevoked() {
+				allRevoked = false
+				break
+			}
+		}
+		if allRevoked {
 			return nil, "", ErrKeyStatusTerminal
 		}
 	}
@@ -420,51 +455,68 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 		return nil, "", err
 	}
 
+	// Warn only when the keyName had signing material but no active key remains.
+	// A verification-only keyName (external/public records, no private key) never
+	// signs, so a "signing will fail" warning there would be misleading (ADR 0028).
 	warning := ""
-	if !s.hasActiveSigningKey(ctx, keyName) {
-		warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
-		ksLog.Warn(warning, "issuer", keyName)
+	if recs, ferr := s.keyDAO.FindByKeyName(ctx, keyName); ferr == nil {
+		if latest, sawInactive := latestActiveSigningRec(recs); latest == nil && sawInactive {
+			warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
+			ksLog.Warn(warning, "issuer", keyName)
+		}
 	}
 	return summary, warning, nil
 }
 
 // refreshTokenIssuerKey re-derives the cached token signing key and verification
-// JWKS after a status change on the token issuer's keyName. If an active signing
-// key remains it becomes the signing key; otherwise the verification JWKS is
-// rebuilt (dropping any revoked kid) and a loud ERROR is logged — the cached
-// signing key is left in place so the failure surfaces on the next issuance
-// rather than silently continuing to sign under a retired kid.
+// JWKS after a status change on the token issuer's keyName. It reads the issuer's
+// records once and either:
+//   - installs the latest active record as the signing key and rebuilds the JWKS
+//     around it when one remains; or
+//   - clears the signing key (nil) and rebuilds the verification JWKS from the
+//     surviving non-revoked records when no active key remains. Revoked kids are
+//     dropped (an empty JWKS is the correct result when every record is revoked —
+//     the revoked kid must stop verifying); suspended kids are kept so
+//     already-issued tokens still verify. Clearing the signing key makes the next
+//     issuance fail loudly rather than continuing to sign under a retired/revoked
+//     kid (ADR 0028).
+//
+// A transient DAO read failure leaves the cached key and JWKS untouched so a blip
+// does not lock admins out; the next status change or restart retries.
 func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
-	rec, err := s.findLatestActiveSigningRec(ctx, s.tokenIssuer)
+	recs, err := s.keyDAO.FindByKeyName(ctx, s.tokenIssuer)
 	if err != nil {
-		if jwks := s.buildAuthJWKS(ctx, s.tokenIssuer, nil, ""); jwks != nil {
-			s.tokenPubKey = jwks
-			s.authIssuer.UpdateTokenKey(s.tokenIssuer, s.tokenKid, s.tokenKey, jwks)
-		}
-		ksLog.Error("Token issuer has no active signing key after status change",
-			"issuer", s.tokenIssuer,
-			"remedy", "rotate a new key or reactivate a suspended key")
+		ksLog.Error("Failed to reload token issuer keys after status change",
+			"issuer", s.tokenIssuer, "error", err)
 		return
 	}
 
-	key, kerr := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
-	if kerr != nil {
-		ksLog.Error("Failed to parse re-selected token signing key", "issuer", s.tokenIssuer, "error", kerr)
-		return
+	signingRec, _ := latestActiveSigningRec(recs)
+	var signingKey *rsa.PrivateKey
+	signingKid := ""
+	if signingRec != nil {
+		key, kid, perr := parseSigningRec(signingRec)
+		if perr != nil {
+			ksLog.Error("Failed to parse re-selected token signing key",
+				"issuer", s.tokenIssuer, "error", perr)
+			return
+		}
+		signingKey, signingKid = key, kid
 	}
-	kid := rec.Kid
-	if kid == "" {
-		kid = rec.KeyName
-	}
-	jwks := s.buildAuthJWKS(ctx, s.tokenIssuer, key, kid)
-	if jwks == nil {
-		ksLog.Error("Failed to rebuild JWKS after token issuer status change", "issuer", s.tokenIssuer)
-		return
-	}
-	s.tokenKey = key
-	s.tokenKid = kid
+
+	// jwksFromRecs returns a (possibly empty) non-nil JWKS, so the revoked-only
+	// case replaces the stale verification set instead of leaving the revoked kid
+	// verifying. When a signing key remains its kid is force-matched to it.
+	jwks := jwksFromRecs(recs, signingKey, signingKid)
+	s.tokenKey = signingKey
+	s.tokenKid = signingKid
 	s.tokenPubKey = jwks
-	s.authIssuer.UpdateTokenKey(s.tokenIssuer, kid, key, jwks)
+	s.authIssuer.UpdateTokenKey(s.tokenIssuer, signingKid, signingKey, jwks)
+
+	if signingRec == nil {
+		ksLog.Warn("Token issuer has no active signing key after status change; issuance will fail until you rotate or reactivate",
+			"issuer", s.tokenIssuer)
+	}
 }
 
 // GetPublicJWKS returns the JWKS JSON for the public keys associated with keyName.
@@ -587,18 +639,34 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 		return nil
 	}
 
-	// Sort oldest-first so that when multiple records share the same kid (which can
-	// happen after a transient DB error causes a duplicate insert), the newest
-	// record's public key overwrites older ones in the givenKeys map — keeping the
-	// JWKS consistent with FindLatestByKeyName, which is used for signing.
-	sort.Slice(keys, func(i, j int) bool {
-		return keys[i].Id < keys[j].Id
+	jwks := jwksFromRecs(keys, signingKey, signingKid)
+	if len(jwks.KIDs()) == 0 {
+		ksLog.Error("No valid keys found", "keyName", keyName)
+		return nil
+	}
+	return jwks
+}
+
+// jwksFromRecs builds a verification JWKS from recs, excluding revoked records
+// (suspended keys stay published so already-issued tokens still verify — ADR
+// 0028). When signingKey/signingKid are supplied, that kid's entry is forced to
+// signingKey's public half regardless of what the store held, guaranteeing the
+// signing private key and its published verification key are a matched pair even
+// when a concurrent cluster node inserted a different record under the same kid.
+// Unlike buildAuthJWKS it returns a (possibly empty) non-nil JWKS, so a caller
+// can install an empty verification set to stop a revoked kid from verifying.
+func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey *rsa.PrivateKey, signingKid string) *keyfunc.JWKS {
+	// Copy before sorting so the caller's slice (which it may still be iterating)
+	// is not mutated. Oldest-first so that when records share a kid the newest
+	// public key overwrites older ones in the map — matching signing selection.
+	sorted := make([]*interfaces.JwkKeyRec, len(recs))
+	copy(sorted, recs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Id < sorted[j].Id
 	})
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
-	for _, rec := range keys {
-		// Revoked keys are excluded from verification immediately; suspended
-		// keys remain so already-issued tokens still verify (ADR 0028).
+	for _, rec := range sorted {
 		if rec.IsRevoked() {
 			continue
 		}
@@ -618,19 +686,10 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 		})
 	}
 
-	// Always use the caller-supplied signing key for its kid, overriding whatever the
-	// DB returned. This is safe because the caller has the canonical private key in
-	// hand; a concurrent node's conflicting DB record cannot affect signing/verify
-	// consistency.
 	if signingKey != nil && signingKid != "" {
 		givenKeys[signingKid] = keyfunc.NewGivenRSA(&signingKey.PublicKey, keyfunc.GivenKeyOptions{
 			Algorithm: "RS256",
 		})
-	}
-
-	if len(givenKeys) == 0 {
-		ksLog.Error("No valid keys found", "keyName", keyName)
-		return nil
 	}
 
 	return keyfunc.NewGiven(givenKeys)
