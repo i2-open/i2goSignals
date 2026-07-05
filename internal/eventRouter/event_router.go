@@ -236,6 +236,10 @@ type RouterDeps struct {
 	SubjectRelayService *services.SubjectRelayService
 }
 
+// The router is the reset-egress sink EventService reports re-queued events to
+// (ADR 0055 Q91.4), translating each into a source:reset metering observation.
+var _ services.ResetEgressObserver = (*router)(nil)
+
 func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	ctx, cancel := context.WithCancel(context.Background())
 	router := &router{
@@ -264,6 +268,14 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
 		recentOutboundWakes:    make(map[string]time.Time),
+	}
+
+	// Route reset re-deliveries through this router's metering observer. A stream
+	// reset re-queues stored events directly (bypassing fan-out), so EventService
+	// reports each re-queue here and the router emits a source:reset egress
+	// observation to whatever MeteringObserver is registered (ADR 0055 Q91.4).
+	if deps.EventService != nil {
+		deps.EventService.SetResetEgressObserver(router)
 	}
 
 	if deps.PushDelivery != nil {

@@ -1,10 +1,14 @@
 package eventRouter
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,6 +43,88 @@ func (o *recordingMeteringObserver) byDirection(dir Direction) []MeteringObserva
 		}
 	}
 	return out
+}
+
+func (o *recordingMeteringObserver) bySource(src MeteringSource) []MeteringObservation {
+	var out []MeteringObservation
+	for _, obs := range o.snapshot() {
+		if obs.Source == src {
+			out = append(out, obs)
+		}
+	}
+	return out
+}
+
+// TestResetEventStream_EmitsEgressTaggedReset is the Q91.4 billing-escape fix
+// (ADR 0055): ResetEventStream re-queues already-stored events, bypassing the
+// router fan-out where egress is normally metered — so reset re-deliveries used
+// to escape billing entirely. Each re-queued (stream, JTI) must now emit a
+// DirectionEgress observation tagged source:reset (reset is fresh chargeable
+// delivery). A subsequent re-poll of the still-pending events (protocol replay)
+// must emit ZERO additional observations — charged once at reset, free
+// thereafter, per Q91.4 "free by construction".
+func TestResetEventStream_EmitsEgressTaggedReset(t *testing.T) {
+	s := setupDedupRouterPollStream(t)
+
+	observer := &recordingMeteringObserver{}
+	s.h.router.RegisterMeteringObserver(observer)
+
+	ctx := context.Background()
+	state, err := s.h.streamService.GetStreamState(ctx, s.streamID)
+	require.NoError(t, err)
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		token := newRiscToken(fmt.Sprintf("reset-jti-%d", i), dupTestIssuer, s.audience)
+		token.SubjectId = (&goSet.SubjectIdentifier{}).AddEmail(fmt.Sprintf("user%d@example.com", i))
+		require.NoError(t, s.h.router.HandleEvent(token, `{"raw":true}`, s.streamID))
+	}
+
+	// Baseline: fan-out produced n normal (source-empty) egress observations and
+	// no reset-tagged ones yet.
+	require.Len(t, observer.byDirection(DirectionEgress), n, "fan-out egress before reset")
+	require.Empty(t, observer.bySource(SourceReset), "no reset observations before a reset")
+
+	// Reset by date: re-queue every stored, matching, non-operational event —
+	// exactly the predicate the stream-management handler applies.
+	resetDate := time.Now().Add(-time.Hour)
+	err = s.h.router.eventService.ResetEventStream(ctx, s.streamID, "", &resetDate,
+		func(e *model.EventRecord) bool {
+			if e.Operational {
+				return false
+			}
+			return s.h.router.eventService.MatchesStream(state, e)
+		})
+	require.NoError(t, err)
+
+	reset := observer.bySource(SourceReset)
+	require.Len(t, reset, n, "one reset-tagged egress per re-queued (stream, JTI) — date reset")
+	for _, obs := range reset {
+		assert.Equal(t, DirectionEgress, obs.Direction, "reset re-delivery is egress")
+		assert.Equal(t, s.streamID, obs.StreamURN, "reset egress urn is the target stream")
+		require.NotNil(t, obs.Subject, "reset observation carries the event subject")
+	}
+
+	// Protocol replay: re-polling the now-pending events (a failed-ack re-poll)
+	// must NOT re-observe — GetEventIds never re-enters fan-out or reset.
+	before := len(observer.snapshot())
+	_, _ = s.h.router.eventService.GetEventIds(ctx, s.streamID, model.PollParameters{MaxEvents: 100})
+	_, _ = s.h.router.eventService.GetEventIds(ctx, s.streamID, model.PollParameters{MaxEvents: 100})
+	assert.Equal(t, before, len(observer.snapshot()),
+		"re-polling pending events (protocol replay) must emit zero additional observations")
+
+	// Reset by JTI: re-queue the reference event and every following one. Reset to
+	// the first JTI re-delivers all n events again, each a fresh source:reset egress.
+	err = s.h.router.eventService.ResetEventStream(ctx, s.streamID, "reset-jti-0", nil,
+		func(e *model.EventRecord) bool {
+			if e.Operational {
+				return false
+			}
+			return s.h.router.eventService.MatchesStream(state, e)
+		})
+	require.NoError(t, err)
+	assert.Len(t, observer.bySource(SourceReset), 2*n,
+		"a JTI reset re-delivering n events adds n more reset-tagged egress observations")
 }
 
 // TestRegisterMeteringObserver_FiresIngressOnLivePath is the ingress half of the
