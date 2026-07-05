@@ -214,6 +214,80 @@ func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.Deli
 	return nil
 }
 
+// ListDeliveredForStream returns a copy of streamID's delivered events (ADR 0055).
+func (d *EventDAOMemory) ListDeliveredForStream(_ context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	delivered := d.deliveredEvents[streamID]
+	out := make([]interfaces.DeliveredEvent, len(delivered))
+	copy(out, delivered)
+	return out, nil
+}
+
+// RemoveDelivered drops streamID's delivered entry for jti. The global body is
+// left intact — refcount-gated deletion is DeleteBodyIfUnreferenced's job.
+func (d *EventDAOMemory) RemoveDelivered(_ context.Context, jti string, streamID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	delivered, ok := d.deliveredEvents[streamID]
+	if !ok {
+		return nil
+	}
+	kept := delivered[:0:0]
+	for _, evt := range delivered {
+		if evt.Jti != jti {
+			kept = append(kept, evt)
+		}
+	}
+	if len(kept) == 0 {
+		delete(d.deliveredEvents, streamID)
+	} else {
+		d.deliveredEvents[streamID] = kept
+	}
+	return nil
+}
+
+// DeleteBodyIfUnreferenced deletes the global body for jti only when no stream
+// references it in pending or delivered (refcount 0).
+func (d *EventDAOMemory) DeleteBodyIfUnreferenced(_ context.Context, jti string) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, ok := d.events[jti]; !ok {
+		return false, nil
+	}
+	for _, pending := range d.pendingEvents {
+		for _, evt := range pending {
+			if evt.Jti == jti {
+				return false, nil
+			}
+		}
+	}
+	for _, delivered := range d.deliveredEvents {
+		for _, evt := range delivered {
+			if evt.Jti == jti {
+				return false, nil
+			}
+		}
+	}
+
+	delete(d.events, jti)
+	if d.useDisk {
+		d.deleteEventFromDiskLocked(jti)
+	}
+	return true, nil
+}
+
+// CountRetainedForStream returns the count of post-ack-retained (delivered)
+// JTIs for streamID — the daily occupancy sampler's retained_count.
+func (d *EventDAOMemory) CountRetainedForStream(_ context.Context, streamID string) (int64, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return int64(len(d.deliveredEvents[streamID])), nil
+}
+
 func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID string)) error {
 	// Mock implementation: for now, we don't need to do anything here
 	// since HandleEvent already updates local buffers in the router.
@@ -234,6 +308,14 @@ func (d *EventDAOMemory) saveEventToDiskLocked(record *model.EventRecord) error 
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+func (d *EventDAOMemory) deleteEventFromDiskLocked(jti string) {
+	if d.persistDir == "" {
+		return
+	}
+	path := filepath.Join(d.persistDir, "events", jti+".set")
+	_ = os.Remove(path)
 }
 
 func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, error) {

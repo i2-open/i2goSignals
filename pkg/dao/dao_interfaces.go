@@ -71,6 +71,33 @@ type EventDAO interface {
 	// Delivered events
 	MarkDelivered(ctx context.Context, event *DeliverableEvent, ackDate time.Time) error
 
+	// --- Ack-anchored retention purge + occupancy sampling (ADR 0055) ---
+
+	// ListDeliveredForStream returns streamID's delivered (post-ack,
+	// not-yet-purged) events, each carrying its AckDate. It is the enumerator the
+	// per-(stream, JTI) retention clock reads to decide expiry. Order is
+	// unspecified.
+	ListDeliveredForStream(ctx context.Context, streamID string) ([]DeliveredEvent, error)
+
+	// RemoveDelivered drops streamID's delivered entry for jti when its
+	// retention clock fires. It does NOT touch the global event body; body
+	// deletion is refcount-gated via DeleteBodyIfUnreferenced. Removing an entry
+	// that does not exist is not an error.
+	RemoveDelivered(ctx context.Context, jti string, streamID string) error
+
+	// DeleteBodyIfUnreferenced deletes the global event body for jti ONLY when no
+	// stream still references it in pending or delivered (refcount 0 — the body
+	// survives to the maximum effective window across all referencing streams).
+	// Because pending is never purged, a still-pending JTI always keeps its body.
+	// It reports whether the body was deleted; a still-referenced or absent body
+	// is not an error.
+	DeleteBodyIfUnreferenced(ctx context.Context, jti string) (deleted bool, err error)
+
+	// CountRetainedForStream returns the number of post-ack-retained (delivered,
+	// not-yet-purged) JTIs for streamID — the daily occupancy sampler's per-stream
+	// retained_count (pending excluded).
+	CountRetainedForStream(ctx context.Context, streamID string) (int64, error)
+
 	// Change streams
 	WatchPending(ctx context.Context, callback func(jti string, streamID string)) error
 }

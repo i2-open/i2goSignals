@@ -156,6 +156,33 @@ func (d *notifyingEventDAO) MarkDelivered(ctx context.Context, event *interfaces
 	return nil
 }
 
+func (d *notifyingEventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
+	return d.inner.ListDeliveredForStream(ctx, streamID)
+}
+
+func (d *notifyingEventDAO) RemoveDelivered(ctx context.Context, jti string, streamID string) error {
+	if err := d.inner.RemoveDelivered(ctx, jti, streamID); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
+func (d *notifyingEventDAO) DeleteBodyIfUnreferenced(ctx context.Context, jti string) (bool, error) {
+	deleted, err := d.inner.DeleteBodyIfUnreferenced(ctx, jti)
+	if err != nil {
+		return deleted, err
+	}
+	if deleted {
+		d.notify()
+	}
+	return deleted, nil
+}
+
+func (d *notifyingEventDAO) CountRetainedForStream(ctx context.Context, streamID string) (int64, error) {
+	return d.inner.CountRetainedForStream(ctx, streamID)
+}
+
 func (d *notifyingEventDAO) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
 	return d.inner.WatchPending(ctx, callback)
 }

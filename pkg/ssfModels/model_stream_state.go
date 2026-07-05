@@ -106,6 +106,16 @@ type StreamStateRecord struct {
 	// slice — it is settable, persisted, and round-trippable.
 	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitempty" bson:"subject_removal_grace_seconds,omitempty"`
 
+	// RetentionWindowDays is the per-stream event-retention override (ADR 0055,
+	// Q91.1). Like DefaultSubjects it is a goSignals operator knob and is
+	// deliberately kept OFF the SSF wire-format StreamConfiguration — it is NOT
+	// an RFC 8935 StreamConfiguration field. `nil` means inherit the tenancy
+	// default (which itself defaults to keep-forever), so the ack-anchored purge
+	// engine stays dormant until a finite window is set. The effective window is
+	// resolved server-side as stream.RetentionWindowDays ?? bundle default ??
+	// keep-forever. A non-positive value is treated as keep-forever.
+	RetentionWindowDays *int `json:"retention_window_days,omitempty" bson:"retention_window_days,omitempty"`
+
 	// --- SSTP bidirectional pair fields (PRD #154, ADR 0018) ---
 	// A single StreamStateRecord represents both directions of an SSTP pair on
 	// one node: the embedded StreamConfiguration is the transmit (outbound)
@@ -162,6 +172,10 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res := *ss
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
+	if ss.RetentionWindowDays != nil {
+		v := *ss.RetentionWindowDays
+		res.RetentionWindowDays = &v
+	}
 	if ss.SstpInbound != nil {
 		inbound := ss.SstpInbound.DeepCopy()
 		res.SstpInbound = &inbound
@@ -186,6 +200,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.SubjectFilterMode = mod.SubjectFilterMode
 	ss.EventSource = mod.EventSource
 	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
+	ss.RetentionWindowDays = mod.RetentionWindowDays
 	ss.SstpInbound = mod.SstpInbound
 	ss.SstpMethod = mod.SstpMethod
 	ss.PairId = mod.PairId

@@ -80,6 +80,16 @@ func (f *fakeEventDAO) MarkDelivered(_ context.Context, _ *interfaces.Deliverabl
 func (f *fakeEventDAO) WatchPending(_ context.Context, _ func(jti string, streamID string)) error {
 	return nil
 }
+func (f *fakeEventDAO) ListDeliveredForStream(_ context.Context, _ string) ([]interfaces.DeliveredEvent, error) {
+	return nil, nil
+}
+func (f *fakeEventDAO) RemoveDelivered(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeEventDAO) DeleteBodyIfUnreferenced(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeEventDAO) CountRetainedForStream(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
 
 func newTokenWithJTI(jti string) *goSet.SecurityEventToken {
 	token := &goSet.SecurityEventToken{
