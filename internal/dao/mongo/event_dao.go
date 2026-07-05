@@ -324,6 +324,109 @@ func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.Del
 	return err
 }
 
+// ListDeliveredForStream returns streamID's delivered (post-ack) events with
+// their AckDate — the retention purge clock's enumerator (ADR 0055).
+func (d *EventDAOMongo) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
+	c, err := d.deliveredColLoad()
+	if err != nil {
+		return nil, err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return nil, err
+	}
+	cursor, err := c.Find(ctx, bson.M{"sid": sid})
+	if err != nil {
+		eLog.Error("Error listing delivered events", "error", err)
+		return nil, err
+	}
+	var docs []deliveredDoc
+	if err = cursor.All(ctx, &docs); err != nil {
+		eLog.Error("Error parsing delivered events", "error", err)
+		return nil, err
+	}
+	out := make([]interfaces.DeliveredEvent, len(docs))
+	for i, doc := range docs {
+		out[i] = interfaces.DeliveredEvent{
+			DeliverableEvent: interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()},
+			AckDate:          doc.AckDate,
+		}
+	}
+	return out, nil
+}
+
+// RemoveDelivered drops streamID's delivered entry for jti (its retention clock
+// firing). The global body is left untouched.
+func (d *EventDAOMongo) RemoveDelivered(ctx context.Context, jti string, streamID string) error {
+	c, err := d.deliveredColLoad()
+	if err != nil {
+		return err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return err
+	}
+	_, err = c.DeleteOne(ctx, bson.M{"jti": jti, "sid": sid})
+	if err != nil {
+		eLog.Error("Error removing delivered event", "error", err)
+	}
+	return err
+}
+
+// DeleteBodyIfUnreferenced deletes the global body for jti only when no stream
+// still references it in pending or delivered (refcount 0).
+func (d *EventDAOMongo) DeleteBodyIfUnreferenced(ctx context.Context, jti string) (bool, error) {
+	pendingCol, err := d.pendingColLoad()
+	if err != nil {
+		return false, err
+	}
+	deliveredCol, err := d.deliveredColLoad()
+	if err != nil {
+		return false, err
+	}
+	eventCol, err := d.eventColLoad()
+	if err != nil {
+		return false, err
+	}
+
+	pendingRefs, err := pendingCol.CountDocuments(ctx, bson.M{"jti": jti})
+	if err != nil {
+		eLog.Error("Error counting pending refs", "error", err)
+		return false, err
+	}
+	if pendingRefs > 0 {
+		return false, nil
+	}
+	deliveredRefs, err := deliveredCol.CountDocuments(ctx, bson.M{"jti": jti})
+	if err != nil {
+		eLog.Error("Error counting delivered refs", "error", err)
+		return false, err
+	}
+	if deliveredRefs > 0 {
+		return false, nil
+	}
+
+	res, err := eventCol.DeleteOne(ctx, bson.M{"jti": jti})
+	if err != nil {
+		eLog.Error("Error deleting event body", "error", err)
+		return false, err
+	}
+	return res.DeletedCount > 0, nil
+}
+
+// CountRetainedForStream counts streamID's delivered (post-ack-retained) JTIs.
+func (d *EventDAOMongo) CountRetainedForStream(ctx context.Context, streamID string) (int64, error) {
+	c, err := d.deliveredColLoad()
+	if err != nil {
+		return 0, err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return 0, err
+	}
+	return c.CountDocuments(ctx, bson.M{"sid": sid})
+}
+
 func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
 	c, err := d.pendingColLoad()
 	if err != nil {
