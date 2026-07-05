@@ -256,8 +256,8 @@ func (sa *SsfApplication) JwksJsonIssuer(w http.ResponseWriter, r *http.Request)
 	server.JwksJsonIssuerHandler(sa, w, r)
 }
 
-func (sa *SsfApplication) DeleteJwksIssuerKey(w http.ResponseWriter, r *http.Request) {
-	server.DeleteJwksIssuerKeyHandler(sa, w, r)
+func (sa *SsfApplication) SetKeyStatus(w http.ResponseWriter, r *http.Request) {
+	server.SetKeyStatusHandler(sa, w, r)
 }
 
 func (sa *SsfApplication) PollEvents(w http.ResponseWriter, r *http.Request) {

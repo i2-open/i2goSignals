@@ -118,8 +118,12 @@ func TestKeyScopeDeniedRotate(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, status, "key scope must NOT permit force=rotate")
 }
 
-// TestKeyScopeDeniedDelete verifies a key-scoped caller cannot delete a key.
-func TestKeyScopeDeniedDelete(t *testing.T) {
+// TestHardDeleteRouteRemoved verifies the hard-delete HTTP surface is gone: the
+// family policy is revoke/suspend, not hard delete (community ADR 0028 / admin
+// ADR 0013). A DELETE to /key/{keyName} now matches no method on that path, so
+// gorilla/mux returns 405 (route gone). Key material is retired via
+// POST /key/{keyName}/status instead.
+func TestHardDeleteRouteRemoved(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "boot-secret-key")
 	instance, err := createServer(t, "key_delete_test", true)
 	require.NoError(t, err)
@@ -129,7 +133,8 @@ func TestKeyScopeDeniedDelete(t *testing.T) {
 	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, create)
 
 	status := deleteKey(t, instance, "boot-secret-key", "del.example.com")
-	assert.Equal(t, http.StatusForbidden, status, "key scope must NOT permit delete")
+	assert.Contains(t, []int{http.StatusMethodNotAllowed, http.StatusNotFound}, status,
+		"the hard-delete route must be removed")
 }
 
 // TestKeyScopeDeniedUpload verifies a key-scope-only (bootstrap) caller cannot
@@ -165,10 +170,11 @@ func TestAdminCanUploadKey(t *testing.T) {
 		"stream_admin may upload caller-supplied key material")
 }
 
-// TestAdminCanReplaceAndDelete confirms a full stream_admin token retains the
-// ability to replace/rotate/delete (the key-scope restriction is additive, not
-// a regression for admins).
-func TestAdminCanReplaceAndDelete(t *testing.T) {
+// TestAdminCanReplaceHardDeleteGone confirms a full stream_admin token retains
+// the ability to replace (force=replace still uses the KeyService delete Go API
+// internally), while the hard-delete HTTP route is gone for everyone including
+// admins (community ADR 0028): keys are retired via the status route now.
+func TestAdminCanReplaceHardDeleteGone(t *testing.T) {
 	t.Setenv("I2SIG_BOOTSTRAP_TOKEN", "")
 	instance, err := createServer(t, "key_admin_test", true)
 	require.NoError(t, err)
@@ -182,5 +188,6 @@ func TestAdminCanReplaceAndDelete(t *testing.T) {
 	assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, replace, "admin may replace")
 
 	del := deleteKey(t, instance, admin, "adminkey.example.com")
-	assert.Contains(t, []int{http.StatusOK, http.StatusNoContent}, del, "admin may delete")
+	assert.Contains(t, []int{http.StatusMethodNotAllowed, http.StatusNotFound}, del,
+		"the hard-delete route is removed for admins too")
 }

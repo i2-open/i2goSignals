@@ -21,15 +21,21 @@ func (f *failingKeyDAO) FindByKeyName(_ context.Context, _ string) ([]*interface
 	return nil, errors.New("simulated MongoDB error during FindByKeyName")
 }
 
-// failingFindLatestKeyDAO wraps a real in-memory KeyDAO but makes
-// FindLatestByKeyName return a transient (non-ErrKeyNotFound) error, simulating
-// a brief MongoDB outage during the key-load phase of InitializeTokenKey.
+// failingFindLatestKeyDAO wraps a real in-memory KeyDAO but makes the signing-key
+// load path return a transient (non-ErrKeyNotFound) error, simulating a brief
+// MongoDB outage during the key-load phase of InitializeTokenKey. Issuance
+// selection reads via FindByKeyName (latest *active* record, ADR 0028), so both
+// that and the legacy FindLatestByKeyName are faulted here.
 type failingFindLatestKeyDAO struct {
 	interfaces.KeyDAO
 }
 
 func (f *failingFindLatestKeyDAO) FindLatestByKeyName(_ context.Context, _ string) (*interfaces.JwkKeyRec, error) {
 	return nil, errors.New("simulated transient MongoDB error during FindLatestByKeyName")
+}
+
+func (f *failingFindLatestKeyDAO) FindByKeyName(_ context.Context, _ string) ([]*interfaces.JwkKeyRec, error) {
+	return nil, errors.New("simulated transient MongoDB error during FindByKeyName")
 }
 
 // ---- test suite ----

@@ -125,6 +125,15 @@ type KeyDAO interface {
 	FindByStreamID(ctx context.Context, streamID string) (*JwkKeyRec, error)
 	DeleteByKid(ctx context.Context, kid string) error
 	DeleteByKeyName(ctx context.Context, keyName string) error
+	// SetKeyStatus sets the lifecycle timestamps on matching key record(s). A nil
+	// pointer leaves that field unchanged; a non-nil pointer sets it (pass the
+	// zero time to clear — in practice only SuspendedAt is ever cleared). When
+	// kid is non-empty only that record is updated; otherwise every record under
+	// keyName is updated. RevokedAt is write-once: a record that already carries
+	// a RevokedAt is never re-stamped or cleared. Returns the number of records
+	// changed, or ErrKeyNotFound when no record matched keyName/kid. The status
+	// predicate (transition rules) lives in KeyService, not here.
+	SetKeyStatus(ctx context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error)
 	ListKids(ctx context.Context) ([]string, error)
 	ListKeyNames(ctx context.Context) ([]string, error)
 	KeySummary(ctx context.Context, keyName string) (*KeySummary, error)
@@ -177,6 +186,16 @@ type ServerDAO interface {
 // adapter stores this internally as a bson.ObjectID via a private doc type
 // for backward compatibility with existing data; callers must not assume
 // the Mongo serialization format.
+// Key lifecycle status values. Status is DERIVED from the SuspendedAt/RevokedAt
+// timestamps on a JwkKeyRec (see JwkKeyRec.Status) and is never stored — the
+// timestamp representation mirrors TokenRecord/ADR 0022 and leaves room for
+// future-dated or windowed policy without a schema change (ADR 0028).
+const (
+	KeyStatusActive    = "active"    // signing candidate; published in all JWKS
+	KeyStatusSuspended = "suspended" // reversible; not a signing candidate; still published for verification
+	KeyStatusRevoked   = "revoked"   // terminal; not a signing candidate; excluded from JWKS
+)
+
 type JwkKeyRec struct {
 	Id              string `json:"id"`
 	KeyName         string `json:"keyName"`       // primary identifier; replaces Iss/Aud
@@ -187,6 +206,42 @@ type JwkKeyRec struct {
 	KeyBytes        []byte `json:"keyBytes,omitempty"`        // private key (PKCS1); nil for public-only or external
 	PubKeyBytes     []byte `json:"pubKeyBytes,omitempty"`     // public key (PKCS1); nil for external-only
 	ReceiverJwksUrl string `json:"receiverJwksUrl,omitempty"` // external JWKS URL
+
+	// SuspendedAt (reversible) and RevokedAt (terminal, once set never cleared)
+	// are the lifecycle timestamps. Both zero => active. The material and audit
+	// trail are always retained: revoke/suspend never delete the record. See
+	// ADR 0028.
+	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
+	RevokedAt   time.Time `json:"revokedAt,omitzero"`
+}
+
+// IsRevoked reports whether the key has been terminally revoked.
+func (key *JwkKeyRec) IsRevoked() bool { return !key.RevokedAt.IsZero() }
+
+// IsActive reports whether the key is neither suspended nor revoked and is thus
+// a candidate for signing/issuance.
+func (key *JwkKeyRec) IsActive() bool { return key.RevokedAt.IsZero() && key.SuspendedAt.IsZero() }
+
+// Status derives the lifecycle status from the timestamps. Revocation wins over
+// suspension; an untouched record is active.
+func (key *JwkKeyRec) Status() string {
+	if !key.RevokedAt.IsZero() {
+		return KeyStatusRevoked
+	}
+	if !key.SuspendedAt.IsZero() {
+		return KeyStatusSuspended
+	}
+	return KeyStatusActive
+}
+
+// ToKeyState projects the per-kid lifecycle state carried on a KeySummary.
+func (key *JwkKeyRec) ToKeyState() KeyState {
+	return KeyState{
+		Kid:         key.Kid,
+		Status:      key.Status(),
+		SuspendedAt: key.SuspendedAt,
+		RevokedAt:   key.RevokedAt,
+	}
 }
 
 func (key *JwkKeyRec) ToSummary() KeySummary {
@@ -210,19 +265,30 @@ func (key *JwkKeyRec) ToSummary() KeySummary {
 		StreamIds: streamIds,
 		Type:      keyType,
 		JwksUrl:   key.ReceiverJwksUrl,
+		KeyStates: []KeyState{key.ToKeyState()},
 	}
+}
+
+// KeyState carries the derived lifecycle status and timestamps for a single kid
+// so a KeySummary reports per-kid state without a second round trip (ADR 0028).
+type KeyState struct {
+	Kid         string    `json:"kid"`
+	Status      string    `json:"status"` // "active" | "suspended" | "revoked"
+	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
+	RevokedAt   time.Time `json:"revokedAt,omitzero"`
 }
 
 // KeySummary is used to report a key registry entry and its capabilities without exposing key material
 type KeySummary struct {
-	Kids      []string `json:"kid"`
-	KeyName   string   `json:"keyName"`
-	Use       string   `json:"use,omitempty"` // "sig" | "enc"
-	ProjectId string   `json:"projectId,omitempty"`
-	StreamIds []string `json:"streamIds,omitempty"`
-	Type      string   `json:"type"` // "pair" | "public" | "external"
-	JwksUrl   string   `json:"jwksUrl,omitempty"`
-	Rotations int      `json:"rotations,omitempty"`
+	Kids      []string   `json:"kid"`
+	KeyName   string     `json:"keyName"`
+	Use       string     `json:"use,omitempty"` // "sig" | "enc"
+	ProjectId string     `json:"projectId,omitempty"`
+	StreamIds []string   `json:"streamIds,omitempty"`
+	Type      string     `json:"type"` // "pair" | "public" | "external"
+	JwksUrl   string     `json:"jwksUrl,omitempty"`
+	Rotations int        `json:"rotations,omitempty"`
+	KeyStates []KeyState `json:"keyStates,omitempty"` // per-kid lifecycle status + timestamps
 }
 
 func (key KeySummary) AdjustBase(baseUrl *url.URL) KeySummary {

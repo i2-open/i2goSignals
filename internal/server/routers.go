@@ -469,10 +469,10 @@ func (h *HttpRouter) adminRoutes() Routes {
 		},
 
 		Route{
-			"KeyDelete",
-			http.MethodDelete,
-			"/key/{keyName}",
-			h.sa.DeleteKey,
+			"KeyStatus",
+			http.MethodPost,
+			"/key/{keyName}/status",
+			h.sa.SetKeyStatus,
 			false,
 		},
 

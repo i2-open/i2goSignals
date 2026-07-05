@@ -460,46 +460,107 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	writer.WriteHeader(http.StatusOK)
 }
 
-// DeleteKey deletes the keys associated with a specified issuer.
-//
-// Inputs:
-//   - issuer (path): The name of the issuer whose keys are to be deleted.
-//
-// Return values:
-//   - 200 OK: Issuer keys successfully deleted.
-//
-// Errors:
-//   - 403 Forbidden: Invalid permissions.
-//   - 404 Not Found: Issuer keys not found.
-//   - 500 Internal Server Error: Error during deletion process.
-func (sa *SignalsApplication) DeleteKey(w http.ResponseWriter, r *http.Request) {
-	DeleteJwksIssuerKeyHandler(sa, w, r)
+// KeyStatusResponse is the body returned by POST /key/{keyName}/status: the
+// refreshed per-kid summary plus a non-empty Warning when the transition left
+// the keyName with no active signing key (ADR 0028).
+type KeyStatusResponse struct {
+	Summary interfaces.KeySummary `json:"summary"`
+	Warning string                `json:"warning,omitempty"`
 }
 
-func DeleteJwksIssuerKeyHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+// SetKeyStatus implements the key revoke/suspend primitive: a non-destructive
+// lifecycle transition (active/suspended/revoked) over one or all records under
+// a keyName. Unlike the removed hard-delete surface, the key material and audit
+// trail are retained. See community ADR 0028.
+//
+// Inputs:
+//   - keyName (path): the issuer/keyName whose records are transitioned.
+//   - body: SetKeyStatusRequest {status, kid?}. Omitting kid affects all
+//     records under keyName; a supplied kid must belong to keyName.
+//
+// Return values:
+//   - 200 OK: KeyStatusResponse (updated summary + optional warning).
+//
+// Errors:
+//   - 400 Bad Request: malformed body, invalid status, or a transition away
+//     from the terminal revoked state.
+//   - 403 Forbidden: caller lacks stream_admin/root (the bare "key" scope is
+//     denied — status mutation is takeover-class, ADR 0006).
+//   - 404 Not Found: keyName has no records, or the supplied kid does not
+//     belong to keyName.
+func (sa *SignalsApplication) SetKeyStatus(w http.ResponseWriter, r *http.Request) {
+	SetKeyStatusHandler(sa, w, r)
+}
+
+func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
+	// Status mutation is takeover-class: only stream_admin/root, never the bare
+	// "key" scope (ADR 0006's create-allowed / takeover-denied line).
 	authCtx, stat := sa.GetAuth().ValidateAuthorizationAny(r, []string{authSupport.ScopeStreamAdmin, authSupport.ScopeRoot})
 	if stat != http.StatusOK || authCtx == nil {
 		http.Error(w, "Invalid permission", http.StatusForbidden)
 		return
 	}
+
 	vars := mux.Vars(r)
 	rawKeyName := vars["keyName"]
 	if rawKeyName == "" {
 		rawKeyName = vars["issuer"]
 	}
-	keyName, _ := url.QueryUnescape(rawKeyName)
-	err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
+	keyName, err := url.QueryUnescape(rawKeyName)
 	if err != nil {
-		serverLog.Error("Error deleting keys for keyName", keyName, err.Error())
-		if errors.Is(err, interfaces.ErrKeyNotFound) {
+		http.Error(w, "Error malformed keyName encoding", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+	var req model.SetKeyStatusRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	summary, warning, err := sa.GetKeyService().SetKeyStatus(r.Context(), keyName, req.Kid, req.Status)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrKeyStatusInvalid), errors.Is(err, services.ErrKeyStatusTerminal):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, interfaces.ErrKeyNotFound):
 			http.Error(w, "Key not found", http.StatusNotFound)
-			return
+		default:
+			serverLog.Error("Error setting key status", "keyName", keyName, "error", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Flush the event router's cached signing key for this issuer so outbound SET
+	// signing stops using a just-revoked/suspended kid. SetKeyStatus already
+	// refreshed the auth-plane key; the event plane caches issuer keys separately
+	// and is only otherwise flushed on an RFC8935 jws_signature_failed callback.
+	// The real router implements InvalidateIssuerKey; the admin-route surface,
+	// which holds no key cache, does not — hence the capability check (ADR 0028).
+	if er := sa.GetEventRouter(); er != nil {
+		if inv, ok := er.(interface{ InvalidateIssuerKey(string) }); ok {
+			inv.InvalidateIssuerKey(keyName)
+		}
+	}
+
+	resp := KeyStatusResponse{Warning: warning}
+	if summary != nil {
+		resp.Summary = summary.AdjustBase(sa.GetBaseUrl())
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	out, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "Error marshalling response", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	return
+	_, _ = w.Write(out)
 }
 
 func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {

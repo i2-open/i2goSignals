@@ -733,21 +733,19 @@ func (suite *ServerSuite) TestA_GetIssuers() {
 	assert.Contains(suite.T(), names.Issuers, "https://example.com", "Issuer https://example.com returned")
 }
 
+// TestB_DeleteIssuers confirms the hard-delete HTTP surface is gone (community
+// ADR 0028 / admin ADR 0013). DELETE /key/{keyName} matches no method on that
+// path now, so gorilla/mux returns 405. Keys are retired via
+// POST /key/{keyName}/status instead.
 func (suite *ServerSuite) TestB_DeleteIssuers() {
 
-	baseUrl := fmt.Sprintf("http://%s/key/notfound.com", suite.servers[0].host)
+	baseUrl := fmt.Sprintf("http://%s/key/example.com", suite.servers[0].host)
 	req, _ := http.NewRequest(http.MethodDelete, baseUrl, nil)
 	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
 	resp, err := suite.servers[0].client.Do(req)
 	assert.NoError(suite.T(), err, "No error making request")
-	assert.Equal(suite.T(), http.StatusNotFound, resp.StatusCode, "Issuer not found")
-
-	baseUrl = fmt.Sprintf("http://%s/key/example.com", suite.servers[0].host)
-	req, _ = http.NewRequest(http.MethodDelete, baseUrl, nil)
-	req.Header.Set("Authorization", "Bearer "+suite.servers[0].streamMgmtToken)
-	resp, err = suite.servers[0].client.Do(req)
-	assert.NoError(suite.T(), err, "No error making request")
-	assert.Equal(suite.T(), http.StatusOK, resp.StatusCode, "Request completed")
+	assert.Contains(suite.T(), []int{http.StatusMethodNotAllowed, http.StatusNotFound}, resp.StatusCode,
+		"hard-delete route removed")
 }
 
 func (suite *ServerSuite) TestC_RotateIssuerKey() {

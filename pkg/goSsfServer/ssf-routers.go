@@ -262,17 +262,10 @@ func (h *HttpRouter) getRoutes() Routes {
 		},
 
 		Route{
-			"JwksJsonIssuerDelete",
-			http.MethodDelete,
-			"/jwks/{keyName}",
-			h.sa.DeleteJwksIssuerKey,
-			false,
-		},
-		Route{
-			"KeyDelete",
-			http.MethodDelete,
-			"/key/{keyName}",
-			h.sa.DeleteJwksIssuerKey,
+			"KeyStatus",
+			http.MethodPost,
+			"/key/{keyName}/status",
+			h.sa.SetKeyStatus,
 			false,
 		},
 

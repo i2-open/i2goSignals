@@ -209,6 +209,15 @@ func (d *notifyingKeyDAO) DeleteByKeyName(ctx context.Context, keyName string) e
 	return nil
 }
 
+func (d *notifyingKeyDAO) SetKeyStatus(ctx context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
+	n, err := d.inner.SetKeyStatus(ctx, keyName, kid, suspendedAt, revokedAt)
+	if err != nil {
+		return n, err
+	}
+	d.notify()
+	return n, nil
+}
+
 func (d *notifyingKeyDAO) ListKids(ctx context.Context) ([]string, error) {
 	return d.inner.ListKids(ctx)
 }

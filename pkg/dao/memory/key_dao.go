@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
@@ -133,6 +134,33 @@ func (d *KeyDAOMemory) DeleteByKeyName(_ context.Context, keyName string) error 
 	return nil
 }
 
+func (d *KeyDAOMemory) SetKeyStatus(_ context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	updated := 0
+	for _, rec := range d.keys {
+		if rec.KeyName != keyName {
+			continue
+		}
+		if kid != "" && rec.Kid != kid {
+			continue
+		}
+		if suspendedAt != nil {
+			rec.SuspendedAt = *suspendedAt
+		}
+		// RevokedAt is write-once: never overwrite an existing terminal stamp.
+		if revokedAt != nil && rec.RevokedAt.IsZero() {
+			rec.RevokedAt = *revokedAt
+		}
+		updated++
+	}
+	if updated == 0 {
+		return 0, interfaces.ErrKeyNotFound
+	}
+	return updated, nil
+}
+
 func (d *KeyDAOMemory) ListKids(_ context.Context) ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -171,11 +199,14 @@ func (d *KeyDAOMemory) KeySummary(ctx context.Context, keyName string) (*interfa
 	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
 	firstKey := recs[0]
 	var kids []string
+	var states []interfaces.KeyState
 	for _, rec := range recs {
 		kids = append(kids, rec.Kid)
+		states = append(states, rec.ToKeyState())
 	}
 	summary := firstKey.ToSummary()
 	summary.Kids = kids
+	summary.KeyStates = states
 	summary.Rotations = len(recs) - 1
 	return &summary, nil
 }
