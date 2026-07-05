@@ -15,14 +15,38 @@ import (
 
 var esLog = logger.Sub("EVENT_SERVICE")
 
+// ResetEgressObserver is notified once per event that ResetEventStream re-queues
+// onto a stream. A stream reset re-delivers already-stored events as fresh
+// chargeable egress (ADR 0055 Q91.4), but it re-queues them directly — bypassing
+// the event-router fan-out where egress is normally metered — so ResetEventStream
+// reports them here instead. The sink tags the resulting observation source:reset.
+// A protocol replay (a re-poll of a still-pending, unacked event) never enters
+// this path and stays free by construction.
+type ResetEgressObserver interface {
+	ObserveResetEgress(streamID string, event *model.EventRecord)
+}
+
 type EventService struct {
 	eventDAO interfaces.EventDAO
+	// resetEgressObserver, when non-nil, receives one call per event
+	// ResetEventStream re-queues, so reset re-deliveries are metered as fresh
+	// egress. nil (the default) leaves the reset path unmetered — the community
+	// build registers none, mirroring the event-router metering observer.
+	resetEgressObserver ResetEgressObserver
 }
 
 func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 	return &EventService{
 		eventDAO: eventDAO,
 	}
+}
+
+// SetResetEgressObserver installs (or clears, with nil) the sink notified per
+// event re-queued by ResetEventStream. The event router wires itself here at
+// construction so reset re-deliveries flow to the same metering observer the
+// fan-out egress uses (ADR 0055 Q91.4).
+func (s *EventService) SetResetEgressObserver(observer ResetEgressObserver) {
+	s.resetEgressObserver = observer
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
@@ -304,9 +328,21 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	// Now search and re-assign events from the event store
 	var events []*model.EventRecord
 	if jti != "" {
-		// TODO: Implement JTI-based reset (need to add to DAO)
-		esLog.Warn("JTI-based reset not yet implemented, using time-based reset")
-		return errors.New("JTI-based reset not yet implemented")
+		// Reset to a JTI = re-queue that event and every following one (the CLI's
+		// "reset to a JTI and include all following events"). Resolve the reference
+		// JTI to its sort time and reuse the same time-range query — and so the same
+		// metering path — as the date-based reset.
+		ref, ferr := s.eventDAO.FindByJTI(ctx, jti)
+		if ferr != nil {
+			return ferr
+		}
+		if ref == nil {
+			return errors.New("reset error: jti not found")
+		}
+		events, err = s.eventDAO.FindByTimeRange(ctx, ref.SortTime, nil, isStreamEvent)
+		if err != nil {
+			return err
+		}
 	} else if resetDate != nil {
 		events, err = s.eventDAO.FindByTimeRange(ctx, *resetDate, nil, isStreamEvent)
 		if err != nil {
@@ -316,11 +352,19 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 		return errors.New("no reset date or JTI reset point provided")
 	}
 
-	// Re-add events to pending
+	// Re-add events to pending. Each successful re-queue is a fresh chargeable
+	// egress (ADR 0055 Q91.4): reset bypasses the router fan-out where egress is
+	// normally metered, so we report the re-delivery to the reset-egress observer
+	// (tagged source:reset downstream). A failed re-queue is not re-delivered and
+	// so is not metered.
 	for _, event := range events {
 		err = s.AddEventToStream(ctx, event.Jti, streamID)
 		if err != nil {
 			esLog.Error("Error re-adding event to stream during reset", "jti", event.Jti, "streamID", streamID, "error", err)
+			continue
+		}
+		if s.resetEgressObserver != nil {
+			s.resetEgressObserver.ObserveResetEgress(streamID, event)
 		}
 	}
 
