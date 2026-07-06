@@ -5,13 +5,23 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
+
+// captureSink records the occupancy samples SampleOccupancy emits so the test
+// can assert the RetentionEngine read the live store through p.EventDAO.
+type captureSink struct{ samples []services.OccupancySample }
+
+func (c *captureSink) ObserveOccupancy(s services.OccupancySample) {
+	c.samples = append(c.samples, s)
+}
 
 // assertDedupParity exercises the slice #156 cross-provider parity check: a
 // double-AddEvent on the same JTI must return interfaces.ErrDuplicateJTI on
@@ -129,6 +139,70 @@ func TestOpenPersistence_Memory(t *testing.T) {
 	// SSTP pair parity: the bidirectional StreamStateRecord round-trips and is
 	// retrievable by inbound SID and PairId through the memory provider.
 	assertSstpPairParity(t, p)
+
+	_ = p.Storage.Close()
+}
+
+// TestOpenPersistence_EventDAO_LiveInstance proves issue #229 (ADR-0055 A5.2):
+// Persistence exposes the live, storage-backed EventDAO — the SAME instance the
+// router's EventService writes through — so an enterprise embedder can bind
+// services.NewRetentionEngine(p.EventDAO) to the live store. It drives an event
+// to delivered state THROUGH p.EventService and observes it via p.EventDAO, then
+// runs the RetentionEngine sampler/purge against that same store.
+func TestOpenPersistence_EventDAO_LiveInstance(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	p, err := OpenPersistence("memorydb:", "test_persist_eventdao")
+	assert.NoError(t, err)
+	assert.NotNil(t, p)
+	assert.NotNil(t, p.EventDAO, "EventDAO must be exposed on Persistence")
+
+	ctx := context.Background()
+	// The RetentionEngine keys the store by stream.Id.Hex(), so the delivered
+	// streamID must be an ObjectID hex for the sampler/purge to line up.
+	oid := bson.NewObjectID()
+	streamID := oid.Hex()
+
+	// Drive an event THROUGH the router (p.EventService) to delivered state:
+	// AddEvent (insert body) -> AddEventToStream (pending) -> AckEvent (delivered).
+	evt := &goSet.SecurityEventToken{Events: map[string]interface{}{"x": "y"}}
+	evt.ID = "retention-jti-1"
+	_, err = p.EventService.AddEvent(ctx, evt, streamID, "raw-1")
+	assert.NoError(t, err, "AddEvent through the router should succeed")
+	assert.NoError(t, p.EventService.AddEventToStream(ctx, evt.ID, streamID))
+	assert.NoError(t, p.EventService.AckEvent(ctx, evt.ID, streamID, 0))
+
+	// Same-instance visibility: a write performed through EventService is
+	// observable via the EventDAO handle exposed on Persistence.
+	count, err := p.EventDAO.CountRetainedForStream(ctx, streamID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), count, "delivered event must be visible via p.EventDAO")
+
+	delivered, err := p.EventDAO.ListDeliveredForStream(ctx, streamID)
+	assert.NoError(t, err)
+	assert.Len(t, delivered, 1, "delivered list must reflect the router write")
+
+	// The live EventDAO drives a RetentionEngine against the same store.
+	window := 1
+	streams := []model.StreamStateRecord{{Id: oid, RetentionWindowDays: &window}}
+	engine := services.NewRetentionEngine(p.EventDAO)
+
+	// SampleOccupancy reads CountRetainedForStream from the live store.
+	sink := &captureSink{}
+	assert.NoError(t, engine.SampleOccupancy(ctx, time.Now(), "urn:test:server", streams, sink))
+	if assert.Len(t, sink.samples, 1, "sampler should emit one sample from the live store") {
+		assert.Equal(t, int64(1), sink.samples[0].RetainedCount, "sample reflects the retained event")
+	}
+
+	// PurgeExpired at a time past the window purges the delivered body via the
+	// same live store (ackDate is ~now; a future 'now' pushes it past cutoff).
+	purged, err := engine.PurgeExpired(ctx, time.Now().Add(48*time.Hour), streams, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, purged, "expired body should be purged from the live store")
+
+	// Post-purge the live store no longer retains the event.
+	count, err = p.EventDAO.CountRetainedForStream(ctx, streamID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), count, "purge is observable via p.EventDAO")
 
 	_ = p.Storage.Close()
 }

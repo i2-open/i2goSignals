@@ -9,6 +9,7 @@ import (
 
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -55,6 +56,34 @@ func findEventJtiIndex(t *testing.T, p *MongoProvider) (sparse, unique bool, fou
 		}
 	}
 	return false, false, false
+}
+
+// TestGetEventDAO_LiveInstance proves issue #229 on the Mongo path: GetEventDAO
+// returns a non-nil, live, storage-backed EventDAO that is the SAME instance the
+// EventService writes through. A write driven through the router's EventService
+// must be observable via the EventDAO handle. Skips when Mongo is unavailable.
+func TestGetEventDAO_LiveInstance(t *testing.T) {
+	p := openEventIdxProvider(t)
+	ctx := context.Background()
+
+	dao := p.GetEventDAO()
+	if dao == nil {
+		t.Fatal("GetEventDAO must be non-nil")
+	}
+
+	evt := &goSet.SecurityEventToken{Events: map[string]interface{}{"x": "y"}}
+	evt.ID = "eventdao-live-jti"
+	if _, err := p.GetEventService().AddEvent(ctx, evt, "sid-1", "raw-1"); err != nil {
+		t.Fatalf("AddEvent through EventService: %v", err)
+	}
+
+	rec, err := dao.FindByJTI(ctx, "eventdao-live-jti")
+	if err != nil {
+		t.Fatalf("FindByJTI via GetEventDAO: %v", err)
+	}
+	if rec == nil || rec.Jti != "eventdao-live-jti" {
+		t.Fatalf("EventDAO did not observe the router write; got %+v", rec)
+	}
 }
 
 // TestEventJtiIndex_CreatedOnFreshDb: a fresh database's createIndexes run

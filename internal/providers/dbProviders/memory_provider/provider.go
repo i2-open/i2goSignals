@@ -11,6 +11,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -62,6 +63,13 @@ type MemoryProvider struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 
+	// eventDAO is the notifyingEventDAO wrapper the eventService above writes
+	// through. Held so GetEventDAO can hand out the SAME live instance (not the
+	// raw DAO, not a fresh wrapper). Reassigned in buildServices so a
+	// ResetDb(true) rebuild keeps it in lockstep with the new EventService
+	// (issue #229, ADR 0055 A5.2).
+	eventDAO interfaces.EventDAO
+
 	// Direct references to the raw memory DAOs. Services see notifyingDAO
 	// wrappers around these for after-mutation persistence triggering (#44);
 	// PersistenceManager works against the raw DAOs because it needs the
@@ -98,6 +106,11 @@ func (m *MemoryProvider) Coordinator() cluster.ClusterCoordinator {
 func (m *MemoryProvider) GetStreamService() *services.StreamService { return m.streamService }
 func (m *MemoryProvider) GetKeyService() *services.KeyService       { return m.keyService }
 func (m *MemoryProvider) GetEventService() *services.EventService   { return m.eventService }
+
+// GetEventDAO returns the live notifyingEventDAO the EventService writes
+// through — the SAME instance, so reads via this handle see router writes and
+// dirty-tracking notifications still fire (issue #229, ADR 0055 A5.2).
+func (m *MemoryProvider) GetEventDAO() interfaces.EventDAO          { return m.eventDAO }
 func (m *MemoryProvider) GetClientService() *services.ClientService { return m.clientService }
 func (m *MemoryProvider) GetServerService() *services.ServerService { return m.serverService }
 func (m *MemoryProvider) GetTokenService() *services.TokenService   { return m.tokenService }
@@ -122,7 +135,7 @@ func (m *MemoryProvider) Name() string {
 // ResetDb(true) so the wiring stays in one place.
 func (m *MemoryProvider) buildServices() {
 	streamDAO := newNotifyingStreamDAO(m.rawStreamDAO, m.markDirty)
-	eventDAO := newNotifyingEventDAO(m.rawEventDAO, m.markDirty)
+	m.eventDAO = newNotifyingEventDAO(m.rawEventDAO, m.markDirty)
 	keyDAO := newNotifyingKeyDAO(m.rawKeyDAO, m.markDirty)
 	clientDAO := newNotifyingClientDAO(m.rawClientDAO, m.markDirty)
 	serverDAO := newNotifyingServerDAO(m.rawServerDAO, m.markDirty)
@@ -132,7 +145,7 @@ func (m *MemoryProvider) buildServices() {
 	m.tokenService.SetStreamDAO(streamDAO)
 	m.keyService = services.NewKeyService(keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
 	m.streamService = services.NewStreamService(streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
-	m.eventService = services.NewEventService(eventDAO)
+	m.eventService = services.NewEventService(m.eventDAO)
 	m.clientService = services.NewClientService(clientDAO, m.keyService)
 	m.serverService = services.NewServerService(serverDAO)
 	m.subjectFilterService = services.NewSubjectFilterService(memory.NewSubjectFilterDAO())
