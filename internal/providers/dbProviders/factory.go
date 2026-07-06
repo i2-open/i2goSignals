@@ -36,6 +36,12 @@ type Persistence struct {
 	// EventService above writes through — exposed so an enterprise embedder can
 	// bind services.NewRetentionEngine(p.EventDAO) to the running store (issue
 	// #229, ADR 0055 A5.2). Additive and off the SSF wire.
+	//
+	// Lifecycle: like the service references above, the memory adapter swaps
+	// this instance on Storage.ResetDb(true) (Mongo rebinds in place). Callers
+	// must re-read p.EventDAO after Refresh(); a RetentionEngine captured from
+	// the pre-reset value keeps operating on the discarded store, so rebuild it
+	// after a reset on a memory-backed server.
 	EventDAO interfaces.EventDAO
 
 	Coordinator cluster.ClusterCoordinator
