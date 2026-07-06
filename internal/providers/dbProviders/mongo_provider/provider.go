@@ -208,6 +208,13 @@ func (m *MongoProvider) GetSubjectRelayService() *services.SubjectRelayService {
 	return m.subjectRelayService
 }
 
+// GetEventDAO returns the live storage-backed EventDAO — the SAME instance
+// wired into the EventService (initServices). Rebinds on reconnect happen in
+// place via SetCollections, so the instance is stable for the process lifetime.
+// Exposed so dbProviders.Persistence can bind a RetentionEngine to the live
+// store (issue #229, ADR 0055 A5.2).
+func (m *MongoProvider) GetEventDAO() interfaces.EventDAO { return m.eventDAO }
+
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in
 // internal/providers/dbProviders/mongo_provider/test/rebind_test.go to assert
 // that collection rebinding takes effect on the same DAO instance.

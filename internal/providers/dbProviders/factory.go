@@ -8,6 +8,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
 )
@@ -30,6 +31,12 @@ type Persistence struct {
 	TokenService         *services.TokenService
 	SubjectFilterService *services.SubjectFilterService
 	SubjectRelayService  *services.SubjectRelayService
+
+	// EventDAO is the live, storage-backed EventDAO — the SAME instance the
+	// EventService above writes through — exposed so an enterprise embedder can
+	// bind services.NewRetentionEngine(p.EventDAO) to the running store (issue
+	// #229, ADR 0055 A5.2). Additive and off the SSF wire.
+	EventDAO interfaces.EventDAO
 
 	Coordinator cluster.ClusterCoordinator
 	Storage     storage.Storage
@@ -57,6 +64,7 @@ func (p *Persistence) Refresh() {
 	p.TokenService = p.src.GetTokenService()
 	p.SubjectFilterService = p.src.GetSubjectFilterService()
 	p.SubjectRelayService = p.src.GetSubjectRelayService()
+	p.EventDAO = p.src.GetEventDAO()
 }
 
 // serviceSource is the accessor surface present on both *MemoryProvider and
@@ -72,6 +80,7 @@ type serviceSource interface {
 	GetTokenService() *services.TokenService
 	GetSubjectFilterService() *services.SubjectFilterService
 	GetSubjectRelayService() *services.SubjectRelayService
+	GetEventDAO() interfaces.EventDAO
 }
 
 // OpenPersistence detects the database URL and returns the Persistence record
@@ -122,6 +131,7 @@ func persistenceFromMemory(mp *memory_provider.MemoryProvider) *Persistence {
 		TokenService:         mp.GetTokenService(),
 		SubjectFilterService: mp.GetSubjectFilterService(),
 		SubjectRelayService:  mp.GetSubjectRelayService(),
+		EventDAO:             mp.GetEventDAO(),
 		Coordinator:          mp.Coordinator(),
 		Storage:              memory_provider.NewMemoryStorage(mp),
 		src:                  mp,
@@ -139,6 +149,7 @@ func persistenceFromMongo(mp *mongo_provider.MongoProvider) *Persistence {
 		TokenService:         svcSrc.GetTokenService(),
 		SubjectFilterService: svcSrc.GetSubjectFilterService(),
 		SubjectRelayService:  svcSrc.GetSubjectRelayService(),
+		EventDAO:             svcSrc.GetEventDAO(),
 		Coordinator:          mp.Coordinator(),
 		Storage:              mongo_provider.NewMongoStorage(mp),
 		src:                  mp,
