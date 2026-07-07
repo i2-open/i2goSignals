@@ -42,7 +42,8 @@ DOCKER_BINS := goSignals goSignalsServer goSsfServer cluster-monitor genTlsKeys 
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
-    run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals
+    run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals \
+    seams
 
 all: build
 
@@ -257,3 +258,22 @@ dev-clean:
 # Start the docker-compose.yml demo cluster.
 run: build build-docker
 	$(DOCKER) compose -f docker-compose.yml up -d
+
+# Cross-repo seam self-check (family "make seams" contract).
+# community is a dependency ROOT (no Go sibling modules depend UP into it), so
+# the wide workspace degenerates to `use .`: we spin up an EPHEMERAL go.work,
+# compile + vet the whole module through it, then delete it. go.work is never
+# committed — the git-tag pin stays the single source of truth (ADR 0048).
+# `go build ./...` and `go vet ./...` are both hard gates: a broken seam fails
+# the compile, and vet must be clean. (The formerly-documented generated-code
+# diagnostics — duplicate JSON tags in pkg/ssfModels / pkg/goScim, unkeyed bson.E
+# in cmd/cluster-monitor — have been fixed on the release branch.)
+seams:
+	@echo ">> make seams: ephemeral wide go.work self-check (community = dependency root)"
+	@rm -f go.work go.work.sum
+	@trap 'rm -f go.work go.work.sum' EXIT INT TERM; \
+	  $(GO) work init && \
+	  $(GO) work use . && \
+	  echo ">> go build ./..." && $(GO) build ./... && \
+	  echo ">> go vet ./..." && $(GO) vet ./... && \
+	  echo ">> make seams: OK (wide-workspace build + vet green)"

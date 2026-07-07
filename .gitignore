@@ -37,3 +37,7 @@
 /.idea/vcs.xml
 __debug_bin*
 /graphify-out/
+# Ephemeral go.work written by `make seams`; the git-tag pin is the single
+# source of truth for cross-repo deps, so go.work is never committed (ADR 0048).
+/go.work
+/go.work.sum
