@@ -264,11 +264,10 @@ run: build build-docker
 # the wide workspace degenerates to `use .`: we spin up an EPHEMERAL go.work,
 # compile + vet the whole module through it, then delete it. go.work is never
 # committed — the git-tag pin stays the single source of truth (ADR 0048).
-# `go build ./...` is the load-bearing gate (a broken seam fails the compile);
-# `go vet ./...` runs advisory because this repo carries documented, pre-existing
-# generated-code diagnostics (duplicate JSON tags in pkg/ssfModels / pkg/goScim,
-# unkeyed bson.E in cmd/cluster-monitor — see CLAUDE.md) that predate this target
-# and are out of scope to churn here.
+# `go build ./...` and `go vet ./...` are both hard gates: a broken seam fails
+# the compile, and vet must be clean. (The formerly-documented generated-code
+# diagnostics — duplicate JSON tags in pkg/ssfModels / pkg/goScim, unkeyed bson.E
+# in cmd/cluster-monitor — have been fixed on the release branch.)
 seams:
 	@echo ">> make seams: ephemeral wide go.work self-check (community = dependency root)"
 	@rm -f go.work go.work.sum
@@ -276,6 +275,5 @@ seams:
 	  $(GO) work init && \
 	  $(GO) work use . && \
 	  echo ">> go build ./..." && $(GO) build ./... && \
-	  echo ">> go vet ./... (advisory — see target comment)" && \
-	  { $(GO) vet ./... || echo ">> go vet reported pre-existing diagnostics (advisory, non-fatal)"; } && \
-	  echo ">> make seams: OK (wide-workspace build green)"
+	  echo ">> go vet ./..." && $(GO) vet ./... && \
+	  echo ">> make seams: OK (wide-workspace build + vet green)"
