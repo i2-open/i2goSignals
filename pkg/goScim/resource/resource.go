@@ -22,9 +22,9 @@ type ScimResource struct {
 	Id         string
 	ExternalId string
 	Meta       Meta
-	User
-	Group
-	Extensions
+	User       User
+	Group      Group
+	Extensions Extensions
 }
 
 func GenerateFakeUser(basePath string) ScimResource {
