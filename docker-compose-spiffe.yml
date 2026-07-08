@@ -527,7 +527,7 @@ services:
       I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4.7
+    image: quay.io/keycloak/keycloak:26.6.4
     container_name: keycloak-signals
     hostname: keycloak
     networks:
