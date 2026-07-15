@@ -147,7 +147,9 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 		}
 	}
 
-	_ = unverified // peek result was used for iss/aud pre-check only; never returned as trust
+	// The peek result (`unverified`) was consumed above for iss/aud pre-check
+	// only and is intentionally discarded here — the accepted token below is
+	// the signature-verified one (ADR-0066 §D3).
 
 	return &ReceivedSET{
 		Token:       token,
