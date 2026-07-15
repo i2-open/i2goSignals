@@ -114,11 +114,6 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 	return nil
 }
 
-// validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
-// the request before any state is mutated (PRD #97 issue #98). Sits alongside
-// validateSubjectFilterMode in the create/update pipeline. Only the request
-// value is checked here — the WARN-and-drop for a receiver stream is the
-// caller's responsibility, since the rejection must be field-shape only.
 // normalizeStreamTrustFields applies the "NONE" → empty normalization to the
 // stream's IssuerJWKSUrl. Some SCIM peers signal "the key is internal to this
 // server" by literally writing "NONE" for IssuerJWKSUrl; downstream code and
@@ -177,6 +172,11 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 	return nil
 }
 
+// validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
+// the request before any state is mutated (PRD #97 issue #98). Sits alongside
+// validateSubjectFilterMode in the create/update pipeline. Only the request
+// value is checked here — the WARN-and-drop for a receiver stream is the
+// caller's responsibility, since the rejection must be field-shape only.
 func validateSubjectRemovalGrace(grace int) error {
 	if grace < 0 {
 		return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
