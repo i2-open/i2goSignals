@@ -1,8 +1,11 @@
 package server
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 
+	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -11,12 +14,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// unsignedSet renders a SET to its compact (alg=none) JWS string so the parse
-// helper can validate it with goSetPush.ParseReceivedSET (JWKS=nil verifies an
-// alg=none token's claims without a signature).
-func unsignedSet(t *testing.T, jti, iss, aud string) string {
+// signedSet renders a SET to its compact JWS string using RS256 and returns
+// both the wire string and a matching JWKS the receiver can use to verify it.
+// Per ADR-0066 §D2 the receiver requires a configured trust anchor — the
+// alg=none unsigned test-fixture path is retired (goSet.JWS with nil key is
+// now refused, and ParseReceivedSET rejects any SET when JWKS is nil).
+func signedSet(t *testing.T, jti, iss, aud string) (string, *keyfunc.JWKS) {
 	t.Helper()
-	tok := &goSet.SecurityEventToken{
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	set := goSet.SecurityEventToken{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:   iss,
 			Audience: jwt.ClaimStrings{aud},
@@ -25,10 +33,16 @@ func unsignedSet(t *testing.T, jti, iss, aud string) string {
 			"https://schemas.openid.net/secevent/risc/event-type/account-disabled": map[string]interface{}{},
 		},
 	}
-	tok.ID = jti
-	s, err := tok.JWT().SignedString(jwt.UnsafeAllowNoneSignatureType)
+	set.ID = jti
+	// Force a kid the JWKS below is keyed by.
+	set.Kid = "kid-" + jti
+
+	signed, err := set.JWS(jwt.SigningMethodRS256, priv)
 	require.NoError(t, err)
-	return s
+
+	given := keyfunc.NewGivenRSA(&priv.PublicKey, keyfunc.GivenKeyOptions{Algorithm: "RS256"})
+	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{set.Kid: given})
+	return signed, jwks
 }
 
 // TestParseSstpInboundSets_ValidSetIsParsed: each byte-identical RFC8935 SET in
@@ -36,10 +50,11 @@ func unsignedSet(t *testing.T, jti, iss, aud string) string {
 // returned as an SstpInboundSet carrying the verified token + raw string (Q5.1).
 func TestParseSstpInboundSets_ValidSetIsParsed(t *testing.T) {
 	const iss, aud = "https://peer.example", "https://local.example"
-	raw := unsignedSet(t, "jti-ok", iss, aud)
+	raw, jwks := signedSet(t, "jti-ok", iss, aud)
 	msg := goSetSstp.Message{Sets: map[string]string{"jti-ok": raw}}
 
 	parsed, setErrs := parseSstpInboundSets(msg, goSetPush.ReceiverConfig{
+		JWKS:              jwks,
 		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{aud},
 	})
@@ -54,13 +69,16 @@ func TestParseSstpInboundSets_ValidSetIsParsed(t *testing.T) {
 
 // TestParseSstpInboundSets_BadIssuerYieldsSetErr: a SET whose issuer does not
 // match the rx-side expected issuer is rejected per-JTI (mapped to the SSTP §2.3
-// vocabulary), not parsed into the inbound batch.
+// vocabulary), not parsed into the inbound batch. The bad-issuer decision fires
+// on the pre-verify Peek per ADR-0066 §D3 (which is why no JWKS is needed here —
+// the receiver never reaches the verify step).
 func TestParseSstpInboundSets_BadIssuerYieldsSetErr(t *testing.T) {
 	const aud = "https://local.example"
-	raw := unsignedSet(t, "jti-bad-iss", "https://attacker.example", aud)
+	raw, jwks := signedSet(t, "jti-bad-iss", "https://attacker.example", aud)
 	msg := goSetSstp.Message{Sets: map[string]string{"jti-bad-iss": raw}}
 
 	parsed, setErrs := parseSstpInboundSets(msg, goSetPush.ReceiverConfig{
+		JWKS:              jwks,
 		ExpectedIssuer:    "https://peer.example",
 		ExpectedAudiences: []string{aud},
 	})

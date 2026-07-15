@@ -57,10 +57,13 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 
 	tokenString := string(bodyBytes)
 
-	// Parse unverified first to check issuer/audience before signature verification.
-	// This ensures we return the correct RFC8935 error code (invalid_issuer, invalid_audience)
-	// rather than a generic invalid_request when the JWKS kid lookup fails due to a wrong issuer.
-	unverified, err := goSet.Parse(tokenString, nil)
+	// Peek at the token's claims (UNVERIFIED) to check issuer/audience before
+	// signature verification. This ensures we return the correct RFC8935 error
+	// code (invalid_issuer, invalid_audience) rather than a generic
+	// invalid_request when the JWKS kid lookup fails due to a wrong issuer.
+	// Per ADR-0066 §D3 the peek result is never accepted as the trust decision —
+	// the accepted token below is the verified one only.
+	unverified, err := goSet.Peek(tokenString)
 	if err != nil {
 		log.Warn("RFC8935: Error parsing SET token", "error", err)
 		return nil, &DeliveryErr{
@@ -98,39 +101,55 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 		}
 	}
 
-	// Verify the signature. With a JWKS configured we always verify. Under the
-	// signing-only posture (RequireSignature, #184) the JWS signature is the trust
-	// gate, so a verify failure is jws_signature_failed (the RFC8935 §2.4
-	// rotate-and-retry signal) and a missing trust anchor (nil JWKS) is itself a
-	// hard reject — the SET must never be accepted unverified. Without the posture
-	// the prior behavior is preserved: a nil JWKS skips verification and a verify
-	// failure is invalid_request. Issuer mismatch was already handled above, so a
-	// failure here is a bad signature, not a trust failure. Signature failures are
-	// expected peer events, hence WARN, not ERROR (CONTEXT.md log-level policy).
-	token := unverified
-	if config.JWKS != nil {
-		token, err = goSet.Parse(tokenString, config.JWKS)
-		if err != nil {
-			if config.RequireSignature {
-				log.Warn("RFC8935: SET signature verification failed (signing-only)", "error", err)
-				return nil, &DeliveryErr{
-					ErrCode:     ErrJwsSignatureFailed,
-					Description: "The SET signature could not be validated.",
-				}
-			}
-			log.Warn("RFC8935: Error validating SET token signature", "error", err)
+	// Verify the signature. Per ADR-0066 §D2 the "None + unverified" state is
+	// unrepresentable: every business stream MUST have at least one active
+	// authentication layer (L2 channel auth OR L3 SET-signature verification
+	// against a configured trust root). Stream-config validation enforces this
+	// at configure time (i2goSignals#235); this receiver enforces it defensively
+	// at runtime — a nil JWKS is always a hard reject, an unverified parse is
+	// never the accepted token.
+	//
+	// Issuer mismatch was already handled above, so a failure here is a bad
+	// signature, not a trust failure. Signature failures are expected peer
+	// events, hence WARN, not ERROR (CONTEXT.md log-level policy).
+	if config.JWKS == nil {
+		if config.RequireSignature {
+			log.Warn("RFC8935: SET signature required but no JWKS available to verify (signing-only)")
 			return nil, &DeliveryErr{
-				ErrCode:     ErrInvalidRequest,
-				Description: "The request could not be parsed as a SET.",
+				ErrCode:     ErrJwsSignatureFailed,
+				Description: "The SET signature could not be validated.",
 			}
 		}
-	} else if config.RequireSignature {
-		log.Warn("RFC8935: SET signature required but no JWKS available to verify (signing-only)")
+		// Defense in depth for ADR-0066 §D2: reaching this branch means the
+		// stream is configured without a trust anchor and without transport
+		// auth as the signature gate. Stream-config validation should have
+		// prevented this; reject the delivery rather than accept unverified.
+		log.Warn("RFC8935: no JWKS configured; refusing to accept unverified SET (ADR-0066)")
 		return nil, &DeliveryErr{
-			ErrCode:     ErrJwsSignatureFailed,
-			Description: "The SET signature could not be validated.",
+			ErrCode:     ErrInvalidRequest,
+			Description: "The SET could not be verified: no trust anchor is configured.",
 		}
 	}
+
+	token, err := goSet.Parse(tokenString, config.JWKS)
+	if err != nil {
+		if config.RequireSignature {
+			log.Warn("RFC8935: SET signature verification failed (signing-only)", "error", err)
+			return nil, &DeliveryErr{
+				ErrCode:     ErrJwsSignatureFailed,
+				Description: "The SET signature could not be validated.",
+			}
+		}
+		log.Warn("RFC8935: Error validating SET token signature", "error", err)
+		return nil, &DeliveryErr{
+			ErrCode:     ErrInvalidRequest,
+			Description: "The request could not be parsed as a SET.",
+		}
+	}
+
+	// The peek result (`unverified`) was consumed above for iss/aud pre-check
+	// only and is intentionally discarded here — the accepted token below is
+	// the signature-verified one (ADR-0066 §D3).
 
 	return &ReceivedSET{
 		Token:       token,

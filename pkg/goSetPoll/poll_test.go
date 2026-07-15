@@ -247,8 +247,9 @@ func TestPollRaw_ConnectionError(t *testing.T) {
 
 func TestPoll_WithValidSETs(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://issuer.example.com", []string{"https://aud.example.com"}, key)
-	jti2, token2 := createTestSET(t, "https://issuer.example.com", []string{"https://aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, []string{"https://aud.example.com"}, key)
+	jti2, token2 := createTestSET(t, iss, []string{"https://aud.example.com"}, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -265,7 +266,8 @@ func TestPoll_WithValidSETs(t *testing.T) {
 
 	parsed, status, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
 		EndpointURL:       server.URL,
-		ExpectedIssuer:    "https://issuer.example.com",
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{"https://aud.example.com"},
 	})
 
@@ -376,7 +378,11 @@ func TestPoll_RequireSignature_BadSignatureRejected(t *testing.T) {
 
 func TestPoll_IssuerValidationError(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://wrong-issuer.example.com", nil, key)
+	// Create a well-signed SET whose iss does not match ExpectedIssuer. The
+	// key is registered under the token's actual iss so signature verification
+	// succeeds; the iss mismatch surfaces as invalid_issuer (post-verify).
+	tokenIss := "https://wrong-issuer.example.com"
+	jti1, token1 := createTestSET(t, tokenIss, nil, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -390,6 +396,7 @@ func TestPoll_IssuerValidationError(t *testing.T) {
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
 		EndpointURL:    server.URL,
+		JWKS:           jwksForKey(t, tokenIss, key),
 		ExpectedIssuer: "https://expected-issuer.example.com",
 	})
 
@@ -401,7 +408,8 @@ func TestPoll_IssuerValidationError(t *testing.T) {
 
 func TestPoll_AudienceValidationError(t *testing.T) {
 	key := generateTestKey(t)
-	jti1, token1 := createTestSET(t, "https://issuer.example.com", []string{"https://wrong-aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, []string{"https://wrong-aud.example.com"}, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -415,6 +423,7 @@ func TestPoll_AudienceValidationError(t *testing.T) {
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
 		EndpointURL:       server.URL,
+		JWKS:              jwksForKey(t, iss, key),
 		ExpectedAudiences: []string{"https://expected-aud.example.com"},
 	})
 
@@ -425,6 +434,12 @@ func TestPoll_AudienceValidationError(t *testing.T) {
 }
 
 func TestPoll_MalformedSET(t *testing.T) {
+	// Malformed SET is refused at parse time; with a JWKS present it becomes
+	// jws_signature_failed under RequireSignature, and invalid_request without.
+	// We test the no-RequireSignature branch: invalid_request classification.
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
 			Sets: map[string]string{
@@ -439,6 +454,7 @@ func TestPoll_MalformedSET(t *testing.T) {
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
 		EndpointURL: server.URL,
+		JWKS:        jwksForKey(t, iss, key),
 	})
 
 	require.NoError(t, err)
@@ -449,7 +465,8 @@ func TestPoll_MalformedSET(t *testing.T) {
 
 func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	key := generateTestKey(t)
-	goodJti, goodToken := createTestSET(t, "https://issuer.example.com", nil, key)
+	iss := "https://issuer.example.com"
+	goodJti, goodToken := createTestSET(t, iss, nil, key)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := PollResponse{
@@ -466,7 +483,8 @@ func TestPoll_MixedValidAndInvalid(t *testing.T) {
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
 		EndpointURL:    server.URL,
-		ExpectedIssuer: "https://issuer.example.com",
+		JWKS:           jwksForKey(t, iss, key),
+		ExpectedIssuer: iss,
 	})
 
 	require.NoError(t, err)
@@ -474,6 +492,35 @@ func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	assert.Contains(t, parsed.ParsedSETs, goodJti)
 	assert.Len(t, parsed.Errors, 1)
 	assert.Contains(t, parsed.Errors, "bad-jti")
+}
+
+// TestPoll_NoJWKS_AlwaysRejected pins the ADR-0066 §D2 defense-in-depth: even
+// without RequireSignature, a poll receiver with no configured trust anchor
+// must never accept a SET — the "None + unverified" state is unrepresentable.
+// If this test ever starts accepting the token, the injection hole has
+// reopened.
+func TestPoll_NoJWKS_AlwaysRejected(t *testing.T) {
+	key := generateTestKey(t)
+	iss := "https://issuer.example.com"
+	jti1, token1 := createTestSET(t, iss, nil, key)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PollResponse{Sets: map[string]string{jti1: token1}})
+	}))
+	defer server.Close()
+
+	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		EndpointURL: server.URL,
+		// no JWKS, no RequireSignature — the receiver must still refuse.
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, parsed.ParsedSETs, "no SET may be accepted without a configured trust anchor (ADR-0066 §D2)")
+	require.Contains(t, parsed.Errors, jti1)
+	assert.Equal(t, "invalid_request", parsed.Errors[jti1].Error)
+	assert.Contains(t, parsed.Errors[jti1].Description, "no trust anchor")
 }
 
 func TestPoll_EmptyResponse(t *testing.T) {
