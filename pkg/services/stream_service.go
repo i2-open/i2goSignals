@@ -119,6 +119,64 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 // validateSubjectFilterMode in the create/update pipeline. Only the request
 // value is checked here — the WARN-and-drop for a receiver stream is the
 // caller's responsibility, since the rejection must be field-shape only.
+// normalizeStreamTrustFields applies the "NONE" → empty normalization to the
+// stream's IssuerJWKSUrl. Some SCIM peers signal "the key is internal to this
+// server" by literally writing "NONE" for IssuerJWKSUrl; downstream code and
+// the validateBusinessStreamSecurity invariant expect an empty value in that
+// case. Case-insensitive per the historical CreateStream normalization.
+func normalizeStreamTrustFields(cfg *model.StreamConfiguration) {
+	if cfg == nil {
+		return
+	}
+	if strings.EqualFold(cfg.IssuerJWKSUrl, "NONE") {
+		cfg.IssuerJWKSUrl = ""
+	}
+}
+
+// validateBusinessStreamSecurity enforces the ADR-0066 §D2 invariant: every
+// business stream MUST have at least one active authentication layer — L2
+// channel auth (bearer / mTLS), OR L3 SET-signature verification against a
+// configured trust root (IssuerJWKSUrl + Iss).
+//
+// In this codebase, the receive-side L2 posture is represented by SigningOnly:
+// when SigningOnly is TRUE the transport bearer requirement is dropped
+// (see internal/server/api_sstp.go and internal/server/api_receiver.go under
+// #184), so the ONLY remaining trust layer is the SET signature — and that
+// requires a real trust anchor (Iss + IssuerJWKSUrl). When SigningOnly is
+// FALSE the bearer requirement is in force and the L2 layer is active; a
+// trust anchor is still allowed (belt-and-suspenders) but is not required.
+//
+// This function is invariant-only: it does NOT validate SSF-shape fields or
+// operator knobs. Call this from every create/update entry point, and from
+// startup receiver-stream loading, so a persisted-but-invalid configuration
+// cannot go live.
+//
+// The invariant guard is expressed positively so a diff or a reviewer can
+// see it at a glance:
+//   - if L2 = None (SigningOnly): trust root MUST be configured.
+//   - otherwise: no additional guard.
+//
+// The "None + unverified" state is not representable through this validator.
+func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
+	if !cfg.SigningOnly {
+		// L2 (bearer) is the active authentication layer — invariant satisfied.
+		return nil
+	}
+	// L2 = None; a trust anchor (Iss + IssuerJWKSUrl) is mandatory (ADR-0066 §D2).
+	if strings.EqualFold(cfg.IssuerJWKSUrl, "NONE") {
+		// Defensive: callers should have normalized this to "" before validating.
+		return errors.New(
+			"signingOnly (L2=None) requires a configured trust root — " +
+				"IssuerJWKSUrl 'NONE' is not a trust root (ADR-0066 §D2)")
+	}
+	if cfg.Iss == "" || cfg.IssuerJWKSUrl == "" {
+		return errors.New(
+			"signingOnly (L2=None) requires both iss and issuerJWKSUrl to be " +
+				"configured — 'None + unverified' is not a configurable state (ADR-0066 §D2)")
+	}
+	return nil
+}
+
 func validateSubjectRemovalGrace(grace int) error {
 	if grace < 0 {
 		return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
@@ -268,10 +326,8 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	// Normalise IssuerJWKSUrl == "NONE" (any case) to the empty string. SCIM
 	// servers signal "key is internal to this server" via "NONE"; downstream
-	// code expects an empty value.
-	if strings.EqualFold(request.IssuerJWKSUrl, "NONE") {
-		request.IssuerJWKSUrl = ""
-	}
+	// code and the ADR-0066 §D2 invariant expect an empty value.
+	normalizeStreamTrustFields(&request.StreamConfiguration)
 
 	// Validate goSignals-specific knobs before any state is mutated. The SSF
 	// §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
@@ -280,13 +336,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
-	// Signing-only receive posture guardrail (#184): a stream that gates trust on
-	// the SET's JWS signature (rather than a transport bearer) MUST carry an explicit
-	// trust anchor — the issuer it trusts plus where that issuer's keys live. We
-	// validate the request as supplied (before Iss is defaulted to the local issuer),
-	// so signingOnly can never be silently enabled without a real trust anchor.
-	if request.SigningOnly && (request.Iss == "" || request.IssuerJWKSUrl == "") {
-		return model.StreamConfiguration{}, errors.New("signingOnly requires both iss and issuerJWKSUrl to be configured")
+	// ADR-0066 §D2 invariant — "None + unverified" is not a configurable state
+	// (i2goSignals#235). We validate the request as supplied (before Iss is
+	// defaulted to the local issuer), so signingOnly can never be silently
+	// enabled without a real trust anchor.
+	if err := validateBusinessStreamSecurity(request.StreamConfiguration); err != nil {
+		return model.StreamConfiguration{}, err
 	}
 
 	mid := bson.NewObjectID()
@@ -1108,14 +1163,17 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 
 	// Signing-only posture (#184) is settable on receiver streams via update; it is a
-	// no-op on transmitter streams. Apply the same trust-anchor guardrail as create:
-	// the resulting stream must name both an issuer and a JWKS URL when signing-only.
+	// no-op on transmitter streams. Normalize the NONE→empty JWKS-URL sentinel
+	// exactly as CreateStream does — the invariant validator below assumes the
+	// normalized form. Then apply the ADR-0066 §D2 invariant (i2goSignals#235)
+	// so the "None + unverified" state is unreachable via update.
 	switch config.Delivery.GetMethod() {
 	case model.ReceivePoll, model.ReceivePush:
 		config.SigningOnly = configReq.SigningOnly
 	}
-	if config.SigningOnly && (config.Iss == "" || config.IssuerJWKSUrl == "") {
-		return nil, errors.New("signingOnly requires both iss and issuerJWKSUrl to be configured")
+	normalizeStreamTrustFields(config)
+	if err := validateBusinessStreamSecurity(*config); err != nil {
+		return nil, err
 	}
 
 	streamRec.StreamConfiguration = *config
@@ -1392,6 +1450,23 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 	res := map[string]*model.StreamStateRecord{}
 	for _, streamState := range recs {
 		state := streamState
+
+		// ADR-0066 §D2 (i2goSignals#235) fail-closed startup guard: if a
+		// persisted stream violates the "at least one active auth layer"
+		// invariant — i.e. it was configured by an older validator that let
+		// "None + unverified" through — disable it here rather than surface a
+		// live unauthenticated event-injection endpoint. Operator must
+		// reconfigure it (with a JWKS URL, or SigningOnly=false) before it
+		// will accept traffic again. A single WARN with the SID + the concrete
+		// violation makes the remediation obvious.
+		if err := s.disableIfSecurityInvariantViolated(ctx, &state); err != nil {
+			// Persisting the disabled status failed — do NOT surface the
+			// stream: skip loading it entirely so it cannot serve requests.
+			ssLog.Error("Fail-closed: skipping load of security-invariant-violating stream",
+				"sid", state.StreamConfiguration.Id, "error", err)
+			continue
+		}
+
 		// An SSTP pair receives on its inbound direction: preload the inbound JWKS
 		// keyed under the rx-side SID (== SstpInbound.Id), the key the receive path
 		// looks up (finding #1/#2/#10). The tx-side primary config holds no inbound
@@ -1411,6 +1486,52 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 	s.receiverStreams = res
 	s.mu.Unlock()
 	return res
+}
+
+// disableIfSecurityInvariantViolated re-validates a persisted receiver stream
+// against ADR-0066 §D2 at load time and, if the invariant is violated, marks
+// the stream disabled with a clear operator-visible error message. The
+// resulting record is written back through the DAO so the disabled state
+// survives a restart. Returns any DAO write error so the caller can decide
+// whether to surface the stream at all.
+//
+// The invariant is applied to both the primary StreamConfiguration and the
+// SstpInbound leg (an SSTP pair's rx-side has its own iss/JWKS/signing-only
+// posture). If either violates, the pair is disabled — a partially-invariant
+// pair cannot safely accept inbound events.
+func (s *StreamService) disableIfSecurityInvariantViolated(
+	ctx context.Context, rec *model.StreamStateRecord,
+) error {
+	normalizeStreamTrustFields(&rec.StreamConfiguration)
+	if err := validateBusinessStreamSecurity(rec.StreamConfiguration); err != nil {
+		return s.disableInvariantViolation(ctx, rec, "primary", err)
+	}
+	if rec.SstpInbound != nil {
+		normalizeStreamTrustFields(rec.SstpInbound)
+		if err := validateBusinessStreamSecurity(*rec.SstpInbound); err != nil {
+			return s.disableInvariantViolation(ctx, rec, "sstp-inbound", err)
+		}
+	}
+	return nil
+}
+
+// disableInvariantViolation writes the fail-closed disabled state back to the
+// DAO and emits a single WARN naming the violation source ("primary" vs
+// "sstp-inbound"), the stream SID, and the invariant error. Split out from
+// disableIfSecurityInvariantViolated so both legs share the same disable
+// path.
+func (s *StreamService) disableInvariantViolation(
+	ctx context.Context, rec *model.StreamStateRecord, leg string, invariantErr error,
+) error {
+	sid := rec.StreamConfiguration.Id
+	ssLog.Warn("Fail-closed: disabling receiver stream that violates ADR-0066 §D2 (None + unverified)",
+		"sid", sid, "leg", leg, "invariant", invariantErr.Error())
+	rec.Status = model.StreamStateDisable
+	rec.ErrorMsg = "ADR-0066 §D2 invariant violation (" + leg + "): " + invariantErr.Error()
+	if err := s.streamDAO.Update(ctx, rec); err != nil {
+		return fmt.Errorf("persist disabled state: %w", err)
+	}
+	return nil
 }
 
 // isPermanentJwksError determines if a JWKS loading error is permanent (should disable stream)
