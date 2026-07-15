@@ -163,16 +163,32 @@ func TestSetJws(t *testing.T) {
 
 	assert.Truef(t, slices.Contains([]string(newSet.Audience), "cluster.example.com"), "Contains audience")
 
-	unsignedString, err := testSet.JWS(jwt.SigningMethodNone, nil)
-	fmt.Println("Alg=None unsigned value")
+	// ADR-0066 §D3: JWS with nil key is refused (alg=none production removed).
+	_, errUnsigned := testSet.JWS(jwt.SigningMethodNone, nil)
+	assert.Error(t, errUnsigned, "JWS with nil key must be refused (ADR-0066 §D3)")
+	assert.Contains(t, errUnsigned.Error(), "alg=none production removed", "Refusal must cite the ADR-0066 rationale")
+
+	// Peek supports explicit unverified inspection for routing/display only.
+	// Construct an unsigned token directly via the JWT wrapper (test fixture)
+	// to exercise Peek's parse+type-check path.
+	unsignedString, err := testSet.JWT().SignedString(jwt.UnsafeAllowNoneSignatureType)
+	assert.NoError(t, err, "test-only unsigned string produced via JWT wrapper")
+	fmt.Println("Alg=None unsigned value (test fixture)")
 	fmt.Println(unsignedString)
 
-	newUnSignedSet, err := goSet.Parse(unsignedString, nil)
-	assert.Nil(t, err, "Assert that unsigned token was valid and parsed")
-	if err != nil {
-		fmt.Println("Parsed Unsigned token")
-		println(newUnSignedSet.String())
+	peekedSet, err := goSet.Peek(unsignedString)
+	assert.Nil(t, err, "Peek returns unverified claims for routing/display")
+	if peekedSet != nil {
+		fmt.Println("Peeked Unsigned token")
+		println(peekedSet.String())
 	}
+
+	// Parse with nil JWKS must be refused — the verify-only trust path never
+	// accepts an unverified token (ADR-0066 §D3).
+	rejected, errNil := goSet.Parse(unsignedString, nil)
+	assert.Error(t, errNil, "Parse with nil JWKS must be refused (ADR-0066 §D3)")
+	assert.Nil(t, rejected, "No token returned when Parse refuses")
+	assert.Contains(t, errNil.Error(), "JWKS is required", "Refusal must cite the ADR-0066 posture")
 
 	altPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

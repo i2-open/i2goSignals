@@ -55,29 +55,36 @@ func buildPushRequest(t *testing.T, body string, contentType string) *http.Reque
 
 func TestParseReceivedSET_ValidToken(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", []string{"https://audience.example.com"}, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://audience.example.com"}, key)
 
-	// Parse without signature verification (no JWKS)
+	// Per ADR-0066 §D2, the receiver requires a configured trust anchor —
+	// provide a matching JWKS so signature verification succeeds.
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
 	config := ReceiverConfig{
-		ExpectedIssuer:    "https://issuer.example.com",
+		JWKS:              jwksForKey(t, iss, key),
+		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{"https://audience.example.com"},
 	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
 	require.NotNil(t, result)
-	assert.Equal(t, "https://issuer.example.com", result.Token.Issuer)
+	assert.Equal(t, iss, result.Token.Issuer)
 	assert.Equal(t, tokenString, result.TokenString)
 }
 
 func TestParseReceivedSET_EmptyContentType(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", nil, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, nil, key)
 
-	// Empty Content-Type should be accepted (per existing behavior)
+	// Empty Content-Type should be accepted (per existing behavior). Trust
+	// anchor is required by ADR-0066 §D2.
 	req := buildPushRequest(t, tokenString, "")
-	config := ReceiverConfig{}
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
@@ -147,10 +154,14 @@ func TestParseReceivedSET_InvalidAudience(t *testing.T) {
 
 func TestParseReceivedSET_SkipIssuerValidation(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://any-issuer.example.com", nil, key)
+	iss := "https://any-issuer.example.com"
+	tokenString := createTestSET(t, iss, nil, key)
 
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
-	config := ReceiverConfig{} // no ExpectedIssuer set
+	// no ExpectedIssuer set — but trust anchor still required (ADR-0066 §D2).
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
@@ -159,14 +170,38 @@ func TestParseReceivedSET_SkipIssuerValidation(t *testing.T) {
 
 func TestParseReceivedSET_SkipAudienceValidation(t *testing.T) {
 	key := generateTestKey(t)
-	tokenString := createTestSET(t, "https://issuer.example.com", []string{"https://any-aud.example.com"}, key)
+	iss := "https://issuer.example.com"
+	tokenString := createTestSET(t, iss, []string{"https://any-aud.example.com"}, key)
 
 	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
-	config := ReceiverConfig{} // no ExpectedAudiences set
+	// no ExpectedAudiences set — but trust anchor still required (ADR-0066 §D2).
+	config := ReceiverConfig{
+		JWKS: jwksForKey(t, iss, key),
+	}
 
 	result, deliveryErr := ParseReceivedSET(req, config)
 	assert.Nil(t, deliveryErr)
 	require.NotNil(t, result)
+}
+
+// TestParseReceivedSET_NoJWKS_AlwaysRejected pins ADR-0066 §D2: a push
+// receiver with no configured trust anchor MUST refuse the SET even when
+// RequireSignature is not set. The "None + unverified" combination is
+// unrepresentable at the receiver too — stream-config validation
+// (i2goSignals#235) prevents it at configure time, but the receiver enforces
+// it defensively.
+func TestParseReceivedSET_NoJWKS_AlwaysRejected(t *testing.T) {
+	key := generateTestKey(t)
+	tokenString := createTestSET(t, "https://issuer.example.com", nil, key)
+
+	req := buildPushRequest(t, tokenString, "application/secevent+jwt")
+	config := ReceiverConfig{} // no JWKS, no RequireSignature
+
+	result, deliveryErr := ParseReceivedSET(req, config)
+	assert.Nil(t, result, "no SET may be accepted without a configured trust anchor (ADR-0066 §D2)")
+	require.NotNil(t, deliveryErr)
+	assert.Equal(t, ErrInvalidRequest, deliveryErr.ErrCode)
+	assert.Contains(t, deliveryErr.Description, "no trust anchor")
 }
 
 // jwksForKey builds a JWKS keyed by the issuer string, matching the "kid"

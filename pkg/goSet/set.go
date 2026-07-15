@@ -212,13 +212,33 @@ func (set *SecurityEventToken) GetEventIds() []string {
 	return keys
 }
 
+// JWT returns a jwt.Token wrapper carrying this SET's claims with
+// SigningMethodNone as the wrapper method.
+//
+// Deprecated: this returns an alg=none token wrapper. Under ADR-0066 §D3
+// alg=none is never accepted on the trust path, and no production caller
+// produces unsigned SETs. This wrapper survives only for test fixtures that
+// need to inspect an unsigned token's header/claims; do not use it to emit
+// wire tokens. New code MUST use JWS with a real signing method + key.
 func (set *SecurityEventToken) JWT() *jwt.Token {
 	token := jwt.NewWithClaims(jwt.SigningMethodNone, set)
 	token.Header["typ"] = "secevent+jwt"
 	return token
 }
 
+// JWS produces a signed SET wire string. signingMethod defaults to ES256 when
+// nil; key MUST be non-nil.
+//
+// Per ADR-0066 §D3 the unsigned (alg=none) production path has been removed:
+// there is no legitimate production producer of unsigned SETs, and leaving
+// the write-side capability increases the injection blast-radius if a
+// verifier is ever misconfigured. Callers that previously passed nil to
+// obtain an alg=none token must construct one directly via jwt.NewWithClaims
+// (test fixtures only).
 func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.PrivateKey) (string, error) {
+	if key == nil {
+		return "", errors.New("goSet.JWS: key is required; alg=none production removed (ADR-0066 §D3)")
+	}
 	if signingMethod == nil {
 		signingMethod = jwt.SigningMethodES256
 	}
@@ -226,42 +246,31 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	token := jwt.NewWithClaims(signingMethod, set)
 	token.Header["typ"] = "secevent+jwt"
 
-	// publicKey := key.PublicKey
-
-	// givenKey := keyfunc.NewGivenRSA(&publicKey)
-
-	//	jwks := keyfunc.NewGiven(map[string]keyfunc.GivenKey{
-	//		"issuer": givenKey,
-	//	})
-
 	if set.Kid != "" {
 		token.Header["kid"] = set.Kid
 	} else {
 		token.Header["kid"] = set.Issuer
 	}
 
-	if key == nil {
-		return token.SignedString(jwt.UnsafeAllowNoneSignatureType)
-	}
 	return token.SignedString(key)
-
 }
 
-/*
-Parse will parse a SET or JWT into a SecurityEventToken. If issuerPublicJwks is provided the JWT will be validated.
-Note that if issuerPublicJwks is nil, the token will be validated if the header has alg=none only.
-*/
+// Parse parses a SET wire string and verifies its signature against the
+// supplied JWKS. It is a verify-only trust-path API: issuerPublicJwks MUST be
+// non-nil; passing nil returns an error.
+//
+// Per ADR-0066 §D3 the previous silent ParseUnverified fallback has been
+// removed — an accepted Parse result is always a signature-verified token,
+// and alg=none is never accepted where a signature is expected. For
+// explicit, unverified inspection (e.g. pre-verify routing on the push
+// receiver, or CLI display), use Peek — its result is never the accepted
+// token.
 func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
-	var token *jwt.Token
-	var err error
 	if issuerPublicJwks == nil {
-		token, _, err = new(jwt.Parser).ParseUnverified(tokenString, &SecurityEventToken{})
-
-	} else {
-
-		token, err = jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
+		return nil, errors.New("goSet.Parse: JWKS is required for verified parsing; use Peek for explicit unverified inspection (ADR-0066 §D3)")
 	}
 
+	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())
 		return nil, err
@@ -271,17 +280,34 @@ func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventTo
 		return nil, errors.New("token type is not `secevent+jwt`")
 	}
 
-	// jsonByte, _ := json.MarshalIndent(token.Claims, "", "  ")
-	// claimString := string(jsonByte)
-	// log.Println(claimString)
 	return token.Claims.(*SecurityEventToken), nil
-	/*
-		if claims, ok := token.Claims.(*SecurityEventToken); ok && token.Valid {
-			return claims, nil
-		}
-		return nil, errors.New("****** Failed to validate")
+}
 
-	*/
+// Peek parses a SET wire string WITHOUT verifying its signature and returns
+// the claims for routing, dispatch, or display purposes only. The result is
+// UNTRUSTED — it MUST NOT be treated as an accepted token, forwarded as if
+// verified, or used to make any authorization decision. It exists to
+// support:
+//
+//   - RFC 8935 push receivers that need to inspect iss/aud before signature
+//     verification so that a wrong-issuer failure returns the correct
+//     invalid_issuer error code rather than a generic invalid_request from a
+//     JWKS lookup miss.
+//   - CLI display of an inbound token when the operator is only inspecting,
+//     not accepting.
+//
+// Per ADR-0066 §D3 unverified parsing is never a trust path. This function
+// is deliberately named so a reviewer or an agent cannot mistake it for
+// Parse.
+func Peek(tokenString string) (*SecurityEventToken, error) {
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, &SecurityEventToken{})
+	if err != nil {
+		return nil, err
+	}
+	if token.Header["typ"] != "secevent+jwt" {
+		return nil, errors.New("token type is not `secevent+jwt`")
+	}
+	return token.Claims.(*SecurityEventToken), nil
 }
 
 func GenerateJti() string {

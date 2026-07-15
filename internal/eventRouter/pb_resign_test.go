@@ -174,7 +174,9 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 	require.Len(t, bodiesB, iterations, "stream B receiver must see one SET per iteration")
 
 	for _, body := range bodiesA {
-		parsed, err := goSet.Parse(body, nil)
+		// Test-side inspection only: the captured HTTP body is examined for
+		// claim shape, not accepted as a trust decision — use Peek per ADR-0066.
+		parsed, err := goSet.Peek(body)
 		require.NoError(t, err)
 		assert.Equal(t, "https://issuer-A.example.com", parsed.Issuer, "stream A receiver must only see stream A's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-A.example.com"}, parsed.Audience, "stream A receiver must only see stream A's aud")
@@ -182,7 +184,7 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 		assert.Equal(t, "txn-"+parsed.ID, parsed.TransactionId, "txn must be preserved verbatim alongside jti")
 	}
 	for _, body := range bodiesB {
-		parsed, err := goSet.Parse(body, nil)
+		parsed, err := goSet.Peek(body)
 		require.NoError(t, err)
 		assert.Equal(t, "https://issuer-B.example.com", parsed.Issuer, "stream B receiver must only see stream B's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-B.example.com"}, parsed.Audience, "stream B receiver must only see stream B's aud")

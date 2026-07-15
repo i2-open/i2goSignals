@@ -406,7 +406,9 @@ func TestHTTPAdapter_PBReSignPreservesJtiAndTxn(t *testing.T) {
 	require.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
 	require.Len(t, bodies, 1, "receiver must see exactly one signed SET")
 
-	parsed, err := goSet.Parse(bodies[0], nil)
+	// Test-side inspection only: we look at the captured wire body's claim
+	// shape; verification is not the concern here — use Peek per ADR-0066.
+	parsed, err := goSet.Peek(bodies[0])
 	require.NoError(t, err, "the pushed PB token must be a parseable SET")
 
 	assert.Equal(t, "jti-source-1", parsed.ID, "PB re-sign must preserve jti verbatim (ADR 0017)")
@@ -498,7 +500,8 @@ func TestHTTPAdapter_ConcurrentFanOutNoSharedMutation(t *testing.T) {
 	require.Len(t, bodiesB, iterations)
 
 	for _, body := range bodiesA {
-		parsed, err := goSet.Parse(body, nil)
+		// Test-side inspection only — Peek per ADR-0066 §D3.
+		parsed, err := goSet.Peek(body)
 		require.NoError(t, err)
 		assert.Equal(t, "https://issuer-A.example.com", parsed.Issuer, "stream A receiver must only ever see stream A's iss")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-A.example.com"}, parsed.Audience, "stream A receiver must only ever see stream A's aud")
@@ -506,7 +509,7 @@ func TestHTTPAdapter_ConcurrentFanOutNoSharedMutation(t *testing.T) {
 		assert.Equal(t, "txn-source-1", parsed.TransactionId, "txn must be preserved across fan-out")
 	}
 	for _, body := range bodiesB {
-		parsed, err := goSet.Parse(body, nil)
+		parsed, err := goSet.Peek(body)
 		require.NoError(t, err)
 		assert.Equal(t, "https://issuer-B.example.com", parsed.Issuer, "stream B receiver must only ever see stream B's iss")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-B.example.com"}, parsed.Audience, "stream B receiver must only ever see stream B's aud")

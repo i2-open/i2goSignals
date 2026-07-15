@@ -98,14 +98,27 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 	}
 
 	for jti, setString := range rawResp.Sets {
-		// Signing-only poll posture (#184): verification of pulled SETs is mandatory.
-		// Without a trust anchor we cannot verify, so the SET is rejected rather than
-		// accepted unverified. Signature failures are expected peer events (WARN).
-		if config.RequireSignature && config.JWKS == nil {
-			log.Warn("RFC8936: SET signature required but no JWKS available to verify (signing-only)", "jti", jti)
+		// Per ADR-0066 §D2 the "None + unverified" state is unrepresentable:
+		// every business stream MUST have at least one active authentication
+		// layer. Stream-config validation enforces this at configure time
+		// (i2goSignals#235); this poll receiver enforces it defensively at
+		// runtime — nil JWKS is always a rejection, an unverified parse is
+		// never the accepted token. Signature failures are expected peer
+		// events (WARN, CONTEXT.md log-level policy).
+		if config.JWKS == nil {
+			if config.RequireSignature {
+				log.Warn("RFC8936: SET signature required but no JWKS available to verify (signing-only)", "jti", jti)
+				result.Errors[jti] = SetErrType{
+					Error:       "jws_signature_failed",
+					Description: "The SET signature could not be validated.",
+				}
+				continue
+			}
+			// Defense in depth for ADR-0066 §D2 — see receiver.go in goSetPush.
+			log.Warn("RFC8936: no JWKS configured; refusing to accept unverified SET (ADR-0066)", "jti", jti)
 			result.Errors[jti] = SetErrType{
-				Error:       "jws_signature_failed",
-				Description: "The SET signature could not be validated.",
+				Error:       "invalid_request",
+				Description: "The SET could not be verified: no trust anchor is configured.",
 			}
 			continue
 		}
@@ -115,7 +128,7 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 			// When verifying against a JWKS under the signing-only posture, a parse
 			// failure is a bad signature → jws_signature_failed (the RFC8935 §2.4
 			// rotate-and-retry signal). Otherwise the prior invalid_request is kept.
-			if config.RequireSignature && config.JWKS != nil {
+			if config.RequireSignature {
 				log.Warn("RFC8936: SET signature verification failed (signing-only)", "jti", jti, "error", err)
 				result.Errors[jti] = SetErrType{
 					Error:       "jws_signature_failed",
