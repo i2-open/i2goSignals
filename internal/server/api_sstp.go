@@ -75,6 +75,22 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	// bearer that IS presented is still held to the full check, so the gate is
 	// enforced whenever an Authorization header is present or the stream is not
 	// signing-only — leaving flag-off pairs byte-for-byte unchanged.
+	//
+	// ADR-0066 §D2 audit (i2goSignals#235): dropping the L2 bearer requirement
+	// is safe ONLY when the L3 SET-signature verification path has a real trust
+	// root. The invariant is enforced upstream by three cooperating layers:
+	//   1. StreamService.CreateStream — validateBusinessStreamSecurity rejects
+	//      SigningOnly=true without a trust root at create time.
+	//   2. StreamService.UpdateStream — same validator on the update path,
+	//      before any DAO write.
+	//   3. LoadReceiverStreams startup guard — persisted-but-invalid records
+	//      (from an older validator) are marked disabled before they can
+	//      serve traffic.
+	// Under these three, this handler is entered only for pairs that satisfy
+	// the invariant, so no additional runtime "no trust root" gate is needed
+	// (and a naive `IssuerJWKSUrl == ""` check here would false-positive on
+	// the DEFAULT-loopback issuer, whose trust root is resolved by local key
+	// lookup rather than by an outbound URL fetch — see loadInboundJwksForPair).
 	signingOnly := rec.SstpInbound != nil && rec.SstpInbound.SigningOnly
 	bearerPresented := r.Header.Get("Authorization") != ""
 
