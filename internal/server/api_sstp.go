@@ -3,8 +3,6 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"strings"
 
@@ -26,39 +24,35 @@ func (sa *SignalsApplication) ReceiveSstpEvent(w http.ResponseWriter, r *http.Re
 	ReceiveSstpEventHandler(sa, w, r)
 }
 
-// ReceiveSstpEventHandler implements the SSTP route + auth middleware. It performs
-// content-type enforcement, deleted-pair detection, and defense-in-depth bearer
-// authorization, then shapes the response for the paused-pair case. The full
-// long-poll runner bodies (draining outbound / ingesting inbound SETs) are wired
-// by the runner slices (#164/#165); this handler provides only the route, the
-// auth gate, and the paused/enabled response envelope the issue scopes.
+// ReceiveSstpEventHandler implements the SSTP route + auth middleware, migrated
+// (PRD #49 slice 3) onto the pkg/goSetSstp acceptor primitives so parse/write
+// duplication lives in one place. Observable gate order is pinned verbatim to
+// the pre-migration behavior — Check(405/415) → pair-404 → bearer-401 → Parse
+// (400) — with no pre-auth body read (pkg CheckExchangeRequest owns method +
+// content-type only, ParseExchangeRequest owns the body).
+//
+// The pair record is resolved EXACTLY ONCE here (AC 2) and threaded into
+// eventRouter.SstpServerHandler; the runner no longer re-looks-up. Ingest of
+// each inbound SET uses goSetSstp.VerifySET (AC 3) — goSetPush.ParseReceivedSET
+// remains push-path-only on this surface.
 func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request) {
-	// POST-only. The route is registered method-agnostically (see routers.go) so any
-	// other method reaches here and gets an explicit 405 (PRD #154 Q19, Q21.a).
-	if r.Method != goSetSstp.Method {
-		w.Header().Set("Allow", goSetSstp.Method)
-		writeSstpError(w, http.StatusMethodNotAllowed, goSetPush.ErrInvalidRequest,
-			"SSTP endpoint accepts POST only")
-		return
-	}
-
-	// Strict Content-Type: application/sstp+json. Match on the base media type and
-	// ignore parameters so "application/sstp+json; charset=utf-8" is accepted
-	// (PRD #154 Q21.c). The strict-content-type contract forces a deliberate SSTP
-	// client, so a MISSING Content-Type is rejected exactly like a wrong one — the
-	// base type MUST be present. Any mismatch (or absence) is a 415.
-	baseType, _, ctErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if ctErr != nil || !strings.EqualFold(baseType, goSetSstp.ContentType) {
-		writeSstpError(w, http.StatusUnsupportedMediaType, goSetPush.ErrInvalidRequest,
-			"Expecting Content-Type "+goSetSstp.ContentType)
+	// Gate 1 (Check): method (405) + content-type base (415). No body read —
+	// this stays before the auth gate so the pinned observable ordering is
+	// preserved (Seam 1 r3: split allows each consumer to keep its own gate
+	// order without a pre-auth body read).
+	if rerr := goSetSstp.CheckExchangeRequest(r); rerr != nil {
+		if rerr.Status == http.StatusMethodNotAllowed {
+			w.Header().Set("Allow", goSetSstp.Method)
+		}
+		writeSstpError(w, rerr.Status, goSetPush.ErrInvalidRequest, rerr.Description)
 		return
 	}
 
 	pairId := mux.Vars(r)["id"]
 
-	// Resolve the pair record by PairId. A missing record means the pair was
-	// deleted (or never existed) — that is the 4xx case; HTTP status is the
-	// primary error signal end-to-end (PRD #154 Q20, Q7.3).
+	// Gate 2 (pair-404): resolve the pair record by PairId ONCE. AC 2 —
+	// the runner no longer performs a second GetStreamStateByPairId; this
+	// resolved record is threaded into SstpServerHandler.
 	rec, err := sa.GetStreamService().GetStreamStateByPairId(r.Context(), pairId)
 	if err != nil || rec == nil {
 		if err != nil && !errors.Is(err, daoInterfaces.ErrNotFound) {
@@ -69,12 +63,13 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		return
 	}
 
-	// Signing-only posture (#184): a business SSTP pair may gate trust on each SET's
-	// JWS signature rather than the stream-scoped bearer, so the bearer becomes
-	// optional when the rx-side stream is signing-only AND none was presented. A
-	// bearer that IS presented is still held to the full check, so the gate is
-	// enforced whenever an Authorization header is present or the stream is not
-	// signing-only — leaving flag-off pairs byte-for-byte unchanged.
+	// Gate 3 (bearer-401): signing-only posture (#184) lets a business SSTP
+	// pair gate trust on each SET's JWS signature rather than the stream-scoped
+	// bearer, so the bearer becomes optional when the rx-side stream is
+	// signing-only AND none was presented. A bearer that IS presented is still
+	// held to the full check, so the gate is enforced whenever an Authorization
+	// header is present or the stream is not signing-only — leaving flag-off
+	// pairs byte-for-byte unchanged.
 	//
 	// ADR-0066 §D2 audit (i2goSignals#235): dropping the L2 bearer requirement
 	// is safe ONLY when the L3 SET-signature verification path has a real trust
@@ -86,69 +81,57 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	//   3. LoadReceiverStreams startup guard — persisted-but-invalid records
 	//      (from an older validator) are marked disabled before they can
 	//      serve traffic.
-	// Under these three, this handler is entered only for pairs that satisfy
-	// the invariant, so no additional runtime "no trust root" gate is needed
-	// (and a naive `IssuerJWKSUrl == ""` check here would false-positive on
-	// the DEFAULT-loopback issuer, whose trust root is resolved by local key
-	// lookup rather than by an outbound URL fetch — see loadInboundJwksForPair).
 	signingOnly := rec.SstpInbound != nil && rec.SstpInbound.SigningOnly
 	bearerPresented := r.Header.Get("Authorization") != ""
-
-	// Defense-in-depth authorization. The bearer carries StreamIds=[txSid, rxSid]
-	// (the internal pair SIDs), NOT the PairId on the path. We resolve the actual
-	// SIDs from the record and verify the token authorizes at least one of them for
-	// the event scope, via AuthContext.IsAuthorizedForStream (never a bare
-	// authCtx.Eat check, which is nil for OAuth/STS callers) (PRD #154 Q19, Q42).
 	if (bearerPresented || !signingOnly) && !sstpAuthorized(sa, r, rec) {
 		writeSstpError(w, http.StatusUnauthorized, goSetPush.ErrAuthenticationFailed,
 			"The authorization was not valid for this SSTP pair")
 		return
 	}
 
-	// Parse the SSTP request body. A malformed body is a 4xx (HTTP status is the
-	// primary error signal end-to-end, PRD #154 Q20).
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeSstpError(w, http.StatusBadRequest, goSetPush.ErrInvalidRequest, "Unable to read SSTP request body")
+	// Gate 4 (Parse): body read + JSON decode (400/413). Community business
+	// acceptor stays uncapped (MaxBodyBytes: 0) — the pkg imposes no default
+	// cap and the caller chooses. Only reached after the three gates above.
+	inbound, rerr := goSetSstp.ParseExchangeRequest(r, goSetSstp.ParseOptions{MaxBodyBytes: 0})
+	if rerr != nil {
+		writeSstpError(w, rerr.Status, goSetPush.ErrInvalidRequest, rerr.Description)
 		return
 	}
-	var inbound goSetSstp.Message
-	if len(body) > 0 {
-		if jErr := json.Unmarshal(body, &inbound); jErr != nil {
-			writeSstpError(w, http.StatusBadRequest, goSetPush.ErrInvalidRequest, "SSTP request body is not valid application/sstp+json")
-			return
-		}
-	}
 
-	// Parse each inbound SET (byte-identical to an RFC8935 SET, Q5.1) against the
-	// rx-side issuer/audience/JWKS. Per-JTI parse rejections become "setErrs"; valid
-	// SETs are ingested by the runner. The rx-side SID resolves the inbound config.
+	// Verify each inbound SET (byte-identical to an RFC8935 SET, Q5.1) against
+	// the rx-side issuer/audience/JWKS via goSetSstp.VerifySET (AC 3). Per-JTI
+	// verify rejections become "setErrs"; valid SETs are ingested by the runner.
+	// goSetPush.ParseReceivedSET is NOT used on the SSTP surface — it remains
+	// push-path-only.
 	parseErrs := map[string]goSetSstp.SetErr{}
 	var parsedIn []eventRouter.SstpInboundSet
-	if len(inbound.Sets) > 0 {
-		rxCfg := goSetPush.ReceiverConfig{}
+	if inbound != nil && len(inbound.Sets) > 0 {
+		verifyCfg := goSetSstp.VerifyConfig{}
 		if rec.SstpInbound != nil {
-			rxCfg.ExpectedIssuer = rec.SstpInbound.Iss
-			rxCfg.ExpectedAudiences = rec.SstpInbound.Aud
-			rxCfg.JWKS = sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), rec.SstpInbound.Id)
-			// Signing-only (#184): make signature verification of each inbound SET
-			// mandatory so a per-JTI jws_signature_failed is reported via setErrs.
-			rxCfg.RequireSignature = rec.SstpInbound.SigningOnly
+			verifyCfg.ExpectedIssuer = rec.SstpInbound.Iss
+			verifyCfg.ExpectedAudiences = rec.SstpInbound.Aud
+			verifyCfg.JWKS = sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), rec.SstpInbound.Id)
+			// Signing-only (#184): mandatory signature verification per inbound
+			// SET so a per-JTI jws_signature_failed is reported via setErrs.
+			// Even when SigningOnly is false, VerifySET already requires a JWKS
+			// (nil ⇒ ErrBadSignature) — the flag is preserved for API stability.
+			verifyCfg.RequireSignature = rec.SstpInbound.SigningOnly
 		}
-		parsedIn, parseErrs = parseSstpInboundSets(inbound, rxCfg)
+		parsedIn, parseErrs = verifySstpInboundSets(*inbound, verifyCfg)
 	}
 
 	// Run one SSTP-server cycle: ingest valid inbound SETs (persist-then-route,
 	// counting eventsIn with tfr=SSTP, stream_id=rxSid) and long-poll the outbound
-	// buffer. The runner shapes the paused-pair response (200, returnEvents=false)
-	// and returns 4xx only for a deleted/unknown pair (Q11.1, Q15, Q20, Q46).
-	resp, status := sa.GetEventRouter().SstpServerHandler(r.Context(), pairId, inbound, parsedIn)
-	if status != http.StatusOK {
-		writeSstpError(w, status, goSetPush.ErrNotFound, "SSTP pair "+pairId+" could not be located or was deleted")
-		return
+	// buffer. Pair-404 is already handled above — the runner receives the resolved
+	// record and never re-looks-up (AC 2, PRD #49 slice 3).
+	msg := inbound
+	if msg == nil {
+		empty := goSetSstp.Message{}
+		msg = &empty
 	}
+	resp := sa.GetEventRouter().SstpServerHandler(r.Context(), rec, *msg, parsedIn)
 
-	// Merge per-JTI parse errors into the response's setErrs before sending.
+	// Merge per-JTI verify errors into the response's setErrs before sending.
 	for jti, se := range parseErrs {
 		if resp.SetErrs == nil {
 			resp.SetErrs = map[string]goSetSstp.SetErr{}
@@ -156,35 +139,62 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		resp.SetErrs[jti] = se
 	}
 
-	writeSstpMessage(w, resp)
+	if wErr := goSetSstp.WriteExchangeResponse(w, resp); wErr != nil {
+		serverLog.Error("SSTP: response write failed", "pairId", pairId, "error", wErr)
+	}
 }
 
-// parseSstpInboundSets parses each SET in the SSTP message's "sets" map using
-// goSetPush.ParseReceivedSET (each SET is byte-identical to an RFC8935 SET, Q5.1).
-// Successfully parsed SETs are returned as the inbound batch to ingest; rejected
-// SETs are returned in a per-JTI setErrs map mapped to the SSTP §2.3 vocabulary.
-func parseSstpInboundSets(msg goSetSstp.Message, cfg goSetPush.ReceiverConfig) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
+// verifySstpInboundSets verifies each SET in the SSTP message's "sets" map via
+// goSetSstp.VerifySET (each SET is byte-identical to an RFC8935 SET, Q5.1) and
+// splits them into (verified inbound batch, per-JTI setErrs). Rejected SETs
+// carry their verify-sentinel mapped to the SSTP §2.3 vocabulary. PRD #49 slice
+// 3 AC 3: replaces the pre-migration goSetPush.ParseReceivedSET-based helper —
+// the push-path parser stays for RFC8935 push receivers only.
+func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
 	parsed := make([]eventRouter.SstpInboundSet, 0, len(msg.Sets))
 	setErrs := map[string]goSetSstp.SetErr{}
 	for jti, raw := range msg.Sets {
-		req, err := http.NewRequest(goSetSstp.Method, "/", strings.NewReader(raw))
-		if err != nil {
-			setErrs[jti] = goSetSstp.SetErr{Err: goSetSstp.ErrSetParse, Description: err.Error()}
+		verified, vErr := goSetSstp.VerifySET(raw, cfg)
+		if vErr != nil {
+			setErrs[jti] = classifyVerifyErrorForAcceptor(vErr)
 			continue
 		}
-		req.Header.Set("Content-Type", "application/secevent+jwt")
-		received, deliveryErr := goSetPush.ParseReceivedSET(req, cfg)
-		if deliveryErr != nil {
-			setErrs[jti] = goSetSstp.ClassifyFromGoSetPushError(deliveryErr)
+		if verified.Token == nil {
+			// Defensive: a nil Token from VerifySET would violate its
+			// contract. Report as a parse error rather than fabricate ingest.
+			setErrs[jti] = goSetSstp.SetErr{
+				Err:         goSetSstp.ErrSetParse,
+				Description: "verified SET carried a nil token",
+			}
 			continue
 		}
 		parsed = append(parsed, eventRouter.SstpInboundSet{
 			Jti:   jti,
-			Token: received.Token,
-			Raw:   received.TokenString,
+			Token: verified.Token,
+			Raw:   verified.Raw,
 		})
 	}
 	return parsed, setErrs
+}
+
+// classifyVerifyErrorForAcceptor maps a goSetSstp.VerifySET failure sentinel to
+// its closest SSTP §2.3 keyword for the acceptor's per-JTI setErr surface.
+// Consumer-owned mapping (classify/execute split) — the pkg exposes the trust
+// vocabulary, the acceptor decides the on-wire code emitted to the sender.
+func classifyVerifyErrorForAcceptor(err error) goSetSstp.SetErr {
+	desc := err.Error()
+	switch {
+	case errors.Is(err, goSetSstp.ErrIssuerCertMismatch):
+		return goSetSstp.SetErr{Err: goSetSstp.ErrJwtIss, Description: desc}
+	case errors.Is(err, goSetSstp.ErrWrongAudience):
+		return goSetSstp.SetErr{Err: goSetSstp.ErrJwtAud, Description: desc}
+	case errors.Is(err, goSetSstp.ErrBadSignature):
+		return goSetSstp.SetErr{Err: goSetSstp.ErrJws, Description: desc}
+	case errors.Is(err, goSetSstp.ErrUnknownKey):
+		return goSetSstp.SetErr{Err: goSetSstp.ErrJwtCrypto, Description: desc}
+	default:
+		return goSetSstp.SetErr{Err: goSetSstp.ErrSetParse, Description: desc}
+	}
 }
 
 // sstpAuthorized validates the request's bearer and verifies, defense-in-depth,
@@ -212,22 +222,11 @@ func sstpAuthorized(sa SsfApplicationInterface, r *http.Request, rec *model.Stre
 	return false
 }
 
-// writeSstpMessage writes a 200 OK SSTP response body with the strict
-// application/sstp+json Content-Type.
-func writeSstpMessage(w http.ResponseWriter, msg goSetSstp.Message) {
-	body, err := json.Marshal(msg)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", goSetSstp.ContentType)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
-}
-
 // writeSstpError writes the SSF {err, description} error envelope with the given
 // HTTP status. HTTP status is the primary error signal; the envelope mirrors the
-// RFC8935 DeliveryErr shape used by the push receiver (PRD #154 Q20).
+// RFC8935 DeliveryErr shape used by the push receiver (PRD #154 Q20). Rendering
+// stays consumer-local (Seam 1: pkg/goSetSstp deliberately provides no error
+// writer — community keeps this DeliveryErr shape, admin keeps its plain-text).
 func writeSstpError(w http.ResponseWriter, status int, errCode string, description string) {
 	body, err := json.MarshalIndent(goSetPush.DeliveryErr{ErrCode: errCode, Description: description}, "", "  ")
 	if err != nil {

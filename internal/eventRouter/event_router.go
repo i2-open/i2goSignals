@@ -53,13 +53,16 @@ type EventRouter interface {
 	GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
-	// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId:
-	// it ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
-	// counting eventsIn with tfr=SSTP, stream_id=rxSid), long-polls the outbound
-	// EventPollBuffer, and returns the SSTP response message plus an HTTP status
-	// (200 served/paused, 4xx deleted/unknown pair). Takes no cluster lease — every
-	// node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19, Q20, Q46).
-	SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int)
+	// SstpServerHandler runs one SSTP-server cycle for the pair already resolved
+	// by the HTTP handler: it ingests the already-parsed inbound SETs
+	// (persist-then-route via HandleEvent, counting eventsIn with tfr=SSTP,
+	// stream_id=rxSid), long-polls the outbound EventPollBuffer, and returns
+	// the SSTP response message. Pair-404 is owned by the HTTP handler, which
+	// performs the SINGLE GetStreamStateByPairId lookup and threads the record
+	// here (PRD #49 slice 3 AC 2 — single pair resolution). Takes no cluster
+	// lease — every node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19,
+	// Q20, Q46).
+	SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) goSetSstp.Message
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	// RegisterMeteringObserver installs the subject-carrying metering observer
