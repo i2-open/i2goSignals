@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,8 +61,7 @@ func inCounterValueSstp(t *testing.T, vec *prometheus.CounterVec, sid string) fl
 // SET delivered to the SSTP-server side is persisted and counted in eventsIn with
 // tfr=SSTP and stream_id=rxSid (Q46, Q5.1).
 func TestSstpServer_IngestsInboundAndCountsRxMetric(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	txSid, rxSid, pairId := "sstp-tx-in", "sstp-rx-in", "pair-in"
 	rec := sstpServerPairState(txSid, rxSid, pairId)
@@ -89,8 +87,7 @@ func TestSstpServer_IngestsInboundAndCountsRxMetric(t *testing.T) {
 // arrival does NOT increment eventsIn a second time, yet is still acked so the
 // sender stops resending (PRD #154 Q13 takeover window).
 func TestSstpServer_DuplicateInboundJtiSwallowed(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	txSid, rxSid, pairId := "sstp-tx-dup", "sstp-rx-dup", "pair-dup"
 	rec := sstpServerPairState(txSid, rxSid, pairId)
@@ -119,8 +116,7 @@ func TestSstpServer_DuplicateInboundJtiSwallowed(t *testing.T) {
 // pair's tx side is returned in the SSTP response "sets" (forward mode returns
 // the original SET verbatim). This is the outbound half of the single cycle.
 func TestSstpServer_DrainsOutboundReturnsSets(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	txSid, rxSid, pairId := "sstp-tx-out", "sstp-rx-out", "pair-out"
 	rec := sstpServerPairState(txSid, rxSid, pairId)
@@ -141,8 +137,7 @@ func TestSstpServer_DrainsOutboundReturnsSets(t *testing.T) {
 // sets — the long-poll cycle keeps running and resumes draining on unpause. 4xx is
 // reserved for the deleted-pair case (PRD #154 Q20, Q7.3).
 func TestSstpServer_PausedPairReturnsReturnEventsFalse(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	txSid, rxSid, pairId := "sstp-tx-pause", "sstp-rx-pause", "pair-pause"
 	rec := sstpServerPairState(txSid, rxSid, pairId)
@@ -163,8 +158,7 @@ func TestSstpServer_PausedPairReturnsReturnEventsFalse(t *testing.T) {
 // TestSstpServer_DeletedPairReturns4xx: an unknown/deleted PairId returns a 4xx
 // status (HTTP status is the primary error signal end-to-end).
 func TestSstpServer_DeletedPairReturns4xx(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	_, status := h.router.SstpServerHandler(context.Background(), "pair-does-not-exist", goSetSstp.Message{}, nil)
 	assert.GreaterOrEqual(t, status, 400, "deleted/unknown pair must return 4xx")
@@ -176,8 +170,7 @@ func TestSstpServer_DeletedPairReturns4xx(t *testing.T) {
 // in addition to the tx side primed in slice #164 — so the inbound metric is
 // visible from process start (Q46).
 func TestSstpServer_PreInitializeCounter_RxSide(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 
 	// No series exist before pre-initialization (avoid the With() side effect of
 	// auto-creating the series, which would make a label-value read pass trivially).
@@ -205,8 +198,7 @@ func TestSstpServer_PreInitializeCounter_RxSide(t *testing.T) {
 // handler return early; it waits out the buffer timeout (PRD #154 Q15, distinct
 // from the SSTP-client side which DOES cancel on lease loss).
 func TestSstpServer_LongPollIgnoresContextCancel(t *testing.T) {
-	adapter := delivery.NewSstpMemoryAdapter(delivery.SstpOutcome{})
-	h := newSstpRunnerHarness(t, adapter)
+	h := newSstpRunnerHarness(t)
 	// Shrink the buffer long-poll timeout so the test waits ~1s, not 30s.
 	h.router.pollDefaultTimeoutSecs = 1
 

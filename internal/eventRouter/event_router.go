@@ -130,10 +130,12 @@ type router struct {
 	// pending list remains the durable source of truth, so a takeover re-reads pending
 	// regardless of any in-memory claim.
 	sstpInFlight map[string]map[string]bool
-	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
-	// backoff timing for SSTP-client runner tests. Production leaves it nil and
-	// loads the POLL_RETRY_* env knobs.
-	sstpCfgOverride      *sstpBackoffConfig
+	// sstpDialer is the optional hook the router calls when SSTP-client pairs are
+	// registered / removed (PRD #49 slice 2a). Implemented in internal/server by
+	// the relocated dialer, which starts a per-pair goroutine on RegisterPair and
+	// stops it on UnregisterPair. Nil ⇒ no SSTP dialer goroutine ever starts (unit
+	// tests that do not need the dialer skip the callback).
+	sstpDialer           SstpDialerHooks
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
 	keyService           *services.KeyService
@@ -141,7 +143,6 @@ type router struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
-	sstpDelivery         delivery.SstpDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
 	// meteringObserver holds the optional subject-carrying metering observer
 	// (issue #218), read lock-free on the routing path. Distinct from the
@@ -221,11 +222,12 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
-	// SstpDelivery is the client-side SSTP seam for one-cycle SET delivery to a
-	// pair endpoint (PRD #154 slice 7). Main.go injects the HTTP adapter
-	// (production); tests inject delivery.NewSstpMemoryAdapter. If nil, NewRouter
-	// constructs a default SstpHTTPAdapter.
-	SstpDelivery delivery.SstpDelivery
+	// SstpDialerHooks is the optional hook the router calls when SSTP-client
+	// pairs are added / removed (PRD #49 slice 2a). Implemented in internal/server
+	// by the relocated dialer; tests that do not exercise a live dialer leave it
+	// nil (no SSTP client goroutine is started). Wire direction is server → router
+	// (server implements the hook; router calls into it).
+	SstpDialerHooks SstpDialerHooks
 	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
 	// time. When nil (or the feature is disabled) every event passes.
 	SubjectFilterService *services.SubjectFilterService
@@ -291,11 +293,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		router.pushDelivery = delivery.NewHTTPAdapter(deps.StreamService, router)
 	}
 
-	if deps.SstpDelivery != nil {
-		router.sstpDelivery = deps.SstpDelivery
-	} else {
-		router.sstpDelivery = delivery.NewSstpHTTPAdapter(nil)
-	}
+	// SSTP dialer hook: PRD #49 slice 2a relocated the dialer loop to
+	// internal/server. Nil is legal (the router simply skips the register/
+	// unregister callbacks and no SSTP client goroutine ever starts).
+	router.sstpDialer = deps.SstpDialerHooks
 
 	// When SPIFFE is configured, replace the plain HTTP client with one that
 	// uses mutual TLS backed by the workload's X509-SVID. This allows inter-cluster
@@ -1688,15 +1689,21 @@ func (r *router) RemoveStream(sid string) {
 	// document _id == PairId == tx-side SID, so the single sid passed here matches
 	// both the client maps (keyed by PairId) and the server maps (keyed by txSid).
 	// Closing the buffers wakes any in-flight long-poll wait; deleting the
-	// sstpClientStreams entry is the stop signal the client runner observes on its
-	// next-cycle refresh (refreshSstpClientStream returns ok=false), so the runner
-	// goroutine exits rather than polling a dead peer forever.
+	// sstpClientStreams entry is the stop signal the client dialer observes on its
+	// next-cycle RefreshPair (returns ok=false), so the dialer goroutine exits
+	// rather than polling a dead peer forever. If the relocated dialer hook is
+	// wired (PRD #49 slice 2a) we also call UnregisterPair as a fast-path so the
+	// goroutine stops immediately rather than waiting for its next cycle to
+	// observe the map deletion.
 	if cb, ok := r.sstpBuffers[sid]; ok {
 		cb.Close()
 		delete(r.sstpBuffers, sid)
 	}
 	if _, ok := r.sstpClientStreams[sid]; ok {
 		delete(r.sstpClientStreams, sid)
+		if r.sstpDialer != nil {
+			r.sstpDialer.UnregisterPair(sid)
+		}
 	}
 	// Drop the pair's in-flight claim set and second-push slot so a removed pair
 	// leaves no stale entries (keyed on PairId == sid for a pair).
