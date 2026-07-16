@@ -213,15 +213,43 @@ func parseSstpFloatEnv(name, oldName string, defaultVal float64) float64 {
 	return f
 }
 
-// nextSstpBackoff returns the next exponential-backoff delay, capped by
-// maxDelay. Duplicated inline (rather than reused from eventRouter) so the
-// dialer stays self-contained after the loop relocation.
+// sstpBackoffJitterFraction is the ±25% jitter applied to every backoff delay
+// on the sleep-now side (PRD #49 slice 2c AC 4, US 5 thundering-herd fix).
+// Matches enterprise's sstpconnector/retry.go JitterFraction so both sides
+// of a Signals family deployment share one reconnect-jitter shape (ADR-0040).
+const sstpBackoffJitterFraction = 0.25
+
+// nextSstpBackoff advances the exponential-backoff ladder, capped by
+// maxDelay. The stored ladder value is UN-jittered so the exponential growth
+// is monotonic; jitter is applied by jitteredSstpBackoff on the sleep-now
+// value returned to the caller.
+//
+// Duplicated inline (rather than reused from eventRouter) so the dialer
+// stays self-contained after the loop relocation.
 func nextSstpBackoff(current time.Duration, factor float64, maxDelay time.Duration) time.Duration {
 	next := time.Duration(float64(current) * factor)
 	if next > maxDelay {
 		next = maxDelay
 	}
 	return next
+}
+
+// jitteredSstpBackoff returns d with ±25% uniform jitter applied (PRD #49
+// slice 2c AC 4). Formula matches enterprise's sstpconnector/retry.go so
+// both sides of a Signals family deployment draw from the same jitter shape:
+//
+//	factor := 1 - jf + 2*jf*rand.Float64()   // uniform in [1-jf, 1+jf]
+//	delay  := d * factor
+//
+// so the delay is uniformly distributed in [d*(1-jf), d*(1+jf)] and two
+// independent draws almost never collide, spreading thundering-herd after
+// a cluster-wide blip.
+func jitteredSstpBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	factor := 1 - sstpBackoffJitterFraction + 2*sstpBackoffJitterFraction*rand.Float64()
+	return time.Duration(float64(d) * factor)
 }
 
 // SstpDialer is the community-side SSTP business-stream dialer. It owns
@@ -481,6 +509,16 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 
 	delay := d.cfg.BaseDelay
 
+	// pendingAcks carries the JTIs of inbound response-carried SETs we have
+	// successfully ingested via HandleInboundEvent but not yet echoed back to
+	// the peer in an SSTP request's Ack field (PRD #49 slice 2c AC 1). The
+	// pair-loop owns the list so the request-side Ack carriage survives
+	// across cycles: appended after each successful ingest, cleared on the
+	// next cycle whose Exchange the peer accepted (200 → ClassOK / ClassPerJTI).
+	// On transport / 4xx / weird responses the list is preserved so the acks
+	// are retried on the next successful exchange — never lost mid-flight.
+	var pendingAcks []string
+
 	for {
 		select {
 		case <-cycleCtx.Done():
@@ -504,8 +542,9 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 		// Run the primary cycle concurrently so the loop can react to a new
 		// outbound SET arriving while the peer holds this cycle's connection
 		// as a long-poll (push-while-poll-held, Q7.2, #166).
-		outcome, resumeDelay, exit := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, fencingToken, &delay)
+		outcome, resumeDelay, exit, updatedAcks := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, fencingToken, &delay, pendingAcks)
 		_ = outcome
+		pendingAcks = updatedAcks
 		if exit {
 			if parentCtx.Err() != nil {
 				return false
@@ -538,18 +577,22 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 // new outbound SET arrives WHILE the primary is still held open as a
 // long-poll, fires a bounded SECOND POST (returnEvents=false) to flush the
 // queued outbound immediately (Q7.2, #166). Both share ctx so lease loss /
-// shutdown cancels both. Returns the primary cycle's outcome verbatim.
-func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration) (goSetSstp.Classification, time.Duration, bool) {
+// shutdown cancels both. Returns the primary cycle's outcome verbatim plus
+// the updated pending-inbound-acks list (AC 1) — the primary owns the ack
+// list; the second push carries no Ack (returnEvents=false request, so the
+// peer already has no state that needs an ack echoed on that side POST).
+func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration, pendingAcks []string) (goSetSstp.Classification, time.Duration, bool, []string) {
 	pairId := stream.PairId
 	type cycleResult struct {
-		cls   goSetSstp.Classification
-		delay time.Duration
-		exit  bool
+		cls    goSetSstp.Classification
+		delay  time.Duration
+		exit   bool
+		nAcks  []string
 	}
 	done := make(chan cycleResult, 1)
 	go func() {
-		cls, dly, exit := d.runCycle(ctx, stream, fencingToken, delay)
-		done <- cycleResult{cls: cls, delay: dly, exit: exit}
+		cls, dly, exit, nAcks := d.runCycle(ctx, stream, fencingToken, delay, pendingAcks)
+		done <- cycleResult{cls: cls, delay: dly, exit: exit, nAcks: nAcks}
 	}()
 
 	// secondPushWg tracks in-flight second-push goroutines so we do not
@@ -561,13 +604,13 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 	for {
 		select {
 		case res := <-done:
-			return res.cls, res.delay, res.exit
+			return res.cls, res.delay, res.exit, res.nAcks
 		case <-ctx.Done():
 			// Lease loss / shutdown: primary observes ctx and returns
 			// (exit=true); wait for it so we return its result and never
 			// leak it.
 			res := <-done
-			return res.cls, res.delay, res.exit
+			return res.cls, res.delay, res.exit, res.nAcks
 		case <-wakeup:
 			// A new outbound SET arrived while the primary is held. Fire a
 			// bounded second push to flush it now. The guard in
@@ -590,11 +633,24 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 
 // runCycle performs one SSTP HTTP cycle: drain the outbound buffer, deliver,
 // and apply the classifier result. Returns the classification, the delay
-// the caller should wait before the next cycle (0 = immediate), and
-// exit=true when the loop should terminate (stream disabled or ctx done).
+// the caller should wait before the next cycle (0 = immediate), exit=true
+// when the loop should terminate (stream disabled, ctx done, sign failure,
+// weird response), and the updated pendingAcks list to carry into the next
+// cycle (AC 1).
+//
 // delay carries the running exponential-backoff value across transport /
-// transient retries; it is reset to BaseDelay on ClassOK/ClassPerJTI.
-func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration) (goSetSstp.Classification, time.Duration, bool) {
+// transient retries; it is reset to BaseDelay on ClassOK/ClassPerJTI. Sleep
+// delays returned to the caller are jittered ±25% (AC 4).
+//
+// pendingAcks are the JTIs of previously-ingested response-carried SETs to
+// echo back in this request's Ack field (AC 1). They are cleared from the
+// returned updatedAcks only on a peer-accepted (200) response; on 4xx /
+// transport / sign-failure the same list is preserved so the acks are
+// retried on the next successful exchange. Newly-ingested response SETs
+// (verified via goSetSstp.VerifySET, fed to HandleInboundEvent WITHOUT
+// re-parse — AC 2) are appended to the updatedAcks so they ride the next
+// request.
+func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration, pendingAcks []string) (goSetSstp.Classification, time.Duration, bool, []string) {
 	pairId := stream.PairId
 
 	// Gather the outbound JTIs to flush this cycle. Drain the buffer first
@@ -602,67 +658,156 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	// back to the pending list when the buffer is empty (Q13).
 	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
 
-	// Nothing to flush: idle a short cycle so we don't busy-loop.
-	if len(outJtis) == 0 {
-		*delay = d.cfg.BaseDelay
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false
-	}
-
 	events := d.outbound.ResolveEvents(pairId, outJtis)
+
+	// Idle guard: no outbound events AND no acks to echo means there is
+	// nothing to say to the peer this cycle. Idle a short cycle rather than
+	// open a keep-alive request that would only add load without carrying
+	// state. When pendingAcks IS non-empty we still POST (empty Sets, non-
+	// empty Ack) so the peer can clear its outbound (AC 1). When events
+	// is non-empty we always POST (normal outbound cycle).
+	if len(events) == 0 && len(pendingAcks) == 0 {
+		*delay = d.cfg.BaseDelay
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false, pendingAcks
+	}
 
 	var rsaKey *rsa.PrivateKey
 	var kid string
-	if stream.GetRouteMode() != model.RouteModeForward {
+	if len(events) > 0 && stream.GetRouteMode() != model.RouteModeForward {
 		rsaKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
 	}
 
-	cls, acked := d.deliver(ctx, stream, events, rsaKey, kid, nil)
+	// AC 1: carry pendingAcks in the request. Non-empty pendingAcks alone
+	// is enough to justify a request (the idle guard above ensures we do
+	// not POST when both events AND pendingAcks are empty).
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, nil, pendingAcks)
 
 	if ctx.Err() != nil {
 		// Cancelled in flight: release the claim so the next owner
-		// re-drains and retries these events.
+		// re-drains and retries these events. pendingAcks preserved.
 		d.outbound.ReleaseOutbound(pairId, events)
-		return cls, 0, true
+		return cls, 0, true, pendingAcks
+	}
+
+	// AC 5: signing failure is an error, not a skip. Halt the dial cycle
+	// (release the claim, pause outbound so an operator investigates the
+	// broken key material, exit the loop) rather than send an unsigned SET.
+	// Signing runs BEFORE Exchange, so nothing has been sent — pendingAcks
+	// are preserved verbatim (no request reached the peer, no ack echo owed).
+	if signErr != nil {
+		d.outbound.ReleaseOutbound(pairId, events)
+		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on pair=%s: %s", pairId, signErr.Error())
+		sstpDialerLog.Error("egress signing failure — halting dial cycle",
+			"pairId", pairId, "error", signErr)
+		d.outbound.PauseOutbound(stream, reason)
+		return cls, 0, true, pendingAcks
 	}
 
 	switch cls.Class {
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
+		// AC 2: ingest response-carried SETs via VerifySET → HandleInboundEvent
+		// without re-parse. Any JTI whose verify or HandleEvent fails is NOT
+		// added to newAcks, so the peer's outbound will resend it on a
+		// subsequent cycle (US 5 literal-ack semantics: only what we
+		// actually accepted is acked).
+		newAcks := d.runInboundHalf(stream, received)
 		ackedCount := d.outbound.AckOutbound(stream, acked, events, fencingToken)
 		*delay = d.cfg.BaseDelay
+
+		// AC 1: the peer accepted the request, so any pendingAcks we just
+		// echoed are consumed. The updated list is only the freshly-ingested
+		// JTIs (which will ride the NEXT request's Ack).
+		updatedAcks := newAcks
+
 		// If we acked everything we sent, drain more immediately;
 		// otherwise idle a short cycle to avoid re-sending unacked SETs.
-		if ackedCount >= len(events) {
-			return cls, 0, false
+		if len(events) > 0 && ackedCount >= len(events) {
+			return cls, 0, false, updatedAcks
 		}
-		return cls, d.cfg.BaseDelay, false
+		if len(events) == 0 && len(received) == 0 {
+			// Purely idle cycle — sleep the base delay to avoid busy-loop.
+			return cls, d.cfg.BaseDelay, false, updatedAcks
+		}
+		return cls, d.cfg.BaseDelay, false, updatedAcks
 
 	case goSetSstp.ClassRequestError:
 		// 4xx: pause ONLY the outbound (client) direction of the pair.
 		// Release the claim so a later resume re-drains and retries.
+		// pendingAcks preserved so they retry after resume.
 		d.outbound.ReleaseOutbound(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: 4xx request error on pair=%s", pairId)
 		d.outbound.PauseOutbound(stream, reason)
-		return cls, 0, true
+		return cls, 0, true, pendingAcks
 
 	case goSetSstp.ClassTransient, goSetSstp.ClassTransport:
 		// 5xx / connection failure: back off per POLL_RETRY_*, do NOT
 		// pause (Q25). Release the claim so the retried cycle re-drains.
+		// pendingAcks preserved for the retry.
 		d.outbound.ReleaseOutbound(pairId, events)
 		next := *delay
 		if cls.NextDelay > 0 {
 			next = cls.NextDelay
 		}
+		// AC 4: jitter the sleep-now value; the stored ladder is unjittered
+		// so exponential growth stays monotonic.
+		jittered := jitteredSstpBackoff(next)
 		sstpDialerLog.Warn("transport/transient failure, backing off",
-			"pairId", pairId, "class", cls.Class.String(), "delay", next)
+			"pairId", pairId, "class", cls.Class.String(), "delay", jittered)
 		*delay = nextSstpBackoff(*delay, d.cfg.BackoffFactor, d.cfg.MaxDelay)
-		return cls, next, false
+		return cls, jittered, false, pendingAcks
 
 	default: // ClassWeirdResponse
 		d.outbound.ReleaseOutbound(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: weird response on pair=%s", pairId)
 		d.outbound.PauseOutbound(stream, reason)
-		return cls, 0, true
+		return cls, 0, true, pendingAcks
 	}
+}
+
+// runInboundHalf verifies each response-carried SET via goSetSstp.VerifySET
+// and hands the verified token to HandleInboundEvent WITHOUT re-parse
+// (PRD #49 slice 2c AC 2). Returns the JTIs of SETs that BOTH verified
+// AND ingested successfully — those are the acks to echo in the next
+// request's Ack field (AC 1, US 5 literal semantics). A per-JTI verify
+// or ingest failure is logged and dropped from the ack list, so the peer's
+// outbound will resend on the next cycle until we either accept it or
+// operator intervention resolves the trust-root mismatch.
+func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received map[string]string) []string {
+	if len(received) == 0 {
+		return nil
+	}
+	// AC 2: config comes from today's business-stream trust settings —
+	// JWKS-backed; ExpectedIssuer / ExpectedAudiences from the pair's inbound
+	// direction. AllowedAlgs is left nil so VerifySET applies the
+	// {RS256, ES256, EdDSA} default (Seam 2 r3 / ADR-0066).
+	cfg := d.outbound.InboundVerifyConfig(stream)
+	rxSid := ""
+	if stream.SstpInbound != nil {
+		rxSid = stream.SstpInbound.Id
+	}
+	acks := make([]string, 0, len(received))
+	for jti, raw := range received {
+		verified, vErr := goSetSstp.VerifySET(raw, cfg)
+		if vErr != nil {
+			sstpDialerLog.Warn("inbound response SET failed verify — dropping",
+				"pairId", stream.PairId, "jti", jti, "error", vErr)
+			continue
+		}
+		if verified.Token == nil {
+			// Defensive: a nil Token from VerifySET violates its contract,
+			// but skipping is safer than a panic under an unexpected shape.
+			sstpDialerLog.Warn("VerifySET returned nil Token — skipping ingest",
+				"pairId", stream.PairId, "jti", jti)
+			continue
+		}
+		if iErr := d.outbound.HandleInboundEvent(verified.Token, verified.Raw, rxSid); iErr != nil {
+			sstpDialerLog.Warn("HandleInboundEvent failed — dropping ack for JTI",
+				"pairId", stream.PairId, "jti", jti, "error", iErr)
+			continue
+		}
+		acks = append(acks, jti)
+	}
+	return acks
 }
 
 // heartbeat renews the lease every HeartbeatInterval. A single renew
@@ -752,10 +897,29 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	}
 
 	returnEvents := goSetSstp.BoolPtr(false)
-	cls, acked := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents)
+	// The second push carries NO Ack — the primary owns pendingAcks
+	// bookkeeping (AC 1). Running Acks through both cycles risks the peer
+	// clearing an outbound entry twice and any concurrent list mutation
+	// race between the two goroutines. Empty Ack here is deliberate.
+	cls, acked, _, signErr := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents, nil)
+
+	if signErr != nil {
+		// AC 5: signing failure halts even on the second-push path — never
+		// send an unsigned SET. Pause outbound and log; the primary loop
+		// will observe the pause on its next RefreshPair and exit.
+		d.outbound.ReleaseOutbound(pairId, events)
+		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on push-while-poll-held for pair=%s: %s", pairId, signErr.Error())
+		sstpDialerLog.Error("egress signing failure on second push — halting",
+			"pairId", pairId, "error", signErr)
+		d.outbound.PauseOutbound(stream, reason)
+		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}
+	}
 
 	switch cls.Class {
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
+		// Second-push acks: the peer's returned Ack is its "we received
+		// these" acknowledgement for the SETs we just sent. Use it verbatim
+		// (no ack-all fallback, AC 3).
 		d.outbound.AckOutbound(stream, acked, events, fencingToken)
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary
@@ -774,9 +938,20 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 }
 
 // deliver performs one SSTP HTTP cycle by calling pkg/goSetSstp.Exchange
-// (ADR-0067 single-cycle). Returns the classifier's verdict and the peer's
-// ack list (empty when the peer returned no explicit ack — the §2.3
-// success-without-detail case is handled by AckOutbound).
+// (ADR-0067 single-cycle). Returns the classifier's verdict, the peer's ack
+// list, the response-carried SETs (jti → compact SET string) for the caller
+// to verify + ingest via the inbound half (AC 2), and a signing error if
+// egress signing failed (AC 5 — signing failure is an ERROR that halts the
+// dial cycle, never a silent skip).
+//
+// Signing runs BEFORE Exchange: on signErr != nil no HTTP request is issued,
+// so the caller's rollback is trivial (release the claim + pause + exit).
+// This is the single egress-signing site the AC consolidates onto — the
+// legacy "HTTP adapter also signs" split is retired here.
+//
+// requestAck carries the caller's pendingAcks (AC 1 request-side Ack
+// carriage): JTIs of previously-ingested response SETs to echo back so the
+// peer clears them from its outbound.
 //
 // The HTTP client + Authorization header come from the credential-chain
 // resolver (PRD 49 slice 2b, AC 2): when d.cfg.ResolveClient is wired
@@ -784,15 +959,24 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 // posture and the per-pair bearer wins the Authorization header (AC 3
 // precedence). When ResolveClient is unset (tests) or errors, the dialer
 // falls back to d.cfg.HTTPClient + the raw per-pair bearer.
-func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string, returnEvents *bool) (goSetSstp.Classification, []string) {
+func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string, returnEvents *bool, requestAck []string) (goSetSstp.Classification, []string, map[string]string, error) {
 	method := stream.SstpMethod
 	if method == nil || method.EndpointUrl == "" {
-		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil
+		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, nil
+	}
+
+	// AC 5: egress signing is the SINGLE consolidated site. Sign FIRST so a
+	// failure short-circuits before any HTTP work happens; the caller then
+	// halts the dial cycle rather than sending an unsigned SET.
+	sets, signErr := buildSstpSets(stream, events, key, kid)
+	if signErr != nil {
+		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, signErr
 	}
 
 	msg := goSetSstp.Message{
 		ReturnEvents: returnEvents,
-		Sets:         buildSstpSets(stream, events, key, kid),
+		Sets:         sets,
+		Ack:          requestAck,
 	}
 
 	client := d.cfg.HTTPClient
@@ -827,22 +1011,34 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 
 	cls := goSetSstp.ClassifyResult(result)
 	var acked []string
+	var received map[string]string
 	if result.Message != nil {
 		acked = result.Message.Ack
+		received = result.Message.Sets
 	}
-	return cls, acked
+	return cls, acked, received, nil
 }
 
 // buildSstpSets renders each outbound event to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer
-// key otherwise. Missing key or sign failure skips the JTI (AC 1 parity —
-// slice 2c consolidates sign failure = error).
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string) map[string]string {
+// key otherwise (AC 5 — consolidated egress-signing site).
+//
+// PRD #49 slice 2c AC 5: a signing failure returns an error rather than
+// silently skipping the JTI. Missing key material for a publish-mode pair
+// is likewise an error — sending an unsigned SET violates ADR-0067's
+// verify-at-ingest invariant, so the dial cycle halts (caller's contract)
+// rather than dropping SETs onto the wire with no signature. Forward-mode
+// pairs bypass signing entirely (Event.Original is on-wire verbatim), so
+// they can never trip this error.
+func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string) (map[string]string, error) {
 	if len(events) == 0 {
-		return nil
+		return nil, nil
 	}
 	cfg := stream.StreamConfiguration
 	forward := cfg.RouteMode == model.RouteModeForward
+	if !forward && key == nil {
+		return nil, fmt.Errorf("sstp: no signing key for stream %s (issuer %s)", cfg.Id, cfg.Iss)
+	}
 	sets := make(map[string]string, len(events))
 	for _, ev := range events {
 		if ev == nil {
@@ -852,9 +1048,6 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 			sets[ev.Jti] = ev.Original
 			continue
 		}
-		if key == nil {
-			continue
-		}
 		token := &ev.Event
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
@@ -862,10 +1055,13 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		token.Kid = kid
 		signed, err := token.JWS(jwt.SigningMethodRS256, key)
 		if err != nil {
-			continue
+			// AC 5: signing failure is an ERROR — halt the dial cycle
+			// rather than send an unsigned SET (or drop it silently).
+			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, err)
 		}
 		sets[ev.Jti] = signed
 	}
-	return sets
+	return sets, nil
 }
+
 

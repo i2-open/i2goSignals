@@ -21,6 +21,8 @@ import (
 	"crypto/rsa"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -108,6 +110,24 @@ type SstpOutbound interface {
 	// cycle context on it so router.Shutdown() cancels in-flight cycles
 	// (Q14.a shutdown handoff).
 	Ctx() context.Context
+
+	// InboundVerifyConfig returns the JWKS-backed verify config for the pair's
+	// inbound direction (rec.SstpInbound), used by the dialer's response-SET
+	// ingest half (PRD #49 slice 2c AC 2). ExpectedIssuer / ExpectedAudiences
+	// come from rec.SstpInbound.Iss / Aud; the JWKS comes from the router's
+	// StreamService.GetIssuerJwksForReceiver keyed on rec.SstpInbound.Id.
+	// A nil rec (or one without SstpInbound) returns a bare config whose nil
+	// JWKS forces goSetSstp.VerifySET into its ErrBadSignature path — a pair
+	// without a configured inbound trust root never accepts a response SET.
+	InboundVerifyConfig(rec *model.StreamStateRecord) goSetSstp.VerifyConfig
+
+	// HandleInboundEvent hands a verified inbound SET to the router's ingest
+	// path (persist-then-route, HandleEvent) using the pair's rx-side SID.
+	// The dialer calls this after goSetSstp.VerifySET on a response-carried
+	// SET so the router's ingest never re-parses (PRD #49 slice 2c AC 2:
+	// verified via VerifySET at ingest and fed to router.HandleEvent via
+	// VerifiedSET.Token without re-parse).
+	HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error
 }
 
 // SstpDialerHooks is the hook interface the router calls when SSTP-client
@@ -217,6 +237,35 @@ func (r *router) BackfillBatch() int {
 
 func (r *router) Ctx() context.Context {
 	return r.ctx
+}
+
+// InboundVerifyConfig builds the JWKS-backed verify config for the pair's
+// inbound direction from the source-of-truth StreamStateRecord (PRD #49 slice
+// 2c AC 2). ExpectedIssuer / ExpectedAudiences come from rec.SstpInbound; the
+// JWKS is resolved via StreamService.GetIssuerJwksForReceiver keyed on the
+// inbound-side SID — the same resolver the SSTP-server handler already uses
+// so the two ingest halves share one trust vocabulary. AllowedAlgs is left
+// nil so goSetSstp.VerifySET applies its {RS256, ES256, EdDSA} default (Seam
+// 2 r3 / ADR-0066).
+func (r *router) InboundVerifyConfig(rec *model.StreamStateRecord) goSetSstp.VerifyConfig {
+	cfg := goSetSstp.VerifyConfig{RequireSignature: true}
+	if rec == nil || rec.SstpInbound == nil {
+		return cfg
+	}
+	cfg.ExpectedIssuer = rec.SstpInbound.Iss
+	cfg.ExpectedAudiences = rec.SstpInbound.Aud
+	cfg.JWKS = r.streamService.GetIssuerJwksForReceiver(r.ctx, rec.SstpInbound.Id)
+	return cfg
+}
+
+// HandleInboundEvent delegates to the router's HandleEvent ingest path (PRD
+// #49 slice 2c AC 2). The dialer already holds a *goSet.SecurityEventToken
+// straight out of goSetSstp.VerifiedSET.Token, so no second parse happens
+// here — the surface just carries the already-verified token into the
+// standard ingest pipeline with the rx-side SID so eventsIn counters carry
+// stream_id=rxSid (Q46), matching the SSTP-server runner's ingest.
+func (r *router) HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error {
+	return r.HandleEvent(token, raw, sid)
 }
 
 // Compile-time assertion: the router satisfies SstpOutbound. This is the
@@ -391,11 +440,16 @@ func (r *router) releaseSstpClaims(pairId string, jtis []string) {
 // the provider, clears its in-flight claim, and increments the outbound
 // eventsOut counter (tfr=SSTP, stream_id=txSid) per acked event (Q46). A peer
 // ack is honored only for JTIs in the sent set — a stray ack for something we
-// did not send is ignored, so an un-sent SET is never removed. When the peer
-// returns no explicit ack list, every SET sent this cycle is treated as
-// accepted (the §2.3 success-without-detail case). Any sent-but-NOT-acked JTI
-// has its in-flight claim released so it is re-drained and retried on a later
-// cycle. Returns the number of acked (and counted) events.
+// did not send is ignored, so an un-sent SET is never removed.
+//
+// PRD #49 slice 2c AC 3 — literal SSTP ack semantics. An omitted or empty
+// ack list confirms NOTHING: every sent SET has its in-flight claim released
+// so it is re-drained and retried on a later cycle. The historical
+// "success-without-detail ⇒ ack-all-sent" fallback is REMOVED with no
+// compatibility knob; delivery loss is no longer masked by an empty response
+// ack (US 5). Any sent-but-NOT-acked JTI likewise has its claim released so
+// it is re-drained on a later cycle. Returns the number of acked (and
+// counted) events.
 func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord, fencingToken int64) int {
 	sid := stream.StreamConfiguration.Id
 	pairId := stream.PairId
@@ -408,13 +462,12 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 		sentByJti[ev.Jti] = ev
 	}
 
+	// AC 3: literal ack semantics — no ack-all-sent fallback. An empty ack
+	// list falls through to the loop below and acks zero JTIs; every sent
+	// SET is then released for a later retry via the tail unacked-release
+	// block. This is the enforcement site for the "empty ack confirms
+	// nothing" invariant (US 5).
 	ackSet := acked
-	if len(ackSet) == 0 {
-		ackSet = make([]string, 0, len(sent))
-		for _, ev := range sent {
-			ackSet = append(ackSet, ev.Jti)
-		}
-	}
 
 	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
