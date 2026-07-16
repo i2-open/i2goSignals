@@ -91,10 +91,19 @@ type SstpDialerConfig struct {
 	// [sstpTakeoverJitterMin, sstpTakeoverJitterMax].
 	Jitter func() time.Duration
 
-	// HTTPClient is the outbound client used by every SSTP cycle. AC 1
-	// parity: this slice keeps today's inline construction (default 60s
-	// timeout). Slice 2b routes it through the credential-chain resolver.
+	// HTTPClient is the fallback outbound client used by SSTP cycles when
+	// ResolveClient is unset (tests) or returns an error. Production wires
+	// ResolveClient to the credential-chain resolver so per-pair TLS/OAuth
+	// posture applies; HTTPClient is a safety net (default 60s timeout).
 	HTTPClient *http.Client
+
+	// ResolveClient invokes the transmitter credential-selection chain
+	// (Security-Protocol-Architecture §5) to obtain the per-cycle
+	// (*http.Client, Authorization header, close func). Wired by the
+	// composition root (application.go) to sa.ResolveTransmitterClient.
+	// When nil, the dialer falls back to HTTPClient + the raw per-pair
+	// bearer from SstpMethod.AuthorizationHeader.
+	ResolveClient func(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, func(), error)
 
 	// BackfillBatch is the claim/drain batch size (mirrors the router's
 	// backfillBatch). 0 ⇒ 100 (the router's own default).
@@ -764,16 +773,17 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	return cls
 }
 
-// deliver performs one SSTP HTTP cycle over the configured HTTPClient by
-// calling pkg/goSetSstp.Exchange (ADR-0067 single-cycle). Returns the
-// classifier's verdict and the peer's ack list (empty when the peer
-// returned no explicit ack — the §2.3 success-without-detail case is
-// handled by AckOutbound).
+// deliver performs one SSTP HTTP cycle by calling pkg/goSetSstp.Exchange
+// (ADR-0067 single-cycle). Returns the classifier's verdict and the peer's
+// ack list (empty when the peer returned no explicit ack — the §2.3
+// success-without-detail case is handled by AckOutbound).
 //
-// AC 1 parity: this slice keeps today's inline http.Client + Authorization
-// header construction. Slice 2b (issue #242) routes it through the
-// credential-chain resolver so TxAlias-configured TLS posture and OAuth
-// credentials apply.
+// The HTTP client + Authorization header come from the credential-chain
+// resolver (PRD 49 slice 2b, AC 2): when d.cfg.ResolveClient is wired
+// (production path), the per-cycle client honors PeerServerAlias transport
+// posture and the per-pair bearer wins the Authorization header (AC 3
+// precedence). When ResolveClient is unset (tests) or errors, the dialer
+// falls back to d.cfg.HTTPClient + the raw per-pair bearer.
 func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string, returnEvents *bool) (goSetSstp.Classification, []string) {
 	method := stream.SstpMethod
 	if method == nil || method.EndpointUrl == "" {
@@ -785,7 +795,26 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 		Sets:         buildSstpSets(stream, events, key, kid),
 	}
 
+	client := d.cfg.HTTPClient
 	auth := method.AuthorizationHeader
+	closeClient := func() {}
+	if d.cfg.ResolveClient != nil {
+		if resolved, resolvedAuth, resolvedClose, err := d.cfg.ResolveClient(ctx, stream); err == nil {
+			client = resolved
+			// The resolver is authoritative for auth (SSTP branch already
+			// picks the per-pair bearer per AC 3). Empty means "client
+			// injects Authorization itself" (OAuth transport).
+			auth = resolvedAuth
+			if resolvedClose != nil {
+				closeClient = resolvedClose
+			}
+		} else {
+			sstpDialerLog.Warn("credential-chain resolver failed; falling back to inline HTTP client",
+				"pairId", stream.PairId, "error", err)
+		}
+	}
+	defer closeClient()
+
 	if auth != "" && !strings.Contains(strings.ToLower(auth), "bearer") && !strings.Contains(auth, " ") {
 		auth = "Bearer " + auth
 	}
@@ -793,7 +822,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	result := goSetSstp.Exchange(ctx, msg, goSetSstp.DialerConfig{
 		EndpointURL:   method.EndpointUrl,
 		Authorization: auth,
-		HTTPClient:    d.cfg.HTTPClient,
+		HTTPClient:    client,
 	})
 
 	cls := goSetSstp.ClassifyResult(result)

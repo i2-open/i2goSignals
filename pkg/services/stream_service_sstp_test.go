@@ -342,6 +342,49 @@ func TestCreateSstpPair_ResponderRollsBackOnCascadeFailure(t *testing.T) {
 	assert.Empty(t, all, "responder should have rolled back its local half")
 }
 
+// TestCreateSstpPair_PersistsPeerServerAlias proves PRD 49 slice 2b (issue
+// #242, AC 4): the bootstrap's PeerServerAlias is persisted on the resulting
+// record's SstpMethod so the SSTP dialer's credential-chain helper can
+// honor operator-configured TLS/OAuth transport posture per pair. Before
+// this slice, CreateSstpPair resolved the alias once to the peerServer and
+// dropped the string. Regression assertion: it survives to the record.
+func TestCreateSstpPair_PersistsPeerServerAlias(t *testing.T) {
+	svc, ss := sstpFixture(t)
+	peer := newMockPeer(t, false)
+	alias := storePeerServer(t, ss, peer.ts.URL)
+
+	b := responderBootstrap()
+	b.PeerServerAlias = alias
+
+	rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec.SstpMethod)
+	assert.Equal(t, alias, rec.SstpMethod.PeerServerAlias,
+		"CreateSstpPair must persist bootstrap.PeerServerAlias on SstpMethod (AC 4)")
+
+	// And a Get from the store returns the field, proving persistence
+	// (not just the in-memory returned copy).
+	got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
+	require.NoError(t, err)
+	require.NotNil(t, got.SstpMethod)
+	assert.Equal(t, alias, got.SstpMethod.PeerServerAlias,
+		"PeerServerAlias must survive persistence + read-back (AC 4 round-trip)")
+}
+
+// TestCreateSstpPair_NoPeerServerAlias_LeavesAliasEmpty pins the local-only
+// provisioning path (Q31): a bootstrap with no PeerServerAlias produces a
+// record whose SstpMethod.PeerServerAlias is empty — the dialer will fall
+// back to the default HTTP client transport.
+func TestCreateSstpPair_NoPeerServerAlias_LeavesAliasEmpty(t *testing.T) {
+	svc, _ := sstpFixture(t)
+
+	rec, err := svc.CreateSstpPair(context.Background(), responderBootstrap(), "proj-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec.SstpMethod)
+	assert.Empty(t, rec.SstpMethod.PeerServerAlias,
+		"local-only provisioning (no alias) should leave SstpMethod.PeerServerAlias empty")
+}
+
 func TestCreateSstpPair_InitiatorNoRollbackOnCascadeFailure(t *testing.T) {
 	svc, ss := sstpFixture(t)
 	peer := newMockPeer(t, true) // peer returns 500

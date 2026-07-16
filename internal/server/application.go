@@ -219,7 +219,14 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	// startup UpdateStreamState iteration calls sstpDialer.RegisterPair on
 	// every existing SSTP-client pair, which queues them until Bind late-
 	// binds the outbound surface below and drains the queue.
-	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, LoadSstpDialerConfig())
+	// Wire the SSTP dialer to the transmitter credential-selection chain
+	// (PRD 49 slice 2b, AC 2): the dialer resolves per-cycle HTTP client
+	// + Authorization through sa.ResolveTransmitterClient so
+	// PeerServerAlias-configured TLS/OAuth transport posture applies and
+	// the per-pair bearer wins the Authorization header (AC 3).
+	sstpDialerCfg := LoadSstpDialerConfig()
+	sstpDialerCfg.ResolveClient = sa.ResolveTransmitterClient
+	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
 		StreamService:        persistence.StreamService,

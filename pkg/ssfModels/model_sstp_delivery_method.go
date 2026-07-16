@@ -31,6 +31,17 @@ type SstpMethod struct {
 	AuthorizationHeader string `json:"authorization_header,omitempty" bson:"authorization_header,omitempty"`
 	// PeerPairId is the PairId held by the peer node for this same pair.
 	PeerPairId string `json:"peer_pair_id,omitempty" bson:"peer_pair_id,omitempty"`
+	// PeerServerAlias names a stored Server whose configuration contributes
+	// TRANSPORT POSTURE (TLS trust roots, OAuth transport, mTLS) to outbound
+	// SSTP business-stream cycles targeting the peer. Persisted at pair
+	// creation from SstpPairBootstrap.PeerServerAlias so the SSTP dialer's
+	// credential-chain helper can honor operator-configured transmitter TLS
+	// on a per-pair basis. The per-pair bearer (AuthorizationHeader) ALWAYS
+	// wins the Authorization header — the resolved Server contributes
+	// posture only, not its own credential. Empty when the pair was created
+	// with no PeerServerAlias (Q31 local-only provisioning) — the dialer
+	// falls back to the default http.Client transport.
+	PeerServerAlias string `json:"peer_server_alias,omitempty" bson:"peer_server_alias,omitempty"`
 }
 
 // DeepCopy returns an independent copy of the SstpMethod, or nil when m is nil.

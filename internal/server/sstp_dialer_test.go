@@ -361,3 +361,208 @@ func TestSstpDialer_BasicDialAndAck(t *testing.T) {
 	assert.True(t, coord.acquired.Load(),
 		"dialer must acquire the sstp-client:<PairId> lease via cluster.Coordinator")
 }
+
+// ---------------------------------------------------------------------------
+// AC 2 (PRD 49 slice 2b, issue #242): the dialer routes each SSTP cycle
+// through the credential-chain resolver so PeerServerAlias-configured
+// transport posture applies and the per-pair bearer wins Authorization.
+// ---------------------------------------------------------------------------
+
+// TestSstpDialer_UsesResolveClientForCredentialChain proves the dialer
+// consults cfg.ResolveClient on every cycle rather than reaching into
+// SstpMethod.AuthorizationHeader / cfg.HTTPClient directly. This is the
+// wiring seam AC 2 requires: the SSTP dialer + push delivery share ONE
+// resolver (sa.ResolveTransmitterClient in production), so a rotated
+// per-pair bearer / PeerServerAlias TLS posture is picked up automatically.
+//
+// Assertion strategy: wire a stub ResolveClient that returns a
+// distinctive Authorization header and record its invocation. The stub's
+// header must land on the peer's inbound request — proving deliver()
+// preferred the resolver's output over the raw SstpMethod bearer.
+func TestSstpDialer_UsesResolveClientForCredentialChain(t *testing.T) {
+	const (
+		pairId = "pair-resolver-wired"
+		txSid  = "tx-resolver-wired"
+		jti    = "sstp-resolver-1"
+	)
+
+	var (
+		mu           sync.Mutex
+		gotAuth      string
+		requestCount int
+	)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		requestCount++
+		mu.Unlock()
+		raw, _ := io.ReadAll(r.Body)
+		var msg goSetSstp.Message
+		require.NoError(t, json.Unmarshal(raw, &msg))
+		acks := make([]string, 0, len(msg.Sets))
+		for j := range msg.Sets {
+			acks = append(acks, j)
+		}
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{Ack: acks})
+	}))
+	defer peer.Close()
+
+	pair := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        txSid,
+			Iss:       "https://issuer.example.com",
+			Aud:       []string{"https://peer.example.com"},
+			RouteMode: model.RouteModeForward,
+		},
+		Status: model.StreamStateEnabled,
+		PairId: pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                model.SstpRoleInitiator,
+			EndpointUrl:         peer.URL,
+			AuthorizationHeader: "Bearer STALE-inline-bearer",
+			// PeerServerAlias would drive TLS posture in production;
+			// the stub resolver stands in for it here.
+			PeerServerAlias: "stub-peer-alias",
+		},
+	}
+	ev := &model.EventRecord{Jti: jti, Original: `{"jti":"` + jti + `","raw":true}`}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := newFakeSstpOutbound(ctx, pair, ev)
+	coord := &oneShotCoordinator{}
+
+	var resolverInvocations atomic.Int64
+	cfg := SstpDialerConfig{
+		BaseDelay:           5 * time.Millisecond,
+		MaxDelay:            50 * time.Millisecond,
+		BackoffFactor:       2.0,
+		LeaseDuration:       500 * time.Millisecond,
+		HeartbeatInterval:   200 * time.Millisecond,
+		HeartbeatRetryDelay: 10 * time.Millisecond,
+		Jitter:              func() time.Duration { return 0 },
+		HTTPClient:          &http.Client{Timeout: 2 * time.Second},
+		BackfillBatch:       10,
+		ResolveClient: func(ctx context.Context, s *model.StreamStateRecord) (*http.Client, string, func(), error) {
+			resolverInvocations.Add(1)
+			require.Equal(t, pairId, s.PairId,
+				"resolver must receive the live stream record for this pair")
+			// The resolver is authoritative — it can return an
+			// Authorization value different from the raw SstpMethod bearer
+			// (e.g. after a bearer rotation). The dialer must use THIS.
+			return &http.Client{Timeout: 2 * time.Second}, "Bearer FRESH-from-resolver", func() {}, nil
+		},
+	}
+
+	dialer := NewSstpDialer(coord, "node-resolver-test", nil, cfg)
+	dialer.Bind(fake)
+	dialer.RegisterPair(pairId)
+	t.Cleanup(func() { dialer.UnregisterPair(pairId) })
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		rc := requestCount
+		mu.Unlock()
+		return rc >= 1
+	}, 3*time.Second, 20*time.Millisecond,
+		"dialer must dial the peer at least once")
+
+	mu.Lock()
+	auth := gotAuth
+	mu.Unlock()
+
+	assert.Equal(t, "Bearer FRESH-from-resolver", auth,
+		"deliver() must use the resolver's Authorization header, not the raw SstpMethod bearer (AC 2 wiring)")
+	assert.Greater(t, resolverInvocations.Load(), int64(0),
+		"deliver() must call cfg.ResolveClient on each cycle (AC 2)")
+}
+
+// TestSstpDialer_FallsBackToInlineClientWhenResolverErrors proves the
+// safety net: a resolver failure must not stop the dialer — it falls back
+// to cfg.HTTPClient + the raw SstpMethod.AuthorizationHeader so a mis-
+// configured resolver cannot silently blackhole outbound SSTP traffic.
+func TestSstpDialer_FallsBackToInlineClientWhenResolverErrors(t *testing.T) {
+	const (
+		pairId = "pair-resolver-error"
+		txSid  = "tx-resolver-error"
+		jti    = "sstp-resolver-err-1"
+	)
+
+	var (
+		mu      sync.Mutex
+		gotAuth string
+	)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		raw, _ := io.ReadAll(r.Body)
+		var msg goSetSstp.Message
+		_ = json.Unmarshal(raw, &msg)
+		acks := make([]string, 0, len(msg.Sets))
+		for j := range msg.Sets {
+			acks = append(acks, j)
+		}
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{Ack: acks})
+	}))
+	defer peer.Close()
+
+	pair := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        txSid,
+			Iss:       "https://issuer.example.com",
+			Aud:       []string{"https://peer.example.com"},
+			RouteMode: model.RouteModeForward,
+		},
+		Status: model.StreamStateEnabled,
+		PairId: pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                model.SstpRoleInitiator,
+			EndpointUrl:         peer.URL,
+			AuthorizationHeader: "Bearer inline-fallback",
+		},
+	}
+	ev := &model.EventRecord{Jti: jti, Original: `{"jti":"` + jti + `","raw":true}`}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := newFakeSstpOutbound(ctx, pair, ev)
+	coord := &oneShotCoordinator{}
+
+	cfg := SstpDialerConfig{
+		BaseDelay:           5 * time.Millisecond,
+		MaxDelay:            50 * time.Millisecond,
+		BackoffFactor:       2.0,
+		LeaseDuration:       500 * time.Millisecond,
+		HeartbeatInterval:   200 * time.Millisecond,
+		HeartbeatRetryDelay: 10 * time.Millisecond,
+		Jitter:              func() time.Duration { return 0 },
+		HTTPClient:          &http.Client{Timeout: 2 * time.Second},
+		BackfillBatch:       10,
+		ResolveClient: func(ctx context.Context, s *model.StreamStateRecord) (*http.Client, string, func(), error) {
+			return nil, "", nil, assert.AnError
+		},
+	}
+
+	dialer := NewSstpDialer(coord, "node-fallback", nil, cfg)
+	dialer.Bind(fake)
+	dialer.RegisterPair(pairId)
+	t.Cleanup(func() { dialer.UnregisterPair(pairId) })
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return gotAuth != ""
+	}, 3*time.Second, 20*time.Millisecond,
+		"dialer must fall through to the inline HTTPClient when the resolver errors")
+
+	mu.Lock()
+	auth := gotAuth
+	mu.Unlock()
+	assert.Equal(t, "Bearer inline-fallback", auth,
+		"resolver error must fall back to SstpMethod.AuthorizationHeader + cfg.HTTPClient — never black-hole traffic")
+}
