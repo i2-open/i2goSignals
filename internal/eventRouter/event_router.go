@@ -53,13 +53,16 @@ type EventRouter interface {
 	GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
-	// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId:
-	// it ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
-	// counting eventsIn with tfr=SSTP, stream_id=rxSid), long-polls the outbound
-	// EventPollBuffer, and returns the SSTP response message plus an HTTP status
-	// (200 served/paused, 4xx deleted/unknown pair). Takes no cluster lease — every
-	// node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19, Q20, Q46).
-	SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int)
+	// SstpServerHandler runs one SSTP-server cycle for the pair already resolved
+	// by the HTTP handler: it ingests the already-parsed inbound SETs
+	// (persist-then-route via HandleEvent, counting eventsIn with tfr=SSTP,
+	// stream_id=rxSid), long-polls the outbound EventPollBuffer, and returns
+	// the SSTP response message. Pair-404 is owned by the HTTP handler, which
+	// performs the SINGLE GetStreamStateByPairId lookup and threads the record
+	// here (PRD #49 slice 3 AC 2 — single pair resolution). Takes no cluster
+	// lease — every node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19,
+	// Q20, Q46).
+	SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) goSetSstp.Message
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	// RegisterMeteringObserver installs the subject-carrying metering observer
@@ -130,10 +133,12 @@ type router struct {
 	// pending list remains the durable source of truth, so a takeover re-reads pending
 	// regardless of any in-memory claim.
 	sstpInFlight map[string]map[string]bool
-	// sstpCfgOverride, when non-nil, supplies deterministic lease/heartbeat/
-	// backoff timing for SSTP-client runner tests. Production leaves it nil and
-	// loads the POLL_RETRY_* env knobs.
-	sstpCfgOverride      *sstpBackoffConfig
+	// sstpDialer is the optional hook the router calls when SSTP-client pairs are
+	// registered / removed (PRD #49 slice 2a). Implemented in internal/server by
+	// the relocated dialer, which starts a per-pair goroutine on RegisterPair and
+	// stops it on UnregisterPair. Nil ⇒ no SSTP dialer goroutine ever starts (unit
+	// tests that do not need the dialer skip the callback).
+	sstpDialer           SstpDialerHooks
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
 	keyService           *services.KeyService
@@ -141,7 +146,6 @@ type router struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
-	sstpDelivery         delivery.SstpDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
 	// meteringObserver holds the optional subject-carrying metering observer
 	// (issue #218), read lock-free on the routing path. Distinct from the
@@ -221,11 +225,12 @@ type RouterDeps struct {
 	// deterministic outcomes. If nil, NewRouter constructs a default HTTPAdapter
 	// wired to the router as KeyReloader.
 	PushDelivery delivery.PushDelivery
-	// SstpDelivery is the client-side SSTP seam for one-cycle SET delivery to a
-	// pair endpoint (PRD #154 slice 7). Main.go injects the HTTP adapter
-	// (production); tests inject delivery.NewSstpMemoryAdapter. If nil, NewRouter
-	// constructs a default SstpHTTPAdapter.
-	SstpDelivery delivery.SstpDelivery
+	// SstpDialerHooks is the optional hook the router calls when SSTP-client
+	// pairs are added / removed (PRD #49 slice 2a). Implemented in internal/server
+	// by the relocated dialer; tests that do not exercise a live dialer leave it
+	// nil (no SSTP client goroutine is started). Wire direction is server → router
+	// (server implements the hook; router calls into it).
+	SstpDialerHooks SstpDialerHooks
 	// SubjectFilterService applies SSF §8.1.3 subject filtering at delivery
 	// time. When nil (or the feature is disabled) every event passes.
 	SubjectFilterService *services.SubjectFilterService
@@ -291,11 +296,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		router.pushDelivery = delivery.NewHTTPAdapter(deps.StreamService, router)
 	}
 
-	if deps.SstpDelivery != nil {
-		router.sstpDelivery = deps.SstpDelivery
-	} else {
-		router.sstpDelivery = delivery.NewSstpHTTPAdapter(nil)
-	}
+	// SSTP dialer hook: PRD #49 slice 2a relocated the dialer loop to
+	// internal/server. Nil is legal (the router simply skips the register/
+	// unregister callbacks and no SSTP client goroutine ever starts).
+	router.sstpDialer = deps.SstpDialerHooks
 
 	// When SPIFFE is configured, replace the plain HTTP client with one that
 	// uses mutual TLS backed by the workload's X509-SVID. This allows inter-cluster
@@ -663,8 +667,23 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		}
 		pairId := stream.PairId
 		if current, ok := r.sstpClientStreams[pairId]; ok {
+			oldStatus := current.Status
 			current.Update(stream)
 			r.sstpClientStreams[pairId] = current
+			// If the pair transitioned back to enabled from pause/disable,
+			// the previous dialer goroutine may have exited (runPair returns
+			// when Status != Enabled, and PauseOutbound / sign-error paths
+			// force that exit). Re-register so a fresh goroutine picks up
+			// the enabled config; RegisterPair is idempotent when a
+			// goroutine is already running for the pair.
+			if current.Status == model.StreamStateEnabled &&
+				oldStatus != model.StreamStateEnabled &&
+				r.sstpDialer != nil {
+				dialer := r.sstpDialer
+				r.mu.Unlock()
+				dialer.RegisterPair(pairId)
+				r.mu.Lock()
+			}
 			return
 		}
 		r.mu.Unlock()
@@ -1660,8 +1679,13 @@ func (r *router) InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, 
 }
 
 func (r *router) RemoveStream(sid string) {
+	// Perform all map/buffer teardown under r.mu, then release the write lock
+	// BEFORE calling UnregisterPair. UnregisterPair waits (up to 2s) for the
+	// per-pair goroutine to exit, and that goroutine re-enters the router via
+	// RefreshPair/ReleaseOutbound (which take r.mu.RLock). Holding r.mu.Lock
+	// across that wait would deadlock every dialer for the full timeout.
+	unregisterPair := false
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	pb, ok := r.pushBuffers[sid]
 	if ok {
@@ -1688,15 +1712,21 @@ func (r *router) RemoveStream(sid string) {
 	// document _id == PairId == tx-side SID, so the single sid passed here matches
 	// both the client maps (keyed by PairId) and the server maps (keyed by txSid).
 	// Closing the buffers wakes any in-flight long-poll wait; deleting the
-	// sstpClientStreams entry is the stop signal the client runner observes on its
-	// next-cycle refresh (refreshSstpClientStream returns ok=false), so the runner
-	// goroutine exits rather than polling a dead peer forever.
+	// sstpClientStreams entry is the stop signal the client dialer observes on its
+	// next-cycle RefreshPair (returns ok=false), so the dialer goroutine exits
+	// rather than polling a dead peer forever. If the relocated dialer hook is
+	// wired (PRD #49 slice 2a) we also call UnregisterPair as a fast-path so the
+	// goroutine stops immediately rather than waiting for its next cycle to
+	// observe the map deletion.
 	if cb, ok := r.sstpBuffers[sid]; ok {
 		cb.Close()
 		delete(r.sstpBuffers, sid)
 	}
 	if _, ok := r.sstpClientStreams[sid]; ok {
 		delete(r.sstpClientStreams, sid)
+		if r.sstpDialer != nil {
+			unregisterPair = true
+		}
 	}
 	// Drop the pair's in-flight claim set and second-push slot so a removed pair
 	// leaves no stale entries (keyed on PairId == sid for a pair).
@@ -1708,6 +1738,12 @@ func (r *router) RemoveStream(sid string) {
 	}
 	if _, ok := r.sstpServerStreams[sid]; ok {
 		delete(r.sstpServerStreams, sid)
+	}
+
+	r.mu.Unlock()
+
+	if unregisterPair {
+		r.sstpDialer.UnregisterPair(sid)
 	}
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)

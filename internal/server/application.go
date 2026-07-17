@@ -69,6 +69,7 @@ type SignalsApplication struct {
 	Server               *http.Server
 	Handler              http.Handler
 	EventRouter          eventRouter.EventRouter
+	SstpDialer           *SstpDialer
 	BaseUrl              *url.URL
 	HostName             string
 	DefIssuer            string
@@ -212,6 +213,23 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	// expose the handler for external server usage (e.g., httptest.Server)
 	sa.Handler = httpRouter.router
 
+	// SSTP-client dialer (PRD #49 slice 2a). AC 3: the production server
+	// boot path in internal/server is the caller that registers/starts the
+	// SSTP dialer loop — internal/eventRouter no longer starts any SSTP
+	// dialer goroutine. Constructed first (unbound outbound); NewRouter's
+	// startup UpdateStreamState iteration calls sstpDialer.RegisterPair on
+	// every existing SSTP-client pair, which queues them until Bind late-
+	// binds the outbound surface below and drains the queue.
+	// Wire the SSTP dialer to the transmitter credential-selection chain
+	// (PRD 49 slice 2b, AC 2): the dialer resolves per-cycle HTTP client
+	// + Authorization through sa.ResolveTransmitterClient so
+	// PeerServerAlias-configured TLS/OAuth transport posture applies and
+	// the per-pair bearer wins the Authorization header (AC 3).
+	sstpDialerCfg := LoadSstpDialerConfig()
+	sstpDialerCfg.ResolveClient = sa.ResolveTransmitterClient
+	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
+	sa.SstpDialer = sstpDialer
+
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
 		StreamService:        persistence.StreamService,
 		KeyService:           persistence.KeyService,
@@ -222,8 +240,20 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		// The HTTP push adapter is wired at the composition root. NewRouter
 		// late-binds itself as the KeyReloader so the adapter can drive the
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.
-		PushDelivery: delivery.NewHTTPAdapter(persistence.StreamService, nil),
+		PushDelivery:    delivery.NewHTTPAdapter(persistence.StreamService, nil),
+		SstpDialerHooks: sstpDialer,
 	}, nodeID)
+
+	// Late-bind the router as the dialer's narrow outbound surface. The
+	// router satisfies eventRouter.SstpOutbound (see internal/eventRouter/
+	// sstp_outbound.go). This closes the two-way wiring: router →
+	// SstpDialerHooks (Register/UnregisterPair), dialer → SstpOutbound
+	// (buffer/claim/ack/wake/refresh/pause/key/second-push).
+	if outbound, ok := sa.EventRouter.(eventRouter.SstpOutbound); ok {
+		sstpDialer.Bind(outbound)
+	} else {
+		serverLog.Error("EventRouter does not implement eventRouter.SstpOutbound; SSTP dialer will not function")
+	}
 
 	var baseUrl *url.URL
 	var err error

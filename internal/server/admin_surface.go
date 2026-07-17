@@ -149,9 +149,9 @@ func (a *adminRouterAdapter) PollStreamHandler(string, model.PollParameters) (ma
 	return nil, false, 0
 }
 
-func (a *adminRouterAdapter) SstpServerHandler(context.Context, string, goSetSstp.Message, []eventRouter.SstpInboundSet) (goSetSstp.Message, int) {
+func (a *adminRouterAdapter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) goSetSstp.Message {
 	a.unsupported("SstpServerHandler")
-	return goSetSstp.Message{}, 0
+	return goSetSstp.Message{}
 }
 
 func (a *adminRouterAdapter) Shutdown() { a.unsupported("Shutdown") }

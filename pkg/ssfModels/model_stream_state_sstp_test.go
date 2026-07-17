@@ -3,6 +3,8 @@ package model
 import (
 	"encoding/json"
 	"testing"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // newSstpPairRecord builds a representative bidirectional SSTP StreamStateRecord:
@@ -28,6 +30,10 @@ func newSstpPairRecord() *StreamStateRecord {
 			EndpointUrl:         "https://peer.example/sstp/pair-peer999",
 			AuthorizationHeader: "Bearer secret-token",
 			PeerPairId:          "pair-peer999",
+			// PRD 49 slice 2b (issue #242, AC 4): PeerServerAlias is
+			// persisted on the record so the credential-chain helper can
+			// honor operator-configured TLS/OAuth posture per pair.
+			PeerServerAlias: "peer-tx-alias",
 		},
 		InboundStatus:   StreamStatePause,
 		InboundErrorMsg: "peer unreachable",
@@ -142,6 +148,12 @@ func TestStreamStateRecord_Sstp_JSONRoundTrip(t *testing.T) {
 	if got.SstpMethod.PeerPairId != orig.SstpMethod.PeerPairId {
 		t.Errorf("SstpMethod.PeerPairId = %q, want %q", got.SstpMethod.PeerPairId, orig.SstpMethod.PeerPairId)
 	}
+	// PRD 49 slice 2b (issue #242, AC 4): PeerServerAlias must survive the
+	// round-trip so the credential-chain helper can resolve the stored
+	// Server's TLS/OAuth posture for outbound SSTP cycles.
+	if got.SstpMethod.PeerServerAlias != orig.SstpMethod.PeerServerAlias {
+		t.Errorf("SstpMethod.PeerServerAlias = %q, want %q", got.SstpMethod.PeerServerAlias, orig.SstpMethod.PeerServerAlias)
+	}
 }
 
 // TestStreamStateRecord_Sstp_JSONOmitEmpty proves the new fields are absent from
@@ -187,5 +199,49 @@ func TestStreamStateRecord_Sstp_DeepCopy(t *testing.T) {
 	cp.SstpMethod.AuthorizationHeader = "mutated"
 	if orig.SstpMethod.AuthorizationHeader == "mutated" {
 		t.Error("DeepCopy SstpMethod is not independent")
+	}
+}
+
+// TestSstpMethod_PeerServerAlias_BSONRoundTrip proves PeerServerAlias
+// survives a BSON marshal/unmarshal cycle so a Mongo write/read preserves
+// the field the SSTP dialer's credential-chain helper depends on (PRD 49
+// slice 2b, issue #242, AC 4).
+func TestSstpMethod_PeerServerAlias_BSONRoundTrip(t *testing.T) {
+	orig := &SstpMethod{
+		Role:                SstpRoleResponder,
+		EndpointUrl:         "https://local.example/sstp/pair-abc",
+		AuthorizationHeader: "Bearer minted-secret",
+		PeerPairId:          "pair-peer",
+		PeerServerAlias:     "peer-tx-alias",
+	}
+	raw, err := bson.Marshal(orig)
+	if err != nil {
+		t.Fatalf("bson.Marshal failed: %v", err)
+	}
+	var got SstpMethod
+	if err := bson.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("bson.Unmarshal failed: %v", err)
+	}
+	if got.PeerServerAlias != orig.PeerServerAlias {
+		t.Errorf("PeerServerAlias round-trip: got %q, want %q", got.PeerServerAlias, orig.PeerServerAlias)
+	}
+	// Sanity: the other fields still ride along; the additive slice #242
+	// field must not disturb the existing shape.
+	if got.Role != orig.Role || got.EndpointUrl != orig.EndpointUrl ||
+		got.AuthorizationHeader != orig.AuthorizationHeader || got.PeerPairId != orig.PeerPairId {
+		t.Errorf("SstpMethod BSON round-trip lost sibling fields: got %+v want %+v", got, orig)
+	}
+}
+
+// TestSstpMethod_PeerServerAlias_OmitEmpty proves an unset PeerServerAlias
+// is absent from JSON so pre-slice records (no alias) pay no wire cost.
+func TestSstpMethod_PeerServerAlias_OmitEmpty(t *testing.T) {
+	m := &SstpMethod{Role: SstpRoleInitiator}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if indexOf(string(raw), `"peer_server_alias"`) >= 0 {
+		t.Errorf("peer_server_alias should be omitempty when unset, got %s", raw)
 	}
 }

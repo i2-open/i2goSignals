@@ -469,6 +469,10 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 			EndpointUrl:         endpointUrl,
 			AuthorizationHeader: authHeader,
 			PeerPairId:          b.PeerPairId,
+			// Persist the bootstrap's PeerServerAlias so the SSTP dialer's
+			// credential-chain helper can honor operator-configured TLS/OAuth
+			// transport posture per pair (PRD 49 slice 2b, AC 4).
+			PeerServerAlias: b.PeerServerAlias,
 		},
 		StartDate:     now,
 		CreatedAt:     now,

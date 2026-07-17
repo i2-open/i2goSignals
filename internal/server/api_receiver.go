@@ -224,68 +224,14 @@ func (sa *SignalsApplication) getServerForStream(ctx context.Context, stream *mo
 	return nil, nil
 }
 
+// getHTTPClientForStream is the historical entrypoint for push / poll dial-
+// outs. Post-slice #242 (PRD 49 2b) it delegates to ResolveTransmitterClient
+// — the SINGLE named helper for the transmitter credential-selection chain
+// (see internal/server/transmitter_credential_chain.go). Keeping the wrapper
+// avoids churning ~15 call sites in this file; new call sites SHOULD call
+// ResolveTransmitterClient directly.
 func (sa *SignalsApplication) getHTTPClientForStream(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, func(), error) {
-	noop := func() {}
-	conf := stream.StreamConfiguration
-	var server *model.Server
-	var err error
-
-	// 1. Try TxAlias (New preferred method) - get server configuration first
-	server, err = sa.getServerForStream(ctx, stream)
-	if err != nil {
-		serverLog.Warn("RCV: Server not found for alias", "alias", *conf.TxAlias, "error", err)
-	}
-
-	// 2. Backward compatibility: TxToken (no server object). Carry the per-stream
-	// transmitter-TLS settings so the inline static-token path honors a
-	// self-signed / hostname-mismatched transmitter cert.
-	if server == nil && conf.TxToken != nil && *conf.TxToken != "" {
-		server = &model.Server{
-			ClientToken:    conf.TxToken,
-			TLSCertificate: conf.TxTLSCertificate,
-			TLSSkipVerify:  conf.TxTLSSkipVerify,
-		}
-	}
-
-	// Use unified client acquisition if server is available
-	if server != nil {
-		client, closeClient, err := oauthClient.GetClientForServer(ctx, server)
-		if err == nil {
-			return client, "", closeClient, nil // Client handles Authorization header
-		}
-		alias := ""
-		if conf.TxAlias != nil {
-			alias = *conf.TxAlias
-		}
-		serverLog.Error("RCV: Failed to get client for server", "alias", alias, "error", err)
-	}
-
-	// 3. Per-stream transmitter-TLS settings (no TxAlias / no TxToken): honor
-	// TxTLSSkipVerify / TxTLSCertificate set on the stream itself. The conformance
-	// suite's nginx serves a self-signed cert with no SAN, so verify/status calls
-	// from a receiver registered with neither TxAlias nor TxToken (the suite case)
-	// would otherwise fail TLS verification. Mirrors getHTTPClientForWellKnownEndpoint.
-	if conf.TxTLSSkipVerify || conf.TxTLSCertificate != "" {
-		srv := &model.Server{TLSSkipVerify: conf.TxTLSSkipVerify, TLSCertificate: conf.TxTLSCertificate}
-		client, closeClient, err := oauthClient.GetClientForServer(ctx, srv)
-		if err == nil {
-			return client, "", closeClient, nil
-		}
-		serverLog.Warn("RCV: failed to build TLS-skip client for stream; falling back", "sid", conf.Id, "error", err)
-	}
-
-	// 4. Fallback for Polling Receiver (legacy delivery method auth)
-	if stream.GetType() == model.ReceivePoll && stream.Delivery.PollReceiveMethod != nil && stream.Delivery.PollReceiveMethod.AuthorizationHeader != "" {
-		serverLog.Warn("RCV: polling service authentication information missing. Defaulting to TLS config only", "sid", stream.StreamConfiguration.Id)
-		client := &http.Client{}
-		tlsSupport.CheckCaInstalled(client)
-		return client, stream.Delivery.PollReceiveMethod.AuthorizationHeader, noop, nil
-	}
-
-	// Default client without extra authorization
-	client := &http.Client{}
-	tlsSupport.CheckCaInstalled(client)
-	return client, "", noop, nil
+	return sa.ResolveTransmitterClient(ctx, stream)
 }
 
 // CascadeReceiverStreamDelete deletes the corresponding stream on the FOREIGN

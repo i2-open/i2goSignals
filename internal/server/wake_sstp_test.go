@@ -75,8 +75,8 @@ func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.EventReco
 func (rr *recordingRouter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
 	return nil, false, http.StatusOK
 }
-func (rr *recordingRouter) SstpServerHandler(context.Context, string, goSetSstp.Message, []eventRouter.SstpInboundSet) (goSetSstp.Message, int) {
-	return goSetSstp.Message{}, http.StatusOK
+func (rr *recordingRouter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) goSetSstp.Message {
+	return goSetSstp.Message{}
 }
 func (rr *recordingRouter) Shutdown()                                                      {}
 func (rr *recordingRouter) SetEventCounter(*prometheus.CounterVec, *prometheus.CounterVec) {}

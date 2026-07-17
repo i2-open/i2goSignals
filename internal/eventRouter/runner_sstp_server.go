@@ -3,7 +3,6 @@ package eventRouter
 import (
 	"context"
 	"crypto/rsa"
-	"net/http"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -31,19 +30,25 @@ type SstpInboundSet struct {
 	Raw   string
 }
 
-// SstpServerHandler runs one SSTP-server cycle for the pair named by pairId: it
-// ingests the already-parsed inbound SETs (persist-then-route through HandleEvent,
+// SstpServerHandler runs one SSTP-server cycle for the pair already resolved by
+// the HTTP handler (PRD #49 slice 3, AC 2: single pair resolution). The handler
+// owns pair-404 — it looks the record up once, applies its 4xx gates in order
+// (Check → pair-404 → bearer → Parse), and threads the resolved record here. The
+// runner therefore performs NO second GetStreamStateByPairId — a rec==nil is a
+// caller contract violation and yields an empty response so a misuse cannot
+// silently re-deliver on stale state.
+//
+// It ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
 // counting eventsIn with tfr=SSTP, stream_id=rxSid), then long-polls the outbound
-// EventPollBuffer and returns the resulting SSTP response message. Returns the
-// response and an HTTP status: 200 for a served (or paused) pair, 404 for a
-// deleted/unknown pair.
-func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, int) {
-	rec, err := r.streamService.GetStreamStateByPairId(r.ctx, pairId)
-	if err != nil || rec == nil {
-		return goSetSstp.Message{}, http.StatusNotFound
-	}
-
+// EventPollBuffer and returns the resulting SSTP response message.
+func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) goSetSstp.Message {
 	resp := goSetSstp.Message{}
+	if rec == nil {
+		// Defensive: the handler must resolve the pair before calling. If a
+		// caller nonetheless passes nil, refuse to fabricate state — return
+		// an empty response rather than panicking or re-looking-up.
+		return resp
+	}
 
 	// Outbound ack consumption (Finding #5): the peer's request carries, in
 	// Message.Ack, the JTIs of outbound SETs it received on a previous cycle. Ack
@@ -97,10 +102,11 @@ func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound g
 	// Outbound long-poll drain is governed by the outbound direction's status. A
 	// paused (or disabled) outbound returns 200 with returnEvents=false so the
 	// long-poll cycle keeps running and resumes draining on unpause — 4xx is
-	// reserved for the deleted-pair case (PRD #154 Q20, Q7.3).
+	// reserved for the deleted-pair case (PRD #154 Q20, Q7.3), handled at the
+	// HTTP handler.
 	if rec.Status != model.StreamStateEnabled {
 		resp.ReturnEvents = goSetSstp.BoolPtr(false)
-		return resp, http.StatusOK
+		return resp
 	}
 
 	// Outbound long-poll drain: wait on the pair's EventPollBuffer for the duration
@@ -110,7 +116,7 @@ func (r *router) SstpServerHandler(ctx context.Context, pairId string, inbound g
 		resp.Sets = sets
 	}
 
-	return resp, http.StatusOK
+	return resp
 }
 
 // drainSstpOutbound long-polls the pair's outbound EventPollBuffer and returns the

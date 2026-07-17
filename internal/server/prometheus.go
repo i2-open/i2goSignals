@@ -387,6 +387,9 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 
 	sa.Stats = &prometheusHandler
 	sa.EventRouter.SetStatsHandler(sa.Stats)
+	if sa.SstpDialer != nil {
+		sa.SstpDialer.SetStats(sa.Stats)
+	}
 }
 
 func registerTo(reg prometheus.Registerer, collector prometheus.Collector) {
