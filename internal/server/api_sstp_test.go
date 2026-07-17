@@ -125,8 +125,10 @@ func TestClassifyVerifyErrorForAcceptor_MapsSentinels(t *testing.T) {
 	}{
 		{"issuer mismatch", goSetSstp.ErrIssuerCertMismatch, goSetSstp.ErrJwtIss},
 		{"wrong audience", goSetSstp.ErrWrongAudience, goSetSstp.ErrJwtAud},
-		{"bad signature", goSetSstp.ErrBadSignature, goSetSstp.ErrJws},
-		{"unknown key", goSetSstp.ErrUnknownKey, goSetSstp.ErrJwtCrypto},
+		// Retryable per goSetSstp/problem.go emission contract — must be the
+		// URI, not the §2.3 keyword (which default-denies to non-retryable).
+		{"bad signature", goSetSstp.ErrBadSignature, goSetSstp.ProblemSignatureInvalid},
+		{"unknown key", goSetSstp.ErrUnknownKey, goSetSstp.ProblemUnknownKID},
 		{"unrelated", errors.New("something else"), goSetSstp.ErrSetParse},
 	}
 	for _, tc := range cases {

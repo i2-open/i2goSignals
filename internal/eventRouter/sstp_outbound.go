@@ -187,7 +187,14 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 	// (recovery after takeover relies on persisted outbound events, Q13)
 	// and claim those too. The direct pull avoids racing the buffer's
 	// async channel drain.
-	pending, _ := r.eventService.GetEventIds(r.ctx, pair.StreamConfiguration.Id, model.PollParameters{
+	//
+	// Use a fresh Background context (not r.ctx). r.ctx is cancelled on
+	// router.Shutdown, but the dialer pair-loop's own cycle context has
+	// not necessarily been cancelled yet — passing r.ctx here would make
+	// this final drain silently return 0 events during a graceful
+	// shutdown, adding delivery latency until the next takeover. The
+	// call is ReturnImmediately, so it will not block on the provider.
+	pending, _ := r.eventService.GetEventIds(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
 		MaxEvents:         int32(max),
 		ReturnImmediately: true,
 	})

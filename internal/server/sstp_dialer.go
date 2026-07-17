@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -63,6 +64,13 @@ type SstpDialerStats interface {
 	TrackLeaseAcquisition(resource string, success bool)
 	IncLeasesHeld()
 	DecLeasesHeld()
+}
+
+// dialerStatsHolder boxes SstpDialerStats so it can live in an
+// atomic.Pointer (which requires a concrete type). The field is set once at
+// wire time via SetStats and read on the pair hot-path.
+type dialerStatsHolder struct {
+	stats SstpDialerStats
 }
 
 // SstpDialerConfig configures the relocated dialer: backoff/lease timing,
@@ -268,8 +276,12 @@ func jitteredSstpBackoff(d time.Duration) time.Duration {
 type SstpDialer struct {
 	coordinator cluster.ClusterCoordinator
 	nodeID      string
-	stats       SstpDialerStats
-	cfg         SstpDialerConfig
+	// stats is late-bindable: application.go constructs the dialer BEFORE
+	// InitializePrometheus wires the stats handler. Reads are on the pair
+	// hot-path (per-cycle + per-heartbeat), so use an atomic pointer to
+	// avoid a mutex on those paths. Nil pointer ⇒ no reporting.
+	stats atomic.Pointer[dialerStatsHolder]
+	cfg   SstpDialerConfig
 
 	mu       sync.Mutex
 	outbound eventRouter.SstpOutbound
@@ -301,19 +313,47 @@ type sstpPairLoop struct {
 // application can late-bind outbound to the just-constructed router.
 func NewSstpDialer(coord cluster.ClusterCoordinator, nodeID string, stats SstpDialerStats, cfg SstpDialerConfig) *SstpDialer {
 	cfg.fillDefaults()
-	return &SstpDialer{
+	d := &SstpDialer{
 		coordinator: coord,
 		nodeID:      nodeID,
-		stats:       stats,
 		cfg:         cfg,
 		running:     map[string]*sstpPairLoop{},
 	}
+	if stats != nil {
+		d.stats.Store(&dialerStatsHolder{stats: stats})
+	}
+	return d
+}
+
+// SetStats late-binds the stats sink. Safe to call after per-pair goroutines
+// have started (reads use an atomic pointer). Passing nil unsets any prior
+// binding.
+func (d *SstpDialer) SetStats(stats SstpDialerStats) {
+	if stats == nil {
+		d.stats.Store(nil)
+		return
+	}
+	d.stats.Store(&dialerStatsHolder{stats: stats})
+}
+
+// statsSink returns the current stats sink or nil if none is wired.
+func (d *SstpDialer) statsSink() SstpDialerStats {
+	h := d.stats.Load()
+	if h == nil {
+		return nil
+	}
+	return h.stats
 }
 
 // Bind late-binds the router's narrow outbound surface and starts any
 // per-pair goroutines that were queued via RegisterPair before Bind ran.
 // Safe to call exactly once — a second Bind is a silent no-op after the
 // first replaces outbound / drains pending.
+//
+// Pending drain pre-installs a placeholder running entry per pair under
+// d.mu BEFORE releasing the lock, so an UnregisterPair racing against the
+// drain window observes running[pairId], cancels it, and the goroutine
+// never opens a peer connection for a pair the caller already removed.
 func (d *SstpDialer) Bind(outbound eventRouter.SstpOutbound) {
 	d.mu.Lock()
 	if d.bound {
@@ -324,9 +364,30 @@ func (d *SstpDialer) Bind(outbound eventRouter.SstpOutbound) {
 	d.bound = true
 	pending := d.pending
 	d.pending = nil
-	d.mu.Unlock()
+	// Pre-install loops so UnregisterPair, if racing, can find and cancel.
+	parent := d.outbound.Ctx()
+	loops := make([]*sstpPairLoop, 0, len(pending))
+	ctxs := make([]context.Context, 0, len(pending))
 	for _, pairId := range pending {
-		d.startPair(pairId)
+		if _, ok := d.running[pairId]; ok {
+			// Already spawned (duplicate pending entry) — skip.
+			loops = append(loops, nil)
+			ctxs = append(ctxs, nil)
+			continue
+		}
+		ctx, cancel := context.WithCancel(parent)
+		loop := &sstpPairLoop{cancel: cancel, done: make(chan struct{})}
+		d.running[pairId] = loop
+		loops = append(loops, loop)
+		ctxs = append(ctxs, ctx)
+	}
+	d.mu.Unlock()
+
+	for i, pairId := range pending {
+		if loops[i] == nil {
+			continue
+		}
+		d.spawnPair(ctxs[i], pairId, loops[i])
 	}
 }
 
@@ -352,8 +413,9 @@ func (d *SstpDialer) RegisterPair(pairId string) {
 	d.startPair(pairId)
 }
 
-// startPair is the internal starter used by both RegisterPair (post-Bind)
-// and Bind (draining pending). Caller must have observed !d.running[pairId].
+// startPair is the internal starter used by RegisterPair (post-Bind). It
+// allocates the per-pair context and running-map entry under d.mu, then
+// hands off to spawnPair to launch the goroutine outside the lock.
 func (d *SstpDialer) startPair(pairId string) {
 	d.mu.Lock()
 	if _, ok := d.running[pairId]; ok {
@@ -368,8 +430,26 @@ func (d *SstpDialer) startPair(pairId string) {
 	d.running[pairId] = loop
 	d.mu.Unlock()
 
+	d.spawnPair(ctx, pairId, loop)
+}
+
+// spawnPair launches the per-pair goroutine after the caller has installed
+// the running-map entry. Used by both startPair (RegisterPair path) and
+// Bind (pending-drain path).
+func (d *SstpDialer) spawnPair(ctx context.Context, pairId string, loop *sstpPairLoop) {
 	go func() {
 		defer close(loop.done)
+		// If the pair was already cancelled (e.g. UnregisterPair fired
+		// against a placeholder loop from Bind before this goroutine was
+		// scheduled), exit immediately without opening a peer connection.
+		if ctx.Err() != nil {
+			d.mu.Lock()
+			if cur, ok := d.running[pairId]; ok && cur == loop {
+				delete(d.running, pairId)
+			}
+			d.mu.Unlock()
+			return
+		}
 		d.runPair(ctx, pairId)
 		// Self-clean the running-map entry when the goroutine exits on its
 		// own (e.g. pair removed via RefreshPair ok=false), so a subsequent
@@ -388,12 +468,14 @@ func (d *SstpDialer) startPair(pairId string) {
 // pending entry so a queued pair that is removed before Bind never starts.
 // Idempotent — a pair that was never registered (or already stopped) is a
 // silent no-op.
+//
+// The running-map entry is KEPT until the goroutine confirms exit (or the
+// 2s timeout fires). Removing it before the wait would let an immediate
+// RegisterPair spawn a second goroutine that races the first for the
+// pair's cluster lease.
 func (d *SstpDialer) UnregisterPair(pairId string) {
 	d.mu.Lock()
 	loop, ok := d.running[pairId]
-	if ok {
-		delete(d.running, pairId)
-	}
 	if len(d.pending) > 0 {
 		filtered := d.pending[:0]
 		for _, p := range d.pending {
@@ -409,11 +491,25 @@ func (d *SstpDialer) UnregisterPair(pairId string) {
 	}
 	loop.cancel()
 	// Best-effort wait so a UnregisterPair immediately followed by a
-	// RegisterPair does not race the old goroutine's cleanup.
+	// RegisterPair does not race the old goroutine's cleanup. The goroutine
+	// self-cleans its entry in d.running on exit (startPair's defer).
+	timedOut := false
 	select {
 	case <-loop.done:
 	case <-time.After(2 * time.Second):
 		sstpDialerLog.Warn("UnregisterPair: goroutine did not exit within 2s", "pairId", pairId)
+		timedOut = true
+	}
+	if timedOut {
+		// The goroutine is still alive; drop the entry so a subsequent
+		// RegisterPair is not silently swallowed as a duplicate. The old
+		// goroutine's own self-clean at exit is guarded on the loop
+		// pointer matching, so it will not clobber a newly-spawned entry.
+		d.mu.Lock()
+		if cur, ok := d.running[pairId]; ok && cur == loop {
+			delete(d.running, pairId)
+		}
+		d.mu.Unlock()
 	}
 }
 
@@ -439,8 +535,8 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 		}
 
 		acquired, fencingToken, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
-		if d.stats != nil {
-			d.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
+		if s := d.statsSink(); s != nil {
+			s.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
 		if err != nil {
 			sstpDialerLog.Error("lease acquisition error", "pairId", pairId, "error", err)
@@ -493,9 +589,9 @@ func (d *SstpDialer) releaseLease(resource, pairId string) {
 // Returns true when the caller should attempt to re-acquire (lease lost),
 // false to exit (shutdown, pair removed, stream disabled).
 func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fencingToken int64) bool {
-	if d.stats != nil {
-		d.stats.IncLeasesHeld()
-		defer d.stats.DecLeasesHeld()
+	if s := d.statsSink(); s != nil {
+		s.IncLeasesHeld()
+		defer s.DecLeasesHeld()
 	}
 
 	resource := fmt.Sprintf("sstp-client:%s", pairId)
@@ -505,7 +601,16 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 	cycleCtx, cycleCancel := context.WithCancel(parentCtx)
 	defer cycleCancel()
 
-	go d.heartbeat(cycleCtx, cycleCancel, resource, pairId)
+	// The fencing token is strictly monotonic per resource (ClusterCoordinator
+	// contract): every successful acquire/renew increments it. Downstream
+	// ack ownership checks (eventService.AckEvent) compare against the
+	// stored expected token, so a stale value silently no-ops all acks
+	// after the first heartbeat renew. Publish it atomically so the
+	// heartbeat can update it in place while the cycle reads it.
+	var currentFencingToken atomic.Int64
+	currentFencingToken.Store(fencingToken)
+
+	go d.heartbeat(cycleCtx, cycleCancel, resource, pairId, &currentFencingToken)
 
 	delay := d.cfg.BaseDelay
 
@@ -542,7 +647,7 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 		// Run the primary cycle concurrently so the loop can react to a new
 		// outbound SET arriving while the peer holds this cycle's connection
 		// as a long-poll (push-while-poll-held, Q7.2, #166).
-		outcome, resumeDelay, exit, updatedAcks := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, fencingToken, &delay, pendingAcks)
+		outcome, resumeDelay, exit, updatedAcks := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, currentFencingToken.Load(), &delay, pendingAcks)
 		_ = outcome
 		pendingAcks = updatedAcks
 		if exit {
@@ -584,10 +689,10 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration, pendingAcks []string) (goSetSstp.Classification, time.Duration, bool, []string) {
 	pairId := stream.PairId
 	type cycleResult struct {
-		cls    goSetSstp.Classification
-		delay  time.Duration
-		exit   bool
-		nAcks  []string
+		cls   goSetSstp.Classification
+		delay time.Duration
+		exit  bool
+		nAcks []string
 	}
 	done := make(chan cycleResult, 1)
 	go func() {
@@ -621,6 +726,17 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 			if !ok {
 				continue // pair removed; primary's next refresh exits the loop.
 			}
+			// Skip the goroutine spawn entirely when the second-push slot is
+			// already held — otherwise a bursty wake stream (thousands of
+			// subject-filter wakes/sec) queues thousands of no-op goroutines
+			// into secondPushWg and the outer function cannot return until
+			// each one is scheduled and drained, delaying failover for the
+			// wakeup burst's duration. pushWhilePollHeld re-checks the slot
+			// itself — this is a fast reject to prevent goroutine backlog.
+			if !d.outbound.AcquireSecondPushSlot(pairId) {
+				continue
+			}
+			d.outbound.ReleaseSecondPushSlot(pairId)
 			streamCopy := live
 			secondPushWg.Add(1)
 			go func() {
@@ -785,6 +901,18 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 	if stream.SstpInbound != nil {
 		rxSid = stream.SstpInbound.Id
 	}
+	// If JWKS resolution failed (async load pending, IssuerJWKSUrl
+	// unreachable, inbound record not yet cached), every VerifySET below
+	// would reject with ErrBadSignature and log a per-JTI warn — the
+	// dialer would still return empty acks (so the peer resends and the
+	// SETs are not lost), but the log surface saturates. Short-circuit
+	// with a single warn and drop the batch unacked; a later cycle whose
+	// JWKS has arrived processes the resend normally.
+	if cfg.RequireSignature && cfg.JWKS == nil {
+		sstpDialerLog.Warn("inbound JWKS unavailable — deferring verify, peer will resend",
+			"pairId", stream.PairId, "count", len(received))
+		return nil
+	}
 	acks := make([]string, 0, len(received))
 	for jti, raw := range received {
 		verified, vErr := goSetSstp.VerifySET(raw, cfg)
@@ -814,13 +942,16 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 // failure is retried once after a short pause before the lease is declared
 // lost (Q14.c) — one-shot Mongo blips do not trigger takeover churn. On a
 // confirmed loss it cancels cycleCtx, aborting any in-flight cycle (Q14.a).
-func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFunc, resource, pairId string) {
+// currentFencingToken is updated with the fresh token on every successful
+// renew so downstream ack ownership checks (eventService.AckEvent) see the
+// live token rather than the initial acquire's value.
+func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFunc, resource, pairId string, currentFencingToken *atomic.Int64) {
 	ticker := time.NewTicker(d.cfg.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			if d.renewLeaseWithRetry(cycleCtx, resource, pairId) {
+			if d.renewLeaseWithRetry(cycleCtx, resource, pairId, currentFencingToken) {
 				continue
 			}
 			sstpDialerLog.Warn("lease lost, cancelling in-flight cycle", "pairId", pairId)
@@ -834,13 +965,16 @@ func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFu
 
 // renewLeaseWithRetry attempts a lease renew; on failure retries exactly
 // once after HeartbeatRetryDelay (cancellable via ctx). Returns true while
-// ownership is retained, false once the lease is confirmed lost.
-func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId string) bool {
-	ok, _, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
-	if d.stats != nil {
-		d.stats.TrackLeaseAcquisition(resource, ok && err == nil)
+// ownership is retained, false once the lease is confirmed lost. On success
+// stores the fresh fencing token into currentFencingToken so subsequent
+// AckOutbound/AckEvent calls carry the live value.
+func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId string, currentFencingToken *atomic.Int64) bool {
+	ok, token, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+	if s := d.statsSink(); s != nil {
+		s.TrackLeaseAcquisition(resource, ok && err == nil)
 	}
 	if ok && err == nil {
+		currentFencingToken.Store(token)
 		return true
 	}
 	sstpDialerLog.Debug("heartbeat renew blip, retrying once", "pairId", pairId, "error", err)
@@ -853,11 +987,15 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 		return false
 	}
 
-	ok, _, err = d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
-	if d.stats != nil {
-		d.stats.TrackLeaseAcquisition(resource, ok && err == nil)
+	ok, token, err = d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+	if s := d.statsSink(); s != nil {
+		s.TrackLeaseAcquisition(resource, ok && err == nil)
 	}
-	return ok && err == nil
+	if ok && err == nil {
+		currentFencingToken.Store(token)
+		return true
+	}
+	return false
 }
 
 // pushWhilePollHeld performs a SECOND, parallel SSTP POST to flush queued
@@ -901,7 +1039,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	// bookkeeping (AC 1). Running Acks through both cycles risks the peer
 	// clearing an outbound entry twice and any concurrent list mutation
 	// race between the two goroutines. Empty Ack here is deliberate.
-	cls, acked, _, signErr := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents, nil)
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents, nil)
 
 	if signErr != nil {
 		// AC 5: signing failure halts even on the second-push path — never
@@ -921,6 +1059,14 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		// these" acknowledgement for the SETs we just sent. Use it verbatim
 		// (no ack-all fallback, AC 3).
 		d.outbound.AckOutbound(stream, acked, events, fencingToken)
+		// A peer whose acceptor opportunistically ships queued outbound SETs
+		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
+		// forbids long-poll waiting, not the return of already-queued SETs)
+		// would otherwise have its Sets silently dropped. Ingest+ack them so
+		// they land in the pair's inbound stream rather than being resent.
+		if len(received) > 0 {
+			d.runInboundHalf(stream, received)
+		}
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary
 		// long-poll (inbound) continues uninterrupted (Q12.3).
@@ -999,8 +1145,19 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	}
 	defer closeClient()
 
-	if auth != "" && !strings.Contains(strings.ToLower(auth), "bearer") && !strings.Contains(auth, " ") {
-		auth = "Bearer " + auth
+	// Prefix "Bearer " only when auth is a raw token — i.e., no scheme prefix.
+	// A token that happens to contain the substring "bearer" or a space is
+	// still a raw token; only a leading "bearer " (case-insensitive) or a
+	// leading token with a space (another scheme) means the caller already
+	// supplied a scheme. Use HasPrefix, not Contains, per RFC 7235.
+	if auth != "" {
+		lower := strings.ToLower(auth)
+		hasScheme := strings.HasPrefix(lower, "bearer ") ||
+			strings.HasPrefix(lower, "basic ") ||
+			strings.HasPrefix(lower, "digest ")
+		if !hasScheme {
+			auth = "Bearer " + auth
+		}
 	}
 
 	result := goSetSstp.Exchange(ctx, msg, goSetSstp.DialerConfig{
@@ -1063,5 +1220,3 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 	}
 	return sets, nil
 }
-
-

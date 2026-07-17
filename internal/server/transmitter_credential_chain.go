@@ -33,15 +33,15 @@ import (
 //
 //  1. SSTP business pair (stream.SstpMethod != nil):
 //     a. The per-pair bearer (SstpMethod.AuthorizationHeader) ALWAYS wins
-//        the returned Authorization header. It authenticates the
-//        business channel end-to-end (ADR-0066: bearer is the L2 menu).
+//     the returned Authorization header. It authenticates the
+//     business channel end-to-end (ADR-0066: bearer is the L2 menu).
 //     b. When SstpMethod.PeerServerAlias resolves a stored Server, the
-//        returned client uses that Server's TRANSPORT POSTURE only —
-//        TLS trust roots, hostname-mismatch override, OAuth transport,
-//        mTLS. The Server's own credential is NOT applied here (would
-//        double up on the per-pair bearer, breaking ADR-0066 precedence).
+//     returned client uses that Server's TRANSPORT POSTURE only —
+//     TLS trust roots, hostname-mismatch override, OAuth transport,
+//     mTLS. The Server's own credential is NOT applied here (would
+//     double up on the per-pair bearer, breaking ADR-0066 precedence).
 //     c. When PeerServerAlias is empty or does not resolve, the transport
-//        is the default http.Client with a system-CA check.
+//     is the default http.Client with a system-CA check.
 //
 //  2. Push / poll (stream.SstpMethod == nil): verbatim extraction of the
 //     pre-slice logic — TxAlias → TxToken → per-stream TxTLS → polling
@@ -89,6 +89,18 @@ func (sa *SignalsApplication) resolveSstpBusinessClient(ctx context.Context, str
 			// AC 3 fallback: no per-pair bearer is stored, so the Server
 			// credential drives Authorization (posture + credential). The
 			// oauthClient handles the header client-side.
+			//
+			// Guard: a Server with no ClientToken, no OAuthClientConfig, and
+			// no SpiffeConfig has no auth mechanism at all — GetClientForServer
+			// would still return a plain TLS client with no Authorization
+			// injection, and the dialer would POST with no bearer at all.
+			// Detect that explicitly so operators see a clear "credential
+			// missing" WARN instead of silent 401 loops at the peer.
+			if !hasAuthMechanism(server) {
+				serverLog.Warn("SSTP: peer_server_alias resolves to a Server with no credential and no per-pair bearer; outbound will be unauthenticated",
+					"pair_id", stream.PairId, "alias", method.PeerServerAlias)
+				return oauthClient.GetBaseHTTPClientForServer(server), "", noop, nil
+			}
 			client, closeClient, cerr := oauthClient.GetClientForServer(ctx, server)
 			if cerr == nil {
 				return client, "", closeClient, nil
@@ -102,6 +114,25 @@ func (sa *SignalsApplication) resolveSstpBusinessClient(ctx context.Context, str
 	client := &http.Client{}
 	tlsSupport.CheckCaInstalled(client)
 	return client, auth, noop, nil
+}
+
+// hasAuthMechanism reports whether the Server carries at least one credential
+// source (bearer token, OAuth client, or SPIFFE identity). A Server with only
+// TLS trust roots configured returns false.
+func hasAuthMechanism(server *model.Server) bool {
+	if server == nil {
+		return false
+	}
+	if server.ClientToken != nil && *server.ClientToken != "" {
+		return true
+	}
+	if server.OAuthClientConfig != nil {
+		return true
+	}
+	if server.SpiffeConfig != nil {
+		return true
+	}
+	return false
 }
 
 // resolveTransmitterClientPushPoll is the push / poll credential chain,

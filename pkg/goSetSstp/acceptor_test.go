@@ -199,8 +199,8 @@ type failingResponseWriter struct {
 	status int
 }
 
-func (f *failingResponseWriter) Header() http.Header       { return f.header }
-func (f *failingResponseWriter) WriteHeader(status int)    { f.status = status }
+func (f *failingResponseWriter) Header() http.Header    { return f.header }
+func (f *failingResponseWriter) WriteHeader(status int) { f.status = status }
 func (f *failingResponseWriter) Write(_ []byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }

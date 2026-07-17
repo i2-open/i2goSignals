@@ -667,8 +667,23 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		}
 		pairId := stream.PairId
 		if current, ok := r.sstpClientStreams[pairId]; ok {
+			oldStatus := current.Status
 			current.Update(stream)
 			r.sstpClientStreams[pairId] = current
+			// If the pair transitioned back to enabled from pause/disable,
+			// the previous dialer goroutine may have exited (runPair returns
+			// when Status != Enabled, and PauseOutbound / sign-error paths
+			// force that exit). Re-register so a fresh goroutine picks up
+			// the enabled config; RegisterPair is idempotent when a
+			// goroutine is already running for the pair.
+			if current.Status == model.StreamStateEnabled &&
+				oldStatus != model.StreamStateEnabled &&
+				r.sstpDialer != nil {
+				dialer := r.sstpDialer
+				r.mu.Unlock()
+				dialer.RegisterPair(pairId)
+				r.mu.Lock()
+			}
 			return
 		}
 		r.mu.Unlock()
@@ -1664,8 +1679,13 @@ func (r *router) InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, 
 }
 
 func (r *router) RemoveStream(sid string) {
+	// Perform all map/buffer teardown under r.mu, then release the write lock
+	// BEFORE calling UnregisterPair. UnregisterPair waits (up to 2s) for the
+	// per-pair goroutine to exit, and that goroutine re-enters the router via
+	// RefreshPair/ReleaseOutbound (which take r.mu.RLock). Holding r.mu.Lock
+	// across that wait would deadlock every dialer for the full timeout.
+	unregisterPair := false
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	pb, ok := r.pushBuffers[sid]
 	if ok {
@@ -1705,7 +1725,7 @@ func (r *router) RemoveStream(sid string) {
 	if _, ok := r.sstpClientStreams[sid]; ok {
 		delete(r.sstpClientStreams, sid)
 		if r.sstpDialer != nil {
-			r.sstpDialer.UnregisterPair(sid)
+			unregisterPair = true
 		}
 	}
 	// Drop the pair's in-flight claim set and second-push slot so a removed pair
@@ -1718,6 +1738,12 @@ func (r *router) RemoveStream(sid string) {
 	}
 	if _, ok := r.sstpServerStreams[sid]; ok {
 		delete(r.sstpServerStreams, sid)
+	}
+
+	r.mu.Unlock()
+
+	if unregisterPair {
+		r.sstpDialer.UnregisterPair(sid)
 	}
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)

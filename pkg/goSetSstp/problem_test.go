@@ -90,9 +90,9 @@ func TestClassifySetErr_TotalCoverage_KeywordHalf(t *testing.T) {
 // never hot-retried).
 func TestClassifySetErr_UnknownParks(t *testing.T) {
 	unknowns := []string{
-		"",                                    // empty
-		"unknown-keyword",                     // bare word (not a URI, not a §2.3 keyword)
-		"https://example.com/some/other/uri",  // URI outside our namespace
+		"",                                   // empty
+		"unknown-keyword",                    // bare word (not a URI, not a §2.3 keyword)
+		"https://example.com/some/other/uri", // URI outside our namespace
 		"https://schemas.independentid.com/secevent/i2sig/problem/v1/future-slug",
 	}
 	for _, u := range unknowns {

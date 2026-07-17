@@ -106,10 +106,10 @@ type fakeSstpOutbound struct {
 	// dialer handed to HandleInboundEvent (verified.Token + raw + rxSid) —
 	// tests inspect it to prove no re-parse happened and that the router
 	// received the VerifiedSET.Token verbatim.
-	verifyCfg     goSetSstp.VerifyConfig
-	ingested      []ingestedInboundSet
-	ingestErr     error // when non-nil, HandleInboundEvent returns it
-	ctx           context.Context
+	verifyCfg goSetSstp.VerifyConfig
+	ingested  []ingestedInboundSet
+	ingestErr error // when non-nil, HandleInboundEvent returns it
+	ctx       context.Context
 }
 
 // ingestedInboundSet captures one HandleInboundEvent call from the dialer's

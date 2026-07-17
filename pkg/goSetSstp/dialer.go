@@ -138,4 +138,3 @@ func Exchange(ctx context.Context, msg Message, config DialerConfig) Result {
 		RetryAfter: retryAfter,
 	}
 }
-

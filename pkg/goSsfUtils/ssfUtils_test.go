@@ -244,8 +244,8 @@ func TestGetStreamStatus_TwoCallsCoverBothPairDirections(t *testing.T) {
 
 	var authSeen atomic.Int32
 	statusByStreamId := map[string]*model.StreamStatus{
-		pairId: {Status: "enabled"},        // tx side
-		rxSid:  {Status: "enabled"},        // rx side
+		pairId: {Status: "enabled"}, // tx side
+		rxSid:  {Status: "enabled"}, // rx side
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

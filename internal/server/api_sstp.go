@@ -178,9 +178,15 @@ func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig) ([
 }
 
 // classifyVerifyErrorForAcceptor maps a goSetSstp.VerifySET failure sentinel to
-// its closest SSTP §2.3 keyword for the acceptor's per-JTI setErr surface.
+// its closest setErr code for the acceptor's per-JTI setErr surface.
 // Consumer-owned mapping (classify/execute split) — the pkg exposes the trust
 // vocabulary, the acceptor decides the on-wire code emitted to the sender.
+//
+// Emission contract (goSetSstp/problem.go §Emission contract): rejections with
+// registry semantics MUST carry the canonical v1 problem URI so the peer's
+// retryability dispatch resolves correctly. Signature/key failures are the
+// two retryable cases — JWKS refresh can heal them — and default-deny under
+// the §2.3 keyword table would silently park them.
 func classifyVerifyErrorForAcceptor(err error) goSetSstp.SetErr {
 	desc := err.Error()
 	switch {
@@ -189,9 +195,11 @@ func classifyVerifyErrorForAcceptor(err error) goSetSstp.SetErr {
 	case errors.Is(err, goSetSstp.ErrWrongAudience):
 		return goSetSstp.SetErr{Err: goSetSstp.ErrJwtAud, Description: desc}
 	case errors.Is(err, goSetSstp.ErrBadSignature):
-		return goSetSstp.SetErr{Err: goSetSstp.ErrJws, Description: desc}
+		// Retryable: peer JWKS refresh may heal it. Use the URI, not ErrJws.
+		return goSetSstp.SetErr{Err: goSetSstp.ProblemSignatureInvalid, Description: desc}
 	case errors.Is(err, goSetSstp.ErrUnknownKey):
-		return goSetSstp.SetErr{Err: goSetSstp.ErrJwtCrypto, Description: desc}
+		// Retryable: peer JWKS refresh may add the kid. Use the URI, not ErrJwtCrypto.
+		return goSetSstp.SetErr{Err: goSetSstp.ProblemUnknownKID, Description: desc}
 	default:
 		return goSetSstp.SetErr{Err: goSetSstp.ErrSetParse, Description: desc}
 	}

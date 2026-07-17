@@ -155,6 +155,11 @@ func ParseExchangeRequest(r *http.Request, opts ParseOptions) (*Message, *ReqErr
 func WriteExchangeResponse(w http.ResponseWriter, msg Message) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
+		// Write an explicit 500 so a caller that only logs the returned
+		// error does not exit with net/http's implicit 200-OK-empty-body,
+		// which a peer would treat as "no detail, delivered" — silently
+		// dropping SETs on a marshal failure.
+		w.WriteHeader(http.StatusInternalServerError)
 		return fmt.Errorf("sstp: marshal response: %w", err)
 	}
 	w.Header().Set("Content-Type", ContentType)

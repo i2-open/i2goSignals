@@ -69,6 +69,7 @@ type SignalsApplication struct {
 	Server               *http.Server
 	Handler              http.Handler
 	EventRouter          eventRouter.EventRouter
+	SstpDialer           *SstpDialer
 	BaseUrl              *url.URL
 	HostName             string
 	DefIssuer            string
@@ -227,6 +228,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	sstpDialerCfg := LoadSstpDialerConfig()
 	sstpDialerCfg.ResolveClient = sa.ResolveTransmitterClient
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
+	sa.SstpDialer = sstpDialer
 
 	sa.EventRouter = eventRouter.NewRouter(eventRouter.RouterDeps{
 		StreamService:        persistence.StreamService,

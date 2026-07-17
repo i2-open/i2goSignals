@@ -138,7 +138,11 @@ func TestSstpSigningOnly(t *testing.T) {
 		resp.Body.Close()
 		require.NoError(t, json.Unmarshal(raw, &msg))
 		require.Contains(t, msg.SetErrs, forgedJti, "forged inbound SET must be rejected with a per-JTI error")
-		assert.Equal(t, goSetSstp.ErrJws, msg.SetErrs[forgedJti].Err)
+		// Signature-invalid rejections carry the canonical v1 problem URI
+		// (retryable) rather than the §2.3 keyword — a JWKS refresh can heal
+		// a JWKS-lag failure at the peer. See goSetSstp/problem.go emission
+		// contract.
+		assert.Equal(t, goSetSstp.ProblemSignatureInvalid, msg.SetErrs[forgedJti].Err)
 		assert.Nil(t, instance.GetEvent(forgedJti), "forged inbound SET must not be persisted")
 	})
 
