@@ -46,6 +46,12 @@ type SetErrType struct {
 	Description string `json:"description,omitempty"`
 }
 
+// SETValidator adds an optional event-profile validation step after JWS,
+// issuer and audience validation. It must not perform a durable policy action:
+// callers do that only after they decide to acknowledge a successfully handled
+// SET. Returning an error reports the SET as invalid_request in the next poll.
+type SETValidator func(*goSet.SecurityEventToken) error
+
 // ParsedPollResponse extends PollResponse with parsed and validated SET tokens.
 type ParsedPollResponse struct {
 	// Sets contains the raw SET token strings keyed by JTI.
@@ -79,6 +85,11 @@ type ReceiverConfig struct {
 
 	// ExpectedAudiences is the list of acceptable "aud" values. Empty skips validation.
 	ExpectedAudiences []string
+
+	// SETValidator optionally validates event-profile semantics after the SET
+	// envelope has been verified. For example, events.ValidateWISESET can make
+	// a Receiver explicitly opt into the supported WISE semantic subset.
+	SETValidator SETValidator
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default is used.
 	HTTPClient *http.Client

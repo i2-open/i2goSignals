@@ -139,6 +139,17 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 			}
 		}
 
+		if config.SETValidator != nil {
+			if err := config.SETValidator(token); err != nil {
+				log.Warn("RFC8936: SET semantic validation error", "jti", jti, "error", err)
+				result.Errors[jti] = SetErrType{
+					Error:       "invalid_request",
+					Description: "The SET event payload is unsupported or invalid: " + err.Error(),
+				}
+				continue
+			}
+		}
+
 		result.ParsedSETs[jti] = token
 	}
 
