@@ -56,7 +56,7 @@ produces, since `WARN` leaves the wire response unchanged — watch
 
 | Metric Name | Type | Labels | Description |
 |-------------|------|--------|-------------|
-| `goSignals_router_event_validation_total` | Counter | `disposition`, `mode`, `transport` | Whole-SET event-validation dispositions (`valid`, `unsupported`, `malformed`) by resolved `event_validation` mode (`WARN`, `ENFORCE`, `STRICT`) and receive transport (`push`, `poll`). |
+| `goSignals_router_event_validation_total` | Counter | `disposition`, `mode`, `transport` | Whole-SET event-validation dispositions (`valid`, `unsupported`, `malformed`) by resolved `event_validation` mode (`WARN`, `ENFORCE`, `STRICT`) and receive transport (`push`, `poll`, `sstp` — one label for both SSTP paths, acceptor and dialer inbound half). |
 
 Deliberately **not** labeled by `stream_id` or event URI: either would make the
 series count unbounded on a busy receiver. A stream on `NONE` engages no

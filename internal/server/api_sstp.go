@@ -106,7 +106,13 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	parseErrs := map[string]goSetSstp.SetErr{}
 	var parsedIn []eventRouter.SstpInboundSet
 	if inbound != nil && len(inbound.Sets) > 0 {
-		verifyCfg := goSetSstp.VerifyConfig{}
+		// Event validation (spec #247 #254): the pair's single event_validation
+		// field governs its INBOUND leg (ADR COM-0018), and engagement comes
+		// from that leg's negotiated events_delivered. A NONE pair builds no
+		// validator set, so it stays on the pre-#247 acceptor path.
+		policy, validators := sstpInboundValidationPolicy(rec,
+			resolveReceiveValidationMode(sa.GetStreamService(), rec), statsFor(sa))
+		verifyCfg := goSetSstp.VerifyConfig{Validators: validators}
 		if rec.SstpInbound != nil {
 			verifyCfg.ExpectedIssuer = rec.SstpInbound.Iss
 			verifyCfg.ExpectedAudiences = rec.SstpInbound.Aud
@@ -117,7 +123,7 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 			// (nil ⇒ ErrBadSignature) — the flag is preserved for API stability.
 			verifyCfg.RequireSignature = rec.SstpInbound.SigningOnly
 		}
-		parsedIn, parseErrs = verifySstpInboundSets(*inbound, verifyCfg)
+		parsedIn, parseErrs = verifySstpInboundSets(*inbound, verifyCfg, policy)
 	}
 
 	// Run one SSTP-server cycle: ingest valid inbound SETs (persist-then-route,
@@ -150,7 +156,13 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 // carry their verify-sentinel mapped to the SSTP §2.3 vocabulary. PRD #49 slice
 // 3 AC 3: replaces the pre-migration goSetPush.ParseReceivedSET-based helper —
 // the push-path parser stays for RFC8935 push receivers only.
-func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
+//
+// policy applies the pair's event_validation mode to the dispositions cfg's
+// validator set computed (spec #247 #254). A rejected SET joins setErrs like a
+// verify rejection does and never reaches the router; the other JTIs in the
+// same message are unaffected, which is the whole point of a per-JTI surface.
+// A zero policy is the pre-#247 behavior.
+func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig, policy sstpValidationPolicy) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
 	parsed := make([]eventRouter.SstpInboundSet, 0, len(msg.Sets))
 	setErrs := map[string]goSetSstp.SetErr{}
 	for jti, raw := range msg.Sets {
@@ -166,6 +178,10 @@ func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig) ([
 				Err:         goSetSstp.ErrSetParse,
 				Description: "verified SET carried a nil token",
 			}
+			continue
+		}
+		if vsErr := policy.applySstpInbound(jti, verified.Validation); vsErr != nil {
+			setErrs[jti] = *vsErr
 			continue
 		}
 		parsed = append(parsed, eventRouter.SstpInboundSet{

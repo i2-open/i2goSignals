@@ -729,6 +729,17 @@ and, for a malformed payload, the failing claim.
 - **Poll** — the jti goes into the next poll's `setErrs` instead of
   `ack`. Other jtis in the same batch ack normally: the decision is
   per-jti, because the jti is the ack granularity.
+- **SSTP** — the jti goes into the message's `setErrs` on BOTH server
+  paths: the acceptor puts it in the response it is already writing,
+  and the dialer's inbound half carries it in its next request
+  alongside the acks. A pair is one bidirectional
+  `StreamStateRecord` (ADR COM-0018), so its single
+  `event_validation` field governs the **inbound** leg on both paths,
+  and engagement comes from that leg's `events_delivered` — never the
+  transmit leg's. `goSetSstp.VerifyConfig.Validators` /
+  `VerifiedSET.Validation` are the additive hook, added without moving
+  `VerifySET`'s signature because the package has live out-of-tree
+  consumers.
 - **`WARN`** is wire-invisible — normal 202 / normal ack, plus a WARN
   log carrying jti, event URI and the failed check. Unsupported logs
   at DEBUG, since any event type no validator pack covers yet is

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -14,6 +15,11 @@ import (
 const (
 	validationTransportPush = "push"
 	validationTransportPoll = "poll"
+	// SSTP is one label for both server paths — the acceptor and the dialer's
+	// inbound half. They are the two halves of one transport, and splitting
+	// them would make an operator's "how much is my SSTP fleet rejecting"
+	// query a sum rather than a lookup.
+	validationTransportSstp = "sstp"
 )
 
 // validationRejectionErrCode is the wire error both transports report for a SET
@@ -77,11 +83,24 @@ func engagedEventUris(rec *model.StreamStateRecord) []string {
 	if rec == nil {
 		return nil
 	}
-	delivered := rec.StreamConfiguration.EventsDelivered
+	return engagedEventUrisFor(&rec.StreamConfiguration)
+}
+
+// engagedEventUrisFor is engagedEventUris over a bare stream configuration. It
+// exists because an SSTP pair's receive side is NOT the record's embedded
+// StreamConfiguration (that one is the transmit leg) but the separate
+// rec.SstpInbound configuration — one bidirectional record, two legs
+// (ADR COM-0018). Engagement must always be computed from the leg that is
+// actually receiving.
+func engagedEventUrisFor(cfg *model.StreamConfiguration) []string {
+	if cfg == nil {
+		return nil
+	}
+	delivered := cfg.EventsDelivered
 	if len(delivered) == 0 {
 		return nil
 	}
-	supported := rec.StreamConfiguration.EventsSupported
+	supported := cfg.EventsSupported
 	if len(supported) == 0 {
 		supported = model.GetSupportedEvents()
 	}
@@ -99,6 +118,62 @@ func buildReceiveValidatorSet(rec *model.StreamStateRecord, mode model.EventVali
 		return nil
 	}
 	return goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), engagedEventUris(rec))
+}
+
+// sstpValidationPolicy is the event_validation policy the two SSTP receive
+// paths (acceptor + dialer inbound half) apply to a verified inbound SET.
+//
+// It exists so the additive #254 hook does not turn either path's verify helper
+// into a five-parameter function, and so both paths are demonstrably driven by
+// the same inputs: the mode resolved for the pair's INBOUND leg, the receiving
+// SID for logs, and the metrics sink. Its ZERO value is the pre-#247 posture
+// (Unset mode ⇒ applyEventValidation forwards everything and counts nothing),
+// which is what lets narrow test harnesses opt out by omission.
+type sstpValidationPolicy struct {
+	Mode  model.EventValidationMode
+	Sid   string
+	Stats *PrometheusHandler
+}
+
+// sstpInboundValidationPolicy resolves the event_validation policy for an SSTP
+// pair's inbound leg and returns it together with the validator set the verify
+// config should carry. A nil validator set (NONE, or a record with no inbound
+// leg) makes goSetSstp.VerifySET skip validation entirely, so NONE is
+// byte-for-byte the pre-#247 SSTP receive path.
+//
+// Per ADR COM-0018 a pair is ONE bidirectional StreamStateRecord, so the single
+// event_validation field governs the inbound leg on both SSTP paths — the mode
+// is resolved from the record, and engagement from rec.SstpInbound's negotiated
+// events_delivered.
+func sstpInboundValidationPolicy(rec *model.StreamStateRecord, mode model.EventValidationMode, stats *PrometheusHandler) (sstpValidationPolicy, *goSetValidate.ValidatorSet) {
+	policy := sstpValidationPolicy{Mode: mode, Stats: stats}
+	if rec != nil && rec.SstpInbound != nil {
+		policy.Sid = rec.SstpInbound.Id
+	}
+	if mode == model.EventValidationNone || mode == model.EventValidationUnset {
+		return policy, nil
+	}
+	if rec == nil || rec.SstpInbound == nil {
+		return policy, nil
+	}
+	return policy, goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), engagedEventUrisFor(rec.SstpInbound))
+}
+
+// applySstpInbound applies the policy to one verified inbound SET and returns
+// the per-JTI setErr to report to the peer, or nil to forward it.
+//
+// Both SSTP paths report a rejection the same way — an SSTP §2.3 setErrs entry
+// carrying "invalid_request" — because RFC8935 §2.4 makes that the code for a
+// non-conformant event payload and RFC8936 §7.1.2 shares the registry, so an
+// operator sees one code for one policy across all three transports. It is
+// deliberately NOT one of the retryable problem URIs: a payload that fails
+// validation fails identically on resend, so the peer must clear it.
+func (p sstpValidationPolicy) applySstpInbound(jti string, result goSetValidate.SetResult) *goSetSstp.SetErr {
+	decision := applyEventValidation(p.Mode, validationTransportSstp, p.Sid, jti, result, p.Stats)
+	if !decision.Reject {
+		return nil
+	}
+	return &goSetSstp.SetErr{Err: decision.ErrCode, Description: decision.Description}
 }
 
 // rejectsDisposition reports whether mode rejects a whole-SET disposition.
