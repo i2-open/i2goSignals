@@ -202,6 +202,29 @@ func (f sstpPendingFeedback) empty() bool {
 	return len(f.Acks) == 0 && len(f.SetErrs) == 0
 }
 
+// merge folds other into f, de-duplicating acks. Used to fold feedback produced
+// off the primary cycle (pushWhilePollHeld) back into the pair loop's carried
+// value. A JTI can never land in both Acks and SetErrs — runInboundHalf puts
+// each inbound JTI in exactly one — so no cross-field reconciliation is needed.
+func (f *sstpPendingFeedback) merge(other sstpPendingFeedback) {
+	if len(other.Acks) > 0 {
+		seen := make(map[string]struct{}, len(f.Acks))
+		for _, jti := range f.Acks {
+			seen[jti] = struct{}{}
+		}
+		for _, jti := range other.Acks {
+			if _, dup := seen[jti]; dup {
+				continue
+			}
+			seen[jti] = struct{}{}
+			f.Acks = append(f.Acks, jti)
+		}
+	}
+	for jti, se := range other.SetErrs {
+		f.addSetErr(jti, se)
+	}
+}
+
 func (c *SstpDialerConfig) fillDefaults() {
 	if c.BaseDelay <= 0 {
 		c.BaseDelay = 1 * time.Second
@@ -377,6 +400,20 @@ type SstpDialer struct {
 	// Bind drains this queue.
 	pending []string
 	running map[string]*sstpPairLoop
+
+	// deferredMu guards deferred.
+	deferredMu sync.Mutex
+	// deferred holds inbound feedback produced OUTSIDE the primary cycle — today
+	// only by pushWhilePollHeld, which runs in its own goroutine while the pair
+	// loop carries its pending feedback as a plain value it cannot safely mutate
+	// from there. The pair loop drains this into that value at the top of each
+	// cycle, so a SET ingested (or rejected) on a second push is still acked or
+	// setErr'd, one cycle later at worst.
+	//
+	// Without it the second push's feedback was discarded: the peer never learned
+	// we had taken those SETs, so its outbound never cleared them and it resent
+	// them every cycle forever (code-review finding on spec #247 #254).
+	deferred map[string]sstpPendingFeedback
 }
 
 // sstpPairLoop is a running per-pair goroutine's cancel/wait handle. The
@@ -402,11 +439,48 @@ func NewSstpDialer(coord cluster.ClusterCoordinator, nodeID string, stats SstpDi
 		nodeID:      nodeID,
 		cfg:         cfg,
 		running:     map[string]*sstpPairLoop{},
+		deferred:    map[string]sstpPendingFeedback{},
 	}
 	if stats != nil {
 		d.stats.Store(&dialerStatsHolder{stats: stats})
 	}
 	return d
+}
+
+// deferFeedback records feedback owed to a peer that was produced off the
+// primary cycle, for the pair loop to carry on its next request.
+func (d *SstpDialer) deferFeedback(pairId string, fb sstpPendingFeedback) {
+	if fb.empty() {
+		return
+	}
+	d.deferredMu.Lock()
+	defer d.deferredMu.Unlock()
+	carried := d.deferred[pairId]
+	carried.merge(fb)
+	d.deferred[pairId] = carried
+}
+
+// takeDeferredFeedback removes and returns the feedback deferred for a pair.
+// Taking rather than reading is what makes the hand-off exactly-once: the pair
+// loop now owns it and applies the normal preserve-on-failure lifecycle, so a
+// failed exchange retries it instead of this store accumulating a second copy.
+func (d *SstpDialer) takeDeferredFeedback(pairId string) sstpPendingFeedback {
+	d.deferredMu.Lock()
+	defer d.deferredMu.Unlock()
+	fb, ok := d.deferred[pairId]
+	if !ok {
+		return sstpPendingFeedback{}
+	}
+	delete(d.deferred, pairId)
+	return fb
+}
+
+// dropDeferredFeedback discards a removed pair's deferred feedback so the store
+// does not outlive the pair it belongs to.
+func (d *SstpDialer) dropDeferredFeedback(pairId string) {
+	d.deferredMu.Lock()
+	defer d.deferredMu.Unlock()
+	delete(d.deferred, pairId)
 }
 
 // SetStats late-binds the stats sink. Safe to call after per-pair goroutines
@@ -570,6 +644,8 @@ func (d *SstpDialer) UnregisterPair(pairId string) {
 		d.pending = filtered
 	}
 	d.mu.Unlock()
+	// The pair is going away, so nothing will ever carry its deferred feedback.
+	d.dropDeferredFeedback(pairId)
 	if !ok {
 		return
 	}
@@ -728,6 +804,12 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 			return false
 		}
 		streamCopy := live
+
+		// Fold in any feedback a second push produced while an earlier cycle was
+		// in flight. Drained here — before the primary goroutine starts and while
+		// nothing else touches `pending` — so the merge needs no lock of its own
+		// and a second push landing mid-cycle is simply carried one cycle later.
+		pending.merge(d.takeDeferredFeedback(pairId))
 
 		// Run the primary cycle concurrently so the loop can react to a new
 		// outbound SET arriving while the peer holds this cycle's connection
@@ -1182,7 +1264,13 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		// would otherwise have its Sets silently dropped. Ingest+ack them so
 		// they land in the pair's inbound stream rather than being resent.
 		if len(received) > 0 {
-			d.runInboundHalf(stream, received)
+			// The feedback for those SETs cannot ride this response — the request
+			// is already sent — and this goroutine may not touch the pair loop's
+			// carried value. Hand it to the deferred store so the loop echoes it
+			// on its next request; dropping it left the peer resending the same
+			// SETs forever, which is precisely the loop the setErr carriage
+			// exists to break.
+			d.deferFeedback(pairId, d.runInboundHalf(stream, received))
 		}
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary
