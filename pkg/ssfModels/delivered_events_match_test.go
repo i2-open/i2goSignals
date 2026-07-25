@@ -135,9 +135,23 @@ func TestMatchesEventPattern(t *testing.T) {
 		{name: "suffix wildcard", pattern: "urn:ietf:params:scim:event:prov:*", eventUri: "urn:ietf:params:scim:event:prov:create:full", want: true},
 		{name: "embedded wildcard", pattern: "https://schemas.openid.net/secevent/*/event-type/account-disabled", eventUri: "https://schemas.openid.net/secevent/risc/event-type/account-disabled", want: true},
 		{name: "no match", pattern: "urn:example:other", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
-		{name: "malformed pattern returns false", pattern: "urn:[unclosed", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
-		{name: "malformed pattern with wildcard returns false", pattern: "*[unclosed", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
 		{name: "empty pattern matches (unanchored search)", pattern: "", eventUri: "urn:ietf:params:scim:event:prov:delete", want: true},
+
+		// "*" is the only metacharacter: everything else is quoted and matched
+		// literally, so a receiver-supplied pattern cannot smuggle in regex syntax.
+		// Event URIs are dot- and slash-dense, which makes an unquoted "." the
+		// realistic over-match rather than a contrived one.
+		{name: "dot is literal, not any-char", pattern: "schemas.openid.net", eventUri: "https://schemasXopenidYnet/secevent/risc/event-type/account-disabled", want: false},
+		{name: "dot still matches a real dot", pattern: "schemas.openid.net", eventUri: "https://schemas.openid.net/secevent/risc/event-type/account-disabled", want: true},
+		{name: "plus is literal, not a quantifier", pattern: "even+t", eventUri: "urn:ietf:params:scim:eveent:prov:delete", want: false},
+		{name: "regex alternation is literal", pattern: "(delete|activate)", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
+		{name: "character class is literal", pattern: "[dp]rov", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
+		{name: "anchors are literal", pattern: "^urn:ietf", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
+		// A bracket no longer fails to compile — it is quoted, so it simply does
+		// not occur in the URI. Same answer, sounder reason.
+		{name: "unbalanced bracket is literal and does not match", pattern: "urn:[unclosed", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
+		{name: "unbalanced bracket with wildcard does not match", pattern: "*[unclosed", eventUri: "urn:ietf:params:scim:event:prov:delete", want: false},
+		{name: "a literal metacharacter in the URI still matches", pattern: "*prov:[x]", eventUri: "urn:ietf:params:scim:event:prov:[x]", want: true},
 	}
 
 	for _, tt := range tests {

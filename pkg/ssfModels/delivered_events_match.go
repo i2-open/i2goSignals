@@ -51,11 +51,27 @@ func MatchDeliveredEvents(requested []string, supported []string) []string {
 // that cannot be compiled returns false rather than panicking, so a malformed
 // receiver-supplied glob is skipped instead of failing the caller.
 //
+// "*" is the ONLY metacharacter. Every other character is quoted before the
+// expression is compiled, so a receiver-supplied pattern is glob syntax and not
+// a regular expression: event URIs are dot- and slash-dense
+// ("https://schemas.openid.net/..."), and an unquoted "." would match any
+// character and silently widen events_delivered past what was requested. A
+// pattern carrying "(", "[" or "+" would likewise either over-match or fail to
+// compile and be dropped entirely.
+//
 // The comparison is an unanchored search, preserving the original behaviour: a
 // pattern is satisfied when it occurs anywhere within the event URI.
 func MatchesEventPattern(pattern string, eventUri string) bool {
-	expr := "(?i)" + strings.ReplaceAll(pattern, "*", ".*")
-	match, err := regexp.MatchString(expr, eventUri)
+	var expr strings.Builder
+	expr.WriteString("(?i)")
+	for i, segment := range strings.Split(pattern, "*") {
+		if i > 0 {
+			expr.WriteString(".*")
+		}
+		expr.WriteString(regexp.QuoteMeta(segment))
+	}
+
+	match, err := regexp.MatchString(expr.String(), eventUri)
 	if err != nil {
 		return false
 	}
