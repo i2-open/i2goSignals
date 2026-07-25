@@ -1,8 +1,27 @@
 package services
 
 import (
+	"errors"
+	"fmt"
+
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
+
+// ErrInvalidRequest marks a service error caused by the caller's request rather
+// than a server fault, so the HTTP layer can answer 400 (as StreamCreate/
+// StreamUpdate already document) instead of the catch-all 500.
+var ErrInvalidRequest = errors.New("invalid stream configuration")
+
+// validateEventPatterns rejects an events_requested pattern that cannot compile,
+// before any state is mutated. Without this the pattern matches nothing and the
+// receiver is handed a silently narrower events_delivered — a registration that
+// looks successful but never delivers what was asked for (spec #247).
+func validateEventPatterns(requested []string) error {
+	if err := model.ValidateEventPatterns(requested); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	return nil
+}
 
 // validateEventValidationMode rejects a malformed per-stream event_validation
 // mode on the request before any state is mutated (spec #247 issue #250). It

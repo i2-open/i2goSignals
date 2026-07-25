@@ -355,6 +355,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
+	// events_requested patterns must compile, or the stream registers with a
+	// silently narrower events_delivered than the receiver asked for.
+	if err := validateEventPatterns(request.EventsRequested); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
 	// ADR-0066 §D2 invariant — "None + unverified" is not a configurable state
 	// (i2goSignals#235). We validate the request as supplied (before Iss is
 	// defaulted to the local issuer), so signingOnly can never be silently
@@ -1142,6 +1148,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	// Per-receiver event-validation mode (spec #247 #250). Shape-checked ahead of
 	// the SSTP dispatch so a malformed mode is rejected on both patch paths.
 	if err := validateEventValidationMode(configReq.EventValidation); err != nil {
+		return nil, err
+	}
+
+	// Same for events_requested patterns — checked ahead of the SSTP dispatch so
+	// an uncompilable pattern cannot narrow events_delivered on either path.
+	if err := validateEventPatterns(configReq.EventsRequested); err != nil {
 		return nil, err
 	}
 

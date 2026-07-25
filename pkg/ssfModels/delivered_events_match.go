@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -20,9 +21,10 @@ import (
 //   - otherwise every pattern is matched against every supported URI via
 //     MatchesEventPattern, accumulating in pattern-major order.
 //
-// A pattern that matches nothing simply contributes nothing; a malformed pattern
-// is skipped rather than being fatal, because events_requested is receiver-supplied
-// and a bad glob must not fail an otherwise valid stream registration.
+// A pattern that matches nothing simply contributes nothing. A pattern that does
+// not compile contributes nothing either, but that case is not supposed to reach
+// here: ValidateEventPatterns rejects it at registration so the receiver learns
+// its pattern was bad instead of silently getting a narrower events_delivered.
 //
 // This is deliberately NOT the routing-time check: by the time a SET is routed,
 // events_delivered is already concrete, so matching an event's types against a
@@ -47,33 +49,51 @@ func MatchDeliveredEvents(requested []string, supported []string) []string {
 }
 
 // MatchesEventPattern reports whether a single events_requested pattern matches
-// an event URI. Matching is case-insensitive and "*" is a wildcard run; a pattern
-// that cannot be compiled returns false rather than panicking, so a malformed
-// receiver-supplied glob is skipped instead of failing the caller.
+// an event URI. Matching is case-insensitive, unanchored, and the pattern is a
+// REGULAR EXPRESSION in which "*" is additionally rewritten to ".*" so the
+// familiar glob shorthand ("urn:ietf:params:scim:event:prov:*") keeps working.
 //
-// "*" is the ONLY metacharacter. Every other character is quoted before the
-// expression is compiled, so a receiver-supplied pattern is glob syntax and not
-// a regular expression: event URIs are dot- and slash-dense
-// ("https://schemas.openid.net/..."), and an unquoted "." would match any
-// character and silently widen events_delivered past what was requested. A
-// pattern carrying "(", "[" or "+" would likewise either over-match or fail to
-// compile and be dropped entirely.
+// Regex is the deliberate pattern language, not an accident of the
+// implementation: a receiver selecting a subset of a 30-URI catalog wants
+// alternation ("*:event:(feed|sig):*"), character classes and anchors, and the
+// CLI and its tests have relied on that since the matcher was introduced. The
+// price is that regex metacharacters in a URI-shaped pattern are live — "." is
+// any-character rather than a literal dot — which is a widening a receiver opts
+// into by writing one, not something the server does behind its back.
 //
-// The comparison is an unanchored search, preserving the original behaviour: a
-// pattern is satisfied when it occurs anywhere within the event URI.
+// A pattern that does not compile returns false. Callers must not rely on that
+// as an error channel: ValidateEventPatterns rejects an uncompilable pattern at
+// registration time, which is where a receiver can still act on it.
 func MatchesEventPattern(pattern string, eventUri string) bool {
-	var expr strings.Builder
-	expr.WriteString("(?i)")
-	for i, segment := range strings.Split(pattern, "*") {
-		if i > 0 {
-			expr.WriteString(".*")
-		}
-		expr.WriteString(regexp.QuoteMeta(segment))
-	}
-
-	match, err := regexp.MatchString(expr.String(), eventUri)
+	match, err := regexp.MatchString(eventPatternExpr(pattern), eventUri)
 	if err != nil {
 		return false
 	}
 	return match
+}
+
+// ValidateEventPatterns reports the first events_requested pattern that is not a
+// usable expression, naming it and the compile failure. Registration calls this
+// before anything is persisted (spec #247): a pattern that cannot compile
+// otherwise contributes no matches and the receiver is handed a silently
+// narrower events_delivered — the stream looks registered but never carries the
+// events that were asked for. Rejecting the registration surfaces the typo while
+// the caller can still fix it.
+//
+// An empty or nil set is valid: it means "no explicit request", which the stream
+// service resolves to the full supported catalog.
+func ValidateEventPatterns(requested []string) error {
+	for _, pattern := range requested {
+		if _, err := regexp.Compile(eventPatternExpr(pattern)); err != nil {
+			return fmt.Errorf("invalid events_requested pattern %q: %v", pattern, err)
+		}
+	}
+	return nil
+}
+
+// eventPatternExpr is the single pattern -> expression transform shared by the
+// matcher and the validator, so what is validated at registration is exactly
+// what is compiled at match time.
+func eventPatternExpr(pattern string) string {
+	return "(?i)" + strings.ReplaceAll(pattern, "*", ".*")
 }

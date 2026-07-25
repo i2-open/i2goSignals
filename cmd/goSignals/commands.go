@@ -1235,7 +1235,7 @@ type CreateStreamSstpCmd struct {
 	Iss           string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
 	IssJwksUrl    string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
 	Aud           []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
-	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode)."`
+	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode). Each value is a case-insensitive regular expression with '*' as shorthand for '.*'."`
 	Mode          string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
 }
 
@@ -1408,7 +1408,7 @@ type CreateStreamCmd struct {
 	Iss        string              `optional:"" help:"The event issuer value (e.g. scim.example.com)"`
 	Name       string              `optional:"" short:"n" help:"An alias name for the stream to be created"`
 	IssJwksUrl string              `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
+	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Each value is a case-insensitive regular expression matched anywhere in an event uri, with '*' as shorthand for '.*' -- e.g. '*:event:prov:*' or '*:event:(feed|sig):*'. Omit for all supported events."`
 }
 
 // bootstrapBearer returns the bearer to present on bootstrap-capable calls

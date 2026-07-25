@@ -74,6 +74,12 @@ func validateSstpDirection(name string, d model.SstpDirection) error {
 	if _, ok := model.SstpModeToRouteMode(d.Mode); !ok {
 		return fmt.Errorf("invalid %s.mode: must be one of FORWARD, PUBLISH, IMPORT", name)
 	}
+	// A pattern that cannot compile matches nothing, so the leg would come up
+	// with a narrower events_delivered than the bootstrap asked for and no error
+	// anywhere (spec #247). Reject the bootstrap instead.
+	if err := model.ValidateEventPatterns(d.Events); err != nil {
+		return fmt.Errorf("invalid %s.events: %v", name, err)
+	}
 	return nil
 }
 

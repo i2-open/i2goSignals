@@ -470,7 +470,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	server2Name := suite.servers[1].Name()
 	server1Name := suite.servers[0].Name()
 	server1Addr := suite.servers[0].server.Addr
-	cmd := fmt.Sprintf("create stream poll publish %s --name=scimPoll --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:feed:*,*:event:sig:* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server1Addr)
+	cmd := fmt.Sprintf("create stream poll publish %s --name=scimPoll --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:(feed|sig):* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server1Addr)
 	testLog.Println("    Executing:\n" + cmd)
 	res, err := suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
@@ -485,7 +485,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	testLog.Println(fmt.Sprintf("Result:\n%s", res))
 
 	testLog.Println("  Testing simple Create Stream Poll Receive...")
-	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:feed:*,*:event:sig:* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1Name, server1Addr, streamConfig.Delivery.PollTransmitMethod.EndpointUrl, streamConfig.Delivery.PollTransmitMethod.AuthorizationHeader)
+	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:(feed|sig):* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1Name, server1Addr, streamConfig.Delivery.PollTransmitMethod.EndpointUrl, streamConfig.Delivery.PollTransmitMethod.AuthorizationHeader)
 	testLog.Println("    Executing:\n" + cmd)
 	res, err = suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")

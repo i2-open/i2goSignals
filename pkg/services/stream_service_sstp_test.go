@@ -174,6 +174,26 @@ func TestCreateSstpPair_RoleRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), "role")
 }
 
+// An events pattern that cannot compile matches nothing, so the leg would come
+// up with a narrower events_delivered than the bootstrap asked for and report no
+// error anywhere. Both directions are gated (spec #247).
+func TestCreateSstpPair_UncompilableEventPatternIsRejected(t *testing.T) {
+	svc, _ := sstpFixture(t)
+
+	b := responderBootstrap()
+	b.Primary.Events = []string{"urn:ietf:params:scim:event:prov:[typo"}
+	_, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "primary.events")
+	assert.Contains(t, err.Error(), "[typo", "the error must name the offending pattern")
+
+	b = responderBootstrap()
+	b.Inbound.Events = []string{"*:event:(feed|sig:*"}
+	_, err = svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inbound.events")
+}
+
 func TestCreateSstpPair_ResponderRejectsOperatorEndpointAndBearer(t *testing.T) {
 	svc, _ := sstpFixture(t)
 

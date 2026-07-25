@@ -208,3 +208,68 @@ func TestExpandRequestedEvents_NoWildcardIsIdentity(t *testing.T) {
 
 	assert.Equal(t, requested, expandRequestedEvents(requested, []string{"urn:a:one"}))
 }
+
+// events_requested is a regular expression (with "*" as ".*" shorthand), so a
+// typo like an unclosed group compiles to nothing and used to register a stream
+// that quietly delivered a narrower set than was asked for. It must be a
+// rejected registration the caller can act on instead — flagged ErrInvalidRequest
+// so the handler answers 400 rather than the catch-all 500.
+func TestCreateStream_UncompilablePatternIsRejected(t *testing.T) {
+	svc := newEventValidationTestService(model.EventValidationUnset)
+	ctx := context.Background()
+
+	req := pollReceiverRequest()
+	req.EventsRequested = []string{"urn:ietf:params:scim:event:prov:[typo"}
+
+	_, err := svc.CreateStream(ctx, req, "test-project", nil)
+
+	require.Error(t, err, "an uncompilable events_requested pattern must fail the registration")
+	assert.ErrorIs(t, err, ErrInvalidRequest, "it is the caller's request that is bad, not the server")
+	assert.Contains(t, err.Error(), "[typo", "the error must name the offending pattern")
+}
+
+// The same gate on the patch path: a bad pattern must not silently narrow an
+// already-working stream's events_delivered.
+func TestUpdateStream_UncompilablePatternIsRejected(t *testing.T) {
+	svc := newEventValidationTestService(model.EventValidationUnset)
+	ctx := context.Background()
+
+	created, err := svc.CreateStream(ctx, pollReceiverRequest(), "test-project", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.EventsDelivered)
+
+	_, err = svc.UpdateStream(ctx, created.Id, "test-project", model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{EventsRequested: []string{"*:event:(feed|sig:*"}},
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	// The stream must be untouched — a rejected patch mutates nothing.
+	state, err := svc.GetStreamState(ctx, created.Id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, created.EventsDelivered, state.StreamConfiguration.EventsDelivered,
+		"a rejected patch must leave events_delivered as it was")
+}
+
+// A valid regex is the point of keeping regex: one pattern selects a subset of
+// the catalog by alternation, which no glob could express.
+func TestCreateStream_AlternationPatternSelectsSubset(t *testing.T) {
+	svc := newEventValidationTestService(model.EventValidationUnset)
+	ctx := context.Background()
+
+	req := pollReceiverRequest()
+	req.EventsRequested = []string{"*:event:(feed|sig):*"}
+
+	created, err := svc.CreateStream(ctx, req, "test-project", nil)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, created.EventsDelivered, "alternation must select real events")
+	for _, uri := range created.EventsDelivered {
+		assert.True(t,
+			strings.Contains(uri, ":event:feed:") || strings.Contains(uri, ":event:sig:"),
+			"only the alternation's branches may be delivered, got %q", uri)
+	}
+	assert.Less(t, len(created.EventsDelivered), len(model.GetSupportedEvents()),
+		"an alternation over two branches must be a strict subset of the catalog")
+}
