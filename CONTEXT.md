@@ -676,6 +676,50 @@ write on the hot path). The management-plane token table *joins* this
 onto stream-typed tokens. This is the stream-token analogue of an IAT's
 Last-redemption IP. Undefined for IATs (they are not bound to a stream).
 
+## Event validation vocabulary
+
+### Event validation mode
+
+A setting on a goSignals **receiver stream** controlling whether the
+*semantics* of SET event payloads (required claims, subject shape) are
+checked after the SET itself passes signature/`iss`/`aud` verification.
+Validation is per event URI: an event is **recognized** when a
+validator for its URI is registered, **unsupported** otherwise.
+
+- **`NONE`** (default) — no payload checks; valid signature → forward.
+  Today's content-agnostic router posture, unchanged.
+- **`WARN`** — checks run for observability only: a recognized but
+  malformed payload is logged at WARN and still forwarded; unsupported
+  URIs forward silently. The staged-rollout mode.
+- **`ENFORCE`** — recognized-but-malformed events are rejected on the
+  wire (each transport maps the rejection to its own RFC semantics);
+  unsupported URIs still forward. "What I recognize must be
+  well-formed."
+- **`STRICT`** — firewall posture: every event must be vouched for by
+  a validator. Malformed *and* unsupported events are both rejected.
+
+An event is also treated as unsupported when its URI is
+**out-of-contract** — matching none of the stream's negotiated
+`events_delivered` patterns. Which event *types* flow on a stream
+remains the job of `events_requested` ∩ `events_supported`;
+validation mode governs payload well-formedness, not type selection.
+
+Rejection granularity is the whole SET (worst disposition wins): the
+router forwards raw signed tokens and never strips a payload, so under
+`STRICT` a SET carrying an unrecognized extension payload alongside a
+valid event is rejected whole.
+
+### SSF stream-management events
+
+The two event types the SSF spec itself defines, both diagnostic /
+operational rather than business signals: the **Verification Event**
+(SSF §8.1.4.1, the receiver-triggered stream liveness check) and the
+**Stream Updated Event** (§8.1.5). They are always in-contract and
+always validated regardless of a stream's `events_delivered` list, so
+a narrowly-scoped `STRICT` receiver never rejects its own verification
+handshake. Distinct from the enterprise product's control-stream
+events, which are not community vocabulary.
+
 ## Adding a new persistence method
 
 1. Add the method to the appropriate **DAO interface**
