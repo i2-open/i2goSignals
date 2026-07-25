@@ -48,7 +48,9 @@ func BuiltinRegistry() *Registry {
 		Register(SsfVerificationEventUri, ValidatorFunc(validateVerificationEvent)).
 		Register(SsfStreamUpdatedEventUri, ValidatorFunc(validateStreamUpdatedEvent))
 
-	return registerCaepValidators(r)
+	r = registerCaepValidators(r)
+
+	return registerRiscValidators(r)
 }
 
 // Register adds or replaces the validator for eventURI and returns the receiver

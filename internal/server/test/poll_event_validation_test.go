@@ -225,7 +225,7 @@ func TestPollEventValidationModeMatrix(t *testing.T) {
 					"the setErrs description names the failing claim")
 			}
 			if tc.rejectUnsupported {
-				assert.Contains(t, setErrs[unsupportedJti].Description, evRiscUri)
+				assert.Contains(t, setErrs[unsupportedJti].Description, evNoValidatorUri)
 			}
 		})
 	}

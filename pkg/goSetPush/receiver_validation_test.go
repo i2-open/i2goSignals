@@ -14,7 +14,10 @@ import (
 const (
 	validationTestIssuer = "https://issuer.example.com"
 	validationTestStream = "stream-under-validation"
-	validationRiscUri    = "https://schemas.openid.net/secevent/risc/event-type/account-disabled"
+	// An out-of-tree vendor URI, deliberately not a RISC/CAEP/SCIM one: this
+	// fixture means "an event type no built-in validator pack covers", and a
+	// standardised URI stops meaning that as soon as a pack adds it.
+	validationNoValidatorUri = "https://vendor.example.com/secevent/event-type/no-validator"
 )
 
 var validationTestAud = []string{"https://aud.example.com"}
@@ -71,9 +74,9 @@ func TestParseReceivedSET_NoValidatorsIsUnchanged(t *testing.T) {
 // no disposition may become a *DeliveryErr inside this package.
 func TestParseReceivedSET_ValidatorsReportNeverReject(t *testing.T) {
 	key := generateTestKey(t)
-	// Engage only the RISC URI; the two SSF stream-management URIs are added
+	// Engage only the unvalidated vendor URI; the two SSF stream-management URIs are added
 	// unconditionally by NewValidatorSet.
-	vs := goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), []string{validationRiscUri})
+	vs := goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), []string{validationNoValidatorUri})
 
 	cases := []struct {
 		name            string
@@ -93,10 +96,10 @@ func TestParseReceivedSET_ValidatorsReportNeverReject(t *testing.T) {
 		{
 			name: "engaged URI with no registered validator is unsupported",
 			addPayload: func(s *goSet.SecurityEventToken) {
-				s.AddEventPayload(validationRiscUri, map[string]any{"reason": "test"})
+				s.AddEventPayload(validationNoValidatorUri, map[string]any{"reason": "test"})
 			},
 			wantDisposition: goSetValidate.Unsupported,
-			wantURI:         validationRiscUri,
+			wantURI:         validationNoValidatorUri,
 		},
 		{
 			name: "stream updated event with a bad status is malformed",
@@ -160,7 +163,7 @@ func TestParseReceivedSET_WorstDispositionWins(t *testing.T) {
 
 	token := signValidationSET(t, key, func(s *goSet.SecurityEventToken) {
 		s.AddEventPayload(goSetValidate.SsfVerificationEventUri, map[string]any{"state": "abc"})
-		s.AddEventPayload(validationRiscUri, map[string]any{"reason": "companion"})
+		s.AddEventPayload(validationNoValidatorUri, map[string]any{"reason": "companion"})
 	})
 
 	received, deliveryErr := ParseReceivedSET(

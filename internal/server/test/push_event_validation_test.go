@@ -22,10 +22,13 @@ import (
 )
 
 const (
-	evKid      = "event-validation-kid"
-	evIssuer   = "https://ev-transmitter.example.com"
-	evRiscUri  = "https://schemas.openid.net/secevent/risc/event-type/account-disabled"
-	evAudience = "https://ev-receiver.example.com"
+	evKid    = "event-validation-kid"
+	evIssuer = "https://ev-transmitter.example.com"
+	// An out-of-tree vendor URI: the matrix needs an event type that is neither
+	// in the stream's contract nor covered by a built-in validator pack, and a
+	// standardised URI stops being either as soon as a pack adds it.
+	evNoValidatorUri = "https://vendor.example.com/secevent/event-type/no-validator"
+	evAudience       = "https://ev-receiver.example.com"
 )
 
 // evJwksServer stands up a JWKS endpoint for the public half of key, under evKid.
@@ -70,7 +73,7 @@ func evMalformedPayload(s *goSet.SecurityEventToken) {
 }
 
 func evUnsupportedPayload(s *goSet.SecurityEventToken) {
-	s.AddEventPayload(evRiscUri, map[string]any{"reason": "event-validation matrix"})
+	s.AddEventPayload(evNoValidatorUri, map[string]any{"reason": "event-validation matrix"})
 }
 
 func evMixedPayload(s *goSet.SecurityEventToken) {
@@ -203,7 +206,7 @@ func TestPushEventValidationModeMatrix(t *testing.T) {
 						assert.Contains(t, deliveryErr.Description, "status",
 							"the description names the failing claim")
 					default:
-						assert.Contains(t, deliveryErr.Description, evRiscUri,
+						assert.Contains(t, deliveryErr.Description, evNoValidatorUri,
 							"the description names the out-of-contract event URI")
 					}
 				})

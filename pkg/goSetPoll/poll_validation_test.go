@@ -18,7 +18,10 @@ import (
 const (
 	validationTestIssuer = "https://issuer.example.com"
 	validationTestStream = "stream-under-validation"
-	validationRiscUri    = "https://schemas.openid.net/secevent/risc/event-type/account-disabled"
+	// An out-of-tree vendor URI, deliberately not a RISC/CAEP/SCIM one: this
+	// fixture means "an event type no built-in validator pack covers", and a
+	// standardised URI stops meaning that as soon as a pack adds it.
+	validationNoValidatorUri = "https://vendor.example.com/secevent/event-type/no-validator"
 )
 
 var validationTestAud = []string{"https://aud.example.com"}
@@ -87,13 +90,13 @@ func TestPoll_NoValidatorsIsUnchanged(t *testing.T) {
 // jti into Errors inside this package — the ack/setErrs decision is the caller's.
 func TestPoll_ValidatorsReportNeverNack(t *testing.T) {
 	key := generateTestKey(t)
-	vs := goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), []string{validationRiscUri})
+	vs := goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), []string{validationNoValidatorUri})
 
 	validJti, validToken := signValidationSET(t, key, func(s *goSet.SecurityEventToken) {
 		s.AddEventPayload(goSetValidate.SsfVerificationEventUri, map[string]any{"state": "abc"})
 	})
 	unsupportedJti, unsupportedToken := signValidationSET(t, key, func(s *goSet.SecurityEventToken) {
-		s.AddEventPayload(validationRiscUri, map[string]any{"reason": "test"})
+		s.AddEventPayload(validationNoValidatorUri, map[string]any{"reason": "test"})
 	})
 	malformedJti, malformedToken := signValidationSET(t, key, func(s *goSet.SecurityEventToken) {
 		s.AddEventPayload(goSetValidate.SsfStreamUpdatedEventUri, map[string]any{"status": "bogus"})
@@ -164,7 +167,7 @@ func TestPoll_WorstDispositionWins(t *testing.T) {
 
 	jti, token := signValidationSET(t, key, func(s *goSet.SecurityEventToken) {
 		s.AddEventPayload(goSetValidate.SsfVerificationEventUri, map[string]any{"state": "abc"})
-		s.AddEventPayload(validationRiscUri, map[string]any{"reason": "companion"})
+		s.AddEventPayload(validationNoValidatorUri, map[string]any{"reason": "companion"})
 	})
 
 	server := validationPollServer(t, map[string]string{jti: token})
