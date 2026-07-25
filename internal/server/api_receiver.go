@@ -1490,6 +1490,14 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			},
 		}
 		tracedCtx := httptrace.WithClientTrace(heartbeatCtx, pollTrace)
+
+		// Resolve this receiver's event_validation mode and engage the matching
+		// validators (spec #247 #251). Re-resolved every iteration so an operator
+		// changing the mode on a live stream takes effect on the next poll; under
+		// NONE the validator set is nil and Poll takes exactly the pre-#247 path.
+		validationMode := resolveReceiveValidationMode(ps.sa.StreamService, stream)
+		validators := buildReceiveValidatorSet(stream, validationMode)
+
 		parsed, httpStatus, err := goSetPoll.Poll(tracedCtx, pollReq, goSetPoll.ReceiverConfig{
 			EndpointURL:       eventUrl,
 			Authorization:     auth,
@@ -1500,6 +1508,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			// Signing-only (#184): make verification of pulled SETs mandatory so a
 			// nil JWKS rejects rather than silently accepting unsigned events.
 			RequireSignature: ps.stream.SigningOnly,
+			Validators:       validators,
 		})
 
 		if err != nil {
@@ -1662,8 +1671,29 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		setCnt := len(parsed.Sets)
 		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
 
+		// Carry over the parse / iss / aud errors goSetPoll reported, to be sent
+		// back in the next poll's setErrs. Merged rather than assigned so the
+		// event_validation rejections added below are not clobbered.
+		for jti, setErr := range parsed.Errors {
+			setErrs[jti] = setErr
+		}
+
 		// Process successfully parsed and validated SETs
 		for jti, token := range parsed.ParsedSETs {
+			// Apply the stream's event_validation mode to the dispositions
+			// goSetPoll computed (spec #247 #251). A rejected jti goes into
+			// setErrs with invalid_request instead of being acked, and is never
+			// routed; other jtis in the same batch still ack normally, because the
+			// decision is per-jti even though it is whole-SET within a jti.
+			if decision := applyEventValidation(validationMode, validationTransportPoll,
+				ps.stream.StreamConfiguration.Id, jti, parsed.Validations[jti], ps.sa.Stats); decision.Reject {
+				setErrs[jti] = goSetPoll.SetErrType{
+					Error:       decision.ErrCode,
+					Description: decision.Description,
+				}
+				continue
+			}
+
 			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
 			err = ps.sa.EventRouter.HandleEvent(token, parsed.Sets[jti], ps.stream.StreamConfiguration.Id)
 			if err != nil {
@@ -1672,11 +1702,6 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				continue
 			}
 			acks = append(acks, jti)
-		}
-
-		// Carry over validation errors to report in next poll
-		if len(parsed.Errors) > 0 {
-			setErrs = parsed.Errors
 		}
 
 		// Persist the resolved peer address on first connection or when it changes
@@ -1821,6 +1846,12 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 		sa.GetStreamService().UpdateRemoteAddress(r.Context(), sid, remoteIP)
 	}
 
+	// Resolve this receiver's event_validation mode and engage the matching
+	// validators (spec #247 #251). Under NONE the validator set is nil, so
+	// ParseReceivedSET takes exactly the pre-#247 path.
+	validationMode := resolveReceiveValidationMode(sa.GetStreamService(), streamState)
+	validators := buildReceiveValidatorSet(streamState, validationMode)
+
 	// Use goSetPush to handle RFC8935 protocol parsing and validation
 	jwksKey := sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), sid)
 	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
@@ -1828,9 +1859,20 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 		ExpectedIssuer:    streamState.Iss,
 		ExpectedAudiences: streamState.Aud,
 		RequireSignature:  streamState.SigningOnly,
+		Validators:        validators,
 	})
 	if deliveryErr != nil {
 		goSetPush.WriteDeliveryError(w, deliveryErr.ErrCode, deliveryErr.Description)
+		return
+	}
+
+	// Apply the mode to the dispositions goSetPush computed. This sits between the
+	// parse and everything downstream, so a rejected SET reaches neither the push
+	// monitor nor the event router: HTTP 400 with an RFC8935 §2.4 invalid_request
+	// body naming the event URI and failing claim, and nothing is routed.
+	if decision := applyEventValidation(validationMode, validationTransportPush, sid,
+		received.Token.ID, received.Validation, statsFor(sa)); decision.Reject {
+		goSetPush.WriteDeliveryError(w, decision.ErrCode, decision.Description)
 		return
 	}
 

@@ -709,6 +709,42 @@ router forwards raw signed tokens and never strips a payload, so under
 `STRICT` a SET carrying an unrecognized extension payload alongside a
 valid event is rejected whole.
 
+### Event validation wire mapping
+
+Where a rejected SET surfaces on each receive transport. The
+`pkg/goSet*` receiver libraries never reject: they compute
+dispositions and report them (`goSetPush.ReceivedSET.Validation`,
+`goSetPoll.ParsedPollResponse.Validations`). Mode policy and the
+mapping below live in `internal/server` — the libraries stay
+policy-free, and "dispositions reach the server wiring" is structural
+rather than a review checkpoint.
+
+Both transports report the same error code, `invalid_request`: RFC8935
+§2.4 defines it for a non-conformant event payload and RFC8936 §7.1.2
+shares that registry. The description names the offending event URI
+and, for a malformed payload, the failing claim.
+
+- **Push** — HTTP 400 with the RFC8935 error body. The SET is not
+  routed and never reaches the `EventRouter`.
+- **Poll** — the jti goes into the next poll's `setErrs` instead of
+  `ack`. Other jtis in the same batch ack normally: the decision is
+  per-jti, because the jti is the ack granularity.
+- **`WARN`** is wire-invisible — normal 202 / normal ack, plus a WARN
+  log carrying jti, event URI and the failed check. Unsupported logs
+  at DEBUG, since any event type no validator pack covers yet is
+  unsupported and would otherwise be pure noise.
+
+Validator **engagement** is derived from the stream's negotiated
+`events_delivered`, expanded through `ssfModels.MatchDeliveredEvents`
+so exactly one pattern→URI surface exists. `NONE` builds no validator
+set at all, so the default posture is the pre-validation receive path
+rather than "validate and discard the answer".
+
+Observability is one counter, `goSignals_router_event_validation_total`,
+labeled disposition × mode × transport. It is not labeled by stream or
+event URI, either of which would make the series unbounded. `NONE`
+records nothing, because it computes nothing.
+
 ### SSF stream-management events
 
 The two event types the SSF spec itself defines, both diagnostic /

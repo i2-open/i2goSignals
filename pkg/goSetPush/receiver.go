@@ -151,9 +151,16 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 	// only and is intentionally discarded here — the accepted token below is
 	// the signature-verified one (ADR-0066 §D3).
 
+	// Event-payload validation (spec #247). Runs only once the SET is fully
+	// trusted — signature, iss and aud are all settled above — and only reports:
+	// a nil Validators leaves Validation zero, and a non-Valid disposition is
+	// never turned into a *DeliveryErr here. Mapping a disposition onto the
+	// stream's event_validation mode and onto RFC8935 §2.4 invalid_request is the
+	// caller's job.
 	return &ReceivedSET{
 		Token:       token,
 		TokenString: tokenString,
+		Validation:  config.Validators.Validate(token),
 	}, nil
 }
 
