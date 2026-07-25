@@ -148,34 +148,50 @@ type sstpPendingFeedback struct {
 	SetErrs map[string]goSetSstp.SetErr
 }
 
-// clearedOutbound returns the JTIs to clear from the pair's outbound buffer:
-// everything the peer acked, plus everything it REJECTED via a per-JTI setErr.
+// clearedOutbound returns the JTIs to clear from the pair's outbound buffer —
+// everything the peer acked, plus every DETERMINISTIC per-JTI rejection — and the
+// stream-fatal setErr, if the peer sent one, for the caller to act on.
 //
-// A setErr must clear the SET on the same terms as an ack. Outbound bookkeeping
-// is literal-ack — anything sent-but-unacked is released for retry — so a SET the
-// peer rejects on event-validation grounds would otherwise be claimed, signed,
-// POSTed, rejected, released and re-claimed on every cycle, forever, without the
-// buffer ever draining that JTI.
+// A deterministic rejection must clear the SET on the same terms as an ack.
+// Outbound bookkeeping is literal-ack — anything sent-but-unacked is released for
+// retry — so a SET the peer rejects on event-validation grounds would otherwise be
+// claimed, signed, POSTed, rejected, released and re-claimed on every cycle,
+// forever, without the buffer ever draining that JTI.
 //
-// This follows the RFC8936 poll transmitter (PollStreamHandler), which acks
-// setErr'd JTIs on the same path as params.Acks and does NOT discriminate by
-// error code. The transient signature case is handled upstream rather than here:
-// goSetPush owns a rotate-and-retry for jws_signature_failed (ADR 0028), so a
-// key-rotation race is retried before it can ever surface as a setErr.
+// It is NOT every rejection, because clearing is permanent: a peer that rejects
+// with a retryable code (ProblemSignatureInvalid / ProblemUnknownKID / jwtCrypto —
+// what our own acceptor emits while a signing key rotates or its JWKS cache is
+// briefly stale) would otherwise have those SETs deleted, silently, with the pair
+// still enabled. goSetSstp.PartitionSetErrs applies the ADR-0040 verdicts: park
+// (clear), retry (leave pending), or stream-fatal (stop the direction).
 //
 // Each rejection is logged WARN — that log is the operator's only view of what a
-// peer refused, since the SET is discarded immediately after.
-func clearedOutbound(pairId string, acked []string, setErrs map[string]goSetSstp.SetErr) []string {
+// peer refused, since a cleared SET is discarded immediately after.
+func clearedOutbound(pairId string, acked []string, setErrs map[string]goSetSstp.SetErr) ([]string, *goSetSstp.SetErr) {
 	if len(setErrs) == 0 {
-		return acked
+		return acked, nil
 	}
-	cleared := make([]string, 0, len(acked)+len(setErrs))
+	disposition := goSetSstp.PartitionSetErrs(setErrs)
+
+	for _, jti := range disposition.Retry {
+		se := setErrs[jti]
+		sstpDialerLog.Warn("SSTP-CLIENT: peer rejected outbound SET with a retryable code, holding it for resend",
+			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
+	}
+	for _, jti := range disposition.Fatal {
+		se := setErrs[jti]
+		sstpDialerLog.Error("SSTP-CLIENT: peer reports the stream is dead, holding outbound SET",
+			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
+	}
+
+	cleared := make([]string, 0, len(acked)+len(disposition.Clear))
 	cleared = append(cleared, acked...)
 	seen := make(map[string]struct{}, len(acked))
 	for _, jti := range acked {
 		seen[jti] = struct{}{}
 	}
-	for jti, se := range setErrs {
+	for _, jti := range disposition.Clear {
+		se := setErrs[jti]
 		sstpDialerLog.Warn("SSTP-CLIENT: peer rejected outbound SET, clearing it",
 			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
 		if _, dup := seen[jti]; dup {
@@ -185,7 +201,13 @@ func clearedOutbound(pairId string, acked []string, setErrs map[string]goSetSstp
 		}
 		cleared = append(cleared, jti)
 	}
-	return cleared
+
+	var fatal *goSetSstp.SetErr
+	if len(disposition.Fatal) > 0 {
+		fatalErr := disposition.FatalErr
+		fatal = &fatalErr
+	}
+	return cleared, fatal
 }
 
 // addSetErr records a per-JTI rejection, allocating the map on first use.
@@ -995,13 +1017,25 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		// subsequent cycle (US 5 literal-ack semantics: only what we
 		// actually accepted is acked).
 		newFeedback := d.runInboundHalf(stream, received)
-		ackedCount := d.outbound.AckOutbound(stream, clearedOutbound(stream.PairId, acked, cls.SetErrs), events, fencingToken)
+		cleared, fatal := clearedOutbound(stream.PairId, acked, cls.SetErrs)
+		ackedCount := d.outbound.AckOutbound(stream, cleared, events, fencingToken)
 		*delay = d.cfg.BaseDelay
 
 		// AC 1: the peer accepted the request, so the feedback we just echoed is
 		// consumed. What carries forward is only this cycle's inbound half
 		// (which rides the NEXT request's Ack / setErrs).
 		updatedPending := newFeedback
+
+		// A stream-fatal setErr (binding-revoked) says every subsequent send is
+		// rejected the same way. Pause outbound and exit rather than spend the
+		// next cycles draining the queue into a dead stream; the SETs stay
+		// pending, so a resume replays them.
+		if fatal != nil {
+			reason := fmt.Sprintf("SSTP-CLIENT: peer reports stream dead on pair=%s: %s: %s",
+				stream.PairId, fatal.Err, fatal.Description)
+			d.outbound.PauseOutbound(stream, reason)
+			return cls, 0, true, updatedPending
+		}
 
 		// If we acked everything we sent, drain more immediately;
 		// otherwise idle a short cycle to avoid re-sending unacked SETs.
@@ -1255,9 +1289,11 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
 		// Second-push acks: the peer's returned Ack is its "we received
 		// these" acknowledgement for the SETs we just sent. Use it verbatim
-		// (no ack-all fallback, AC 3), plus any JTI the peer rejected — a
-		// rejection clears the SET on the same terms as an ack.
-		d.outbound.AckOutbound(stream, clearedOutbound(pairId, acked, cls.SetErrs), events, fencingToken)
+		// (no ack-all fallback, AC 3), plus any JTI the peer rejected
+		// deterministically — such a rejection clears the SET on the same terms
+		// as an ack, while a retryable one stays pending for a later cycle.
+		cleared, fatal := clearedOutbound(pairId, acked, cls.SetErrs)
+		d.outbound.AckOutbound(stream, cleared, events, fencingToken)
 		// A peer whose acceptor opportunistically ships queued outbound SETs
 		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
 		// forbids long-poll waiting, not the return of already-queued SETs)
@@ -1271,6 +1307,15 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 			// SETs forever, which is precisely the loop the setErr carriage
 			// exists to break.
 			d.deferFeedback(pairId, d.runInboundHalf(stream, received))
+		}
+		// A stream-fatal setErr pauses ONLY outbound, like the 4xx case below:
+		// every subsequent send is rejected the same way, so stop pushing rather
+		// than drain the queue into a dead stream. The held primary long-poll
+		// (inbound) is untouched, and the SETs stay pending for a resume.
+		if fatal != nil {
+			d.outbound.PauseOutbound(stream, fmt.Sprintf(
+				"SSTP-CLIENT: peer reports stream dead on push-while-poll-held for pair=%s: %s: %s",
+				pairId, fatal.Err, fatal.Description))
 		}
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary

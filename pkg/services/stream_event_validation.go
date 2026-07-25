@@ -28,12 +28,19 @@ func validateEventPatterns(requested []string) error {
 // sits alongside validateSubjectRemovalGrace in the create/update pipeline and
 // is a field-shape check only — the WARN-and-drop for a transmit-only stream is
 // applyEventValidation's job.
+//
+// The rejection wraps ErrInvalidRequest for the same reason validateEventPatterns
+// does: a typo in event_validation is the caller's mistake, and without the wrap
+// the HTTP layer's errors.Is check misses it and answers 500 — a typo'd pattern
+// would get 400 while a typo'd mode got "the server broke".
 func validateEventValidationMode(mode model.EventValidationMode) error {
 	if mode.Valid() {
 		return nil
 	}
-	_, err := model.ParseEventValidationMode(string(mode))
-	return err
+	if _, err := model.ParseEventValidationMode(string(mode)); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	return nil
 }
 
 // applyEventValidation copies a set event_validation mode from the request onto

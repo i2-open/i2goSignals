@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"context"
 	"crypto/rsa"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -77,25 +78,44 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 
 	// Outbound setErr consumption: the peer's request also carries, in
 	// Message.SetErrs, the JTIs of outbound SETs it REJECTED — notably a SET whose
-	// payload failed the peer's event_validation. Those must clear exactly like an
-	// ack, or drainSstpOutbound re-claims them every cycle and the pair's outbound
-	// buffer never drains that JTI: claim, sign, POST, reject, release, repeat.
+	// payload failed the peer's event_validation. A DETERMINISTIC rejection must
+	// clear exactly like an ack, or drainSstpOutbound re-claims it every cycle and
+	// the pair's outbound buffer never drains that JTI: claim, sign, POST, reject,
+	// release, repeat.
 	//
-	// This mirrors the RFC8936 poll transmitter (PollStreamHandler), which acks
-	// setErr'd JTIs on the same path as params.Acks and does not discriminate by
-	// error code. A rejection is logged WARN so the operator sees what the peer
-	// refused and why.
+	// Clearing is permanent, so it is not applied to every code. goSetSstp.
+	// PartitionSetErrs applies the ADR-0040 verdicts: a retryable rejection
+	// (ProblemSignatureInvalid / ProblemUnknownKID / jwtCrypto — what a peer emits
+	// while our signing key rotates or its JWKS cache is briefly stale) stays
+	// pending so the very same SET is re-sent once the key material settles, and a
+	// stream-fatal one (binding-revoked) pauses the outbound direction instead of
+	// draining the queue into a stream the peer says is dead. Every rejection is
+	// logged so the operator sees what the peer refused and why.
 	if len(inbound.SetErrs) > 0 {
-		buf := r.sstpServerBufferFor(txSid)
-		jtis := make([]string, 0, len(inbound.SetErrs))
-		for jti, se := range inbound.SetErrs {
+		disposition := goSetSstp.PartitionSetErrs(inbound.SetErrs)
+		for _, jti := range disposition.Retry {
+			se := inbound.SetErrs[jti]
+			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET with a retryable code, holding it for resend",
+				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
+		}
+		for _, jti := range disposition.Clear {
+			se := inbound.SetErrs[jti]
 			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET, clearing it",
 				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
-			jtis = append(jtis, jti)
 		}
-		buf.AckEvents(jtis)
-		for _, jti := range jtis {
-			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
+		if len(disposition.Clear) > 0 {
+			buf := r.sstpServerBufferFor(txSid)
+			buf.AckEvents(disposition.Clear)
+			for _, jti := range disposition.Clear {
+				_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
+			}
+		}
+		if len(disposition.Fatal) > 0 {
+			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing outbound",
+				"sid", txSid, "jti", disposition.Fatal[0],
+				"err", disposition.FatalErr.Err, "description", disposition.FatalErr.Description)
+			r.pauseSstpOutbound(rec, fmt.Sprintf("SSTP-SRV: peer reports stream dead on pair=%s: %s: %s",
+				rec.PairId, disposition.FatalErr.Err, disposition.FatalErr.Description))
 		}
 	}
 

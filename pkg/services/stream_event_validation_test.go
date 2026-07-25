@@ -95,6 +95,10 @@ func TestEventValidation_MalformedRejectedAtCreateAndUpdate(t *testing.T) {
 	for _, want := range []string{"NONE", "WARN", "ENFORCE", "STRICT"} {
 		assert.Contains(t, err.Error(), want, "create error must name the accepted values")
 	}
+	// Flagged like its sibling pattern check so the handler answers the documented
+	// 400 — otherwise a typo'd mode is reported as a server fault (500).
+	assert.ErrorIs(t, err, ErrInvalidRequest,
+		"a typo in event_validation is the caller's mistake, not a server fault")
 
 	created, err := svc.CreateStream(ctx, pollReceiverRequest(), "test-project", nil)
 	require.NoError(t, err)
@@ -105,6 +109,7 @@ func TestEventValidation_MalformedRejectedAtCreateAndUpdate(t *testing.T) {
 	for _, want := range []string{"NONE", "WARN", "ENFORCE", "STRICT"} {
 		assert.Contains(t, err.Error(), want, "update error must name the accepted values")
 	}
+	assert.ErrorIs(t, err, ErrInvalidRequest, "the patch path must flag it the same way")
 }
 
 // TestEventValidation_IgnoredOnTransmitOnlyStream verifies the receive-side-only
