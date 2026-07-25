@@ -123,11 +123,16 @@ func resolveReceiveValidationMode(ss *services.StreamService, rec *model.StreamS
 // stored events_delivered carries a pattern (notably "*"), which then engages
 // every matching URI instead of none.
 //
-// A URI this server does not know is deliberately left OUT of the engaged set:
-// no validator could vouch for it either way, so it reports Unsupported whether
-// it is engaged or not. The two SSF stream-management URIs are added
-// unconditionally by goSetValidate.NewValidatorSet and are not this function's
-// concern.
+// A URI outside model.GetSupportedEvents() is deliberately left OUT of the
+// engaged set. That holds only while the catalog and the goSetValidate builtin
+// registry cover the same event types — otherwise a URI the registry CAN vouch
+// for would be filtered out here and report Unsupported anyway, which ENFORCE
+// forwards unvalidated and STRICT rejects outright. The per-pack drift guards in
+// pkg/ssfModels (*_validator_coverage_test.go) are what keep the two aligned;
+// the WISE pack was the case that proved it (spec #247).
+//
+// The two SSF stream-management URIs are added unconditionally by
+// goSetValidate.NewValidatorSet and are not this function's concern.
 func engagedEventUris(rec *model.StreamStateRecord) []string {
 	if rec == nil {
 		return nil

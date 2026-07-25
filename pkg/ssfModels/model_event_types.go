@@ -20,6 +20,20 @@ var RiscEvents = []string{
 	"https://schemas.openid.net/secevent/risc/event-type/identifier-recycled",
 }
 
+// WiseEvents are the WISE (workload identity) event types this transmitter
+// supports. The WISE draft defines many more — the credential-issued /
+// credential-rotated, workload-lifecycle, policy, supply-chain and
+// anomalous-behavior families — which are deliberately absent: the catalog
+// advertises only what the pkg/goSetValidate WISE pack can actually vouch for,
+// so an advertised type is never one that resolves as Unsupported and gets
+// rejected by a STRICT receiver.
+var WiseEvents = []string{
+	"https://schemas.openid.net/secevent/wise/event-type/credential-revoked",
+	"https://schemas.openid.net/secevent/wise/event-type/credential-compromise",
+	"https://schemas.openid.net/secevent/wise/event-type/trust-anchor-changed",
+	"https://schemas.openid.net/secevent/wise/event-type/workload-compromised",
+}
+
 const (
 	EventScimFeedAdd      = "urn:ietf:params:scim:event:feed:add"
 	EventScimFeedRemove   = "urn:ietf:params:scim:event:feed:remove"
@@ -54,5 +68,6 @@ func GetSupportedEvents() []string {
 
 	events = append(events, CaepEvents...)
 	events = append(events, RiscEvents...)
+	events = append(events, WiseEvents...)
 	return events
 }
