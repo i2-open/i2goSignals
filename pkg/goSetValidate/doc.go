@@ -19,6 +19,16 @@
 // which is what keeps it standalone-consumable by a third-party SSF receiver and
 // keeps the server's stream state inside internal/ (ADR 0049 r5).
 //
+// # Experimental packs
+//
+// BuiltinRegistry carries one pack drawn from an UNADOPTED proposal: WISE
+// (Workload Identity Security Events, see wise.go). It makes no conformance
+// claim and no stability promise, and it is the only pack whose event URIs may
+// change out from under a deployment. Should that happen, the stale URIs simply
+// stop matching and the new ones resolve as Unsupported — forwarded under NONE /
+// WARN / ENFORCE, rejected only under STRICT. Every other pack tracks an adopted
+// specification.
+//
 // # Import boundary
 //
 // Per the standing pkg/goSet* rule and the #247 Slice Contract, this package

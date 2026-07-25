@@ -50,8 +50,11 @@ func BuiltinRegistry() *Registry {
 
 	r = registerCaepValidators(r)
 	r = registerRiscValidators(r)
+	r = registerScimValidators(r)
 
-	return registerScimValidators(r)
+	// EXPERIMENTAL, and last on purpose: WISE is an unadopted proposal, so the
+	// adopted packs above are what a receiver is actually promised. See wise.go.
+	return registerWiseValidators(r)
 }
 
 // Register adds or replaces the validator for eventURI and returns the receiver
