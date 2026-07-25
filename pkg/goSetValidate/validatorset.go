@@ -44,14 +44,17 @@ func NewValidatorSet(r *Registry, engagedURIs []string) *ValidatorSet {
 		r = BuiltinRegistry()
 	}
 
+	// Engagement keys are case-folded for the same reason registry keys are: the
+	// router matches event types case-insensitively, so engagement must too, or a
+	// case-variant URI is routed but reported out-of-contract.
 	engaged := make(map[string]struct{}, len(engagedURIs)+2)
 	for _, uri := range engagedURIs {
 		if uri != "" {
-			engaged[uri] = struct{}{}
+			engaged[registryKey(uri)] = struct{}{}
 		}
 	}
-	engaged[SsfVerificationEventUri] = struct{}{}
-	engaged[SsfStreamUpdatedEventUri] = struct{}{}
+	engaged[registryKey(SsfVerificationEventUri)] = struct{}{}
+	engaged[registryKey(SsfStreamUpdatedEventUri)] = struct{}{}
 
 	return &ValidatorSet{registry: r, engaged: engaged}
 }
@@ -98,7 +101,7 @@ func (vs *ValidatorSet) Validate(set *goSet.SecurityEventToken) SetResult {
 
 // validateOne resolves engagement, normalises the payload, and delegates.
 func (vs *ValidatorSet) validateOne(uri string, rawPayload any, set *goSet.SecurityEventToken) Result {
-	if _, engaged := vs.engaged[uri]; !engaged {
+	if _, engaged := vs.engaged[registryKey(uri)]; !engaged {
 		// Out-of-contract for this stream — identical to unsupported (ADR 0029).
 		return unsupported(uri)
 	}

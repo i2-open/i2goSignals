@@ -1,8 +1,27 @@
 package goSetValidate
 
 import (
+	"strings"
+
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
+
+// registryKey normalizes an event-type URI for registry and engagement lookups.
+//
+// Event types are matched case-insensitively elsewhere in the stack — the router's
+// MatchesStream predicate uses strings.EqualFold, and the delivered-events glob
+// matcher is case-insensitive — so an exact map lookup here would disagree with
+// the component that decided to route the event in the first place. That
+// disagreement is asymmetrically bad: a case-variant URI would be routed but
+// report Unsupported, which STRICT turns into a rejection of legitimate traffic
+// and ENFORCE turns into an unvalidated pass for a malformed payload.
+//
+// URI schemes and hosts are case-insensitive per RFC 3986 §6.2.2.1, and the SET
+// event-type URIs are opaque identifiers compared for equality, so folding case is
+// safe for the identifiers this registry holds.
+func registryKey(eventURI string) string {
+	return strings.ToLower(eventURI)
+}
 
 // Validator validates one event type's payload.
 //
@@ -67,16 +86,17 @@ func (r *Registry) Register(eventURI string, v Validator) *Registry {
 	if r.validators == nil {
 		r.validators = make(map[string]Validator)
 	}
-	r.validators[eventURI] = v
+	r.validators[registryKey(eventURI)] = v
 	return r
 }
 
-// Lookup returns the validator registered for eventURI. A nil receiver reports a
-// miss rather than panicking.
+// Lookup returns the validator registered for eventURI. Matching is
+// case-insensitive, agreeing with the router's event-type comparison. A nil
+// receiver reports a miss rather than panicking.
 func (r *Registry) Lookup(eventURI string) (Validator, bool) {
 	if r == nil {
 		return nil, false
 	}
-	v, ok := r.validators[eventURI]
+	v, ok := r.validators[registryKey(eventURI)]
 	return v, ok
 }

@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -9,6 +11,53 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
+
+// sharedBuiltinRegistry is the process-wide built-in validator registry used by
+// the receive paths.
+//
+// goSetValidate.BuiltinRegistry() deliberately returns a FRESH registry per call
+// so one embedder chaining Register cannot mutate another's view. That guarantee
+// is for library consumers; internal/server never registers onto the result, so
+// paying the full pack-registration cost (SSF + CAEP + RISC + SCIM + WISE) on
+// every inbound SET bought nothing. A Registry is documented as safe for
+// concurrent reads once built, which is exactly how it is used here.
+var (
+	sharedBuiltinRegistryOnce sync.Once
+	sharedBuiltinRegistryVal  *goSetValidate.Registry
+)
+
+func sharedBuiltinRegistry() *goSetValidate.Registry {
+	sharedBuiltinRegistryOnce.Do(func() {
+		sharedBuiltinRegistryVal = goSetValidate.BuiltinRegistry()
+	})
+	return sharedBuiltinRegistryVal
+}
+
+// engagedUriCache memoizes engaged-URI derivation, which compiles one regexp per
+// delivered-events pattern.
+//
+// The cache key IS the full input (delivered + supported), so a hit can never be
+// stale: a stream whose configuration changes produces a different key rather
+// than a wrong answer, and no invalidation hook is needed. Growth is bounded by
+// the number of distinct (events_delivered, events_supported) combinations across
+// the server's streams, not by event volume.
+var engagedUriCache sync.Map // string -> []string
+
+// engagedUriCacheKey joins the two input slices with separators that cannot occur
+// in an event-type URI, so distinct inputs cannot collide on one key.
+func engagedUriCacheKey(delivered, supported []string) string {
+	var b strings.Builder
+	for _, s := range delivered {
+		b.WriteString(s)
+		b.WriteByte(0x00)
+	}
+	b.WriteByte(0x1f)
+	for _, s := range supported {
+		b.WriteString(s)
+		b.WriteByte(0x00)
+	}
+	return b.String()
+}
 
 // Receive-transport labels for the event-validation counter. Deliberately a
 // closed pair of constants: the label is low-cardinality by contract.
@@ -104,7 +153,14 @@ func engagedEventUrisFor(cfg *model.StreamConfiguration) []string {
 	if len(supported) == 0 {
 		supported = model.GetSupportedEvents()
 	}
-	return model.MatchDeliveredEvents(delivered, supported)
+
+	key := engagedUriCacheKey(delivered, supported)
+	if cached, ok := engagedUriCache.Load(key); ok {
+		return cached.([]string)
+	}
+	engaged := model.MatchDeliveredEvents(delivered, supported)
+	engagedUriCache.Store(key, engaged)
+	return engaged
 }
 
 // buildReceiveValidatorSet returns the validator set a receiver stream should
@@ -117,7 +173,7 @@ func buildReceiveValidatorSet(rec *model.StreamStateRecord, mode model.EventVali
 	if mode == model.EventValidationNone || mode == model.EventValidationUnset {
 		return nil
 	}
-	return goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), engagedEventUris(rec))
+	return goSetValidate.NewValidatorSet(sharedBuiltinRegistry(), engagedEventUris(rec))
 }
 
 // sstpValidationPolicy is the event_validation policy the two SSTP receive
@@ -156,7 +212,7 @@ func sstpInboundValidationPolicy(rec *model.StreamStateRecord, mode model.EventV
 	if rec == nil || rec.SstpInbound == nil {
 		return policy, nil
 	}
-	return policy, goSetValidate.NewValidatorSet(goSetValidate.BuiltinRegistry(), engagedEventUrisFor(rec.SstpInbound))
+	return policy, goSetValidate.NewValidatorSet(sharedBuiltinRegistry(), engagedEventUrisFor(rec.SstpInbound))
 }
 
 // applySstpInbound applies the policy to one verified inbound SET and returns

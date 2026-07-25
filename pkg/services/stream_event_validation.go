@@ -29,13 +29,26 @@ func applyEventValidation(streamRec *model.StreamStateRecord, requested model.Ev
 	if requested == model.EventValidationUnset {
 		return
 	}
+	// Normalize to the canonical upper-case constant before persisting.
+	// ParseEventValidationMode is case-insensitive, so "enforce" is legitimately
+	// accepted on the wire — but storing it verbatim would leave a value that
+	// Valid() rejects, and ResolveEventValidationMode would then silently fall
+	// back to the server default (NONE). The operator would see "enforce" on the
+	// record with enforcement entirely off. The env path already stores the
+	// parsed value; this makes the request path agree.
+	mode, err := model.ParseEventValidationMode(string(requested))
+	if err != nil || mode == model.EventValidationUnset {
+		// Unreachable: validateEventValidationMode shape-checks the request
+		// earlier in the pipeline. Dropping beats persisting an unresolvable mode.
+		return
+	}
 	if !streamRec.HasInbound() {
 		ssLog.Warn("event_validation ignored on a transmit-only stream",
 			"stream_id", streamRec.StreamConfiguration.Id,
-			"mode", string(requested))
+			"mode", string(mode))
 		return
 	}
-	streamRec.EventValidation = requested
+	streamRec.EventValidation = mode
 }
 
 // ResolveEventValidationMode resolves the effective event-validation mode for a
@@ -47,8 +60,11 @@ func ResolveEventValidationMode(rec *model.StreamStateRecord, serverDefault mode
 	if rec == nil || !rec.HasInbound() {
 		return model.EventValidationNone
 	}
-	if rec.EventValidation != model.EventValidationUnset && rec.EventValidation.Valid() {
-		return rec.EventValidation
+	// Parse rather than requiring an exact canonical match, so a record whose
+	// event_validation was persisted un-normalized still resolves to the mode the
+	// operator asked for instead of silently degrading to the server default.
+	if mode, err := model.ParseEventValidationMode(string(rec.EventValidation)); err == nil && mode != model.EventValidationUnset {
+		return mode
 	}
 	if serverDefault == model.EventValidationUnset || !serverDefault.Valid() {
 		return model.EventValidationNone
