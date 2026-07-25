@@ -75,6 +75,30 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		}
 	}
 
+	// Outbound setErr consumption: the peer's request also carries, in
+	// Message.SetErrs, the JTIs of outbound SETs it REJECTED — notably a SET whose
+	// payload failed the peer's event_validation. Those must clear exactly like an
+	// ack, or drainSstpOutbound re-claims them every cycle and the pair's outbound
+	// buffer never drains that JTI: claim, sign, POST, reject, release, repeat.
+	//
+	// This mirrors the RFC8936 poll transmitter (PollStreamHandler), which acks
+	// setErr'd JTIs on the same path as params.Acks and does not discriminate by
+	// error code. A rejection is logged WARN so the operator sees what the peer
+	// refused and why.
+	if len(inbound.SetErrs) > 0 {
+		buf := r.sstpServerBufferFor(txSid)
+		jtis := make([]string, 0, len(inbound.SetErrs))
+		for jti, se := range inbound.SetErrs {
+			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET, clearing it",
+				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
+			jtis = append(jtis, jti)
+		}
+		buf.AckEvents(jtis)
+		for _, jti := range jtis {
+			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
+		}
+	}
+
 	// Inbound ingest: persist-then-process each parsed SET via HandleEvent, keyed
 	// on the rx-side SID so the inbound counter carries stream_id=rxSid (Q46). A
 	// duplicate JTI is swallowed silently by HandleEvent's #153 short-circuit; we

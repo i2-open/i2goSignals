@@ -148,6 +148,46 @@ type sstpPendingFeedback struct {
 	SetErrs map[string]goSetSstp.SetErr
 }
 
+// clearedOutbound returns the JTIs to clear from the pair's outbound buffer:
+// everything the peer acked, plus everything it REJECTED via a per-JTI setErr.
+//
+// A setErr must clear the SET on the same terms as an ack. Outbound bookkeeping
+// is literal-ack — anything sent-but-unacked is released for retry — so a SET the
+// peer rejects on event-validation grounds would otherwise be claimed, signed,
+// POSTed, rejected, released and re-claimed on every cycle, forever, without the
+// buffer ever draining that JTI.
+//
+// This follows the RFC8936 poll transmitter (PollStreamHandler), which acks
+// setErr'd JTIs on the same path as params.Acks and does NOT discriminate by
+// error code. The transient signature case is handled upstream rather than here:
+// goSetPush owns a rotate-and-retry for jws_signature_failed (ADR 0028), so a
+// key-rotation race is retried before it can ever surface as a setErr.
+//
+// Each rejection is logged WARN — that log is the operator's only view of what a
+// peer refused, since the SET is discarded immediately after.
+func clearedOutbound(pairId string, acked []string, setErrs map[string]goSetSstp.SetErr) []string {
+	if len(setErrs) == 0 {
+		return acked
+	}
+	cleared := make([]string, 0, len(acked)+len(setErrs))
+	cleared = append(cleared, acked...)
+	seen := make(map[string]struct{}, len(acked))
+	for _, jti := range acked {
+		seen[jti] = struct{}{}
+	}
+	for jti, se := range setErrs {
+		sstpDialerLog.Warn("SSTP-CLIENT: peer rejected outbound SET, clearing it",
+			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
+		if _, dup := seen[jti]; dup {
+			// A peer that both acks and setErrs one JTI is malformed; clearing it
+			// once is right either way.
+			continue
+		}
+		cleared = append(cleared, jti)
+	}
+	return cleared
+}
+
 // addSetErr records a per-JTI rejection, allocating the map on first use.
 func (f *sstpPendingFeedback) addSetErr(jti string, se goSetSstp.SetErr) {
 	if f.SetErrs == nil {
@@ -873,7 +913,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		// subsequent cycle (US 5 literal-ack semantics: only what we
 		// actually accepted is acked).
 		newFeedback := d.runInboundHalf(stream, received)
-		ackedCount := d.outbound.AckOutbound(stream, acked, events, fencingToken)
+		ackedCount := d.outbound.AckOutbound(stream, clearedOutbound(stream.PairId, acked, cls.SetErrs), events, fencingToken)
 		*delay = d.cfg.BaseDelay
 
 		// AC 1: the peer accepted the request, so the feedback we just echoed is
@@ -1133,8 +1173,9 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	case goSetSstp.ClassOK, goSetSstp.ClassPerJTI:
 		// Second-push acks: the peer's returned Ack is its "we received
 		// these" acknowledgement for the SETs we just sent. Use it verbatim
-		// (no ack-all fallback, AC 3).
-		d.outbound.AckOutbound(stream, acked, events, fencingToken)
+		// (no ack-all fallback, AC 3), plus any JTI the peer rejected — a
+		// rejection clears the SET on the same terms as an ack.
+		d.outbound.AckOutbound(stream, clearedOutbound(pairId, acked, cls.SetErrs), events, fencingToken)
 		// A peer whose acceptor opportunistically ships queued outbound SETs
 		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
 		// forbids long-poll waiting, not the return of already-queued SETs)
