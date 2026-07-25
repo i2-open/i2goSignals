@@ -268,6 +268,12 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 		target.Aud = patch.Aud
 	}
 
+	// Per-receiver event-validation mode (spec #247 #250). A pair record always
+	// has an inbound leg, so the single field is honored here and binds to that
+	// inbound leg regardless of which direction streamID names (ADR COM-0018,
+	// story 12). The request value was shape-checked by UpdateStream.
+	applyEventValidation(streamRec, patch.EventValidation)
+
 	streamRec.ModifiedAt = time.Now()
 	if err := s.streamDAO.Update(ctx, streamRec); err != nil {
 		return nil, err

@@ -116,6 +116,17 @@ type StreamStateRecord struct {
 	// keep-forever. A non-positive value is treated as keep-forever.
 	RetentionWindowDays *int `json:"retention_window_days,omitempty" bson:"retention_window_days,omitempty"`
 
+	// EventValidation is the per-receiver event-validation policy (spec #247
+	// issue #250): NONE, WARN, ENFORCE or STRICT. Like DefaultSubjects and
+	// RetentionWindowDays it is a goSignals operator knob and is deliberately
+	// kept OFF the SSF wire-format StreamConfiguration. An empty value
+	// (EventValidationUnset) means inherit the server-wide
+	// `I2SIG_STREAM_EVENT_VALIDATION` default. The knob is receive-side only: a
+	// mode set on a transmit-only stream is WARN-logged and ignored at
+	// CreateStream/UpdateStream. On a bidirectional SSTP pair record (ADR
+	// COM-0018) this single field governs the INBOUND leg.
+	EventValidation EventValidationMode `json:"event_validation,omitempty" bson:"event_validation,omitempty"`
+
 	// --- SSTP bidirectional pair fields (PRD #154, ADR 0018) ---
 	// A single StreamStateRecord represents both directions of an SSTP pair on
 	// one node: the embedded StreamConfiguration is the transmit (outbound)
@@ -201,6 +212,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.EventSource = mod.EventSource
 	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
 	ss.RetentionWindowDays = mod.RetentionWindowDays
+	ss.EventValidation = mod.EventValidation
 	ss.SstpInbound = mod.SstpInbound
 	ss.SstpMethod = mod.SstpMethod
 	ss.PairId = mod.PairId

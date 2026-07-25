@@ -70,6 +70,7 @@ type StreamService struct {
 	mu                      sync.RWMutex
 	minVerificationInterval int
 	maxInactivityTimeout    int
+	eventValidationDefault  model.EventValidationMode
 }
 
 // SetSubjectFilterService wires in the SubjectFilterService so that a
@@ -265,10 +266,15 @@ func applyEventSource(streamRec *model.StreamStateRecord, requested *model.Event
 // literal 0 as the server default would be read back everywhere as "unset".
 // This contract is pinned by TestNewStreamServiceConfigDefaults and was decided
 // in issue #182.
+// EventValidationDefault: the server-wide fallback for a stream that carries no
+// per-stream event_validation value (spec #247 issue #250). An unset, empty, or
+// unrecognized value resolves to model.EventValidationNone with a WARN log,
+// following the defaulting pattern above.
 type StreamServiceConfig struct {
 	BaseUrl                 *url.URL
 	MinVerificationInterval int
 	MaxInactivityTimeout    int
+	EventValidationDefault  model.EventValidationMode
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string, cfg StreamServiceConfig) *StreamService {
@@ -280,6 +286,13 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 	if maxInactivityTimeout <= 0 {
 		maxInactivityTimeout = 3600
 	}
+	eventValidationDefault := cfg.EventValidationDefault
+	if eventValidationDefault == model.EventValidationUnset || !eventValidationDefault.Valid() {
+		ssLog.Warn("event validation server default unset or unrecognized — falling back to NONE",
+			"requested", string(cfg.EventValidationDefault),
+			"effective", string(model.EventValidationNone))
+		eventValidationDefault = model.EventValidationNone
+	}
 	return &StreamService{
 		streamDAO:               streamDAO,
 		keyService:              keyService,
@@ -288,6 +301,7 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 		BaseUrl:                 cfg.BaseUrl,
 		minVerificationInterval: minVerificationInterval,
 		maxInactivityTimeout:    maxInactivityTimeout,
+		eventValidationDefault:  eventValidationDefault,
 	}
 }
 
@@ -332,6 +346,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
 	// event-source pipeline a few lines below.
 	if err := validateSubjectRemovalGrace(request.SubjectRemovalGraceSeconds); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
+	// Per-receiver event-validation mode (spec #247 #250) — shape-checked here,
+	// direction-checked by applyEventValidation once the record exists.
+	if err := validateEventValidationMode(request.EventValidation); err != nil {
 		return model.StreamConfiguration{}, err
 	}
 
@@ -835,6 +855,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// checked above by validateSubjectRemovalGrace.
 	applyRemovalGraceOverride(streamRec, request.SubjectRemovalGraceSeconds)
 
+	// Per-receiver event-validation mode (spec #247 #250). Receive-side only:
+	// dropped with a WARN on a transmit-only stream. Request value is already
+	// shape-checked above by validateEventValidationMode.
+	applyEventValidation(streamRec, request.EventValidation)
+
 	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
 	// incompatible with the stream's upstream before the stream is persisted.
 	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
@@ -1034,6 +1059,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		return nil, errors.New(ErrorInvalidProject)
 	}
 
+	// Per-receiver event-validation mode (spec #247 #250). Shape-checked ahead of
+	// the SSTP dispatch so a malformed mode is rejected on both patch paths.
+	if err := validateEventValidationMode(configReq.EventValidation); err != nil {
+		return nil, err
+	}
+
 	// SSTP pairs use a distinct patchable-fields whitelist (Q35): the generic
 	// delivery-method switch below does not apply. streamID names a direction
 	// (txSid == PairId, or rxSid == SstpInbound.Id) so per-direction Iss/Aud can
@@ -1181,6 +1212,10 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	// SSF §9.3 grace override (PRD #97 #98). Request value is already shape-
 	// checked above by validateSubjectRemovalGrace.
 	applyRemovalGraceOverride(streamRec, configReq.SubjectRemovalGraceSeconds)
+
+	// Per-receiver event-validation mode (spec #247 #250). Receive-side only;
+	// already shape-checked above by validateEventValidationMode.
+	applyEventValidation(streamRec, configReq.EventValidation)
 
 	// PRD #89 #95: re-validate the subject-filter mode against the upstream
 	// whenever the mode or event source could have changed.

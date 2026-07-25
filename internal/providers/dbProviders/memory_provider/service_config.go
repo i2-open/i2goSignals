@@ -7,6 +7,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/pkg/services"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 const CEnvBaseURL = "BASE_URL"
@@ -51,6 +52,20 @@ func streamServiceConfigFromEnv() services.StreamServiceConfig {
 			pLog.Error("Invalid I2SIG_STREAM_MAX_INACTIVITY_TIMEOUT value", "error", err.Error())
 		} else {
 			cfg.MaxInactivityTimeout = v
+		}
+	}
+
+	// I2SIG_STREAM_EVENT_VALIDATION is the server-wide default event-validation
+	// mode (ADR 0011 taxonomy, spec #247 issue #250). It is new in v0.12.0 and so
+	// carries no deprecated undecorated alias. An unrecognized value is WARN-logged
+	// and left unset; NewStreamService then falls back to NONE.
+	if mode := envcompat.Lookup("I2SIG_STREAM_EVENT_VALIDATION", ""); mode != "" {
+		v, err := model.ParseEventValidationMode(mode)
+		if err != nil {
+			pLog.Warn("Invalid I2SIG_STREAM_EVENT_VALIDATION value - falling back to NONE",
+				"error", err.Error())
+		} else {
+			cfg.EventValidationDefault = v
 		}
 	}
 
