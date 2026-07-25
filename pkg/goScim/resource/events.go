@@ -6,7 +6,9 @@ import (
 
 func CreateFullEventPayload(resource ScimResource) map[string]interface{} {
 	return map[string]interface{}{
-		"Data": resource,
+		// RFC 9967 §2.4 names the full-form payload attribute "data" — the
+		// receiver's validator keys on the exact spelling.
+		"data": resource,
 	}
 }
 

@@ -9,7 +9,7 @@
     - **RFC8936 Poll Delivery of SETs using HTTP**: [RFC8936](https://www.rfc-editor.org/rfc/rfc8936.txt)
     - **SSF Shared Signals Framework Specification**: [SSF Shared Signals Framework Specification](https://openid.net/specs/openid-sharedsignals-framework-1_0.txt)
     - SET Token Event Types
-        - [SCIM Profile for Security Event Tokens](https://www.ietf.org/archive/id/draft-ietf-scim-events-16.txt)
+        - [RFC9967 SCIM Profile for Security Event Tokens](https://www.rfc-editor.org/rfc/rfc9967.txt)
         - [OpenID RISC Profile Specification](https://openid.net/specs/openid-risc-1_0-final.txt)
         - [OpenID Continuous Access Evaluation Profile 1.0](https://openid.net/specs/openid-caep-1_0-final.txt)
 

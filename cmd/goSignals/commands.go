@@ -2651,10 +2651,10 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:full", payload)
+		event.AddEventPayload(model.EventScimCreateFull, payload)
 	case "create:notice":
 		payload := resource.CreateNoticeEventPaylaod(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:notice", payload)
+		event.AddEventPayload(model.EventScimCreateNotice, payload)
 	}
 	if gen.Alias == "" {
 		fmt.Println("Generated Event:")
