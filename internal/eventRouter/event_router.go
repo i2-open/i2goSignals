@@ -1470,8 +1470,31 @@ func (r *router) dispatchPushFailure(
 		return RecoveryOutcomeDisabled, true
 
 	case goSetPush.ClassRFC8935Error:
-		// Caller already retried jws_signature_failed once via the key-flush sub-policy. Any
-		// RFC8935 §2.4 error reaching us here is deterministic per-SET — disable.
+		// invalid_request is a rejection of ONE SET's payload, not a statement about the
+		// stream — a receiver running event_validation=ENFORCE/STRICT emits it for a single
+		// non-conformant event. Disabling the stream for it meant one bad payload stopped
+		// delivery for every subject until an operator intervened.
+		//
+		// Poll is the precedent: a setErr'd JTI is logged WARN and then acked like any other
+		// (PollStreamHandler), clearing the SET without touching stream state. Push now
+		// matches, so all three transports treat a per-SET payload rejection the same way.
+		// The SET is acked rather than left unacked because a payload that fails validation
+		// fails identically on resend; leaving it would be an unbounded redelivery loop.
+		if cls.RFC8935ErrCode == goSetPush.ErrInvalidRequest {
+			eventLogger.Warn("PUSH-SRV: receiver rejected SET payload, clearing it and continuing",
+				"sid", sid, "jti", jti,
+				"rfc8935ErrCode", cls.RFC8935ErrCode,
+				"description", cls.RFC8935Description)
+			if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
+				eventLogger.Error("PUSH-SRV: Error acking rejected event", "sid", sid, "jti", jti, "error", err)
+			}
+			return RecoveryOutcomeResumed, false
+		}
+
+		// Every other RFC8935 §2.4 code still disables: the caller already retried
+		// jws_signature_failed once via the key-flush sub-policy (ADR 0028), so what reaches
+		// here is a deterministic stream-level fault (bad audience, bad issuer, access denied)
+		// rather than one malformed payload.
 		reason := fmt.Sprintf("PUSH-SRV: RFC8935 %s on jti=%s: %s", cls.RFC8935ErrCode, jti, cls.RFC8935Description)
 		r.updateStream(stream, model.StreamStateDisable, reason)
 		return RecoveryOutcomeDisabled, true
