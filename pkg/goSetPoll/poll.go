@@ -10,6 +10,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 )
 
 // PollRequest represents the JSON body of an RFC8936 poll request.
@@ -59,6 +60,14 @@ type ParsedPollResponse struct {
 	// These should be sent back in the next poll's SetErrs field.
 	Errors map[string]SetErrType
 
+	// Validations maps JTI to the event-payload dispositions computed by
+	// ReceiverConfig.Validators, for every JTI that reached ParsedSETs. It is nil
+	// when no validator set was configured. A malformed or unsupported disposition
+	// does NOT move a JTI into Errors — this package reports, and the caller that
+	// owns event_validation mode policy decides whether the JTI is acked or
+	// reported in the next poll's setErrs.
+	Validations map[string]goSetValidate.SetResult
+
 	// MoreAvailable indicates whether the transmitter has more events ready.
 	MoreAvailable bool
 }
@@ -85,6 +94,16 @@ type ReceiverConfig struct {
 	// is available to verify it or when verification fails. When false (default),
 	// verification is conditional on JWKS being non-nil (prior behavior).
 	RequireSignature bool
+
+	// Validators optionally engages event-payload validation for this receiver
+	// stream (spec #247). When nil — the default — no validation runs and
+	// ParsedPollResponse.Validations stays nil, so behavior is exactly as it was
+	// before the field existed. When set, dispositions are computed per JTI and
+	// reported on ParsedPollResponse.Validations; this package NEVER moves a JTI
+	// into Errors because of one. event_validation mode policy
+	// (NONE/WARN/ENFORCE/STRICT), the ack/setErrs decision, and the metrics
+	// belong to the caller.
+	Validators *goSetValidate.ValidatorSet
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default is used.
 	HTTPClient *http.Client

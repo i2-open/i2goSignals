@@ -506,3 +506,61 @@ func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
 	s.Equal(90, state.SubjectRemovalGraceSeconds,
 		"subject_removal_grace_seconds must round-trip through Mongo update")
 }
+
+// TestZ_EventValidationRoundTrip verifies the per-receiver event_validation knob
+// (spec #247 issue #250) is persisted on the StreamStateRecord and round-trips
+// through the MongoDB adapter on both create and update. The knob is receive-side
+// only, so the fixture is a ReceivePoll stream. Mirrors the memory-DAO coverage in
+// pkg/services/stream_event_validation_test.go.
+func (s *MongoProviderSuite) TestZ_EventValidationRoundTrip() {
+	authCtx := authSupport.ConvertProject(s.project)
+	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
+
+	req := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"validate.example.com"},
+			Iss:      "validate.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: &model.PollReceiveMethod{Method: model.ReceivePoll, EndpointUrl: "https://tx.example/poll"}},
+		},
+		EventValidation: model.EventValidationEnforce,
+	}
+
+	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream should succeed")
+
+	state, err := s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after create should succeed")
+	s.Equal(model.EventValidationEnforce, state.EventValidation,
+		"event_validation must round-trip through Mongo create")
+
+	update := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{Id: created.Id},
+		EventValidation:     model.EventValidationStrict,
+	}
+	_, err = s.provider.GetStreamService().UpdateStream(ctx, created.Id, authCtx.ProjectId, update)
+	s.Require().NoError(err, "UpdateStream should succeed")
+
+	state, err = s.provider.GetStreamService().GetStreamState(ctx, created.Id)
+	s.Require().NoError(err, "GetStreamState after update should succeed")
+	s.Equal(model.EventValidationStrict, state.EventValidation,
+		"event_validation must round-trip through Mongo update")
+
+	// An empty value stays empty in storage; resolution to the server default is a
+	// read-time concern (StreamService.ResolveEventValidation), not a persisted one.
+	bare := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:      []string{"validate2.example.com"},
+			Iss:      "validate2.com",
+			Delivery: &model.OneOfStreamConfigurationDelivery{PollReceiveMethod: &model.PollReceiveMethod{Method: model.ReceivePoll, EndpointUrl: "https://tx.example/poll2"}},
+		},
+	}
+	createdBare, err := s.provider.GetStreamService().CreateStream(ctx, bare, authCtx.ProjectId, nil)
+	s.Require().NoError(err, "CreateStream without event_validation should succeed")
+	bareState, err := s.provider.GetStreamService().GetStreamState(ctx, createdBare.Id)
+	s.Require().NoError(err)
+	s.Equal(model.EventValidationUnset, bareState.EventValidation,
+		"an unset event_validation must persist as empty")
+	s.Equal(model.EventValidationNone,
+		s.provider.GetStreamService().ResolveEventValidation(bareState),
+		"an unset value resolves to the NONE server default at read time")
+}

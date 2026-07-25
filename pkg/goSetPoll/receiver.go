@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -96,6 +97,11 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 		Errors:        make(map[string]SetErrType),
 		MoreAvailable: rawResp.MoreAvailable,
 	}
+	// Only allocated when validation is engaged, so an unconfigured receiver
+	// reports a nil Validations map — the documented "zero" (spec #247 #251).
+	if config.Validators != nil {
+		result.Validations = make(map[string]goSetValidate.SetResult, len(rawResp.Sets))
+	}
 
 	for jti, setString := range rawResp.Sets {
 		// Per ADR-0066 §D2 the "None + unverified" state is unrepresentable:
@@ -173,6 +179,16 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 				}
 				continue
 			}
+		}
+
+		// Event-payload validation (spec #247). Runs only once the SET is fully
+		// trusted — signature, iss and aud are all settled above — and only
+		// reports: the JTI still lands in ParsedSETs whatever the disposition, so
+		// this package never silently drops or nacks an event. The caller reads
+		// Validations, applies the stream's event_validation mode, and decides
+		// between ack and setErrs.
+		if config.Validators != nil {
+			result.Validations[jti] = config.Validators.Validate(token)
 		}
 
 		result.ParsedSETs[jti] = token

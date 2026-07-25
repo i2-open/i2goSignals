@@ -12,6 +12,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 )
 
 // RFC8935 error codes per Section 2.4.
@@ -43,6 +44,14 @@ func (e *DeliveryErr) Error() string {
 type ReceivedSET struct {
 	Token       *goSet.SecurityEventToken
 	TokenString string
+
+	// Validation reports the event-payload dispositions computed by
+	// ReceiverConfig.Validators, so the caller that owns event_validation mode
+	// policy can act on them and count them. It is the ZERO SetResult
+	// (Disposition == goSetValidate.Valid, no Results) when no validator set was
+	// configured — this package never rejects on a disposition and never maps one
+	// to an RFC8935 error.
+	Validation goSetValidate.SetResult
 }
 
 // ReceiverConfig configures the push receiver protocol handler.
@@ -61,6 +70,15 @@ type ReceiverConfig struct {
 	// to verify against or if verification fails. When false (default) behavior is
 	// unchanged — a nil JWKS skips verification and a verify failure is invalid_request.
 	RequireSignature bool
+
+	// Validators optionally engages event-payload validation for this receiver
+	// stream (spec #247). When nil — the default — no validation runs and
+	// ReceivedSET.Validation is left zero, so behavior is exactly as it was
+	// before the field existed. When set, dispositions are computed and reported
+	// on ReceivedSET.Validation; this package NEVER rejects a SET because of one.
+	// event_validation mode policy (NONE/WARN/ENFORCE/STRICT), the wire mapping,
+	// and the metrics belong to the caller.
+	Validators *goSetValidate.ValidatorSet
 
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger

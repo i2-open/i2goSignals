@@ -45,6 +45,23 @@ visibility into receiver health, recovery activity, and the T3 idle keepalive fe
 | `goSignals_router_push_recovery_duration_seconds` | Histogram | `stream_id` | Wall-time elapsed inside `recoveryLoop`, from entry to exit. Long-tail buckets up to 6h to surface streams stuck in transport recovery. |
 | `goSignals_router_push_idle_verify_total` | Counter | `stream_id`, `outcome` | Verify-event push outcomes (`acked` or `failed`). Dominated in production by T3 idle keepalives; operator-triggered verifies also pass through. |
 
+## Event Validation Metrics
+
+Inbound SET payload validation, controlled per receiver stream by `event_validation`
+(see `docs/configuration_properties.md` for the `I2SIG_STREAM_EVENT_VALIDATION`
+server default). The counter is the only machine-readable signal a `WARN` rollout
+produces, since `WARN` leaves the wire response unchanged — watch
+`disposition="malformed"` on `WARN` to size the impact before moving a stream to
+`ENFORCE`.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `goSignals_router_event_validation_total` | Counter | `disposition`, `mode`, `transport` | Whole-SET event-validation dispositions (`valid`, `unsupported`, `malformed`) by resolved `event_validation` mode (`WARN`, `ENFORCE`, `STRICT`) and receive transport (`push`, `poll`, `sstp` — one label for both SSTP paths, acceptor and dialer inbound half). |
+
+Deliberately **not** labeled by `stream_id` or event URI: either would make the
+series count unbounded on a busy receiver. A stream on `NONE` engages no
+validators and therefore records nothing, so there is no `mode="NONE"` series.
+
 ## HTTP Metrics
 
 | Metric Name | Type | Labels | Description |

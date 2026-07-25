@@ -120,6 +120,37 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_TxAliasWithAdminScopeSuc
 	s.NotEqual(http.StatusForbidden, rr.Code, "tx_alias create at admin scope must pass the authz gate")
 }
 
+// An events_requested pattern that cannot compile is the caller's mistake, and
+// StreamCreate documents 400 for an invalid configuration. Before the gate it
+// reached no error at all — the stream registered and silently delivered less
+// than was asked for; the catch-all 500 would be just as wrong an answer,
+// blaming the server for a typo the caller can fix (spec #247).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_UncompilableEventPatternIs400() {
+	tok := s.streamToken("proj-A")
+	cfg := model.StreamStateRecord{}
+	cfg.EventsRequested = []string{"urn:ietf:params:scim:event:prov:[typo"}
+	body, _ := json.Marshal(cfg)
+
+	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
+	s.Equal(http.StatusBadRequest, rr.Code, "a bad events_requested pattern is a client error")
+	s.Contains(rr.Body.String(), "[typo", "the response must name the offending pattern")
+}
+
+// A typo'd event_validation mode is the same kind of caller mistake as a typo'd
+// pattern, and must get the same answer. It did not: the mode check returned a
+// bare parse error, so the handler's ErrInvalidRequest test missed it and the
+// caller was told the server broke (spec #247).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_UnknownEventValidationModeIs400() {
+	tok := s.streamToken("proj-A")
+	cfg := model.StreamStateRecord{}
+	cfg.EventValidation = model.EventValidationMode("ENFORE")
+	body, _ := json.Marshal(cfg)
+
+	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
+	s.Equal(http.StatusBadRequest, rr.Code, "an unrecognized event_validation mode is a client error")
+	s.Contains(rr.Body.String(), "ENFORE", "the response must name the offending value")
+}
+
 // TestCanProvisionTxAlias locks the tx_alias authorization policy directly,
 // across both caller shapes, without minting tokens: foreign-server provisioning
 // needs admin (root rides free) OR the full reg+stream+event operate-the-stream

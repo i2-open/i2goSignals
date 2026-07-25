@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 )
 
 // Verification sentinels — every verify failure (VerifySET and VerifySETX5C
@@ -89,6 +90,23 @@ type VerifyConfig struct {
 	// is preserved so the pkg can serve future non-trust-path callers
 	// without changing shape.
 	RequireSignature bool
+
+	// Validators optionally engages event-payload validation for this SSTP
+	// pair's INBOUND leg (spec #247). When nil — the default, and the value
+	// every pre-#247 caller supplies — no validation runs and
+	// VerifiedSET.Validation is left zero, so behavior is byte-for-byte what
+	// it was before the field existed. When set, dispositions are computed
+	// and reported on VerifiedSET.Validation; this package NEVER rejects a
+	// SET because of one and never maps one to an SSTP §2.3 setErr.
+	// event_validation mode policy (NONE/WARN/ENFORCE/STRICT), the wire
+	// mapping, and the metrics belong to the caller — the acceptor
+	// (internal/server/api_sstp.go) and the dialer's inbound half
+	// (internal/server/sstp_dialer.go) on the community server.
+	//
+	// The field is additive by construction: pkg/goSetSstp has live
+	// out-of-tree consumers (enterprise, admin) that construct VerifyConfig
+	// as a literal, and a nil-safe zero value means they recompile unchanged.
+	Validators *goSetValidate.ValidatorSet
 }
 
 // VerifiedSET is the successful VerifySET / VerifySETX5C return. It carries
@@ -102,6 +120,14 @@ type VerifiedSET struct {
 	Claims map[string]any
 	Token  *goSet.SecurityEventToken
 	Raw    string
+
+	// Validation reports the event-payload dispositions computed by
+	// VerifyConfig.Validators, so the caller that owns event_validation mode
+	// policy can act on them and count them. It is the ZERO SetResult
+	// (Disposition == goSetValidate.Valid, no Results) when no validator set
+	// was configured — including on the VerifySETX5C control-stream path,
+	// which carries no validator hook.
+	Validation goSetValidate.SetResult
 }
 
 // VerifySET verifies a compact SET token against the JWKS-backed trust
@@ -172,12 +198,19 @@ func VerifySET(token string, config VerifyConfig) (VerifiedSET, error) {
 		return VerifiedSET{}, fmt.Errorf("%w: %v", ErrBadSignature, err)
 	}
 	claims := setToClaimsMap(verified)
+	// Event-payload validation (spec #247). Runs only once the SET is fully
+	// trusted — alg, iss, aud and signature are all settled above — so a trust
+	// failure can never be reported as a payload defect. A nil Validators
+	// leaves Validation zero, and a non-Valid disposition is never turned into
+	// an error here: mapping a disposition onto the pair's event_validation
+	// mode and onto a per-JTI setErr is the caller's job.
 	return VerifiedSET{
-		Issuer: verified.Issuer,
-		JTI:    verified.ID,
-		Claims: claims,
-		Token:  verified,
-		Raw:    token,
+		Issuer:     verified.Issuer,
+		JTI:        verified.ID,
+		Claims:     claims,
+		Token:      verified,
+		Raw:        token,
+		Validation: config.Validators.Validate(verified),
 	}, nil
 }
 

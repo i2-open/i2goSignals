@@ -2,7 +2,7 @@
 
 Guidance for Claude Code working in this repo (the **community** `i2-open/i2goSignals`).
 
-`i2goSignals` is a Go Security Event Token (SET) router/gateway implementing the OpenID Shared Signals Framework (SSF) — it bridges SET transmitters/receivers across protocols, persists streams/events in MongoDB, and runs as a MongoDB-lease-coordinated cluster. Must stay compatible with RFC8417 (SET), RFC8935 (push), RFC8936 (poll), the OpenID SSF spec, and the SCIM/RISC/CAEP event-type profiles.
+`i2goSignals` is a Go Security Event Token (SET) router/gateway implementing the OpenID Shared Signals Framework (SSF) — it bridges SET transmitters/receivers across protocols, persists streams/events in MongoDB, and runs as a MongoDB-lease-coordinated cluster. Must stay compatible with RFC8417 (SET), RFC8935 (push), RFC8936 (poll), the OpenID SSF spec, and the SCIM/RISC/CAEP event-type profiles (SCIM events: RFC9967).
 
 ## Build, test, run
 

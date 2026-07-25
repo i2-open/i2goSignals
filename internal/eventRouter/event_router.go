@@ -30,6 +30,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -1429,6 +1430,38 @@ func (r *router) preflightCheckStatus(ctx context.Context, stream *model.StreamS
 	return RecoveryOutcomeResumed
 }
 
+// corroboratesRejection reports whether THIS transmitter's own validators independently agree
+// that the SET behind jti carries a non-conformant event payload.
+//
+// It is the discriminator for RFC8935 §2.4 invalid_request, which one code covers two very
+// different situations with: "this one event payload is not conformant" (a receiver running
+// event_validation=ENFORCE/STRICT) and "I cannot accept anything you send" (unparseable SET,
+// unverifiable signature, no trust anchor — see goSetPush's receiver). Nothing on the wire
+// separates them, so the transmitter asks the only other party that can have an opinion about
+// the payload: itself.
+//
+// Only Malformed corroborates. Unsupported means our registry has no validator for the type, so
+// we cannot vouch for the receiver's verdict either way — and a STRICT receiver rejecting a type
+// it did not engage is a contract mismatch, not a bad payload. Treating that as corroboration
+// would destroy a perfectly good event.
+//
+// Every URI carried by the SET is engaged, deliberately: this asks "is this payload conformant",
+// which is independent of any stream's negotiated contract.
+func (r *router) corroboratesRejection(jti string) bool {
+	rec := r.eventService.GetEventRecord(r.ctx, jti)
+	if rec == nil {
+		// Already gone (operator reset, or a racing ack). Nothing to corroborate, and
+		// nothing left to lose by taking the conservative branch.
+		return false
+	}
+	uris := make([]string, 0, len(rec.Event.Events))
+	for uri := range rec.Event.Events {
+		uris = append(uris, uri)
+	}
+	vs := goSetValidate.NewValidatorSet(goSetValidate.SharedBuiltinRegistry(), uris)
+	return vs.Validate(&rec.Event).Disposition == goSetValidate.Malformed
+}
+
 // dispatchPushFailure reacts to a non-Accepted push Classification. It either:
 //   - sleeps the receiver-suggested Retry-After (rate-limited), then returns Resumed (no exit);
 //   - disables the stream and returns (Disabled, true);
@@ -1470,8 +1503,44 @@ func (r *router) dispatchPushFailure(
 		return RecoveryOutcomeDisabled, true
 
 	case goSetPush.ClassRFC8935Error:
-		// Caller already retried jws_signature_failed once via the key-flush sub-policy. Any
-		// RFC8935 §2.4 error reaching us here is deterministic per-SET — disable.
+		// invalid_request may be a rejection of ONE SET's payload — a receiver running
+		// event_validation=ENFORCE/STRICT emits it for a single non-conformant event — or a
+		// statement that the receiver can accept nothing at all (goSetPush's receiver returns
+		// the same code for an unparseable SET, a signature it could not verify, and a stream
+		// with no trust anchor). RFC8935 §2.4 gives no way to tell the two apart on the wire,
+		// and the two demand opposite responses: discard the event, or stop the stream.
+		//
+		// So ask our own validators (corroboratesRejection). Neither branch loses an event
+		// that is not already provably bad:
+		//   - we agree the payload is malformed: the receiver is right, and a payload that
+		//     fails validation fails identically on resend. Clear it and keep delivering, so
+		//     one bad event cannot stop the stream for every subject however many arrive.
+		//   - we do not agree: the fault is receiver-side, so disable the stream and leave the
+		//     SET unacked. It stays pending and is replayed once an operator fixes the
+		//     receiver.
+		if cls.RFC8935ErrCode == goSetPush.ErrInvalidRequest {
+			if r.corroboratesRejection(jti) {
+				eventLogger.Warn("PUSH-SRV: receiver rejected SET payload and our validators agree, clearing it",
+					"sid", sid, "jti", jti,
+					"rfc8935ErrCode", cls.RFC8935ErrCode,
+					"description", cls.RFC8935Description)
+				if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
+					eventLogger.Error("PUSH-SRV: Error acking rejected event", "sid", sid, "jti", jti, "error", err)
+				}
+				return RecoveryOutcomeResumed, false
+			}
+			reason := fmt.Sprintf("PUSH-SRV: receiver rejected jti=%s with invalid_request but the payload "+
+				"validates here, so the fault is receiver-side: %s", jti, cls.RFC8935Description)
+			eventLogger.Error("PUSH-SRV: uncorroborated invalid_request, disabling stream without discarding the event",
+				"sid", sid, "jti", jti, "description", cls.RFC8935Description)
+			r.updateStream(stream, model.StreamStateDisable, reason)
+			return RecoveryOutcomeDisabled, true
+		}
+
+		// Every other RFC8935 §2.4 code still disables: the caller already retried
+		// jws_signature_failed once via the key-flush sub-policy (ADR 0028), so what reaches
+		// here is a deterministic stream-level fault (bad audience, bad issuer, access denied)
+		// rather than one malformed payload.
 		reason := fmt.Sprintf("PUSH-SRV: RFC8935 %s on jti=%s: %s", cls.RFC8935ErrCode, jti, cls.RFC8935Description)
 		r.updateStream(stream, model.StreamStateDisable, reason)
 		return RecoveryOutcomeDisabled, true

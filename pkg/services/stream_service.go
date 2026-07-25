@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +70,7 @@ type StreamService struct {
 	mu                      sync.RWMutex
 	minVerificationInterval int
 	maxInactivityTimeout    int
+	eventValidationDefault  model.EventValidationMode
 }
 
 // SetSubjectFilterService wires in the SubjectFilterService so that a
@@ -266,10 +266,15 @@ func applyEventSource(streamRec *model.StreamStateRecord, requested *model.Event
 // literal 0 as the server default would be read back everywhere as "unset".
 // This contract is pinned by TestNewStreamServiceConfigDefaults and was decided
 // in issue #182.
+// EventValidationDefault: the server-wide fallback for a stream that carries no
+// per-stream event_validation value (spec #247 issue #250). An unset, empty, or
+// unrecognized value resolves to model.EventValidationNone with a WARN log,
+// following the defaulting pattern above.
 type StreamServiceConfig struct {
 	BaseUrl                 *url.URL
 	MinVerificationInterval int
 	MaxInactivityTimeout    int
+	EventValidationDefault  model.EventValidationMode
 }
 
 func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, defaultIssuer string, cfg StreamServiceConfig) *StreamService {
@@ -281,6 +286,20 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 	if maxInactivityTimeout <= 0 {
 		maxInactivityTimeout = 3600
 	}
+	eventValidationDefault := cfg.EventValidationDefault
+	if eventValidationDefault == model.EventValidationUnset || !eventValidationDefault.Valid() {
+		// UNSET is the documented default for every deployment that has not opted
+		// in, so it is not a misconfiguration and must not WARN: an operator who
+		// sees a new "unrecognized value" warning on every node start and every
+		// failover learns to ignore the WARN channel. A genuinely bad value still
+		// WARNs — both here and, for the env path, in streamServiceConfigFromEnv.
+		if eventValidationDefault != model.EventValidationUnset {
+			ssLog.Warn("event validation server default unrecognized — falling back to NONE",
+				"requested", string(cfg.EventValidationDefault),
+				"effective", string(model.EventValidationNone))
+		}
+		eventValidationDefault = model.EventValidationNone
+	}
 	return &StreamService{
 		streamDAO:               streamDAO,
 		keyService:              keyService,
@@ -289,6 +308,7 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 		BaseUrl:                 cfg.BaseUrl,
 		minVerificationInterval: minVerificationInterval,
 		maxInactivityTimeout:    maxInactivityTimeout,
+		eventValidationDefault:  eventValidationDefault,
 	}
 }
 
@@ -333,6 +353,18 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// §9.3 grace override (PRD #97 #98) is validated alongside #89's mode and
 	// event-source pipeline a few lines below.
 	if err := validateSubjectRemovalGrace(request.SubjectRemovalGraceSeconds); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
+	// Per-receiver event-validation mode (spec #247 #250) — shape-checked here,
+	// direction-checked by applyEventValidation once the record exists.
+	if err := validateEventValidationMode(request.EventValidation); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
+	// events_requested patterns must compile, or the stream registers with a
+	// silently narrower events_delivered than the receiver asked for.
+	if err := validateEventPatterns(request.EventsRequested); err != nil {
 		return model.StreamConfiguration{}, err
 	}
 
@@ -433,10 +465,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	config.EventsSupported = model.GetSupportedEvents()
 
-	if len(request.EventsRequested) > 0 {
-		config.EventsRequested = request.EventsRequested
-		config.EventsDelivered = s.calculateDeliveredEvents(request.EventsRequested, config.EventsSupported)
-	}
+	// An omitted events_requested defaults to the full supported catalog, and any
+	// "*" shorthand is enumerated here so the stored/returned configuration is
+	// always a concrete URI set (see resolveStreamEvents).
+	config.EventsRequested, config.EventsDelivered = resolveStreamEvents(request.EventsRequested, config.EventsSupported)
 
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
@@ -836,6 +868,11 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// checked above by validateSubjectRemovalGrace.
 	applyRemovalGraceOverride(streamRec, request.SubjectRemovalGraceSeconds)
 
+	// Per-receiver event-validation mode (spec #247 #250). Receive-side only:
+	// dropped with a WARN on a transmit-only stream. Request value is already
+	// shape-checked above by validateEventValidationMode.
+	applyEventValidation(streamRec, request.EventValidation)
+
 	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
 	// incompatible with the stream's upstream before the stream is persisted.
 	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
@@ -965,7 +1002,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		if txStreamResp.Iss != "" {
 			config.Iss = txStreamResp.Iss
 		}
-		config.EventsRequested = request.EventsRequested
+		// Echo back what we asked the transmitter for, enumerated against the
+		// transmitter's own catalog so a "*" shorthand never survives into the
+		// stored configuration. An omitted events_requested keeps the full-catalog
+		// default already resolved at registration time above.
+		if len(request.EventsRequested) > 0 {
+			txSupported := txStreamResp.EventsSupported
+			if len(txSupported) == 0 {
+				txSupported = txStreamResp.EventsDelivered
+			}
+			config.EventsRequested = expandRequestedEvents(request.EventsRequested, txSupported)
+		}
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
 
@@ -1003,32 +1050,136 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	return config, nil
 }
 
+// calculateDeliveredEvents resolves the requested event patterns against the
+// supported event URIs. The glob semantics live in model.MatchDeliveredEvents so
+// exactly one implementation of the pattern -> URI matching exists; this remains
+// as the service-local spelling its callers already use.
 func (s *StreamService) calculateDeliveredEvents(requested []string, supported []string) []string {
-	var delivered []string
+	return model.MatchDeliveredEvents(requested, supported)
+}
+
+// resolveStreamEvents turns a registration's events_requested into the
+// (events_requested, events_delivered) pair that is persisted on the stream and
+// returned to the caller.
+//
+// Two normalizations happen here:
+//
+//   - An absent events_requested means "everything you support". SSF 1.0 §7.1.1
+//     leaves the field optional, and a stream registered without it previously
+//     negotiated an empty events_delivered and so delivered nothing at all —
+//     never what a receiver that omitted the field intended.
+//   - "*" is a non-standard goSignals shorthand accepted on the way IN only.
+//     events_requested and events_delivered are defined as sets of event type
+//     URIs, so any wildcard pattern is expanded to the URIs it selects and a
+//     returned configuration always enumerates rather than echoing a pattern.
+//
+// A requested URI carrying no wildcard is preserved verbatim even when this
+// transmitter does not support it: events_requested records what the receiver
+// asked for, and events_delivered is the subset that was granted.
+func resolveStreamEvents(requested []string, supported []string) (events []string, delivered []string) {
 	if len(requested) == 0 {
-		return []string{}
+		return copyEvents(supported), copyEvents(supported)
 	}
-	if requested[0] == "*" {
-		return supported
+	return expandRequestedEvents(requested, supported),
+		copyEvents(model.MatchDeliveredEvents(requested, supported))
+}
+
+// expandRequestedEvents replaces every pattern in requested with the concrete
+// supported URIs it matches, preserving order and dropping duplicates
+// case-insensitively. A requested set containing no pattern is returned
+// unchanged.
+//
+// An entry is treated as a pattern when it is NOT itself one of the supported
+// URIs yet still selects at least one of them. Testing for "*" would not do:
+// events_requested is a REGULAR EXPRESSION language (see
+// model.MatchesEventPattern), so "urn:ietf:params:scim:event:(feed|sig):add" is
+// a perfectly legal pattern with no wildcard in it, and echoing it back would
+// put a non-URI value in a field SSF 1.0 §7.1.1 defines as a set of event type
+// URIs — breaking resolveStreamEvents' own enumerate-never-echo contract.
+//
+// An entry matching NOTHING is dropped when it is pattern-shaped and preserved
+// verbatim otherwise. Both halves are load-bearing: a typo'd pattern must not be
+// echoed into the configuration, while a concrete URI this transmitter does not
+// support must survive the round trip, because events_requested records what the
+// receiver asked for and events_delivered is the subset that was granted.
+func expandRequestedEvents(requested []string, supported []string) []string {
+	supportedSet := make(map[string]struct{}, len(supported))
+	for _, uri := range supported {
+		supportedSet[strings.ToLower(uri)] = struct{}{}
 	}
 
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
+	// Resolve each entry once — MatchDeliveredEvents compiles a regexp per call.
+	const (
+		keepVerbatim = iota
+		expand
+		drop
+	)
+	verdicts := make([]int, len(requested))
+	expansions := make([][]string, len(requested))
+	rewrite := false
+	for i, req := range requested {
+		if _, exact := supportedSet[strings.ToLower(req)]; exact {
+			continue
 		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			}
-			if match {
-				delivered = append(delivered, eventUri)
-			}
+		if matched := model.MatchDeliveredEvents([]string{req}, supported); len(matched) > 0 {
+			verdicts[i], expansions[i] = expand, matched
+			rewrite = true
+			continue
+		}
+		if isEventPattern(req) {
+			verdicts[i] = drop
+			rewrite = true
 		}
 	}
-	return delivered
+	if !rewrite {
+		return requested
+	}
+
+	expanded := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	add := func(uri string) {
+		key := strings.ToLower(uri)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		expanded = append(expanded, uri)
+	}
+	for i, req := range requested {
+		switch verdicts[i] {
+		case drop:
+		case expand:
+			for _, uri := range expansions[i] {
+				add(uri)
+			}
+		default:
+			add(req)
+		}
+	}
+	return expanded
+}
+
+// eventPatternMetachars are the regexp metacharacters whose presence marks an
+// events_requested entry as a PATTERN rather than a concrete event-type URI.
+//
+// "." and ":" are deliberately absent even though "." is a live metacharacter:
+// every event-type URI in the catalog contains both, so treating them as pattern
+// evidence would classify ordinary URIs as patterns and silently drop the
+// unsupported ones instead of recording them.
+const eventPatternMetachars = `*()|[]?+^${}\`
+
+// isEventPattern reports whether an events_requested entry is pattern-shaped.
+// Only consulted for entries that matched no supported URI, to decide between
+// dropping a typo'd pattern and preserving an unsupported concrete URI.
+func isEventPattern(req string) bool {
+	return strings.ContainsAny(req, eventPatternMetachars)
+}
+
+// copyEvents returns an independent copy so events_requested, events_delivered
+// and events_supported never share a backing array — MatchDeliveredEvents
+// returns supported as-is for the "*" shorthand, which would otherwise alias.
+func copyEvents(events []string) []string {
+	return append([]string{}, events...)
 }
 
 // UpdateStream patches an existing stream. configReq is a StreamStateRecord so
@@ -1055,6 +1206,18 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		return nil, errors.New(ErrorInvalidProject)
 	}
 
+	// Per-receiver event-validation mode (spec #247 #250). Shape-checked ahead of
+	// the SSTP dispatch so a malformed mode is rejected on both patch paths.
+	if err := validateEventValidationMode(configReq.EventValidation); err != nil {
+		return nil, err
+	}
+
+	// Same for events_requested patterns — checked ahead of the SSTP dispatch so
+	// an uncompilable pattern cannot narrow events_delivered on either path.
+	if err := validateEventPatterns(configReq.EventsRequested); err != nil {
+		return nil, err
+	}
+
 	// SSTP pairs use a distinct patchable-fields whitelist (Q35): the generic
 	// delivery-method switch below does not apply. streamID names a direction
 	// (txSid == PairId, or rxSid == SstpInbound.Id) so per-direction Iss/Aud can
@@ -1073,8 +1236,16 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	config := &streamRec.StreamConfiguration
 
 	if len(configReq.EventsRequested) > 0 {
-		config.EventsRequested = configReq.EventsRequested
-		config.EventsDelivered = s.calculateDeliveredEvents(configReq.EventsRequested, configReq.EventsSupported)
+		// events_supported is Read-Only (SSF 1.0 §7.1.1) and a PATCH body rarely
+		// carries it; fall back to the stream's own catalog so a patch re-negotiates
+		// against what this transmitter actually supports instead of nothing. Empty
+		// events_requested is "not patched" here, so the create-time full-catalog
+		// default does not apply.
+		supported := configReq.EventsSupported
+		if len(supported) == 0 {
+			supported = config.EventsSupported
+		}
+		config.EventsRequested, config.EventsDelivered = resolveStreamEvents(configReq.EventsRequested, supported)
 	}
 
 	if configReq.Format != "" {
@@ -1202,6 +1373,10 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	// SSF §9.3 grace override (PRD #97 #98). Request value is already shape-
 	// checked above by validateSubjectRemovalGrace.
 	applyRemovalGraceOverride(streamRec, configReq.SubjectRemovalGraceSeconds)
+
+	// Per-receiver event-validation mode (spec #247 #250). Receive-side only;
+	// already shape-checked above by validateEventValidationMode.
+	applyEventValidation(streamRec, configReq.EventValidation)
 
 	// PRD #89 #95: re-validate the subject-filter mode against the upstream
 	// whenever the mode or event source could have changed.

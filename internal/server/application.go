@@ -227,6 +227,13 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	// the per-pair bearer wins the Authorization header (AC 3).
 	sstpDialerCfg := LoadSstpDialerConfig()
 	sstpDialerCfg.ResolveClient = sa.ResolveTransmitterClient
+	// Spec #247 #254: the dialer's inbound half is a receiver, so it inherits
+	// the same server-wide event_validation default (I2SIG_STREAM_EVENT_VALIDATION)
+	// the acceptor resolves through the StreamService — one policy per pair
+	// regardless of which side dialed.
+	if persistence.StreamService != nil {
+		sstpDialerCfg.EventValidationDefault = persistence.StreamService.EventValidationDefault()
+	}
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 	sa.SstpDialer = sstpDialer
 

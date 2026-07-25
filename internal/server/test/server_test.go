@@ -315,17 +315,20 @@ func (suite *ServerSuite) Test4_StreamUpdate() {
 	suite.servers[0].streamToken = streamToken
 	suite.servers[0].stream = config
 
-	suite.servers[0].stream.EventsRequested = suite.servers[0].stream.EventsSupported
 	streamUrl := fmt.Sprintf("http://%s/stream?stream_id=%s", suite.servers[0].host, suite.servers[0].stream.Id)
 
 	// check that the delivery structure was serialized and deserialized correctly
 	assert.NotNil(suite.T(), config.Delivery, "Delivery is not null")
 	assert.NotNil(suite.T(), config.Delivery.PollTransmitMethod, "Poll delivery is defined")
-	assert.Equal(suite.T(), 0, len(config.EventsDelivered), "No events to be delivered")
+	// An omitted events_requested defaults to the full supported catalog: a stream
+	// registered without asking for anything specific delivers everything.
+	assert.Equal(suite.T(), len(config.EventsSupported), len(config.EventsDelivered),
+		"All supported events delivered by default")
 
-	testLog.Println("Updating stream with PUT to request all events supported...")
-	// enable all events
-	config.EventsRequested = config.EventsSupported // request all events
+	testLog.Println("Updating stream with PUT to narrow the requested events...")
+	// narrow the stream to a single event so the PUT visibly re-negotiates
+	config.EventsRequested = config.EventsSupported[0:1]
+	suite.servers[0].stream.EventsRequested = config.EventsRequested
 
 	// Do PUT to update
 	bodyBytes, err := json.MarshalIndent(config, "", " ")

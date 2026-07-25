@@ -30,6 +30,12 @@ type PrometheusHandler struct {
 	PushStateTransitions   *prometheus.CounterVec
 	PushRecoveryDuration   *prometheus.HistogramVec
 	PushIdleVerifyOutcomes *prometheus.CounterVec
+
+	// Inbound event-validation instrumentation (spec #247 #251). Labels are
+	// disposition × mode × transport, all closed enums — deliberately NOT
+	// stream_id or event_uri, either of which would make the series unbounded on
+	// a busy STRICT receiver.
+	EventValidations *prometheus.CounterVec
 }
 
 type streamCollector struct {
@@ -223,6 +229,18 @@ func (h *PrometheusHandler) RecordIdleVerifyOutcome(sid, outcome string) {
 	}
 }
 
+// RecordEventValidation counts one inbound SET's whole-SET event-validation
+// disposition. disposition is a goSetValidate.Disposition.String() ("valid",
+// "unsupported", "malformed"), mode is the resolved event_validation mode, and
+// transport is "push" or "poll". It is only called when validation actually ran —
+// a NONE stream builds no validator set and reports nothing, so the counter never
+// carries a meaningless mode="NONE" series.
+func (h *PrometheusHandler) RecordEventValidation(disposition, mode, transport string) {
+	if h != nil && h.EventValidations != nil {
+		h.EventValidations.WithLabelValues(disposition, mode, transport).Inc()
+	}
+}
+
 func (sa *SignalsApplication) InitializePrometheus() {
 	sa.InitializePrometheusWithRegisterer(prometheus.DefaultRegisterer)
 }
@@ -358,6 +376,15 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 			},
 			[]string{"stream_id", "outcome"},
 		),
+		EventValidations: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "event_validation_total",
+				Help:      "Inbound SET event-validation dispositions, labeled by whole-SET disposition, resolved event_validation mode, and receive transport.",
+			},
+			[]string{"disposition", "mode", "transport"},
+		),
 	}
 
 	sa.EventRouter.SetEventCounter(prometheusHandler.EventsIn, prometheusHandler.EventsOut)
@@ -376,6 +403,7 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	registerTo(reg, prometheusHandler.PushStateTransitions)
 	registerTo(reg, prometheusHandler.PushRecoveryDuration)
 	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)
+	registerTo(reg, prometheusHandler.EventValidations)
 	registerTo(reg, newStreamCollector(sa))
 	registerTo(reg, newClusterCollector(sa))
 

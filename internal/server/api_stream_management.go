@@ -10,6 +10,7 @@ Because of this, administrative access is via admin.go
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -577,6 +578,12 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		// A request the caller can fix is the documented 400, not the catch-all
+		// 500 that says the server broke.
+		if errors.Is(err, services.ErrInvalidRequest) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -789,6 +796,10 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		}
 		if err != nil && err.Error() == "not found" || configResp == nil {
 			http.Error(w, "No stream found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, services.ErrInvalidRequest) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)

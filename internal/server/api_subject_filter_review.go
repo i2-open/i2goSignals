@@ -30,6 +30,7 @@ type subjectFilterReviewResponse struct {
 	DefaultSubjects            string                           `json:"default_subjects,omitempty"`
 	EventSource                *model.EventSource               `json:"event_source"`
 	SubjectRemovalGraceSeconds int                              `json:"subject_removal_grace_seconds"`
+	EventValidation            model.EventValidationMode        `json:"event_validation"`
 	PassthruNoLocalFilter      bool                             `json:"passthru_no_local_filter,omitempty"`
 	Counts                     *subjectFilterReviewCounts       `json:"counts,omitempty"`
 	Pending                    []subjectFilterReviewEntry       `json:"pending,omitempty"`
@@ -140,7 +141,13 @@ func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		return
 	}
 
-	body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review))
+	// Resolve the per-receiver event-validation mode at read time (spec #247
+	// #250): an empty per-stream value inherits the server-wide
+	// I2SIG_STREAM_EVENT_VALIDATION default, so the review reports what would
+	// actually apply to inbound events.
+	effectiveValidation := sa.GetStreamService().ResolveEventValidation(stream)
+
+	body, err := json.Marshal(buildSubjectFilterReviewResponse(stream, review, effectiveValidation))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -152,13 +159,16 @@ func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWrite
 // buildSubjectFilterReviewResponse translates the service-layer review into
 // the wire-format response. Kept separate so the JSON contract is one tested
 // adapter and the service stays free of HTTP concerns.
-func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview) subjectFilterReviewResponse {
+// eventValidation is the already-resolved effective mode (per-stream value or
+// the server default); the adapter stays a pure translation.
+func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *services.SubjectFilterReview, eventValidation model.EventValidationMode) subjectFilterReviewResponse {
 	out := subjectFilterReviewResponse{
 		StreamId:                   stream.StreamConfiguration.Id,
 		Mode:                       stream.SubjectFilterMode,
 		DefaultSubjects:            stream.DefaultSubjects,
 		EventSource:                effectiveEventSource(stream.EventSource),
 		SubjectRemovalGraceSeconds: effectiveRemovalGrace(stream.SubjectRemovalGraceSeconds),
+		EventValidation:            eventValidation,
 		PassthruNoLocalFilter:      review.NoLocalFilter,
 	}
 	if review.Counts != nil {

@@ -1,0 +1,122 @@
+package goSetValidate
+
+import (
+	"strings"
+	"sync"
+
+	"github.com/i2-open/i2goSignals/pkg/goSet"
+)
+
+// registryKey normalizes an event-type URI for registry and engagement lookups.
+//
+// Event types are matched case-insensitively elsewhere in the stack — the router's
+// MatchesStream predicate uses strings.EqualFold, and the delivered-events glob
+// matcher is case-insensitive — so an exact map lookup here would disagree with
+// the component that decided to route the event in the first place. That
+// disagreement is asymmetrically bad: a case-variant URI would be routed but
+// report Unsupported, which STRICT turns into a rejection of legitimate traffic
+// and ENFORCE turns into an unvalidated pass for a malformed payload.
+//
+// URI schemes and hosts are case-insensitive per RFC 3986 §6.2.2.1, and the SET
+// event-type URIs are opaque identifiers compared for equality, so folding case is
+// safe for the identifiers this registry holds.
+func registryKey(eventURI string) string {
+	return strings.ToLower(eventURI)
+}
+
+// Validator validates one event type's payload.
+//
+// payload is the event's claim map, already normalised from whatever the SET
+// carried (a JSON object from the wire, or a typed struct attached in-process via
+// SecurityEventToken.AddEventPayload). set is the surrounding envelope, needed by
+// event types whose spec puts required claims at the top level — both SSF
+// stream-management events require a top-level sub_id.
+//
+// A Validator MUST NOT reject: it returns a Result and lets the caller apply
+// policy. It MUST tolerate unknown extra claims (forward compatibility) and MUST
+// NOT fail on an absent OPTIONAL or RECOMMENDED claim.
+type Validator interface {
+	Validate(eventURI string, payload map[string]any, set *goSet.SecurityEventToken) Result
+}
+
+// ValidatorFunc adapts a plain function to Validator.
+type ValidatorFunc func(eventURI string, payload map[string]any, set *goSet.SecurityEventToken) Result
+
+func (f ValidatorFunc) Validate(eventURI string, payload map[string]any, set *goSet.SecurityEventToken) Result {
+	return f(eventURI, payload, set)
+}
+
+// Registry maps event-type URIs to validators. It is built once and then read
+// concurrently; Register is not safe against concurrent readers, so finish
+// building before handing a Registry to a ValidatorSet.
+type Registry struct {
+	validators map[string]Validator
+}
+
+// NewRegistry returns an empty registry. Use BuiltinRegistry to start from the
+// validators this repo ships.
+func NewRegistry() *Registry {
+	return &Registry{validators: make(map[string]Validator)}
+}
+
+// BuiltinRegistry returns a FRESH registry pre-loaded with the validators this
+// repo ships. A new instance per call is deliberate: an embedder that chains
+// Register onto the result must not mutate process-wide state that another
+// embedder depends on.
+func BuiltinRegistry() *Registry {
+	r := NewRegistry().
+		Register(SsfVerificationEventUri, ValidatorFunc(validateVerificationEvent)).
+		Register(SsfStreamUpdatedEventUri, ValidatorFunc(validateStreamUpdatedEvent))
+
+	r = registerCaepValidators(r)
+	r = registerRiscValidators(r)
+	r = registerScimValidators(r)
+
+	// EXPERIMENTAL, and last on purpose: WISE is an unadopted proposal, so the
+	// adopted packs above are what a receiver is actually promised. See wise.go.
+	return registerWiseValidators(r)
+}
+
+// SharedBuiltinRegistry returns a process-wide BuiltinRegistry built once on
+// first use. Callers MUST NOT Register onto the result — doing so mutates every
+// other caller's view, which is exactly what BuiltinRegistry's fresh-per-call
+// contract exists to prevent.
+//
+// It is for the hot paths that only ever read: paying the full pack-registration
+// cost (SSF + CAEP + RISC + SCIM + WISE) per inbound SET, or per rejected
+// outbound SET, buys nothing. A Registry is safe for concurrent reads once
+// built, which is the only way this value is ever used.
+func SharedBuiltinRegistry() *Registry {
+	sharedBuiltinOnce.Do(func() { sharedBuiltin = BuiltinRegistry() })
+	return sharedBuiltin
+}
+
+var (
+	sharedBuiltinOnce sync.Once
+	sharedBuiltin     *Registry
+)
+
+// Register adds or replaces the validator for eventURI and returns the receiver
+// so built-in packs and embedder registrations chain. An empty URI or a nil
+// validator is ignored.
+func (r *Registry) Register(eventURI string, v Validator) *Registry {
+	if r == nil || eventURI == "" || v == nil {
+		return r
+	}
+	if r.validators == nil {
+		r.validators = make(map[string]Validator)
+	}
+	r.validators[registryKey(eventURI)] = v
+	return r
+}
+
+// Lookup returns the validator registered for eventURI. Matching is
+// case-insensitive, agreeing with the router's event-type comparison. A nil
+// receiver reports a miss rather than panicking.
+func (r *Registry) Lookup(eventURI string) (Validator, bool) {
+	if r == nil {
+		return nil, false
+	}
+	v, ok := r.validators[registryKey(eventURI)]
+	return v, ok
+}

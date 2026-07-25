@@ -62,7 +62,7 @@ func TestVerifySstpInboundSets_ValidSetIsParsed(t *testing.T) {
 		JWKS:              jwks,
 		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{aud},
-	})
+	}, sstpValidationPolicy{})
 
 	require.Empty(t, setErrs, "a valid SET produces no per-JTI error")
 	require.Len(t, parsed, 1)
@@ -85,7 +85,7 @@ func TestVerifySstpInboundSets_BadIssuerYieldsSetErr(t *testing.T) {
 		JWKS:              jwks,
 		ExpectedIssuer:    "https://peer.example",
 		ExpectedAudiences: []string{aud},
-	})
+	}, sstpValidationPolicy{})
 
 	assert.Empty(t, parsed, "an invalid SET is not added to the inbound batch")
 	require.Contains(t, setErrs, "jti-bad-iss")
@@ -104,7 +104,7 @@ func TestVerifySstpInboundSets_BadAudienceYieldsJwtAud(t *testing.T) {
 		JWKS:              jwks,
 		ExpectedIssuer:    iss,
 		ExpectedAudiences: []string{"https://local.example"},
-	})
+	}, sstpValidationPolicy{})
 
 	assert.Empty(t, parsed)
 	require.Contains(t, setErrs, "jti-bad-aud")

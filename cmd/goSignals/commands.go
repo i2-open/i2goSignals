@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -628,33 +627,12 @@ func createRegRequestFromParams(method string, modeParam string, cli *CLI, conne
 	return reg
 }
 
+// calculateEvents resolves the operator's requested event patterns against the
+// transmitter's advertised events_supported. The glob semantics live in
+// model.MatchDeliveredEvents so the CLI and the server share exactly one
+// implementation of the pattern -> URI matching.
 func calculateEvents(requested []string, supported []string) []string {
-	var delivered []string
-	if len(requested) == 0 {
-		return []string{}
-	}
-	if requested[0] == "*" {
-		delivered = supported
-		return delivered
-	}
-
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
-		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			} // ignore bad input
-			if match {
-				delivered = append(delivered, eventUri)
-			}
-		}
-	}
-	return delivered
+	return model.MatchDeliveredEvents(requested, supported)
 }
 
 func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
@@ -1257,7 +1235,7 @@ type CreateStreamSstpCmd struct {
 	Iss           string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
 	IssJwksUrl    string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
 	Aud           []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
-	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode)."`
+	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode). Each value is a case-insensitive regular expression with '*' as shorthand for '.*'."`
 	Mode          string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
 }
 
@@ -1430,7 +1408,7 @@ type CreateStreamCmd struct {
 	Iss        string              `optional:"" help:"The event issuer value (e.g. scim.example.com)"`
 	Name       string              `optional:"" short:"n" help:"An alias name for the stream to be created"`
 	IssJwksUrl string              `optional:"" help:"The issuer JwksUrl value. Used for SET Event token validation."`
-	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Use '*' to match by wildcard."`
+	Events     []string            `optional:"" default:"*" help:"The event uris (types) requested for a stream. Each value is a case-insensitive regular expression matched anywhere in an event uri, with '*' as shorthand for '.*' -- e.g. '*:event:prov:*' or '*:event:(feed|sig):*'. Omit for all supported events."`
 }
 
 // bootstrapBearer returns the bearer to present on bootstrap-capable calls
@@ -2673,10 +2651,10 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:full", payload)
+		event.AddEventPayload(model.EventScimCreateFull, payload)
 	case "create:notice":
 		payload := resource.CreateNoticeEventPaylaod(genResource)
-		event.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:notice", payload)
+		event.AddEventPayload(model.EventScimCreateNotice, payload)
 	}
 	if gen.Alias == "" {
 		fmt.Println("Generated Event:")

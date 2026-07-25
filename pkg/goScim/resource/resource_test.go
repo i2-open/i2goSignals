@@ -57,12 +57,12 @@ func TestCreateEvent(t *testing.T) {
 	var subject goSet.EventSubject
 	subject.SubjectIdentifier = *subId
 	createEvent := goSet.CreateSet(&subject, "ascim.example.com", []string{"aud.example.com"})
-	createEvent.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:full", fullPayload)
+	createEvent.AddEventPayload("urn:ietf:params:scim:event:prov:create:full", fullPayload)
 
 	fmt.Println("Create Event:\n" + createEvent.String())
 	createEventNotice := goSet.CreateSet(&subject, "ascim.example.com", []string{"aud.example.com"})
 
-	createEventNotice.AddEventPayload("urn:ietf:params:SCIM:event:prov:create:notice", noticePayload)
+	createEventNotice.AddEventPayload("urn:ietf:params:scim:event:prov:create:notice", noticePayload)
 
 	fmt.Println("Create Notice Event:\n" + createEventNotice.String())
 }
