@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -1003,32 +1002,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	return config, nil
 }
 
+// calculateDeliveredEvents resolves the requested event patterns against the
+// supported event URIs. The glob semantics live in model.MatchDeliveredEvents so
+// exactly one implementation of the pattern -> URI matching exists; this remains
+// as the service-local spelling its callers already use.
 func (s *StreamService) calculateDeliveredEvents(requested []string, supported []string) []string {
-	var delivered []string
-	if len(requested) == 0 {
-		return []string{}
-	}
-	if requested[0] == "*" {
-		return supported
-	}
-
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
-		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			}
-			if match {
-				delivered = append(delivered, eventUri)
-			}
-		}
-	}
-	return delivered
+	return model.MatchDeliveredEvents(requested, supported)
 }
 
 // UpdateStream patches an existing stream. configReq is a StreamStateRecord so

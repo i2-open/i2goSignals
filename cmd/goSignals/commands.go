@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -628,33 +627,12 @@ func createRegRequestFromParams(method string, modeParam string, cli *CLI, conne
 	return reg
 }
 
+// calculateEvents resolves the operator's requested event patterns against the
+// transmitter's advertised events_supported. The glob semantics live in
+// model.MatchDeliveredEvents so the CLI and the server share exactly one
+// implementation of the pattern -> URI matching.
 func calculateEvents(requested []string, supported []string) []string {
-	var delivered []string
-	if len(requested) == 0 {
-		return []string{}
-	}
-	if requested[0] == "*" {
-		delivered = supported
-		return delivered
-	}
-
-	for _, reqUri := range requested {
-		compUri := "(?i)" + reqUri
-		if strings.Contains(reqUri, "*") {
-			compUri = strings.Replace(compUri, "*", ".*", -1)
-		}
-
-		for _, eventUri := range supported {
-			match, err := regexp.MatchString(compUri, eventUri)
-			if err != nil {
-				continue
-			} // ignore bad input
-			if match {
-				delivered = append(delivered, eventUri)
-			}
-		}
-	}
-	return delivered
+	return model.MatchDeliveredEvents(requested, supported)
 }
 
 func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
