@@ -2,9 +2,11 @@ package eventRouter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -13,16 +15,7 @@ import (
 
 // dispatchPushFailureFixture drives dispatchPushFailure with the ancillary
 // timers/config it needs but that these cases do not exercise.
-func dispatchPushFailureFixture(t *testing.T, h *testHarness, stream *model.StreamStateRecord, cls goSetPush.Classification) (RecoveryOutcome, bool) {
-	t.Helper()
-	consecutiveRejects := 0
-	return dispatchPushFailureCounted(t, h, stream, cls, &consecutiveRejects)
-}
-
-// dispatchPushFailureCounted is the fixture for cases that care about the
-// consecutive-rejection budget and therefore need the counter to survive across
-// calls.
-func dispatchPushFailureCounted(t *testing.T, h *testHarness, stream *model.StreamStateRecord, cls goSetPush.Classification, consecutiveRejects *int) (RecoveryOutcome, bool) {
+func dispatchPushFailureFixture(t *testing.T, h *testHarness, stream *model.StreamStateRecord, jti string, cls goSetPush.Classification) (RecoveryOutcome, bool) {
 	t.Helper()
 	backfill := time.NewTicker(time.Hour)
 	t.Cleanup(backfill.Stop)
@@ -30,104 +23,166 @@ func dispatchPushFailureCounted(t *testing.T, h *testHarness, stream *model.Stre
 	t.Cleanup(func() { idle.Stop() })
 
 	return h.router.dispatchPushFailure(
-		context.Background(), stream, "jti-under-test", cls,
+		context.Background(), stream, jti, cls,
 		nil, RecoveryConfig{BaseDelay: time.Millisecond},
-		backfill, idle, 0, consecutiveRejects,
+		backfill, idle, 0,
 	)
 }
 
+// invalidRequestCls is what a receiver returns for both situations RFC8935 §2.4
+// overloads onto one code — the wire form is identical either way, which is the
+// whole reason the transmitter has to consult its own validators.
+func invalidRequestCls(description string) goSetPush.Classification {
+	return goSetPush.Classification{
+		Class:              goSetPush.ClassRFC8935Error,
+		RFC8935ErrCode:     goSetPush.ErrInvalidRequest,
+		RFC8935Description: description,
+	}
+}
+
+// persistPushEvent stores token against the stream and returns its JTI, so
+// dispatchPushFailure's corroboration lookup finds a real event record.
+func persistPushEvent(t *testing.T, h *testHarness, sid string, token *goSet.SecurityEventToken) string {
+	t.Helper()
+	rec, err := h.router.eventService.AddEvent(context.Background(), token, sid, "")
+	require.NoError(t, err)
+	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), rec.Jti, sid))
+	return rec.Jti
+}
+
+// malformedRiscToken carries a RISC account-disabled event with no subject in
+// either carrier (in-payload "subject" or top-level sub_id), which the RISC pack
+// reports Malformed.
+func malformedRiscToken(jti string) *goSet.SecurityEventToken {
+	token := newRiscToken(jti, dupTestIssuer, "https://receiver.example.com")
+	token.Events = map[string]interface{}{
+		typeAcctDisabled: map[string]interface{}{},
+	}
+	return token
+}
+
+// conformantRiscToken carries the same event type with the subject the RISC pack
+// requires, so our validators report it Valid.
+func conformantRiscToken(jti string) *goSet.SecurityEventToken {
+	token := newRiscToken(jti, dupTestIssuer, "https://receiver.example.com")
+	token.Events = map[string]interface{}{
+		typeAcctDisabled: map[string]interface{}{
+			"subject": map[string]interface{}{
+				"format": "email",
+				"email":  "user@example.com",
+			},
+		},
+	}
+	return token
+}
+
+// pendingCount reports how many JTIs are still deliverable for sid — the check
+// that separates "the event was cleared" from "the event survived".
+func pendingCount(t *testing.T, h *testHarness, sid string) int {
+	t.Helper()
+	jtis, _ := h.router.eventService.GetEventIds(context.Background(), sid, model.PollParameters{
+		MaxEvents: 100, ReturnImmediately: true,
+	})
+	return len(jtis)
+}
+
 // A receiver running event_validation=ENFORCE/STRICT rejects ONE non-conformant
-// SET with RFC8935 §2.4 invalid_request. That must not take the stream down:
-// disabling meant a single bad payload stopped delivery for every subject until
-// an operator intervened. Poll is the precedent — a setErr'd JTI is logged WARN
-// and acked, leaving stream state alone (PollStreamHandler) — and push now
-// matches it (code-review finding on spec #247).
-func TestDispatchPushFailure_InvalidRequestDoesNotDisableStream(t *testing.T) {
+// SET with RFC8935 §2.4 invalid_request. When our own validators agree the
+// payload is malformed the receiver is corroborated, so the SET is cleared and
+// delivery continues: disabling here meant a single bad payload stopped delivery
+// for every subject until an operator intervened.
+func TestDispatchPushFailure_CorroboratedInvalidRequestClearsAndContinues(t *testing.T) {
 	h := newTestRouter(t)
 	projectId := projectIdFromHarness(t, h)
 	stream := mustCreateTestStream(t, h, projectId)
+	sid := stream.StreamConfiguration.Id
 	require.Equal(t, model.StreamStateEnabled, stream.Status)
 
-	outcome, exit := dispatchPushFailureFixture(t, h, stream, goSetPush.Classification{
-		Class:              goSetPush.ClassRFC8935Error,
-		RFC8935ErrCode:     goSetPush.ErrInvalidRequest,
-		RFC8935Description: "The event payload for \"...session-revoked\" is not conformant",
-	})
+	jti := persistPushEvent(t, h, sid, malformedRiscToken("corroborated-jti"))
+	require.Equal(t, 1, pendingCount(t, h, sid))
 
-	assert.Equal(t, RecoveryOutcomeResumed, outcome, "invalid_request must resume, not disable")
+	outcome, exit := dispatchPushFailureFixture(t, h, stream, jti,
+		invalidRequestCls(`The event payload for "...account-disabled" is not conformant`))
+
+	assert.Equal(t, RecoveryOutcomeResumed, outcome, "a corroborated rejection must resume, not disable")
 	assert.False(t, exit, "the push loop must keep running")
 	assert.Equal(t, model.StreamStateEnabled, stream.Status,
 		"in-memory stream state must be untouched by a per-SET payload rejection")
+	assert.Equal(t, 0, pendingCount(t, h, sid), "the corroborated bad payload must be cleared")
 
-	persisted, err := h.streamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
+	persisted, err := h.streamService.GetStreamState(context.Background(), sid)
 	require.NoError(t, err)
 	assert.Equal(t, model.StreamStateEnabled, persisted.Status,
 		"persisted stream state must be untouched by a per-SET payload rejection")
 }
 
-// invalid_request is also what goSetPush's receiver returns for an unparseable
-// SET, a signature it could not verify, and a stream with no trust anchor —
-// receiver-side faults that reject EVERY SET. Ack-and-continue there drains the
-// whole stream into WARN logs while it still reports healthy, so the tolerance is
-// bounded: once the budget is spent with no accepted delivery in between, the
-// stream disables with a visible reason and the rest stays replayable.
-func TestDispatchPushFailure_ConsecutiveInvalidRequestsDisableStream(t *testing.T) {
+// However many corroborated rejections arrive, back to back and with no accepted
+// delivery in between, the stream stays up: each one is an event we independently
+// agree is bad, so clearing it loses nothing and there is no burst that can take
+// a healthy stream down.
+func TestDispatchPushFailure_CorroboratedBurstNeverDisables(t *testing.T) {
 	h := newTestRouter(t)
 	projectId := projectIdFromHarness(t, h)
 	stream := mustCreateTestStream(t, h, projectId)
+	sid := stream.StreamConfiguration.Id
 
-	cls := goSetPush.Classification{
-		Class:              goSetPush.ClassRFC8935Error,
-		RFC8935ErrCode:     goSetPush.ErrInvalidRequest,
-		RFC8935Description: "The SET could not be verified: no trust anchor is configured.",
-	}
-
-	consecutiveRejects := 0
-	for i := 0; i < pushInvalidRequestBudget; i++ {
-		outcome, exit := dispatchPushFailureCounted(t, h, stream, cls, &consecutiveRejects)
-		require.Equal(t, RecoveryOutcomeResumed, outcome, "rejection %d is still within budget", i+1)
+	for i := 0; i < 25; i++ {
+		jti := persistPushEvent(t, h, sid, malformedRiscToken(fmt.Sprintf("burst-jti-%d", i)))
+		outcome, exit := dispatchPushFailureFixture(t, h, stream, jti,
+			invalidRequestCls("not conformant"))
+		require.Equal(t, RecoveryOutcomeResumed, outcome, "rejection %d must resume", i)
 		require.False(t, exit)
-		require.Equal(t, model.StreamStateEnabled, stream.Status)
 	}
 
-	outcome, exit := dispatchPushFailureCounted(t, h, stream, cls, &consecutiveRejects)
-	assert.Equal(t, RecoveryOutcomeDisabled, outcome, "the rejection past the budget must disable")
+	assert.Equal(t, model.StreamStateEnabled, stream.Status,
+		"a burst of independently-confirmed bad payloads must never disable the stream")
+	assert.Equal(t, 0, pendingCount(t, h, sid))
+}
+
+// invalid_request is also what goSetPush's receiver returns for an unparseable
+// SET, a signature it could not verify, and a stream with no trust anchor —
+// receiver-side faults that reject EVERY SET. Our validators do not corroborate
+// those, so the stream disables AND the event stays pending: the rejection cost
+// zero events, and they replay once an operator fixes the receiver.
+func TestDispatchPushFailure_UncorroboratedInvalidRequestDisablesWithoutLoss(t *testing.T) {
+	h := newTestRouter(t)
+	projectId := projectIdFromHarness(t, h)
+	stream := mustCreateTestStream(t, h, projectId)
+	sid := stream.StreamConfiguration.Id
+
+	jti := persistPushEvent(t, h, sid, conformantRiscToken("uncorroborated-jti"))
+	require.Equal(t, 1, pendingCount(t, h, sid))
+
+	outcome, exit := dispatchPushFailureFixture(t, h, stream, jti,
+		invalidRequestCls("The SET could not be verified: no trust anchor is configured."))
+
+	assert.Equal(t, RecoveryOutcomeDisabled, outcome, "an uncorroborated rejection must disable")
 	assert.True(t, exit, "the push loop must exit rather than keep draining")
 	assert.Equal(t, model.StreamStateDisable, stream.Status)
-	assert.Contains(t, stream.ErrorMsg, "consecutive",
+	assert.Contains(t, stream.ErrorMsg, "receiver-side",
 		"the operator needs to see WHY the stream stopped")
+	assert.Equal(t, 1, pendingCount(t, h, sid),
+		"a conformant event must survive a receiver-side rejection")
 
-	persisted, err := h.streamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
+	persisted, err := h.streamService.GetStreamState(context.Background(), sid)
 	require.NoError(t, err)
 	assert.Equal(t, model.StreamStateDisable, persisted.Status)
 }
 
-// The budget counts CONSECUTIVE rejections. A receiver rejecting the occasional
-// non-conformant payload while accepting everything else must never trip it —
-// that is the #247 behavior this bound is not allowed to regress.
-func TestDispatchPushFailure_BudgetIsConsecutiveOnly(t *testing.T) {
+// A JTI whose record has already gone (operator reset, racing ack) cannot be
+// corroborated, so it takes the conservative branch: disable rather than treat an
+// unverifiable rejection as proof the payload was bad.
+func TestDispatchPushFailure_MissingEventRecordDisables(t *testing.T) {
 	h := newTestRouter(t)
 	projectId := projectIdFromHarness(t, h)
 	stream := mustCreateTestStream(t, h, projectId)
 
-	cls := goSetPush.Classification{
-		Class:              goSetPush.ClassRFC8935Error,
-		RFC8935ErrCode:     goSetPush.ErrInvalidRequest,
-		RFC8935Description: "The event payload for \"...session-revoked\" is not conformant",
-	}
+	outcome, exit := dispatchPushFailureFixture(t, h, stream, "no-such-jti",
+		invalidRequestCls("not conformant"))
 
-	consecutiveRejects := 0
-	for i := 0; i < pushInvalidRequestBudget*3; i++ {
-		outcome, exit := dispatchPushFailureCounted(t, h, stream, cls, &consecutiveRejects)
-		require.Equal(t, RecoveryOutcomeResumed, outcome)
-		require.False(t, exit)
-		// An accepted push in between resets the counter — this is what runPushLoop
-		// does on ClassAccepted.
-		consecutiveRejects = 0
-	}
-
-	assert.Equal(t, model.StreamStateEnabled, stream.Status,
-		"isolated payload rejections must never disable the stream, however many there are")
+	assert.Equal(t, RecoveryOutcomeDisabled, outcome)
+	assert.True(t, exit)
+	assert.Equal(t, model.StreamStateDisable, stream.Status)
 }
 
 // Every other RFC8935 §2.4 code still disables. jws_signature_failed has already
@@ -144,7 +199,7 @@ func TestDispatchPushFailure_OtherRFC8935CodesStillDisable(t *testing.T) {
 		projectId := projectIdFromHarness(t, h)
 		stream := mustCreateTestStream(t, h, projectId)
 
-		outcome, exit := dispatchPushFailureFixture(t, h, stream, goSetPush.Classification{
+		outcome, exit := dispatchPushFailureFixture(t, h, stream, "jti-under-test", goSetPush.Classification{
 			Class:          goSetPush.ClassRFC8935Error,
 			RFC8935ErrCode: errCode,
 		})

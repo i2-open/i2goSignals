@@ -273,3 +273,48 @@ func TestCreateStream_AlternationPatternSelectsSubset(t *testing.T) {
 	assert.Less(t, len(created.EventsDelivered), len(model.GetSupportedEvents()),
 		"an alternation over two branches must be a strict subset of the catalog")
 }
+
+// events_requested is a REGULAR EXPRESSION language, so a legal pattern need not
+// contain "*": alternation, character classes and anchors are all supported and
+// documented. Such a pattern must still be enumerated, or the configuration
+// returned by GET /stream carries a value that is not an event type URI in a
+// field SSF 1.0 §7.1.1 defines as a set of event type URIs.
+func TestExpandRequestedEvents_NonWildcardPatternIsEnumerated(t *testing.T) {
+	supported := []string{
+		"urn:ietf:params:scim:event:feed:add",
+		"urn:ietf:params:scim:event:sig:add",
+		"urn:ietf:params:scim:event:prov:create:full",
+	}
+
+	expanded := expandRequestedEvents([]string{"urn:ietf:params:scim:event:(feed|sig):add"}, supported)
+
+	assert.Equal(t, []string{
+		"urn:ietf:params:scim:event:feed:add",
+		"urn:ietf:params:scim:event:sig:add",
+	}, expanded, "an alternation pattern must enumerate, not echo")
+	for _, entry := range expanded {
+		assert.NotContains(t, entry, "|", "no regex metacharacter may survive into events_requested")
+	}
+}
+
+// A character-class pattern is the same case, and confirms the rule is about
+// pattern-ness rather than a hardcoded list of metacharacters.
+func TestExpandRequestedEvents_CharacterClassPatternIsEnumerated(t *testing.T) {
+	supported := []string{"urn:a:one", "urn:a:two", "urn:b:one"}
+
+	assert.Equal(t, []string{"urn:a:one", "urn:a:two"},
+		expandRequestedEvents([]string{"urn:[a]:.*"}, supported))
+}
+
+// The counterpart the enumerate rule must not break: a concrete URI this
+// transmitter does not support is still recorded verbatim, because
+// events_requested is what the receiver asked for and events_delivered is what
+// was granted. Only PATTERN-shaped entries that match nothing are dropped.
+func TestExpandRequestedEvents_UnsupportedConcreteUriSurvivesEnumeration(t *testing.T) {
+	supported := []string{"urn:a:one", "urn:a:two"}
+
+	expanded := expandRequestedEvents([]string{"urn:a:*", "urn:foreign:type"}, supported)
+
+	assert.Equal(t, []string{"urn:a:one", "urn:a:two", "urn:foreign:type"}, expanded,
+		"an unsupported concrete URI must survive alongside an expanded pattern")
+}

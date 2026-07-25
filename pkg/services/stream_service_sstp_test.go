@@ -419,3 +419,50 @@ func TestCreateSstpPair_InitiatorNoRollbackOnCascadeFailure(t *testing.T) {
 	all := svc.ListStreams(context.Background())
 	assert.Empty(t, all, "initiator should not have written any local row")
 }
+
+// An SSTP bootstrap direction that names no event types must forward NOTHING.
+//
+// resolveStreamEvents reads an absent events_requested as "everything you
+// support", which is the right reading for SSF registration (the receiver is
+// asking to be sent things) and the wrong one here: `goSignals create stream
+// sstp` leaves --events optional, so silence is the operator not having chosen,
+// not a peer requesting the full catalog. Widening it would start forwarding the
+// SCIM full-resource event types — whose payload carries a complete resource —
+// to a peer that asked for none of it.
+func TestCreateSstpPair_NoEventsForwardsNothing(t *testing.T) {
+	svc, _ := sstpFixture(t)
+
+	rec, err := svc.CreateSstpPair(context.Background(), responderBootstrap(), "proj-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec.SstpInbound)
+
+	assert.Empty(t, rec.StreamConfiguration.EventsDelivered,
+		"a tx direction with no --events must forward nothing, not the whole catalog")
+	assert.Empty(t, rec.StreamConfiguration.EventsRequested)
+	assert.Empty(t, rec.SstpInbound.EventsDelivered,
+		"the inbound leg must not silently subscribe to everything either")
+	assert.Empty(t, rec.SstpInbound.EventsRequested)
+
+	// The catalog is still advertised — what this side COULD carry is unchanged;
+	// only what it has been told to carry is empty.
+	assert.NotEmpty(t, rec.StreamConfiguration.EventsSupported)
+}
+
+// Naming events still resolves normally: the withheld normalization is only the
+// empty case.
+func TestCreateSstpPair_NamedEventsResolveNormally(t *testing.T) {
+	svc, _ := sstpFixture(t)
+
+	b := responderBootstrap()
+	b.Primary.Events = []string{model.EventScimCreateFull}
+	b.Inbound.Events = []string{"urn:ietf:params:scim:event:prov:*"}
+
+	rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec.SstpInbound)
+
+	assert.Equal(t, []string{model.EventScimCreateFull}, rec.StreamConfiguration.EventsDelivered)
+	assert.NotEmpty(t, rec.SstpInbound.EventsDelivered, "a pattern still expands to the URIs it selects")
+	assert.NotContains(t, rec.SstpInbound.EventsRequested, "urn:ietf:params:scim:event:prov:*",
+		"a returned configuration enumerates rather than echoing a pattern")
+}

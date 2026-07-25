@@ -2,6 +2,7 @@ package goSetValidate
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 )
@@ -75,6 +76,25 @@ func BuiltinRegistry() *Registry {
 	// adopted packs above are what a receiver is actually promised. See wise.go.
 	return registerWiseValidators(r)
 }
+
+// SharedBuiltinRegistry returns a process-wide BuiltinRegistry built once on
+// first use. Callers MUST NOT Register onto the result — doing so mutates every
+// other caller's view, which is exactly what BuiltinRegistry's fresh-per-call
+// contract exists to prevent.
+//
+// It is for the hot paths that only ever read: paying the full pack-registration
+// cost (SSF + CAEP + RISC + SCIM + WISE) per inbound SET, or per rejected
+// outbound SET, buys nothing. A Registry is safe for concurrent reads once
+// built, which is the only way this value is ever used.
+func SharedBuiltinRegistry() *Registry {
+	sharedBuiltinOnce.Do(func() { sharedBuiltin = BuiltinRegistry() })
+	return sharedBuiltin
+}
+
+var (
+	sharedBuiltinOnce sync.Once
+	sharedBuiltin     *Registry
+)
 
 // Register adds or replaces the validator for eventURI and returns the receiver
 // so built-in packs and embedder registrations chain. An empty URI or a nil

@@ -178,6 +178,11 @@ func clearedOutbound(pairId string, acked []string, setErrs map[string]goSetSstp
 		sstpDialerLog.Warn("SSTP-CLIENT: peer rejected outbound SET with a retryable code, holding it for resend",
 			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
 	}
+	for _, jti := range disposition.Unrecognized {
+		se := setErrs[jti]
+		sstpDialerLog.Warn("SSTP-CLIENT: peer rejected outbound SET with an unrecognized code, holding it rather than discarding it",
+			"pairId", pairId, "jti", jti, "err", se.Err, "description", se.Description)
+	}
 	for _, jti := range disposition.Fatal {
 		se := setErrs[jti]
 		sstpDialerLog.Error("SSTP-CLIENT: peer reports the stream is dead, holding outbound SET",

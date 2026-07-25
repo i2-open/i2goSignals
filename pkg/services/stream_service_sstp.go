@@ -425,6 +425,31 @@ func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.Str
 	}
 }
 
+// resolveSstpDirectionEvents is resolveStreamEvents for ONE leg of an SSTP pair,
+// with the absent-means-everything normalization deliberately withheld.
+//
+// resolveStreamEvents reads an omitted events_requested as "everything you
+// support", which is right for SSF registration: SSF 1.0 §7.1.1 makes the field
+// optional, and the party omitting it is the RECEIVER asking to be sent things.
+// An SSTP bootstrap is the opposite situation — the local operator is describing
+// what this side will forward, and `goSignals create stream sstp` leaves
+// --events optional with no default — so reading silence as consent would start
+// forwarding the entire catalog, including the SCIM full-resource event types
+// whose payload carries a complete resource, to a peer that asked for nothing.
+//
+// The direction therefore forwards nothing until an operator names events, which
+// is what it did before spec #247. The WARN is what makes that visible rather
+// than mysterious.
+func resolveSstpDirectionEvents(pairId, direction string, requested, supported []string) (events []string, delivered []string) {
+	if len(requested) == 0 {
+		ssLog.Warn("SSTP pair direction names no event types and will forward nothing; "+
+			"set --events to choose what it carries",
+			"pairId", pairId, "direction", direction)
+		return nil, nil
+	}
+	return resolveStreamEvents(requested, supported)
+}
+
 // buildSstpRecord assembles the bidirectional StreamStateRecord from a validated
 // bootstrap. The tx (primary) side aliases its Id to the Mongo _id hex (== the
 // PairId), preserving the existing aliasing invariant; the inbound side uses the
@@ -437,8 +462,8 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 	inboundMode, _ := model.SstpModeToRouteMode(b.Inbound.Mode)
 
 	supported := model.GetSupportedEvents()
-	primaryRequested, primaryDelivered := resolveStreamEvents(b.Primary.Events, supported)
-	inboundRequested, inboundDelivered := resolveStreamEvents(b.Inbound.Events, supported)
+	primaryRequested, primaryDelivered := resolveSstpDirectionEvents(pairId, "primary", b.Primary.Events, supported)
+	inboundRequested, inboundDelivered := resolveSstpDirectionEvents(pairId, "inbound", b.Inbound.Events, supported)
 
 	primary := model.StreamConfiguration{
 		Id:              pairId,

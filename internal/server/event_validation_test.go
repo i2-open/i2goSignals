@@ -238,7 +238,6 @@ func TestBuildReceiveValidatorSet(t *testing.T) {
 // delivered-event set through the exported pkg/ssfModels matcher.
 func TestEngagedEventUris(t *testing.T) {
 	assert.Nil(t, engagedEventUris(nil))
-	assert.Empty(t, engagedEventUris(&model.StreamStateRecord{}), "no events_delivered engages nothing")
 
 	// A concrete delivered set passes through unchanged.
 	concrete := engagedEventUris(&model.StreamStateRecord{
@@ -269,6 +268,35 @@ func TestEngagedEventUris(t *testing.T) {
 	require.NotEmpty(t, scoped)
 	assert.Contains(t, scoped, model.EventScimActivate)
 	assert.NotContains(t, scoped, testUnsupportedUri, "a RISC URI is outside the SCIM prov pattern")
+}
+
+// A stream persisted with an empty events_delivered never negotiated one — the
+// pre-#247 CreateStream only populated it when the registration supplied
+// events_requested, so every stream registered without it has [] in Mongo.
+// Engaging nothing for those makes STRICT reject 100% of their traffic while an
+// identically-configured new stream (which gets the full-catalog default) works.
+func TestEngagedEventUris_EmptyDeliveredEngagesSupportedSet(t *testing.T) {
+	legacy := engagedEventUris(&model.StreamStateRecord{})
+	assert.Equal(t, model.GetSupportedEvents(), legacy,
+		"a stream that never negotiated events_delivered must engage what this server supports")
+
+	// The consequence that matters: a supported event type on such a stream is no
+	// longer reported out-of-contract, so STRICT stops rejecting everything. The
+	// same URI is the Unsupported fixture elsewhere in this file precisely because
+	// those streams scope events_delivered narrowly.
+	vs := buildReceiveValidatorSet(&model.StreamStateRecord{}, model.EventValidationStrict)
+	require.NotNil(t, vs)
+	result := vs.Validate(unsupportedEventSetForTest("stream-legacy"))
+	assert.NotEqual(t, goSetValidate.Unsupported, result.Disposition,
+		"a legacy stream must not report every supported event type as out-of-contract")
+
+	// An explicitly advertised events_supported still narrows the fallback.
+	narrow := engagedEventUris(&model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			EventsSupported: []string{model.EventScimCreateFull},
+		},
+	})
+	assert.Equal(t, []string{model.EventScimCreateFull}, narrow)
 }
 
 // TestEngagedEventUrisAlwaysInContractStreamManagement pins story 11: a narrowly

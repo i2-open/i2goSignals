@@ -279,3 +279,64 @@ func TestValidatorFunc_ImplementsValidator(t *testing.T) {
 	assert.Equal(t, Malformed, got.Disposition)
 	assert.Equal(t, "urn:example:x", got.EventURI)
 }
+
+// A payload map assembled in-process can hold typed Go values, which validators
+// asserting map[string]any would reject as Malformed for a SET that is perfectly
+// conformant once serialized. normalizePayload documents a JSON round-trip; this
+// pins that it actually happens rather than being short-circuited by the map
+// type check.
+func TestNormalizePayload_RoundTripsTypedMembers(t *testing.T) {
+	type scimResource struct {
+		Id   string `json:"id"`
+		Name string `json:"userName"`
+	}
+
+	payload, err := normalizePayload(map[string]any{
+		"data": scimResource{Id: "2819c223", Name: "bjensen"},
+	})
+	require.NoError(t, err)
+
+	data, ok := payload["data"].(map[string]any)
+	require.True(t, ok, "a typed struct member must reach validators as a JSON object")
+	assert.Equal(t, "2819c223", data["id"])
+	assert.Equal(t, "bjensen", data["userName"])
+}
+
+// Nesting must not let a typed value through: the walk is recursive, so a struct
+// buried in a slice inside a map still forces the round-trip.
+func TestNormalizePayload_RoundTripsNestedTypedMembers(t *testing.T) {
+	type ref struct {
+		URI string `json:"uri"`
+	}
+
+	payload, err := normalizePayload(map[string]any{
+		"outer": map[string]any{"list": []any{ref{URI: "urn:example"}}},
+	})
+	require.NoError(t, err)
+
+	outer := payload["outer"].(map[string]any)
+	list := outer["list"].([]any)
+	entry, ok := list[0].(map[string]any)
+	require.True(t, ok, "a struct nested in a slice must still be round-tripped")
+	assert.Equal(t, "urn:example", entry["uri"])
+}
+
+// A payload that came off the wire is already wire-shaped, so it is returned
+// verbatim — the round-trip is not paid on the receive hot path.
+func TestNormalizePayload_WireShapedMapIsReturnedAsIs(t *testing.T) {
+	in := map[string]any{
+		"subject": map[string]any{"format": "email", "email": "user@example.com"},
+		"count":   float64(3),
+		"tags":    []any{"a", "b"},
+		"ok":      true,
+		"none":    nil,
+	}
+	out, err := normalizePayload(in)
+	require.NoError(t, err)
+
+	// Same backing map, not a copy: identity is the observable proof no
+	// marshal/unmarshal happened.
+	out["probe"] = "sentinel"
+	assert.Equal(t, "sentinel", in["probe"],
+		"a wire-shaped payload must be passed through without a round-trip")
+}

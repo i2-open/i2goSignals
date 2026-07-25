@@ -24,19 +24,25 @@ func TestPartitionSetErrs_SplitsByVerdict(t *testing.T) {
 	assert.Equal(t, []string{"jti-crypto", "jti-kid", "jti-sig"}, d.Retry,
 		"key/JWKS rejections stay pending so a refresh can heal them")
 	assert.Equal(t, []string{"jti-revoked"}, d.Fatal)
+	assert.Empty(t, d.Unrecognized, "every code here is registered")
 	assert.Equal(t, "stream is revoked", d.FatalErr.Description,
 		"the fatal setErr is carried so the operator sees the peer's own reason")
 }
 
-// An err value from neither half of the registry must default-deny to park
-// (ADR-0040): cleared, never hot-retried, never terminal.
-func TestPartitionSetErrs_UnknownCodeParks(t *testing.T) {
+// An err value from neither half of the registry must be HELD, not cleared. The
+// sender has no park facility — its only moves are clear (permanent) and
+// leave-pending — so a code it cannot even name must never authorize deleting an
+// event. A vendor extension, a transient condition a peer invented, or a future
+// SSTP §2.3 keyword all land here.
+func TestPartitionSetErrs_UnknownCodeIsHeldNotCleared(t *testing.T) {
 	d := PartitionSetErrs(map[string]SetErr{
 		"jti-future": {Err: "https://example.com/some/future/problem"},
+		"jti-vendor": {Err: "server_busy"},
 	})
 
-	assert.Equal(t, []string{"jti-future"}, d.Clear)
-	assert.Empty(t, d.Retry)
+	assert.Equal(t, []string{"jti-future", "jti-vendor"}, d.Unrecognized)
+	assert.Empty(t, d.Clear, "an unrecognized code must never delete an event")
+	assert.Empty(t, d.Retry, "it is held, but not because the peer said it can heal")
 	assert.Empty(t, d.Fatal)
 }
 

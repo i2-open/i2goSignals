@@ -209,7 +209,18 @@ func TestPollEventValidationModeMatrix(t *testing.T) {
 					require.Contains(t, setErrs, jti, "%s must be reported in setErrs under %s", shape, tc.mode)
 					assert.Equal(t, "invalid_request", setErrs[jti].Error)
 					assert.NotEmpty(t, setErrs[jti].Description)
-					assert.False(t, acked[jti], "a rejected jti must not be acked")
+					// A rejected jti is ALSO acked. RFC8936 §2.4 keeps ack and
+					// setErrs separate and leaves a transmitter free to keep an
+					// un-acked SET pending, so reporting the error alone means a
+					// transmitter that does not read setErrs as an acknowledgement
+					// re-delivers the same SET on every poll forever — and with a
+					// bounded maxEvents the poison SET occupies the batch every
+					// cycle, so nothing behind it is ever delivered. The setErr
+					// still carries WHY it was refused; the ack says "do not send
+					// this again", which is true because a payload that fails
+					// validation fails identically on resend.
+					assert.True(t, acked[jti],
+						"a rejected jti must be acked as well as reported, or the poll stream livelocks")
 				} else {
 					assert.True(t, acked[jti], "%s acks under %s", shape, tc.mode)
 					assert.NotContains(t, setErrs, jti)

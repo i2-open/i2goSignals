@@ -30,6 +30,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
+	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -1337,12 +1338,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
 
-	// Consecutive per-SET invalid_request rejections with no accepted delivery in between —
-	// the signal that separates "one bad payload" from "this receiver rejects everything"
-	// (see pushInvalidRequestBudget). Loop-local, like the T3 timer: a failover restarts the
-	// count on the new lease holder, which is the right conservative reset.
-	consecutiveRejects := 0
-
 	for {
 		select {
 		case <-heartbeatCtx.Done():
@@ -1358,16 +1353,13 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			if cls.Class == goSetPush.ClassAccepted {
 				// R1: reset T3 idle timer on every successful push, including verify itself.
 				resetIdleTimer(idleTimer, idleVerifyInterval)
-				// An accepted delivery proves the receiver is not rejecting everything, so
-				// any earlier invalid_request was about that payload — reset the budget.
-				consecutiveRejects = 0
 				continue
 			}
 
 			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
 			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
 			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idleTimer, idleVerifyInterval, &consecutiveRejects)
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idleTimer, idleVerifyInterval)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -1438,17 +1430,37 @@ func (r *router) preflightCheckStatus(ctx context.Context, stream *model.StreamS
 	return RecoveryOutcomeResumed
 }
 
-// pushInvalidRequestBudget is how many CONSECUTIVE per-SET invalid_request rejections a push
-// stream may clear before the transmitter stops treating them as isolated bad payloads and
-// disables the stream instead.
+// corroboratesRejection reports whether THIS transmitter's own validators independently agree
+// that the SET behind jti carries a non-conformant event payload.
 //
-// It exists because RFC8935 §2.4 has one code for two very different situations: "this one event
-// is not conformant" (a receiver running event_validation=ENFORCE/STRICT) and "I cannot accept
-// anything you send" (unparseable, unverifiable, or no trust anchor — see goSetPush's receiver).
-// Nothing on the wire separates them, but their shapes differ: the first is interleaved with
-// accepted deliveries, the second never is. The counter resets on every accepted push, so this
-// bound is only ever reached by a receiver rejecting everything.
-const pushInvalidRequestBudget = 10
+// It is the discriminator for RFC8935 §2.4 invalid_request, which one code covers two very
+// different situations with: "this one event payload is not conformant" (a receiver running
+// event_validation=ENFORCE/STRICT) and "I cannot accept anything you send" (unparseable SET,
+// unverifiable signature, no trust anchor — see goSetPush's receiver). Nothing on the wire
+// separates them, so the transmitter asks the only other party that can have an opinion about
+// the payload: itself.
+//
+// Only Malformed corroborates. Unsupported means our registry has no validator for the type, so
+// we cannot vouch for the receiver's verdict either way — and a STRICT receiver rejecting a type
+// it did not engage is a contract mismatch, not a bad payload. Treating that as corroboration
+// would destroy a perfectly good event.
+//
+// Every URI carried by the SET is engaged, deliberately: this asks "is this payload conformant",
+// which is independent of any stream's negotiated contract.
+func (r *router) corroboratesRejection(jti string) bool {
+	rec := r.eventService.GetEventRecord(r.ctx, jti)
+	if rec == nil {
+		// Already gone (operator reset, or a racing ack). Nothing to corroborate, and
+		// nothing left to lose by taking the conservative branch.
+		return false
+	}
+	uris := make([]string, 0, len(rec.Event.Events))
+	for uri := range rec.Event.Events {
+		uris = append(uris, uri)
+	}
+	vs := goSetValidate.NewValidatorSet(goSetValidate.SharedBuiltinRegistry(), uris)
+	return vs.Validate(&rec.Event).Disposition == goSetValidate.Malformed
+}
 
 // dispatchPushFailure reacts to a non-Accepted push Classification. It either:
 //   - sleeps the receiver-suggested Retry-After (rate-limited), then returns Resumed (no exit);
@@ -1468,7 +1480,6 @@ func (r *router) dispatchPushFailure(
 	backfillTicker *time.Ticker,
 	idleTimer *time.Timer,
 	idleVerifyInterval time.Duration,
-	consecutiveRejects *int,
 ) (RecoveryOutcome, bool) {
 	sid := stream.StreamConfiguration.Id
 
@@ -1492,46 +1503,36 @@ func (r *router) dispatchPushFailure(
 		return RecoveryOutcomeDisabled, true
 
 	case goSetPush.ClassRFC8935Error:
-		// invalid_request is a rejection of ONE SET's payload, not a statement about the
-		// stream — a receiver running event_validation=ENFORCE/STRICT emits it for a single
-		// non-conformant event. Disabling the stream for it meant one bad payload stopped
-		// delivery for every subject until an operator intervened.
+		// invalid_request may be a rejection of ONE SET's payload — a receiver running
+		// event_validation=ENFORCE/STRICT emits it for a single non-conformant event — or a
+		// statement that the receiver can accept nothing at all (goSetPush's receiver returns
+		// the same code for an unparseable SET, a signature it could not verify, and a stream
+		// with no trust anchor). RFC8935 §2.4 gives no way to tell the two apart on the wire,
+		// and the two demand opposite responses: discard the event, or stop the stream.
 		//
-		// Poll is the precedent: a setErr'd JTI is logged WARN and then acked like any other
-		// (PollStreamHandler), clearing the SET without touching stream state. Push now
-		// matches, so all three transports treat a per-SET payload rejection the same way.
-		// The SET is acked rather than left unacked because a payload that fails validation
-		// fails identically on resend; leaving it would be an unbounded redelivery loop.
-		//
-		// The tolerance is BOUNDED, because RFC8935 §2.4 gives invalid_request to more than
-		// event validation: goSetPush's receiver also returns it for an unparseable SET, a
-		// signature it could not verify, and a stream with no trust anchor configured. Those
-		// are receiver-side faults that reject EVERY SET, so unbounded ack-and-continue would
-		// quietly drain the whole stream while it still reported healthy. A per-SET payload
-		// rejection is interleaved with accepted deliveries (which reset the counter); a
-		// receiver rejecting everything trips the budget and disables the stream with a
-		// visible reason, leaving the remaining events replayable.
-		if cls.RFC8935ErrCode == goSetPush.ErrInvalidRequest && *consecutiveRejects < pushInvalidRequestBudget {
-			*consecutiveRejects++
-			eventLogger.Warn("PUSH-SRV: receiver rejected SET payload, clearing it and continuing",
-				"sid", sid, "jti", jti,
-				"rfc8935ErrCode", cls.RFC8935ErrCode,
-				"description", cls.RFC8935Description,
-				"consecutiveRejects", *consecutiveRejects, "budget", pushInvalidRequestBudget)
-			if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
-				eventLogger.Error("PUSH-SRV: Error acking rejected event", "sid", sid, "jti", jti, "error", err)
-			}
-			return RecoveryOutcomeResumed, false
-		}
+		// So ask our own validators (corroboratesRejection). Neither branch loses an event
+		// that is not already provably bad:
+		//   - we agree the payload is malformed: the receiver is right, and a payload that
+		//     fails validation fails identically on resend. Clear it and keep delivering, so
+		//     one bad event cannot stop the stream for every subject however many arrive.
+		//   - we do not agree: the fault is receiver-side, so disable the stream and leave the
+		//     SET unacked. It stays pending and is replayed once an operator fixes the
+		//     receiver.
 		if cls.RFC8935ErrCode == goSetPush.ErrInvalidRequest {
-			// Budget spent with no successful delivery in between: this is not one bad
-			// payload, it is a receiver that rejects everything. Stop, so the rest of the
-			// stream stays deliverable once an operator fixes it.
-			reason := fmt.Sprintf("PUSH-SRV: receiver rejected %d consecutive SETs with invalid_request "+
-				"(last jti=%s): %s", *consecutiveRejects, jti, cls.RFC8935Description)
-			eventLogger.Error("PUSH-SRV: consecutive invalid_request budget exhausted, disabling stream",
-				"sid", sid, "jti", jti, "consecutiveRejects", *consecutiveRejects,
-				"budget", pushInvalidRequestBudget, "description", cls.RFC8935Description)
+			if r.corroboratesRejection(jti) {
+				eventLogger.Warn("PUSH-SRV: receiver rejected SET payload and our validators agree, clearing it",
+					"sid", sid, "jti", jti,
+					"rfc8935ErrCode", cls.RFC8935ErrCode,
+					"description", cls.RFC8935Description)
+				if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
+					eventLogger.Error("PUSH-SRV: Error acking rejected event", "sid", sid, "jti", jti, "error", err)
+				}
+				return RecoveryOutcomeResumed, false
+			}
+			reason := fmt.Sprintf("PUSH-SRV: receiver rejected jti=%s with invalid_request but the payload "+
+				"validates here, so the fault is receiver-side: %s", jti, cls.RFC8935Description)
+			eventLogger.Error("PUSH-SRV: uncorroborated invalid_request, disabling stream without discarding the event",
+				"sid", sid, "jti", jti, "description", cls.RFC8935Description)
 			r.updateStream(stream, model.StreamStateDisable, reason)
 			return RecoveryOutcomeDisabled, true
 		}

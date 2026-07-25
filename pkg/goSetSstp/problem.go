@@ -139,6 +139,16 @@ var setErrClassTable = map[string]SetErrClass{
 	ErrSetParse:    ClassSetErrNonRetryable,
 	ErrSetData:     ClassSetErrNonRetryable,
 	ErrDirectional: ClassSetErrNonRetryable,
+
+	// -- shared RFC8935 §2.4 / RFC8936 §7.1.2 half ----------------------
+	// invalid_request is what BOTH the acceptor (unreadable/empty body) and the
+	// event_validation policy (non-conformant event payload, spec #247) report,
+	// so it is the code a peer is most likely to send us. Registered explicitly
+	// rather than left to default-deny: PartitionSetErrs only lets a REGISTERED
+	// non-retryable verdict delete an event, and a payload that fails validation
+	// fails identically on resend — leaving it pending would be an unbounded
+	// claim/sign/POST/reject/release loop.
+	ErrCodeInvalidRequest: ClassSetErrNonRetryable,
 }
 
 // ClassifySetErr is the total classifier: every well-formed SetErr returns

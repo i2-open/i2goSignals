@@ -127,7 +127,17 @@ func normalizePayload(rawPayload any) (map[string]any, error) {
 	if rawPayload == nil {
 		return nil, errors.New("payload is null")
 	}
-	if m, ok := rawPayload.(map[string]any); ok {
+	// A map is returned as-is ONLY when it already holds wire shapes all the way
+	// down. Short-circuiting on the map type alone would skip the round-trip for
+	// a map assembled in-process — AddEventPayload(uri, map[string]any{"data":
+	// someStruct}) is a shape this repo's own event builders produce — and the
+	// validators would then see a Go struct where they assert map[string]any and
+	// report a perfectly conformant SET as Malformed.
+	//
+	// The check is a non-allocating type walk, so the common case (a payload that
+	// came off the wire, which is wire-shaped by construction) still costs no
+	// marshal/unmarshal on the receive hot path.
+	if m, ok := rawPayload.(map[string]any); ok && isWireShape(m) {
 		return m, nil
 	}
 
@@ -143,4 +153,35 @@ func normalizePayload(rawPayload any) (map[string]any, error) {
 		return nil, errors.New("payload is null")
 	}
 	return m, nil
+}
+
+// isWireShape reports whether v is built exclusively from the types
+// encoding/json produces when unmarshalling into an any: nil, bool, float64,
+// string, []any and map[string]any.
+//
+// Anything else — a typed struct, a pointer, an int, a time.Time, a
+// json.Number — means the value was assembled in-process rather than parsed off
+// the wire, so normalizePayload must round-trip it before a validator sees it.
+// Reporting false is always safe: the cost is one marshal/unmarshal.
+func isWireShape(v any) bool {
+	switch t := v.(type) {
+	case nil, bool, float64, string:
+		return true
+	case []any:
+		for _, e := range t {
+			if !isWireShape(e) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for _, e := range t {
+			if !isWireShape(e) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }

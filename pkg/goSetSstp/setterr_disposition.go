@@ -13,10 +13,12 @@ import "sort"
 // turns a peer-side JWKS rotation race into permanent, silent event loss with
 // the stream still reporting healthy.
 type SetErrDisposition struct {
-	// Clear are the JTIs to remove from the outbound buffer: the rejection will
-	// not heal by resending the same bytes (ClassSetErrNonRetryable, which is
-	// also the default-deny verdict for any unrecognized err value). Leaving one
-	// pending would be an unbounded claim/sign/POST/reject/release loop.
+	// Clear are the JTIs to remove from the outbound buffer: a REGISTERED
+	// ClassSetErrNonRetryable code, where the rejection will not heal by
+	// resending the same bytes. Leaving one pending would be an unbounded
+	// claim/sign/POST/reject/release loop.
+	//
+	// Unregistered codes are deliberately NOT here — see Unrecognized.
 	Clear []string
 
 	// Retry are the JTIs to LEAVE pending (ClassSetErrRetryable): a JWKS refresh
@@ -30,20 +32,47 @@ type SetErrDisposition struct {
 	// sender stops the direction rather than draining its queue into the void.
 	Fatal []string
 
+	// Unrecognized are the JTIs whose err string is in NEITHER half of the
+	// registry — a vendor URI, a transient condition a peer invented, or a
+	// future SSTP §2.3 keyword. Like Retry they are LEFT PENDING.
+	//
+	// ClassifySetErr resolves these to ClassSetErrNonRetryable by default-deny,
+	// but ADR-0040 spells that verdict "park, never terminal, never hot-retried"
+	// — and this sender has no park facility: its only two moves are clear
+	// (permanent) and leave-pending. Clearing on a code we cannot even name
+	// turns a peer-side condition we do not understand into permanent, silent
+	// event loss, so the conservative move is to keep the event. That is also
+	// what the pre-ADR-0040 sender did, which ignored setErrs entirely.
+	//
+	// They are a separate bucket rather than folded into Retry so a caller can
+	// say WHY it is holding them: "the peer says this can heal" and "we do not
+	// recognize what the peer said" are different operator stories.
+	Unrecognized []string
+
 	// FatalErr is the first (lowest JTI) stream-fatal setErr, carried so the
 	// caller can put the peer's own words in the operator-visible reason. Zero
 	// when Fatal is empty.
 	FatalErr SetErr
 }
 
-// PartitionSetErrs splits setErrs into the three sender-side buckets. Each slice
+// PartitionSetErrs splits setErrs into the four sender-side buckets. Each slice
 // is sorted so the outcome does not depend on Go's randomized map iteration — a
 // caller's logs, its ack list and its chosen fatal reason stay reproducible.
 // A nil/empty map yields the zero SetErrDisposition.
+//
+// It uses LookupSetErrClass rather than ClassifySetErr because the sender needs
+// the one distinction the total classifier throws away: whether the verdict was
+// READ from the table or DEFAULTED into it. Only a registered non-retryable code
+// authorizes deleting an event.
 func PartitionSetErrs(setErrs map[string]SetErr) SetErrDisposition {
 	var d SetErrDisposition
 	for jti, se := range setErrs {
-		switch ClassifySetErr(se) {
+		class, registered := LookupSetErrClass(se.Err)
+		if !registered {
+			d.Unrecognized = append(d.Unrecognized, jti)
+			continue
+		}
+		switch class {
 		case ClassSetErrRetryable:
 			d.Retry = append(d.Retry, jti)
 		case ClassSetErrStreamFatal:
@@ -55,6 +84,7 @@ func PartitionSetErrs(setErrs map[string]SetErr) SetErrDisposition {
 	sort.Strings(d.Clear)
 	sort.Strings(d.Retry)
 	sort.Strings(d.Fatal)
+	sort.Strings(d.Unrecognized)
 	if len(d.Fatal) > 0 {
 		d.FatalErr = setErrs[d.Fatal[0]]
 	}

@@ -1681,16 +1681,32 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		// Process successfully parsed and validated SETs
 		for jti, token := range parsed.ParsedSETs {
 			// Apply the stream's event_validation mode to the dispositions
-			// goSetPoll computed (spec #247 #251). A rejected jti goes into
-			// setErrs with invalid_request instead of being acked, and is never
-			// routed; other jtis in the same batch still ack normally, because the
-			// decision is per-jti even though it is whole-SET within a jti.
+			// goSetPoll computed (spec #247 #251). A rejected jti is reported in
+			// setErrs with invalid_request and is never routed; other jtis in the
+			// same batch still ack normally, because the decision is per-jti even
+			// though it is whole-SET within a jti.
+			//
+			// It is ALSO acked. RFC8936 §2.4 keeps ack and setErrs separate and
+			// leaves a transmitter free to keep an un-acked SET pending, so
+			// reporting the error alone means a transmitter that does not read
+			// setErrs as an acknowledgement re-delivers the same SET on every poll
+			// forever — and with a bounded maxEvents or JTI-ordered service, the
+			// poison SET occupies the batch every cycle and nothing behind it is
+			// ever delivered. The stream livelocks while still reporting enabled.
+			//
+			// Acking it says "do not send this again", which is true: a payload
+			// that fails validation fails identically on resend. The setErr is
+			// what carries WHY, so the transmitter still learns the SET was
+			// rejected rather than processed. This is the disposition the other
+			// two transports already take — push clears a corroborated rejection,
+			// SSTP maps invalid_request to Clear.
 			if decision := applyEventValidation(validationMode, validationTransportPoll,
 				ps.stream.StreamConfiguration.Id, jti, parsed.Validations[jti], ps.sa.Stats); decision.Reject {
 				setErrs[jti] = goSetPoll.SetErrType{
 					Error:       decision.ErrCode,
 					Description: decision.Description,
 				}
+				acks = append(acks, jti)
 				continue
 			}
 

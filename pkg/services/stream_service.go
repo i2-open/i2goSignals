@@ -288,9 +288,16 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 	}
 	eventValidationDefault := cfg.EventValidationDefault
 	if eventValidationDefault == model.EventValidationUnset || !eventValidationDefault.Valid() {
-		ssLog.Warn("event validation server default unset or unrecognized — falling back to NONE",
-			"requested", string(cfg.EventValidationDefault),
-			"effective", string(model.EventValidationNone))
+		// UNSET is the documented default for every deployment that has not opted
+		// in, so it is not a misconfiguration and must not WARN: an operator who
+		// sees a new "unrecognized value" warning on every node start and every
+		// failover learns to ignore the WARN channel. A genuinely bad value still
+		// WARNs — both here and, for the env path, in streamServiceConfigFromEnv.
+		if eventValidationDefault != model.EventValidationUnset {
+			ssLog.Warn("event validation server default unrecognized — falling back to NONE",
+				"requested", string(cfg.EventValidationDefault),
+				"effective", string(model.EventValidationNone))
+		}
 		eventValidationDefault = model.EventValidationNone
 	}
 	return &StreamService{
@@ -1077,18 +1084,54 @@ func resolveStreamEvents(requested []string, supported []string) (events []strin
 		copyEvents(model.MatchDeliveredEvents(requested, supported))
 }
 
-// expandRequestedEvents replaces every wildcard pattern in requested with the
-// concrete supported URIs it matches, preserving order and dropping duplicates
-// case-insensitively. A requested set with no wildcard is returned unchanged.
+// expandRequestedEvents replaces every pattern in requested with the concrete
+// supported URIs it matches, preserving order and dropping duplicates
+// case-insensitively. A requested set containing no pattern is returned
+// unchanged.
+//
+// An entry is treated as a pattern when it is NOT itself one of the supported
+// URIs yet still selects at least one of them. Testing for "*" would not do:
+// events_requested is a REGULAR EXPRESSION language (see
+// model.MatchesEventPattern), so "urn:ietf:params:scim:event:(feed|sig):add" is
+// a perfectly legal pattern with no wildcard in it, and echoing it back would
+// put a non-URI value in a field SSF 1.0 §7.1.1 defines as a set of event type
+// URIs — breaking resolveStreamEvents' own enumerate-never-echo contract.
+//
+// An entry matching NOTHING is dropped when it is pattern-shaped and preserved
+// verbatim otherwise. Both halves are load-bearing: a typo'd pattern must not be
+// echoed into the configuration, while a concrete URI this transmitter does not
+// support must survive the round trip, because events_requested records what the
+// receiver asked for and events_delivered is the subset that was granted.
 func expandRequestedEvents(requested []string, supported []string) []string {
-	hasPattern := false
-	for _, req := range requested {
-		if strings.Contains(req, "*") {
-			hasPattern = true
-			break
+	supportedSet := make(map[string]struct{}, len(supported))
+	for _, uri := range supported {
+		supportedSet[strings.ToLower(uri)] = struct{}{}
+	}
+
+	// Resolve each entry once — MatchDeliveredEvents compiles a regexp per call.
+	const (
+		keepVerbatim = iota
+		expand
+		drop
+	)
+	verdicts := make([]int, len(requested))
+	expansions := make([][]string, len(requested))
+	rewrite := false
+	for i, req := range requested {
+		if _, exact := supportedSet[strings.ToLower(req)]; exact {
+			continue
+		}
+		if matched := model.MatchDeliveredEvents([]string{req}, supported); len(matched) > 0 {
+			verdicts[i], expansions[i] = expand, matched
+			rewrite = true
+			continue
+		}
+		if isEventPattern(req) {
+			verdicts[i] = drop
+			rewrite = true
 		}
 	}
-	if !hasPattern {
+	if !rewrite {
 		return requested
 	}
 
@@ -1102,16 +1145,34 @@ func expandRequestedEvents(requested []string, supported []string) []string {
 		seen[key] = struct{}{}
 		expanded = append(expanded, uri)
 	}
-	for _, req := range requested {
-		if !strings.Contains(req, "*") {
+	for i, req := range requested {
+		switch verdicts[i] {
+		case drop:
+		case expand:
+			for _, uri := range expansions[i] {
+				add(uri)
+			}
+		default:
 			add(req)
-			continue
-		}
-		for _, uri := range model.MatchDeliveredEvents([]string{req}, supported) {
-			add(uri)
 		}
 	}
 	return expanded
+}
+
+// eventPatternMetachars are the regexp metacharacters whose presence marks an
+// events_requested entry as a PATTERN rather than a concrete event-type URI.
+//
+// "." and ":" are deliberately absent even though "." is a live metacharacter:
+// every event-type URI in the catalog contains both, so treating them as pattern
+// evidence would classify ordinary URIs as patterns and silently drop the
+// unsupported ones instead of recording them.
+const eventPatternMetachars = `*()|[]?+^${}\`
+
+// isEventPattern reports whether an events_requested entry is pattern-shaped.
+// Only consulted for entries that matched no supported URI, to decide between
+// dropping a typo'd pattern and preserving an unsupported concrete URI.
+func isEventPattern(req string) bool {
+	return strings.ContainsAny(req, eventPatternMetachars)
 }
 
 // copyEvents returns an independent copy so events_requested, events_delivered

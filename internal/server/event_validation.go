@@ -13,24 +13,10 @@ import (
 )
 
 // sharedBuiltinRegistry is the process-wide built-in validator registry used by
-// the receive paths.
-//
-// goSetValidate.BuiltinRegistry() deliberately returns a FRESH registry per call
-// so one embedder chaining Register cannot mutate another's view. That guarantee
-// is for library consumers; internal/server never registers onto the result, so
-// paying the full pack-registration cost (SSF + CAEP + RISC + SCIM + WISE) on
-// every inbound SET bought nothing. A Registry is documented as safe for
-// concurrent reads once built, which is exactly how it is used here.
-var (
-	sharedBuiltinRegistryOnce sync.Once
-	sharedBuiltinRegistryVal  *goSetValidate.Registry
-)
-
+// the receive paths. internal/server never registers onto it, which is the one
+// precondition goSetValidate.SharedBuiltinRegistry attaches.
 func sharedBuiltinRegistry() *goSetValidate.Registry {
-	sharedBuiltinRegistryOnce.Do(func() {
-		sharedBuiltinRegistryVal = goSetValidate.BuiltinRegistry()
-	})
-	return sharedBuiltinRegistryVal
+	return goSetValidate.SharedBuiltinRegistry()
 }
 
 // engagedUriCache memoizes engaged-URI derivation, which compiles one regexp per
@@ -150,13 +136,25 @@ func engagedEventUrisFor(cfg *model.StreamConfiguration) []string {
 	if cfg == nil {
 		return nil
 	}
-	delivered := cfg.EventsDelivered
-	if len(delivered) == 0 {
-		return nil
-	}
 	supported := cfg.EventsSupported
 	if len(supported) == 0 {
 		supported = model.GetSupportedEvents()
+	}
+
+	// An empty events_delivered means the stream never negotiated one — not that
+	// it engaged nothing. Streams registered before spec #247 only populated
+	// events_requested/events_delivered when the registration supplied
+	// events_requested, so every stream created without it has [] persisted.
+	//
+	// Engaging nothing for those would make STRICT reject 100% of their traffic
+	// (every real event type reports Unsupported, which STRICT rejects) while an
+	// identically-configured NEW stream works, because only new streams get the
+	// full-catalog default. Falling back to the supported set makes the two agree:
+	// STRICT vouches for everything this server can validate and rejects only what
+	// it genuinely cannot.
+	delivered := cfg.EventsDelivered
+	if len(delivered) == 0 {
+		delivered = supported
 	}
 
 	key := engagedUriCacheKey(delivered, supported)

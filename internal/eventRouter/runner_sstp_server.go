@@ -98,6 +98,11 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET with a retryable code, holding it for resend",
 				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
 		}
+		for _, jti := range disposition.Unrecognized {
+			se := inbound.SetErrs[jti]
+			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET with an unrecognized code, holding it rather than discarding it",
+				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
+		}
 		for _, jti := range disposition.Clear {
 			se := inbound.SetErrs[jti]
 			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET, clearing it",
