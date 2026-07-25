@@ -44,9 +44,11 @@ func NewRegistry() *Registry {
 // Register onto the result must not mutate process-wide state that another
 // embedder depends on.
 func BuiltinRegistry() *Registry {
-	return NewRegistry().
+	r := NewRegistry().
 		Register(SsfVerificationEventUri, ValidatorFunc(validateVerificationEvent)).
 		Register(SsfStreamUpdatedEventUri, ValidatorFunc(validateStreamUpdatedEvent))
+
+	return registerCaepValidators(r)
 }
 
 // Register adds or replaces the validator for eventURI and returns the receiver
