@@ -452,10 +452,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 
 	config.EventsSupported = model.GetSupportedEvents()
 
-	if len(request.EventsRequested) > 0 {
-		config.EventsRequested = request.EventsRequested
-		config.EventsDelivered = s.calculateDeliveredEvents(request.EventsRequested, config.EventsSupported)
-	}
+	// An omitted events_requested defaults to the full supported catalog, and any
+	// "*" shorthand is enumerated here so the stored/returned configuration is
+	// always a concrete URI set (see resolveStreamEvents).
+	config.EventsRequested, config.EventsDelivered = resolveStreamEvents(request.EventsRequested, config.EventsSupported)
 
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
@@ -989,7 +989,17 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		if txStreamResp.Iss != "" {
 			config.Iss = txStreamResp.Iss
 		}
-		config.EventsRequested = request.EventsRequested
+		// Echo back what we asked the transmitter for, enumerated against the
+		// transmitter's own catalog so a "*" shorthand never survives into the
+		// stored configuration. An omitted events_requested keeps the full-catalog
+		// default already resolved at registration time above.
+		if len(request.EventsRequested) > 0 {
+			txSupported := txStreamResp.EventsSupported
+			if len(txSupported) == 0 {
+				txSupported = txStreamResp.EventsDelivered
+			}
+			config.EventsRequested = expandRequestedEvents(request.EventsRequested, txSupported)
+		}
 		config.Description = request.Description
 		config.TxWellKnownUrl = request.TxWellKnownUrl
 
@@ -1033,6 +1043,76 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 // as the service-local spelling its callers already use.
 func (s *StreamService) calculateDeliveredEvents(requested []string, supported []string) []string {
 	return model.MatchDeliveredEvents(requested, supported)
+}
+
+// resolveStreamEvents turns a registration's events_requested into the
+// (events_requested, events_delivered) pair that is persisted on the stream and
+// returned to the caller.
+//
+// Two normalizations happen here:
+//
+//   - An absent events_requested means "everything you support". SSF 1.0 §7.1.1
+//     leaves the field optional, and a stream registered without it previously
+//     negotiated an empty events_delivered and so delivered nothing at all —
+//     never what a receiver that omitted the field intended.
+//   - "*" is a non-standard goSignals shorthand accepted on the way IN only.
+//     events_requested and events_delivered are defined as sets of event type
+//     URIs, so any wildcard pattern is expanded to the URIs it selects and a
+//     returned configuration always enumerates rather than echoing a pattern.
+//
+// A requested URI carrying no wildcard is preserved verbatim even when this
+// transmitter does not support it: events_requested records what the receiver
+// asked for, and events_delivered is the subset that was granted.
+func resolveStreamEvents(requested []string, supported []string) (events []string, delivered []string) {
+	if len(requested) == 0 {
+		return copyEvents(supported), copyEvents(supported)
+	}
+	return expandRequestedEvents(requested, supported),
+		copyEvents(model.MatchDeliveredEvents(requested, supported))
+}
+
+// expandRequestedEvents replaces every wildcard pattern in requested with the
+// concrete supported URIs it matches, preserving order and dropping duplicates
+// case-insensitively. A requested set with no wildcard is returned unchanged.
+func expandRequestedEvents(requested []string, supported []string) []string {
+	hasPattern := false
+	for _, req := range requested {
+		if strings.Contains(req, "*") {
+			hasPattern = true
+			break
+		}
+	}
+	if !hasPattern {
+		return requested
+	}
+
+	expanded := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	add := func(uri string) {
+		key := strings.ToLower(uri)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		expanded = append(expanded, uri)
+	}
+	for _, req := range requested {
+		if !strings.Contains(req, "*") {
+			add(req)
+			continue
+		}
+		for _, uri := range model.MatchDeliveredEvents([]string{req}, supported) {
+			add(uri)
+		}
+	}
+	return expanded
+}
+
+// copyEvents returns an independent copy so events_requested, events_delivered
+// and events_supported never share a backing array — MatchDeliveredEvents
+// returns supported as-is for the "*" shorthand, which would otherwise alias.
+func copyEvents(events []string) []string {
+	return append([]string{}, events...)
 }
 
 // UpdateStream patches an existing stream. configReq is a StreamStateRecord so
@@ -1083,8 +1163,16 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	config := &streamRec.StreamConfiguration
 
 	if len(configReq.EventsRequested) > 0 {
-		config.EventsRequested = configReq.EventsRequested
-		config.EventsDelivered = s.calculateDeliveredEvents(configReq.EventsRequested, configReq.EventsSupported)
+		// events_supported is Read-Only (SSF 1.0 §7.1.1) and a PATCH body rarely
+		// carries it; fall back to the stream's own catalog so a patch re-negotiates
+		// against what this transmitter actually supports instead of nothing. Empty
+		// events_requested is "not patched" here, so the create-time full-catalog
+		// default does not apply.
+		supported := configReq.EventsSupported
+		if len(supported) == 0 {
+			supported = config.EventsSupported
+		}
+		config.EventsRequested, config.EventsDelivered = resolveStreamEvents(configReq.EventsRequested, supported)
 	}
 
 	if configReq.Format != "" {

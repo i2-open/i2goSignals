@@ -431,6 +431,8 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 	inboundMode, _ := model.SstpModeToRouteMode(b.Inbound.Mode)
 
 	supported := model.GetSupportedEvents()
+	primaryRequested, primaryDelivered := resolveStreamEvents(b.Primary.Events, supported)
+	inboundRequested, inboundDelivered := resolveStreamEvents(b.Inbound.Events, supported)
 
 	primary := model.StreamConfiguration{
 		Id:              pairId,
@@ -438,8 +440,8 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		Aud:             b.Primary.Aud,
 		IssuerJWKSUrl:   b.Primary.IssJwksUrl,
 		EventsSupported: supported,
-		EventsRequested: b.Primary.Events,
-		EventsDelivered: s.calculateDeliveredEvents(b.Primary.Events, supported),
+		EventsRequested: primaryRequested,
+		EventsDelivered: primaryDelivered,
 		Description:     b.Description,
 		Format:          CSubjectFmt,
 		RouteMode:       primaryMode,
@@ -454,8 +456,8 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		Aud:             b.Inbound.Aud,
 		IssuerJWKSUrl:   b.Inbound.IssJwksUrl,
 		EventsSupported: supported,
-		EventsRequested: b.Inbound.Events,
-		EventsDelivered: s.calculateDeliveredEvents(b.Inbound.Events, supported),
+		EventsRequested: inboundRequested,
+		EventsDelivered: inboundDelivered,
 		Description:     b.Description,
 		Format:          CSubjectFmt,
 		RouteMode:       inboundMode,
