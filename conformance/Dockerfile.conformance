@@ -13,7 +13,7 @@
 ##
 ## Build stage — compile from source (pinned to go.mod's toolchain).
 ##
-FROM golang:1.26.4-bookworm AS build
+FROM golang:1.26.5-bookworm AS build
 
 WORKDIR /src
 
