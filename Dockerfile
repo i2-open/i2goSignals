@@ -53,4 +53,16 @@ COPY --chmod=0644 ./THIRD-PARTY-NOTICES.txt  ./THIRD-PARTY-NOTICES.txt
 
 EXPOSE 8888
 
+# Image-level default health probe. Mirrors the per-service healthchecks in the
+# compose files so plain `docker run` gets the same signal. /app/healthcheck is
+# used instead of curl/wget — the chainguard/bash base ships neither — and is
+# exec'd directly, so no shell is involved. TLS is the default listener, hence
+# https and -k (the server may present a self-signed or SPIFFE cert). The binary
+# takes a single URL and has no scheme fallback, so a TLS-disabled deployment or
+# a non-default port must override with `docker run --health-cmd` (or the compose
+# `healthcheck` key). retries x interval gives a 5-minute grace window for
+# mongo/cluster join.
+HEALTHCHECK --interval=10s --timeout=5s --retries=30 \
+    CMD ["/app/healthcheck", "-k", "https://localhost:8888/health"]
+
 CMD ["/app/goSignalsServer"]
