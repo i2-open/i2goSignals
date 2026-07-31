@@ -114,6 +114,36 @@ ARCHS := $(subst linux/,,$(subst $(comma), ,$(PLATFORMS)))
 
 # Cross-compile every binary the production Dockerfile copies, for every arch
 # in PLATFORMS. For single-arch local builds this is just the host arch.
+#
+# NOT ENABLED — image-payload stripping, recorded here for a later release.
+# Debug information is deliberately retained for the current release.
+#
+# Appending the linker flags `-s` (disable symbol table) and `-w` (disable DWARF
+# generation) to the link step below strips debug metadata from the six staged
+# binaries. Measured on linux/arm64 at v0.12.0-alpha.16:
+#
+#     goSignalsServer   37.5MB -> 29.3MB  (-22%)
+#     goSsfServer       37.5MB -> 29.3MB  (-22%)
+#     goSignals         22.4MB -> 15.7MB  (-30%)
+#     cluster-monitor   20.6MB -> 14.3MB  (-31%)
+#     healthcheck        7.6MB ->  5.3MB  (-31%)
+#     genTlsKeys         6.0MB ->  4.1MB  (-32%)
+#     ------------------------------------------
+#     image payload      131MiB ->  98MiB (-25%)
+#
+# Verified to have no effect on: panic tracebacks (Go resolves those from the
+# pclntab, not DWARF, so function/file/line survive stripping), embedded build
+# info (`go version -m` still reports all 29 deps, so buildx `--sbom=true` and
+# the provenance attestation are unaffected), and the -X version injection in
+# LDFLAGS. The one real loss is source-level debugging (Delve/gdb) against a
+# binary pulled out of the image — which is why this stays off for now.
+#
+# Scoped to this target only. console-build / server-build keep full debug info
+# regardless, and Dockerfile-dev is unaffected either way: it builds from source
+# under `dlv debug` and never reads LDFLAGS.
+#
+# To enable, uncomment and append $(STRIP_LDFLAGS) to -ldflags in the recipe:
+# STRIP_LDFLAGS := -s -w
 cross-compile-linux:
 	@for arch in $(ARCHS); do \
 		outdir=$(BIN_DIR)/linux/$$arch; \
