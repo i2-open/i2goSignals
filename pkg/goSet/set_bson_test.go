@@ -1,6 +1,7 @@
 package goSet
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -220,6 +221,103 @@ func TestSecurityEventTokenBSON_WireNamedClaims(t *testing.T) {
 	assert.Equal(t, "jti-1", bson.Raw(raw).Lookup("jti").StringValue())
 	assert.Equal(t, "https://issuer.example", bson.Raw(raw).Lookup("iss").StringValue())
 	assert.Equal(t, int64(1700000000), bson.Raw(raw).Lookup("iat").AsInt64())
+}
+
+// TestEventSubjectBSON_KeepsTopLevelSub: EventSubject embeds SubjectIdentifier
+// by value, so it would inherit that type's promoted MarshalBSON — which sees
+// only the SubjectIdentifier half and silently drops the top-level `sub` the
+// type exists to carry. Issue #259 flagged the collision and scoped the type
+// out; this pins that the wire-shape codec did not reintroduce it as data loss.
+func TestEventSubjectBSON_KeepsTopLevelSub(t *testing.T) {
+	es := EventSubject{
+		SubIdentifier: SubIdentifier{Sub: "top-level-sub"},
+		SubjectIdentifier: SubjectIdentifier{
+			Format:           "opaque",
+			OpaqueIdentifier: OpaqueIdentifier{Id: "codex:exec-1"},
+		},
+	}
+
+	raw, err := bson.Marshal(es)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{"sub", "format", "id"}, bsonKeys(t, raw),
+		"both halves are stored, not just the SubjectIdentifier")
+	assert.Equal(t, "top-level-sub", bson.Raw(raw).Lookup("sub").StringValue())
+
+	var got EventSubject
+	require.NoError(t, bson.Unmarshal(raw, &got))
+	assert.Equal(t, es, got, "round trip preserves both halves")
+}
+
+// TestEventSubjectBSON_MatchesJSONShape: the stored shape is the wire shape,
+// which for EventSubject means Go's embedded-field depth rules decide `sub` —
+// SubIdentifier.Sub shadows the deeper IssuerSubjectIdentifier.Sub. BSON must
+// mirror whatever JSON does rather than invent a resolution of its own.
+func TestEventSubjectBSON_MatchesJSONShape(t *testing.T) {
+	es := EventSubject{
+		SubIdentifier: SubIdentifier{Sub: "top-level-sub"},
+		SubjectIdentifier: SubjectIdentifier{
+			Format:                  "iss_sub",
+			IssuerSubjectIdentifier: IssuerSubjectIdentifier{Issuer: "https://issuer.example"},
+		},
+	}
+
+	raw, err := bson.Marshal(es)
+	require.NoError(t, err)
+	j, err := json.Marshal(es)
+	require.NoError(t, err)
+
+	var fromJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(j, &fromJSON))
+	var fromBSON map[string]interface{}
+	require.NoError(t, bson.Unmarshal(raw, &fromBSON))
+
+	assert.Equal(t, fromJSON, fromBSON, "stored document matches the wire document")
+}
+
+// TestSecurityEventTokenBSON_OmitsNullMembers: a minimal SET stores no
+// null-valued key. `events` is required by RFC 8417 and so cannot carry
+// `json:",omitempty"` — its wire shape must not move — but a nil map has no
+// business reaching the stored document.
+func TestSecurityEventTokenBSON_OmitsNullMembers(t *testing.T) {
+	set := SecurityEventToken{
+		RegisteredClaims: jwt.RegisteredClaims{ID: "jti-null"},
+	}
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"jti"}, bsonKeys(t, raw),
+		"a nil events map must not be stored as null")
+
+	var got SecurityEventToken
+	require.NoError(t, bson.Unmarshal(raw, &got))
+	assert.Equal(t, "jti-null", got.ID)
+	assert.Nil(t, got.Events, "an omitted events key reads back as nil, as it was")
+}
+
+// TestSecurityEventTokenBSON_KeepsNullsInsideEventPayloads: the null filter is
+// top-level only. A null inside an arbitrary event payload is the payload's
+// own data — dropping it would corrupt the SET on round-trip.
+func TestSecurityEventTokenBSON_KeepsNullsInsideEventPayloads(t *testing.T) {
+	set := SecurityEventToken{
+		RegisteredClaims: jwt.RegisteredClaims{ID: "jti-payload-null"},
+		Events: map[string]interface{}{
+			"urn:example:event": map[string]any{"previous_value": nil},
+		},
+	}
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	var got SecurityEventToken
+	require.NoError(t, bson.Unmarshal(raw, &got))
+
+	payload, ok := got.Events["urn:example:event"].(map[string]interface{})
+	require.True(t, ok, "event payload survives the round trip")
+	value, present := payload["previous_value"]
+	assert.True(t, present, "an explicit null in a payload is the payload's data")
+	assert.Nil(t, value)
 }
 
 // TestSecurityEventTokenBSON_RoundTrip: a stored SET decodes back to the token

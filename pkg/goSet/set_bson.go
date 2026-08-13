@@ -11,7 +11,7 @@ import (
 //
 // Without it, the default mongo-driver struct codec serializes these types by
 // Go field name and has no notion of the `json:",omitempty"` tags, so every
-// persisted event carried all eleven embedded subject-identifier variants with
+// persisted event carried all ten embedded subject-identifier variants with
 // empty values, and buried the RFC 8417 registered claims in a
 // `registeredclaims` subdocument under Go names rather than their wire names
 // (iss, aud, exp, nbf, iat, jti). See issue #259.
@@ -23,6 +23,13 @@ import (
 
 // wireBSON encodes v via its JSON representation so the resulting BSON document
 // carries wire member names and omits absent members.
+//
+// Top-level null members are dropped as well. A few wire members are required
+// by RFC 8417 and so cannot carry `json:",omitempty"` (notably `events`), but a
+// null tells a reader nothing the missing key does not, and storing it defeats
+// the compaction this file exists for. Only the top level is filtered: nulls
+// deeper in an arbitrary event payload are the payload's own data and are
+// stored verbatim.
 func wireBSON(v interface{}) ([]byte, error) {
 	j, err := json.Marshal(v)
 	if err != nil {
@@ -32,7 +39,20 @@ func wireBSON(v interface{}) ([]byte, error) {
 	if err := bson.UnmarshalExtJSON(j, false, &doc); err != nil {
 		return nil, err
 	}
-	return bson.Marshal(doc)
+	return bson.Marshal(dropNullMembers(doc))
+}
+
+// dropNullMembers returns doc without its null-valued elements, preserving the
+// order of the rest.
+func dropNullMembers(doc bson.D) bson.D {
+	kept := make(bson.D, 0, len(doc))
+	for _, e := range doc {
+		if e.Value == nil {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // wireUnwrapBSON is the inverse of wireBSON: it re-reads a stored document
@@ -97,6 +117,29 @@ var legacySubjectKeys = []string{
 // subjectIdentifierWire is SubjectIdentifier stripped of its BSON methods, so
 // the json codec inside wireBSON/wireUnwrapBSON sees the plain struct.
 type subjectIdentifierWire SubjectIdentifier
+
+// MarshalBSON persists an event subject in its wire shape.
+//
+// EventSubject embeds SubjectIdentifier by value, so it would otherwise inherit
+// the promoted methods above — and those see only the SubjectIdentifier half,
+// silently dropping the top-level `sub` that EventSubject exists to carry.
+// These two methods shadow them. EventSubject is not on the persistence path
+// today (SecurityEventToken holds a *SubjectIdentifier), so there is no legacy
+// shape to sniff for; this closes the trap rather than migrating anything.
+func (es EventSubject) MarshalBSON() ([]byte, error) {
+	return wireBSON(eventSubjectWire(es))
+}
+
+// UnmarshalBSON reads an event subject back from its stored wire shape.
+func (es *EventSubject) UnmarshalBSON(data []byte) error {
+	return wireUnwrapBSON(data, (*eventSubjectWire)(es))
+}
+
+// eventSubjectWire is EventSubject stripped of its own BSON methods. It still
+// inherits SubjectIdentifier's promoted ones, which is harmless: wireBSON and
+// wireUnwrapBSON route through the json codec, never through bson.Marshal on
+// the value itself.
+type eventSubjectWire EventSubject
 
 // MarshalBSON persists a SET in its RFC 8417 wire shape: registered claims at
 // the top level under their wire names (iss, sub, aud, exp, nbf, iat, jti),

@@ -20,7 +20,7 @@ every stored event was Go-shaped rather than wire-shaped:
   subdocument under Go names (`issuer`, `audience`, `expiresat`, `issuedat`,
   `id`) instead of appearing at the top level as `iss`, `aud`, `exp`, `iat`,
   `jti`.
-- `SubjectIdentifier` embeds eleven identifier variants, so an opaque subject
+- `SubjectIdentifier` embeds ten identifier variants, so an opaque subject
   that is two members on the wire (`{"format":"opaque","id":"…"}`) was stored
   fully expanded, with every unused variant present and empty.
 - The same defect reached the `subject_filters` collection, because
@@ -76,6 +76,26 @@ to reparse, so a DAO-level reparse path would have fixed only half the problem.
 **D4 — No migration.** Old rows are read in place and rewritten in the new
 shape only if something updates them. There is no backfill and no dual-write.
 
+**D5 — Top-level null members are dropped on encode.** `json:",omitempty"`
+carries most of the omission, but a few wire members are required by RFC 8417
+and so cannot have it — `events` above all. A nil `Events` map would therefore
+still store `events: null`. Since the on-wire SET shape is fixed and must not
+move, the omission happens in the BSON encoder instead of on the `json:` tag.
+The filter is deliberately **top level only**: a null deeper inside an
+arbitrary event payload is the payload's own data, and dropping it would
+corrupt the SET on round-trip.
+
+**D6 — `EventSubject` gets its own methods to shadow the promoted ones.** It
+embeds `SubjectIdentifier` by value, so D1's methods are promoted onto it — and
+they see only the `SubjectIdentifier` half, silently dropping the top-level
+`sub` the type exists to carry. It is not on the persistence path today
+(`SecurityEventToken` holds a `*SubjectIdentifier`), so this is a latent trap
+rather than a live defect, but a promoted method that loses data is not
+something to leave armed for the next caller. Its stored shape mirrors its JSON
+shape, including Go's embedded-field depth rule that lets `SubIdentifier.Sub`
+shadow the deeper `IssuerSubjectIdentifier.Sub`; BSON follows the wire rather
+than inventing its own resolution.
+
 ## Consequences
 
 ### Positive
@@ -83,7 +103,7 @@ shape only if something updates them. There is no backfill and no dual-write.
 - Stored events are readable SETs: claims under their wire names, subjects as
   RFC 9493 members, and nothing the token did not carry.
 - Row size drops materially for the common case — an opaque subject goes from
-  eleven subdocuments to two members.
+  a format string plus ten subdocuments to two members.
 - `subject_filters` gets the same compaction and the same read compatibility for
   free, because the fix is on the shared type.
 - Absent complex-subject members are no longer stored as null, which matters
