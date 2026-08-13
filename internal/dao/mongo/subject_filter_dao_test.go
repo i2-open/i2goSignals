@@ -9,6 +9,7 @@ import (
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -307,4 +308,74 @@ func (suite *SubjectFilterDAOMongoSuite) TestListComplexReturnsOnlyNonSimpleForS
 		suite.NotEqual(model.SubjectKindSimple, e.Kind, "ListComplex must never return a simple entry")
 		suite.Equal("stream-1", e.StreamId)
 	}
+}
+
+// TestAdd_StoresCompactSubject: the subject_filters collection embeds a
+// *goSet.SubjectIdentifier, so it carries the same issue #259 defect as the
+// events collection. A stored complex subject must hold only the members the
+// receiver actually filtered on — an absent complex member is a §8.1.3.1
+// wildcard and must not be persisted as null.
+func (suite *SubjectFilterDAOMongoSuite) TestAdd_StoresCompactSubject() {
+	ctx := context.Background()
+	entry := &model.SubjectFilterEntry{
+		StreamId:     "stream-compact",
+		CanonicalKey: "complex:user=email:alice@example.com",
+		Kind:         model.SubjectKindComplex,
+		Subject: &goSet.SubjectIdentifier{
+			Format: "complex",
+			ComplexIdentifier: goSet.ComplexIdentifier{
+				User: &goSet.SubjectIdentifier{
+					Format:          "email",
+					EmailIdentifier: goSet.EmailIdentifier{Email: "alice@example.com"},
+				},
+			},
+		},
+	}
+	suite.Require().NoError(suite.dao.Add(ctx, entry))
+
+	var stored bson.Raw
+	suite.Require().NoError(suite.collection.FindOne(ctx,
+		bson.M{"stream_id": "stream-compact"}).Decode(&stored))
+
+	subDoc, ok := stored.Lookup("subject").DocumentOK()
+	suite.Require().True(ok)
+	suite.ElementsMatch([]string{"format", "user"}, rawKeys(suite.T(), subDoc),
+		"absent complex members are wildcards and must not be stored")
+
+	userDoc, ok := subDoc.Lookup("user").DocumentOK()
+	suite.Require().True(ok)
+	suite.ElementsMatch([]string{"format", "email"}, rawKeys(suite.T(), userDoc))
+
+	got, err := suite.dao.Get(ctx, "stream-compact", "complex:user=email:alice@example.com")
+	suite.Require().NoError(err)
+	suite.Require().NotNil(got.Subject)
+	suite.Equal(*entry.Subject, *got.Subject, "stored subject must round-trip")
+}
+
+// TestGet_ReadsLegacySubjectDocument: filter rows written before the fix must
+// still decode. Subject filtering is a delivery gate — a silently empty subject
+// would change which events reach the receiver rather than failing loudly.
+func (suite *SubjectFilterDAOMongoSuite) TestGet_ReadsLegacySubjectDocument() {
+	ctx := context.Background()
+	legacy := bson.D{
+		{Key: "stream_id", Value: "stream-legacy"},
+		{Key: "canonical_key", Value: "email:bob@example.com"},
+		{Key: "kind", Value: model.SubjectKindSimple},
+		{Key: "subject", Value: bson.D{
+			{Key: "format", Value: "email"},
+			{Key: "usernameidentifier", Value: bson.D{{Key: "username", Value: ""}}},
+			{Key: "emailidentifier", Value: bson.D{{Key: "email", Value: "bob@example.com"}}},
+			{Key: "opaqueidentifier", Value: bson.D{{Key: "id", Value: ""}}},
+			{Key: "complexidentifier", Value: bson.D{{Key: "user", Value: nil}}},
+		}},
+	}
+	_, err := suite.collection.InsertOne(ctx, legacy)
+	suite.Require().NoError(err)
+
+	got, err := suite.dao.Get(ctx, "stream-legacy", "email:bob@example.com")
+	suite.Require().NoError(err)
+	suite.Require().NotNil(got.Subject)
+	suite.Equal("email", got.Subject.Format)
+	suite.Equal("bob@example.com", got.Subject.Email,
+		"pre-fix filter row must not decode to an empty subject")
 }
