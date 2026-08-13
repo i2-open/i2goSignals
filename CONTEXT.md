@@ -37,6 +37,15 @@ stream's current server-issued bearer) doubles as self-service credential
 rotation. See **Rotate-on-GET** below and
 [`docs/security_model.md`](docs/security_model.md).
 
+### Standards-required public SSF surface
+
+The Internet-reachable endpoints required for SSF interoperability: transmitter
+discovery and keys, stream configuration/status/verification/subject management,
+and push, poll, or SSTP event delivery. It excludes operator-only administration,
+bootstrap, cluster-internal, health, metrics, and Swagger surfaces unless a
+deployment deliberately publishes them. Avoid the narrower term “event
+endpoints,” which hides the required stream-control endpoints such as status.
+
 ### Rotate-on-GET (bearer rotation)
 
 The SSF behavior where a GET of a stream's configuration returns a

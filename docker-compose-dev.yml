@@ -498,7 +498,7 @@ services:
       - "./config/keycloak/themes:/opt/keycloak/themes"
       - "./config/certs:/opt/keycloak/certs"
   goSignalsAdmin:
-    image: independentid/gosignalsadmin:latest
+    image: independentid/gosignalsadmin:v0.12.0-alpha.16
     container_name: gosignalsadmin
     hostname: gosignalsadmin
     networks:
