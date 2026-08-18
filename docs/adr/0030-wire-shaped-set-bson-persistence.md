@@ -55,10 +55,31 @@ including for types we do not own.
 
 **D2 — Relaxed (non-canonical) ExtJSON is the intermediate.** It preserves
 field order, so stored documents are deterministic, and it preserves integer
-types rather than widening everything to double. The known constraint is that
-`$`-prefixed keys inside an arbitrary event payload are not representable; that
-surfaces as a loud `Insert` failure, not silent corruption, and no SCIM / RISC /
-CAEP profile uses such keys.
+types rather than widening everything to double. The constraint it brings is
+that `$`-prefixed keys are reserved by the encoding, and an arbitrary event
+payload may legitimately use them.
+
+That constraint was first recorded here as "not representable … a loud `Insert`
+failure, not silent corruption." **That was wrong, and the truth is the
+inverse.** Verified against mongo-driver v2.8.0: `bson.UnmarshalExtJSON`
+accepts a reserved name and silently rewrites the value. `{"$numberLong":"7"}`
+is stored as the scalar `7`; `{"$date":{"$numberLong":"1600000000000"}}` as
+`{"$date":"2020-09-13T12:26:40Z"}` — the original object is destroyed with no
+error. Only a *malformed* wrapper (`{"$oid":"not-hex"}`) fails loudly, and an
+*unrecognised* name (`$op`) passes through untouched. So the damage was
+confined to well-formed uses of the reserved names, and was invisible.
+
+`rejectReservedKeys` therefore refuses the whole class before encoding: a SET
+carrying a `$`-prefixed member anywhere fails its insert with an error naming
+the member. A router must not silently reshape a token it was asked to persist,
+and a failed insert is recoverable where a corrupted stored SET is not. It
+remains true that no SCIM / RISC / CAEP profile uses such keys, so this is a
+guard against third-party payloads rather than a path we expect to hit.
+
+Escaping the names instead of rejecting them would keep such payloads storable,
+but it would move the stored shape away from the wire shape this ADR exists to
+establish, and would need a matching unescape on read. Rejecting is the smaller
+commitment; if a real payload ever needs those names, escaping stays open.
 
 **D3 — Read compatibility is a legacy sniff inside `UnmarshalBSON`.** Before
 decoding, the unmarshaler checks the document's top-level keys for markers that
@@ -146,6 +167,16 @@ both are that tool's rendering of a typed BSON integer, not stored text.
   branch that has to keep being tested.
 - `json:` tags are now load-bearing for the storage format. Renaming a member
   changes the on-disk shape, which was previously insulated from JSON changes.
+- A SET whose event payload uses a `$`-prefixed member is now unstorable rather
+  than stored wrong (D2). That is the intended trade, but it converts a silent
+  corruption into a delivery failure, which is a visible behaviour change for
+  any producer that was relying on the old path appearing to work.
+- `pkg/goSet` now imports `go.mongodb.org/mongo-driver/v2/bson`, so a package
+  CLAUDE.md describes as a standalone library carries the Mongo driver in its
+  dependency closure. The package still imports nothing under `internal/`, and
+  the driver is already an indirect dependency of every consumer that persists,
+  but a pure SET consumer now pulls it in. The alternative — hand-written
+  `bson:` tags on every type — was rejected as D1.
 - Widening costs 4 bytes per integer and leaves rows written before D7 holding
   int32 for the same members. Both are absorbed by MongoDB's cross-type numeric
   comparison, but a future `$type` filter over `events` would have to accept

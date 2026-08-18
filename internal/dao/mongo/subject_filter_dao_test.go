@@ -361,13 +361,7 @@ func (suite *SubjectFilterDAOMongoSuite) TestGet_ReadsLegacySubjectDocument() {
 		{Key: "stream_id", Value: "stream-legacy"},
 		{Key: "canonical_key", Value: "email:bob@example.com"},
 		{Key: "kind", Value: model.SubjectKindSimple},
-		{Key: "subject", Value: bson.D{
-			{Key: "format", Value: "email"},
-			{Key: "usernameidentifier", Value: bson.D{{Key: "username", Value: ""}}},
-			{Key: "emailidentifier", Value: bson.D{{Key: "email", Value: "bob@example.com"}}},
-			{Key: "opaqueidentifier", Value: bson.D{{Key: "id", Value: ""}}},
-			{Key: "complexidentifier", Value: bson.D{{Key: "user", Value: nil}}},
-		}},
+		{Key: "subject", Value: legacySubjectDoc("email", "bob@example.com", "")},
 	}
 	_, err := suite.collection.InsertOne(ctx, legacy)
 	suite.Require().NoError(err)

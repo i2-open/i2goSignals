@@ -145,13 +145,7 @@ func TestSubjectIdentifierBSON_Aliases(t *testing.T) {
 	members, err := bson.Raw(raw).Lookup("identifiers").Array().Values()
 	require.NoError(t, err)
 	require.Len(t, members, 2)
-	first, err := members[0].Document().Elements()
-	require.NoError(t, err)
-	firstKeys := make([]string, 0, len(first))
-	for _, e := range first {
-		firstKeys = append(firstKeys, e.Key())
-	}
-	assert.ElementsMatch(t, []string{"format", "email"}, firstKeys,
+	assert.ElementsMatch(t, []string{"format", "email"}, bsonKeys(t, members[0].Document()),
 		"nested alias members must be compact too")
 
 	var got SubjectIdentifier
@@ -176,13 +170,8 @@ func TestSubjectIdentifierBSON_Complex(t *testing.T) {
 	assert.ElementsMatch(t, []string{"format", "user", "tenant"}, bsonKeys(t, raw),
 		"absent complex members are wildcards and must not be stored")
 
-	userKeys, err := bson.Raw(raw).Lookup("user").Document().Elements()
-	require.NoError(t, err)
-	keys := make([]string, 0, len(userKeys))
-	for _, e := range userKeys {
-		keys = append(keys, e.Key())
-	}
-	assert.ElementsMatch(t, []string{"format", "email"}, keys)
+	assert.ElementsMatch(t, []string{"format", "email"},
+		bsonKeys(t, bson.Raw(raw).Lookup("user").Document()))
 
 	var got SubjectIdentifier
 	require.NoError(t, bson.Unmarshal(raw, &got))
@@ -535,4 +524,156 @@ func TestSecurityEventTokenBSON_WideningPreservesValues(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, wire, string(out),
 		"widening must not alter any value on the way back to the wire")
+}
+
+// TestWireBSON_RejectsReservedKeys: `$`-prefixed member names are reserved by
+// the Extended JSON encoding the persister uses as its intermediate. A payload
+// using one is refused rather than stored, because the encoder would otherwise
+// rewrite the value silently — see ADR-0030 D2.
+func TestWireBSON_RejectsReservedKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload map[string]interface{}
+		member  string
+	}{
+		{"recognised wrapper", map[string]interface{}{"$numberLong": "7"}, "$numberLong"},
+		{"unrecognised name", map[string]interface{}{"$op": "add"}, "$op"},
+		{"nested in an array", map[string]interface{}{
+			"items": []interface{}{map[string]interface{}{"$date": "2020-09-13T12:26:40Z"}},
+		}, "$date"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set := CreateSet(nil, "https://issuer.example", []string{"https://receiver.example"})
+			set.AddEventPayload("urn:example:event", tc.payload)
+
+			_, err := bson.Marshal(set)
+			require.Error(t, err, "a reserved member must not be silently reshaped")
+			assert.Contains(t, err.Error(), tc.member,
+				"the error must name the offending member")
+		})
+	}
+}
+
+// TestWireBSON_AcceptsDollarInsideValues: only member NAMES are reserved. A
+// `$` in a value, or in a value that merely looks like a wrapper name, is
+// ordinary data and must still persist.
+func TestWireBSON_AcceptsDollarInsideValues(t *testing.T) {
+	set := CreateSet(nil, "https://issuer.example", []string{"https://receiver.example"})
+	set.AddEventPayload("urn:example:event", map[string]interface{}{
+		"amount": "$42.00",
+		"note":   "$numberLong",
+	})
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	var got SecurityEventToken
+	require.NoError(t, bson.Unmarshal(raw, &got))
+	payload := got.Events["urn:example:event"].(map[string]interface{})
+	assert.Equal(t, "$42.00", payload["amount"])
+	assert.Equal(t, "$numberLong", payload["note"])
+}
+
+// TestSubjectIdentifierBSON_MalformedDocumentErrors: a truncated document must
+// fail loudly. Returning "not legacy" would send it down the wire-shape path,
+// where unknown fields are ignored and it would decode to the same silent
+// empty subject the legacy sniff exists to prevent.
+func TestSubjectIdentifierBSON_MalformedDocumentErrors(t *testing.T) {
+	raw, err := bson.Marshal(legacySubjectDoc("codex:exec-truncated"))
+	require.NoError(t, err)
+
+	var got SubjectIdentifier
+	err = bson.Unmarshal(raw[:len(raw)-4], &got)
+	require.Error(t, err, "a malformed document must not decode to an empty subject")
+	assert.Empty(t, got.Id)
+}
+
+// legacyAliasesSubjectDoc is the Go-shaped document the pre-#259 codec wrote
+// for an aliases subject: the nested members are themselves Go-shaped, so each
+// one must re-enter UnmarshalBSON and sniff again.
+func legacyAliasesSubjectDoc() bson.D {
+	nested := func(format, key, value string) bson.D {
+		d := legacySubjectDoc("")
+		d[0] = bson.E{Key: "format", Value: format}
+		for i, e := range d {
+			if e.Key == key {
+				d[i] = bson.E{Key: key, Value: value}
+			}
+		}
+		return d
+	}
+	return bson.D{
+		{Key: "format", Value: "aliases"},
+		{Key: "usernameidentifier", Value: bson.D{{Key: "username", Value: ""}}},
+		{Key: "emailidentifier", Value: bson.D{{Key: "email", Value: ""}}},
+		{Key: "opaqueidentifier", Value: bson.D{{Key: "id", Value: ""}}},
+		{Key: "aliasesidentifier", Value: bson.D{{Key: "identifiers", Value: bson.A{
+			nested("email", "emailidentifier", ""),
+			nested("opaque", "opaqueidentifier", ""),
+		}}}},
+	}
+}
+
+// TestSubjectIdentifierBSON_ReadsLegacyAliases: the nested branch of the legacy
+// sniff. Each alias element is itself a legacy document and must fall back in
+// turn, rather than decoding to an empty subject.
+func TestSubjectIdentifierBSON_ReadsLegacyAliases(t *testing.T) {
+	doc := legacyAliasesSubjectDoc()
+	// Give the two nested aliases real values.
+	aliases := doc[4].Value.(bson.D)[0].Value.(bson.A)
+	for i, e := range aliases[0].(bson.D) {
+		if e.Key == "emailidentifier" {
+			aliases[0].(bson.D)[i] = bson.E{Key: e.Key, Value: bson.D{{Key: "email", Value: "alias@example.com"}}}
+		}
+	}
+	for i, e := range aliases[1].(bson.D) {
+		if e.Key == "opaqueidentifier" {
+			aliases[1].(bson.D)[i] = bson.E{Key: e.Key, Value: bson.D{{Key: "id", Value: "alias-opaque"}}}
+		}
+	}
+
+	raw, err := bson.Marshal(doc)
+	require.NoError(t, err)
+
+	var got SubjectIdentifier
+	require.NoError(t, bson.Unmarshal(raw, &got))
+
+	assert.Equal(t, "aliases", got.Format)
+	require.Len(t, got.Identifiers, 2, "legacy alias members must survive the fallback")
+	assert.Equal(t, "alias@example.com", got.Identifiers[0].Email)
+	assert.Equal(t, "alias-opaque", got.Identifiers[1].Id)
+}
+
+// TestSubjectIdentifierBSON_ReadsLegacyComplex: same for a populated complex
+// subject, whose members are pointers to further legacy documents.
+func TestSubjectIdentifierBSON_ReadsLegacyComplex(t *testing.T) {
+	user := legacySubjectDoc("")
+	user[0] = bson.E{Key: "format", Value: "email"}
+	user[2] = bson.E{Key: "emailidentifier", Value: bson.D{{Key: "email", Value: "user@example.com"}}}
+
+	doc := bson.D{
+		{Key: "format", Value: "complex"},
+		{Key: "opaqueidentifier", Value: bson.D{{Key: "id", Value: ""}}},
+		{Key: "complexidentifier", Value: bson.D{
+			{Key: "user", Value: user},
+			{Key: "group", Value: nil},
+			{Key: "device", Value: nil},
+			{Key: "session", Value: nil},
+			{Key: "tenant", Value: legacySubjectDoc("tenant-7")},
+			{Key: "orgunit", Value: nil},
+		}},
+	}
+
+	raw, err := bson.Marshal(doc)
+	require.NoError(t, err)
+
+	var got SubjectIdentifier
+	require.NoError(t, bson.Unmarshal(raw, &got))
+
+	assert.Equal(t, "complex", got.Format)
+	require.NotNil(t, got.User, "a legacy complex member must not decode to nil")
+	assert.Equal(t, "user@example.com", got.User.Email)
+	require.NotNil(t, got.Tenant)
+	assert.Equal(t, "tenant-7", got.Tenant.Id)
+	assert.Nil(t, got.Group, "absent complex members stay absent")
 }

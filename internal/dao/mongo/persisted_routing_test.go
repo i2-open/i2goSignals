@@ -92,7 +92,7 @@ func routeStream(iss string, aud []string, delivered ...string) *model.StreamSta
 // legacyEventDoc is a hand-transcribed pre-#259 events row: the registered
 // claims buried under Go field names in a `registeredclaims` subdocument, and
 // the subject expanded into every identifier variant.
-func legacyEventDoc(jti, iss string, aud []string, opaqueId string, types []string) bson.D {
+func legacyEventDoc(jti, iss string, aud []string, subjectEmail string, types []string) bson.D {
 	audA := bson.A{}
 	for _, a := range aud {
 		audA = append(audA, a)
@@ -112,13 +112,7 @@ func legacyEventDoc(jti, iss string, aud []string, opaqueId string, types []stri
 			}},
 			{Key: "timeofevent", Value: nil},
 			{Key: "transactionid", Value: ""},
-			{Key: "subjectid", Value: bson.D{
-				{Key: "format", Value: "email"},
-				{Key: "usernameidentifier", Value: bson.D{{Key: "username", Value: ""}}},
-				{Key: "emailidentifier", Value: bson.D{{Key: "email", Value: opaqueId}}},
-				{Key: "opaqueidentifier", Value: bson.D{{Key: "id", Value: ""}}},
-				{Key: "complexidentifier", Value: bson.D{{Key: "user", Value: nil}}},
-			}},
+			{Key: "subjectid", Value: legacySubjectDoc("email", subjectEmail, "")},
 			{Key: "events", Value: bson.D{{Key: routeTypeAcctDisabled, Value: bson.D{}}}},
 			{Key: "kid", Value: ""},
 		}},
