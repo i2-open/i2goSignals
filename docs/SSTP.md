@@ -133,6 +133,41 @@ patched later via UPDATE.
 Because mode is per direction, a pair can FORWARD outbound while PUBLISH-ing
 inbound, etc.
 
+### Inbound mode governs routing, not just signing
+
+The inbound (rx) mode decides whether an SSTP-ingested SET is **routed onward**,
+exactly as the equivalent mode does on an RFC 8935 push receiver:
+
+| Inbound mode | Routed to other streams? |
+| :----------- | :----------------------- |
+| `IMPORT` | **No.** The SET is consumed locally — persisted and available to local readers, but never fanned out. |
+| `FORWARD` | **Yes**, to every matching outbound stream (aud- or explicitly-routed). |
+| `PUBLISH` | **Yes**, to every matching outbound stream. |
+
+**`FORWARD` and `PUBLISH` are identical on the inbound leg.** Both mean "route
+onward"; the inbound mode does not decide whether the SET is forwarded verbatim
+or re-signed. That choice belongs to each **outbound** stream and is made at
+delivery time from *that* stream's own route mode — exactly as on the push path.
+So an outbound stream in `FORWARD` mode forwards verbatim even when the inbound
+direction is `PUBLISH`, and vice versa. Read the mode table above this section
+for the signing behaviour of a given direction; read this one only for whether
+an inbound SET travels further.
+
+This is what makes a two-hop topology work: in
+`A --sstp--> goSignals --sstp--> B`, hop 2 happens only when the inbound
+direction of the A-pair is `FORWARD` or `PUBLISH`. Under `IMPORT` the SET stops
+at goSignals.
+
+Note the two different "defaults" here. A bootstrap that omits `mode` maps to
+`PUBLISH` (`SstpModeToRouteMode`), so a newly created pair stores an explicit
+mode either way. A *persisted* record whose inbound `RouteMode` is blank
+predates per-direction mode; those are treated as `IMPORT`, which is how they
+behaved before inbound routing was honoured, so upgrading does not start
+fanning out their events.
+
+A SET is never routed back out the pair it arrived on, even when that pair's
+outbound direction matches it on `aud`.
+
 ## Delivery runtime
 
 ### Client (initiator) side
