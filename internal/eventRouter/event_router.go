@@ -805,15 +805,35 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	r.IncrementCounter(streamState, eventToken, true)
 	r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventToken)
 
-	// SSTP-server inbound is terminal: the rx side imports the SET for local
-	// consumption (RouteModeImport). It is not fanned out to RFC8935/RFC8936
-	// outbound streams — the pair's own outbound is the tx side, fed independently
-	// (PRD #154 Q5.1).
+	// An SSTP inbound honours its own direction's RouteMode, the same way an
+	// RFC 8935 push receiver does (#261): IMPORT consumes the SET locally,
+	// FORWARD and PUBLISH fan it out to matching outbound streams. As on the
+	// push path, the forward-verbatim vs re-sign decision is NOT made here —
+	// it is made per outbound stream at delivery time from that stream's own
+	// route mode.
+	//
+	// streamState is the rx-side view built by sstpInboundCounterRecord, whose
+	// StreamConfiguration is the pair's SstpInbound, so GetRouteMode() is the
+	// inbound direction's mode.
+	//
+	// This guard previously returned unconditionally, citing PRD #154 Q5.1
+	// ("consumed locally … not fanned out"). That predates the per-direction
+	// `mode` on the pair bootstrap, and made a two-hop
+	// A --sstp--> goSignals --sstp--> B topology silently drop hop 2.
+	//
+	// An empty mode is treated as IMPORT rather than following
+	// SstpModeToRouteMode's PUBLISH default: the bootstrap always stores an
+	// explicit mode, so a blank one means a record written before the field
+	// existed, and those were all import-only under the old guard. Defaulting
+	// to PUBLISH would start fanning out their events on upgrade.
+	sstpInboundRouted := false
 	if sstpInbound {
-		return nil
-	}
-
-	if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
+		mode := streamState.GetRouteMode()
+		if mode == model.RouteModeImport || mode == "" {
+			return nil
+		}
+		sstpInboundRouted = true
+	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
 		return nil
 	}
@@ -868,7 +888,15 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		}
 	}
 
-	r.routeEventToSstpPairsLocked(event)
+	// When the SET arrived over SSTP, exclude the pair it arrived on so it is
+	// not sent straight back to the peer that just delivered it (#261). The
+	// originating pair's tx side frequently matches the event on aud, so
+	// without this the FORWARD/PUBLISH fan-out would echo.
+	excludePairId := ""
+	if sstpInboundRouted {
+		excludePairId = streamState.PairId
+	}
+	r.routeEventToSstpPairsLocked(event, excludePairId)
 	return nil
 }
 
@@ -883,8 +911,15 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 //   - SSTP-server (responder) pairs: when the event matches, broadcast
 //     wake-sstp-server to active nodes (the server side takes no lease, so any node
 //     may be holding the long-poll) and wake the local long-poll buffer.
-func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord) {
+//
+// excludePairId, when non-empty, names a pair to skip: the SET arrived on that
+// pair's rx side, and returning it down the same pair's tx side would echo it
+// back to the peer that sent it (#261). Empty for locally-originated events.
+func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludePairId string) {
 	for pairId, pair := range r.sstpClientStreams {
+		if excludePairId != "" && pairId == excludePairId {
+			continue
+		}
 		if !r.eventService.MatchesStream(&pair, event) {
 			continue
 		}
@@ -911,6 +946,11 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord) {
 	}
 
 	for txSid, pair := range r.sstpServerStreams {
+		// Responder pairs are keyed by tx SID, so compare on the record's
+		// PairId rather than the map key.
+		if excludePairId != "" && pair.PairId == excludePairId {
+			continue
+		}
 		if !r.eventService.MatchesStream(&pair, event) {
 			continue
 		}
