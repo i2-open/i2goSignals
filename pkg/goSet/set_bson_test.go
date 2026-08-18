@@ -447,3 +447,92 @@ func TestSecurityEventTokenBSON_ReadsLegacyDocument(t *testing.T) {
 		"nested legacy subject must decode too")
 	assert.Equal(t, []string{"urn:example:event"}, got.GetEventIds())
 }
+
+// bsonTypeAt returns the BSON type stored at a dotted path.
+func bsonTypeAt(t *testing.T, raw []byte, path ...string) bson.Type {
+	t.Helper()
+	val, err := bson.Raw(raw).LookupErr(path...)
+	require.NoError(t, err, "no member at %v", path)
+	return val.Type
+}
+
+// TestSecurityEventTokenBSON_DateClaimsAreInt64 pins the stored integer type to
+// the member rather than to the value. The ExtJSON parser picks the narrowest
+// integer type a value fits in, so `iat` persisted as int32 while any
+// NumericDate at or past 2038-01-19T03:14:07Z persisted as int64 — the same
+// claim carrying two different BSON types depending on when the SET was issued.
+func TestSecurityEventTokenBSON_DateClaimsAreInt64(t *testing.T) {
+	set := SecurityEventToken{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "https://issuer.example",
+			ID:        "urn:uuid:8a843c88",
+			IssuedAt:  jwt.NewNumericDate(time.Unix(1786735851, 0)), // pre-2038, fits int32
+			ExpiresAt: jwt.NewNumericDate(time.Unix(2200000000, 0)), // post-2038, does not
+		},
+		TimeOfEvent: jwt.NewNumericDate(time.Unix(1786735851, 0)),
+		Events:      map[string]interface{}{"urn:example:event": map[string]interface{}{}},
+	}
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	for _, claim := range []string{"iat", "exp", "toe"} {
+		assert.Equal(t, bson.TypeInt64, bsonTypeAt(t, raw, claim),
+			"%s must persist as int64 whichever side of 2038 it falls on", claim)
+	}
+}
+
+// TestSecurityEventTokenBSON_PayloadIntegersAreInt64: the widening recurses into
+// event payloads, including through arrays. Unlike the null filter — which is
+// top-level only because dropping a null loses data — widening an integer is
+// lossless and invisible to a reader, so there is no reason to stop at the
+// top level and leave payload numbers typed by magnitude.
+func TestSecurityEventTokenBSON_PayloadIntegersAreInt64(t *testing.T) {
+	set := SecurityEventToken{
+		RegisteredClaims: jwt.RegisteredClaims{Issuer: "https://issuer.example", ID: "j"},
+		Events: map[string]interface{}{
+			"urn:example:event": map[string]interface{}{
+				"count":  42,
+				"nested": map[string]interface{}{"deep": 7},
+				"list":   []interface{}{1, 9999999999},
+				"ratio":  1.5,
+			},
+		},
+	}
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	assert.Equal(t, bson.TypeInt64, bsonTypeAt(t, raw, "events", "urn:example:event", "count"))
+	assert.Equal(t, bson.TypeInt64, bsonTypeAt(t, raw, "events", "urn:example:event", "nested", "deep"))
+	assert.Equal(t, bson.TypeInt64, bsonTypeAt(t, raw, "events", "urn:example:event", "list", "0"),
+		"array elements are widened too")
+	assert.Equal(t, bson.TypeInt64, bsonTypeAt(t, raw, "events", "urn:example:event", "list", "1"))
+	assert.Equal(t, bson.TypeDouble, bsonTypeAt(t, raw, "events", "urn:example:event", "ratio"),
+		"a fractional number stays a double; only integers are widened")
+}
+
+// TestSecurityEventTokenBSON_WideningPreservesValues: widening changes the
+// stored type, never the value a reader gets back. Relaxed ExtJSON renders
+// int32 and int64 identically, so the delivered SET is byte-for-byte what it
+// was before — this pins that the round-trip stayed lossless.
+func TestSecurityEventTokenBSON_WideningPreservesValues(t *testing.T) {
+	wire := `{"iss":"https://issuer.example","aud":["https://receiver.example"],` +
+		`"exp":2200000000,"iat":1786735851,"jti":"urn:uuid:8a843c88","toe":1786735851,` +
+		`"sub_id":{"format":"opaque","id":"claude-code:toolu_01"},` +
+		`"events":{"urn:example:event":{"count":42,"list":[1,9999999999],"ratio":1.5}}}`
+
+	var set SecurityEventToken
+	require.NoError(t, json.Unmarshal([]byte(wire), &set))
+
+	raw, err := bson.Marshal(set)
+	require.NoError(t, err)
+
+	var got SecurityEventToken
+	require.NoError(t, bson.Unmarshal(raw, &got))
+
+	out, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.JSONEq(t, wire, string(out),
+		"widening must not alter any value on the way back to the wire")
+}

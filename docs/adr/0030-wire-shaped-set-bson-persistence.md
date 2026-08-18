@@ -96,6 +96,32 @@ shape, including Go's embedded-field depth rule that lets `SubIdentifier.Sub`
 shadow the deeper `IssuerSubjectIdentifier.Sub`; BSON follows the wire rather
 than inventing its own resolution.
 
+**D7 — Integers persist as int64 at every depth.** D2 chose relaxed ExtJSON
+partly because it "preserves integer types rather than widening everything to
+double," but that parser picks the *narrowest* integer type each value fits in,
+so the stored BSON type was decided by magnitude rather than by member. `iat`
+persisted as int32, while any `NumericDate` at or past 2038-01-19T03:14:07Z
+persisted as int64 — the same claim carrying two types depending on when the
+SET was issued, and a `$type`-sensitive query or aggregation would have had to
+know which. `wireBSON` now widens every int32 to int64 before marshalling.
+
+JSON has a single number type and the stored shape mirrors the wire shape, so
+the mapping is pinned rather than inferred: integer → int64, fractional →
+double. Unlike D5's null filter, this recurses into event payloads. Dropping a
+null loses data, which is why D5 stops at the top level; widening an integer is
+lossless and invisible to a reader, because relaxed ExtJSON renders int32 and
+int64 identically on the way back out. The delivered SET is unchanged.
+
+No migration, per D4: existing rows keep their int32, and MongoDB compares and
+sorts numeric types against each other — which the events collection already
+relied on, since pre- and post-2038 rows were going to disagree anyway. Nothing
+queries inside `event` (see Context), so the change is unobservable outside
+storage.
+
+Note this does not make stored numbers render as plain JSON in a GUI — no such
+BSON type exists. A viewer that showed `NumberInt(…)` now shows `NumberLong(…)`;
+both are that tool's rendering of a typed BSON integer, not stored text.
+
 ## Consequences
 
 ### Positive
@@ -108,6 +134,8 @@ than inventing its own resolution.
   free, because the fix is on the shared type.
 - Absent complex-subject members are no longer stored as null, which matters
   because SSF §8.1.3.1 reads an absent member as a wildcard.
+- A claim's stored BSON type no longer depends on its value, so `iat` does not
+  silently change type on 2038-01-19 and a reader can assume int64 (D7).
 
 ### Negative
 
@@ -118,6 +146,10 @@ than inventing its own resolution.
   branch that has to keep being tested.
 - `json:` tags are now load-bearing for the storage format. Renaming a member
   changes the on-disk shape, which was previously insulated from JSON changes.
+- Widening costs 4 bytes per integer and leaves rows written before D7 holding
+  int32 for the same members. Both are absorbed by MongoDB's cross-type numeric
+  comparison, but a future `$type` filter over `events` would have to accept
+  either.
 
 ## Related
 

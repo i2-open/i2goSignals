@@ -30,6 +30,8 @@ import (
 // the compaction this file exists for. Only the top level is filtered: nulls
 // deeper in an arbitrary event payload are the payload's own data and are
 // stored verbatim.
+//
+// Every integer is then widened to int64, at every depth. See widenInts.
 func wireBSON(v interface{}) ([]byte, error) {
 	j, err := json.Marshal(v)
 	if err != nil {
@@ -39,7 +41,44 @@ func wireBSON(v interface{}) ([]byte, error) {
 	if err := bson.UnmarshalExtJSON(j, false, &doc); err != nil {
 		return nil, err
 	}
-	return bson.Marshal(dropNullMembers(doc))
+	return bson.Marshal(widenInts(dropNullMembers(doc)))
+}
+
+// widenInts returns v with every int32 replaced by the equivalent int64,
+// recursing through documents and arrays.
+//
+// The ExtJSON parser picks the narrowest integer type a value fits in, so the
+// stored BSON type would otherwise depend on the value rather than the member:
+// `iat` persists as int32 today and as int64 for any NumericDate at or past
+// 2038-01-19T03:14:07Z, and two SETs written either side of that boundary would
+// disagree on the type of the same claim. JSON has a single number type, and
+// the stored shape is meant to mirror the wire shape, so the mapping is pinned
+// here instead of being left to magnitude: integer to int64, fractional to
+// double.
+//
+// Unlike dropNullMembers this recurses into event payloads. Dropping a null
+// loses data, so that filter is deliberately top-level only; widening an
+// integer is lossless and invisible to the reader, since relaxed ExtJSON
+// renders int32 and int64 identically on the way back out.
+func widenInts(v interface{}) interface{} {
+	switch t := v.(type) {
+	case bson.D:
+		out := make(bson.D, len(t))
+		for i, e := range t {
+			out[i] = bson.E{Key: e.Key, Value: widenInts(e.Value)}
+		}
+		return out
+	case bson.A:
+		out := make(bson.A, len(t))
+		for i, e := range t {
+			out[i] = widenInts(e)
+		}
+		return out
+	case int32:
+		return int64(t)
+	default:
+		return v
+	}
 }
 
 // dropNullMembers returns doc without its null-valued elements, preserving the
