@@ -1,0 +1,288 @@
+package goSet
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+// This file gives the SET types a BSON representation that matches their wire
+// (JSON) representation.
+//
+// Without it, the default mongo-driver struct codec serializes these types by
+// Go field name and has no notion of the `json:",omitempty"` tags, so every
+// persisted event carried all ten embedded subject-identifier variants with
+// empty values, and buried the RFC 8417 registered claims in a
+// `registeredclaims` subdocument under Go names rather than their wire names
+// (iss, aud, exp, nbf, iat, jti). See issue #259.
+//
+// The wire shape is produced by round-tripping through the type's own JSON
+// encoding, which is the single source of truth for member names and for which
+// members are omitted when empty. That also covers jwt.RegisteredClaims, a
+// third-party type we cannot tag.
+
+// wireBSON encodes v via its JSON representation so the resulting BSON document
+// carries wire member names and omits absent members.
+//
+// Top-level null members are dropped as well. A few wire members are required
+// by RFC 8417 and so cannot carry `json:",omitempty"` (notably `events`), but a
+// null tells a reader nothing the missing key does not, and storing it defeats
+// the compaction this file exists for. Only the top level is filtered: nulls
+// deeper in an arbitrary event payload are the payload's own data and are
+// stored verbatim.
+//
+// Every integer is then widened to int64, at every depth. See widenInts.
+//
+// Member names beginning with `$` are rejected before encoding. See
+// rejectReservedKeys.
+func wireBSON(v interface{}) ([]byte, error) {
+	j, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectReservedKeys(j); err != nil {
+		return nil, err
+	}
+	var doc bson.D
+	if err := bson.UnmarshalExtJSON(j, false, &doc); err != nil {
+		return nil, err
+	}
+	return bson.Marshal(widenInts(dropNullMembers(doc)))
+}
+
+// rejectReservedKeys returns an error if any object member name in j begins
+// with `$`.
+//
+// The encoder reads its input as Extended JSON, which gives `$`-prefixed names
+// a reserved meaning, and a SET's event payloads are arbitrary third-party
+// JSON that may legitimately use them. The parser recognises such a member as
+// a type wrapper and REWRITES the value silently: `{"$numberLong":"7"}` is
+// stored as the scalar 7, and `{"$date":{"$numberLong":"1600000000000"}}` as
+// `{"$date":"2020-09-13T12:26:40Z"}` — the original object is gone, with no
+// error. Only a malformed wrapper (`{"$oid":"not-hex"}`) fails loudly, and an
+// unrecognised name (`$op`) passes through untouched, so the damage is
+// confined to well-formed uses of the reserved names and is invisible without
+// this guard.
+//
+// A router must not silently reshape a security event token it was asked to
+// persist, so the whole class is refused at the boundary: the caller gets a
+// failed insert naming the member rather than a corrupted stored SET. Escaping
+// instead of rejecting would keep such payloads storable, but it would change
+// the stored shape away from the wire shape this file exists to preserve.
+func rejectReservedKeys(j []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(j))
+	dec.UseNumber()
+	// inObject tracks the open containers; when the innermost is an object,
+	// expectKey alternates between member name and value.
+	var inObject []bool
+	expectKey := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				inObject = append(inObject, true)
+				expectKey = true
+				continue
+			case '[':
+				inObject = append(inObject, false)
+				expectKey = false
+				continue
+			default: // '}' or ']' — the container itself was a value
+				inObject = inObject[:len(inObject)-1]
+			}
+		case string:
+			if expectKey {
+				if strings.HasPrefix(t, "$") {
+					return fmt.Errorf("goSet: cannot persist member %q: "+
+						"names beginning with $ are reserved by the BSON "+
+						"Extended JSON encoding and would be stored with a "+
+						"different value", t)
+				}
+				expectKey = false
+				continue
+			}
+		}
+		// A completed value: inside an object the next token is a key again.
+		expectKey = len(inObject) > 0 && inObject[len(inObject)-1]
+	}
+}
+
+// widenInts returns v with every int32 replaced by the equivalent int64,
+// recursing through documents and arrays.
+//
+// The ExtJSON parser picks the narrowest integer type a value fits in, so the
+// stored BSON type would otherwise depend on the value rather than the member:
+// `iat` persists as int32 today and as int64 for any NumericDate at or past
+// 2038-01-19T03:14:07Z, and two SETs written either side of that boundary would
+// disagree on the type of the same claim. JSON has a single number type, and
+// the stored shape is meant to mirror the wire shape, so the mapping is pinned
+// here instead of being left to magnitude: integer to int64, fractional to
+// double.
+//
+// Unlike dropNullMembers this recurses into event payloads. Dropping a null
+// loses data, so that filter is deliberately top-level only; widening an
+// integer is lossless and invisible to the reader, since relaxed ExtJSON
+// renders int32 and int64 identically on the way back out.
+func widenInts(v interface{}) interface{} {
+	switch t := v.(type) {
+	case bson.D:
+		out := make(bson.D, len(t))
+		for i, e := range t {
+			out[i] = bson.E{Key: e.Key, Value: widenInts(e.Value)}
+		}
+		return out
+	case bson.A:
+		out := make(bson.A, len(t))
+		for i, e := range t {
+			out[i] = widenInts(e)
+		}
+		return out
+	case int32:
+		return int64(t)
+	default:
+		return v
+	}
+}
+
+// dropNullMembers returns doc without its null-valued elements, preserving the
+// order of the rest.
+func dropNullMembers(doc bson.D) bson.D {
+	kept := make(bson.D, 0, len(doc))
+	for _, e := range doc {
+		if e.Value == nil {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+// decodeWireBSON is the inverse of wireBSON: it re-reads a stored document
+// through the type's JSON decoding.
+func decodeWireBSON(data []byte, v interface{}) error {
+	j, err := bson.MarshalExtJSON(bson.Raw(data), false, false)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(j, v)
+}
+
+// hasLegacyKey reports whether the stored document carries any of the Go field
+// names the pre-#259 default struct codec produced. Those names never occur in
+// the wire shape, so their presence unambiguously identifies an old document.
+//
+// This matters because BSON decoding IGNORES unknown fields: without this
+// check an old row would decode to a zero value — an empty subject that
+// silently mis-matches a subject filter — rather than failing loudly.
+//
+// A malformed document is returned as an error rather than as "not legacy",
+// for the same reason: falling through to the wire-shape path would decode it
+// to that same silent empty subject.
+func hasLegacyKey(data []byte, keys ...string) (bool, error) {
+	elems, err := bson.Raw(data).Elements()
+	if err != nil {
+		return false, err
+	}
+	for _, e := range elems {
+		for _, k := range keys {
+			if e.Key() == k {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// MarshalBSON persists a subject identifier in its RFC 9493 wire shape — only
+// the members actually present, under their wire names.
+func (sid SubjectIdentifier) MarshalBSON() ([]byte, error) {
+	return wireBSON(subjectIdentifierWire(sid))
+}
+
+// UnmarshalBSON reads a subject identifier back from its stored wire shape,
+// falling back to the pre-#259 Go-shaped layout for documents written before
+// the fix.
+func (sid *SubjectIdentifier) UnmarshalBSON(data []byte) error {
+	legacy, err := hasLegacyKey(data, legacySubjectKeys...)
+	if err != nil {
+		return err
+	}
+	if legacy {
+		// The wire type carries no BSON methods, so this is the default
+		// struct codec — i.e. exactly the encoder that wrote the document.
+		return bson.Unmarshal(data, (*subjectIdentifierWire)(sid))
+	}
+	return decodeWireBSON(data, (*subjectIdentifierWire)(sid))
+}
+
+// legacySubjectKeys are the embedded-struct field names the default codec
+// emitted for SubjectIdentifier. None of them is a wire member name.
+var legacySubjectKeys = []string{
+	"usernameidentifier", "emailidentifier", "issuersubjectidentifier",
+	"opaqueidentifier", "phonenumberidentifier", "decentralizedidentifier",
+	"uniformresourceidentifier", "externalidentifier", "aliasesidentifier",
+	"complexidentifier",
+}
+
+// subjectIdentifierWire is SubjectIdentifier stripped of its BSON methods, so
+// the json codec inside wireBSON/decodeWireBSON sees the plain struct.
+type subjectIdentifierWire SubjectIdentifier
+
+// MarshalBSON persists an event subject in its wire shape.
+//
+// EventSubject embeds SubjectIdentifier by value, so it would otherwise inherit
+// the promoted methods above — and those see only the SubjectIdentifier half,
+// silently dropping the top-level `sub` that EventSubject exists to carry.
+// These two methods shadow them. EventSubject is not on the persistence path
+// today (SecurityEventToken holds a *SubjectIdentifier), so there is no legacy
+// shape to sniff for; this closes the trap rather than migrating anything.
+func (es EventSubject) MarshalBSON() ([]byte, error) {
+	return wireBSON(eventSubjectWire(es))
+}
+
+// UnmarshalBSON reads an event subject back from its stored wire shape.
+func (es *EventSubject) UnmarshalBSON(data []byte) error {
+	return decodeWireBSON(data, (*eventSubjectWire)(es))
+}
+
+// eventSubjectWire is EventSubject stripped of its own BSON methods. It still
+// inherits SubjectIdentifier's promoted ones, which is harmless: wireBSON and
+// decodeWireBSON route through the json codec, never through bson.Marshal on
+// the value itself.
+type eventSubjectWire EventSubject
+
+// MarshalBSON persists a SET in its RFC 8417 wire shape: registered claims at
+// the top level under their wire names (iss, sub, aud, exp, nbf, iat, jti),
+// and no member the token does not carry.
+func (set SecurityEventToken) MarshalBSON() ([]byte, error) {
+	return wireBSON(securityEventTokenWire(set))
+}
+
+// UnmarshalBSON reads a SET back from its stored wire shape, falling back to
+// the pre-#259 Go-shaped layout for documents written before the fix. A nested
+// legacy sub_id is handled by SubjectIdentifier.UnmarshalBSON in turn.
+func (set *SecurityEventToken) UnmarshalBSON(data []byte) error {
+	legacy, err := hasLegacyKey(data, "registeredclaims")
+	if err != nil {
+		return err
+	}
+	if legacy {
+		return bson.Unmarshal(data, (*securityEventTokenWire)(set))
+	}
+	return decodeWireBSON(data, (*securityEventTokenWire)(set))
+}
+
+// securityEventTokenWire is SecurityEventToken stripped of its BSON methods.
+type securityEventTokenWire SecurityEventToken
