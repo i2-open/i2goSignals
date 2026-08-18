@@ -175,3 +175,91 @@ func TestHandleEvent_SstpInboundForward_DoesNotEchoToOriginatingPair(t *testing.
 	assert.NotContains(t, jtis, "sstp-echo-jti",
 		"a SET must not be routed back out the pair it arrived on")
 }
+
+// TestHandleEvent_SstpInboundBlankMode_NotRouted pins ADR-0031 D4. A blank
+// inbound RouteMode means a record written before the field existed; those were
+// import-only under the old unconditional guard, so they must stay that way.
+// Following SstpModeToRouteMode's PUBLISH default would silently start fanning
+// out their events on upgrade.
+func TestHandleEvent_SstpInboundBlankMode_NotRouted(t *testing.T) {
+	h := newTestRouter(t)
+	projectId := projectIdFromHarness(t, h)
+	out := mustCreateOutboundPollStream(t, h, projectId)
+	pair := persistSstpPairWithInboundMode(t, h, "")
+
+	require.NoError(t, h.router.HandleEvent(sstpInboundTestToken("sstp-blank-jti"), `{"raw":true}`, pair.SstpInbound.Id))
+
+	assert.Never(t, func() bool { return pollBufferCount(h, out.StreamConfiguration.Id) > 0 },
+		250*time.Millisecond, 10*time.Millisecond,
+		"a blank inbound RouteMode is a pre-#261 record and must not route")
+}
+
+// TestSstpInboundRouteMode_NilInboundIsImport: sstpInboundCounterRecord leaves
+// the TX StreamConfiguration in place when a pair has no inbound half, so
+// reading the mode straight off that view would return the TX direction's mode
+// and route on it. A pair with no inbound direction has no inbound mode.
+func TestSstpInboundRouteMode_NilInboundIsImport(t *testing.T) {
+	pair := &model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        "tx-sid",
+			RouteMode: model.RouteModePublish, // the TX mode must not leak through
+		},
+	}
+	assert.Equal(t, model.RouteModeImport, sstpInboundRouteMode(pair),
+		"a pair with no inbound direction must not route on its tx mode")
+	assert.Equal(t, model.RouteModeImport, sstpInboundRouteMode(nil))
+}
+
+// TestHandleEvent_SstpInboundForward_RoutesToOtherSstpPair is the positive
+// SSTP-tx case: the echo guard must skip only the ORIGINATING pair, not the
+// whole SSTP fan-out. A second, unrelated pair matching on aud must still
+// receive the SET.
+func TestHandleEvent_SstpInboundForward_RoutesToOtherSstpPair(t *testing.T) {
+	h := newTestRouter(t)
+	origin := persistSstpPairWithInboundMode(t, h, model.RouteModeForward)
+	other := persistSstpPairWithInboundMode(t, h, model.RouteModeImport)
+
+	originTx := origin.StreamConfiguration.Id
+	otherTx := other.StreamConfiguration.Id
+	require.NotEqual(t, originTx, otherTx, "test premise: two distinct pairs")
+
+	h.router.mu.Lock()
+	h.router.sstpServerStreams[originTx] = *origin
+	h.router.sstpServerStreams[otherTx] = *other
+	h.router.mu.Unlock()
+
+	token := sstpInboundTestToken("sstp-fanout-jti")
+	token.Audience = jwt.ClaimStrings{"https://tx.audience.example"}
+	require.NoError(t, h.router.HandleEvent(token, `{"raw":true}`, origin.SstpInbound.Id))
+
+	params := model.PollParameters{MaxEvents: 100, ReturnImmediately: true}
+	otherJtis, _ := h.router.eventService.GetEventIds(context.Background(), otherTx, params)
+	assert.Contains(t, otherJtis, "sstp-fanout-jti",
+		"a non-originating SSTP pair must still receive the forwarded SET")
+
+	originJtis, _ := h.router.eventService.GetEventIds(context.Background(), originTx, params)
+	assert.NotContains(t, originJtis, "sstp-fanout-jti",
+		"the originating pair must still be excluded")
+}
+
+// TestHandleEvent_SstpInboundForward_DoesNotEchoToInitiatorPair: the exclusion
+// must hold on the initiator (client) fan-out loop too, which is keyed by
+// PairId rather than by tx SID.
+func TestHandleEvent_SstpInboundForward_DoesNotEchoToInitiatorPair(t *testing.T) {
+	h := newTestRouter(t)
+	pair := persistSstpPairWithInboundMode(t, h, model.RouteModeForward)
+	txSid := pair.StreamConfiguration.Id
+
+	h.router.mu.Lock()
+	h.router.sstpClientStreams[pair.PairId] = *pair
+	h.router.mu.Unlock()
+
+	token := sstpInboundTestToken("sstp-echo-client-jti")
+	token.Audience = jwt.ClaimStrings{"https://tx.audience.example"}
+	require.NoError(t, h.router.HandleEvent(token, `{"raw":true}`, pair.SstpInbound.Id))
+
+	jtis, _ := h.router.eventService.GetEventIds(context.Background(), txSid,
+		model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
+	assert.NotContains(t, jtis, "sstp-echo-client-jti",
+		"an initiator pair must not be echoed either")
+}

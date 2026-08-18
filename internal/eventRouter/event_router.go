@@ -773,7 +773,7 @@ evaluates if it should be added to any streams for outgoing propagation. `sid` i
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
 	// eventLogger.Println("\n", event.Event.String())
 
-	sstpInbound := false
+	var sstpPair *model.StreamStateRecord
 	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil {
 		// SSTP-server inbound (PRD #154 Q5.1, Q46): an inbound SET is keyed on the
@@ -786,7 +786,7 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 			return err
 		}
 		streamState = sstpInboundCounterRecord(pair, sid)
-		sstpInbound = true
+		sstpPair = pair
 	}
 
 	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
@@ -805,34 +805,24 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	r.IncrementCounter(streamState, eventToken, true)
 	r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventToken)
 
-	// An SSTP inbound honours its own direction's RouteMode, the same way an
-	// RFC 8935 push receiver does (#261): IMPORT consumes the SET locally,
-	// FORWARD and PUBLISH fan it out to matching outbound streams. As on the
-	// push path, the forward-verbatim vs re-sign decision is NOT made here —
-	// it is made per outbound stream at delivery time from that stream's own
-	// route mode.
+	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
+	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
+	// the push path, the forward-verbatim vs re-sign choice is NOT made here —
+	// it is made per outbound stream at delivery time (ADR-0031 D2).
 	//
-	// streamState is the rx-side view built by sstpInboundCounterRecord, whose
-	// StreamConfiguration is the pair's SstpInbound, so GetRouteMode() is the
-	// inbound direction's mode.
-	//
-	// This guard previously returned unconditionally, citing PRD #154 Q5.1
-	// ("consumed locally … not fanned out"). That predates the per-direction
-	// `mode` on the pair bootstrap, and made a two-hop
-	// A --sstp--> goSignals --sstp--> B topology silently drop hop 2.
-	//
-	// An empty mode is treated as IMPORT rather than following
-	// SstpModeToRouteMode's PUBLISH default: the bootstrap always stores an
-	// explicit mode, so a blank one means a record written before the field
-	// existed, and those were all import-only under the old guard. Defaulting
-	// to PUBLISH would start fanning out their events on upgrade.
-	sstpInboundRouted := false
-	if sstpInbound {
-		mode := streamState.GetRouteMode()
-		if mode == model.RouteModeImport || mode == "" {
+	// excludeSstpTxSid names the pair the SET arrived on, so the fan-out below
+	// does not send it straight back to the peer that just delivered it: that
+	// pair's own tx side frequently matches the event on aud (ADR-0031 D5).
+	// The tx SID is the exclusion key because it is what both fan-out maps are
+	// keyed by, and unlike PairId it is always populated.
+	excludeSstpTxSid := ""
+	if sstpPair != nil {
+		// Same test the push path makes below; sstpInboundRouteMode has already
+		// folded "no inbound mode" into IMPORT.
+		if sstpInboundRouteMode(sstpPair) == model.RouteModeImport {
 			return nil
 		}
-		sstpInboundRouted = true
+		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
 	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
 		return nil
@@ -888,16 +878,32 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		}
 	}
 
-	// When the SET arrived over SSTP, exclude the pair it arrived on so it is
-	// not sent straight back to the peer that just delivered it (#261). The
-	// originating pair's tx side frequently matches the event on aud, so
-	// without this the FORWARD/PUBLISH fan-out would echo.
-	excludePairId := ""
-	if sstpInboundRouted {
-		excludePairId = streamState.PairId
-	}
-	r.routeEventToSstpPairsLocked(event, excludePairId)
+	r.routeEventToSstpPairsLocked(event, excludeSstpTxSid)
 	return nil
+}
+
+// sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
+// direction, normalised so that only an explicit FORWARD or PUBLISH routes.
+//
+// Two cases collapse to IMPORT rather than to SstpModeToRouteMode's PUBLISH
+// default, because both mean "this record predates inbound routing" and both
+// behaved as import-only before #261 — honouring PUBLISH would silently start
+// fanning out their events on upgrade:
+//
+//   - A blank RouteMode. The bootstrap always stores an explicit mode
+//     (buildSstpRecord), so blank means a record written before the field.
+//   - A nil SstpInbound. sstpInboundCounterRecord leaves the TX
+//     StreamConfiguration in place when there is no inbound half, so reading
+//     the mode off that view would yield the tx direction's mode and route on
+//     it. A pair with no inbound direction cannot have an inbound mode.
+func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
+	if pair == nil || pair.SstpInbound == nil {
+		return model.RouteModeImport
+	}
+	if pair.SstpInbound.RouteMode == "" {
+		return model.RouteModeImport
+	}
+	return pair.SstpInbound.RouteMode
 }
 
 // routeEventToSstpPairsLocked fans an outbound event out to the SSTP pairs this
@@ -912,12 +918,18 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 //     wake-sstp-server to active nodes (the server side takes no lease, so any node
 //     may be holding the long-poll) and wake the local long-poll buffer.
 //
-// excludePairId, when non-empty, names a pair to skip: the SET arrived on that
-// pair's rx side, and returning it down the same pair's tx side would echo it
-// back to the peer that sent it (#261). Empty for locally-originated events.
-func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludePairId string) {
+// excludeTxSid, when non-empty, is the tx-side SID of a pair to skip: the SET
+// arrived on that pair's rx side, and sending it back down the same pair's tx
+// side would return it to the peer that sent it (#261, ADR-0031 D5). Empty for
+// locally-originated events.
+//
+// The tx SID identifies the pair in both maps below -- initiator pairs are
+// keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
+// responder pairs are keyed by the tx SID directly -- so one key works for both
+// and stays correct on a record whose PairId was never populated.
+func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTxSid string) {
 	for pairId, pair := range r.sstpClientStreams {
-		if excludePairId != "" && pairId == excludePairId {
+		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
 		if !r.eventService.MatchesStream(&pair, event) {
@@ -946,9 +958,7 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludePa
 	}
 
 	for txSid, pair := range r.sstpServerStreams {
-		// Responder pairs are keyed by tx SID, so compare on the record's
-		// PairId rather than the map key.
-		if excludePairId != "" && pair.PairId == excludePairId {
+		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
 		if !r.eventService.MatchesStream(&pair, event) {

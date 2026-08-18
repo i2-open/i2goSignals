@@ -47,10 +47,20 @@ at that point is the rx-side view built by `sstpInboundCounterRecord`, whose
 returns the inbound mode — no new lookup is needed.
 
 **D2 — The forward-vs-re-sign choice is NOT made on the inbound path.** It is
-made per outbound stream at delivery time, from that stream's own route mode,
-which is how the push path already works. The inbound mode decides only
-*whether* the SET is routed. This keeps one signing decision point rather than
-two that could disagree.
+made per outbound stream at delivery time, from that stream's own route mode
+(`delivery/http.go` `forward()`, and `buildSstpOutboundSets` in
+`runner_sstp_server.go`), which is how the push path already works. The inbound
+mode decides only *whether* the SET is routed. This keeps one signing decision
+point rather than two that could disagree.
+
+**This deviates from the issue's acceptance criteria, deliberately.** GH #261
+asks for a test proving the SET arrives "re-signed / verbatim respectively" for
+inbound `PUBLISH` / `FORWARD`. That is not implementable as written: on the
+inbound leg the two modes are indistinguishable, because nothing about signing
+has happened yet. An outbound stream in `FORWARD` mode forwards verbatim even
+when the inbound direction is `PUBLISH`. The AC is therefore read as satisfied
+by proving the SET is *routed* under both modes, with signing left to the
+existing outbound-side tests. Recorded here rather than silently dropped.
 
 **D3 — The check cannot reuse `IsReceiver()`.** That helper matches
 `ReceivePush` / `ReceivePoll` only, and an SSTP inbound's delivery method is
@@ -60,19 +70,36 @@ that condition. Widening `IsReceiver()` was rejected: it is used elsewhere to
 mean "RFC8935/8936 receive-side", and changing it would move behaviour outside
 this issue.
 
-**D4 — A blank inbound `RouteMode` is treated as `IMPORT`, not as
-`SstpModeToRouteMode`'s `PUBLISH` default.** The bootstrap always stores an
-explicit mode, so a blank value means a record written before the field existed.
-Every such record behaved as import-only under the old guard, and honouring the
-`PUBLISH` default would silently start fanning out their events on upgrade —
-a data-flow change no operator asked for. New pairs are unaffected.
+**D4 — "No inbound mode" normalises to `IMPORT`, not to
+`SstpModeToRouteMode`'s `PUBLISH` default.** `sstpInboundRouteMode` folds two
+cases into `IMPORT`:
+
+- **A blank `RouteMode`.** The bootstrap always stores an explicit mode
+  (`buildSstpRecord`), so blank means a record written before the field existed.
+- **A nil `SstpInbound`.** `sstpInboundCounterRecord` leaves the *tx*
+  `StreamConfiguration` in place when a pair has no inbound half, so reading the
+  mode off that view would return the **tx** direction's mode and route on it —
+  a pair with no inbound direction cannot have an inbound mode. Harmless while
+  the guard returned unconditionally; a live mis-route once it stopped.
+
+Both behaved as import-only under the old guard, and honouring the `PUBLISH`
+default would silently start fanning out their events on upgrade — a data-flow
+change no operator asked for. New pairs are unaffected.
+
+The normalisation lives in the helper rather than in the caller so the caller
+can make exactly the same `== RouteModeImport` test the push path makes.
 
 **D5 — A SET is never routed back out the pair it arrived on.**
-`routeEventToSstpPairsLocked` takes an `excludePairId`. The originating pair's
+`routeEventToSstpPairsLocked` takes an `excludeTxSid`. The originating pair's
 outbound direction frequently matches the event on `aud`, so without this the
-fan-out would return the SET to the peer that just sent it. Initiator pairs are
-keyed by `PairId`; responder pairs are keyed by tx SID, so that loop compares
-`pair.PairId` rather than its map key.
+fan-out would return the SET to the peer that just sent it.
+
+The **tx SID** is the exclusion key, not `PairId`. It identifies the pair in
+both fan-out maps — initiator pairs are keyed by `PairId`, which the aliasing
+invariant makes equal to the tx SID, and responder pairs are keyed by the tx SID
+directly — so one key covers both loops with an identical test, and it stays
+correct on a record whose `PairId` was never populated (where a `PairId`-keyed
+exclusion would silently no-op and echo).
 
 This is a *pair*-level exclusion, not a general loop suppressor. A longer cycle
 across distinct pairs (A→B→A) is still possible and is out of scope here; SSTP
@@ -85,8 +112,11 @@ has no hop count or path record to detect it with.
 - Two-hop SSTP topologies work, so `independentid/i2gosignals-ai#2` no longer
   needs the RFC 8935 push workaround for its inbound leg.
 - `docs/SSTP.md`'s per-direction claim becomes true rather than aspirational.
-- Inbound SSTP and inbound push now behave the same way for the same mode,
-  which is one rule to learn instead of two.
+- Inbound SSTP and inbound push now behave the same way for the same *explicit*
+  mode, which is one rule to learn instead of two. They still differ on a
+  missing mode: SSTP treats it as `IMPORT` (D4) where the push path falls
+  through to routing. That asymmetry is the price of not changing behaviour for
+  existing SSTP records, and it disappears once no blank-mode records remain.
 
 ### Negative
 
@@ -97,9 +127,9 @@ has no hop count or path record to detect it with.
 - The exclusion is one pair deep (D5), so a multi-pair routing cycle remains
   possible to configure. Detecting it needs loop-prevention state that does not
   exist yet.
-- `HandleEvent` now carries a second piece of SSTP-specific branching. The
-  routing decision and the echo exclusion are separated by the whole fan-out
-  block, coupled through the `sstpInboundRouted` local.
+- `HandleEvent` now carries a second piece of SSTP-specific branching, and
+  holds the resolved pair (`sstpPair`) across the whole fan-out block to derive
+  the exclusion from it.
 
 ## Related
 

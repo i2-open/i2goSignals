@@ -141,12 +141,17 @@ exactly as the equivalent mode does on an RFC 8935 push receiver:
 | Inbound mode | Routed to other streams? |
 | :----------- | :----------------------- |
 | `IMPORT` | **No.** The SET is consumed locally — persisted and available to local readers, but never fanned out. |
-| `FORWARD` | **Yes**, to every matching outbound stream (aud- or explicitly-routed), forwarded verbatim. |
-| `PUBLISH` | **Yes**, to every matching outbound stream, re-signed with the outbound direction's issuer key. |
+| `FORWARD` | **Yes**, to every matching outbound stream (aud- or explicitly-routed). |
+| `PUBLISH` | **Yes**, to every matching outbound stream. |
 
-`FORWARD` and `PUBLISH` differ only in signing, and — as on the push path — that
-choice is made per **outbound** stream at delivery time from that stream's own
-route mode, not from the inbound one.
+**`FORWARD` and `PUBLISH` are identical on the inbound leg.** Both mean "route
+onward"; the inbound mode does not decide whether the SET is forwarded verbatim
+or re-signed. That choice belongs to each **outbound** stream and is made at
+delivery time from *that* stream's own route mode — exactly as on the push path.
+So an outbound stream in `FORWARD` mode forwards verbatim even when the inbound
+direction is `PUBLISH`, and vice versa. Read the mode table above this section
+for the signing behaviour of a given direction; read this one only for whether
+an inbound SET travels further.
 
 This is what makes a two-hop topology work: in
 `A --sstp--> goSignals --sstp--> B`, hop 2 happens only when the inbound
