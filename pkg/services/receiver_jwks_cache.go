@@ -212,3 +212,21 @@ func receiveDirection(rec *model.StreamStateRecord) (sid, iss, jwksUrl string) {
 	}
 	return rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, normalizedJwksUrl(rec.StreamConfiguration.IssuerJWKSUrl)
 }
+
+// recordIdentifiedBy reports whether streamID names rec under any of the
+// identities a caller can hold: the document _id, the primary (tx-side)
+// StreamConfiguration SID, the pair's wire SID (PairId, ADR 0018), or the
+// inbound SID. A plain receiver's first two are the same value; a pair's are
+// three distinct ones, which is what makes eviction by key alone unsafe.
+func recordIdentifiedBy(rec *model.StreamStateRecord, streamID string) bool {
+	if rec == nil || streamID == "" {
+		return false
+	}
+	if rec.StreamConfiguration.Id == streamID || rec.Id.Hex() == streamID {
+		return true
+	}
+	if rec.PairId == streamID {
+		return true
+	}
+	return rec.SstpInbound != nil && rec.SstpInbound.Id == streamID
+}

@@ -1415,11 +1415,39 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 }
 
 func (s *StreamService) DeleteStream(ctx context.Context, streamID string) error {
-	// Remove from receiver streams cache if present
-	s.mu.Lock()
-	delete(s.receiverStreams, streamID)
-	s.mu.Unlock()
+	s.evictReceiverEntries(streamID)
 	return s.streamDAO.Delete(ctx, streamID)
+}
+
+// evictReceiverEntries removes every receiver-cache entry belonging to the
+// stream named by streamID.
+//
+// Keying is the subtlety. A plain receiver's entry is keyed by its own SID, so
+// deleting by that key worked. An SSTP pair's entry is keyed by the INBOUND SID
+// (ADR 0018), which is not the document _id DeleteStream is called with — the
+// HTTP delete handler and both pair-create rollback paths in
+// stream_service_sstp.go all name the tx-side SID. Deleting by key alone
+// therefore orphaned a pair's entry: the record was gone from the DAO while its
+// cached JWKS and retry bookkeeping stayed resident for the life of the
+// process, and a pair recreated on the same inbound SID would read the stale
+// entry instead of resolving afresh.
+//
+// The sweep matches on the record's identities rather than on the map key, so
+// eviction is correct whichever SID the caller names. It runs over receiver
+// entries only — a handful per node — so the linear scan is not worth trading
+// for a second index.
+func (s *StreamService) evictReceiverEntries(streamID string) {
+	if streamID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.receiverStreams, streamID)
+	for sid, entry := range s.receiverStreams {
+		if entry != nil && recordIdentifiedBy(entry.record, streamID) {
+			delete(s.receiverStreams, sid)
+		}
+	}
 }
 
 func (s *StreamService) GetStream(ctx context.Context, id string) (*model.StreamConfiguration, error) {
