@@ -398,20 +398,25 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 	return nil
 }
 
-// applyStreamStatusToRecord writes a status change onto rec in memory, and only
-// in memory — persisting is the caller's, because the JWKS paths must reach the
-// DAO with the receiver-cache lock released.
+// applyStreamStatusToRecord writes a status change onto rec in memory. It does
+// not persist: callers that need the change durable follow it with a DAO write,
+// which on the JWKS paths has to happen with the receiver-cache lock released.
 //
 // This is the single home of the direction-routing rule (Q39, Q41): naming an
 // SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
 // side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
-// ALWAYS couples both directions regardless of which SID is named. A record with
-// no inbound leg has one direction, so it always takes Status/ErrorMsg.
+// ALWAYS couples both directions regardless of which SID is named. A record that
+// is not a pair has one direction, so it always takes Status/ErrorMsg.
+//
+// "Is a pair" is GetType() — SstpMethod != nil, the same predicate
+// findSstpPairBySID admits on — and deliberately not "SstpInbound != nil". A
+// pair still couples on Disable when its inbound leg is absent; only the rx-side
+// routing needs that leg, because it needs a SID to compare against.
 func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorMsg string) {
 	if rec == nil {
 		return
 	}
-	isPair := rec.SstpInbound != nil
+	isPair := rec.GetType() == model.DeliverySstpPair
 
 	if isPair && status == model.StreamStateDisable {
 		// Pair-level: couple both directions.
@@ -421,7 +426,7 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 		rec.InboundErrorMsg = errorMsg
 		return
 	}
-	if isPair && sid == rec.SstpInbound.Id {
+	if isPair && rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
 		rec.InboundStatus = status
 		rec.InboundErrorMsg = errorMsg
 		return
@@ -432,10 +437,23 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 
 // updateSstpPairStatus applies a status change to an SSTP pair with
 // per-direction routing (Q39, Q41) and persists the result.
+//
+// The mutation runs under s.mu so that the status fields have ONE locking story
+// across the service: the JWKS paths read and write Status/InboundStatus on a
+// cached record under this mutex, and rec can be that same object — the memory
+// DAO hands back the pointer it stores, and persistDisabledRecord stores a
+// cached record. No interleaving reaching here is known to be live today (a
+// permanently-disabled entry is not a retry candidate, so nothing re-reads it),
+// so this forecloses the hazard rather than fixing a demonstrated race. The DAO
+// round trip then runs off the lock, on a copy taken under it, because this
+// mutex is on the inbound verification path.
 func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
+	s.mu.Lock()
 	applyStreamStatusToRecord(rec, sid, status, errorMsg)
+	persistCopy := *rec
+	s.mu.Unlock()
 
-	if err := s.streamDAO.Update(ctx, rec); err != nil {
+	if err := s.streamDAO.Update(ctx, &persistCopy); err != nil {
 		ssLog.Error("Error updating sstp pair status", "sid", sid, "error", err)
 	}
 }

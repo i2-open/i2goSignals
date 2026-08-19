@@ -1741,14 +1741,13 @@ func (s *StreamService) disableIfSecurityInvariantViolated(
 // disableIfSecurityInvariantViolated so both legs share the same disable
 // path.
 //
-// The disable goes through applyStreamStatusToRecord so a pair is disabled in
-// BOTH directions, which is what the caller's contract has always claimed and
-// what the code did not do: writing rec.Status alone left InboundStatus at the
-// "enabled" a normally-created pair carries, and inbound ingest is gated on
-// InboundStatus ALONE (runner_sstp_server.go) — so the pair went on accepting
-// inbound events on the very leg whose trust root was missing. Which leg the
-// violation is on does not steer the routing here, because a disable is
-// pair-level either way (Q39); the leg is carried in the reason instead.
+// The disable routes through applyStreamStatusToRecord so a pair is disabled in
+// BOTH directions, which is what fail-closed requires here: inbound ingest is
+// gated on InboundStatus ALONE (runner_sstp_server.go), so a pair carrying a
+// disable only on Status would go on accepting inbound events on the very leg
+// whose trust root is missing. Which leg the violation is on does not steer the
+// routing, because a disable is pair-level either way (Q39); the leg is carried
+// in the reason instead.
 func (s *StreamService) disableInvariantViolation(
 	ctx context.Context, rec *model.StreamStateRecord, leg string, invariantErr error,
 ) error {
@@ -1880,7 +1879,9 @@ func (s *StreamService) newReceiverEntry(ctx context.Context, rec *model.StreamS
 	jwks, err := s.resolveSnapshotJwks(ctx, snap)
 	entry.recordAttempt(s.now(), jwks, err)
 	if reason, permanent := permanentJwksFailure(err); permanent {
-		disableRecordForJwksFailure(rec, snap.sid, reason)
+		// snap.sid names the direction that failed, so the disable routes
+		// through the same Q39 rule as every other status change.
+		applyStreamStatusToRecord(rec, snap.sid, model.StreamStateDisable, reason)
 		s.persistDisabledRecord(ctx, rec, snap.sid)
 	}
 	// Keep the record's ValidateJwks in step with the entry so nothing reading
@@ -1914,20 +1915,6 @@ func permanentJwksFailure(err error) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error()), true
-}
-
-// disableRecordForJwksFailure applies the permanent-failure disable to rec. The
-// caller must hold s.mu whenever rec is reachable from the receiver cache —
-// UpdateStreamStatus writes these same fields under it.
-//
-// sid names the direction that failed, so an SSTP pair routes through the same
-// Q39 rule as every other status change and a disable couples both directions.
-// Writing rec.Status directly — as this did before — left the inbound leg of a
-// pair reporting enabled with no reason when the inbound leg was precisely the
-// one that could not resolve a key, and left InboundStatus enabled across a
-// restart so the preload put a permanently-broken URL back on the retry ladder.
-func disableRecordForJwksFailure(rec *model.StreamStateRecord, sid, reason string) {
-	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable, reason)
 }
 
 // persistDisabledRecord writes a disabled record through the DAO. The caller
@@ -2116,7 +2103,8 @@ func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyf
 	// a private copy rather than the record UpdateStreamStatus may be writing.
 	var persistCopy *model.StreamStateRecord
 	if permanent {
-		disableRecordForJwksFailure(rec, snap.sid, reason)
+		// Still under s.mu: these are the fields UpdateStreamStatus writes.
+		applyStreamStatusToRecord(rec, snap.sid, model.StreamStateDisable, reason)
 		snapshotRec := *rec
 		persistCopy = &snapshotRec
 	}

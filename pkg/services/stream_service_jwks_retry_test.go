@@ -565,17 +565,13 @@ func TestGetIssuerJwksForReceiver_RetryDoesNotRaceStatusUpdate(t *testing.T) {
 	wg.Wait()
 }
 
-// TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound:
-// a permanent JWKS error on an SSTP pair used to write rec.Status/ErrorMsg
-// directly, so the leg that could not resolve a key — the INBOUND one, since
-// the receiver cache is keyed by the inbound SID (ADR 0018) — kept reporting
-// enabled with no reason, while the transmit leg carried a disable it had done
-// nothing to earn. Querying the pair by the SID that actually failed therefore
-// showed a healthy stream.
-//
-// The bar: the permanent failure routes through the same rule as every other
-// status change (Q39), so both directions carry the disable and its reason, and
-// GetStatus on the rx-side SID reports it.
+// TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound
+// pins where a permanent JWKS failure lands on an SSTP pair. The leg that fails
+// to resolve is the INBOUND one — the receiver cache is keyed by the inbound SID
+// (ADR 0018) — so the disable and its reason must reach
+// InboundStatus/InboundErrorMsg, or querying the pair by the SID that actually
+// failed reports a healthy stream. The failure routes through the same rule as
+// every other status change (Q39), so the transmit direction is coupled too.
 func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound(t *testing.T) {
 	h := newRetryHarness(t)
 	ctx := context.Background()

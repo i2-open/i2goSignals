@@ -78,9 +78,18 @@ rule is recorded here rather than left implicit in the retry code.
   JWKS and clears the marker. A JWKS that parses but carries **zero keys** is
   unresolved, not resolved — non-nil is not the test, and `GetPublicJWKS` above
   is the proof that a zero-key body is reachable in practice.
-- **Permanent-error handling is unchanged.** `isPermanentJwksError` still
-  disables the record and persists the reason. That path is already visible to
-  operators and is not a retry candidate.
+- **Permanent-error classification is unchanged; where the disable lands is
+  refined.** `isPermanentJwksError` still disables the record and persists the
+  reason, and that path stays visible to operators and out of the retry ladder.
+  It no longer writes `Status`/`ErrorMsg` directly, though: the disable goes
+  through the shared per-direction status rule (Q39/Q41), so an SSTP pair whose
+  *inbound* leg cannot resolve a key carries the disable and its reason on
+  `InboundStatus`/`InboundErrorMsg` as well. This matters because the cache is
+  keyed by the inbound SID (ADR 0018) — the failing leg is the inbound one — and
+  inbound ingest is gated on `InboundStatus` alone, so a disable written only to
+  `Status` left the pair admitting events on the leg whose trust root was
+  missing, and left `InboundStatus` enabled across a restart so the preload put a
+  permanently-broken URL back on the retry ladder.
 - **No URL configured: a valid resting state, never unresolved, never
   retried.** The internal key lookup is authoritative and its result — including
   "no key at all" — is legitimate. This rests entirely on the ADR-0066 §D2
