@@ -152,6 +152,75 @@ type StreamStateRecord struct {
 
 	// InboundErrorMsg mirrors ErrorMsg for the receive (inbound) direction.
 	InboundErrorMsg string `json:"inbound_error_msg,omitempty" bson:"inbound_error_msg,omitempty"`
+
+	// --- Node-local JWKS readiness (ADR 0033) ---
+	// Derived, never persisted (bson:"-"), and NOT part of the SSF wire-format
+	// StreamConfiguration. Stream Status is not the carrier for this: an
+	// unresolvable stream keeps reporting "enabled", and readiness is what tells
+	// an operator otherwise. Records read from the DAO never carry it — the
+	// admin stream-state surfaces overlay it via
+	// StreamService.OverlayJwksReadiness before serializing.
+
+	// JwksReadiness is this node's readiness to verify inbound SETs on a plain
+	// receiver stream's receive direction.
+	JwksReadiness *JwksReadiness `json:"jwks_readiness,omitempty" bson:"-"`
+
+	// InboundJwksReadiness is the inbound twin of JwksReadiness, mirroring the
+	// InboundStatus/InboundErrorMsg convention: it covers the receive (inbound)
+	// direction of an SSTP pair, whose cache entry is keyed by the inbound SID
+	// (ADR 0018).
+	InboundJwksReadiness *JwksReadiness `json:"inbound_jwks_readiness,omitempty" bson:"-"`
+}
+
+// JWKS readiness states (ADR 0033). Readiness is node-local and derived: it
+// describes THIS node's current reachability of a receive direction's
+// verification material, not a property of the stream, so two cluster members
+// may legitimately disagree during a partial outage and neither is stale.
+const (
+	// JwksReadinessReady — verification material is resolved and non-empty.
+	JwksReadinessReady = "ready"
+
+	// JwksReadinessUnresolved — an issuer JWKS URL is configured and this node
+	// has not resolved usable keys from it. Carries the last error and, when a
+	// retry is scheduled, the time of the next attempt.
+	JwksReadinessUnresolved = "unresolved"
+
+	// JwksReadinessNotConfigured — no issuer JWKS URL, so nothing is expected on
+	// this direction: it is never unresolved and never retried.
+	JwksReadinessNotConfigured = "not-configured"
+)
+
+// JwksReadiness is the node-local, derived verification-material readiness of a
+// single receive direction. It is excluded from BSON and does not survive a
+// restart.
+type JwksReadiness struct {
+	// State is one of JwksReadinessReady, JwksReadinessUnresolved or
+	// JwksReadinessNotConfigured.
+	State string `json:"state" bson:"-"`
+
+	// LastError is the most recent resolution failure, set only while
+	// unresolved. Empty when this node has not yet attempted a resolution.
+	LastError string `json:"last_error,omitempty" bson:"-"`
+
+	// NextRetryAt is when the next lazy retry becomes eligible. Nil when no
+	// retry is scheduled — a resolved direction, one with no URL, or one whose
+	// last error was permanent (that record is disabled, with the reason
+	// persisted in ErrorMsg).
+	NextRetryAt *time.Time `json:"next_retry_at,omitempty" bson:"-"`
+}
+
+// DeepCopy returns an independent copy of the JwksReadiness, or nil when jr is
+// nil.
+func (jr *JwksReadiness) DeepCopy() *JwksReadiness {
+	if jr == nil {
+		return nil
+	}
+	res := *jr
+	if jr.NextRetryAt != nil {
+		t := *jr.NextRetryAt
+		res.NextRetryAt = &t
+	}
+	return &res
 }
 
 // EventSource describes where a transmitter stream's events originate. This is
@@ -192,6 +261,8 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 		res.SstpInbound = &inbound
 	}
 	res.SstpMethod = ss.SstpMethod.DeepCopy()
+	res.JwksReadiness = ss.JwksReadiness.DeepCopy()
+	res.InboundJwksReadiness = ss.InboundJwksReadiness.DeepCopy()
 	return &res
 }
 
@@ -218,6 +289,8 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.PairId = mod.PairId
 	ss.InboundStatus = mod.InboundStatus
 	ss.InboundErrorMsg = mod.InboundErrorMsg
+	ss.JwksReadiness = mod.JwksReadiness
+	ss.InboundJwksReadiness = mod.InboundJwksReadiness
 }
 
 // GetType returns the delivery method for the stream state record. Returns one

@@ -65,12 +65,18 @@ type StreamService struct {
 	subjectFilterService    *SubjectFilterService
 	subjectRelayService     *SubjectRelayService
 	defaultIssuer           string
-	receiverStreams         map[string]*model.StreamStateRecord
+	receiverStreams         map[string]*receiverCacheEntry
 	BaseUrl                 *url.URL
 	mu                      sync.RWMutex
 	minVerificationInterval int
 	maxInactivityTimeout    int
 	eventValidationDefault  model.EventValidationMode
+
+	// now is the clock the JWKS retry backoff is measured against (ADR 0033).
+	// It is a field rather than a direct time.Now call so the lazy, per-entry
+	// backoff deadline can be driven deterministically from tests without
+	// sleeping. Always non-nil: NewStreamService defaults it to time.Now.
+	now func() time.Time
 }
 
 // SetSubjectFilterService wires in the SubjectFilterService so that a
@@ -304,11 +310,12 @@ func NewStreamService(streamDAO interfaces.StreamDAO, keyService *KeyService, de
 		streamDAO:               streamDAO,
 		keyService:              keyService,
 		defaultIssuer:           defaultIssuer,
-		receiverStreams:         make(map[string]*model.StreamStateRecord),
+		receiverStreams:         make(map[string]*receiverCacheEntry),
 		BaseUrl:                 cfg.BaseUrl,
 		minVerificationInterval: minVerificationInterval,
 		maxInactivityTimeout:    maxInactivityTimeout,
 		eventValidationDefault:  eventValidationDefault,
+		now:                     time.Now,
 	}
 }
 
@@ -885,12 +892,15 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	}
 	ssLog.Info("Stream created", "id", streamRec.Id, "type", config.Delivery.GetMethod())
 
-	// If this is a receiver stream, load its JWKS
+	// If this is a receiver stream, load its JWKS. Resolution happens BEFORE the
+	// entry is installed so a JWKS endpoint that is unreachable at create time
+	// records the direction unresolved rather than poisoning the cache with a
+	// resolved-nil at birth (ADR 0033, GH #264).
 	if streamRec.IsReceiver() {
+		entry := s.newReceiverEntry(ctx, streamRec)
 		s.mu.Lock()
-		s.receiverStreams[config.Id] = streamRec
+		s.receiverStreams[config.Id] = entry
 		s.mu.Unlock()
-		s.loadJwksForReceiver(ctx, streamRec)
 		ssLog.Debug("Receiver started", "id", streamRec.Id)
 	}
 
@@ -1505,13 +1515,12 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 	}
 
 	// Update cache if receiver stream
-	s.mu.RLock()
-	state, ok := s.receiverStreams[streamID]
-	s.mu.RUnlock()
-	if ok {
-		state.Status = status
-		state.ErrorMsg = errorMsg
+	s.mu.Lock()
+	if entry, ok := s.receiverStreams[streamID]; ok {
+		entry.record.Status = status
+		entry.record.ErrorMsg = errorMsg
 	}
+	s.mu.Unlock()
 }
 
 func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP) {
@@ -1521,12 +1530,11 @@ func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string
 	}
 
 	// Update cache if receiver stream
-	s.mu.RLock()
-	state, ok := s.receiverStreams[streamID]
-	s.mu.RUnlock()
-	if ok {
-		state.RemoteAddress = addr
+	s.mu.Lock()
+	if entry, ok := s.receiverStreams[streamID]; ok {
+		entry.record.RemoteAddress = addr
 	}
+	s.mu.Unlock()
 }
 
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
@@ -1628,7 +1636,7 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 		return nil
 	}
 
-	res := map[string]*model.StreamStateRecord{}
+	res := map[string]*receiverCacheEntry{}
 	for _, streamState := range recs {
 		state := streamState
 
@@ -1655,18 +1663,21 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 		if state.GetType() == model.DeliverySstpPair {
 			if state.SstpInbound != nil {
 				inboundView := state
-				inboundView.ValidateJwks = s.loadInboundJwksForPair(ctx, &state)
-				res[state.SstpInbound.Id] = &inboundView
+				res[state.SstpInbound.Id] = s.newReceiverEntry(ctx, &inboundView)
 			}
 			continue
 		}
-		res[streamState.StreamConfiguration.Id] = &state
-		s.loadJwksForReceiver(ctx, &state)
+		res[streamState.StreamConfiguration.Id] = s.newReceiverEntry(ctx, &state)
 	}
 	s.mu.Lock()
 	s.receiverStreams = res
 	s.mu.Unlock()
-	return res
+
+	out := make(map[string]*model.StreamStateRecord, len(res))
+	for sid, entry := range res {
+		out[sid] = entry.record
+	}
+	return out
 }
 
 // disableIfSecurityInvariantViolated re-validates a persisted receiver stream
@@ -1766,38 +1777,68 @@ func isPermanentJwksError(err error) bool {
 	return false
 }
 
-func (s *StreamService) loadJwksForReceiver(ctx context.Context, streamState *model.StreamStateRecord) {
-	if streamState.Status == model.StreamStateEnabled {
-		jwks := s.fetchReceiverJwks(ctx, streamState.StreamConfiguration.Id, streamState.Iss, streamState.IssuerJWKSUrl, streamState)
-		if jwks != nil {
-			streamState.ValidateJwks = jwks
-		}
+// newReceiverEntry resolves the receive direction of rec and returns a fully
+// formed receiver-cache entry. It is the single place a cache slot is built, so
+// the ADR 0033 discriminator and the retry bookkeeping cannot drift between the
+// populate sites (the startup preload in LoadReceiverStreams, CreateStream, and
+// both miss paths in GetIssuerJwksForReceiver). The record's ValidateJwks is
+// kept in step with the entry so nothing reading the record can observe a
+// zero-key JWKS as if it were usable material.
+func (s *StreamService) newReceiverEntry(ctx context.Context, rec *model.StreamStateRecord) *receiverCacheEntry {
+	_, iss, jwksUrl := receiveDirection(rec)
+	entry := &receiverCacheEntry{record: rec, iss: iss, jwksUrl: jwksUrl}
+	jwks, err := s.resolveDirectionJwks(ctx, rec)
+	entry.recordAttempt(s.now(), jwks, err)
+	rec.ValidateJwks = entry.jwks
+	return entry
+}
+
+// resolveDirectionJwks performs one JWKS resolution attempt for the receive
+// direction of rec, honoring that direction's own enabled status (Status for a
+// plain receiver, InboundStatus for the inbound leg of an SSTP pair — findings
+// #1/#2). It returns (nil, nil) without touching the network when the direction
+// is not enabled, and otherwise returns the fetch error so the caller can
+// classify it as permanent or retryable.
+func (s *StreamService) resolveDirectionJwks(ctx context.Context, rec *model.StreamStateRecord) (*keyfunc.JWKS, error) {
+	if rec == nil {
+		return nil, nil
 	}
+	if rec.GetType() == model.DeliverySstpPair {
+		if rec.SstpInbound == nil || rec.InboundStatus != model.StreamStateEnabled {
+			return nil, nil
+		}
+		return s.fetchReceiverJwks(ctx, rec.SstpInbound.Id, rec.SstpInbound.Iss,
+			normalizedJwksUrl(rec.SstpInbound.IssuerJWKSUrl), rec)
+	}
+	if rec.Status != model.StreamStateEnabled {
+		return nil, nil
+	}
+	return s.fetchReceiverJwks(ctx, rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss,
+		normalizedJwksUrl(rec.StreamConfiguration.IssuerJWKSUrl), rec)
 }
 
 // fetchReceiverJwks resolves the verification JWKS for a receiver direction. It
 // loads from the explicit iss_jwks_url when set, otherwise from the internally
 // registered key for the issuer. On a permanent fetch error it disables the
-// owning record (disableRec) and persists it; transient errors are logged and
-// left for retry. Returning nil means "no JWKS available" — callers must NOT
-// treat that as "verification disabled" (finding #2). Used for both plain
-// receiver streams and the inbound direction of an SSTP pair.
-func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl string, disableRec *model.StreamStateRecord) *keyfunc.JWKS {
-	var jwks *keyfunc.JWKS
-	var err error
+// owning record (disableRec) and persists it; a transient error is returned so
+// the caller can record the direction unresolved and retry it later (ADR 0033).
+// A nil JWKS means "no JWKS available" — callers must NOT treat that as
+// "verification disabled" (finding #2). Used for both plain receiver streams
+// and the inbound direction of an SSTP pair.
+func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl string, disableRec *model.StreamStateRecord) (*keyfunc.JWKS, error) {
 	if jwksUrl == "" {
 		ssLog.Debug("Attempting to load JWKS internally", "iss", iss)
 		jwksJson := s.keyService.GetPublicJWKS(ctx, iss)
 		if jwksJson == nil {
 			ssLog.Debug("No JWKS key found for issuer", "iss", iss)
-			return nil
+			return nil, nil
 		}
-		jwks, err = keyfunc.NewJSON(*jwksJson)
+		jwks, err := keyfunc.NewJSON(*jwksJson)
 		if jwks == nil && err != nil {
 			ssLog.Error("Unable to parse internal key", "iss", iss, "err", err.Error())
-			return nil
+			return nil, err
 		}
-		return jwks
+		return jwks, nil
 	}
 
 	ssLog.Debug("Loading JWKS key", "url", jwksUrl)
@@ -1814,7 +1855,7 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl
 			})
 		}
 	}
-	jwks, err = goSet.GetJwksWithClient(jwksUrl, jwksClient)
+	jwks, err := goSet.GetJwksWithClient(jwksUrl, jwksClient)
 	if err != nil {
 		msg := fmt.Sprintf("Error retrieving issuer JWKS public key: %s", err.Error())
 		if isPermanentJwksError(err) {
@@ -1829,30 +1870,38 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, sid, iss, jwksUrl
 		} else {
 			ssLog.Error("Temporary error loading JWKS, will retry", "sid", sid, "error", err.Error())
 		}
-		return nil
+		return nil, err
 	}
-	return jwks
+	return jwks, nil
 }
 
-// loadInboundJwksForPair resolves the inbound-direction verification JWKS for an
-// SSTP pair from its SstpInbound config (inbound iss / iss_jwks_url), honoring the
-// pair's InboundStatus (finding #1/#2). It returns nil when the inbound side is
-// not enabled or no key is resolvable; a non-nil result is the JWKS that
-// goSetPush.ParseReceivedSET must use so a forged inbound SET is rejected.
-func (s *StreamService) loadInboundJwksForPair(ctx context.Context, rec *model.StreamStateRecord) *keyfunc.JWKS {
-	if rec.SstpInbound == nil || rec.InboundStatus != model.StreamStateEnabled {
-		return nil
-	}
-	return s.fetchReceiverJwks(ctx, rec.SstpInbound.Id, rec.SstpInbound.Iss, rec.SstpInbound.IssuerJWKSUrl, rec)
-}
-
+// GetIssuerJwksForReceiver returns the verification material for a receive SID,
+// or nil when none is available (fail-closed: callers must reject rather than
+// admit unverified).
+//
+// Entry PRESENCE is not the answer. An entry that expects verification material
+// (ADR 0033: it has an issuer JWKS URL) and does not hold usable keys is
+// *unresolved*, and a lookup past its backoff deadline re-attempts the fetch.
+// That is what makes the "will retry" the transient-error log promises actually
+// happen — before GH #264 the nil was cached under the SID and every later
+// lookup was a hit on it for the life of the process.
 func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string) *keyfunc.JWKS {
-	// Check cache first
 	s.mu.RLock()
-	streamState, ok := s.receiverStreams[sid]
+	entry, ok := s.receiverStreams[sid]
+	var (
+		cached *keyfunc.JWKS
+		due    bool
+	)
+	if ok {
+		cached = entry.jwks
+		due = entry.dueForRetry(s.now())
+	}
 	s.mu.RUnlock()
 	if ok {
-		return streamState.ValidateJwks
+		if !due {
+			return cached
+		}
+		return s.retryReceiverJwks(ctx, sid)
 	}
 
 	// An SSTP pair receives on its inbound direction whose SID (== SstpInbound.Id)
@@ -1861,11 +1910,11 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	// is verified and rejected (finding #1/#2).
 	if pair, pErr := s.streamDAO.FindByInboundSID(ctx, sid); pErr == nil && pair != nil {
 		inboundView := *pair
-		inboundView.ValidateJwks = s.loadInboundJwksForPair(ctx, pair)
+		newEntry := s.newReceiverEntry(ctx, &inboundView)
 		s.mu.Lock()
-		s.receiverStreams[sid] = &inboundView
+		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
-		return inboundView.ValidateJwks
+		return newEntry.jwks
 	}
 
 	// Try to load the stream
@@ -1876,12 +1925,104 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	}
 
 	if streamState.IsReceiver() {
-		s.loadJwksForReceiver(ctx, streamState)
+		newEntry := s.newReceiverEntry(ctx, streamState)
 		s.mu.Lock()
-		s.receiverStreams[sid] = streamState
+		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
-		return streamState.ValidateJwks
+		return newEntry.jwks
 	}
 
 	return nil
+}
+
+// retryReceiverJwks re-attempts resolution for an unresolved cache entry whose
+// backoff deadline has passed. The cache lock is deliberately NOT held across
+// the network call: it is acquired once to claim the attempt (which also stops
+// concurrent lookups stampeding the endpoint) and again to fold in the outcome.
+// The second acquisition tolerates a concurrent writer having resolved,
+// replaced, or evicted the entry in between (ADR 0033).
+func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyfunc.JWKS {
+	s.mu.Lock()
+	entry, ok := s.receiverStreams[sid]
+	if !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	if !entry.dueForRetry(s.now()) {
+		jwks := entry.jwks
+		s.mu.Unlock()
+		return jwks
+	}
+	entry.inFlight = true
+	rec := entry.record
+	jwksUrl := entry.jwksUrl
+	s.mu.Unlock()
+
+	ssLog.Debug("Re-attempting issuer JWKS resolution", "sid", sid, "url", jwksUrl)
+	jwks, err := s.resolveDirectionJwks(ctx, rec)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry.inFlight = false
+	current, stillCached := s.receiverStreams[sid]
+	if !stillCached {
+		// Evicted (DeleteStream) while the fetch was in flight.
+		return nil
+	}
+	if current != entry {
+		// A concurrent writer replaced the entry; its result wins.
+		return current.jwks
+	}
+	if entry.resolved() {
+		// A concurrent writer resolved this same entry while we were fetching.
+		return entry.jwks
+	}
+	entry.recordAttempt(s.now(), jwks, err)
+	rec.ValidateJwks = entry.jwks
+	if entry.resolved() {
+		ssLog.Info("Issuer JWKS resolved on retry", "sid", sid)
+	}
+	return entry.jwks
+}
+
+// OverlayJwksReadiness stamps this node's derived, never-persisted JWKS
+// readiness onto a record's receive direction(s) (ADR 0033). The admin
+// stream-state surfaces source their records from the DAO and never consult the
+// receiver cache, so they must call this before serializing or readiness is
+// always absent. Transmit-only streams are left untouched.
+func (s *StreamService) OverlayJwksReadiness(rec *model.StreamStateRecord) {
+	if s == nil || rec == nil {
+		return
+	}
+	if rec.GetType() == model.DeliverySstpPair {
+		// The cache is keyed by the inbound SID for a pair (ADR 0018), so the
+		// pair's readiness is reported on the inbound twin.
+		if rec.SstpInbound != nil {
+			rec.InboundJwksReadiness = s.jwksReadinessFor(rec.SstpInbound.Id, rec.SstpInbound.IssuerJWKSUrl)
+		}
+		return
+	}
+	if rec.IsReceiver() {
+		rec.JwksReadiness = s.jwksReadinessFor(rec.StreamConfiguration.Id, rec.StreamConfiguration.IssuerJWKSUrl)
+	}
+}
+
+// jwksReadinessFor derives readiness for one receive direction: from the cache
+// entry when this node holds one, otherwise from the configuration alone — a
+// URL this node has not resolved is unresolved, never ready.
+func (s *StreamService) jwksReadinessFor(sid, jwksUrl string) *model.JwksReadiness {
+	s.mu.RLock()
+	entry, ok := s.receiverStreams[sid]
+	var readiness *model.JwksReadiness
+	if ok {
+		readiness = entry.readiness()
+	}
+	s.mu.RUnlock()
+	if readiness != nil {
+		return readiness
+	}
+	if !expectsVerificationMaterial(jwksUrl) {
+		return &model.JwksReadiness{State: model.JwksReadinessNotConfigured}
+	}
+	return &model.JwksReadiness{State: model.JwksReadinessUnresolved}
 }
