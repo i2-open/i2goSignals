@@ -713,6 +713,14 @@ An event is also treated as unsupported when its URI is
 remains the job of `events_requested` ∩ `events_supported`;
 validation mode governs payload well-formedness, not type selection.
 
+The `events_supported` half of that intersection is the **catalog**:
+the compiled-in SCIM/CAEP/RISC/WISE packs, plus any URIs an operator
+adds through `I2SIG_EVENT_TYPES_EXTRA` (ADR 0032). It is a routing
+gate, not an advertisement — a type outside it negotiates into an
+empty `events_delivered` and its SETs are stored but never routed.
+An extended URI has no built-in validator, so it is *unsupported* by
+the definition above: forwarded under every mode but `STRICT`.
+
 Rejection granularity is the whole SET (worst disposition wins): the
 router forwards raw signed tokens and never strips a payload, so under
 `STRICT` a SET carrying an unrecognized extension payload alongside a

@@ -49,7 +49,18 @@ const (
 	EventScimAsyncResp    = "urn:ietf:params:scim:event:misc:asyncresp"
 )
 
+// GetSupportedEvents returns the event type URIs this transmitter advertises in
+// events_supported and negotiates events_requested against: the compiled-in
+// SCIM/CAEP/RISC/WISE packs plus any catalog extension configured through
+// EnvEventTypesExtra (issue #261).
 func GetSupportedEvents() []string {
+	return append(builtinEventTypes(), extraEventTypes()...)
+}
+
+// builtinEventTypes is the compiled-in half of the catalog — the packs
+// pkg/goSetValidate can actually vouch for, which is what the per-pack drift
+// guards in this package assert against.
+func builtinEventTypes() []string {
 	events := []string{
 		EventScimFeedAdd,
 		EventScimFeedRemove,

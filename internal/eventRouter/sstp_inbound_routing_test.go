@@ -14,7 +14,15 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-const sstpRouteTypeDisabled = "https://schemas.openid.net/secevent/risc/event-type/account-disabled"
+// sstpRouteEventType is deliberately OUTSIDE the compiled-in catalog: it is the
+// exact reproducer from GH #261, where every test in this file passed with a
+// builtin URI and failed the moment the event type was one goSignals had no
+// compiled-in knowledge of. Routing a builtin type is covered by the rest of the
+// package (event_source_routing_test.go, pb_resign_test.go, push_state_test.go,
+// subject_filter_*_test.go); what these tests uniquely pin is that the RouteMode
+// gate and the catalog gate both pass for a vocabulary supplied by configuration.
+// mustCreateOutboundPollStream configures it via EnvEventTypesExtra (ADR 0032).
+const sstpRouteEventType = "urn:i2:gosignals-ai:v1:analysis:tier0-deny"
 
 // persistSstpPairWithInboundMode builds a bidirectional SSTP pair whose inbound
 // (rx) direction carries the given RouteMode, honouring the aliasing invariant
@@ -30,7 +38,7 @@ func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode st
 			Iss:             "https://tx.issuer.example",
 			Aud:             []string{"https://tx.audience.example"},
 			RouteMode:       model.RouteModePublish,
-			EventsDelivered: []string{sstpRouteTypeDisabled},
+			EventsDelivered: []string{sstpRouteEventType},
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp},
 			},
@@ -40,7 +48,7 @@ func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode st
 			Iss:             "https://rx.issuer.example",
 			Aud:             []string{"https://rx.audience.example"},
 			RouteMode:       inboundMode,
-			EventsRequested: []string{sstpRouteTypeDisabled},
+			EventsRequested: []string{sstpRouteEventType},
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				SstpReceiveMarker: &model.SstpReceiveMarker{Method: model.ReceiveSstp},
 			},
@@ -58,10 +66,23 @@ func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode st
 // count is a stable observation point proving the event was routed here.
 func mustCreateOutboundPollStream(t *testing.T, h *testHarness, projectId string) *model.StreamStateRecord {
 	t.Helper()
+	// sstpRouteEventType is outside the compiled-in catalog, so without the
+	// extension the CreateStream below negotiates events_delivered to nothing and
+	// every routing assertion in this file fails on the catalog gate rather than
+	// on the RouteMode gate it means to test (GH #261).
+	t.Setenv(model.EnvEventTypesExtra, sstpRouteEventType)
+	return mustCreateOutboundPollStreamForType(t, h, projectId, sstpRouteEventType)
+}
+
+// mustCreateOutboundPollStreamForType is mustCreateOutboundPollStream over an
+// arbitrary event type, so a test can exercise a vocabulary outside the
+// compiled-in catalog.
+func mustCreateOutboundPollStreamForType(t *testing.T, h *testHarness, projectId, eventType string) *model.StreamStateRecord {
+	t.Helper()
 	cfg := model.StreamConfiguration{
 		Aud:             []string{"https://downstream.example.com"},
 		RouteMode:       model.RouteModePublish,
-		EventsRequested: []string{sstpRouteTypeDisabled},
+		EventsRequested: []string{eventType},
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
 				Method:      model.DeliveryPoll,
@@ -87,7 +108,7 @@ func sstpInboundTestToken(jti string) *goSet.SecurityEventToken {
 			Issuer:   "https://upstream.issuer.example",
 			Audience: jwt.ClaimStrings{"https://rx.audience.example"},
 		},
-		Events: map[string]interface{}{sstpRouteTypeDisabled: map[string]interface{}{}},
+		Events: map[string]interface{}{sstpRouteEventType: map[string]interface{}{}},
 	}
 	token.ID = jti
 	return token
