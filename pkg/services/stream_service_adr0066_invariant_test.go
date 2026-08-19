@@ -222,7 +222,7 @@ func TestADR0066_LoadReceiverStreams_FailClosedOnPersistedViolation(t *testing.T
 		},
 		Status: model.StreamStateEnabled, // was live under the old validator
 	}
-	require.NoError(t, svc.streamDAO.Create(ctx,bad))
+	require.NoError(t, svc.streamDAO.Create(ctx, bad))
 
 	// Simulate a restart: LoadReceiverStreams should re-validate and
 	// fail-closed the offending record.
@@ -258,7 +258,7 @@ func TestADR0066_LoadReceiverStreams_PermitsValidStreams(t *testing.T) {
 		},
 		Status: model.StreamStateEnabled,
 	}
-	require.NoError(t, svc.streamDAO.Create(ctx,good))
+	require.NoError(t, svc.streamDAO.Create(ctx, good))
 
 	_ = svc.LoadReceiverStreams(ctx)
 
@@ -309,8 +309,12 @@ func TestADR0066_LoadReceiverStreams_FailClosedOnSstpInboundViolation(t *testing
 			},
 		},
 		Status: model.StreamStateEnabled,
+		// Both directions start live, the way a pair created through the normal
+		// SSTP path does. Inbound ingest is gated on InboundStatus alone, so a
+		// pair disabled on the transmit leg only keeps accepting inbound events.
+		InboundStatus: model.StreamStateEnabled,
 	}
-	require.NoError(t, svc.streamDAO.Create(ctx,pair))
+	require.NoError(t, svc.streamDAO.Create(ctx, pair))
 
 	_ = svc.LoadReceiverStreams(ctx)
 
@@ -321,6 +325,11 @@ func TestADR0066_LoadReceiverStreams_FailClosedOnSstpInboundViolation(t *testing
 		"an SSTP pair whose inbound leg violates the invariant must be disabled at startup")
 	assert.Contains(t, reloaded.ErrorMsg, "sstp-inbound",
 		"the disable reason must name the offending leg for operator remediation")
+	assert.Equal(t, model.StreamStateDisable, reloaded.InboundStatus,
+		"the inbound leg is the one that violates the invariant, and it is the only status "+
+			"inbound ingest consults — leaving it enabled is what lets the pair keep accepting events")
+	assert.Contains(t, reloaded.InboundErrorMsg, "sstp-inbound",
+		"the inbound leg must carry the reason too, not just the transmit leg")
 }
 
 // (guard against unused imports if the memory package alias flips)

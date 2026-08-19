@@ -1740,14 +1740,23 @@ func (s *StreamService) disableIfSecurityInvariantViolated(
 // "sstp-inbound"), the stream SID, and the invariant error. Split out from
 // disableIfSecurityInvariantViolated so both legs share the same disable
 // path.
+//
+// The disable goes through applyStreamStatusToRecord so a pair is disabled in
+// BOTH directions, which is what the caller's contract has always claimed and
+// what the code did not do: writing rec.Status alone left InboundStatus at the
+// "enabled" a normally-created pair carries, and inbound ingest is gated on
+// InboundStatus ALONE (runner_sstp_server.go) — so the pair went on accepting
+// inbound events on the very leg whose trust root was missing. Which leg the
+// violation is on does not steer the routing here, because a disable is
+// pair-level either way (Q39); the leg is carried in the reason instead.
 func (s *StreamService) disableInvariantViolation(
 	ctx context.Context, rec *model.StreamStateRecord, leg string, invariantErr error,
 ) error {
 	sid := rec.StreamConfiguration.Id
 	ssLog.Warn("Fail-closed: disabling receiver stream that violates ADR-0066 §D2 (None + unverified)",
 		"sid", sid, "leg", leg, "invariant", invariantErr.Error())
-	rec.Status = model.StreamStateDisable
-	rec.ErrorMsg = "ADR-0066 §D2 invariant violation (" + leg + "): " + invariantErr.Error()
+	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable,
+		"ADR-0066 §D2 invariant violation ("+leg+"): "+invariantErr.Error())
 	if err := s.streamDAO.Update(ctx, rec); err != nil {
 		return fmt.Errorf("persist disabled state: %w", err)
 	}
