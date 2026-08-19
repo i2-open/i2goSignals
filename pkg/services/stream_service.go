@@ -1237,14 +1237,23 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 
 	if len(configReq.EventsRequested) > 0 {
 		// events_supported is Read-Only (SSF 1.0 §7.1.1) and a PATCH body rarely
-		// carries it; fall back to the stream's own catalog so a patch re-negotiates
-		// against what this transmitter actually supports instead of nothing. Empty
+		// carries it; fall back to the LIVE catalog so a patch re-negotiates against
+		// what this transmitter supports now instead of nothing. Empty
 		// events_requested is "not patched" here, so the create-time full-catalog
 		// default does not apply.
+		//
+		// Live rather than the stream's stored events_supported: the catalog can
+		// grow between create and patch (an operator adding a vocabulary through
+		// EnvEventTypesExtra, issue #261), and re-negotiating against the snapshot
+		// taken at create would make every pre-existing stream permanently unable to
+		// reach the new types — delete-and-recreate as the only remedy. The stored
+		// catalog is refreshed alongside so events_delivered stays a subset of
+		// events_supported.
 		supported := configReq.EventsSupported
 		if len(supported) == 0 {
-			supported = config.EventsSupported
+			supported = model.GetSupportedEvents()
 		}
+		config.EventsSupported = supported
 		config.EventsRequested, config.EventsDelivered = resolveStreamEvents(configReq.EventsRequested, supported)
 	}
 

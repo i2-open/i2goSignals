@@ -57,11 +57,18 @@ func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode st
 // stream. Poll buffers do not auto-drain the way push buffers do, so the buffer
 // count is a stable observation point proving the event was routed here.
 func mustCreateOutboundPollStream(t *testing.T, h *testHarness, projectId string) *model.StreamStateRecord {
+	return mustCreateOutboundPollStreamForType(t, h, projectId, sstpRouteTypeDisabled)
+}
+
+// mustCreateOutboundPollStreamForType is mustCreateOutboundPollStream over an
+// arbitrary event type, so a test can exercise a vocabulary outside the
+// compiled-in catalog.
+func mustCreateOutboundPollStreamForType(t *testing.T, h *testHarness, projectId, eventType string) *model.StreamStateRecord {
 	t.Helper()
 	cfg := model.StreamConfiguration{
 		Aud:             []string{"https://downstream.example.com"},
 		RouteMode:       model.RouteModePublish,
-		EventsRequested: []string{sstpRouteTypeDisabled},
+		EventsRequested: []string{eventType},
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollTransmitMethod: &model.PollTransmitMethod{
 				Method:      model.DeliveryPoll,

@@ -168,6 +168,24 @@ fanning out their events.
 A SET is never routed back out the pair it arrived on, even when that pair's
 outbound direction matches it on `aud`.
 
+### Routing also requires the event type to be in the catalog
+
+Mode decides *whether* an inbound SET travels further; `events_delivered` decides
+*which* SETs any given outbound stream accepts. A direction's `events` are
+negotiated at bootstrap against this server's supported-event catalog, and the
+router matches a SET's event types against the result — so an event type outside
+the catalog is dropped by every hop regardless of mode.
+
+That matters most for a two-hop topology carrying a **custom vocabulary**: the
+SETs arrive, verify, and persist, and then go nowhere. Set
+`I2SIG_EVENT_TYPES_EXTRA` on every goSignals node in the path to add those URIs
+to the catalog — see `docs/configuration_properties.md` (§ Event) for the format
+and for how an extended type interacts with `I2SIG_STREAM_EVENT_VALIDATION`.
+
+Note also that an SSTP direction naming **no** `events` forwards nothing (unlike
+SSF registration, where an omitted `events_requested` means "everything you
+support"); a `WARN` is logged at create.
+
 ## Delivery runtime
 
 ### Client (initiator) side
@@ -347,6 +365,7 @@ timeout knobs**:
 | `I2SIG_POLL_MAX_TIMEOUT` | server-side outbound long-poll cap |
 | `I2SIG_POLL_RETRY_BASE_DELAY` / `_MAX_DELAY` / `_BACKOFF_FACTOR` | client-side transport/transient backoff |
 | `I2SIG_INSECURE_SSTP_HTTP` | allow an `http`-scheme `endpoint_url` at create (dev only; default `false`) |
+| `I2SIG_EVENT_TYPES_EXTRA` | extend the supported-event catalog so a pair can negotiate and route a custom event vocabulary |
 
 See `docs/configuration_properties.md` for the full catalogue.
 
@@ -356,6 +375,8 @@ See `docs/configuration_properties.md` for the full catalogue.
 - ADR 0018 — one bidirectional `StreamStateRecord` per pair.
 - ADR 0019 — the create bootstrap DTO + peer cascade.
 - ADR 0020 — delete: local proceeds, `cascade_peer` opt-in, 207 partial.
+- ADR 0031 — inbound `mode` governs routing, not just signing.
+- ADR 0032 — the supported-event catalog is extensible by configuration.
 - `docs/Cluster.md` — `sstp-client` lease + wake-up endpoints.
 - `docs/security_model.md` — pair bearer / `StreamIds[]` / `FindByPairId`.
 - `docs/Metrics.md` — `tfr=SSTP` counter label.

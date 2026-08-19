@@ -111,6 +111,35 @@ understands. They are documented in their natural section below.
 | `I2SIG_SUBJECT_REMOVAL_GRACE`             | Server-wide default for the SSF §9.3 ("Malicious Subject Removal") removal grace period, in **seconds**. `0` (or unset) means immediate enforcement — no behavior change. Per-transmitter-stream overrides can be set via `subject_removal_grace_seconds` on the stream's `StreamStateRecord` (set via the management API; an override on a receiver stream is ignored with a `WARN`). Negative or non-integer values fall back to `0`. On `LOCAL` and `HYBRID` streams a delivery-stopping change is deferred for the grace window before it takes effect; on `HYBRID` the upstream `remove` relay is also deferred to the same deadline and fired by the push-transmitter lease owner's backfill sweep, so the upstream keeps feeding events during the window. `PASSTHRU` adds no grace of its own — the upstream transmitter's §9.3 handling is authoritative. | `0` |
 | `I2SIG_INSECURE_SSTP_HTTP`                 | When `true`, allows an SSTP pair `endpoint_url` to use the `http` scheme (otherwise only `https` is accepted). Create-time validation is syntactic only — there is no network probe. Intended for local/dev only. | `false` |
 
+## Event
+
+| Variable                  | Description                                                                                | Default |
+|---------------------------|--------------------------------------------------------------------------------------------|---------|
+| `I2SIG_EVENT_TYPES_EXTRA` | Extends the supported-event catalog with event type URIs this build has no compiled-in knowledge of, so a private or not-yet-published vocabulary can be negotiated and routed without recompiling. Entries are separated by commas and/or whitespace and must each be an **absolute URI**; a blank or relative entry is skipped with a `WARN` naming it, and an entry that duplicates a built-in (or another entry) is ignored. Extended URIs behave exactly like built-in ones: they are advertised in `events_supported`, an `events_requested` naming them — literally, by pattern, or via `"*"` — resolves them into `events_delivered`, and the router then fans out SETs carrying them over push, poll, and SSTP alike. | (none) |
+
+**Why this exists.** `events_delivered` is negotiated at registration as
+`events_requested ∩ events_supported`, and the router matches a SET's event
+types against `events_delivered`. A URI outside the catalog therefore intersects
+to nothing: the stream registers with `201`, SETs carrying that type are
+accepted, verified, stored and counted — and are **never routed anywhere**. That
+silent drop is the failure this variable exists to cure (issue #261).
+
+**Validation.** An extended URI has no built-in payload validator, so it takes
+the existing *Unsupported* path of whatever `I2SIG_STREAM_EVENT_VALIDATION` mode
+applies: `NONE` and `WARN` forward it, `ENFORCE` forwards it unvalidated, and
+`STRICT` **rejects** it. A deployment carrying a custom vocabulary under `STRICT`
+will reject its own events — use `ENFORCE` or lower for those streams, or supply
+a validator pack.
+
+**Scope in time.** The value is read per catalog lookup and parsed once per
+distinct value, so a restart is all that is needed to change it. It does not
+rewrite anything already persisted: a stream or SSTP pair negotiates the extended
+catalog when it is **created or updated** (a `PATCH` carrying `events_requested`
+re-negotiates against the live catalog), while records left untouched keep the
+`events_delivered` they negotiated earlier. Adding a vocabulary to an existing
+stream is a `PATCH`; removing one from the variable does not retract it from
+streams that already negotiated it.
+
 ## Issuer
 
 | Variable                | Description                                                                       | Default     |
