@@ -405,8 +405,12 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 // This is the single home of the direction-routing rule (Q39, Q41): naming an
 // SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
 // side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
-// ALWAYS couples both directions regardless of which SID is named. A record that
-// is not a pair has one direction, so it always takes Status/ErrorMsg.
+// ALWAYS couples both directions regardless of which SID is named. The coupling
+// is PRD #154's decision verbatim — "Disable always couples both directions" —
+// stated with no operator-only carve-out, so a fault-driven disable (a
+// permanent JWKS failure, an ADR-0066 §D2 violation) takes the same rule as an
+// administrative one. A record that is not a pair has one direction, so it
+// always takes Status/ErrorMsg.
 //
 // "Is a pair" is EITHER signal, because findSstpPairBySID admits on either and
 // neither implies the other at this layer: its FindByID branch requires
@@ -457,6 +461,9 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
 	s.mu.Lock()
 	applyStreamStatusToRecord(rec, sid, status, errorMsg)
+	// rec is DAO-bound; the receiver cache holds its own copy of the pair
+	// record under the inbound SID, and the retry machinery reads THAT copy.
+	s.applyStatusToReceiverCache(sid, status, errorMsg)
 	persistCopy := *rec
 	s.mu.Unlock()
 

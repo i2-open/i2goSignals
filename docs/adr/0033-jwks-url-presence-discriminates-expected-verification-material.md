@@ -89,7 +89,14 @@ rule is recorded here rather than left implicit in the retry code.
   inbound ingest is gated on `InboundStatus` alone, so a disable written only to
   `Status` left the pair admitting events on the leg whose trust root was
   missing, and left `InboundStatus` enabled across a restart so the preload put a
-  permanently-broken URL back on the retry ladder.
+  permanently-broken URL back on the retry ladder. A permanent failure latches
+  the cache entry out of the ladder; the latch clears when the direction is
+  explicitly re-enabled — the operator asserting the world changed — and the
+  next lookup then attempts afresh. Status changes reach the cache as well as
+  the DAO: the cache holds its own copy of each record and the retry machinery
+  reads that copy, so a re-enable that stopped at the DAO would never be seen
+  and the direction would stay dead until restart — the defect this ADR exists
+  to close, resurrected through its own remedy path.
 - **No URL configured: a valid resting state, never unresolved, never
   retried.** The internal key lookup is authoritative and its result — including
   "no key at all" — is legitimate. This rests entirely on the ADR-0066 §D2

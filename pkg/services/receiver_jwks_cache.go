@@ -96,7 +96,9 @@ type receiverCacheEntry struct {
 	// permanent records that the last attempt failed with an error
 	// isPermanentJwksError classifies as permanent. That path has already
 	// disabled the record and persisted the reason, so it is visible to an
-	// operator and is not a retry candidate.
+	// operator and is not a retry candidate. It latches: nothing in the ladder
+	// clears it — only an explicit re-enable of the direction
+	// (resetRetryLadder) or eviction of the entry does.
 	permanent bool
 
 	// inFlight is set while an unlocked fetch is running so concurrent lookups
@@ -132,6 +134,18 @@ func (e *receiverCacheEntry) dueForRetry(now time.Time) bool {
 		return false
 	}
 	return !now.Before(e.nextRetry)
+}
+
+// resetRetryLadder makes the entry due for a fresh attempt on the next lookup.
+// It is called when the entry's receive direction transitions to enabled: an
+// explicit re-enable is an operator asserting the world changed, so it clears
+// the permanent latch — the one state dueForRetry never leaves on its own —
+// and zeroes the backoff rather than resuming a ladder whose failures predate
+// the re-enable.
+func (e *receiverCacheEntry) resetRetryLadder() {
+	e.permanent = false
+	e.backoff = 0
+	e.nextRetry = time.Time{}
 }
 
 // recordAttempt folds the outcome of one resolution attempt into the entry and,

@@ -24,7 +24,7 @@ import (
 // "connection refused" — the transient class GH #264 is about.
 const unreachableJwksUrl = "http://127.0.0.1:1/jwks.json"
 
-// readinessFixture builds the admin surface over in-memory DAOs and hands back
+// readinessAdminFixture builds the admin surface over in-memory DAOs and hands back
 // the StreamService so a test can drive the receiver cache directly.
 type readinessAdminFixture struct {
 	surface       *goSignalsServer.AdminSurface

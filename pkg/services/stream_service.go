@@ -1542,13 +1542,37 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
 	}
 
-	// Update cache if receiver stream
 	s.mu.Lock()
-	if entry, ok := s.receiverStreams[streamID]; ok {
-		entry.record.Status = status
-		entry.record.ErrorMsg = errorMsg
-	}
+	s.applyStatusToReceiverCache(streamID, status, errorMsg)
 	s.mu.Unlock()
+}
+
+// applyStatusToReceiverCache mirrors a status change onto this node's receiver
+// cache. The cache holds its own COPY of each record — the preload and both
+// miss paths copy before caching — so a DAO write alone leaves the copy stale,
+// and the retry machinery snapshots the cached record: a stale "not enabled"
+// there keeps a re-enabled direction from ever resolving, which is GH #264's
+// symptom through the re-enable path. Matching is by record identity, not map
+// key, because a pair's entry is keyed by its inbound SID (ADR 0018) while a
+// caller may name any of the record's identities. The status lands through
+// applyStreamStatusToRecord so the cached copy takes the same Q39/Q41 routing
+// as the DAO record, and when the change transitions the entry's receive
+// direction to enabled the retry ladder is reset — including out of the
+// permanent latch, which nothing else clears.
+//
+// The caller must hold s.mu.
+func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg string) {
+	for _, entry := range s.receiverStreams {
+		if entry == nil || !recordIdentifiedBy(entry.record, streamID) {
+			continue
+		}
+		wasEnabled := snapshotReceiveDirection(entry.record).enabled
+		applyStreamStatusToRecord(entry.record, streamID, status, errorMsg)
+		snap := snapshotReceiveDirection(entry.record)
+		if snap.present && snap.enabled && !wasEnabled {
+			entry.resetRetryLadder()
+		}
+	}
 }
 
 func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP) {

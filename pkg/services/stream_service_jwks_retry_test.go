@@ -598,3 +598,93 @@ func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound
 		"querying the pair by the SID that failed must not report a healthy stream")
 	assert.Contains(t, status.Reason, "Error retrieving issuer JWKS public key")
 }
+
+// TestGetIssuerJwksForReceiver_SstpPairReEnabledInboundResolves: the receiver
+// cache holds its own copy of the pair record, keyed by the inbound SID
+// (ADR 0018), and UpdateStreamStatus routes pair updates through
+// updateSstpPairStatus — which mutated only the DAO-bound record, never the
+// cached copy. The retry machinery snapshots the CACHED record, so an inbound
+// leg that was disabled when the cache slot was built stayed "not enabled"
+// there after an operator re-enabled it: every lookup recorded
+// errDirectionNotEnabled without touching the network, and the pair verified
+// nothing until restart — GH #264's symptom resurrected through the re-enable
+// path. A plain receiver never hit this because UpdateStreamStatus updates its
+// cache entry in place.
+func TestGetIssuerJwksForReceiver_SstpPairReEnabledInboundResolves(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	const kid = "pair-reenable"
+	jwksSrv := newFlakyJwksServer(t, kid, &key.PublicKey)
+	jwksSrv.healthy.Store(true)
+
+	h := newRetryHarness(t)
+	ctx := context.Background()
+
+	rec, txSid, rxSid := newSstpPairFixture(t, jwksSrv.URL)
+	rec.InboundStatus = model.StreamStateDisable
+	require.NoError(t, h.streamDAO.Create(ctx, rec))
+
+	h.svc.LoadReceiverStreams(ctx)
+	require.Zero(t, jwksSrv.attempts.Load(),
+		"a disabled inbound leg must not be fetched at load")
+	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, rxSid),
+		"fail-closed: a disabled inbound leg hands out no verification material")
+
+	// The operator re-enables the inbound leg by its own SID. Enable routes per
+	// direction (Q39): only Disable couples the pair.
+	h.svc.UpdateStreamStatus(ctx, rxSid, model.StreamStateEnabled, "")
+
+	jwks := h.svc.GetIssuerJwksForReceiver(ctx, rxSid)
+	require.NotNil(t, jwks,
+		"a re-enabled inbound leg must resolve on the next lookup, not wait for a restart")
+	assert.Contains(t, jwks.KIDs(), kid)
+
+	stored, err := h.streamDAO.FindByID(ctx, txSid)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStateEnabled, stored.InboundStatus)
+	assert.Equal(t, model.StreamStateEnabled, stored.Status,
+		"enable routes per direction: the tx leg was never named and never touched")
+}
+
+// TestGetIssuerJwksForReceiver_ReEnableClearsPermanentFailure: a permanent
+// JWKS failure disables the record and latches the entry out of the retry
+// ladder (ADR 0033) — and nothing in the ladder itself ever clears that latch.
+// An explicit operator re-enable is new information: the operator is asserting
+// the world changed (here, the issuer fixed its endpoint), so it must reset
+// the ladder and let the next lookup attempt afresh. Without the reset the
+// permanent flag outlived the re-enable and the stream verified nothing until
+// restart, while reporting enabled — GH #264's symptom again.
+func TestGetIssuerJwksForReceiver_ReEnableClearsPermanentFailure(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	const kid = "fixed-issuer"
+	jwksSrv := newFlakyJwksServer(t, kid, &key.PublicKey)
+	// A healthy endpoint serving an unparseable document: a permanent error
+	// per isPermanentJwksError, unlike the 503 the unhealthy server returns.
+	garbage := []byte("not a jwks document")
+	jwksSrv.body.Store(&garbage)
+	jwksSrv.healthy.Store(true)
+
+	h := newRetryHarness(t)
+	ctx := context.Background()
+
+	rec := newJwksReceiverFixture(t, "https://tx.example", jwksSrv.URL)
+	require.NoError(t, h.streamDAO.Create(ctx, rec))
+	sid := rec.StreamConfiguration.Id
+
+	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, sid))
+	stored, err := h.streamDAO.FindByID(ctx, sid)
+	require.NoError(t, err)
+	require.Equal(t, model.StreamStateDisable, stored.Status,
+		"an unparseable JWKS document is a permanent error and must disable the stream")
+
+	// The issuer fixes its endpoint; the operator re-enables the stream.
+	full := rsaPublicJWKSBytes(t, kid, &key.PublicKey)
+	jwksSrv.body.Store(&full)
+	h.svc.UpdateStreamStatus(ctx, sid, model.StreamStateEnabled, "")
+
+	jwks := h.svc.GetIssuerJwksForReceiver(ctx, sid)
+	require.NotNil(t, jwks,
+		"an explicit re-enable must reset the ladder and re-attempt, permanent latch or not")
+	assert.Contains(t, jwks.KIDs(), kid)
+}
