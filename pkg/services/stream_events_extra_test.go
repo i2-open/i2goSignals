@@ -116,3 +116,27 @@ func TestCreateSstpPair_ExtendedEventTypeIsNegotiated(t *testing.T) {
 	assert.Contains(t, rec.SstpInbound.EventsSupported, aiEventType,
 		"the pair must advertise the extended catalog it negotiated against")
 }
+
+// TestCreateStream_ExtendedEventTypeMatchedByPattern: events_requested is a
+// REGULAR EXPRESSION language (MatchesEventPattern), not a literal list, and a
+// receiver carrying a private vocabulary is the caller most likely to write a
+// prefix pattern rather than enumerate. The extension has to be visible to the
+// matcher, not only to the literal-equality path the other tests take.
+func TestCreateStream_ExtendedEventTypeMatchedByPattern(t *testing.T) {
+	t.Setenv(model.EnvEventTypesExtra, aiEventType)
+	svc := newEventValidationTestService(model.EventValidationUnset)
+	ctx := context.Background()
+
+	req := pollReceiverRequest()
+	req.EventsRequested = []string{"urn:i2:gosignals-ai:v1:analysis:.*"}
+
+	created, err := svc.CreateStream(ctx, req, "test-project", nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, created.EventsDelivered, aiEventType,
+		"a pattern selecting an extended URI must expand to it in events_delivered")
+	assert.NotContains(t, created.EventsDelivered, model.EventScimFeedAdd,
+		"the pattern must not widen delivery to the compiled-in packs it does not select")
+	assert.Contains(t, created.EventsRequested, aiEventType,
+		"a returned configuration enumerates URIs rather than echoing the pattern")
+}

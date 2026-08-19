@@ -28,7 +28,11 @@ func TestScimEvents_AllHaveBuiltinValidators(t *testing.T) {
 	registry := goSetValidate.BuiltinRegistry()
 
 	found := 0
-	for _, uri := range GetSupportedEvents() {
+	// builtinEventTypes, not GetSupportedEvents: this guard asserts the compiled-in
+	// SCIM pack has a validator for every URN it advertises. A catalog extension
+	// (EnvEventTypesExtra, ADR 0032) deliberately has no builtin validator, so a
+	// SCIM-prefixed extension set in the test runner's environment must not fail it.
+	for _, uri := range builtinEventTypes() {
 		if !strings.HasPrefix(uri, scimEventUrnPrefix) {
 			continue
 		}

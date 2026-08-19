@@ -27,7 +27,10 @@ func TestEventScimAsyncResp_IsCanonicalLowercase(t *testing.T) {
 // conformant receivers — and the OpenID conformance suite — recognize it.
 // This guards against reintroducing a camelCase URN like the asyncResp typo.
 func TestGetSupportedEvents_AllCanonicalLowercase(t *testing.T) {
-	for _, e := range GetSupportedEvents() {
+	// builtinEventTypes, not GetSupportedEvents: the canonical-lowercase rule binds
+	// the URNs this build ships, not a catalog extension whose spelling the operator
+	// chose (EnvEventTypesExtra, ADR 0032).
+	for _, e := range builtinEventTypes() {
 		if lower := strings.ToLower(e); e != lower {
 			t.Errorf("supported event %q is not canonical lowercase (want %q)", e, lower)
 		}

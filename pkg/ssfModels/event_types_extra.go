@@ -3,6 +3,7 @@ package model
 import (
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -43,7 +44,11 @@ func extraEventTypes() []string {
 	if cached, ok := extraEventTypesCache.Load(raw); ok {
 		return cached.([]string)
 	}
-	parsed := parseExtraEventTypes(raw)
+	// Clipped: the cached slice is handed to every caller, and GetSupportedEvents
+	// concatenates it into results that callers do append to. Spare capacity on a
+	// shared backing array is how one caller's append silently overwrites
+	// another's catalog.
+	parsed := slices.Clip(parseExtraEventTypes(raw))
 	extraEventTypesCache.Store(raw, parsed)
 	return parsed
 }

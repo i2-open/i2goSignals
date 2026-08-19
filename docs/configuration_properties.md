@@ -115,7 +115,7 @@ understands. They are documented in their natural section below.
 
 | Variable                  | Description                                                                                | Default |
 |---------------------------|--------------------------------------------------------------------------------------------|---------|
-| `I2SIG_EVENT_TYPES_EXTRA` | Extends the supported-event catalog with event type URIs this build has no compiled-in knowledge of, so a private or not-yet-published vocabulary can be negotiated and routed without recompiling. Entries are separated by commas and/or whitespace and must each be an **absolute URI**; a blank or relative entry is skipped with a `WARN` naming it, and an entry that duplicates a built-in (or another entry) is ignored. Extended URIs behave exactly like built-in ones: they are advertised in `events_supported`, an `events_requested` naming them — literally, by pattern, or via `"*"` — resolves them into `events_delivered`, and the router then fans out SETs carrying them over push, poll, and SSTP alike. | (none) |
+| `I2SIG_EVENT_TYPES_EXTRA` | Extends the supported-event catalog with event type URIs this build has no compiled-in knowledge of, so a private or not-yet-published vocabulary can be negotiated and routed without recompiling. Entries are separated by commas and/or whitespace and must each be an **absolute URI**; a relative or unparseable entry is skipped with a `WARN` naming it, empty entries (a trailing comma, repeated separators) are discarded silently, and an entry that duplicates a built-in (or another entry) is ignored case-insensitively. Extended URIs behave exactly like built-in ones: they are advertised in `events_supported`, an `events_requested` naming them — literally, by pattern, or via `"*"` — resolves them into `events_delivered`, and the router then fans out SETs carrying them over push, poll, and SSTP alike. | (none) |
 
 **Why this exists.** `events_delivered` is negotiated at registration as
 `events_requested ∩ events_supported`, and the router matches a SET's event
@@ -133,12 +133,19 @@ a validator pack.
 
 **Scope in time.** The value is read per catalog lookup and parsed once per
 distinct value, so a restart is all that is needed to change it. It does not
-rewrite anything already persisted: a stream or SSTP pair negotiates the extended
-catalog when it is **created or updated** (a `PATCH` carrying `events_requested`
-re-negotiates against the live catalog), while records left untouched keep the
-`events_delivered` they negotiated earlier. Adding a vocabulary to an existing
-stream is a `PATCH`; removing one from the variable does not retract it from
-streams that already negotiated it.
+rewrite anything already persisted, and the two record kinds differ:
+
+- An **SSF stream** negotiates the extended catalog when it is **created**, and
+  again on a `PATCH` carrying `events_requested` — that re-negotiates against the
+  live catalog, so adding a vocabulary to an existing stream is a `PATCH`.
+- An **SSTP pair** negotiates only at **create**. `PATCH` on a pair is a narrow
+  whitelist (endpoint, peer pair id, per-direction `iss`/`aud`, event validation)
+  that does not touch events, so a pair provisioned before the vocabulary was
+  configured must be recreated to carry it.
+
+Records left untouched keep the `events_delivered` they negotiated earlier, and
+removing a vocabulary from the variable does not retract it from records that
+already negotiated it.
 
 ## Issuer
 

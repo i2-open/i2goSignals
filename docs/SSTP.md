@@ -182,6 +182,10 @@ SETs arrive, verify, and persist, and then go nowhere. Set
 to the catalog — see `docs/configuration_properties.md` (§ Event) for the format
 and for how an extended type interacts with `I2SIG_STREAM_EVENT_VALIDATION`.
 
+Negotiation happens at **bootstrap only**: `PATCH` on a pair is a narrow
+whitelist that does not touch events, so a pair created before the vocabulary was
+configured has to be recreated to carry it.
+
 Note also that an SSTP direction naming **no** `events` forwards nothing (unlike
 SSF registration, where an omitted `events_requested` means "everything you
 support"); a `WARN` is logged at create.
