@@ -398,27 +398,42 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 	return nil
 }
 
-// updateSstpPairStatus applies a status change to an SSTP pair with per-direction
-// routing (Q39, Q41): naming the tx-side SID writes Status/ErrorMsg; naming the
-// rx-side SID writes InboundStatus/InboundErrorMsg. Disabled is a pair-level
-// lifecycle event and ALWAYS couples both directions regardless of which SID is
-// named (Q39); Paused and Enabled honor per-direction routing.
-func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
-	isInbound := rec.SstpInbound != nil && sid == rec.SstpInbound.Id
+// applyStreamStatusToRecord writes a status change onto rec in memory, and only
+// in memory — persisting is the caller's, because the JWKS paths must reach the
+// DAO with the receiver-cache lock released.
+//
+// This is the single home of the direction-routing rule (Q39, Q41): naming an
+// SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
+// side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
+// ALWAYS couples both directions regardless of which SID is named. A record with
+// no inbound leg has one direction, so it always takes Status/ErrorMsg.
+func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorMsg string) {
+	if rec == nil {
+		return
+	}
+	isPair := rec.SstpInbound != nil
 
-	if status == model.StreamStateDisable {
+	if isPair && status == model.StreamStateDisable {
 		// Pair-level: couple both directions.
 		rec.Status = status
 		rec.ErrorMsg = errorMsg
 		rec.InboundStatus = status
 		rec.InboundErrorMsg = errorMsg
-	} else if isInbound {
+		return
+	}
+	if isPair && sid == rec.SstpInbound.Id {
 		rec.InboundStatus = status
 		rec.InboundErrorMsg = errorMsg
-	} else {
-		rec.Status = status
-		rec.ErrorMsg = errorMsg
+		return
 	}
+	rec.Status = status
+	rec.ErrorMsg = errorMsg
+}
+
+// updateSstpPairStatus applies a status change to an SSTP pair with
+// per-direction routing (Q39, Q41) and persists the result.
+func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
+	applyStreamStatusToRecord(rec, sid, status, errorMsg)
 
 	if err := s.streamDAO.Update(ctx, rec); err != nil {
 		ssLog.Error("Error updating sstp pair status", "sid", sid, "error", err)

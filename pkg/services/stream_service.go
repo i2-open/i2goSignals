@@ -1871,7 +1871,7 @@ func (s *StreamService) newReceiverEntry(ctx context.Context, rec *model.StreamS
 	jwks, err := s.resolveSnapshotJwks(ctx, snap)
 	entry.recordAttempt(s.now(), jwks, err)
 	if reason, permanent := permanentJwksFailure(err); permanent {
-		disableRecordForJwksFailure(rec, reason)
+		disableRecordForJwksFailure(rec, snap.sid, reason)
 		s.persistDisabledRecord(ctx, rec, snap.sid)
 	}
 	// Keep the record's ValidateJwks in step with the entry so nothing reading
@@ -1909,13 +1909,16 @@ func permanentJwksFailure(err error) (string, bool) {
 
 // disableRecordForJwksFailure applies the permanent-failure disable to rec. The
 // caller must hold s.mu whenever rec is reachable from the receiver cache —
-// UpdateStreamStatus writes these same two fields under it.
-func disableRecordForJwksFailure(rec *model.StreamStateRecord, reason string) {
-	if rec == nil {
-		return
-	}
-	rec.Status = model.StreamStateDisable
-	rec.ErrorMsg = reason
+// UpdateStreamStatus writes these same fields under it.
+//
+// sid names the direction that failed, so an SSTP pair routes through the same
+// Q39 rule as every other status change and a disable couples both directions.
+// Writing rec.Status directly — as this did before — left the inbound leg of a
+// pair reporting enabled with no reason when the inbound leg was precisely the
+// one that could not resolve a key, and left InboundStatus enabled across a
+// restart so the preload put a permanently-broken URL back on the retry ladder.
+func disableRecordForJwksFailure(rec *model.StreamStateRecord, sid, reason string) {
+	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable, reason)
 }
 
 // persistDisabledRecord writes a disabled record through the DAO. The caller
@@ -2104,7 +2107,7 @@ func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyf
 	// a private copy rather than the record UpdateStreamStatus may be writing.
 	var persistCopy *model.StreamStateRecord
 	if permanent {
-		disableRecordForJwksFailure(rec, reason)
+		disableRecordForJwksFailure(rec, snap.sid, reason)
 		snapshotRec := *rec
 		persistCopy = &snapshotRec
 	}

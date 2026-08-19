@@ -20,7 +20,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // flakyJwksServer serves an RSA JWKS under kid once healthy is set, and 503s
@@ -403,40 +402,13 @@ func TestGetIssuerJwksForReceiver_SstpPairInboundRetries(t *testing.T) {
 	h := newRetryHarness(t)
 	ctx := context.Background()
 
-	txSid := bson.NewObjectID()
-	rxSid := bson.NewObjectID().Hex()
-	rec := &model.StreamStateRecord{
-		Id:        txSid,
-		ProjectId: "proj-1",
-		PairId:    txSid.Hex(),
-		StreamConfiguration: model.StreamConfiguration{
-			Id:  txSid.Hex(),
-			Iss: "https://local.example",
-			Aud: []string{"https://peer.example"},
-			Delivery: &model.OneOfStreamConfigurationDelivery{
-				SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp},
-			},
-		},
-		SstpInbound: &model.StreamConfiguration{
-			Id:            rxSid,
-			Iss:           "https://peer.example",
-			IssuerJWKSUrl: jwksSrv.URL,
-			Aud:           []string{"https://local.example"},
-			Delivery: &model.OneOfStreamConfigurationDelivery{
-				SstpReceiveMarker: &model.SstpReceiveMarker{Method: model.ReceiveSstp},
-			},
-		},
-		SstpMethod:    &model.SstpMethod{Role: model.SstpRoleResponder},
-		Status:        model.StreamStateEnabled,
-		InboundStatus: model.StreamStateEnabled,
-		CreatedAt:     time.Now(),
-	}
+	rec, txSid, rxSid := newSstpPairFixture(t, jwksSrv.URL)
 	require.NoError(t, h.streamDAO.Create(ctx, rec))
 
 	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, rxSid))
 	require.Equal(t, int32(1), jwksSrv.attempts.Load())
 
-	stored, err := h.streamDAO.FindByID(ctx, txSid.Hex())
+	stored, err := h.streamDAO.FindByID(ctx, txSid)
 	require.NoError(t, err)
 	h.svc.OverlayJwksReadiness(stored)
 	assert.Nil(t, stored.JwksReadiness,
@@ -450,7 +422,7 @@ func TestGetIssuerJwksForReceiver_SstpPairInboundRetries(t *testing.T) {
 	require.NotNil(t, jwks, "an SSTP pair's inbound direction must recover the same way")
 	assert.Contains(t, jwks.KIDs(), kid)
 
-	stored, err = h.streamDAO.FindByID(ctx, txSid.Hex())
+	stored, err = h.streamDAO.FindByID(ctx, txSid)
 	require.NoError(t, err)
 	h.svc.OverlayJwksReadiness(stored)
 	require.NotNil(t, stored.InboundJwksReadiness)
@@ -591,4 +563,42 @@ func TestGetIssuerJwksForReceiver_RetryDoesNotRaceStatusUpdate(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound:
+// a permanent JWKS error on an SSTP pair used to write rec.Status/ErrorMsg
+// directly, so the leg that could not resolve a key — the INBOUND one, since
+// the receiver cache is keyed by the inbound SID (ADR 0018) — kept reporting
+// enabled with no reason, while the transmit leg carried a disable it had done
+// nothing to earn. Querying the pair by the SID that actually failed therefore
+// showed a healthy stream.
+//
+// The bar: the permanent failure routes through the same rule as every other
+// status change (Q39), so both directions carry the disable and its reason, and
+// GetStatus on the rx-side SID reports it.
+func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound(t *testing.T) {
+	h := newRetryHarness(t)
+	ctx := context.Background()
+
+	// An unsupported protocol scheme is permanent per isPermanentJwksError.
+	rec, txSid, rxSid := newSstpPairFixture(t, "ftp://keys.example/jwks.json")
+	require.NoError(t, h.streamDAO.Create(ctx, rec))
+
+	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, rxSid))
+
+	stored, err := h.streamDAO.FindByID(ctx, txSid)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStateDisable, stored.InboundStatus,
+		"the inbound leg is the one that could not resolve a key; it must carry the disable")
+	assert.Contains(t, stored.InboundErrorMsg, "Error retrieving issuer JWKS public key",
+		"the inbound leg must carry the reason an operator needs")
+	assert.Equal(t, model.StreamStateDisable, stored.Status,
+		"a disable is a pair-level lifecycle event and couples both directions (Q39)")
+	assert.Contains(t, stored.ErrorMsg, "Error retrieving issuer JWKS public key")
+
+	status, err := h.svc.GetStatus(ctx, rxSid)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStateDisable, status.Status,
+		"querying the pair by the SID that failed must not report a healthy stream")
+	assert.Contains(t, status.Reason, "Error retrieving issuer JWKS public key")
 }
