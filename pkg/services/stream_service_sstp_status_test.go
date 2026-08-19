@@ -92,3 +92,60 @@ func TestUpdateStreamStatus_SstpEnablePerDirection(t *testing.T) {
 	assert.Equal(t, model.StreamStateEnabled, got.Status)
 	assert.Equal(t, model.StreamStatePause, got.InboundStatus, "rx must stay paused")
 }
+
+// TestApplyStreamStatusToRecord_PairPredicateAcceptsEitherSignal exercises the
+// routing helper directly, on the two half-formed record shapes findSstpPairBySID
+// can admit but buildSstpRecord never produces: SstpMethod without an inbound
+// leg (its FindByID branch checks GetType only) and an inbound leg without
+// SstpMethod (its FindByInboundSID branch checks SstpInbound.Id only). Neither
+// is reachable from today's construction site, which is exactly why a
+// single-signal "is a pair" test survives the integration tests while silently
+// mis-routing here — both single-signal spellings fail open, in opposite
+// directions.
+func TestApplyStreamStatusToRecord_PairPredicateAcceptsEitherSignal(t *testing.T) {
+	const rxSid = "rx-sid"
+
+	inboundLeg := func() *model.StreamConfiguration {
+		return &model.StreamConfiguration{Id: rxSid}
+	}
+
+	t.Run("SstpMethod with no inbound leg still couples on Disable", func(t *testing.T) {
+		rec := &model.StreamStateRecord{
+			SstpMethod:    &model.SstpMethod{Role: model.SstpRoleResponder},
+			Status:        model.StreamStateEnabled,
+			InboundStatus: model.StreamStateEnabled,
+		}
+		applyStreamStatusToRecord(rec, "tx-sid", model.StreamStateDisable, "gone")
+
+		assert.Equal(t, model.StreamStateDisable, rec.Status)
+		assert.Equal(t, model.StreamStateDisable, rec.InboundStatus,
+			"a disable is pair-level (Q39); gating on SstpInbound alone would drop the coupling")
+		assert.Equal(t, "gone", rec.InboundErrorMsg)
+	})
+
+	t.Run("inbound leg with no SstpMethod still routes the rx SID inbound", func(t *testing.T) {
+		rec := &model.StreamStateRecord{
+			SstpInbound:   inboundLeg(),
+			Status:        model.StreamStateEnabled,
+			InboundStatus: model.StreamStateEnabled,
+		}
+		applyStreamStatusToRecord(rec, rxSid, model.StreamStatePause, "quiesced")
+
+		assert.Equal(t, model.StreamStatePause, rec.InboundStatus,
+			"naming the rx SID must write the inbound leg")
+		assert.Equal(t, "quiesced", rec.InboundErrorMsg)
+		assert.Equal(t, model.StreamStateEnabled, rec.Status,
+			"gating on GetType alone would have written the TX leg instead")
+		assert.Empty(t, rec.ErrorMsg)
+	})
+
+	t.Run("a plain receiver is never a pair", func(t *testing.T) {
+		rec := &model.StreamStateRecord{Status: model.StreamStateEnabled}
+		applyStreamStatusToRecord(rec, "sid", model.StreamStateDisable, "boom")
+
+		assert.Equal(t, model.StreamStateDisable, rec.Status)
+		assert.Empty(t, rec.InboundStatus,
+			"a receiver has one direction and must not gain an inbound status")
+		assert.Empty(t, rec.InboundErrorMsg)
+	})
+}

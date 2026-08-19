@@ -1031,7 +1031,13 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 			// state-listing surface must never surface a live bearer. MaskCredentials
 			// works on a deep copy, so the in-memory record is untouched.
 			adjusted := adjustStateBaseUrl(sa, stream)
-			result = append(result, *adjusted.MaskCredentials())
+			masked := adjusted.MaskCredentials()
+			// Overlay this node's JWKS readiness (ADR 0033). GetStateMap sources
+			// records from the DAO, which never carries readiness — an unresolvable
+			// stream still reports status "enabled", so without this the operator
+			// has nothing to look at.
+			sa.GetStreamService().OverlayJwksReadiness(masked)
+			result = append(result, *masked)
 		}
 	}
 
@@ -1089,7 +1095,11 @@ func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Mask every credential (ADR 0022 §3): this state read surface must never
 	// surface a live bearer. MaskCredentials returns a deep copy, leaving the
 	// stored record untouched.
-	resp, err := json.Marshal(config.MaskCredentials())
+	masked := config.MaskCredentials()
+	// Overlay this node's JWKS readiness (ADR 0033) — GetStreamState reads from
+	// the DAO and never consults the receiver cache.
+	sa.GetStreamService().OverlayJwksReadiness(masked)
+	resp, err := json.Marshal(masked)
 	if err != nil {
 		serverLog.Error("Internal error GetStreamState:", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)

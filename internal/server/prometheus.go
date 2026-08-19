@@ -39,12 +39,13 @@ type PrometheusHandler struct {
 }
 
 type streamCollector struct {
-	sa           *SignalsApplication
-	statusDesc   *prometheus.Desc
-	errorDesc    *prometheus.Desc
-	createdDesc  *prometheus.Desc
-	startDesc    *prometheus.Desc
-	modifiedDesc *prometheus.Desc
+	sa                *SignalsApplication
+	statusDesc        *prometheus.Desc
+	errorDesc         *prometheus.Desc
+	jwksReadinessDesc *prometheus.Desc
+	createdDesc       *prometheus.Desc
+	startDesc         *prometheus.Desc
+	modifiedDesc      *prometheus.Desc
 }
 
 func newStreamCollector(sa *SignalsApplication) *streamCollector {
@@ -60,6 +61,18 @@ func newStreamCollector(sa *SignalsApplication) *streamCollector {
 			"goSignals_router_stream_error_info",
 			"Information about the stream error message.",
 			[]string{"stream_id", "error_msg"},
+			nil,
+		),
+		// Node-local readiness of a receive direction's SET-verification material
+		// (ADR 0033). It sits beside the error gauge because stream status
+		// deliberately keeps reporting "enabled" for a stream whose issuer JWKS
+		// cannot be resolved — this is the only scrapeable signal for that state.
+		// The readiness value rides as a label, matching the info-gauge idiom the
+		// status and error gauges already use.
+		jwksReadinessDesc: prometheus.NewDesc(
+			"goSignals_router_stream_jwks_readiness_info",
+			"Readiness of a receive direction's SET-verification material on this node: ready, unresolved, or not-configured.",
+			[]string{"stream_id", "direction", "readiness"},
 			nil,
 		),
 		createdDesc: prometheus.NewDesc(
@@ -86,6 +99,7 @@ func newStreamCollector(sa *SignalsApplication) *streamCollector {
 func (c *streamCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.statusDesc
 	ch <- c.errorDesc
+	ch <- c.jwksReadinessDesc
 	ch <- c.createdDesc
 	ch <- c.startDesc
 	ch <- c.modifiedDesc
@@ -100,6 +114,20 @@ func (c *streamCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.createdDesc, prometheus.GaugeValue, float64(state.CreatedAt.Unix()), streamID)
 		ch <- prometheus.MustNewConstMetric(c.startDesc, prometheus.GaugeValue, float64(state.StartDate.Unix()), streamID)
 		ch <- prometheus.MustNewConstMetric(c.modifiedDesc, prometheus.GaugeValue, float64(state.ModifiedAt.Unix()), streamID)
+
+		// GetStateMap sources records from the DAO, which never carries the
+		// derived, node-local readiness — overlay it before reporting (ADR 0033).
+		// Transmit-only streams have no receive direction and emit no series.
+		rec := state
+		c.sa.StreamService.OverlayJwksReadiness(&rec)
+		if rec.JwksReadiness != nil {
+			ch <- prometheus.MustNewConstMetric(c.jwksReadinessDesc, prometheus.GaugeValue, 1,
+				streamID, "receive", rec.JwksReadiness.State)
+		}
+		if rec.InboundJwksReadiness != nil {
+			ch <- prometheus.MustNewConstMetric(c.jwksReadinessDesc, prometheus.GaugeValue, 1,
+				streamID, "inbound", rec.InboundJwksReadiness.State)
+		}
 	}
 }
 
