@@ -408,15 +408,22 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 // ALWAYS couples both directions regardless of which SID is named. A record that
 // is not a pair has one direction, so it always takes Status/ErrorMsg.
 //
-// "Is a pair" is GetType() — SstpMethod != nil, the same predicate
-// findSstpPairBySID admits on — and deliberately not "SstpInbound != nil". A
-// pair still couples on Disable when its inbound leg is absent; only the rx-side
-// routing needs that leg, because it needs a SID to compare against.
+// "Is a pair" is EITHER signal, because findSstpPairBySID admits on either and
+// neither implies the other at this layer: its FindByID branch requires
+// GetType() == DeliverySstpPair (SstpMethod != nil) while its FindByInboundSID
+// branch matches on SstpInbound.Id with no GetType check at all. buildSstpRecord
+// always sets both, so the two coincide on every record created today — but a
+// single-signal test silently mis-routes whichever half-formed shape reaches
+// here, and the failure is fail-open in both directions: on SstpMethod alone a
+// pair would stop coupling on Disable, and on SstpInbound alone naming the rx
+// SID would write the TX leg's Status. A plain receiver has neither, so it is
+// never a pair. Only the rx-routing branch needs SstpInbound specifically,
+// because only it needs a SID to compare against.
 func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorMsg string) {
 	if rec == nil {
 		return
 	}
-	isPair := rec.GetType() == model.DeliverySstpPair
+	isPair := rec.GetType() == model.DeliverySstpPair || rec.SstpInbound != nil
 
 	if isPair && status == model.StreamStateDisable {
 		// Pair-level: couple both directions.
