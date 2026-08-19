@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -47,6 +48,14 @@ func expectsVerificationMaterial(jwksUrl string) bool {
 	return normalizedJwksUrl(jwksUrl) != ""
 }
 
+// errDirectionNotEnabled reports that no resolution was attempted because the
+// receive direction itself is not enabled. It is the third of the three
+// outcomes ADR 0033 requires be told apart from each other — "the fetch failed"
+// and "nothing is expected here" are the other two. Folding it into the failed
+// fetch is what would put an operator-disabled stream on the retry ladder and
+// give it a next-retry time that can never arrive.
+var errDirectionNotEnabled = errors.New("receive direction is not enabled")
+
 // jwksIsUsable reports whether a resolved JWKS actually carries key material.
 // Non-nil is NOT the test: keyService.GetPublicJWKS swallows every per-key
 // error with a continue and returns whatever accumulated, so a total failure
@@ -74,11 +83,10 @@ type receiverCacheEntry struct {
 	// on its SstpInbound leg.
 	record *model.StreamStateRecord
 
-	// iss and jwksUrl are the trust fields of THIS direction — for an SSTP pair
-	// they come from SstpInbound, not from the primary (transmit) configuration.
-	// jwksUrl is already "NONE"-normalized, so it is empty exactly when the
-	// direction expects no verification material.
-	iss     string
+	// jwksUrl is the issuer JWKS URL of THIS direction — for an SSTP pair it
+	// comes from SstpInbound, not from the primary (transmit) configuration. It
+	// is already "NONE"-normalized, so it is empty exactly when the direction
+	// expects no verification material.
 	jwksUrl string
 
 	// jwks is the verification material handed to callers. It is only ever set
@@ -137,6 +145,20 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 		return
 	}
 
+	if errors.Is(err, errDirectionNotEnabled) {
+		// Nothing was attempted, so this is not "resolution failing" and must
+		// not enter the backoff ladder (ADR 0033). nextRetry is left zero so a
+		// re-enable is picked up on the very next lookup: re-checking a
+		// disabled direction returns here again without touching the network,
+		// so there is no endpoint to hammer and no deadline to wait out.
+		e.jwks = nil
+		e.lastErr = errDirectionNotEnabled.Error()
+		e.permanent = false
+		e.backoff = 0
+		e.nextRetry = time.Time{}
+		return
+	}
+
 	if jwksIsUsable(jwks) {
 		e.jwks = jwks
 		e.lastErr = ""
@@ -158,8 +180,9 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 	}
 
 	if e.permanent {
-		// fetchReceiverJwks has already disabled the record and persisted the
-		// reason. Not a retry candidate.
+		// The caller disables the record and persists the reason for this
+		// class of error, so it is already visible to an operator. Not a retry
+		// candidate.
 		e.backoff = 0
 		e.nextRetry = time.Time{}
 		return
@@ -201,16 +224,6 @@ func (e *receiverCacheEntry) readiness() *model.JwksReadiness {
 		out.NextRetryAt = &next
 	}
 	return out
-}
-
-// receiveDirection returns the SID and trust fields of the receive direction a
-// cache entry is keyed by: the inbound leg for an SSTP pair (ADR 0018), the
-// primary configuration otherwise. The returned jwksUrl is "NONE"-normalized.
-func receiveDirection(rec *model.StreamStateRecord) (sid, iss, jwksUrl string) {
-	if rec.GetType() == model.DeliverySstpPair && rec.SstpInbound != nil {
-		return rec.SstpInbound.Id, rec.SstpInbound.Iss, normalizedJwksUrl(rec.SstpInbound.IssuerJWKSUrl)
-	}
-	return rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, normalizedJwksUrl(rec.StreamConfiguration.IssuerJWKSUrl)
 }
 
 // recordIdentifiedBy reports whether streamID names rec under any of the

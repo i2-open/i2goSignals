@@ -492,6 +492,103 @@ func TestGetIssuerJwksForReceiver_ConcurrentRetriesDoNotStampede(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int32(2), jwksSrv.attempts.Load(),
-		"32 concurrent lookups past the deadline must collapse to one outbound fetch")
+		"expected the startup preload plus exactly one collapsed retry: 32 concurrent "+
+			"lookups past the deadline must not produce 32 outbound fetches")
 	require.NotNil(t, h.svc.GetIssuerJwksForReceiver(ctx, sid))
+}
+
+// TestGetIssuerJwksForReceiver_DisabledDirectionIsNotRetried pins the third of
+// the three outcomes ADR 0033 requires be kept apart: "the inbound direction of
+// an SSTP pair is not enabled" is neither a failed fetch nor "nothing is
+// expected here". Folding it into the failed fetch put a disabled stream on the
+// backoff ladder and published a next-retry time that could never arrive —
+// including, after a restart, for a stream that had been disabled by a
+// PERMANENT error, which then lost that classification and re-entered the
+// ladder.
+//
+// The bar: a disabled direction makes no network call, schedules no backoff,
+// and advertises no next-retry time — but resolves promptly once re-enabled.
+func TestGetIssuerJwksForReceiver_DisabledDirectionIsNotRetried(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	const kid = "disabled-direction"
+	jwksSrv := newFlakyJwksServer(t, kid, &key.PublicKey)
+	jwksSrv.healthy.Store(true)
+
+	h := newRetryHarness(t)
+	ctx := context.Background()
+
+	rec := newJwksReceiverFixture(t, "https://tx.example", jwksSrv.URL)
+	rec.Status = model.StreamStateDisable
+	require.NoError(t, h.streamDAO.Create(ctx, rec))
+	sid := rec.StreamConfiguration.Id
+
+	h.svc.LoadReceiverStreams(ctx)
+	require.Zero(t, jwksSrv.attempts.Load(),
+		"a disabled direction must not be fetched: nothing is expected to verify through it")
+
+	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, sid),
+		"fail-closed: a disabled direction hands out no verification material")
+
+	stored, err := h.streamDAO.FindByID(ctx, sid)
+	require.NoError(t, err)
+	h.svc.OverlayJwksReadiness(stored)
+	require.NotNil(t, stored.JwksReadiness)
+	assert.Nil(t, stored.JwksReadiness.NextRetryAt,
+		"a disabled direction must not advertise a retry deadline it will never act on")
+	assert.Equal(t, errDirectionNotEnabled.Error(), stored.JwksReadiness.LastError,
+		"the reason must name the disabled direction, not a fetch that never happened")
+
+	// Re-enabling must resolve on the next lookup rather than waiting out a
+	// backoff window that was never legitimately scheduled.
+	h.svc.UpdateStreamStatus(ctx, sid, model.StreamStateEnabled, "")
+	jwks := h.svc.GetIssuerJwksForReceiver(ctx, sid)
+	require.NotNil(t, jwks, "a re-enabled direction must resolve without waiting out a backoff")
+	assert.Contains(t, jwks.KIDs(), kid)
+}
+
+// TestGetIssuerJwksForReceiver_RetryDoesNotRaceStatusUpdate covers the locking
+// contract ADR 0033 states as a consequence: "the retry attempt must not hold
+// the cache lock across the network call, so the resolver acquires the lock
+// twice around an unlocked fetch". The hazard that creates is the mirror of the
+// one it solves — resolving from the shared record with the lock released races
+// UpdateStreamStatus, which writes Status/ErrorMsg on that same record under
+// the cache lock.
+//
+// Meaningful only under -race, which the repo requires for concurrent code.
+func TestGetIssuerJwksForReceiver_RetryDoesNotRaceStatusUpdate(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwksSrv := newFlakyJwksServer(t, "retry-vs-status", &key.PublicKey)
+
+	h := newRetryHarness(t)
+	ctx := context.Background()
+
+	rec := newJwksReceiverFixture(t, "https://tx.example", jwksSrv.URL)
+	require.NoError(t, h.streamDAO.Create(ctx, rec))
+	sid := rec.StreamConfiguration.Id
+
+	// Preload while the endpoint is down, then step past the deadline so every
+	// lookup below is a retry candidate.
+	h.svc.LoadReceiverStreams(ctx)
+	h.clock.Advance(11 * time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.svc.GetIssuerJwksForReceiver(ctx, sid)
+		}()
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if n%2 == 0 {
+				h.svc.UpdateStreamStatus(ctx, sid, model.StreamStateDisable, "flipped")
+				return
+			}
+			h.svc.UpdateStreamStatus(ctx, sid, model.StreamStateEnabled, "")
+		}(i)
+	}
+	wg.Wait()
 }
