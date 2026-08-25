@@ -311,9 +311,6 @@ func Peek(tokenString string) (*SecurityEventToken, error) {
 }
 
 func GenerateJti() string {
-
-	// return xid.New().String()
-	ksuid.New()
 	return ksuid.New().String()
 }
 
