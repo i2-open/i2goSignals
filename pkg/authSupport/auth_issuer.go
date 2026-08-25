@@ -947,7 +947,7 @@ func GenerateAlias(n int) string {
 			// crypto/rand.Read never returns an error on supported platforms
 			// (Go 1.24+); treat a failure as unrecoverable rather than emit a
 			// weak identifier.
-			panic("crypto/rand failure: " + err.Error())
+			panic("authSupport: crypto/rand failed: " + err.Error())
 		}
 		for _, b := range buf {
 			if b >= limit {

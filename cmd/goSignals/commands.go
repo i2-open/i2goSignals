@@ -654,7 +654,7 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 
 	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
-	name := generateAlias(3)
+	name := authSupport.GenerateAlias(3)
 	pubName := name + "-pub"
 	rcvName := name + "-rcv"
 	if streamPub != nil {
@@ -799,7 +799,7 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 
 	var regReceiveStreamRequest, regPublisherStreamRequest *model.StreamConfiguration
 
-	name := generateAlias(3)
+	name := authSupport.GenerateAlias(3)
 	pubName := name + "-pub"
 	rcvName := name + "-rcv"
 	if streamRcv != nil {
@@ -1158,9 +1158,9 @@ func (cli *CLI) executeCreateRequest(streamAlias string, reg model.StreamConfigu
 	}
 
 	if streamAlias == "" {
-		streamAlias = generateAlias(3)
+		streamAlias = authSupport.GenerateAlias(3)
 		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
-			streamAlias = generateAlias(3)
+			streamAlias = authSupport.GenerateAlias(3)
 		}
 	}
 
@@ -1380,9 +1380,9 @@ func (cli *CLI) executeCreateSstpPair(streamAlias string, boot model.SstpPairBoo
 	}
 
 	if streamAlias == "" {
-		streamAlias = generateAlias(3)
+		streamAlias = authSupport.GenerateAlias(3)
 		for _, exists := server.Streams[streamAlias]; exists; _, exists = server.Streams[streamAlias] {
-			streamAlias = generateAlias(3)
+			streamAlias = authSupport.GenerateAlias(3)
 		}
 	}
 	stream := Stream{

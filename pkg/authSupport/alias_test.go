@@ -30,6 +30,7 @@ func TestGenerateAlias_Unique(t *testing.T) {
 }
 
 // Concurrent IAT issuance must be race-free (run with -race). Issue #267.
+// Uses the shared package fixture `auth` from auth_issuer_test.go.
 func TestIssueProjectIat_Concurrent(t *testing.T) {
 	const workers = 32
 	var wg sync.WaitGroup
@@ -54,6 +55,7 @@ func TestIssueProjectIat_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// 52^4 space; 32 draws colliding would be astronomically unlikely
-	assert.Greater(t, len(projects), workers/2)
+	// 52^4 ids; a birthday collision among 32 draws is ~1e-4, so tolerate a
+	// stray duplicate rather than make the test flaky. -race is the real check.
+	assert.Greater(t, len(projects), workers-2)
 }
