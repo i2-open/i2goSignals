@@ -2,12 +2,12 @@ package authSupport
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathRand "math/rand"
 	"net/http"
 	"os"
 	"slices"
@@ -310,7 +310,7 @@ func iatLifetime() time.Duration {
 func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 	exp := time.Now().Add(iatLifetime())
 
-	projectId := generateAlias(4)
+	projectId := GenerateAlias(4)
 	if authCtx != nil && authCtx.ProjectId != "" {
 		// Reuse the caller's project (e.g. an admin minting another IAT in the
 		// same project). A bootstrap (key-scope) caller carries no ProjectId, so
@@ -927,30 +927,38 @@ func (a *AuthIssuer) parseAuthTokenInternal(tokenString string, verbose bool, st
 }
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-)
 
-var src = mathRand.NewSource(time.Now().UnixNano())
-
-func generateAlias(n int) string {
+// GenerateAlias returns an n-character alias drawn from letterBytes using
+// crypto/rand. Aliases are used as authorization-relevant identifiers (e.g.
+// projectId), so they must be unpredictable and safe to mint concurrently.
+// Rejection sampling over a 256-byte draw keeps the distribution uniform.
+func GenerateAlias(n int) string {
+	if n <= 0 {
+		return ""
+	}
 	sb := strings.Builder{}
 	sb.Grow(n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
+	// Largest multiple of len(letterBytes) that fits in a byte; values at or
+	// above it are rejected so every letter is equally likely.
+	limit := byte(256 - 256%len(letterBytes))
+	buf := make([]byte, n)
+	for sb.Len() < n {
+		if _, err := rand.Read(buf); err != nil {
+			// crypto/rand.Read never returns an error on supported platforms
+			// (Go 1.24+); treat a failure as unrecoverable rather than emit a
+			// weak identifier.
+			panic("crypto/rand failure: " + err.Error())
 		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			sb.WriteByte(letterBytes[idx])
-			i--
+		for _, b := range buf {
+			if b >= limit {
+				continue
+			}
+			sb.WriteByte(letterBytes[int(b)%len(letterBytes)])
+			if sb.Len() == n {
+				break
+			}
 		}
-		cache >>= letterIdxBits
-		remain--
 	}
-
 	return sb.String()
 }
 
