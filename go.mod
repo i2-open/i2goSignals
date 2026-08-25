@@ -1,6 +1,6 @@
 module github.com/i2-open/i2goSignals
 
-go 1.26.5
+go 1.27.0
 
 // replace github.com/i2-open/i2goSignals => ../i2goSignals
 
@@ -21,8 +21,8 @@ require (
 	github.com/segmentio/ksuid v1.0.4
 	github.com/spiffe/go-spiffe/v2 v2.8.1
 	github.com/stretchr/testify v1.12.1
-	go.mongodb.org/mongo-driver/v2 v2.8.0
-	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297
+	go.mongodb.org/mongo-driver/v2 v2.8.1
+	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa
 	golang.org/x/oauth2 v0.36.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -51,6 +51,6 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
-	google.golang.org/grpc v1.83.1 // indirect
+	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
