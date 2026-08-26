@@ -139,6 +139,30 @@ type MongoProvider struct {
 	// coordinator owns the cluster lease/node-registry methods. Collections
 	// are pushed in via SetCollections during initialize/reconnect.
 	coordinator *MongoCoordinator
+
+	// ctx is the server lifecycle context supplied at construction (seam S4).
+	// Cancelling it tells every Mongo round-trip this provider owns — connect,
+	// health check, and the coordinator's lease heartbeats — to give up now
+	// rather than run out its own deadline. Never nil; Open substitutes
+	// context.Background() for callers that have no lifecycle to offer.
+	ctx context.Context
+}
+
+// lifetimeCtx returns the provider's lifecycle context, never nil.
+func (m *MongoProvider) lifetimeCtx() context.Context {
+	if m.ctx == nil {
+		return context.Background()
+	}
+	return m.ctx
+}
+
+// teardownCtx is the lifecycle context with cancellation detached. Disconnect
+// runs *because* the lifecycle ended, so it must not inherit the cancellation
+// that triggered it — context.WithoutCancel keeps the context's values while
+// dropping the Done channel that would otherwise abort the disconnect
+// immediately.
+func (m *MongoProvider) teardownCtx() context.Context {
+	return context.WithoutCancel(m.lifetimeCtx())
 }
 
 func (m *MongoProvider) Name() string {
@@ -188,7 +212,7 @@ func (m *MongoProvider) initServices() {
 	m.streamService.SetSubjectRelayService(m.subjectRelayService)
 
 	if m.coordinator == nil {
-		m.coordinator = NewMongoCoordinator()
+		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
 	}
 }
 
@@ -263,7 +287,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	m.subjectFilterCol = m.ssefDb.Collection(CDbSubjectFilters)
 
 	if m.coordinator == nil {
-		m.coordinator = NewMongoCoordinator()
+		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
 	}
 	m.coordinator.SetCollections(m.leaseCol, m.nodeCol)
 
@@ -521,7 +545,7 @@ func (m *MongoProvider) Check() error {
 	if !dbInit {
 		return errors.New("database not initialized")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 2*time.Second)
 	defer cancel()
 	return m.CheckWithContext(ctx)
 }
@@ -586,12 +610,12 @@ func (m *MongoProvider) connect() error {
 
 	// Disconnect existing client if it exists to prevent leaks
 	if m.mongoClient != nil {
-		_ = m.mongoClient.Disconnect(context.Background())
+		_ = m.mongoClient.Disconnect(m.teardownCtx())
 		m.mongoClient = nil
 	}
 
 	// Overall timeout for the connection attempt, including SPIFFE setup, MongoDB connection, ping, and initialization.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 60*time.Second)
 	defer cancel()
 
 	opts := options.Client().ApplyURI(m.DbUrl)
@@ -709,7 +733,21 @@ func (m *MongoProvider) monitor() {
 	}
 }
 
+// Open constructs a MongoProvider with no lifecycle context. Prefer
+// OpenWithContext from any caller that owns a shutdown signal — Open is the
+// convenience form for tests and one-shot tools.
 func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
+	return OpenWithContext(context.Background(), mongoUrl, dbName)
+}
+
+// OpenWithContext constructs a MongoProvider bound to the server lifecycle ctx
+// (seam S4). Cancelling ctx cancels in-flight connect attempts, health checks,
+// and cluster lease heartbeats; it does not close the provider, so callers
+// still call Close to release the Mongo client.
+func OpenWithContext(ctx context.Context, mongoUrl string, dbName string) (*MongoProvider, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	defaultIssuer := envcompat.Lookup("I2SIG_ISSUER_DEFAULT", CEnvIssuer)
 	if defaultIssuer == "" {
 		if baseURL := os.Getenv(CEnvBaseURL); baseURL != "" {
@@ -745,6 +783,7 @@ func Open(mongoUrl string, dbName string) (*MongoProvider, error) {
 		TokenIssuer:   tknIssuer,
 		resumeTokens:  resumeToken,
 		stopMonitor:   make(chan struct{}),
+		ctx:           ctx,
 	}
 
 	// Construct services with nil-collection DAOs so callers reaching the
@@ -792,7 +831,7 @@ func (m *MongoProvider) Close() error {
 		m.x509Source = nil
 	}
 	if m.mongoClient != nil {
-		err := m.mongoClient.Disconnect(context.Background())
+		err := m.mongoClient.Disconnect(m.teardownCtx())
 		m.mongoClient = nil
 		m.dbInit = false
 		return err

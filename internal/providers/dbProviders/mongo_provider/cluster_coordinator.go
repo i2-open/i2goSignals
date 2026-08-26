@@ -24,12 +24,48 @@ const mongoActiveWindow = 60 * time.Second
 type MongoCoordinator struct {
 	leaseCol atomic.Pointer[mongo.Collection]
 	nodeCol  atomic.Pointer[mongo.Collection]
+
+	// ctx is the server lifecycle context handed in at construction (seam S4).
+	// Every heartbeat/lease round-trip derives its per-operation deadline from
+	// it, so cancelling it at shutdown cancels the in-flight Mongo call instead
+	// of leaving it to run out its own 5s budget against a socket nobody will
+	// read. Never nil — NewMongoCoordinator substitutes context.Background().
+	ctx context.Context
 }
 
-// NewMongoCoordinator returns a coordinator with no collections bound. The
-// MongoProvider calls SetCollections after each successful (re)connect.
-func NewMongoCoordinator() *MongoCoordinator {
-	return &MongoCoordinator{}
+// NewMongoCoordinator returns a coordinator with no collections bound, whose
+// operations are scoped to the server lifecycle ctx. The MongoProvider calls
+// SetCollections after each successful (re)connect.
+//
+// A nil ctx is treated as context.Background() so that a caller which has no
+// lifecycle to offer (a one-shot CLI, a test) still gets a usable coordinator.
+func NewMongoCoordinator(ctx context.Context) *MongoCoordinator {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &MongoCoordinator{ctx: ctx}
+}
+
+// LifecycleContext returns the context this coordinator's heartbeats are scoped
+// to — the signal that says "the process is going away". Callers that own work
+// which must not outlive the cluster membership this coordinator maintains can
+// hang their own cancellation off it rather than inventing a second shutdown
+// channel that has to be kept in sync with this one.
+func (c *MongoCoordinator) LifecycleContext() context.Context {
+	if c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+// coordinatorOpTimeout bounds a single lease or node-registry round-trip.
+const coordinatorOpTimeout = 5 * time.Second
+
+// opCtx derives a per-operation context from the lifecycle ctx. The returned
+// context is cancelled either by the operation timeout or by server shutdown,
+// whichever comes first; callers must always call the returned cancel func.
+func (c *MongoCoordinator) opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.LifecycleContext(), coordinatorOpTimeout)
 }
 
 // SetCollections binds (or rebinds) the collections used for leases and the
@@ -49,7 +85,7 @@ func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string
 		return false, 0, errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	now := time.Now().UTC()
@@ -93,7 +129,7 @@ func (c *MongoCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) e
 		return errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	filter := bson.M{
@@ -118,7 +154,7 @@ func (c *MongoCoordinator) GetLeaseOwner(resource string) (string, time.Time, in
 		return "", time.Time{}, 0, errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	var lease model.ClusterLease
@@ -139,7 +175,7 @@ func (c *MongoCoordinator) RegisterNode(node model.ClusterNode) error {
 		return errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	filter := bson.M{"_id": node.Id}
@@ -165,7 +201,7 @@ func (c *MongoCoordinator) GetActiveNodeCount() (int64, error) {
 		return 0, errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	threshold := time.Now().UTC().Add(-mongoActiveWindow)
@@ -182,7 +218,7 @@ func (c *MongoCoordinator) GetActiveNodes() ([]model.ClusterNode, error) {
 		return nil, errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	threshold := time.Now().UTC().Add(-mongoActiveWindow)
@@ -212,7 +248,7 @@ func (c *MongoCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) {
 		return nil, errors.New("mongo coordinator not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.opCtx()
 	defer cancel()
 
 	var node model.ClusterNode
