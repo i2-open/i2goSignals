@@ -22,7 +22,6 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.8.1
 	github.com/stretchr/testify v1.12.1
 	go.mongodb.org/mongo-driver/v2 v2.8.1
-	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa
 	golang.org/x/oauth2 v0.36.0
 	gopkg.in/yaml.v3 v3.0.1
 )

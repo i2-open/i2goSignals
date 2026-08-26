@@ -233,7 +233,7 @@ later work.
 |---|---|---|---|
 | #270 — baseline + `make qa` | — | — | Established this baseline. |
 | #271 — PQ-KEM guard, TLS MinVersion, WithValidMethods | **+3.0%** `BenchmarkPollBufferSubmitDrain` | **+0.4%** (53.72s vs 53.52s) | Inside the documented 4–7% noise band and untouched by this slice — nothing in it goes near the poll buffer. The one benchmark that does exercise changed code, `BenchmarkSetParse` (now runs `jwt.WithValidMethods`), came in at **-1.4%**: the allow-list is a string compare against a two-element slice, ahead of an RSA verify. Every other row improved or held flat. |
-| #272 — drop `golang.org/x/exp` (log/slog) | | | |
+| #272 — drop `golang.org/x/exp` (log/slog) | **+4.5%** `BenchmarkSetJsonUnmarshal` | **+0.4%** (53.72s vs 53.52s) | Inside the documented 4–7% noise band and untouched by this slice: the only Go change is an import swap in `cmd/genTlsKeys` (a `main` package no benchmark compiles), so no benchmarked package's dependency graph moved — `golang.org/x/exp` was a leaf of that one command. Every other row is ≤ +4.4% or an improvement. The +1 allocs/op on `BenchmarkSetParse` (76 → 77) and `BenchmarkParseAndValidate` (85 → 86) is [#271](https://github.com/i2-open/i2goSignals/issues/271)'s `jwt.WithValidMethods` allow-list, already on the branch and already explained in its row — not this slice. |
 | #273 — JSON wire hygiene, golden-JSON tests, compact poll encoding | | | |
 | #274 — single ID seam `pkg/dao/ids` (uuid v7/v4), drop ksuid | | | |
 | #275 — timer hygiene, coordinator lifecycle context | | | |

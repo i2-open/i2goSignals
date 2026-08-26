@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	log "log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -20,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	log "golang.org/x/exp/slog"
 )
 
 const (
