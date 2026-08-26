@@ -222,6 +222,73 @@ to separate signal from scheduler noise.
 | `BenchmarkSetJsonBytes` | 1447 ns | 1605 ns | **+10.9%** | 1430–1524 | 1580–1674 | **real regression** — ranges do not overlap |
 | `BenchmarkPollBufferWaitWake` | 773 ns | 718 ns | **-7.2%** | 760–793 | 701–728 | noise at count=5; actually **faster** |
 
+## The goroutine-leak gate
+
+`make qa` runs a `leak-check` step alongside the benchmarks. It is here rather than in a
+document of its own because it answers the question the benchmarks cannot: a leaked goroutine
+costs no measurable time at the moment it is created, so no `ns/op` number will ever show one.
+
+Go 1.27 GA'd goroutine leak detection as a `runtime/pprof` profile named `goroutineleak`.
+Writing the profile runs a GC cycle with leak detection enabled and reports the goroutines the
+runtime has **proved** can never become runnable again — one blocked forever on a channel or
+mutex that no live goroutine can ever signal. This is not the count-before-and-after heuristic
+the ecosystem used to hand-roll: a goroutine that is merely slow to finish is never reported,
+so there is no tolerance to tune and nothing to flake on.
+
+Note the surface. The profile is reached through `pprof.Lookup("goroutineleak")`; there is no
+`-test.goroutineleakprofile` flag on `go test` in Go 1.27.0, so the gate is a `TestMain` hook
+rather than a command-line switch.
+
+### Running it
+
+```bash
+make leak-check                                   # the gate
+make qa                                           # ... as part of the full gate
+I2SIG_GOROUTINE_LEAK_CHECK=1 go test -count=1 ./internal/eventRouter/...   # one package
+```
+
+`pkg/goroutineleak` provides the hook; a package opts in with one line in its `TestMain`:
+
+```go
+func TestMain(m *testing.M) { os.Exit(goroutineleak.Run(m)) }
+```
+
+The check is **inert unless `I2SIG_GOROUTINE_LEAK_CHECK` is set**, which `make leak-check` does
+and a bare `go test ./...` does not. That is deliberate: a leak is a property of the whole
+package run, so a failure names the package and not the test that caused it. Keeping it off by
+default leaves the tight edit/test loop reporting the failing *test*, and puts the blunter
+failure in the gate, where "this package leaks" is the right granularity. `-count=1` is
+required — a cached PASS would skip the profile entirely.
+
+`LEAK_PKGS` in the Makefile is the enrolled set: `pkg/goSetPoll`, `pkg/goSetPush`,
+`internal/eventRouter/...` and `internal/server`. Those are the packages that own a timer path —
+lease heartbeats and push recovery, the long-poll wait, the SSTP dialer's heartbeat and resume
+timers — which is where an abandoned goroutine actually comes from.
+
+### Reading a failure
+
+The report prints each leaked goroutine's stack, which names **the code that started the
+goroutine, not the test that stranded it**. To find the test, bisect with `-run`:
+
+```bash
+I2SIG_GOROUTINE_LEAK_CHECK=1 go test -count=1 -run '^(TestA|TestB|...)$' ./internal/server
+```
+
+### What it found on its first run
+
+Enrolling the six packages surfaced two production leaks and two test-hygiene ones, all fixed by
+[#279](https://github.com/i2-open/i2goSignals/issues/279):
+
+| Leak | Where | Cause |
+|---|---|---|
+| Poll buffer pump, on every close with unread events | `internal/eventRouter/buffer/event_buffer.go` | The pump looped while unread JTIs remained even after `in` was closed, re-entering a receive on the channel it had just nil'd. A receive on a nil channel blocks forever. Closing a buffer with events still pending is routine — it is what a stream deletion or a lost lease does. |
+| Poll buffer pump, one per poll stream, on router shutdown | `internal/eventRouter/event_router.go` | `Shutdown` closed push and SSTP buffers but skipped poll buffers, under the reasoning that polling is receiver-driven and needs no shutdown. Every `EventPollBuffer` owns a pump goroutine regardless. `RemoveStream` had always closed them on the per-stream path; `Shutdown` now matches. |
+| Buffer left open by a test | `internal/eventRouter/buffer/event_buffer_test.go` | `TestEventPollBuffer_Wakeup` never closed its buffer. |
+| Routers left running by a suite | `internal/server/server_provisioning_authz_test.go` | `ServerProvisioningAuthzSuite` built a router per test and had no `TearDownTest`. |
+
+The first two are the reason the gate exists: neither was visible in any test result, any
+benchmark, or any log line.
+
 ## Per-change deltas
 
 One row per change that lands against this baseline. Fill in the worst delta you measured — the
@@ -240,7 +307,7 @@ later work.
 | #276 — jsontext reserved-key rejection, aud splice, json/v2 pilot | **+2.4%** `BenchmarkPollBufferSubmitDrain` | **+0.0%** (53.54s vs 53.52s) | The worst row is the poll buffer, which this slice never touches, at well under half the documented 4–7% noise band, and suite wall-clock is unmoved. **This slice adds five benchmarks**, so its own rows are an A/B against this branch's HEAD (`ac74fa3`) with the benchmark files held constant and only the implementation swapped — median of 5 at `-benchtime=200ms`, the same method as the reference. `BenchmarkRejectReservedKeys` (`pkg/goSet`, new): **1933 → 933 ns/op (-51.8%), 73 → 0 allocs/op, 2,040 → 0 B/op**. `BenchmarkWireBSON` (`pkg/goSet`, new — the whole persist-side encode the scan sits in): **13,361 → 12,308 ns/op (-7.9%), 351 → 278 allocs/op, 13,627 → 11,596 B/op**. The zero comes from two changes together: the scan reads member names as raw `jsontext.Value` bytes rather than decoding each one to a Go string, and the decoder is pooled with its reader, because a `jsontext.Decoder` owns a growable buffer and a container stack that a per-call constructor throws away and re-grows — that re-growth was nearly all of the remaining allocation. `v1`'s `json.Decoder.Token()` boxed every token into an `interface{}`; nothing in the new scan allocates at all. `BenchmarkNormalizeAudToArray` and `BenchmarkUnmarshalStreamConfigurationJSON` live in `pkg/ssfModels`, which is deliberately **not** added to `BENCH_PKGS` — the pinned set stays as #270 fixed it so earlier rows keep comparing like with like; run them with `go test -run='^$' -bench=NormalizeAud -benchmem ./pkg/ssfModels`. String aud **6,100 → 308 ns/op (-94.9%), 55 → 1 allocs/op**; array aud **3,629 → 185 ns/op (-94.9%), 32 → 0**; absent aud **3,189 → 1,141 ns/op (-64.2%), 28 → 0**; the surrounding decode **10,708 → 3,592 ns/op (-66.5%), 80 → 21 allocs/op**. The old normaliser decoded the whole document into a `map[string]json.RawMessage` and re-encoded it to change one member — which also sorted the transmitter's members into lexical order, compacted their whitespace, and turned `{"aud":null}` into `{"aud":[""]}`; the splice touches two bytes and returns the caller's own slice untouched whenever there is nothing to rewrite. **The json/v2 pilot verdict: adopted.** `BenchmarkNormalizePayload` (`pkg/goSetValidate`, new) runs both encoders over the same shapes: struct payload **2,067 → 1,399 ns/op (-32.3%), 32 → 22 allocs/op**; map-holding-a-struct **2,610 → 1,719 ns/op (-34.1%), 41 → 31 allocs/op**; already-wire-shaped payload **87.4 → 87.5 ns/op, 0 allocs** (both variants short-circuit, so that row measures `isWireShape` and is expected to be flat). Both axes improve on both round-trip shapes, which is the issue's adoption bar, so `normalizePayload` now runs on `encoding/json/v2`; the superseded v1 form stays in `pkg/goSetValidate/normalize_pilot_test.go` so the A/B is re-runnable against a later toolchain. The pilot is scoped to that one function — `decodeSubjectIdentifier` in `caep.go` keeps its v1 round-trip, since it runs only for CAEP events carrying a payload-level subject, not per event. **One behaviour moves with the encoder:** v2 rejects invalid UTF-8 in a string where v1 substituted U+FFFD, so such a payload now reports `Malformed` instead of validating bytes that had already been rewritten. It can only arrive from an in-process Go string, never off the wire. Every reference row over unchanged code held or improved: `BenchmarkParseAndValidate` **-1.6%**, `BenchmarkValidateEngaged` **-2.2%**, `BenchmarkValidateMultiEvent` **-3.9%**, `BenchmarkSetParse` **-3.0%**, `BenchmarkSetPeek` **-4.2%**. The two ⚑ rows from [Two rows that needed a second look](#two-rows-that-needed-a-second-look) came in flat: `BenchmarkSetJsonBytes` 1619 → 1612 (**-0.4%**, 11 → 10 allocs/op) and `BenchmarkPollBufferWaitWake` 704 → 698 (**-0.8%**). The large wins in this run (`BenchmarkGenerateJti` -74.3%, `BenchmarkCreateSet` -61.1%, `BenchmarkWritePollResponse` -33% to -40%) are [#273](https://github.com/i2-open/i2goSignals/issues/273) and [#274](https://github.com/i2-open/i2goSignals/issues/274) already on the branch, not this slice. Goldens are byte-identical: this slice changes no marshalling API and no struct tag. |
 | #277 — `crypto.Signer` at the 9 signing sites | **+2.8%** `BenchmarkPollBufferSubmitDrain` | **+0.3%** (53.70s vs 53.52s) | The worst row is the poll buffer, which this slice never touches, at well under half the documented 4–7% noise band. **The row that matters is `BenchmarkSetJWS`** — the only benchmark that runs the changed code, since it is the SET signing path this slice re-typed. Against the reference it is **+0.4%** (819,086 → 822,465 ns/op) with **allocations flat at 37/op**. An A/B against this branch's own HEAD (`21a7d64`, immediately before the slice) is tighter still: **814,060 → 822,465 ns/op median (+1.0%), 37 → 37 allocs/op, 7,236 → 7,235 B/op**, with the two five-run ranges overlapping (before 808,948–822,076; after 802,358–839,185) — unproven under this file's own range rule, i.e. no measurable cost. That is the expected shape rather than a lucky result: `golang-jwt`'s `SignedString` has always taken its key as `interface{}` and type-asserted it, so passing a `crypto.Signer` boxes the same pointer that was previously boxed one call later. No allocation is added and no new indirection is introduced on the signing path — the whole benchmark is dominated by one RSA-2048 private-key operation ~800 µs long, against which an interface method call is unmeasurable. The `crypto.Signer` → `*rsa.PrivateKey` narrowings this slice adds sit in the key **store** (PKCS#1 marshal) and JWKS build, both of which run at key load and rotation, not per SET. Everything else in the set improved or held flat (`BenchmarkSetParse` -4.3%, `BenchmarkSetPeek` -7.2%, `BenchmarkParsePollRequest` -6.8%); the large wins (`BenchmarkGenerateJti` -74.3%, `BenchmarkCreateSet` -64.7%, `BenchmarkWritePollResponse` -33% to -38%) are [#273](https://github.com/i2-open/i2goSignals/issues/273) and [#274](https://github.com/i2-open/i2goSignals/issues/274) already on the branch, not this slice. |
 | #278 — ML-DSA-65 SET signing (RFC 9964) | | | |
-| #279 — `testing/synctest` suites + goroutine-leak gate | | | |
+| #279 — `testing/synctest` suites + goroutine-leak gate | **+6.4%** `BenchmarkPollBufferGetEventsAckOnly` (A/B); ⚑ see note on `GetEventsReady` | **-0.5%** (53.24s vs 53.52s) | **This slice's numbers are an A/B against the branch's own HEAD (`358a42d`)**, not against the reference table, because the reference row for one poll-buffer benchmark no longer reproduces on this machine at all — see the ⚑ paragraph below. The A/B is per-benchmark isolated (`-bench='^BenchmarkPollBufferX$'`, median of 5 at `-benchtime=200ms`) because this slice makes an existing WARN reachable, and its output interleaves with `go test`'s on stdout. **The rows over changed code both improve**: `BenchmarkPollBufferSubmitDrain` **-9.2%** (95.88 → 87.10) and `BenchmarkPollBufferGetEventsReady` **-7.2%** (291.50 → 270.50), which is the expected shape — the pump loop lost a `mutex.Lock`/`Unlock` pair per iteration along with the nil-channel leak. The rest are flat: `BenchmarkPollBufferAckEvents` **+0.0%**, `BenchmarkPollBufferWaitWake` **-2.7%**, `BenchmarkPollBufferWakeupSignal` **+2.1%**. The worst row, `BenchmarkPollBufferGetEventsAckOnly` **+6.4%**, is 11.31 → 12.03 ns/op — seven tenths of a nanosecond on a benchmark that does one map lookup, with allocations and B/op unchanged and the two ranges nearly touching (base 11.3–11.5, after 11.7–12.5). Nothing in this slice is on that path. ⚑ **`BenchmarkPollBufferGetEventsReady` reads +52% against the reference table, and that drift is environmental, not this slice's.** The pre-slice branch HEAD measures **291.5 ns/op** against a recorded reference of 178, i.e. worse than this slice's 270.5 — so the slice narrows the gap rather than opening it. Re-measuring [#270](https://github.com/i2-open/i2goSignals/issues/270)'s own commit (`cc680e4`), the tree that *produced* the 178, gives **287.1 ns/op** today; walking the branch forward gives `c83a29a` 291.3, `0b338ae` 296.9, `4a0b2fb` 318.8. Byte-identical source, three-to-four tenths slower than recorded, so the 178 is a property of the conditions of the original run and not of any code since. The reference file already warns that its absolute numbers are machine- and load-specific ("Compare deltas, not absolutes"); this is that warning coming true, and a reason to prefer A/B-against-HEAD for any row where the reference and the current branch disagree. **The non-benchmark result of this slice is the leak gate**, documented above: it found two production goroutine leaks on its first run, neither of which any benchmark could have shown. |
 
 ### Thresholds
 
