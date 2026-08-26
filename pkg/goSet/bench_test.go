@@ -150,3 +150,39 @@ func BenchmarkSetParse(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkRejectReservedKeys measures the reserved-member scan wireBSON runs
+// over every SET on its way into Mongo. The input is the encoder output for
+// the same benchSet the rest of this file uses, so the number tracks the real
+// persistence hot path rather than a synthetic document.
+//
+// The scan walks tokens only — it never materialises a map — so allocs/op is
+// the number to watch: it should not scale with the document.
+func BenchmarkRejectReservedKeys(b *testing.B) {
+	set := benchSet()
+	encoded, err := json.Marshal(securityEventTokenWire(*set))
+	if err != nil {
+		b.Fatalf("marshal: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := rejectReservedKeys(encoded); err != nil {
+			b.Fatalf("rejectReservedKeys: %v", err)
+		}
+	}
+}
+
+// BenchmarkWireBSON measures the whole persist-side encode — JSON marshal, the
+// reserved-member scan, the ExtJSON parse and the int widening — so a change to
+// the scan can be read against the cost of the pipeline it sits in.
+func BenchmarkWireBSON(b *testing.B) {
+	set := securityEventTokenWire(*benchSet())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := wireBSON(set); err != nil {
+			b.Fatalf("wireBSON: %v", err)
+		}
+	}
+}

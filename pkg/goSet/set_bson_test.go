@@ -2,6 +2,7 @@ package goSet
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -541,6 +542,15 @@ func TestWireBSON_RejectsReservedKeys(t *testing.T) {
 		{"nested in an array", map[string]interface{}{
 			"items": []interface{}{map[string]interface{}{"$date": "2020-09-13T12:26:40Z"}},
 		}, "$date"},
+		{"nested four containers deep", map[string]interface{}{
+			"outer": map[string]interface{}{
+				"items": []interface{}{
+					map[string]interface{}{
+						"inner": map[string]interface{}{"$where": "this.x == 1"},
+					},
+				},
+			},
+		}, "$where"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			set := CreateSet(nil, "https://issuer.example", []string{"https://receiver.example"})
@@ -676,4 +686,67 @@ func TestSubjectIdentifierBSON_ReadsLegacyComplex(t *testing.T) {
 	require.NotNil(t, got.Tenant)
 	assert.Equal(t, "tenant-7", got.Tenant.Id)
 	assert.Nil(t, got.Group, "absent complex members stay absent")
+}
+
+// TestRejectReservedKeys_EscapedName: the scan works on decoded member names,
+// not on the raw bytes, so a name spelled with a `\u0024` escape is refused
+// exactly like a literal `$`. The Extended JSON parser downstream unescapes
+// before it looks for a wrapper, so a raw-byte check would let the very
+// rewrite this guard exists to prevent straight through.
+//
+// This calls rejectReservedKeys directly: encoding/json never emits `$` as an
+// escape, so the case is unreachable through wireBSON and can only be pinned
+// at the function.
+func TestRejectReservedKeys_EscapedName(t *testing.T) {
+	err := rejectReservedKeys([]byte(`{"events":{"urn:x":{"\u0024numberLong":"7"}}}`))
+	require.Error(t, err, "an escaped reserved name must not slip past the guard")
+	assert.Contains(t, err.Error(), "$numberLong",
+		"the error must name the member in its decoded form")
+}
+
+// TestRejectReservedKeys_MalformedInput: a document that is not valid JSON is
+// reported as an error rather than passing the scan. wireBSON only ever feeds
+// it encoder output, but returning nil for unparseable input would make the
+// guard silently conditional on a property the function does not check.
+func TestRejectReservedKeys_MalformedInput(t *testing.T) {
+	assert.Error(t, rejectReservedKeys([]byte(`{"a":`)))
+	assert.Error(t, rejectReservedKeys([]byte(`{"a":1,}`)))
+}
+
+// TestRejectReservedKeys_AcceptsWireShapes: the shapes this router actually
+// persists pass the scan, at every depth and in both container kinds.
+func TestRejectReservedKeys_AcceptsWireShapes(t *testing.T) {
+	assert.NoError(t, rejectReservedKeys([]byte(`{}`)))
+	assert.NoError(t, rejectReservedKeys([]byte(`{"a":[],"b":{},"c":null,"d":[[{"e":1}]]}`)))
+	assert.NoError(t, rejectReservedKeys([]byte(`[{"a":"$v"},{"b":["$w"]}]`)))
+	assert.NoError(t, rejectReservedKeys([]byte(`"a$b"`)))
+}
+
+// TestRejectReservedKeys_ScannerReuse: the scan borrows a decoder from a pool
+// and hands it back mid-document on every rejection, so the next borrower
+// inherits whatever state the last one abandoned. The alternation below —
+// clean, rejected, malformed, clean — is the sequence that would expose a
+// decoder that was not fully reset, and the concurrent half makes the same
+// point under -race.
+func TestRejectReservedKeys_ScannerReuse(t *testing.T) {
+	check := func(t *testing.T) {
+		t.Helper()
+		for i := 0; i < 200; i++ {
+			assert.NoError(t, rejectReservedKeys([]byte(`{"a":{"b":[1,2,{"c":"d"}]}}`)))
+			assert.ErrorContains(t, rejectReservedKeys([]byte(`{"a":{"$x":1},"b":2}`)), "$x")
+			assert.Error(t, rejectReservedKeys([]byte(`{"a":`)))
+			assert.NoError(t, rejectReservedKeys([]byte(`{"e":null}`)))
+		}
+	}
+	check(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			check(t)
+		}()
+	}
+	wg.Wait()
 }
