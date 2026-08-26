@@ -267,6 +267,16 @@ func goldenCases() []goldenCase {
 		}},
 		{"poll_response_mixed", PollResponse{Sets: map[string]string{}}},
 
+		// INTENTIONAL WIRE CHANGE (#273): EnforceAt is a non-pointer
+		// time.Time, so its old `omitempty` was a no-op — encoding/json
+		// never treats a struct as empty — and every entry without a
+		// removal grace shipped a meaningless
+		// "enforce_at":"0001-01-01T00:00:00Z". Under `omitzero` the zero
+		// instant is omitted, which is what the tag always claimed. The
+		// zero and mixed goldens below record that: absent enforce_at now
+		// means "no grace deadline", the same thing the epoch-zero stamp
+		// meant, and readers already decode a missing member to the zero
+		// time.
 		{"subject_filter_entry_zero", SubjectFilterEntry{}},
 		{"subject_filter_entry_populated", SubjectFilterEntry{
 			StreamId:     "stream-golden-1",

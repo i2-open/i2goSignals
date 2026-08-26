@@ -1,1 +1,1 @@
-{"stream_id":"stream-golden-1","canonical_key":"email:golden@example.com","kind":"simple","subject":{"format":"email","email":"golden@example.com"},"enforce_at":"0001-01-01T00:00:00Z"}
+{"stream_id":"stream-golden-1","canonical_key":"email:golden@example.com","kind":"simple","subject":{"format":"email","email":"golden@example.com"}}

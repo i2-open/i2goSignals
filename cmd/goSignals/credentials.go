@@ -28,7 +28,7 @@ type Session struct {
 	// LoggedInAt records when this session was established. It drives
 	// last-login-wins active-issuer defaulting when a server trusts several
 	// logged-in realms.
-	LoggedInAt time.Time `json:"loggedInAt,omitempty"`
+	LoggedInAt time.Time `json:"loggedInAt,omitzero"`
 }
 
 // Expired reports whether the access token is at/after its expiry (with a small

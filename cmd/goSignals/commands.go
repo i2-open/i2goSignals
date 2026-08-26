@@ -3060,7 +3060,7 @@ type subjectFilterStatusLookup struct {
 	Found        bool                     `json:"found"`
 	Kind         string                   `json:"kind,omitempty"`
 	CanonicalKey string                   `json:"canonical_key,omitempty"`
-	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitzero"`
 	Pending      bool                     `json:"pending,omitempty"`
 	Delivers     bool                     `json:"delivers"`
 }

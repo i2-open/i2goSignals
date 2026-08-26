@@ -37,5 +37,10 @@ type SubjectFilterEntry struct {
 	// until now ≥ EnforceAt — until then the subject keeps delivering. Only
 	// pending-removal entries carry it, so the Mongo index on enforce_at is
 	// sparse/partial.
-	EnforceAt time.Time `json:"enforce_at,omitempty" bson:"enforce_at,omitempty"`
+	//
+	// The json tag is omitzero, not omitempty: omitempty is a no-op on a
+	// non-pointer time.Time, so entries with no grace deadline used to ship a
+	// meaningless "enforce_at":"0001-01-01T00:00:00Z". Absent now carries the
+	// same meaning the epoch-zero stamp did (#273).
+	EnforceAt time.Time `json:"enforce_at,omitzero" bson:"enforce_at,omitempty"`
 }
