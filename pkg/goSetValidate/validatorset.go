@@ -1,7 +1,7 @@
 package goSetValidate
 
 import (
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"sort"
 
@@ -123,6 +123,21 @@ func (vs *ValidatorSet) validateOne(uri string, rawPayload any, set *goSet.Secur
 // map: already a map from a wire parse, or a typed struct attached in-process via
 // AddEventPayload (round-tripped through JSON so validators only ever see wire
 // shapes).
+//
+// The round-trip runs on encoding/json/v2. It is the only JSON work this package
+// does and the only allocation on its hot path, which made it the spec #101
+// json/v2 pilot; v2 came in ~35% faster with ten fewer allocations per call and
+// was adopted on that evidence. See docs/perf/go127-baseline.md and the A/B in
+// normalize_pilot_test.go, which also pins that v2 decodes into an `any` with
+// exactly the six wire types v1 used — the property isWireShape and every
+// validator type assertion below rest on.
+//
+// One behaviour moves with the encoder: v2 REJECTS invalid UTF-8 in a string
+// where v1 silently substituted U+FFFD. Such a payload can only arrive from an
+// in-process Go string (RFC 8259 requires JSON text to be valid UTF-8, so it
+// cannot come off the wire), and it now reports Malformed instead of validating
+// a payload whose bytes had already been rewritten. That is the better of the
+// two answers, and it is still a report rather than a rejection.
 func normalizePayload(rawPayload any) (map[string]any, error) {
 	if rawPayload == nil {
 		return nil, errors.New("payload is null")
@@ -141,12 +156,12 @@ func normalizePayload(rawPayload any) (map[string]any, error) {
 		return m, nil
 	}
 
-	encoded, err := json.Marshal(rawPayload)
+	encoded, err := jsonv2.Marshal(rawPayload)
 	if err != nil {
 		return nil, err
 	}
 	var m map[string]any
-	if err := json.Unmarshal(encoded, &m); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &m); err != nil {
 		return nil, err
 	}
 	if m == nil {
@@ -155,9 +170,10 @@ func normalizePayload(rawPayload any) (map[string]any, error) {
 	return m, nil
 }
 
-// isWireShape reports whether v is built exclusively from the types
-// encoding/json produces when unmarshalling into an any: nil, bool, float64,
-// string, []any and map[string]any.
+// isWireShape reports whether v is built exclusively from the types the JSON
+// decoder produces when unmarshalling into an any: nil, bool, float64, string,
+// []any and map[string]any. v1 and v2 agree on this set; normalize_pilot_test.go
+// holds that agreement to a test.
 //
 // Anything else — a typed struct, a pointer, an int, a time.Time, a
 // json.Number — means the value was assembled in-process rather than parsed off
