@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"testing"
 
@@ -282,7 +283,8 @@ func (s *KeyServiceTestSuite) TestEnsureSigningKey_CreatesThenIdempotent() {
 
 	key2, _, err := svc.GetPrivateKeyWithKeyname(ctx, issuer)
 	s.Require().NoError(err)
-	s.Equal(key1.D, key2.D, "the stored signing key must be reused, not regenerated")
+	s.True(key1.Public().(*rsa.PublicKey).Equal(key2.Public()),
+		"the stored signing key must be reused, not regenerated")
 }
 
 // TestEnsureSigningKey_SurvivesReconnect simulates a restart: a fresh KeyService

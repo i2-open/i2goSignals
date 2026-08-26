@@ -1,7 +1,7 @@
 package goSet
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"log"
@@ -231,13 +231,33 @@ func (set *SecurityEventToken) JWT() *jwt.Token {
 // JWS produces a signed SET wire string. signingMethod defaults to ES256 when
 // nil; key MUST be non-nil.
 //
+// key is a crypto.Signer rather than a concrete *rsa.PrivateKey so that the
+// choice of signature algorithm lives entirely with the caller's
+// signingMethod. Every signing site in this project previously named
+// *rsa.PrivateKey in its own signature, which meant adding an algorithm
+// (RFC 9964 ML-DSA, or plain ES256 on a stored EC key) required editing each
+// call site rather than passing a different key. crypto.Signer is the stdlib's
+// name for "a private key you can sign with"; *rsa.PrivateKey,
+// *ecdsa.PrivateKey and ed25519.PrivateKey all satisfy it, so RSA-2048/RS256
+// remains the default with no behaviour change.
+//
+// The pairing of signingMethod to key is the caller's responsibility and is
+// enforced by golang-jwt: SigningMethodRS256.Sign type-asserts its key back to
+// *rsa.PrivateKey and returns ErrInvalidKey on a mismatch. On the verify side
+// the acceptable algorithms are pinned separately by AllowedAlgs.
+//
+// key must be a non-nil interface holding a non-nil key. A typed-nil pointer
+// boxed into the interface (a *rsa.PrivateKey(nil) assigned to a
+// crypto.Signer) is not detectable here and will panic inside the signer, so
+// key-lookup paths that can fail must return an untyped nil.
+//
 // Per ADR-0066 §D3 the unsigned (alg=none) production path has been removed:
 // there is no legitimate production producer of unsigned SETs, and leaving
 // the write-side capability increases the injection blast-radius if a
 // verifier is ever misconfigured. Callers that previously passed nil to
 // obtain an alg=none token must construct one directly via jwt.NewWithClaims
 // (test fixtures only).
-func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.PrivateKey) (string, error) {
+func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.Signer) (string, error) {
 	if key == nil {
 		return "", errors.New("goSet.JWS: key is required; alg=none production removed (ADR-0066 §D3)")
 	}

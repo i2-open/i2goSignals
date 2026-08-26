@@ -23,7 +23,7 @@ package server
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -963,16 +963,16 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false, pending
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if len(events) > 0 && stream.GetRouteMode() != model.RouteModeForward {
-		rsaKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
 	}
 
 	// AC 1: carry the pending feedback in the request. Non-empty feedback alone
 	// is enough to justify a request (the idle guard above ensures we do
 	// not POST when both events AND the feedback are empty).
-	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, nil, pending)
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, nil, pending)
 
 	if ctx.Err() != nil {
 		// Cancelled in flight: release the claim so the next owner
@@ -1247,10 +1247,10 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() != model.RouteModeForward {
-		rsaKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
 	}
 
 	returnEvents := goSetSstp.BoolPtr(false)
@@ -1258,7 +1258,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	// bookkeeping (AC 1). Running Acks through both cycles risks the peer
 	// clearing an outbound entry twice and any concurrent list mutation
 	// race between the two goroutines. Empty Ack here is deliberate.
-	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents, sstpPendingFeedback{})
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, returnEvents, sstpPendingFeedback{})
 
 	if signErr != nil {
 		// AC 5: signing failure halts even on the second-push path — never
@@ -1343,7 +1343,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 // posture and the per-pair bearer wins the Authorization header (AC 3
 // precedence). When ResolveClient is unset (tests) or errors, the dialer
 // falls back to d.cfg.HTTPClient + the raw per-pair bearer.
-func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
+func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
 	method := stream.SstpMethod
 	if method == nil || method.EndpointUrl == "" {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, nil
@@ -1426,7 +1426,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // rather than dropping SETs onto the wire with no signature. Forward-mode
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string) (map[string]string, error) {
+func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string) (map[string]string, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}

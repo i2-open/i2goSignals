@@ -3,7 +3,7 @@ package eventRouter
 import (
 	"bytes"
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,7 +101,7 @@ type router struct {
 	cancel      context.CancelFunc
 	enabled     bool
 	nodeId      string
-	issuerKeys  map[string]*rsa.PrivateKey
+	issuerKeys  map[string]crypto.Signer
 	issuerKids  map[string]string
 	pollBuffers map[string]*buffer.EventPollBuffer
 	pushBuffers map[string]*buffer.EventPushBuffer
@@ -142,7 +142,7 @@ type router struct {
 	sstpDialer           SstpDialerHooks
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
-	keyService           *services.KeyService
+	keyService           signerSource
 	eventService         *services.EventService
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
@@ -266,7 +266,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
 		sstpInFlight:           map[string]map[string]bool{},
-		issuerKeys:             map[string]*rsa.PrivateKey{},
+		issuerKeys:             map[string]crypto.Signer{},
 		issuerKids:             map[string]string{},
 		enabled:                false,
 		ctx:                    ctx,
@@ -604,7 +604,19 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 	}
 }
 
-func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
+// signerSource is the slice of KeyService the router depends on: resolve an
+// issuer's active signing key. Declared here, at the consumer, so the router's
+// key path is pinned to GetSigner (Slice Contract rev 1, Seam S2) and a test
+// can substitute a stub to prove it.
+type signerSource interface {
+	GetSigner(ctx context.Context, issuer string) (crypto.Signer, string, error)
+}
+
+// checkAndLoadKey returns the cached signing key + kid for issuer, loading it
+// through the KeyService on a cache miss. It returns an untyped nil signer when
+// no key is available — callers compare the result against nil, and a boxed
+// typed-nil pointer would defeat that and panic at the signing site instead.
+func (r *router) checkAndLoadKey(streamID string, issuer string) (crypto.Signer, string) {
 	r.mu.RLock()
 	key, ok := r.issuerKeys[issuer]
 	kid := r.issuerKids[issuer]
@@ -615,14 +627,17 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKe
 		key, ok = r.issuerKeys[issuer]
 		if !ok {
 			var err error
-			key, kid, err = r.keyService.GetPrivateKeyWithKeyname(r.ctx, issuer)
+			key, kid, err = r.keyService.GetSigner(r.ctx, issuer)
 			if err != nil {
 				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
 				r.mu.Unlock()
 				return nil, ""
 			}
-			copyKey := *key
-			r.issuerKeys[issuer] = &copyKey
+			// Cached by reference. The previous shallow struct copy of the RSA
+			// key shared the same big.Int values anyway, so it isolated
+			// nothing; a crypto.Signer is treated as immutable, and rotation
+			// goes through InvalidateAndReload rather than mutation in place.
+			r.issuerKeys[issuer] = key
 			r.issuerKids[issuer] = kid
 		}
 		r.mu.Unlock()
@@ -1182,7 +1197,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 	}
 
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var kid string
 	forwardMode := false
 	if state.GetRouteMode() == model.RouteModeForward {
@@ -1316,11 +1331,11 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		defer r.stats.DecLeasesHeld()
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
-		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
-		if rsaKey == nil {
+		signingKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
+		if signingKey == nil {
 			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", sid, "issuer", stream.StreamConfiguration.Iss)
 		}
 	}
@@ -1402,8 +1417,8 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 				return false // Buffer closed, stop entirely
 			}
 			jti := v.(string)
-			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, rsaKey, kid, fencingToken)
-			rsaKey, kid = newKey, newKid
+			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, signingKey, kid, fencingToken)
+			signingKey, kid = newKey, newKid
 
 			if cls.Class == goSetPush.ClassAccepted {
 				// R1: reset T3 idle timer on every successful push, including verify itself.
@@ -1427,7 +1442,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			}
 			// Resumed — refresh signing key in case the issuer rotated while we were paused.
 			if stream.GetRouteMode() == model.RouteModePublish {
-				rsaKey, kid = r.checkAndLoadKey(sid, stream.Iss)
+				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss)
 			}
 		case <-backfillTicker.C:
 			r.backfillPushBuffer(sid, eventBuf)
@@ -1707,12 +1722,12 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 //
 // Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled
 // by the next backfill iteration once the caller has resolved any required recovery.
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) (goSetPush.Classification, *rsa.PrivateKey, string) {
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
 	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
 	if eventRecord == nil {
 		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
 		// success so the caller advances rather than entering recovery for a stale JTI.
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
 	}
 
 	sid := config.StreamConfiguration.Id
@@ -1730,17 +1745,17 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
 		}
 		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
 	}
 
 	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
 		Stream: config,
 		Event:  eventRecord,
-		Key:    rsaKey,
+		Key:    signingKey,
 		Kid:    kid,
 	})
 	cls := outcome.Classification
-	rsaKey, kid = outcome.Key, outcome.Kid
+	signingKey, kid = outcome.Key, outcome.Kid
 
 	isVerifyPush := isOperationalVerify(eventRecord)
 
@@ -1752,7 +1767,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		if isVerifyPush && r.stats != nil {
 			r.stats.RecordIdleVerifyOutcome(sid, "acked")
 		}
-		return cls, rsaKey, kid
+		return cls, signingKey, kid
 	}
 
 	eventLogger.Warn("PUSH-SRV: push failed",
@@ -1768,7 +1783,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 			r.stats.RecordIdleVerifyOutcome(sid, "failed")
 		}
 	}
-	return cls, rsaKey, kid
+	return cls, signingKey, kid
 }
 
 // isOperationalVerify returns true when the event was both submitted via the operational-event
@@ -1805,7 +1820,7 @@ func (r *router) InvalidateIssuerKey(issuer string) {
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
 // on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
 // reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.
-func (r *router) InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, string) {
+func (r *router) InvalidateAndReload(streamID, issuer string) (crypto.Signer, string) {
 	r.mu.Lock()
 	delete(r.issuerKeys, issuer)
 	delete(r.issuerKids, issuer)

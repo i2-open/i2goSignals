@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"io"
@@ -75,12 +76,12 @@ func newEventRecord() *model.EventRecord {
 
 // stubKeyReloader records each InvalidateAndReload call and returns the scripted key.
 type stubKeyReloader struct {
-	key    *rsa.PrivateKey
+	key    crypto.Signer
 	kid    string
 	called int
 }
 
-func (s *stubKeyReloader) InvalidateAndReload(_, _ string) (*rsa.PrivateKey, string) {
+func (s *stubKeyReloader) InvalidateAndReload(_, _ string) (crypto.Signer, string) {
 	s.called++
 	return s.key, s.kid
 }

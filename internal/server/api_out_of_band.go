@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -317,7 +318,11 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
 	contentType = strings.TrimSpace(contentType)
 
-	var priv *rsa.PrivateKey
+	// priv is declared as the interface, not *rsa.PrivateKey, so the
+	// public-key-only paths below leave it as an untyped nil. A nil
+	// *rsa.PrivateKey boxed into a crypto.Signer would read as present at
+	// AddKey's "privateKey != nil" check and panic on Public().
+	var priv crypto.Signer
 	var pub *rsa.PublicKey
 
 	switch contentType {

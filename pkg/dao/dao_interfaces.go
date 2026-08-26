@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"errors"
 	"net/url"
@@ -349,9 +350,12 @@ type DeliveredEvent struct {
 	AckDate time.Time `json:"ackDate"`
 }
 
-// KeyPairData holds a private/public key pair
+// KeyPairData holds a private/public key pair. PrivateKey is a crypto.Signer
+// so the DAO surface names "a key that can sign" rather than one algorithm;
+// the public half stays *rsa.PublicKey because the stored JWK encoding is the
+// RSA n/e form.
 type KeyPairData struct {
-	PrivateKey *rsa.PrivateKey
+	PrivateKey crypto.Signer
 	PublicKey  *rsa.PublicKey
 	Kid        string
 }

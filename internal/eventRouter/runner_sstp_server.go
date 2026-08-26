@@ -2,7 +2,7 @@ package eventRouter
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"fmt"
 	"time"
 
@@ -228,7 +228,7 @@ func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
 // otherwise. Mirrors the poll-transmitter's signing path (PollStreamHandler).
 func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) map[string]string {
 	forward := rec.GetRouteMode() == model.RouteModeForward
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var kid string
 	if !forward {
 		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss)

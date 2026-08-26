@@ -5,7 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -2612,7 +2612,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	var stream *Stream
 	var server *SsfServer
 	var config *model.StreamConfiguration
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var err error
 	var endpoint string
 	var token string

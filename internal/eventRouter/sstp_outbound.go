@@ -18,7 +18,7 @@ package eventRouter
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -88,7 +88,7 @@ type SstpOutbound interface {
 	// consulting the router's issuer-key cache (or loading it once and
 	// caching). RouteModeForward pairs skip this call — the dialer forwards
 	// Event.Original verbatim.
-	LoadSigningKey(streamID, issuer string) (*rsa.PrivateKey, string)
+	LoadSigningKey(streamID, issuer string) (crypto.Signer, string)
 
 	// AcquireSecondPushSlot reserves the single in-flight push-while-poll-
 	// held slot for pairId (Q7.2 concurrency bound), returning false when a
@@ -226,7 +226,7 @@ func (r *router) PauseOutbound(stream *model.StreamStateRecord, reason string) {
 	r.pauseSstpOutbound(stream, reason)
 }
 
-func (r *router) LoadSigningKey(streamID, issuer string) (*rsa.PrivateKey, string) {
+func (r *router) LoadSigningKey(streamID, issuer string) (crypto.Signer, string) {
 	return r.checkAndLoadKey(streamID, issuer)
 }
 

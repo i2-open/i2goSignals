@@ -289,7 +289,7 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	keyRetrieved, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuer)
 	s.NoError(err, "Should be no error")
 	s.NotNil(keyRetrieved)
-	s.True(key.Equal(keyRetrieved), "Should be same key")
+	s.True(key.Public().(*rsa.PublicKey).Equal(keyRetrieved.Public()), "Should be same key")
 
 	keyFail, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), "should.fail")
 	s.Error(err, "No key found for: should.fail")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -127,8 +128,21 @@ func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *t
 	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }
 
+// GetPrivateKey returns the issuer's signing key as the concrete RSA type the
+// test fixtures need (PEM export, JWKS construction, direct rsa.Sign calls).
+// KeyService hands back a crypto.Signer; this helper is the one place the
+// suite narrows it, so a future non-RSA test key fails here with a clear
+// message instead of at an unrelated assertion.
 func (instance *ssfInstance) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
-	return instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	signer, err := instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	if err != nil {
+		return nil, err
+	}
+	rsaKey, ok := signer.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("signing key for %q is %T, not an RSA key", keyName, signer)
+	}
+	return rsaKey, nil
 }
 
 func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {

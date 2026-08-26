@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -34,7 +35,7 @@ type KeyService struct {
 	keyDAO      interfaces.KeyDAO
 	tokenIssuer string
 	tokenKid    string
-	tokenKey    *rsa.PrivateKey
+	tokenKey    crypto.Signer
 	tokenPubKey *keyfunc.JWKS
 	authIssuer  *authSupport.AuthIssuer
 }
@@ -108,7 +109,12 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 }
 
 // CreateKeyPair generates a new RSA key pair identified by keyName with the given use ("sig" or "enc").
-func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use string, projectId string) (*rsa.PrivateKey, error) {
+//
+// It returns a crypto.Signer rather than the concrete *rsa.PrivateKey it mints:
+// callers plumb the result to a signing site, and RSA-2048 being what this
+// method generates is an implementation choice, not something a caller should
+// be typed against.
+func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use string, projectId string) (crypto.Signer, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		ksLog.Error("Error generating key pair", "error", err)
@@ -170,7 +176,7 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 }
 
 // RotateKey generates a new key pair for keyName with a unique kid.
-func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId string) (*rsa.PrivateKey, string, error) {
+func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId string) (crypto.Signer, string, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, "", err
@@ -204,9 +210,13 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 	return privateKey, kid, nil
 }
 
-func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey *rsa.PrivateKey, projectId string) error {
-	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
-	publicKey := privateKey.PublicKey
+func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string) error {
+	rsaKey, err := rsaSigningKey(privateKey)
+	if err != nil {
+		return err
+	}
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(rsaKey)
+	publicKey := rsaKey.PublicKey
 	pubKeyBytes := x509.MarshalPKCS1PublicKey(&publicKey)
 
 	keyPairRec := &interfaces.JwkKeyRec{
@@ -219,7 +229,7 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 		PubKeyBytes: pubKeyBytes,
 	}
 
-	err := s.keyDAO.Insert(ctx, keyPairRec)
+	err = s.keyDAO.Insert(ctx, keyPairRec)
 	if err == nil && keyName == s.tokenIssuer {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
@@ -238,12 +248,24 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 }
 
 // AddKey stores an externally-provided key (or key pair) identified by keyName.
-func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid string, privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, projectId string) error {
+// Either half may be nil: a public-only call registers a verification key, a
+// private-only call derives the public half from the signer.
+//
+// privateKey must be an untyped nil when absent, not a nil *rsa.PrivateKey
+// boxed into the interface — the latter reads as present and then panics on
+// Public(). publicKey stays the concrete *rsa.PublicKey precisely because it
+// is nilable at its caller: widening it to crypto.PublicKey would box a nil
+// pointer here and defeat the same check.
+func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid string, privateKey crypto.Signer, publicKey *rsa.PublicKey, projectId string) error {
 	var privateKeyBytes []byte
 	if privateKey != nil {
-		privateKeyBytes = x509.MarshalPKCS1PrivateKey(privateKey)
+		rsaKey, err := rsaSigningKey(privateKey)
+		if err != nil {
+			return err
+		}
+		privateKeyBytes = x509.MarshalPKCS1PrivateKey(rsaKey)
 		if publicKey == nil {
-			publicKey = &privateKey.PublicKey
+			publicKey = &rsaKey.PublicKey
 		}
 	}
 
@@ -287,7 +309,7 @@ func (s *KeyService) DeleteKeysByName(ctx context.Context, keyName string) error
 }
 
 // GetPrivateKey retrieves the latest private key for keyName.
-func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (*rsa.PrivateKey, error) {
+func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (crypto.Signer, error) {
 	key, _, err := s.GetPrivateKeyWithKeyname(ctx, keyName)
 	return key, err
 }
@@ -297,7 +319,7 @@ func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (*rsa.Pr
 // keyName has records but none are active, it logs a loud ERROR naming the
 // issuer and the remedy, and returns ErrKeyNotFound — there is deliberately no
 // fallback to an older inactive kid and no auto-rotation (ADR 0028).
-func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (*rsa.PrivateKey, string, error) {
+func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (crypto.Signer, string, error) {
 	rec, err := s.findLatestActiveSigningRec(ctx, keyName)
 	if err != nil {
 		return nil, "", err
@@ -305,11 +327,40 @@ func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName strin
 	return parseSigningRec(rec)
 }
 
+// GetSigner resolves issuer's active signing key and its kid (Slice Contract
+// rev 1, Seam S2). It is the transmitter's key-acquisition path: the event
+// router calls it, and every SET this node signs is signed with what it
+// returns.
+//
+// It names what the caller actually wants — something that can sign for this
+// issuer — instead of GetPrivateKeyWithKeyname's storage-shaped phrasing, and
+// it is the seam an additional signature algorithm arrives behind: when RFC
+// 9964 ML-DSA keys land, GetSigner starts returning them and no signing site
+// changes. The two are one implementation today; GetSigner is the name
+// production code should use.
+func (s *KeyService) GetSigner(ctx context.Context, issuer string) (key crypto.Signer, kid string, err error) {
+	return s.GetPrivateKeyWithKeyname(ctx, issuer)
+}
+
+// rsaSigningKey narrows an algorithm-neutral signer back to the *rsa.PrivateKey
+// the key store can serialize. The stored record format is PKCS#1, which is
+// defined for RSA only, so this is the one place where the widened signing
+// surface meets an RSA-shaped persistence format. A non-RSA signer is a caller
+// error rather than a storage failure; when RFC 9964 adds ML-DSA key records
+// the format grows a variant and this narrowing moves behind that choice.
+func rsaSigningKey(privateKey crypto.Signer) (*rsa.PrivateKey, error) {
+	rsaKey, ok := privateKey.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("unsupported signing key type %T; the key store persists RSA (PKCS#1) keys only", privateKey)
+	}
+	return rsaKey, nil
+}
+
 // parseSigningRec parses a record's PKCS1 private key and derives its kid,
 // falling back to the keyName when the record carries no explicit kid. It is the
 // single signing-key materialization path shared by GetPrivateKeyWithKeyname and
 // the token-issuer refresh so the two can never diverge (ADR 0028).
-func parseSigningRec(rec *interfaces.JwkKeyRec) (*rsa.PrivateKey, string, error) {
+func parseSigningRec(rec *interfaces.JwkKeyRec) (crypto.Signer, string, error) {
 	key, err := x509.ParsePKCS1PrivateKey(rec.KeyBytes)
 	if err != nil {
 		return nil, "", err
@@ -492,7 +543,7 @@ func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
 	}
 
 	signingRec, _ := latestActiveSigningRec(recs)
-	var signingKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	signingKid := ""
 	if signingRec != nil {
 		key, kid, perr := parseSigningRec(signingRec)
@@ -627,7 +678,7 @@ func (s *KeyService) getInternalPublicJWKS(ctx context.Context, keyName string) 
 // that kid. This guarantees that the signing private key and the verification
 // public key in the returned JWKS are always a matched pair, even when a concurrent
 // cluster node has inserted a different key with the same kid.
-func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingKey *rsa.PrivateKey, signingKid string) *keyfunc.JWKS {
+func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingKey crypto.Signer, signingKid string) *keyfunc.JWKS {
 	keys, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil {
 		ksLog.Error("Error retrieving keys", "keyName", keyName, "error", err)
@@ -655,7 +706,7 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 // when a concurrent cluster node inserted a different record under the same kid.
 // Unlike buildAuthJWKS it returns a (possibly empty) non-nil JWKS, so a caller
 // can install an empty verification set to stop a revoked kid from verifying.
-func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey *rsa.PrivateKey, signingKid string) *keyfunc.JWKS {
+func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signingKid string) *keyfunc.JWKS {
 	// Copy before sorting so the caller's slice (which it may still be iterating)
 	// is not mutated. Oldest-first so that when records share a kid the newest
 	// public key overwrites older ones in the map — matching signing selection.
@@ -687,9 +738,19 @@ func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey *rsa.PrivateKey, sign
 	}
 
 	if signingKey != nil && signingKid != "" {
-		givenKeys[signingKid] = keyfunc.NewGivenRSA(&signingKey.PublicKey, keyfunc.GivenKeyOptions{
-			Algorithm: "RS256",
-		})
+		// The published verification key must be the signing key's own public
+		// half, so it is derived through crypto.Signer.Public() rather than
+		// re-read from the store. keyfunc's given-key API is per-algorithm, so
+		// the RSA form is needed here even though the signer is not typed to
+		// it — this narrowing is the JWK n/e export boundary.
+		if rsaPub, ok := signingKey.Public().(*rsa.PublicKey); ok {
+			givenKeys[signingKid] = keyfunc.NewGivenRSA(rsaPub, keyfunc.GivenKeyOptions{
+				Algorithm: "RS256",
+			})
+		} else {
+			ksLog.Error("Signing key is not RSA; cannot publish its verification key",
+				"kid", signingKid, "keyType", fmt.Sprintf("%T", signingKey.Public()))
+		}
 	}
 
 	return keyfunc.NewGiven(givenKeys)
@@ -721,7 +782,7 @@ func (s *KeyService) DeleteKey(ctx context.Context, kid string) error {
 }
 
 // GetPrivateKeyByKid retrieves a private key by its kid.
-func (s *KeyService) GetPrivateKeyByKid(ctx context.Context, kid string) (*rsa.PrivateKey, error) {
+func (s *KeyService) GetPrivateKeyByKid(ctx context.Context, kid string) (crypto.Signer, error) {
 	rec, err := s.keyDAO.FindByKid(ctx, kid)
 	if err != nil {
 		return nil, err
