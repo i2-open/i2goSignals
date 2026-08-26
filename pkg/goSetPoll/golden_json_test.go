@@ -2,7 +2,11 @@ package goSetPoll
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,4 +97,55 @@ func TestGoldenPollJSON(t *testing.T) {
 			assertPollGolden(t, tc.name, got)
 		})
 	}
+}
+
+// TestPollWireIsCompact pins the bytes the two HTTP paths actually put on the
+// wire, not just what json.Marshal produces for the structs.
+//
+// Both sides used to pretty-print with json.MarshalIndent. That ran on every
+// poll return and every poll request — the hot path of RFC 8936 delivery — to
+// produce whitespace no machine reads. This test fails if the indentation ever
+// comes back, and it fails if the encoder starts appending anything (a trailing
+// newline, say) that the golden does not carry.
+func TestPollWireIsCompact(t *testing.T) {
+	populated := PollResponse{
+		Sets:          map[string]string{"jti-1": "eyJhbGciOiJSUzI1NiJ9.e30.sig"},
+		MoreAvailable: true,
+	}
+
+	t.Run("transmitter response body", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		WritePollResponse(w, populated)
+		if got := w.Code; got != http.StatusOK {
+			t.Fatalf("status = %d, want %d", got, http.StatusOK)
+		}
+		assertPollGolden(t, "poll_response_populated", w.Body.Bytes())
+	})
+
+	t.Run("receiver request body", func(t *testing.T) {
+		var sent []byte
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("reading request body: %v", err)
+			}
+			sent = body
+			WritePollResponse(w, PollResponse{})
+		}))
+		defer server.Close()
+
+		request := PollRequest{
+			MaxEvents:         25,
+			ReturnImmediately: true,
+			Acks:              []string{"jti-1", "jti-2"},
+			SetErrs: map[string]SetErrType{
+				"jti-3": {Error: "invalid_key", Description: "unknown kid"},
+			},
+			TimeoutSecs: 30,
+		}
+		if _, _, err := PollRaw(context.Background(), request, ReceiverConfig{EndpointURL: server.URL}); err != nil {
+			t.Fatalf("PollRaw: %v", err)
+		}
+		assertPollGolden(t, "poll_request_populated", sent)
+	})
 }

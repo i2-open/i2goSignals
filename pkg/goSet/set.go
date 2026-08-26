@@ -1,7 +1,6 @@
 package goSet
 
 import (
-	"bytes"
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
@@ -184,13 +183,16 @@ func (set *SecurityEventToken) String() string {
 	return string(jsonByte)
 }
 
+// JsonBytes returns the SET's compact JSON encoding — the bytes that become
+// the JWS payload. json.Marshal rather than json.Encoder: an Encoder appends a
+// trailing newline, which is a byte of payload that carries no meaning and that
+// every receiver has to tolerate.
 func (set *SecurityEventToken) JsonBytes() []byte {
-	var jsonBuf bytes.Buffer
-	err := json.NewEncoder(&jsonBuf).Encode(set)
+	jsonBytes, err := json.Marshal(set)
 	if err != nil {
 		log.Printf("Error encoding token: %s", err.Error())
 	}
-	return jsonBuf.Bytes()
+	return jsonBytes
 }
 
 func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims interface{}) {

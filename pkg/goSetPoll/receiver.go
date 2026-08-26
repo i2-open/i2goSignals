@@ -27,7 +27,9 @@ func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*
 		tlsSupport.CheckCaInstalled(client)
 	}
 
-	bodyBytes, err := json.MarshalIndent(request, "", "  ")
+	// Compact, not indented — see WritePollResponse. A poll request is
+	// machine-to-machine and is sent once per polling interval per stream.
+	bodyBytes, err := json.Marshal(request)
 	if err != nil {
 		return nil, 0, fmt.Errorf("RFC8936: error marshaling poll request: %w", err)
 	}
