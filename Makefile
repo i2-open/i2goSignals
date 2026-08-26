@@ -38,12 +38,30 @@ DEV_IMAGE_STAMP := .dev-image.stamp
 # Binaries staged under bin/linux/<arch>/ and copied by the production Dockerfile.
 DOCKER_BINS := goSignals goSignalsServer goSsfServer cluster-monitor genTlsKeys healthcheck
 
+# --- Quality gate knobs -----------------------------------------------------
+GOFMT ?= gofmt
+
+# The benchmark set that forms the project's performance floor. These four
+# packages carry the hot paths a toolchain or dependency change is most likely
+# to move: SET marshal/parse/sign, event-payload validation, RFC8936 poll
+# request/response encoding, and the long-poll buffer's wait/wake cycle.
+# docs/perf/go127-baseline.md records their numbers and every subsequent
+# change appends a delta row against them. Keep this list and
+# docs/perf/go127-baseline.md in step.
+BENCH_PKGS ?= ./pkg/goSet ./pkg/goSetValidate ./pkg/goSetPoll ./internal/eventRouter/buffer
+
+# `make qa` only needs to prove the benchmarks still compile and run, so one
+# iteration each is enough and keeps the gate fast. Real measurements use a
+# statistically meaningful benchtime -- see docs/perf/go127-baseline.md for
+# the command that produced the recorded numbers.
+BENCHTIME ?= 1x
+
 .PHONY: all help build run console-build server-build clean clean-scim dev-clean \
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
     run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals \
-    seams
+    seams qa fmt-check vet test tidy-check bench
 
 all: build
 
@@ -61,6 +79,12 @@ help:
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
 	@echo "  clean              - remove build artifacts"
+	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test bench"
+	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
+	@echo "  vet                - go vet ./..."
+	@echo "  test               - go test -race ./..."
+	@echo "  tidy-check         - fail if go mod tidy would change go.mod/go.sum"
+	@echo "  bench              - run the benchmark set (BENCHTIME=$(BENCHTIME))"
 
 # Build and install the command line console gosignals.
 console-build:
@@ -307,3 +331,55 @@ seams:
 	  echo ">> go build ./..." && $(GO) build ./... && \
 	  echo ">> go vet ./..." && $(GO) vet ./... && \
 	  echo ">> make seams: OK (wide-workspace build + vet green)"
+
+# --- Quality gate -----------------------------------------------------------
+# `make qa` is THE gate: one command that has to be green before a branch is
+# proposed for merge. It exists so there is a single place to hang a check --
+# CI, a pre-merge review, and an agent finishing a slice all run the same thing
+# rather than each remembering its own list of commands.
+#
+# Ordering is cheapest-first so an obvious failure reports in seconds rather
+# than after the race-detector suite: formatting, then vet, then the go.mod
+# tidiness diff, then tests, then the benchmark set.
+qa: fmt-check vet tidy-check test bench
+	@echo ">> make qa: OK"
+
+# Go sources here are gofmt-canonical tabs. Any output from `gofmt -l` is a
+# failure -- gofmt -l reports the files it WOULD change and exits 0 either way,
+# so the target has to inspect the output rather than the exit status.
+fmt-check:
+	@echo ">> gofmt -l ."
+	@unformatted="$$($(GOFMT) -l .)"; \
+	  if [ -n "$$unformatted" ]; then \
+	    echo "ERROR: these files are not gofmt-clean; run 'gofmt -w' on them:"; \
+	    echo "$$unformatted"; \
+	    exit 1; \
+	  fi
+
+vet:
+	@echo ">> go vet ./..."
+	@$(GO) vet ./...
+
+test:
+	@echo ">> go test -race ./..."
+	@$(GO) test -race ./...
+
+# Fail if `go mod tidy` would change anything. Tidiness is checked rather than
+# applied: the gate must not silently rewrite dependency state underneath the
+# caller. go.mod/go.sum are backed up, tidy runs, the result is diffed, and the
+# trap restores the originals on every exit path including a failed diff.
+tidy-check:
+	@echo ">> go mod tidy (diff check)"
+	@cp go.mod go.mod.qa-backup && cp go.sum go.sum.qa-backup
+	@trap 'mv -f go.mod.qa-backup go.mod; mv -f go.sum.qa-backup go.sum' EXIT INT TERM; \
+	  $(GO) mod tidy && \
+	  if ! diff -u go.mod.qa-backup go.mod || ! diff -u go.sum.qa-backup go.sum; then \
+	    echo "ERROR: go.mod/go.sum are not tidy; run 'go mod tidy' and commit the result."; \
+	    exit 1; \
+	  fi
+
+# Run the benchmark set. -run='^$$' selects no ordinary tests, so this measures
+# only the benchmarks. Override BENCHTIME for a real measurement run.
+bench:
+	@echo ">> benchmark set ($(BENCHTIME)): $(BENCH_PKGS)"
+	@$(GO) test -run='^$$' -bench=. -benchmem -benchtime=$(BENCHTIME) $(BENCH_PKGS)
