@@ -104,7 +104,7 @@ type StreamStateRecord struct {
 	// transmitter streams; an override set on a receiver stream is ignored at
 	// CreateStream/UpdateStream with a WARN. No enforcement is wired up in this
 	// slice — it is settable, persisted, and round-trippable.
-	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitempty" bson:"subject_removal_grace_seconds,omitempty"`
+	SubjectRemovalGraceSeconds int `json:"subject_removal_grace_seconds,omitzero" bson:"subject_removal_grace_seconds,omitempty"`
 
 	// RetentionWindowDays is the per-stream event-retention override (ADR 0055,
 	// Q91.1). Like DefaultSubjects it is a goSignals operator knob and is
@@ -114,7 +114,7 @@ type StreamStateRecord struct {
 	// engine stays dormant until a finite window is set. The effective window is
 	// resolved server-side as stream.RetentionWindowDays ?? bundle default ??
 	// keep-forever. A non-positive value is treated as keep-forever.
-	RetentionWindowDays *int `json:"retention_window_days,omitempty" bson:"retention_window_days,omitempty"`
+	RetentionWindowDays *int `json:"retention_window_days,omitzero" bson:"retention_window_days,omitempty"`
 
 	// EventValidation is the per-receiver event-validation policy (spec #247
 	// issue #250): NONE, WARN, ENFORCE or STRICT. Like DefaultSubjects and

@@ -27,7 +27,7 @@ type TokenRecord struct {
 	// used (a /register call for an IAT); RedemptionCount is the running tally.
 	LastRedemptionIP string    `bson:"last_redemption_ip,omitzero" json:"last_redemption_ip,omitempty"`
 	LastRedemptionAt time.Time `bson:"last_redemption_at,omitzero" json:"last_redemption_at,omitzero"`
-	RedemptionCount  int64     `bson:"redemption_count,omitzero" json:"redemption_count,omitempty"`
+	RedemptionCount  int64     `bson:"redemption_count,omitzero" json:"redemption_count,omitzero"`
 }
 
 // IntrospectionResponse implements RFC7662 response format.

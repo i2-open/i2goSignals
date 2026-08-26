@@ -16,11 +16,11 @@ import (
 // PollRequest represents the JSON body of an RFC8936 poll request.
 type PollRequest struct {
 	// MaxEvents is an optional integer indicating the maximum number of unacknowledged SETs to return.
-	MaxEvents int32 `json:"maxEvents,omitempty"`
+	MaxEvents int32 `json:"maxEvents,omitzero"`
 
 	// ReturnImmediately indicates whether the transmitter should return immediately even if no results
 	// are available (short polling). When false, the transmitter may hold the connection open (long polling).
-	ReturnImmediately bool `json:"returnImmediately,omitempty"`
+	ReturnImmediately bool `json:"returnImmediately,omitzero"`
 
 	// Acks is a list of event JTIs that the receiver is acknowledging.
 	Acks []string `json:"ack,omitempty"`
@@ -29,7 +29,7 @@ type PollRequest struct {
 	SetErrs map[string]SetErrType `json:"setErrs,omitempty"`
 
 	// TimeoutSecs is an optional timeout in seconds for long polling.
-	TimeoutSecs int `json:"timeoutSecs,omitempty"`
+	TimeoutSecs int `json:"timeoutSecs,omitzero"`
 }
 
 // PollResponse represents the JSON body of an RFC8936 poll response.
@@ -38,7 +38,7 @@ type PollResponse struct {
 	Sets map[string]string `json:"sets"`
 
 	// MoreAvailable indicates whether additional SETs are ready to be delivered.
-	MoreAvailable bool `json:"moreAvailable,omitempty"`
+	MoreAvailable bool `json:"moreAvailable,omitzero"`
 }
 
 // SetErrType represents an error reported by the receiver for a specific SET.

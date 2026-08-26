@@ -29,7 +29,7 @@ type SubjectFilterEntry struct {
 	CanonicalKey string                   `json:"canonical_key" bson:"canonical_key"`
 	Kind         string                   `json:"kind" bson:"kind"`
 	Subject      *goSet.SubjectIdentifier `json:"subject" bson:"subject"`
-	Verified     bool                     `json:"verified,omitempty" bson:"verified,omitempty"`
+	Verified     bool                     `json:"verified,omitzero" bson:"verified,omitempty"`
 
 	// EnforceAt is the SSF §9.3 removal-grace deadline (PRD #97 issue #99).
 	// A zero value means the entry is fully active under its baseline. A
