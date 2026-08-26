@@ -1901,9 +1901,18 @@ func (r *router) Shutdown() {
 	for _, sstpServerBuffer := range r.sstpServerBuffers {
 		sstpServerBuffer.Close()
 	}
+	// Poll buffers are closed here too, despite having no delivery goroutine of
+	// their own to stop. Every EventPollBuffer owns a pump goroutine that lives
+	// until its input channel is closed, so skipping them (as this loop used to,
+	// under the reasoning that polling is receiver-driven and needs no shutdown)
+	// stranded one goroutine per poll stream for the rest of the process's life.
+	// RemoveStream has always closed them on the per-stream path; Shutdown now
+	// matches it. Surfaced by the Go 1.27 goroutineleak gate in `make qa`.
+	for _, pollBuffer := range r.pollBuffers {
+		pollBuffer.Close()
+	}
 	if r.x509Source != nil {
 		_ = r.x509Source.Close()
 		r.x509Source = nil
 	}
-	// Nothing need to be done for polling.
 }
