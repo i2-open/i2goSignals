@@ -232,7 +232,7 @@ later work.
 | Change | Worst benchmark delta | Suite wall-clock delta | Notes |
 |---|---|---|---|
 | #270 — baseline + `make qa` | — | — | Established this baseline. |
-| #271 — PQ-KEM guard, TLS MinVersion, WithValidMethods | | | |
+| #271 — PQ-KEM guard, TLS MinVersion, WithValidMethods | **+3.0%** `BenchmarkPollBufferSubmitDrain` | **+0.4%** (53.72s vs 53.52s) | Inside the documented 4–7% noise band and untouched by this slice — nothing in it goes near the poll buffer. The one benchmark that does exercise changed code, `BenchmarkSetParse` (now runs `jwt.WithValidMethods`), came in at **-1.4%**: the allow-list is a string compare against a two-element slice, ahead of an RSA verify. Every other row improved or held flat. |
 | #272 — drop `golang.org/x/exp` (log/slog) | | | |
 | #273 — JSON wire hygiene, golden-JSON tests, compact poll encoding | | | |
 | #274 — single ID seam `pkg/dao/ids` (uuid v7/v4), drop ksuid | | | |

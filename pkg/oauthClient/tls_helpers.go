@@ -44,7 +44,7 @@ func ExtractServerCertificate(hostURL string) (*x509.Certificate, error) {
 		&net.Dialer{Timeout: 10 * time.Second},
 		"tcp",
 		net.JoinHostPort(host, port),
-		&tls.Config{InsecureSkipVerify: true},
+		tlsSupport.Harden(&tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}), //nolint:gosec // cert inspection only: the chain is returned to the caller, never trusted
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
@@ -167,9 +167,10 @@ func parseHostPort(urlStr string) (string, string, error) {
 // administrative override to skip verification
 func GetTlsConfigForServer(server *model.Server) *tls.Config {
 	// Build the TLS config seeded with the global CA pool (system roots + ca-cert.pem).
-	tlsConfig := &tls.Config{
-		RootCAs: tlsSupport.GetGlobalCertPool("AUTH_CA_CERT"),
-	}
+	tlsConfig := tlsSupport.Harden(&tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    tlsSupport.GetGlobalCertPool("AUTH_CA_CERT"),
+	})
 
 	// Check global AUTH_DEBUG override
 	v := strings.ToLower(os.Getenv("AUTH_DEBUG"))

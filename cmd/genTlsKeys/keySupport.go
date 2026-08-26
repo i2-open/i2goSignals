@@ -474,7 +474,7 @@ func CheckCaInstalled(client *http.Client) {
 			log.Debug("Installing CA certificate into HTTP client", "file", caCertPath)
 			caPool = x509.NewCertPool()
 			t := &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: caPool},
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: caPool},
 			}
 			client.Transport = t
 		} else {

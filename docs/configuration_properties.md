@@ -262,6 +262,15 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 | `I2SIG_TLS_CERT_PATH`  | Path to the PEM-encoded server certificate.                                                                       | `config/certs/server-cert.pem`   |
 | `I2SIG_TLS_KEY_PATH`   | Path to the PEM-encoded server private key.                                                                       | `config/certs/server-key.pem`    |
 | `I2SIG_TLS_CA_CERT`    | Path to the CA certificate PEM file. Used to trust the server in clients and to sign certificates via `genTlsKeys`. | `config/certs/ca-cert.pem`      |
+| `I2SIG_TLS_PQ_KEM`     | Post-quantum key exchange offered by every TLS config the server and CLI build. `X25519MLKEM768` (the default) leaves the choice to the Go toolchain, which already leads with the X25519MLKEM768 hybrid and adds new mechanisms as they ship. `MLKEM1024` additionally offers standalone ML-KEM-1024 for deployments whose policy requires NIST category 5. An unrecognised value logs a WARN and falls back to the default. | `X25519MLKEM768` |
+
+> **Note.** `MLKEM1024` widens the *offered* set; it cannot reorder it. `crypto/tls` treats
+> `CurvePreferences` as an allow-list and selects from it using its own internal preference
+> order, so the X25519MLKEM768 hybrid and the classical curves stay in the list — dropping
+> them could not promote ML-KEM-1024, only break peers (ML-KEM is TLS 1.3-only).
+> Every TLS configuration in the project sets `MinVersion` to TLS 1.2 explicitly; a guard
+> test in `pkg/tlsSupport` fails the build if a new `tls.Config` omits it or bypasses the
+> policy helper.
 
 ## SPIFFE
 

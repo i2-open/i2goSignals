@@ -255,6 +255,27 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	return token.SignedString(key)
 }
 
+// AllowedAlgs returns the JWS "alg" values that goSet.Parse will accept, as a
+// fresh slice the caller is free to modify.
+//
+// The allow-list exists so the acceptable signature algorithms are stated once
+// and enforced by the parser, instead of being whatever the JWKS happens to
+// hold a key for. Without it a token carrying alg=none, or one HMAC-signed
+// with a public RSA modulus as the shared secret, still reaches key lookup
+// before anything rejects it — the classic JWT algorithm-confusion shape.
+// Handing this list to jwt.WithValidMethods closes that by construction: the
+// header alg is checked before the key is ever resolved.
+//
+// RS256 and ES256 are what this project signs with today (see JWS). ML-DSA-65
+// is appended by the RFC 9964 signing slice; this function is the single place
+// a new SET signature algorithm becomes acceptable.
+func AllowedAlgs() []string {
+	return []string{
+		jwt.SigningMethodRS256.Alg(),
+		jwt.SigningMethodES256.Alg(),
+	}
+}
+
 // Parse parses a SET wire string and verifies its signature against the
 // supplied JWKS. It is a verify-only trust-path API: issuerPublicJwks MUST be
 // non-nil; passing nil returns an error.
@@ -265,12 +286,16 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 // explicit, unverified inspection (e.g. pre-verify routing on the push
 // receiver, or CLI display), use Peek — its result is never the accepted
 // token.
+//
+// The signature algorithm is checked against AllowedAlgs before key lookup, so
+// an unexpected alg (HS256, none) is refused without the JWKS being consulted.
 func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
 	if issuerPublicJwks == nil {
 		return nil, errors.New("goSet.Parse: JWKS is required for verified parsing; use Peek for explicit unverified inspection (ADR-0066 §D3)")
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc,
+		jwt.WithValidMethods(AllowedAlgs()))
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())
 		return nil, err
