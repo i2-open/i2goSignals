@@ -64,29 +64,34 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 	// rather than re-reading buffer.in without synchronisation.
 	inCh := buffer.in
 
+	// The pump's only job is to move JTIs off `in` and into the slice that
+	// GetEvents reads. It therefore runs exactly as long as `in` is open:
+	// Close() closes `in`, the receive below reports !ok, inCh goes nil and the
+	// loop ends.
+	//
+	// The loop condition is `inCh != nil` and NOT "inCh is nil and everything
+	// has been read". Waiting for the events slice to drain looks tidier but is
+	// a goroutine leak: once inCh is nil there is nothing left to receive, so a
+	// second pass parks this goroutine on a receive from a nil channel, which
+	// blocks forever. Closing a buffer that still holds unread JTIs is routine —
+	// it is what happens whenever a stream is deleted or a node loses its lease
+	// with events pending — so that leak was reachable on an ordinary path. The
+	// Go 1.27 goroutineleak gate in `make qa` is what surfaced it; see
+	// long_poll_synctest_test.go for the regression test.
 	go func() {
-		for {
+		for inCh != nil {
+			v, ok := <-inCh
 			buffer.mutex.Lock()
-			if inCh == nil && len(buffer.events) == 0 {
-				buffer.mutex.Unlock()
-				break
+			if !ok {
+				inCh = nil
+			} else {
+				buffer.events = append(buffer.events, v)
+				if !buffer.closed {
+					close(buffer.notifier)
+					buffer.notifier = make(chan struct{})
+				}
 			}
 			buffer.mutex.Unlock()
-
-			select {
-			case v, ok := <-inCh:
-				buffer.mutex.Lock()
-				if !ok {
-					inCh = nil
-				} else {
-					buffer.events = append(buffer.events, v)
-					if !buffer.closed {
-						close(buffer.notifier)
-						buffer.notifier = make(chan struct{})
-					}
-				}
-				buffer.mutex.Unlock()
-			}
 		}
 
 		buffer.mutex.Lock()
