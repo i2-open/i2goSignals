@@ -93,7 +93,7 @@ type SstpDialerConfig struct {
 	HeartbeatRetryDelay time.Duration
 
 	// Sleep waits for d or returns false when ctx is cancelled. Defaults to
-	// sstpDefaultSleep; tests inject a deterministic implementation.
+	// eventRouter.SleepCtx; tests inject a deterministic implementation.
 	Sleep func(ctx context.Context, d time.Duration) bool
 	// Jitter returns the takeover jitter to wait before the first
 	// connection. Defaults to a uniform draw in
@@ -272,7 +272,7 @@ func (c *SstpDialerConfig) fillDefaults() {
 		c.HeartbeatRetryDelay = 1 * time.Second
 	}
 	if c.Sleep == nil {
-		c.Sleep = sstpDefaultSleep
+		c.Sleep = eventRouter.SleepCtx
 	}
 	if c.Jitter == nil {
 		c.Jitter = defaultSstpJitter
@@ -282,26 +282,6 @@ func (c *SstpDialerConfig) fillDefaults() {
 	}
 	if c.BackfillBatch <= 0 {
 		c.BackfillBatch = 100
-	}
-}
-
-// sstpDefaultSleep waits for d or returns false when ctx is cancelled.
-func sstpDefaultSleep(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -731,12 +711,14 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 
 		if !acquired {
 			sstpDialerLog.Debug("lease not held, waiting...", "pairId", pairId)
-			select {
-			case <-time.After(d.cfg.HeartbeatInterval + d.cfg.LeaseDuration/2):
-				continue
-			case <-ctx.Done():
+			// Cancellable delay via the configured Sleep (eventRouter.SleepCtx by
+			// default) rather than time.After: this runs every loop iteration while
+			// another node holds the lease, and an unstopped timer per spin is exactly
+			// the leak Go 1.27's synchronous timer channels make visible.
+			if !d.cfg.Sleep(ctx, d.cfg.HeartbeatInterval+d.cfg.LeaseDuration/2) {
 				return
 			}
+			continue
 		}
 
 		sstpDialerLog.Info("lease acquired, opening connection", "pairId", pairId)

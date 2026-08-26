@@ -57,20 +57,3 @@ func (r *router) GenerateVerifyEvent(sid string, state string) (*model.EventReco
 	set := events.CreateVerifyEvent(sid, state, cfg.Iss, cfg.Aud)
 	return r.SubmitOperationalEvent(sid, set, "")
 }
-
-// resetIdleTimer drains any pending tick before resetting so callers don't fire spuriously
-// after a Reset on a timer that already expired. This is defensive — Go 1.23+ Timer.Reset
-// semantics make the drain a no-op in our specific call sites — but it costs nothing and
-// makes the call safe regardless of who else might have raced to read t.C.
-func resetIdleTimer(t *time.Timer, d time.Duration) {
-	if t == nil || d <= 0 {
-		return
-	}
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
-}

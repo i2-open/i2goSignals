@@ -387,6 +387,10 @@ const (
 	pollMaxTimeoutSecsDefault     = 300
 )
 
+// leaseRetryDelay is how long a node waits before re-attempting a push-transmitter
+// lease another node currently holds.
+const leaseRetryDelay = 15 * time.Second
+
 // resolvePollTimeoutEnv reads I2SIG_POLL_DEFAULT_TIMEOUT and
 // I2SIG_POLL_MAX_TIMEOUT (with legacy POLL_DEFAULT_TIMEOUT / POLL_MAX_TIMEOUT
 // as fallbacks via envcompat) and applies the validation policy:
@@ -923,9 +927,9 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // side would return it to the peer that sent it (#261, ADR-0031 D5). Empty for
 // locally-originated events.
 //
-// The tx SID identifies the pair in both maps below -- initiator pairs are
+// The tx SID identifies the pair in both maps below — initiator pairs are
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
-// responder pairs are keyed by the tx SID directly -- so one key works for both
+// responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
 func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTxSid string) {
 	for pairId, pair := range r.sstpClientStreams {
@@ -1274,12 +1278,13 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 
 		if !acquired {
 			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
-			select {
-			case <-time.After(15 * time.Second): // Retry after 15s
-				continue
-			case <-r.ctx.Done():
+			// Cancellable retry delay. SleepCtx owns and stops its timer; a time.After
+			// here would arm a fresh runtime timer on every spin of this loop and hold
+			// each one to expiry even after shutdown.
+			if !SleepCtx(r.ctx, leaseRetryDelay) {
 				return
 			}
+			continue
 		}
 
 		// Lease acquired, start the actual push loop
@@ -1402,7 +1407,14 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 
 			if cls.Class == goSetPush.ClassAccepted {
 				// R1: reset T3 idle timer on every successful push, including verify itself.
-				resetIdleTimer(idleTimer, idleVerifyInterval)
+				// Plain Reset, no drain: since Go 1.23 a Timer's channel is unbuffered and
+				// Reset atomically discards a tick that has not been received, so the old
+				// Stop-then-drain-then-Reset dance could never observe a stale value. Go
+				// 1.27 removed the asynctimerchan escape hatch that re-enabled the pre-1.23
+				// buffered behaviour, so the drain is now unreachable in every build.
+				if idleTimer != nil && idleVerifyInterval > 0 {
+					idleTimer.Reset(idleVerifyInterval)
+				}
 				continue
 			}
 
@@ -1431,7 +1443,9 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			// fails, the failure dispatch stops the timer for the duration of recovery.
 			//
 			// Pre-emptively reset here so we don't fire again while the verify push is in
-			// flight; the success-path reset is idempotent.
+			// flight; the success-path reset is idempotent. Plain Reset is correct under
+			// Go 1.23+ timer semantics (unbuffered channel; Reset discards an unreceived
+			// tick), so no Stop-and-drain preamble is needed.
 			if _, err := r.GenerateVerifyEvent(sid, ""); err != nil {
 				eventLogger.Warn("PUSH-SRV: T3 idle verify generation failed", "sid", sid, "error", err)
 			} else {
@@ -1634,6 +1648,8 @@ func (r *router) dispatchPushFailure(
 	switch outcome {
 	case RecoveryOutcomeResumed:
 		backfillTicker.Reset(r.backfillInterval)
+		// Plain Reset on a timer we stopped above, per Go 1.23+ semantics: Stop already
+		// guaranteed no tick can be pending, and Reset re-arms atomically.
 		if idleTimer != nil && idleVerifyInterval > 0 {
 			idleTimer.Reset(idleVerifyInterval)
 		}

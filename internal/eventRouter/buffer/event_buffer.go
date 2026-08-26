@@ -208,6 +208,27 @@ func (b *EventPollBuffer) Clear() {
 	b.events = []string{}
 }
 
+// awaitNotify blocks until the buffer signals new events on notifier or deadline
+// fires, and reports true when a notification arrived first.
+//
+// It takes an owned *time.Timer rather than calling time.After because the
+// timeout is client-controlled: an RFC 8936 long-poll request names its own
+// timeoutSecs (up to pollMaxTimeoutSecs), so a receiver that polls with the
+// maximum timeout and is then woken immediately by a delivered event would,
+// with time.After, leave a fully-armed runtime timer behind on every poll.
+// Under Go 1.27 timer channels are unbuffered and there is no asynctimerchan
+// escape hatch, so the only correct discipline is to own the timer and stop it
+// on every exit path — which the deferred Stop here does.
+func awaitNotify(notifier <-chan struct{}, deadline *time.Timer) bool {
+	defer deadline.Stop()
+	select {
+	case <-notifier:
+		return true
+	case <-deadline.C:
+		return false
+	}
+}
+
 // GetEvents returns all events in the buffer. Events remain in buffer until acknowledged.
 func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, bool) {
 	b.mutex.Lock()
@@ -222,10 +243,10 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 			timeout := time.Duration(timeoutSecs) * time.Second
 			notifier := b.notifier
 			b.mutex.Unlock()
-			select {
-			case <-notifier:
-			case <-time.After(timeout):
-			}
+			// The return value is deliberately ignored: whether we woke on the
+			// notifier or on the deadline, the buffer is re-checked below and an
+			// empty buffer is a legitimate long-poll result either way.
+			_ = awaitNotify(notifier, time.NewTimer(timeout))
 			b.mutex.Lock()
 		}
 	}
