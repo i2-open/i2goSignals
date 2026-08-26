@@ -22,7 +22,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
@@ -224,7 +223,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 
 	clientToken, err := authIssuer.IssueStreamClientToken(model.SsfClient{
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 		ProjectIds:    []string{eat.ProjectId},
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",

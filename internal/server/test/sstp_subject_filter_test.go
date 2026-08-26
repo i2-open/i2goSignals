@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // SSTP slice 11 (PRD #154 Q45): each end of an SSTP pair manages its OWN
@@ -30,9 +30,9 @@ import (
 func newSstpFilterPair(t *testing.T, instance *ssfInstance, defaultSubjects string) (txSid, rxSid, bearer string) {
 	t.Helper()
 
-	txSid = bson.NewObjectID().Hex()
-	rxSid = bson.NewObjectID().Hex()
-	pairId := bson.NewObjectID().Hex()
+	txSid = ids.NewObjectID()
+	rxSid = ids.NewObjectID()
+	pairId := ids.NewObjectID()
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

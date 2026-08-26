@@ -9,7 +9,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func (suite *ServerSuite) TestF_JwksSummaries() {
@@ -27,7 +26,7 @@ func (suite *ServerSuite) TestF_JwksSummaries() {
 
 	// Create a token with only ScopeEventDelivery
 	lowScopeToken, err := suite.servers[0].app.GetAuth().IssueStreamClientToken(model.SsfClient{
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 		ProjectIds:    []string{suite.servers[0].projectId},
 		AllowedScopes: []string{authSupport.ScopeEventDelivery},
 		Email:         "lowscope@test.com",

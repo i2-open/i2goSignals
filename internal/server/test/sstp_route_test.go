@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // sstpTestPair provisions an SSTP pair record directly via the storage seam and
@@ -30,9 +30,9 @@ type sstpTestPair struct {
 func newSstpTestPair(t *testing.T, instance *ssfInstance, status string) *sstpTestPair {
 	t.Helper()
 
-	txSid := bson.NewObjectID().Hex()
-	rxSid := bson.NewObjectID().Hex()
-	pairId := bson.NewObjectID().Hex()
+	txSid := ids.NewObjectID()
+	rxSid := ids.NewObjectID()
+	pairId := ids.NewObjectID()
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -121,7 +121,7 @@ func TestSstpRoute(t *testing.T) {
 		pair := newSstpTestPair(t, instance, model.StreamStateEnabled)
 		// Post to a PairId that does not exist (simulating a deleted pair) but with
 		// a valid bearer for a real pair.
-		url := fmt.Sprintf("http://%s/sstp/%s", instance.host, bson.NewObjectID().Hex())
+		url := fmt.Sprintf("http://%s/sstp/%s", instance.host, ids.NewObjectID())
 		body, _ := json.Marshal(goSetSstp.Message{})
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestSstpRoute(t *testing.T) {
 		// Mint a pair token whose StreamIds are for unrelated SIDs — it does NOT
 		// contain this pair's txSid/rxSid, so defense-in-depth must reject it.
 		foreignBearer, err := instance.GetAuthIssuer().IssueSstpPairToken(
-			bson.NewObjectID().Hex(), bson.NewObjectID().Hex(), instance.projectId, false, nil)
+			ids.NewObjectID(), ids.NewObjectID(), instance.projectId, false, nil)
 		require.NoError(t, err)
 
 		resp := pair.post(t, instance, goSetSstp.ContentType, foreignBearer)

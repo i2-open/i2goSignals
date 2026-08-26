@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/brianvoe/gofakeit/v6"
-	"go.mongodb.org/mongo-driver/v2/bson"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 )
 
 type Meta struct {
@@ -47,7 +47,7 @@ func GenerateFakeUser(basePath string) ScimResource {
 
 	createdTime := time.Now()
 
-	ident := bson.NewObjectID().Hex()
+	ident := ids.NewObjectID()
 
 	resource := ScimResource{
 		Schemas:    []string{"urn:ietf:params:scim:schemas:core:2.0:User"},

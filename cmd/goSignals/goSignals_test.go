@@ -20,8 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -263,7 +261,7 @@ func (suite *toolSuite) Test0_MgmtTokens() {
 		testLog.Printf("  Getting Client admin token for %s...", instance.Name())
 
 		clientToken, err := instance.persistence.KeyService.GetAuthIssuer().IssueStreamClientToken(model.SsfClient{
-			Id:            bson.NewObjectID(),
+			Id:            model.NewRecordId(),
 			ProjectIds:    []string{eat.ProjectId},
 			AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 			Email:         "test@test.com",

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // newSstpPairFixture builds an enabled SSTP pair whose inbound leg verifies
@@ -20,8 +20,8 @@ import (
 // called with the document _id.
 func newSstpPairFixture(t *testing.T, jwksUrl string) (rec *model.StreamStateRecord, txSid, rxSid string) {
 	t.Helper()
-	oid := bson.NewObjectID()
-	rxSid = bson.NewObjectID().Hex()
+	oid := model.NewRecordId()
+	rxSid = ids.NewObjectID()
 	rec = &model.StreamStateRecord{
 		Id:        oid,
 		ProjectId: "proj-1",

@@ -22,7 +22,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var ssLog = logger.Sub("STREAM_SERVICE")
@@ -51,9 +50,10 @@ func isTransmitterMethod(method string) bool {
 }
 
 // mintStreamAud generates a fixed, immutable, opaque, URI-shaped audience for a
-// transmitter-assigned stream (ADR 0024). It is JTI-like (a ksuid) so it is
-// globally unique and carries no caller-identifying information; the value is
-// persisted on the stream and is stable for the stream's lifetime.
+// transmitter-assigned stream (ADR 0024). It is JTI-like (a UUIDv7, minted by
+// pkg/dao/ids) so it is globally unique, sorts into creation order, and carries
+// no caller-identifying information; the value is persisted on the stream and is
+// stable for the stream's lifetime.
 func mintStreamAud() string {
 	return CMintedAudPrefix + goSet.GenerateJti()
 }
@@ -383,7 +383,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
-	mid := bson.NewObjectID()
+	mid := model.NewRecordId()
 
 	// var authCtx authSupport.AuthContext
 	// authCtx = ctx.Value(authSupport.AuthContextKey).(authSupport.AuthContext)

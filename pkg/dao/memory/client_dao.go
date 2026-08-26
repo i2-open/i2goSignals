@@ -6,7 +6,6 @@ import (
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ClientDAOMemory struct {
@@ -24,7 +23,7 @@ func NewClientDAO() interfaces.ClientDAO {
 
 func (d *ClientDAOMemory) Insert(_ context.Context, client *model.SsfClient) error {
 	if client.Id.IsZero() {
-		client.Id = bson.NewObjectID()
+		client.Id = model.NewRecordId()
 	}
 	clientId := client.Id.Hex()
 	d.store.Set(clientId, client)

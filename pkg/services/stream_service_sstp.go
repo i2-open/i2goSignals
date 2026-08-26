@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -140,12 +141,12 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 	endpointUrl := bootstrap.EndpointUrl
 	authHeader := bootstrap.AuthorizationHeader
 
-	mid := bson.NewObjectID()
+	mid := model.NewRecordId()
 	pairId := mid.Hex()
 	// Generate the inbound (rx-side) SID up front so the responder can mint the
 	// pair bearer covering BOTH real SIDs (finding #7). buildSstpRecord is told to
 	// reuse this exact SID so the token binding and the persisted record agree.
-	inboundSid := bson.NewObjectID().Hex()
+	inboundSid := ids.NewV7()
 
 	if bootstrap.Role == model.SstpRoleResponder {
 		// Responder rejects an operator-supplied EndpointUrl and bearer; both are

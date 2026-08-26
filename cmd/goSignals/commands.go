@@ -18,7 +18,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
 	"log"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"gopkg.in/yaml.v3"
 )
@@ -2647,7 +2647,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		SubjectIdentifier: *subjectIdentifier,
 	}, issuer, audience)
 
-	event.TransactionId = bson.NewObjectID().Hex()
+	event.TransactionId = ids.NewV7()
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)

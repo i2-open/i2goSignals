@@ -26,7 +26,9 @@ const benchSetToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6Imh0dHBzOi8vdHJhbnNtaXR0ZXIuZ
 	"eyJhdWQiOlsicmVjZWl2ZXIuZXhhbXBsZS5jb20iXSwiZXZlbnRzIjp7InVybjppZXRmOnBhcmFtczpzY2ltOmV2ZW50OnByb3Y6Y3JlYXRlOmZ1bGwiOnt9fX0." +
 	"c2lnbmF0dXJlLXBsYWNlaG9sZGVyLWJ5dGVzLXRoYXQtYXJlLXJvdWdobHktdGhlLXJpZ2h0LWxlbmd0aA"
 
-// benchJtis builds n synthetic ksuid-shaped jtis.
+// benchJtis builds n synthetic jtis in the pre-#274 ksuid shape. The
+// server mints UUIDv7 jtis now, but this workload stays deliberately frozen so
+// the per-slice delta table keeps comparing like with like.
 func benchJtis(n int) []string {
 	jtis := make([]string, n)
 	for i := range jtis {

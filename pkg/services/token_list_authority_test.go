@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
@@ -201,7 +202,7 @@ func (s *TokenListAuthorityTestSuite) TestFiltersCompose() {
 
 func (s *TokenListAuthorityTestSuite) TestStreamRowJoinsLastSeenIP() {
 	ctx := context.Background()
-	hexID := bson.NewObjectID().Hex()
+	hexID := ids.NewObjectID()
 	s.seedStream(hexID, "p1", "203.0.113.7")
 	s.track("stream-tok", "p1", "c1", model.TokenTypeStream, hexID)
 	s.track("iat-tok", "p1", "c1", model.TokenTypeIAT, "")

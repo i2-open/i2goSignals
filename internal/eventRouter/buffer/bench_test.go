@@ -19,7 +19,9 @@ import (
 // toolchain change rather than the encoding side. Keep the workload stable:
 // the per-slice delta table compares against these exact shapes.
 
-// benchBufferJtis builds n synthetic ksuid-shaped jtis.
+// benchBufferJtis builds n synthetic jtis in the pre-#274 ksuid shape. The
+// server mints UUIDv7 jtis now, but this workload stays deliberately frozen so
+// the per-slice delta table keeps comparing like with like.
 func benchBufferJtis(n int) []string {
 	jtis := make([]string, n)
 	for i := range jtis {

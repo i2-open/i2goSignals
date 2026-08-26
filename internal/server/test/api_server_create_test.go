@@ -12,7 +12,6 @@ import (
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ApiServerTestSuite struct {
@@ -55,7 +54,7 @@ func (s *ApiServerTestSuite) TearDownSuite() {
 
 func (s *ApiServerTestSuite) TestServerCreate() {
 	// 1. Mint an admin token: /server provisioning is admin-only (issue #139).
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-A"}}
 	iat, err := s.sa.Auth.IssueStreamClientToken(client, "proj-A", true, "")
 	s.NoError(err)
 
@@ -100,7 +99,7 @@ func (s *ApiServerTestSuite) TestServerCreate() {
 // true, and a server added without the flag defaults to false (flexible). See
 // PRD #196 done-means 16/17 and ADR 0024 (operator-declared, never auto-detected).
 func (s *ApiServerTestSuite) TestServerCreateStrictSsf() {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-A"}}
 	iat, err := s.sa.Auth.IssueStreamClientToken(client, "proj-A", true, "")
 	s.NoError(err)
 

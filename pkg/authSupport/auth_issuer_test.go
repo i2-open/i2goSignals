@@ -22,7 +22,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TestAuthContext_HasScope locks the shape-aware scope predicate that the
@@ -204,7 +203,7 @@ func newTestTokens() testTokensSet {
 		os.Exit(-1)
 	}
 	client, err := auth.IssueStreamClientToken(model.SsfClient{
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 		ProjectIds:    []string{"abc", "def"},
 		AllowedScopes: []string{ScopeStreamAdmin, ScopeStreamMgmt, ScopeEventDelivery},
 		Email:         "test@example.com",

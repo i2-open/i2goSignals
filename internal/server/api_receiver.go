@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -27,7 +28,6 @@ import (
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"github.com/segmentio/ksuid"
 )
 
 type ClientPollStream struct {
@@ -738,7 +738,7 @@ func (rps *ReceiverPushStream) initiateVerification() {
 		return
 	}
 
-	state := ksuid.New().String()
+	state := ids.NewSecret()
 	rps.mu.Lock()
 	rps.verifying = true
 	rps.verifyState = state
@@ -1215,7 +1215,7 @@ func (ps *ClientPollStream) initiateVerification() {
 
 	params := model.VerificationParameters{
 		StreamId: remoteId,
-		State:    ksuid.New().String(),
+		State:    ids.NewSecret(),
 	}
 	if err := goSsfUtils.PostVerification(ps.ctx, client, verifyUrl, params); err != nil {
 		serverLog.Warn("POLL-RCV: Verification request failed", "sid", sid, "error", err)

@@ -12,12 +12,12 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // newSstpSigningOnlyPair provisions an enabled SSTP pair whose inbound direction is
@@ -28,9 +28,9 @@ import (
 // bypasses the create-time guardrail (tested elsewhere), which is fine here.
 func newSstpSigningOnlyPair(t *testing.T, instance *ssfInstance) *sstpTestPair {
 	t.Helper()
-	txSid := bson.NewObjectID().Hex()
-	rxSid := bson.NewObjectID().Hex()
-	pairId := bson.NewObjectID().Hex()
+	txSid := ids.NewObjectID()
+	rxSid := ids.NewObjectID()
+	pairId := ids.NewObjectID()
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
@@ -151,7 +151,7 @@ func TestSstpSigningOnly(t *testing.T) {
 	t.Run("InvalidBearer_GateEnforced", func(t *testing.T) {
 		goodJti, goodJws := goodInboundSet(t)
 		foreignBearer, err := instance.GetAuthIssuer().IssueSstpPairToken(
-			bson.NewObjectID().Hex(), bson.NewObjectID().Hex(), instance.projectId, false, nil)
+			ids.NewObjectID(), ids.NewObjectID(), instance.projectId, false, nil)
 		require.NoError(t, err)
 
 		resp := postSstpSigningOnly(t, instance, pair.pairId, "Bearer "+foreignBearer,

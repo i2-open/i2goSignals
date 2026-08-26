@@ -23,12 +23,12 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
@@ -431,7 +431,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 			return
 		}
 	} else if force == "rotate" {
-		kid = fmt.Sprintf("%s-%s", keyName, bson.NewObjectID().Hex())
+		kid = fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
 	}
 
 	use := queryParams.Get("use")
@@ -737,7 +737,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Email:         jsonRequest.Email,
 		Description:   jsonRequest.Description,
 		AllowedScopes: scopes,
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 	}
 
 	// The redeemed IAT's JTI is this client token's lineage parent (ADR 0007).

@@ -7,7 +7,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -87,7 +86,7 @@ func TestStreamCollector_ExportsJwksReadinessGauge(t *testing.T) {
 	sa, streamService := newMetricsApplication(t)
 	ctx := context.Background()
 
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	rec := &model.StreamStateRecord{
 		Id:        id,
 		ProjectId: "proj-metrics",
@@ -134,7 +133,7 @@ func TestStreamCollector_NoReadinessSeriesForTransmitOnlyStreams(t *testing.T) {
 	sa, streamService := newMetricsApplication(t)
 	ctx := context.Background()
 
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	rec := &model.StreamStateRecord{
 		Id:        id,
 		ProjectId: "proj-metrics",

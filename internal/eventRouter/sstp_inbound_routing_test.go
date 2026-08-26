@@ -7,11 +7,11 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // sstpRouteEventType is deliberately OUTSIDE the compiled-in catalog: it is the
@@ -29,7 +29,7 @@ const sstpRouteEventType = "urn:i2:gosignals-ai:v1:analysis:tier0-deny"
 // (tx Id == PairId == document _id hex).
 func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode string) *model.StreamStateRecord {
 	t.Helper()
-	mid := bson.NewObjectID()
+	mid := model.NewRecordId()
 	pairId := mid.Hex()
 	rec := &model.StreamStateRecord{
 		Id: mid,
@@ -44,7 +44,7 @@ func persistSstpPairWithInboundMode(t *testing.T, h *testHarness, inboundMode st
 			},
 		},
 		SstpInbound: &model.StreamConfiguration{
-			Id:              bson.NewObjectID().Hex(),
+			Id:              ids.NewObjectID(),
 			Iss:             "https://rx.issuer.example",
 			Aud:             []string{"https://rx.audience.example"},
 			RouteMode:       inboundMode,

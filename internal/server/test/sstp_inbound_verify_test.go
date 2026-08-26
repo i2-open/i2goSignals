@@ -12,12 +12,12 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // newSstpVerifyPair provisions an enabled SSTP pair whose inbound direction's
@@ -26,9 +26,9 @@ import (
 // inbound side must load a real JWKS so a forged SET is rejected.
 func newSstpVerifyPair(t *testing.T, instance *ssfInstance) *sstpTestPair {
 	t.Helper()
-	txSid := bson.NewObjectID().Hex()
-	rxSid := bson.NewObjectID().Hex()
-	pairId := bson.NewObjectID().Hex()
+	txSid := ids.NewObjectID()
+	rxSid := ids.NewObjectID()
+	pairId := ids.NewObjectID()
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

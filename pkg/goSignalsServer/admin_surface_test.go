@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
@@ -194,7 +193,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 // handlers accept, using only the public AuthIssuer.IssueStreamClientToken.
 func (f *adminFixture) adminBearer(t *testing.T, projectId string) string {
 	t.Helper()
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{projectId}}
 	tok, err := f.auth.IssueStreamClientToken(client, projectId, true, "")
 	if err != nil {
 		t.Fatalf("IssueStreamClientToken: %v", err)

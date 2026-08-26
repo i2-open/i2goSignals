@@ -12,7 +12,6 @@ import (
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ApiServerCrudTestSuite struct {
@@ -48,7 +47,7 @@ func (s *ApiServerCrudTestSuite) SetupSuite() {
 	}))
 
 	// /server provisioning is admin-only (issue #139); mint an admin token.
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-A"}}
 	iat, err := s.sa.Auth.IssueStreamClientToken(client, "proj-A", true, "")
 	s.NoError(err)
 	s.iat = iat

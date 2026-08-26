@@ -10,8 +10,6 @@ import (
 	"net/url"
 	"testing"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
@@ -67,7 +65,7 @@ func newReadinessAdminFixture(t *testing.T) *readinessAdminFixture {
 
 func (f *readinessAdminFixture) bearer(t *testing.T, projectId string) string {
 	t.Helper()
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{projectId}}
 	tok, err := f.auth.IssueStreamClientToken(client, projectId, true, "")
 	if err != nil {
 		t.Fatalf("IssueStreamClientToken: %v", err)
@@ -78,7 +76,7 @@ func (f *readinessAdminFixture) bearer(t *testing.T, projectId string) string {
 // receiverRecord is a ReceivePush receiver stream with an explicit issuer JWKS
 // URL — the shape that "expects verification material" (ADR 0033).
 func receiverRecord(projectId, jwksUrl string) *model.StreamStateRecord {
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	return &model.StreamStateRecord{
 		Id:        id,
 		ProjectId: projectId,

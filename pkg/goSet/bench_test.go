@@ -74,7 +74,7 @@ func benchSigned(b *testing.B) (string, *keyfunc.JWKS) {
 }
 
 // BenchmarkCreateSet measures envelope construction, which includes the
-// per-event ksuid jti allocation.
+// per-event UUIDv7 jti allocation.
 func BenchmarkCreateSet(b *testing.B) {
 	subject := benchSubject()
 	b.ReportAllocs()

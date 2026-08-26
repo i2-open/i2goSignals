@@ -10,7 +10,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/segmentio/ksuid"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 )
 
 type UsernameIdentifier struct {
@@ -337,10 +337,13 @@ func Peek(tokenString string) (*SecurityEventToken, error) {
 	return token.Claims.(*SecurityEventToken), nil
 }
 
+// GenerateJti mints the RFC 8417 `jti` claim for a SET: an RFC 9562 UUIDv7 from
+// pkg/dao/ids, the server's single non-Mongo id source.
+//
+// Version 7 is chosen over a purely random id because a jti doubles as the
+// ordering key on the poll and buffer paths -- v7 embeds a millisecond timestamp
+// in its leading bits, so jtis sort into issue order as plain strings and a
+// receiver can group or bound an event window without decoding anything.
 func GenerateJti() string {
-	return ksuid.New().String()
-}
-
-func (set *SecurityEventToken) IsBefore(jtiVal []byte) (bool, error) {
-	return set.ID < string(jtiVal), nil
+	return ids.NewV7()
 }

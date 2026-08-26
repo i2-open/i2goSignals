@@ -10,7 +10,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TestNotifyingDAOs_TriggerOnEverySuccessfulMutation is the tracer bullet
@@ -79,14 +78,14 @@ func TestNotifyingDAOs_TriggerOnEverySuccessfulMutation(t *testing.T) {
 	expected++
 
 	// ClientDAO: Insert, Delete
-	cli := &model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"p1"}}
+	cli := &model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"p1"}}
 	assert.NoError(t, clientDAO.Insert(ctx, cli))
 	expected++
 	assert.NoError(t, clientDAO.Delete(ctx, cli.Id.Hex()))
 	expected++
 
 	// ServerDAO: Create, Update, Delete
-	srv := &model.Server{Id: bson.NewObjectID(), Alias: "alias1", ProjectId: "p1"}
+	srv := &model.Server{Id: model.NewRecordId(), Alias: "alias1", ProjectId: "p1"}
 	assert.NoError(t, serverDAO.Create(ctx, srv))
 	expected++
 	assert.NoError(t, serverDAO.Update(ctx, srv))

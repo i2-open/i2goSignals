@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TestCreateSstpPair_PairBearerAuthorizesBothSids is the regression for finding
@@ -105,8 +105,8 @@ func TestGetIssuerJwksForReceiver_SstpPairLoadsInboundJwks(t *testing.T) {
 	svc := NewStreamService(streamDAO, keyService, "https://local.example", StreamServiceConfig{})
 	ctx := context.Background()
 
-	txSid := bson.NewObjectID()
-	rxSid := bson.NewObjectID().Hex()
+	txSid := model.NewRecordId()
+	rxSid := ids.NewObjectID()
 	rec := &model.StreamStateRecord{
 		Id:        txSid,
 		ProjectId: "proj-1",

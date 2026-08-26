@@ -9,13 +9,12 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func days(n int) *int { return &n }
 
 func streamWithWindow(win *int) model.StreamStateRecord {
-	return model.StreamStateRecord{Id: bson.NewObjectID(), RetentionWindowDays: win}
+	return model.StreamStateRecord{Id: model.NewRecordId(), RetentionWindowDays: win}
 }
 
 func seedBody(t *testing.T, dao *memory.EventDAOMemory, jti string) {
