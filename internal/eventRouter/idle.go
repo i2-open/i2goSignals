@@ -57,3 +57,71 @@ func (r *router) GenerateVerifyEvent(sid string, state string) (*model.EventReco
 	set := events.CreateVerifyEvent(sid, state, cfg.Iss, cfg.Aud)
 	return r.SubmitOperationalEvent(sid, set, "")
 }
+
+// idleKeepalive owns the T3 timer: the one that fires when a push stream has
+// gone idleVerifyInterval without a successful delivery, so the transmitter can
+// synthesise a verification SET and find out whether the receiver is still
+// there. Its whole purpose is to NOT fire — a busy stream resets it on every
+// accepted push and it never reaches zero.
+//
+// It is a type rather than the bare *time.Timer runPushLoop used to pass around
+// for two reasons. First, the timer is optional (a non-positive interval
+// disables the feature), which meant every one of the three call sites repeated
+// `if idleTimer != nil && idleVerifyInterval > 0` and one of them got it subtly
+// different. A nil *idleKeepalive is a working no-op here instead, so the
+// call sites just say what they mean. Second, and more usefully: as an
+// independent value the T3 cadence can be driven by a test through a synctest
+// bubble in microseconds, where reaching it via runPushLoop needs a router, a
+// provider, a lease and a live receiver. See idle_keepalive_test.go.
+//
+// Every method is nil-safe.
+type idleKeepalive struct {
+	interval time.Duration
+	timer    *time.Timer
+}
+
+// newIdleKeepalive returns a keepalive armed for interval, or nil when interval
+// is non-positive — the documented way to switch T3 off.
+func newIdleKeepalive(interval time.Duration) *idleKeepalive {
+	if interval <= 0 {
+		return nil
+	}
+	return &idleKeepalive{interval: interval, timer: time.NewTimer(interval)}
+}
+
+// C returns the channel the idle deadline fires on. For a disabled keepalive it
+// returns nil, and a select arm on a nil channel is never chosen — which is
+// exactly "this feature is off" with no branch at the call site.
+func (k *idleKeepalive) C() <-chan time.Time {
+	if k == nil {
+		return nil
+	}
+	return k.timer.C
+}
+
+// Reset restarts the idle deadline. Callers reach for it on every successful
+// push (the stream is demonstrably alive, so the clock starts over) and after a
+// T3 fire (so the next keepalive is one interval after this one, not immediate).
+//
+// A plain Reset with no Stop-and-drain preamble is correct: since Go 1.23 a
+// Timer's channel is unbuffered and Reset atomically discards a tick that has
+// not been received, so the old dance could never observe a stale value. Go
+// 1.27 removed the asynctimerchan escape hatch that could re-enable the
+// pre-1.23 buffered behaviour, so it is now unreachable in every build.
+func (k *idleKeepalive) Reset() {
+	if k == nil {
+		return
+	}
+	k.timer.Reset(k.interval)
+}
+
+// Stop disarms the keepalive. runPushLoop stops it for the duration of a
+// recovery — there is no point synthesising "are you there?" events at a
+// receiver we are already probing on its status endpoint — and on the way out,
+// so a finished stream leaves no armed runtime timer behind.
+func (k *idleKeepalive) Stop() {
+	if k == nil {
+		return
+	}
+	k.timer.Stop()
+}

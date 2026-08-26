@@ -1344,26 +1344,22 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	heartbeatCtx, heartbeatCancel := context.WithCancel(r.ctx)
 	defer heartbeatCancel()
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				ok, _, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
-				if r.stats != nil {
-					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
-				}
-				if err != nil || !ok {
-					eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
-					heartbeatCancel()
-					return
-				}
-			case <-heartbeatCtx.Done():
-				return
+	go leaseHeartbeat{
+		Coordinator:   r.coordinator,
+		Resource:      resource,
+		NodeId:        r.nodeId,
+		Interval:      leaseRenewInterval,
+		LeaseDuration: leaseTTL,
+		OnRenew: func(renewed bool) {
+			if r.stats != nil {
+				r.stats.TrackLeaseAcquisition(resource, renewed)
 			}
-		}
-	}()
+		},
+		OnLost: func() {
+			eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
+			heartbeatCancel()
+		},
+	}.run(heartbeatCtx)
 
 	recoveryCfg := LoadRecoveryConfig()
 	statusFetcher := r.pushStatusFetcher()
@@ -1394,16 +1390,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	backfillTicker := time.NewTicker(r.backfillInterval)
 	defer backfillTicker.Stop()
 
-	// T3 idle keepalive timer. A non-positive interval disables the feature: idleC stays nil,
-	// which means the corresponding select arm is never chosen. The timer is local to this
-	// lease-holding goroutine (C1) — failover resets the idle clock to "now" naturally.
-	var idleTimer *time.Timer
-	var idleC <-chan time.Time
-	if idleVerifyInterval > 0 {
-		idleTimer = time.NewTimer(idleVerifyInterval)
-		defer idleTimer.Stop()
-		idleC = idleTimer.C
-	}
+	// T3 idle keepalive timer. A non-positive interval disables the feature, in
+	// which case newIdleKeepalive returns nil and every call below is a no-op
+	// whose select arm never fires. The timer is local to this lease-holding
+	// goroutine (C1) — failover resets the idle clock to "now" naturally.
+	idle := newIdleKeepalive(idleVerifyInterval)
+	defer idle.Stop()
 
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
@@ -1421,22 +1413,16 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			signingKey, kid = newKey, newKid
 
 			if cls.Class == goSetPush.ClassAccepted {
-				// R1: reset T3 idle timer on every successful push, including verify itself.
-				// Plain Reset, no drain: since Go 1.23 a Timer's channel is unbuffered and
-				// Reset atomically discards a tick that has not been received, so the old
-				// Stop-then-drain-then-Reset dance could never observe a stale value. Go
-				// 1.27 removed the asynctimerchan escape hatch that re-enabled the pre-1.23
-				// buffered behaviour, so the drain is now unreachable in every build.
-				if idleTimer != nil && idleVerifyInterval > 0 {
-					idleTimer.Reset(idleVerifyInterval)
-				}
+				// R1: a successful push is proof the stream is alive, so the T3
+				// idle clock starts over — verify pushes included.
+				idle.Reset()
 				continue
 			}
 
 			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
 			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
 			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idleTimer, idleVerifyInterval)
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -1450,25 +1436,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		case <-wakeup:
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
-		case <-idleC:
+		case <-idle.C():
 			// T3 fired: no successful push in the last idleVerifyInterval. Generate a real
 			// verify event via the operational-event direct-submission path. The new JTI lands
 			// in eventBuf and the next iteration of this loop will pull it from `out` and push
 			// it via the normal path. If the push succeeds, R1 resets the timer above; if it
 			// fails, the failure dispatch stops the timer for the duration of recovery.
 			//
-			// Pre-emptively reset here so we don't fire again while the verify push is in
-			// flight; the success-path reset is idempotent. Plain Reset is correct under
-			// Go 1.23+ timer semantics (unbuffered channel; Reset discards an unreceived
-			// tick), so no Stop-and-drain preamble is needed.
+			// Pre-emptively re-arm here so we don't fire again while the verify push is in
+			// flight; the success-path reset is idempotent.
 			if _, err := r.GenerateVerifyEvent(sid, ""); err != nil {
 				eventLogger.Warn("PUSH-SRV: T3 idle verify generation failed", "sid", sid, "error", err)
 			} else {
 				eventLogger.Debug("PUSH-SRV: T3 idle verify event generated", "sid", sid, "interval", idleVerifyInterval)
 			}
-			if idleTimer != nil {
-				idleTimer.Reset(idleVerifyInterval)
-			}
+			idle.Reset()
 		}
 	}
 }
@@ -1557,8 +1539,7 @@ func (r *router) dispatchPushFailure(
 	fetcher StatusFetcher,
 	cfg RecoveryConfig,
 	backfillTicker *time.Ticker,
-	idleTimer *time.Timer,
-	idleVerifyInterval time.Duration,
+	idle *idleKeepalive,
 ) (RecoveryOutcome, bool) {
 	sid := stream.StreamConfiguration.Id
 
@@ -1656,18 +1637,12 @@ func (r *router) dispatchPushFailure(
 	// idle-keepalive verify events when we are already actively probing /status. Restart both
 	// on Resumed; failure paths leave them stopped (the goroutine exits).
 	backfillTicker.Stop()
-	if idleTimer != nil {
-		idleTimer.Stop()
-	}
+	idle.Stop()
 	outcome := r.recoveryLoop(ctx, stream, mode, fetcher, cfg)
 	switch outcome {
 	case RecoveryOutcomeResumed:
 		backfillTicker.Reset(r.backfillInterval)
-		// Plain Reset on a timer we stopped above, per Go 1.23+ semantics: Stop already
-		// guaranteed no tick can be pending, and Reset re-arms atomically.
-		if idleTimer != nil && idleVerifyInterval > 0 {
-			idleTimer.Reset(idleVerifyInterval)
-		}
+		idle.Reset()
 		return outcome, false
 	case RecoveryOutcomeDisabled:
 		return outcome, true
