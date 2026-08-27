@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
 )
 
 type UsernameIdentifier struct {
@@ -288,14 +290,55 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.S
 // Handing this list to jwt.WithValidMethods closes that by construction: the
 // header alg is checked before the key is ever resolved.
 //
-// RS256 and ES256 are what this project signs with today (see JWS). ML-DSA-65
-// is appended by the RFC 9964 signing slice; this function is the single place
-// a new SET signature algorithm becomes acceptable.
+// RS256 and ES256 are what this project signs with by default (see JWS).
+// ML-DSA-65 (RFC 9964, FIPS 204) is accepted for streams that opt into
+// post-quantum signatures via StreamConfiguration.signing_alg; it is listed
+// unconditionally because the allow-list gates the *header*, and a receiver
+// must be able to verify a PQ-signed SET whether or not this node transmits
+// one. This function is the single place a new SET signature algorithm becomes
+// acceptable.
 func AllowedAlgs() []string {
 	return []string{
 		jwt.SigningMethodRS256.Alg(),
 		jwt.SigningMethodES256.Alg(),
+		mldsa.Alg,
 	}
+}
+
+// SigningMethodFor maps a stream's configured signing_alg to the jwt.SigningMethod
+// the transmitter signs with. An empty alg means "unset", which is RS256 — the
+// behaviour every stream had before RFC 9964 ML-DSA became selectable, so an
+// existing stream config keeps signing exactly as it did.
+//
+// It exists so the ~5 signing sites (poll response, push delivery, SSTP
+// outbound both directions, CLI) each say `goSet.SigningMethodFor(cfg.SigningAlg)`
+// instead of hard-coding jwt.SigningMethodRS256, and so an unknown alg is one
+// error here rather than a silent fall-through to RSA at each of them. The
+// accepted set is AllowedAlgs minus ES256: this node verifies ES256 tokens from
+// peers but has no EC signing key of its own to select.
+func SigningMethodFor(alg string) (jwt.SigningMethod, error) {
+	switch alg {
+	case "", jwt.SigningMethodRS256.Alg():
+		return jwt.SigningMethodRS256, nil
+	case mldsa.Alg:
+		return mldsa.SigningMethodMLDSA65, nil
+	default:
+		return nil, fmt.Errorf("unsupported SET signing algorithm %q; want one of \"\", %q, %q",
+			alg, jwt.SigningMethodRS256.Alg(), mldsa.Alg)
+	}
+}
+
+// MustSigningMethodFor is SigningMethodFor for the signing sites, which have no
+// error path worth adding for a value validated at stream create/update time.
+// An unknown alg falls back to RS256 rather than signing with nothing; the
+// stream-config validation is what prevents one from ever getting this far.
+func MustSigningMethodFor(alg string) jwt.SigningMethod {
+	method, err := SigningMethodFor(alg)
+	if err != nil {
+		log.Printf("goSet: %s; signing with %s", err, jwt.SigningMethodRS256.Alg())
+		return jwt.SigningMethodRS256
+	}
+	return method
 }
 
 // Parse parses a SET wire string and verifies its signature against the

@@ -31,7 +31,11 @@ import (
 )
 
 func TestAllowedAlgs_ListsTheAlgorithmsThisProjectSignsWith(t *testing.T) {
-	assert.Equal(t, []string{"RS256", "ES256"}, goSet.AllowedAlgs(),
+	// ML-DSA-65 joined the list with RFC 9964 per-stream signing (#278). It is
+	// listed unconditionally because the allow-list gates the token *header*:
+	// a receiver must accept a PQ-signed SET from a peer whether or not this
+	// node has a stream transmitting one.
+	assert.Equal(t, []string{"RS256", "ES256", "ML-DSA-65"}, goSet.AllowedAlgs(),
 		"the allow-list must track what JWS actually produces; widening it is a deliberate act")
 }
 
@@ -40,7 +44,7 @@ func TestAllowedAlgs_ReturnsAFreshSlice(t *testing.T) {
 	require.NotEmpty(t, got)
 	got[0] = "HS256"
 
-	assert.Equal(t, []string{"RS256", "ES256"}, goSet.AllowedAlgs(),
+	assert.Equal(t, []string{"RS256", "ES256", "ML-DSA-65"}, goSet.AllowedAlgs(),
 		"a caller must not be able to widen the verifier's allow-list by writing to a returned slice")
 }
 
