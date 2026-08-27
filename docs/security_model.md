@@ -414,7 +414,7 @@ record is [ADR 0012](adr/0012-scope-checks-via-hasscope-not-eat.md).
 
 `goSet.Parse` is the only verify-and-accept path for inbound SETs (`goSet.Peek`
 is the explicitly unverified counterpart — see ADR-0066 §D3). Parse restricts
-the accepted `alg` to `goSet.AllowedAlgs()`, currently `RS256` and `ES256`,
+the accepted `alg` to `goSet.AllowedAlgs()`, currently `RS256`, `ES256` and `ML-DSA-65`,
 via `jwt.WithValidMethods`.
 
 The property is the same one §2 above buys for bearer tokens, and for the same
