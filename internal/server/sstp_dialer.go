@@ -38,6 +38,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -966,7 +967,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	var signingKey crypto.Signer
 	var kid string
 	if len(events) > 0 && stream.GetRouteMode() != model.RouteModeForward {
-		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
 	// AC 1: carry the pending feedback in the request. Non-empty feedback alone
@@ -1250,7 +1251,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() != model.RouteModeForward {
-		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
 	returnEvents := goSetSstp.BoolPtr(false)
@@ -1449,7 +1450,7 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(jwt.SigningMethodRS256, key)
+		signed, err := token.JWS(goSet.MustSigningMethodFor(cfg.SigningAlg), key)
 		if err != nil {
 			// AC 5: signing failure is an ERROR — halt the dial cycle
 			// rather than send an unsigned SET (or drop it silently).

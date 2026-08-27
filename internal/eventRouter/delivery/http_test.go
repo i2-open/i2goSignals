@@ -81,7 +81,7 @@ type stubKeyReloader struct {
 	called int
 }
 
-func (s *stubKeyReloader) InvalidateAndReload(_, _ string) (crypto.Signer, string) {
+func (s *stubKeyReloader) InvalidateAndReload(_, _, _ string) (crypto.Signer, string) {
 	s.called++
 	return s.key, s.kid
 }

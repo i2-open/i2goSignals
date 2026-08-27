@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -569,7 +568,7 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 }
 
 func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
-	jwks, err := keyfunc.NewJSON(*jwksJson)
+	jwks, err := goSet.NewJwksWithAKP(*jwksJson)
 	if err != nil {
 		return nil, err
 	}

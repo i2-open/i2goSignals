@@ -31,16 +31,18 @@ type stubSignerSource struct {
 	mu      sync.Mutex
 	calls   int
 	issuers []string
+	algs    []string
 	key     crypto.Signer
 	kid     string
 	err     error
 }
 
-func (s *stubSignerSource) GetSigner(_ context.Context, issuer string) (crypto.Signer, string, error) {
+func (s *stubSignerSource) GetSigner(_ context.Context, issuer string, alg string) (crypto.Signer, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	s.issuers = append(s.issuers, issuer)
+	s.algs = append(s.algs, alg)
 	if s.err != nil {
 		return nil, "", s.err
 	}
@@ -76,7 +78,7 @@ func TestCheckAndLoadKey_ResolvesTheIssuerKeyThroughGetSigner(t *testing.T) {
 	src := &stubSignerSource{key: key, kid: "kid-1"}
 	r := newKeyCacheRouter(src)
 
-	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com")
+	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
 
 	require.Equal(t, 1, src.callCount(), "the router must acquire its signing key through GetSigner")
 	assert.Equal(t, []string{"https://issuer.example.com"}, src.issuers)
@@ -89,8 +91,8 @@ func TestCheckAndLoadKey_SecondLookupIsServedFromTheCache(t *testing.T) {
 	src := &stubSignerSource{key: key, kid: "kid-1"}
 	r := newKeyCacheRouter(src)
 
-	first, _ := r.checkAndLoadKey("sid-1", "https://issuer.example.com")
-	second, kid := r.checkAndLoadKey("sid-2", "https://issuer.example.com")
+	first, _ := r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
+	second, kid := r.checkAndLoadKey("sid-2", "https://issuer.example.com", "")
 
 	assert.Equal(t, 1, src.callCount(), "a cached issuer key must not be re-resolved per stream")
 	assert.Same(t, first, second)
@@ -100,11 +102,11 @@ func TestCheckAndLoadKey_SecondLookupIsServedFromTheCache(t *testing.T) {
 func TestInvalidateAndReload_GoesBackToGetSigner(t *testing.T) {
 	src := &stubSignerSource{key: testSigner(t), kid: "kid-1"}
 	r := newKeyCacheRouter(src)
-	r.checkAndLoadKey("sid-1", "https://issuer.example.com")
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
 
 	rotated := testSigner(t)
 	src.key, src.kid = rotated, "kid-2"
-	got, kid := r.InvalidateAndReload("sid-1", "https://issuer.example.com")
+	got, kid := r.InvalidateAndReload("sid-1", "https://issuer.example.com", "")
 
 	// RFC 8935 §2.4: a receiver reporting jws_signature_failed must cause a
 	// genuine re-read, not a second serve of the key it just rejected.
@@ -117,7 +119,7 @@ func TestCheckAndLoadKey_UnavailableKeyIsAnUntypedNil(t *testing.T) {
 	src := &stubSignerSource{err: errors.New("no active signing key")}
 	r := newKeyCacheRouter(src)
 
-	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com")
+	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
 
 	// Every caller decides whether to sign by comparing this against nil. A
 	// typed-nil pointer boxed into the crypto.Signer interface would compare
@@ -130,13 +132,66 @@ func TestCheckAndLoadKey_FailedLookupIsNotCached(t *testing.T) {
 	src := &stubSignerSource{err: errors.New("mongo unavailable")}
 	r := newKeyCacheRouter(src)
 
-	r.checkAndLoadKey("sid-1", "https://issuer.example.com")
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
 	src.err = nil
 	src.key, src.kid = testSigner(t), "kid-1"
-	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com")
+	got, kid := r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
 
 	// A transient store failure must not poison the cache with a permanent
 	// "this issuer has no key", or the stream never recovers without a restart.
 	require.NotNil(t, got)
 	assert.Equal(t, "kid-1", kid)
+}
+
+// Per-stream signing algorithm on the transmitter path (i2goSignals#278).
+//
+// The router is the production caller of GetSigner, so the tests below are what
+// pin that a stream's signing_alg actually reaches the key store — the seam
+// through which RFC 9964 ML-DSA arrives.
+
+func TestCheckAndLoadKey_PassesTheStreamsSigningAlgToGetSigner(t *testing.T) {
+	src := &stubSignerSource{key: testSigner(t), kid: "kid-pq"}
+	r := newKeyCacheRouter(src)
+
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "ML-DSA-65")
+
+	require.Equal(t, 1, src.callCount())
+	assert.Equal(t, []string{"ML-DSA-65"}, src.algs,
+		"a stream opted into post-quantum signing must not be served the issuer's RSA key")
+}
+
+func TestCheckAndLoadKey_CachesPerAlgorithmNotPerIssuer(t *testing.T) {
+	// One issuer can be signing an RS256 stream and an ML-DSA-65 stream at the
+	// same time. A cache keyed on issuer alone would let whichever stream
+	// loaded first pin the wrong key for the other — and that token would go
+	// out with a header its signature does not match.
+	src := &stubSignerSource{key: testSigner(t), kid: "kid-1"}
+	r := newKeyCacheRouter(src)
+
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
+	r.checkAndLoadKey("sid-2", "https://issuer.example.com", "ML-DSA-65")
+
+	require.Equal(t, 2, src.callCount(), "the two algorithms are two distinct cache entries")
+	assert.Equal(t, []string{"", "ML-DSA-65"}, src.algs)
+
+	// ...and each is independently cached thereafter.
+	r.checkAndLoadKey("sid-3", "https://issuer.example.com", "ML-DSA-65")
+	assert.Equal(t, 2, src.callCount())
+}
+
+func TestInvalidateIssuerKey_EvictsEveryAlgorithmForThatIssuer(t *testing.T) {
+	// A revoke or rotation is an issuer-level event. Leaving one algorithm's
+	// entry behind would keep a retired kid in service on whichever stream was
+	// not named.
+	src := &stubSignerSource{key: testSigner(t), kid: "kid-1"}
+	r := newKeyCacheRouter(src)
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
+	r.checkAndLoadKey("sid-2", "https://issuer.example.com", "ML-DSA-65")
+	require.Equal(t, 2, src.callCount())
+
+	r.InvalidateIssuerKey("https://issuer.example.com")
+
+	r.checkAndLoadKey("sid-1", "https://issuer.example.com", "")
+	r.checkAndLoadKey("sid-2", "https://issuer.example.com", "ML-DSA-65")
+	assert.Equal(t, 4, src.callCount(), "both cached entries must have been evicted")
 }

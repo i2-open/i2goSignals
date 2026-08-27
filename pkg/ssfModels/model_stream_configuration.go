@@ -76,6 +76,24 @@ type StreamConfiguration struct {
 	// RemoteStreamId holds the stream_id of the remote stream that this stream is connected to.
 	RemoteStreamId *string `json:"remote_stream_id,omitempty"`
 
+	// SigningAlg selects the JWS algorithm this stream's SETs are signed with
+	// (Slice Contract rev 1, Seam S3). "" and "RS256" both mean RSA-2048/RS256,
+	// which is what every stream signed with before RFC 9964 became selectable;
+	// "ML-DSA-65" opts the stream into post-quantum signatures (FIPS 204,
+	// RFC 9964), for which the transmitter mints and publishes an additional
+	// AKP key alongside its RSA key.
+	//
+	// It is per-stream rather than server-wide because the cost is per-SET and
+	// paid by the receiver: an ML-DSA-65 signature is 3309 bytes against
+	// RS256's 256, so every event grows by roughly 3.3 KB of base64. A receiver
+	// that cannot verify ML-DSA, or that cannot afford the size, keeps its own
+	// stream on RS256 while a PQ-ready peer opts in — on the same issuer and
+	// the same JWKS.
+	//
+	// omitzero, so a stream that never opts in is byte-identical on the wire to
+	// one configured before this field existed.
+	SigningAlg string `json:"signing_alg,omitzero" bson:"signing_alg,omitempty"`
+
 	// TxTLSCertificate is the PEM-encoded certificate for the transmitter
 	TxTLSCertificate string `json:"tx_tls_certificate,omitempty" bson:"tx_tls_certificate,omitempty"`
 	// TxTLSSkipVerify if true, skip certificate verification for the transmitter

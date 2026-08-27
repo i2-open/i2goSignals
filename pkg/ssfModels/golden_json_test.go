@@ -113,6 +113,7 @@ func goldenCases() []goldenCase {
 		ResetJti:                "jti-reset",
 		RouteMode:               "IMPORT",
 		SigningOnly:             true,
+		SigningAlg:              "ML-DSA-65",
 		TxWellKnownUrl:          goldenPtr("https://tx.example.com/.well-known/ssf-configuration"),
 		TxToken:                 goldenPtr("tx-token"),
 		TxAlias:                 goldenPtr("tx-alias"),
@@ -121,8 +122,11 @@ func goldenCases() []goldenCase {
 		TxTLSSkipVerify:         true,
 	}
 
-	// Every bool/numeric field deliberately left at its zero value: this is the
-	// fixture that proves an omitempty -> omitzero retag is byte-identical.
+	// Every bool/numeric field deliberately left at its zero value, and
+	// signing_alg left unset: this is the fixture that proves an
+	// omitempty -> omitzero retag is byte-identical, and that a stream which
+	// never opts into RFC 9964 signing is byte-identical to one configured
+	// before signing_alg existed (#278).
 	scMixed := StreamConfiguration{
 		Id:              "stream-golden-2",
 		Iss:             "https://tx.example.com",

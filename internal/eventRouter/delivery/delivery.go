@@ -62,5 +62,5 @@ type KeyReloader interface {
 	// InvalidateAndReload flushes any cached private key for issuer and fetches a fresh
 	// one from the underlying provider. Returns (nil, "") when reload is unavailable;
 	// the HTTP adapter then skips the retry.
-	InvalidateAndReload(streamID, issuer string) (crypto.Signer, string)
+	InvalidateAndReload(streamID, issuer, alg string) (crypto.Signer, string)
 }

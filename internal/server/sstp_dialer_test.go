@@ -233,7 +233,7 @@ func (f *fakeSstpOutbound) PauseOutbound(stream *model.StreamStateRecord, reason
 	f.pair.Status = model.StreamStatePause
 }
 
-func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer string) (crypto.Signer, string) {
+func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer, alg string) (crypto.Signer, string) {
 	// Unused in the forward-mode dial-and-ack test.
 	return nil, ""
 }

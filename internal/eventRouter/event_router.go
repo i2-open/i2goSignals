@@ -609,27 +609,37 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 // key path is pinned to GetSigner (Slice Contract rev 1, Seam S2) and a test
 // can substitute a stub to prove it.
 type signerSource interface {
-	GetSigner(ctx context.Context, issuer string) (crypto.Signer, string, error)
+	GetSigner(ctx context.Context, issuer string, alg string) (crypto.Signer, string, error)
+}
+
+// signingCacheKey names an entry in the router's signing-key cache. An issuer
+// that has opted one stream into RFC 9964 ML-DSA while another stays on RS256
+// holds two live signing keys at once, so the cache is keyed by the pair rather
+// than by issuer alone — keying on issuer would let whichever stream loaded
+// first pin the wrong key for the other.
+func signingCacheKey(issuer, alg string) string {
+	return issuer + "\x00" + alg
 }
 
 // checkAndLoadKey returns the cached signing key + kid for issuer, loading it
 // through the KeyService on a cache miss. It returns an untyped nil signer when
 // no key is available — callers compare the result against nil, and a boxed
 // typed-nil pointer would defeat that and panic at the signing site instead.
-func (r *router) checkAndLoadKey(streamID string, issuer string) (crypto.Signer, string) {
+func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (crypto.Signer, string) {
+	cacheKey := signingCacheKey(issuer, alg)
 	r.mu.RLock()
-	key, ok := r.issuerKeys[issuer]
-	kid := r.issuerKids[issuer]
+	key, ok := r.issuerKeys[cacheKey]
+	kid := r.issuerKids[cacheKey]
 	r.mu.RUnlock()
 	if !ok {
 		r.mu.Lock()
 		// Double check
-		key, ok = r.issuerKeys[issuer]
+		key, ok = r.issuerKeys[cacheKey]
 		if !ok {
 			var err error
-			key, kid, err = r.keyService.GetSigner(r.ctx, issuer)
+			key, kid, err = r.keyService.GetSigner(r.ctx, issuer, alg)
 			if err != nil {
-				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
+				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer, "alg", alg)
 				r.mu.Unlock()
 				return nil, ""
 			}
@@ -637,8 +647,8 @@ func (r *router) checkAndLoadKey(streamID string, issuer string) (crypto.Signer,
 			// key shared the same big.Int values anyway, so it isolated
 			// nothing; a crypto.Signer is treated as immutable, and rotation
 			// goes through InvalidateAndReload rather than mutation in place.
-			r.issuerKeys[issuer] = key
-			r.issuerKids[issuer] = kid
+			r.issuerKeys[cacheKey] = key
+			r.issuerKids[cacheKey] = kid
 		}
 		r.mu.Unlock()
 	}
@@ -659,7 +669,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	issuer := stream.StreamConfiguration.Iss
 	if issuer != "" {
 		if stream.StreamConfiguration.Id == "" || stream.GetRouteMode() == model.RouteModePublish || stream.GetRouteMode() == "" {
-			r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer)
+			r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer, stream.StreamConfiguration.SigningAlg)
 		}
 	}
 
@@ -1203,7 +1213,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	if state.GetRouteMode() == model.RouteModeForward {
 		forwardMode = true
 	} else {
-		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss)
+		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss, state.StreamConfiguration.SigningAlg)
 	}
 
 	/*
@@ -1251,7 +1261,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			token.IssuedAt = jwt.NewNumericDate(time.Now())
 			token.Kid = kid
 
-			sets[jti], err = token.JWS(jwt.SigningMethodRS256, key)
+			sets[jti], err = token.JWS(goSet.MustSigningMethodFor(state.StreamConfiguration.SigningAlg), key)
 			if err != nil {
 				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 			}
@@ -1334,7 +1344,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
-		signingKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
+		signingKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss, stream.StreamConfiguration.SigningAlg)
 		if signingKey == nil {
 			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", sid, "issuer", stream.StreamConfiguration.Iss)
 		}
@@ -1428,7 +1438,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			}
 			// Resumed — refresh signing key in case the issuer rotated while we were paused.
 			if stream.GetRouteMode() == model.RouteModePublish {
-				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss)
+				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss, stream.StreamConfiguration.SigningAlg)
 			}
 		case <-backfillTicker.C:
 			r.backfillPushBuffer(sid, eventBuf)
@@ -1787,20 +1797,33 @@ func (r *router) InvalidateIssuerKey(issuer string) {
 		return
 	}
 	r.mu.Lock()
-	delete(r.issuerKeys, issuer)
-	delete(r.issuerKids, issuer)
+	r.dropCachedKeysLocked(issuer)
 	r.mu.Unlock()
+}
+
+// dropCachedKeysLocked evicts every cached signing key for issuer, across all
+// signature algorithms. A revoke or rotation is an issuer-level event, so an
+// issuer that signs one stream with RS256 and another with ML-DSA-65 must lose
+// both entries — leaving one behind would keep a retired kid in service on
+// whichever stream was not named. Caller holds r.mu.
+func (r *router) dropCachedKeysLocked(issuer string) {
+	prefix := issuer + "\x00"
+	for cacheKey := range r.issuerKeys {
+		if strings.HasPrefix(cacheKey, prefix) {
+			delete(r.issuerKeys, cacheKey)
+			delete(r.issuerKids, cacheKey)
+		}
+	}
 }
 
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
 // on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
 // reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.
-func (r *router) InvalidateAndReload(streamID, issuer string) (crypto.Signer, string) {
+func (r *router) InvalidateAndReload(streamID, issuer, alg string) (crypto.Signer, string) {
 	r.mu.Lock()
-	delete(r.issuerKeys, issuer)
-	delete(r.issuerKids, issuer)
+	r.dropCachedKeysLocked(issuer)
 	r.mu.Unlock()
-	return r.checkAndLoadKey(streamID, issuer)
+	return r.checkAndLoadKey(streamID, issuer, alg)
 }
 
 func (r *router) RemoveStream(sid string) {
