@@ -309,6 +309,7 @@ Run it via `make generate-certs`.
 | `CERT_COUNTRY`    | Country code (e.g. `CA`).                                                | `CA`                       |
 | `CERT_PROV`       | Province/State (e.g. `BC`).                                              | `BC`                       |
 | `CERT_LOCALITY`   | Locality/City (e.g. `Vancouver`).                                        | `Vancouver`                |
+| `CERT_KEY_ALG`    | Key algorithm for the generated CA and leaf certificates: `RSA` (RSA-4096) or `ML-DSA-65` (post-quantum, FIPS 204 — Go 1.27+). Applies to internal mTLS only and is independent of a stream's `signing_alg` (ADR 0034). An unrecognised value is an error, not a fallback. | `RSA` |
 
 ---
 
