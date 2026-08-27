@@ -1261,7 +1261,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			token.IssuedAt = jwt.NewNumericDate(time.Now())
 			token.Kid = kid
 
-			sets[jti], err = token.JWS(goSet.MustSigningMethodFor(state.StreamConfiguration.SigningAlg), key)
+			sets[jti], err = token.JWS(goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg), key)
 			if err != nil {
 				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 			}

@@ -13,7 +13,10 @@ import (
 
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 )
+
+var setLog = logger.Sub("SET")
 
 type UsernameIdentifier struct {
 	Username string `json:"username,omitempty"`
@@ -328,14 +331,20 @@ func SigningMethodFor(alg string) (jwt.SigningMethod, error) {
 	}
 }
 
-// MustSigningMethodFor is SigningMethodFor for the signing sites, which have no
+// SigningMethodOrRS256 is SigningMethodFor for the signing sites, which have no
 // error path worth adding for a value validated at stream create/update time.
 // An unknown alg falls back to RS256 rather than signing with nothing; the
 // stream-config validation is what prevents one from ever getting this far.
-func MustSigningMethodFor(alg string) jwt.SigningMethod {
+//
+// It is deliberately not named Must*: it does not panic, it downgrades. Reaching
+// the fallback means stream-config validation let an unknown alg through, which
+// is an internal invariant violation and a silent downgrade of a security
+// control, so it logs at ERROR per the CONTEXT.md log-level policy.
+func SigningMethodOrRS256(alg string) jwt.SigningMethod {
 	method, err := SigningMethodFor(alg)
 	if err != nil {
-		log.Printf("goSet: %s; signing with %s", err, jwt.SigningMethodRS256.Alg())
+		setLog.Error("Unknown stream signing_alg reached a signing site; downgrading",
+			"error", err, "alg", alg, "signingWith", jwt.SigningMethodRS256.Alg())
 		return jwt.SigningMethodRS256
 	}
 	return method

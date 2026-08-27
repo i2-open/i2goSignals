@@ -130,7 +130,7 @@ func (a *HTTPAdapter) tokenString(req PushRequest) string {
 	token.Audience = cfg.Aud
 	token.IssuedAt = jwt.NewNumericDate(time.Now())
 	token.Kid = req.Kid
-	signed, err := token.JWS(goSet.MustSigningMethodFor(cfg.SigningAlg), req.Key)
+	signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), req.Key)
 	if err != nil {
 		// Match the prior router behavior: log and return an empty token string so
 		// the receiver responds with an error that ClassifyResult will surface.

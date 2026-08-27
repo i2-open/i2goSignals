@@ -249,7 +249,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		token.Audience = rec.StreamConfiguration.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.MustSigningMethodFor(rec.StreamConfiguration.SigningAlg), key)
+		signed, err := token.JWS(goSet.SigningMethodOrRS256(rec.StreamConfiguration.SigningAlg), key)
 		if err != nil {
 			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", rec.StreamConfiguration.Id, "jti", jti, "error", err)
 			continue

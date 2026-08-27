@@ -1450,7 +1450,7 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.MustSigningMethodFor(cfg.SigningAlg), key)
+		signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), key)
 		if err != nil {
 			// AC 5: signing failure is an ERROR — halt the dial cycle
 			// rather than send an unsigned SET (or drop it silently).

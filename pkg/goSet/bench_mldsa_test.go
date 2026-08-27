@@ -77,11 +77,11 @@ func BenchmarkSetParseMLDSA(b *testing.B) {
 // than quoted from the spec.
 func BenchmarkSetWireSizeByAlg(b *testing.B) {
 	set := benchSet()
-	classical, err := set.JWS(MustSigningMethodFor(""), benchKey)
+	classical, err := set.JWS(SigningMethodOrRS256(""), benchKey)
 	if err != nil {
 		b.Fatalf("JWS: %v", err)
 	}
-	postQuantum, err := set.JWS(MustSigningMethodFor(mldsa.Alg), benchMLDSAKey)
+	postQuantum, err := set.JWS(SigningMethodOrRS256(mldsa.Alg), benchMLDSAKey)
 	if err != nil {
 		b.Fatalf("JWS: %v", err)
 	}
