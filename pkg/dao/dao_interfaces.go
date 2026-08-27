@@ -231,9 +231,25 @@ type JwkKeyRec struct {
 	Use             string `json:"use,omitempty"` // "sig" | "enc"
 	ProjectId       string `json:"projectId,omitempty"`
 	StreamId        string `json:"streamId,omitempty"`
-	KeyBytes        []byte `json:"keyBytes,omitempty"`        // private key (PKCS1); nil for public-only or external
-	PubKeyBytes     []byte `json:"pubKeyBytes,omitempty"`     // public key (PKCS1); nil for external-only
+	KeyBytes        []byte `json:"keyBytes,omitempty"`        // private key; nil for public-only or external
+	PubKeyBytes     []byte `json:"pubKeyBytes,omitempty"`     // public key; nil for external-only
 	ReceiverJwksUrl string `json:"receiverJwksUrl,omitempty"` // external JWKS URL
+
+	// Alg names the signature algorithm the key material belongs to, and with
+	// it the encoding of KeyBytes/PubKeyBytes. It is the discriminator that
+	// lets one key store hold both classical and post-quantum keys for the
+	// same issuer:
+	//
+	//   ""          RSA (the pre-RFC-9964 shape, and what every existing
+	//               record decodes as): KeyBytes is PKCS#1 private, PubKeyBytes
+	//               PKCS#1 public.
+	//   "ML-DSA-65" FIPS 204 / RFC 9964: KeyBytes is the 32-byte ML-DSA seed,
+	//               PubKeyBytes the 1952-byte public key encoding.
+	//
+	// Empty rather than "RS256" for the RSA case on purpose — an absent member
+	// is how a document written before this field existed decodes, so the zero
+	// value has to be the legacy meaning.
+	Alg string `json:"alg,omitempty"`
 
 	// SuspendedAt (reversible) and RevokedAt (terminal, once set never cleared)
 	// are the lifecycle timestamps. Both zero => active. The material and audit

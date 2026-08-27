@@ -29,6 +29,10 @@ type keyDoc struct {
 	KeyBytes        []byte        `bson:"key_bytes"`
 	PubKeyBytes     []byte        `bson:"pub_jwks"`
 	ReceiverJwksUrl string        `bson:"receiver_jwks_url"`
+	// Alg discriminates the key material's algorithm (see JwkKeyRec.Alg).
+	// omitempty keeps it absent from RSA documents, which is exactly how
+	// pre-existing documents decode: "" => RSA.
+	Alg string `bson:"alg,omitempty"`
 	// Lifecycle timestamps (ADR 0028). omitzero keeps them absent from
 	// pre-existing documents, which decode as the zero time => active.
 	SuspendedAt time.Time `bson:"suspended_at,omitzero"`
@@ -46,6 +50,7 @@ func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
 		KeyBytes:        d.KeyBytes,
 		PubKeyBytes:     d.PubKeyBytes,
 		ReceiverJwksUrl: d.ReceiverJwksUrl,
+		Alg:             d.Alg,
 		SuspendedAt:     d.SuspendedAt,
 		RevokedAt:       d.RevokedAt,
 	}
@@ -66,6 +71,7 @@ func recToDoc(rec *interfaces.JwkKeyRec) (*keyDoc, error) {
 		KeyBytes:        rec.KeyBytes,
 		PubKeyBytes:     rec.PubKeyBytes,
 		ReceiverJwksUrl: rec.ReceiverJwksUrl,
+		Alg:             rec.Alg,
 		SuspendedAt:     rec.SuspendedAt,
 		RevokedAt:       rec.RevokedAt,
 	}, nil
