@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"crypto/rsa"
+	"crypto"
 
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 
@@ -33,7 +33,7 @@ type StreamConfigHandler interface {
 	UpdateStream(streamId string, configuration model.StreamConfiguration) (model.StreamConfiguration, error)
 
 	// GetTransmitterJWKS returns the key that will be used to sign events
-	GetTransmitterJWKS(issuer string) (*rsa.PrivateKey, error)
+	GetTransmitterJWKS(issuer string) (crypto.Signer, error)
 
 	// GetPublicTransmitterJWKS is used by an event receiver to return the transmitter's public key in JWKS form
 	GetPublicTransmitterJWKS(streamId string) (*keyfunc.JWKS, error)

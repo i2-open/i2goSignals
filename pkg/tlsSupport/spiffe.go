@@ -101,7 +101,7 @@ func NewResilientMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Conf
 	// 2. Base SPIFFE config for client cert presentation
 	spiffeCfg := tlsconfig.MTLSClientConfig(x509Source, x509Source, tlsconfig.AuthorizeAny())
 
-	return &tls.Config{
+	return Harden(&tls.Config{
 		MinVersion:           tls.VersionTLS12,
 		GetClientCertificate: spiffeCfg.GetClientCertificate,
 		RootCAs:              roots,
@@ -140,7 +140,7 @@ func NewResilientMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Conf
 			_, err = cert.Verify(opts)
 			return err
 		},
-	}, nil
+	}), nil
 }
 
 // NewClusterMTLSClientConfig returns a *tls.Config that presents the workload's
@@ -158,7 +158,7 @@ func NewClusterMTLSClientConfig(x509Source *workloadapi.X509Source) (*tls.Config
 // for mTLS. ClientAuth is set to tls.RequestClientCert to allow fallback to
 // non-SPIFFE authentication (e.g. HMAC or OAuth).
 func NewSpiffeServerConfig(x509Source *workloadapi.X509Source) (*tls.Config, error) {
-	return &tls.Config{
+	return Harden(&tls.Config{
 		MinVersion:     tls.VersionTLS12,
 		ClientAuth:     tls.RequestClientCert,
 		GetCertificate: tlsconfig.GetCertificate(x509Source),
@@ -167,7 +167,7 @@ func NewSpiffeServerConfig(x509Source *workloadapi.X509Source) (*tls.Config, err
 		VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
 			return nil
 		},
-	}, nil
+	}), nil
 }
 
 // NewResilientMTLSClientTransport returns an *http.Transport configured with the
@@ -241,7 +241,7 @@ func NewClusterMTLSServerConfig(x509Source *workloadapi.X509Source) (*tls.Config
 	if err != nil {
 		return nil, err
 	}
-	cfg := &tls.Config{
+	cfg := Harden(&tls.Config{
 		MinVersion: tls.VersionTLS12,
 		// Request but don't require a client cert, preserving HMAC-only fallback.
 		ClientAuth:     tls.RequestClientCert,
@@ -250,6 +250,6 @@ func NewClusterMTLSServerConfig(x509Source *workloadapi.X509Source) (*tls.Config
 		VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
 			return nil
 		},
-	}
+	})
 	return cfg, nil
 }

@@ -19,7 +19,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // ServerProvisioningAuthzSuite verifies the issue #139 authorization model:
@@ -53,9 +52,20 @@ func (s *ServerProvisioningAuthzSuite) SetupTest() {
 	s.app.pollClients = map[string]*ClientPollStream{}
 }
 
+// TearDownTest shuts the per-test router down. The creates these tests exercise
+// register poll-transmitter streams with the router, and each such stream owns a
+// buffer with a pump goroutine that only exits when the buffer is closed —
+// which is what Shutdown does. Without this the suite stranded one goroutine per
+// stream it created, which the `make qa` goroutine-leak gate reports.
+func (s *ServerProvisioningAuthzSuite) TearDownTest() {
+	if s.app != nil && s.app.EventRouter != nil {
+		s.app.EventRouter.Shutdown()
+	}
+}
+
 // adminToken mints a stream-admin token bound to the project.
 func (s *ServerProvisioningAuthzSuite) adminToken(projectId string) string {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{projectId}}
 	tok, err := s.app.GetAuth().IssueStreamClientToken(client, projectId, true, "")
 	s.Require().NoError(err)
 	return tok
@@ -63,7 +73,7 @@ func (s *ServerProvisioningAuthzSuite) adminToken(projectId string) string {
 
 // streamToken mints a stream-mgmt (non-admin) client token bound to the project.
 func (s *ServerProvisioningAuthzSuite) streamToken(projectId string) string {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{projectId}}
 	tok, err := s.app.GetAuth().IssueStreamClientToken(client, projectId, false, "")
 	s.Require().NoError(err)
 	return tok

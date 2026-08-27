@@ -344,6 +344,7 @@ func TestCreateEventPollBufferFast(t *testing.T) {
 
 func TestEventPollBuffer_Wakeup(t *testing.T) {
 	buffer := CreateEventPollBuffer([]string{}, 30, 300)
+	defer buffer.Close()
 
 	start := time.Now()
 

@@ -7,7 +7,6 @@ import (
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ServerDAOMemorySuite struct {
@@ -25,7 +24,7 @@ func TestServerDAOMemorySuite(t *testing.T) {
 
 func (suite *ServerDAOMemorySuite) TestCreateAndFind() {
 	ctx := context.Background()
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	server := &model.Server{
 		Id:    id,
 		Alias: "test-server",
@@ -50,11 +49,11 @@ func (suite *ServerDAOMemorySuite) TestCreateAndFind() {
 func (suite *ServerDAOMemorySuite) TestCreateDuplicateAlias() {
 	ctx := context.Background()
 	server1 := &model.Server{
-		Id:    bson.NewObjectID(),
+		Id:    model.NewRecordId(),
 		Alias: "test-server",
 	}
 	server2 := &model.Server{
-		Id:    bson.NewObjectID(),
+		Id:    model.NewRecordId(),
 		Alias: "test-server",
 	}
 
@@ -68,7 +67,7 @@ func (suite *ServerDAOMemorySuite) TestCreateDuplicateAlias() {
 
 func (suite *ServerDAOMemorySuite) TestUpdate() {
 	ctx := context.Background()
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	server := &model.Server{
 		Id:    id,
 		Alias: "test-server",
@@ -89,7 +88,7 @@ func (suite *ServerDAOMemorySuite) TestUpdate() {
 
 func (suite *ServerDAOMemorySuite) TestDelete() {
 	ctx := context.Background()
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	server := &model.Server{
 		Id:    id,
 		Alias: "test-server",
@@ -122,8 +121,8 @@ func (suite *ServerDAOMemorySuite) TestCreateWithoutID() {
 
 func (suite *ServerDAOMemorySuite) TestList() {
 	ctx := context.Background()
-	_ = suite.dao.Create(ctx, &model.Server{Id: bson.NewObjectID(), Alias: "s1"})
-	_ = suite.dao.Create(ctx, &model.Server{Id: bson.NewObjectID(), Alias: "s2"})
+	_ = suite.dao.Create(ctx, &model.Server{Id: model.NewRecordId(), Alias: "s1"})
+	_ = suite.dao.Create(ctx, &model.Server{Id: model.NewRecordId(), Alias: "s2"})
 
 	list, err := suite.dao.List(ctx)
 	suite.NoError(err)

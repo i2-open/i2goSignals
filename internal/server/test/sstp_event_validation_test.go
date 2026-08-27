@@ -11,8 +11,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
@@ -95,9 +95,9 @@ func TestSstpAcceptorEventValidationModeMatrix(t *testing.T) {
 // the SSF wire-format StreamConfiguration.
 func newSstpEventValidationPair(t *testing.T, instance *ssfInstance, mode model.EventValidationMode) *sstpTestPair {
 	t.Helper()
-	txSid := bson.NewObjectID().Hex()
-	rxSid := bson.NewObjectID().Hex()
-	pairId := bson.NewObjectID().Hex()
+	txSid := ids.NewObjectID()
+	rxSid := ids.NewObjectID()
+	pairId := ids.NewObjectID()
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

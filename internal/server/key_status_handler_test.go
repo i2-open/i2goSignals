@@ -13,7 +13,6 @@ import (
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // KeyStatusHandlerSuite exercises POST /key/{keyName}/status: the takeover-class
@@ -38,14 +37,14 @@ func (s *KeyStatusHandlerSuite) SetupTest() {
 }
 
 func (s *KeyStatusHandlerSuite) adminToken() string {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-A"}}
 	tok, err := s.app.GetAuth().IssueStreamClientToken(client, "proj-A", true, "")
 	s.Require().NoError(err)
 	return tok
 }
 
 func (s *KeyStatusHandlerSuite) streamToken() string {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"proj-A"}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-A"}}
 	tok, err := s.app.GetAuth().IssueStreamClientToken(client, "proj-A", false, "")
 	s.Require().NoError(err)
 	return tok

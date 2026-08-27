@@ -58,7 +58,7 @@ func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
 			closer = x509Source
 			spiffeGetCert := tlsconfig.GetCertificate(x509Source)
 
-			app.TLSConfig = &tls.Config{
+			app.TLSConfig = Harden(&tls.Config{
 				MinVersion: tls.VersionTLS12,
 				ClientAuth: tls.RequestClientCert,
 				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -105,20 +105,21 @@ func InitTransportLayerSecurity(app *http.Server) (io.Closer, bool, error) {
 					// Allow all certs through the handshake; handlers must authorize.
 					return nil
 				},
-			}
+			})
 			return closer, true, nil
 		}
 	}
 
 	// SPIFFE not available or failed; use file-based TLS if enabled.
 	if fileCert != nil {
-		app.TLSConfig = &tls.Config{
+		app.TLSConfig = Harden(&tls.Config{
+			MinVersion:   tls.VersionTLS12,
 			Certificates: []tls.Certificate{*fileCert},
 			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 				slog.Debug("TLS handshake started (file-based)", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr())
 				return nil, nil
 			},
-		}
+		})
 		return nil, true, nil
 	}
 
@@ -231,7 +232,7 @@ func CheckCaInstalled(client *http.Client) {
 		if client != nil {
 			if t, ok := client.Transport.(*http.Transport); ok {
 				if t.TLSClientConfig == nil {
-					t.TLSClientConfig = &tls.Config{}
+					t.TLSClientConfig = Harden(&tls.Config{MinVersion: tls.VersionTLS12})
 				}
 				if t.TLSClientConfig.RootCAs == nil {
 					t.TLSClientConfig.RootCAs = x509.NewCertPool()
@@ -243,7 +244,7 @@ func CheckCaInstalled(client *http.Client) {
 				caPool := x509.NewCertPool()
 				caPool.AppendCertsFromPEM(caCertPem)
 				client.Transport = &http.Transport{
-					TLSClientConfig: &tls.Config{RootCAs: caPool},
+					TLSClientConfig: Harden(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: caPool}),
 				}
 			} else {
 				slog.Warn("HTTP client has non-standard transport, skipping CA installation")
@@ -256,7 +257,7 @@ func CheckCaInstalled(client *http.Client) {
 			}
 			if t, ok := http.DefaultTransport.(*http.Transport); ok {
 				if t.TLSClientConfig == nil {
-					t.TLSClientConfig = &tls.Config{}
+					t.TLSClientConfig = Harden(&tls.Config{MinVersion: tls.VersionTLS12})
 				}
 				if t.TLSClientConfig.RootCAs == nil {
 					t.TLSClientConfig.RootCAs = caPool

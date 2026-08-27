@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var TestDbUrl = "mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?retryWrites=true&replicaSet=dbrs&readPreference=primary&serverSelectionTimeoutMS=5000&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-256"
@@ -128,8 +128,21 @@ func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *t
 	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
 }
 
+// GetPrivateKey returns the issuer's signing key as the concrete RSA type the
+// test fixtures need (PEM export, JWKS construction, direct rsa.Sign calls).
+// KeyService hands back a crypto.Signer; this helper is the one place the
+// suite narrows it, so a future non-RSA test key fails here with a clear
+// message instead of at an unrelated assertion.
 func (instance *ssfInstance) GetPrivateKey(keyName string) (*rsa.PrivateKey, error) {
-	return instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	signer, err := instance.keySvc().GetPrivateKey(context.Background(), keyName)
+	if err != nil {
+		return nil, err
+	}
+	rsaKey, ok := signer.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("signing key for %q is %T, not an RSA key", keyName, signer)
+	}
+	return rsaKey, nil
 }
 
 func (instance *ssfInstance) GetPublicJWKS(keyName string) *json.RawMessage {
@@ -224,7 +237,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 	}
 
 	clientToken, err := authIssuer.IssueStreamClientToken(model.SsfClient{
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 		ProjectIds:    []string{eat.ProjectId},
 		AllowedScopes: []string{authSupport.ScopeStreamAdmin, authSupport.ScopeStreamMgmt},
 		Email:         "test@test.com",

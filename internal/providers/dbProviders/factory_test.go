@@ -12,7 +12,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // captureSink records the occupancy samples SampleOccupancy emits so the test
@@ -53,7 +52,7 @@ func assertSstpPairParity(t *testing.T, p *Persistence) {
 	ctx := context.Background()
 
 	rec := &model.StreamStateRecord{
-		Id:     bson.NewObjectID(),
+		Id:     model.NewRecordId(),
 		PairId: "pair-parity-1",
 		StreamConfiguration: model.StreamConfiguration{
 			Id:       "tx-parity-1",
@@ -159,7 +158,7 @@ func TestOpenPersistence_EventDAO_LiveInstance(t *testing.T) {
 	ctx := context.Background()
 	// The RetentionEngine keys the store by stream.Id.Hex(), so the delivered
 	// streamID must be an ObjectID hex for the sampler/purge to line up.
-	oid := bson.NewObjectID()
+	oid := model.NewRecordId()
 	streamID := oid.Hex()
 
 	// Drive an event THROUGH the router (p.EventService) to delivered state:

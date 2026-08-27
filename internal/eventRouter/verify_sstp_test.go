@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // persistSstpPairRecord builds a minimal bidirectional SSTP record honoring the
@@ -16,7 +16,7 @@ import (
 // machinery.
 func persistSstpPairRecord(t *testing.T, h *testHarness) *model.StreamStateRecord {
 	t.Helper()
-	mid := bson.NewObjectID()
+	mid := model.NewRecordId()
 	pairId := mid.Hex()
 	rec := &model.StreamStateRecord{
 		Id: mid,
@@ -29,7 +29,7 @@ func persistSstpPairRecord(t *testing.T, h *testHarness) *model.StreamStateRecor
 			},
 		},
 		SstpInbound: &model.StreamConfiguration{
-			Id:  bson.NewObjectID().Hex(),
+			Id:  ids.NewObjectID(),
 			Iss: "https://rx.issuer.example",
 			Aud: []string{"https://rx.audience.example"},
 			Delivery: &model.OneOfStreamConfigurationDelivery{

@@ -410,6 +410,40 @@ The environment variables are catalogued in
 [configuration_properties.md](configuration_properties.md#auth); the decision
 record is [ADR 0012](adr/0012-scope-checks-via-hasscope-not-eat.md).
 
+## SET signature verification (algorithm allow-list)
+
+`goSet.Parse` is the only verify-and-accept path for inbound SETs (`goSet.Peek`
+is the explicitly unverified counterpart — see ADR-0066 §D3). Parse restricts
+the accepted `alg` to `goSet.AllowedAlgs()`, currently `RS256`, `ES256` and `ML-DSA-65`,
+via `jwt.WithValidMethods`.
+
+The property is the same one §2 above buys for bearer tokens, and for the same
+reason: the allow-list is checked *before* the JWKS is consulted, so a SET
+carrying `alg: none`, or one HMAC-signed with the issuer's public RSA modulus,
+is refused without any key handling at all. `AllowedAlgs` is the single place a
+new SET signature algorithm becomes acceptable.
+
+`Peek` is deliberately unaffected. Push receivers read `iss`/`aud` from an
+unverified token so a wrong-issuer SET returns `invalid_issuer` rather than a
+generic error from a JWKS miss; its result is never an accepted token.
+
+## Transport security floor
+
+Every `tls.Config` the project builds states `MinVersion: tls.VersionTLS12`
+explicitly. Left unset, `crypto/tls` permits TLS 1.0 on the server side, and the
+omission is invisible at the call site — so a source-scan guard test in
+`pkg/tlsSupport` fails the build when a new `tls.Config` literal omits it.
+
+Key exchange is post-quantum by default. Go has negotiated the X25519MLKEM768
+hybrid since 1.24, and goSignals gets it by *not* constraining
+`CurvePreferences` — an invariant held by omission, which is exactly the kind a
+well-meaning "let's pin the curve list" change breaks silently. `CurvePreferences`
+is therefore written in exactly one place, `tlsSupport.Harden`, which every TLS
+config in `pkg/tlsSupport` and `pkg/oauthClient` routes through; the guard test
+enforces both halves. `I2SIG_TLS_PQ_KEM=MLKEM1024` widens the offered set to
+include standalone ML-KEM-1024 (see
+[configuration_properties.md](configuration_properties.md#tls)).
+
 ## Admin UI Issues
 
 The current command line stores local state and tokens in a local configuration file. The use of tokens for stream management 

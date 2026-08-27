@@ -9,7 +9,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TestStreamService_ListReceiverStreams verifies that StreamService.ListReceiverStreams
@@ -91,7 +90,7 @@ func TestStreamService_ListReceiverStreams(t *testing.T) {
 
 func newReceiverFixture(t *testing.T, method, routeMode, label string) *model.StreamStateRecord {
 	t.Helper()
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	cfg := model.StreamConfiguration{
 		Id:        id.Hex(),
 		Iss:       "test-issuer",

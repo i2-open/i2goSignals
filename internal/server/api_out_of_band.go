@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -19,16 +20,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
@@ -317,7 +317,11 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
 	contentType = strings.TrimSpace(contentType)
 
-	var priv *rsa.PrivateKey
+	// priv is declared as the interface, not *rsa.PrivateKey, so the
+	// public-key-only paths below leave it as an untyped nil. A nil
+	// *rsa.PrivateKey boxed into a crypto.Signer would read as present at
+	// AddKey's "privateKey != nil" check and panic on Public().
+	var priv crypto.Signer
 	var pub *rsa.PublicKey
 
 	switch contentType {
@@ -431,7 +435,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 			return
 		}
 	} else if force == "rotate" {
-		kid = fmt.Sprintf("%s-%s", keyName, bson.NewObjectID().Hex())
+		kid = fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
 	}
 
 	use := queryParams.Get("use")
@@ -564,7 +568,7 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 }
 
 func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
-	jwks, err := keyfunc.NewJSON(*jwksJson)
+	jwks, err := goSet.NewJwksWithAKP(*jwksJson)
 	if err != nil {
 		return nil, err
 	}
@@ -737,7 +741,7 @@ func RegisterClientHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		Email:         jsonRequest.Email,
 		Description:   jsonRequest.Description,
 		AllowedScopes: scopes,
-		Id:            bson.NewObjectID(),
+		Id:            model.NewRecordId(),
 	}
 
 	// The redeemed IAT's JTI is this client token's lineage parent (ADR 0007).

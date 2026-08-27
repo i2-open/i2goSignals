@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -10,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	log "log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -20,7 +22,6 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	log "golang.org/x/exp/slog"
 )
 
 const (
@@ -44,7 +45,7 @@ const (
 type KeyConfig struct {
 	CaKeyFile      string // The file containing a PEM encoded PKCS1 private key
 	CaCertFile     string
-	CaPrivKey      *rsa.PrivateKey
+	CaPrivKey      crypto.Signer
 	CertDir        string // This is the directory where generated keys are output
 	PkixName       pkix.Name
 	ServerCertPath string
@@ -159,26 +160,31 @@ func (config *KeyConfig) ServerCertExists() bool {
 }
 
 func (config *KeyConfig) InitializeCa() error {
-	log.Info("Generating new CA key pair...")
+	alg, err := certKeyAlg()
+	if err != nil {
+		return err
+	}
+	log.Info("Generating new CA key pair...", "alg", alg)
 	// create our private and public key
-	caPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	caPrivKey, err := generateCertKey(alg)
 	if err != nil {
 		return err
 	}
 	config.CaPrivKey = caPrivKey
 
+	keyBlock, err := marshalPrivateKeyPEM(caPrivKey)
+	if err != nil {
+		return err
+	}
 	caPrivKeyPEM := new(bytes.Buffer)
-	_ = pem.Encode(caPrivKeyPEM, &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(caPrivKey),
-	})
+	_ = pem.Encode(caPrivKeyPEM, keyBlock)
 	log.Debug("Writing out CA Key to: " + config.CaKeyFile)
 	err = os.WriteFile(config.CaKeyFile, caPrivKeyPEM.Bytes(), 0644)
 	if err != nil {
 		return err
 	}
 
-	caBytes, err := x509.CreateCertificate(rand.Reader, config.CaConfig, config.CaConfig, &caPrivKey.PublicKey, caPrivKey)
+	caBytes, err := x509.CreateCertificate(rand.Reader, config.CaConfig, config.CaConfig, caPrivKey.Public(), caPrivKey)
 	if err != nil {
 		return err
 	}
@@ -244,7 +250,7 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 		auto = false
 	}
 
-	var caPrivKey *rsa.PrivateKey
+	var caPrivKey crypto.Signer
 
 	// set up our CA certificate
 	config.CaConfig = &x509.Certificate{
@@ -270,8 +276,7 @@ func (config *KeyConfig) InitializeKeys() (err error) {
 			if pemBlock == nil {
 				return errors.New("expecting file to contain a PEM key")
 			}
-			caBytes := pemBlock.Bytes
-			caPrivKey, err = x509.ParsePKCS1PrivateKey(caBytes)
+			caPrivKey, err = parsePrivateKeyPEM(pemBlock)
 			config.CaPrivKey = caPrivKey
 			if err != nil {
 				return err
@@ -389,7 +394,7 @@ func (config *KeyConfig) GenerateClientKeys(keyPath, certPath string) (err error
 
 func (config *KeyConfig) generateCert(
 	ca *x509.Certificate,
-	caPrivKey *rsa.PrivateKey,
+	caPrivKey crypto.Signer,
 	keyUsage []x509.ExtKeyUsage,
 	dnsNames []string) ([]byte, []byte, error) {
 
@@ -429,12 +434,20 @@ func (config *KeyConfig) generateCert(
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
 
-	certPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	// The leaf key follows the CA's algorithm, so an ML-DSA CA issues ML-DSA
+	// leaves and an RSA CA issues RSA leaves. A mixed chain is legal X.509 but
+	// buys nothing here: a classical leaf under a PQ CA is still classically
+	// forgeable, which is the property the option exists to remove.
+	alg := KeyAlgRSA
+	if _, isRSA := caPrivKey.(*rsa.PrivateKey); !isRSA {
+		alg = KeyAlgMLDSA65
+	}
+	certPrivKey, err := generateCertKey(alg)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	certBytes, err := x509.CreateCertificate(rand.Reader, cert, ca, &certPrivKey.PublicKey, caPrivKey)
+	certBytes, err := x509.CreateCertificate(rand.Reader, cert, ca, certPrivKey.Public(), caPrivKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -445,11 +458,12 @@ func (config *KeyConfig) generateCert(
 		Bytes: certBytes,
 	})
 
+	keyBlock, err := marshalPrivateKeyPEM(certPrivKey)
+	if err != nil {
+		return nil, nil, err
+	}
 	certPrivKeyPEM := new(bytes.Buffer)
-	_ = pem.Encode(certPrivKeyPEM, &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(certPrivKey),
-	})
+	_ = pem.Encode(certPrivKeyPEM, keyBlock)
 	return certPEM.Bytes(), certPrivKeyPEM.Bytes(), nil
 }
 
@@ -474,7 +488,7 @@ func CheckCaInstalled(client *http.Client) {
 			log.Debug("Installing CA certificate into HTTP client", "file", caCertPath)
 			caPool = x509.NewCertPool()
 			t := &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: caPool},
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: caPool},
 			}
 			client.Transport = t
 		} else {

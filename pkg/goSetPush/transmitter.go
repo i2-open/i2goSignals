@@ -27,7 +27,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 			// verification entirely (dev / self-signed receivers). CheckCaInstalled
 			// is intentionally not called — verification is being disabled.
 			client.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
 			}
 		} else {
 			tlsSupport.CheckCaInstalled(client)

@@ -2,7 +2,7 @@ package eventRouter
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"fmt"
 	"time"
 
@@ -228,10 +228,10 @@ func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
 // otherwise. Mirrors the poll-transmitter's signing path (PollStreamHandler).
 func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) map[string]string {
 	forward := rec.GetRouteMode() == model.RouteModeForward
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var kid string
 	if !forward {
-		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss)
+		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, rec.StreamConfiguration.SigningAlg)
 	}
 
 	sets := make(map[string]string, len(jtis))
@@ -249,7 +249,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		token.Audience = rec.StreamConfiguration.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(jwt.SigningMethodRS256, key)
+		signed, err := token.JWS(goSet.SigningMethodOrRS256(rec.StreamConfiguration.SigningAlg), key)
 		if err != nil {
 			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", rec.StreamConfiguration.Id, "jti", jti, "error", err)
 			continue

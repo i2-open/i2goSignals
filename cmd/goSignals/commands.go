@@ -5,7 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -18,7 +18,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"io"
 	"log"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	_ "github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"gopkg.in/yaml.v3"
 )
@@ -89,7 +89,7 @@ func getHttpClient(timeout time.Duration) *http.Client {
 		}
 	} else if strings.EqualFold(os.Getenv("I2SIG_TX_TLS_SKIP_VERIFY"), "true") {
 		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // explicit opt-in via I2SIG_TX_TLS_SKIP_VERIFY (conformance-only)
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec // explicit opt-in via I2SIG_TX_TLS_SKIP_VERIFY (conformance-only)
 		}
 	} else {
 		tlsSupport.CheckCaInstalled(client)
@@ -2612,7 +2612,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 	var stream *Stream
 	var server *SsfServer
 	var config *model.StreamConfiguration
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var err error
 	var endpoint string
 	var token string
@@ -2647,7 +2647,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 		SubjectIdentifier: *subjectIdentifier,
 	}, issuer, audience)
 
-	event.TransactionId = bson.NewObjectID().Hex()
+	event.TransactionId = ids.NewV7()
 	switch gen.Event {
 	case "create:full":
 		payload := resource.CreateFullEventPayload(genResource)
@@ -3060,7 +3060,7 @@ type subjectFilterStatusLookup struct {
 	Found        bool                     `json:"found"`
 	Kind         string                   `json:"kind,omitempty"`
 	CanonicalKey string                   `json:"canonical_key,omitempty"`
-	EnforceAt    time.Time                `json:"enforce_at,omitempty"`
+	EnforceAt    time.Time                `json:"enforce_at,omitzero"`
 	Pending      bool                     `json:"pending,omitempty"`
 	Delivers     bool                     `json:"delivers"`
 }

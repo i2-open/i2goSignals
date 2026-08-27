@@ -1,18 +1,30 @@
 package goSetSstp
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestClassifyResult_Table walks the Q12.2 error class table: transport (no response),
 // 4xx → request-level, 5xx → transient, 200-with-non-empty-setErrs → per-JTI, and the
 // happy 200 with no per-JTI errors.
 func TestClassifyResult_Table(t *testing.T) {
+	// A genuine decode failure, produced rather than transcribed. The
+	// classifier's contract is "a 200 that carries a decode error is
+	// transient"; it must not depend on encoding/json's wording, which the
+	// json/v2 API is free to reword. Asserting the error TYPE keeps the test
+	// about the behaviour under test.
+	unparseableBody := json.Unmarshal([]byte("garbage"), &Message{})
+	require.Error(t, unparseableBody, "decoding a garbage body must fail")
+	var syntaxErr *json.SyntaxError
+	require.ErrorAs(t, unparseableBody, &syntaxErr, "a garbage body is a JSON syntax error")
+
 	tests := []struct {
 		name   string
 		result Result
@@ -40,7 +52,7 @@ func TestClassifyResult_Table(t *testing.T) {
 			name: "200 OK whose body failed to parse is transient (not delivered)",
 			result: Result{
 				StatusCode: http.StatusOK,
-				Err:        errors.New("invalid character 'g' looking for beginning of value"),
+				Err:        unparseableBody,
 			},
 			want: ClassTransient,
 		},

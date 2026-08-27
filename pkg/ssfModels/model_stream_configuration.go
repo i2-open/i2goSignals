@@ -32,10 +32,10 @@ type StreamConfiguration struct {
 	Delivery *OneOfStreamConfigurationDelivery `json:"delivery" bson:"delivery"`
 
 	// Read-Only. An integer indicating the minimum amount of time in seconds that must pass in between verification requests. If an Event Receiver submits verification requests more frequently than this, the Event Transmitter MAY respond with a 429 status code. An Event Transmitter SHOULD NOT respond with a 429 status code if an Event Receiver is not exceeding this frequency.
-	MinVerificationInterval int32 `json:"min_verification_interval,omitempty" bson:"min_verification_interval,omitempty"`
+	MinVerificationInterval int32 `json:"min_verification_interval,omitzero" bson:"min_verification_interval,omitempty"`
 
 	// Read-Only. The refreshable inactivity timeout of the stream in seconds. After the timeout duration passes with no eligible activity from the Receiver, as defined below, the Transmitter MAY either pause, disable, or delete the stream
-	InactivityTimeout int32 `json:"inactivity_timeout,omitempty" bson:"inactivity_timeout,omitempty"`
+	InactivityTimeout int32 `json:"inactivity_timeout,omitzero" bson:"inactivity_timeout,omitempty"`
 
 	// Read-Write. The Subject Identifier Format that the Receiver wants for the events. If not set then the Transmitter might decide to use a type that discloses more information than necessary.
 	Format string `json:"format,omitempty" bson:"format,omitempty"`
@@ -61,7 +61,7 @@ type StreamConfiguration struct {
 	// MUST NOT be inferred from "issuer is configured": stream-create requires both Iss
 	// and IssuerJWKSUrl when this is true, as the configured issuer's JWKS is the only
 	// trust anchor a signing-only stream has.
-	SigningOnly bool `json:"signingOnly,omitempty" bson:"signing_only,omitempty"`
+	SigningOnly bool `json:"signingOnly,omitzero" bson:"signing_only,omitempty"`
 
 	// TxWellKnownUrl Used to record the well-known endpoint for the SSF transmitter. Used by receivers to discover the transmitter's configuration and capabilities.
 	// When creating a receiver, providing a value without endpoint values for Delivery (other than method) will cause i2goSignals to initiate an SSF registration with the transmitter.
@@ -76,10 +76,28 @@ type StreamConfiguration struct {
 	// RemoteStreamId holds the stream_id of the remote stream that this stream is connected to.
 	RemoteStreamId *string `json:"remote_stream_id,omitempty"`
 
+	// SigningAlg selects the JWS algorithm this stream's SETs are signed with
+	// (Slice Contract rev 1, Seam S3). "" and "RS256" both mean RSA-2048/RS256,
+	// which is what every stream signed with before RFC 9964 became selectable;
+	// "ML-DSA-65" opts the stream into post-quantum signatures (FIPS 204,
+	// RFC 9964), for which the transmitter mints and publishes an additional
+	// AKP key alongside its RSA key.
+	//
+	// It is per-stream rather than server-wide because the cost is per-SET and
+	// paid by the receiver: an ML-DSA-65 signature is 3309 bytes against
+	// RS256's 256, so every event grows by roughly 3.3 KB of base64. A receiver
+	// that cannot verify ML-DSA, or that cannot afford the size, keeps its own
+	// stream on RS256 while a PQ-ready peer opts in — on the same issuer and
+	// the same JWKS.
+	//
+	// omitzero, so a stream that never opts in is byte-identical on the wire to
+	// one configured before this field existed.
+	SigningAlg string `json:"signing_alg,omitzero" bson:"signing_alg,omitempty"`
+
 	// TxTLSCertificate is the PEM-encoded certificate for the transmitter
 	TxTLSCertificate string `json:"tx_tls_certificate,omitempty" bson:"tx_tls_certificate,omitempty"`
 	// TxTLSSkipVerify if true, skip certificate verification for the transmitter
-	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitempty" bson:"tx_tls_skip_verify,omitempty"`
+	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitzero" bson:"tx_tls_skip_verify,omitempty"`
 }
 
 func (sc *StreamConfiguration) DeepCopy() StreamConfiguration {

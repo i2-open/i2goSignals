@@ -1,18 +1,22 @@
 package goSet
 
 import (
-	"bytes"
-	"crypto/rsa"
+	"crypto"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/segmentio/ksuid"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 )
+
+var setLog = logger.Sub("SET")
 
 type UsernameIdentifier struct {
 	Username string `json:"username,omitempty"`
@@ -184,13 +188,16 @@ func (set *SecurityEventToken) String() string {
 	return string(jsonByte)
 }
 
+// JsonBytes returns the SET's compact JSON encoding — the bytes that become
+// the JWS payload. json.Marshal rather than json.Encoder: an Encoder appends a
+// trailing newline, which is a byte of payload that carries no meaning and that
+// every receiver has to tolerate.
 func (set *SecurityEventToken) JsonBytes() []byte {
-	var jsonBuf bytes.Buffer
-	err := json.NewEncoder(&jsonBuf).Encode(set)
+	jsonBytes, err := json.Marshal(set)
 	if err != nil {
 		log.Printf("Error encoding token: %s", err.Error())
 	}
-	return jsonBuf.Bytes()
+	return jsonBytes
 }
 
 func (set *SecurityEventToken) AddEventPayload(eventUri string, eventClaims interface{}) {
@@ -229,13 +236,33 @@ func (set *SecurityEventToken) JWT() *jwt.Token {
 // JWS produces a signed SET wire string. signingMethod defaults to ES256 when
 // nil; key MUST be non-nil.
 //
+// key is a crypto.Signer rather than a concrete *rsa.PrivateKey so that the
+// choice of signature algorithm lives entirely with the caller's
+// signingMethod. Every signing site in this project previously named
+// *rsa.PrivateKey in its own signature, which meant adding an algorithm
+// (RFC 9964 ML-DSA, or plain ES256 on a stored EC key) required editing each
+// call site rather than passing a different key. crypto.Signer is the stdlib's
+// name for "a private key you can sign with"; *rsa.PrivateKey,
+// *ecdsa.PrivateKey and ed25519.PrivateKey all satisfy it, so RSA-2048/RS256
+// remains the default with no behaviour change.
+//
+// The pairing of signingMethod to key is the caller's responsibility and is
+// enforced by golang-jwt: SigningMethodRS256.Sign type-asserts its key back to
+// *rsa.PrivateKey and returns ErrInvalidKey on a mismatch. On the verify side
+// the acceptable algorithms are pinned separately by AllowedAlgs.
+//
+// key must be a non-nil interface holding a non-nil key. A typed-nil pointer
+// boxed into the interface (a *rsa.PrivateKey(nil) assigned to a
+// crypto.Signer) is not detectable here and will panic inside the signer, so
+// key-lookup paths that can fail must return an untyped nil.
+//
 // Per ADR-0066 §D3 the unsigned (alg=none) production path has been removed:
 // there is no legitimate production producer of unsigned SETs, and leaving
 // the write-side capability increases the injection blast-radius if a
 // verifier is ever misconfigured. Callers that previously passed nil to
 // obtain an alg=none token must construct one directly via jwt.NewWithClaims
 // (test fixtures only).
-func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.PrivateKey) (string, error) {
+func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.Signer) (string, error) {
 	if key == nil {
 		return "", errors.New("goSet.JWS: key is required; alg=none production removed (ADR-0066 §D3)")
 	}
@@ -255,6 +282,74 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 	return token.SignedString(key)
 }
 
+// AllowedAlgs returns the JWS "alg" values that goSet.Parse will accept, as a
+// fresh slice the caller is free to modify.
+//
+// The allow-list exists so the acceptable signature algorithms are stated once
+// and enforced by the parser, instead of being whatever the JWKS happens to
+// hold a key for. Without it a token carrying alg=none, or one HMAC-signed
+// with a public RSA modulus as the shared secret, still reaches key lookup
+// before anything rejects it — the classic JWT algorithm-confusion shape.
+// Handing this list to jwt.WithValidMethods closes that by construction: the
+// header alg is checked before the key is ever resolved.
+//
+// RS256 and ES256 are what this project signs with by default (see JWS).
+// ML-DSA-65 (RFC 9964, FIPS 204) is accepted for streams that opt into
+// post-quantum signatures via StreamConfiguration.signing_alg; it is listed
+// unconditionally because the allow-list gates the *header*, and a receiver
+// must be able to verify a PQ-signed SET whether or not this node transmits
+// one. This function is the single place a new SET signature algorithm becomes
+// acceptable.
+func AllowedAlgs() []string {
+	return []string{
+		jwt.SigningMethodRS256.Alg(),
+		jwt.SigningMethodES256.Alg(),
+		mldsa.Alg,
+	}
+}
+
+// SigningMethodFor maps a stream's configured signing_alg to the jwt.SigningMethod
+// the transmitter signs with. An empty alg means "unset", which is RS256 — the
+// behaviour every stream had before RFC 9964 ML-DSA became selectable, so an
+// existing stream config keeps signing exactly as it did.
+//
+// It exists so the ~5 signing sites (poll response, push delivery, SSTP
+// outbound both directions, CLI) each say `goSet.SigningMethodFor(cfg.SigningAlg)`
+// instead of hard-coding jwt.SigningMethodRS256, and so an unknown alg is one
+// error here rather than a silent fall-through to RSA at each of them. The
+// accepted set is AllowedAlgs minus ES256: this node verifies ES256 tokens from
+// peers but has no EC signing key of its own to select.
+func SigningMethodFor(alg string) (jwt.SigningMethod, error) {
+	switch alg {
+	case "", jwt.SigningMethodRS256.Alg():
+		return jwt.SigningMethodRS256, nil
+	case mldsa.Alg:
+		return mldsa.SigningMethodMLDSA65, nil
+	default:
+		return nil, fmt.Errorf("unsupported SET signing algorithm %q; want one of \"\", %q, %q",
+			alg, jwt.SigningMethodRS256.Alg(), mldsa.Alg)
+	}
+}
+
+// SigningMethodOrRS256 is SigningMethodFor for the signing sites, which have no
+// error path worth adding for a value validated at stream create/update time.
+// An unknown alg falls back to RS256 rather than signing with nothing; the
+// stream-config validation is what prevents one from ever getting this far.
+//
+// It is deliberately not named Must*: it does not panic, it downgrades. Reaching
+// the fallback means stream-config validation let an unknown alg through, which
+// is an internal invariant violation and a silent downgrade of a security
+// control, so it logs at ERROR per the CONTEXT.md log-level policy.
+func SigningMethodOrRS256(alg string) jwt.SigningMethod {
+	method, err := SigningMethodFor(alg)
+	if err != nil {
+		setLog.Error("Unknown stream signing_alg reached a signing site; downgrading",
+			"error", err, "alg", alg, "signingWith", jwt.SigningMethodRS256.Alg())
+		return jwt.SigningMethodRS256
+	}
+	return method
+}
+
 // Parse parses a SET wire string and verifies its signature against the
 // supplied JWKS. It is a verify-only trust-path API: issuerPublicJwks MUST be
 // non-nil; passing nil returns an error.
@@ -265,12 +360,16 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key *rsa.Pri
 // explicit, unverified inspection (e.g. pre-verify routing on the push
 // receiver, or CLI display), use Peek — its result is never the accepted
 // token.
+//
+// The signature algorithm is checked against AllowedAlgs before key lookup, so
+// an unexpected alg (HS256, none) is refused without the JWKS being consulted.
 func Parse(tokenString string, issuerPublicJwks *keyfunc.JWKS) (*SecurityEventToken, error) {
 	if issuerPublicJwks == nil {
 		return nil, errors.New("goSet.Parse: JWKS is required for verified parsing; use Peek for explicit unverified inspection (ADR-0066 §D3)")
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc)
+	token, err := jwt.ParseWithClaims(tokenString, &SecurityEventToken{}, issuerPublicJwks.Keyfunc,
+		jwt.WithValidMethods(AllowedAlgs()))
 	if err != nil {
 		log.Printf("Error validating token: %s", err.Error())
 		return nil, err
@@ -310,10 +409,13 @@ func Peek(tokenString string) (*SecurityEventToken, error) {
 	return token.Claims.(*SecurityEventToken), nil
 }
 
+// GenerateJti mints the RFC 8417 `jti` claim for a SET: an RFC 9562 UUIDv7 from
+// pkg/dao/ids, the server's single non-Mongo id source.
+//
+// Version 7 is chosen over a purely random id because a jti doubles as the
+// ordering key on the poll and buffer paths -- v7 embeds a millisecond timestamp
+// in its leading bits, so jtis sort into issue order as plain strings and a
+// receiver can group or bound an event window without decoding anything.
 func GenerateJti() string {
-	return ksuid.New().String()
-}
-
-func (set *SecurityEventToken) IsBefore(jtiVal []byte) (bool, error) {
-	return set.ID < string(jtiVal), nil
+	return ids.NewV7()
 }

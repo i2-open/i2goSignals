@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -50,6 +51,7 @@ func (a *HTTPAdapter) Deliver(ctx context.Context, req PushRequest) PushOutcome 
 		newKey, newKid := a.keyReloader.InvalidateAndReload(
 			req.Stream.StreamConfiguration.Id,
 			req.Stream.StreamConfiguration.Iss,
+			req.Stream.StreamConfiguration.SigningAlg,
 		)
 		if newKey != nil {
 			retryReq := req
@@ -128,7 +130,7 @@ func (a *HTTPAdapter) tokenString(req PushRequest) string {
 	token.Audience = cfg.Aud
 	token.IssuedAt = jwt.NewNumericDate(time.Now())
 	token.Kid = req.Kid
-	signed, err := token.JWS(jwt.SigningMethodRS256, req.Key)
+	signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), req.Key)
 	if err != nil {
 		// Match the prior router behavior: log and return an empty token string so
 		// the receiver responds with an error that ClassifyResult will surface.

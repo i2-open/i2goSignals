@@ -7,12 +7,11 @@ import (
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func newSstpRecord(txSid, rxSid, pairId string) *model.StreamStateRecord {
 	return &model.StreamStateRecord{
-		Id:     bson.NewObjectID(),
+		Id:     model.NewRecordId(),
 		PairId: pairId,
 		StreamConfiguration: model.StreamConfiguration{
 			Id:       txSid,

@@ -29,7 +29,7 @@ func TestRetentionWindow_OffSsfWire(t *testing.T) {
 // DefaultSubjects precedent.
 func TestRetentionWindow_PersistsOnState(t *testing.T) {
 	rec := StreamStateRecord{
-		Id:                  bson.NewObjectID(),
+		Id:                  NewRecordId(),
 		RetentionWindowDays: intPtr(30),
 	}
 
@@ -66,7 +66,7 @@ func TestRetentionWindow_PersistsOnState(t *testing.T) {
 // TestRetentionWindow_NilOmitted confirms the keep-forever default (nil) is
 // omitted from both encodings — no field emitted means "inherit".
 func TestRetentionWindow_NilOmitted(t *testing.T) {
-	rec := StreamStateRecord{Id: bson.NewObjectID()}
+	rec := StreamStateRecord{Id: NewRecordId()}
 	jb, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatalf("json marshal: %v", err)
@@ -79,7 +79,7 @@ func TestRetentionWindow_NilOmitted(t *testing.T) {
 // TestRetentionWindow_DeepCopyIndependent verifies DeepCopy clones the pointer
 // so mutating the copy never aliases the source.
 func TestRetentionWindow_DeepCopyIndependent(t *testing.T) {
-	src := &StreamStateRecord{Id: bson.NewObjectID(), RetentionWindowDays: intPtr(7)}
+	src := &StreamStateRecord{Id: NewRecordId(), RetentionWindowDays: intPtr(7)}
 	cp := src.DeepCopy()
 	if cp.RetentionWindowDays == nil || *cp.RetentionWindowDays != 7 {
 		t.Fatalf("deep copy did not carry the window: %#v", cp.RetentionWindowDays)
@@ -95,7 +95,7 @@ func TestRetentionWindow_DeepCopyIndependent(t *testing.T) {
 
 // TestRetentionWindow_Update confirms Update() carries the override over.
 func TestRetentionWindow_Update(t *testing.T) {
-	dst := &StreamStateRecord{Id: bson.NewObjectID()}
+	dst := &StreamStateRecord{Id: NewRecordId()}
 	mod := &StreamStateRecord{RetentionWindowDays: intPtr(14)}
 	dst.Update(mod)
 	if dst.RetentionWindowDays == nil || *dst.RetentionWindowDays != 14 {

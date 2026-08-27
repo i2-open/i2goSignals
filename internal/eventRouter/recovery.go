@@ -129,13 +129,34 @@ func (c *RecoveryConfig) fillDefaults() {
 		c.Clock = time.Now
 	}
 	if c.Sleep == nil {
-		c.Sleep = defaultSleep
+		c.Sleep = SleepCtx
 	}
 }
 
-func defaultSleep(ctx context.Context, d time.Duration) bool {
+// SleepCtx is the family's single cancellable delay primitive: it waits for d and
+// reports true, or returns false the moment ctx is cancelled. It is the default
+// RecoveryConfig.Sleep and the default SstpDialerConfig.Sleep — one helper rather
+// than the two near-identical copies that used to live in this file and in
+// internal/server/sstp_dialer.go.
+//
+// It never uses time.After. Go 1.27 removed the asynctimerchan GODEBUG escape
+// hatch, so a timer channel is unbuffered and a time.After left unstopped keeps a
+// runtime timer armed for the full duration even after the caller has moved on.
+// SleepCtx owns a time.Timer and stops it on every exit path, which matters most
+// on the cancellation path: that is precisely when the delay is longest and the
+// caller least wants to hold a timer.
+//
+// A non-positive d still honours cancellation — a cancelled ctx reports false
+// rather than "the zero-length sleep completed", so callers in a retry loop see
+// shutdown on the first iteration instead of one spin later.
+func SleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
-		return true
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()

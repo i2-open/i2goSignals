@@ -2,8 +2,8 @@ package authSupport
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -109,7 +109,7 @@ type AuthIssuer struct {
 	mu           sync.RWMutex
 	TokenIssuer  string
 	TokenKid     string
-	PrivateKey   *rsa.PrivateKey
+	PrivateKey   crypto.Signer
 	PublicKey    *keyfunc.JWKS
 	OAuthPubKeys []*keyfunc.JWKS
 	// OAuth Token
@@ -124,7 +124,14 @@ type AuthIssuer struct {
 	OAuthServersLookup func() string
 }
 
-func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.PrivateKey, publicKey *keyfunc.JWKS) {
+// UpdateTokenKey installs the token-issuer signing key and its matching
+// verification JWKS.
+//
+// privateKey must be an untyped nil when the issuer has no active signing key —
+// a nil *rsa.PrivateKey boxed into the interface would make IsReady report
+// ready and then panic at the first mint. KeyService.refreshTokenIssuerKey is
+// written to pass an untyped nil for exactly this reason.
+func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey crypto.Signer, publicKey *keyfunc.JWKS) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.TokenIssuer = issuer
@@ -138,6 +145,25 @@ func (a *AuthIssuer) UpdateTokenKey(issuer string, kid string, privateKey *rsa.P
 		pubKids = publicKey.KIDs()
 	}
 	authLog.Debug("UpdateTokenKey", "issuer", issuer, "kid", kid, "privateKey", privReady, "publicKey", pubReady, "jwksKids", pubKids)
+}
+
+// signAuthToken mints one signed authorization token. It is the single signing
+// site for every EventAuthToken this issuer produces — IAT, stream-client,
+// SSTP-pair and stream-delivery bearers all pass through here.
+//
+// It exists because those four mints previously repeated the same four lines,
+// each naming jwt.SigningMethodRS256 and a *rsa.PrivateKey inline. That made
+// the algorithm a property of four call sites rather than of the issuer, so
+// adding one (or changing the "typ" header) meant four edits and four chances
+// to miss one. Taking (jwt.SigningMethod, crypto.Signer) puts both choices in
+// the caller's hands while keeping the header shape in one place.
+//
+// key must be a non-nil interface holding a non-nil key; see UpdateTokenKey.
+func signAuthToken(method jwt.SigningMethod, key crypto.Signer, claims jwt.Claims, kid string) (string, error) {
+	token := jwt.NewWithClaims(method, claims)
+	token.Header["typ"] = "jwt"
+	token.Header["kid"] = kid
+	return token.SignedString(key)
 }
 
 // IsReady returns true when both the signing key and verification key are loaded.
@@ -350,12 +376,8 @@ func (a *AuthIssuer) IssueProjectIat(authCtx *AuthContext) (string, error) {
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-	token.Header["typ"] = "jwt"
-	token.Header["kid"] = kid
-
 	authLog.Debug("IssueProjectIat signing", "issuer", issuer, "kid", kid, "privateKeyNil", privateKey == nil, "projectId", projectId)
-	signed, err := token.SignedString(privateKey)
+	signed, err := signAuthToken(jwt.SigningMethodRS256, privateKey, eat, kid)
 	if err != nil {
 		authLog.Error("IssueProjectIat signing failed", "kid", kid, "error", err)
 	} else if a.TokenTracker != nil {
@@ -409,11 +431,7 @@ func (a *AuthIssuer) IssueStreamClientToken(client model.SsfClient, projectId st
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-	token.Header["typ"] = "jwt"
-	token.Header["kid"] = kid
-
-	signed, err := token.SignedString(privateKey)
+	signed, err := signAuthToken(jwt.SigningMethodRS256, privateKey, eat, kid)
 	if err == nil && a.TokenTracker != nil {
 		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
@@ -470,11 +488,7 @@ func (a *AuthIssuer) IssueSstpPairToken(txSid string, rxSid string, projectId st
 		parentJTI = session.Eat.ID
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-	token.Header["typ"] = "jwt"
-	token.Header["kid"] = kid
-
-	signed, err := token.SignedString(privateKey)
+	signed, err := signAuthToken(jwt.SigningMethodRS256, privateKey, eat, kid)
 	if err == nil && a.TokenTracker != nil {
 		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}
@@ -520,11 +534,7 @@ func (a *AuthIssuer) IssueStreamToken(streamId string, projectId string, session
 
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, eat)
-	token.Header["typ"] = "jwt"
-	token.Header["kid"] = kid
-
-	signed, err := token.SignedString(privateKey)
+	signed, err := signAuthToken(jwt.SigningMethodRS256, privateKey, eat, kid)
 	if err == nil && a.TokenTracker != nil {
 		_ = a.TokenTracker.TrackToken(context.Background(), &eat, parentJTI, model.TokenTypeStream)
 	}

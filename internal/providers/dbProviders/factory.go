@@ -1,6 +1,7 @@
 package dbProviders
 
 import (
+	"context"
 	"strings"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
@@ -90,8 +91,23 @@ type serviceSource interface {
 }
 
 // OpenPersistence detects the database URL and returns the Persistence record
-// (services + Coordinator + Storage).
+// (services + Coordinator + Storage) with no lifecycle context. Prefer
+// OpenPersistenceWithContext from any caller that owns a shutdown signal --
+// this form is the convenience entry point for tests and one-shot tools, and
+// is the signature re-exported to out-of-tree embedders via pkg/eventRouter.
 func OpenPersistence(mongoUrl string, dbName string) (*Persistence, error) {
+	return OpenPersistenceWithContext(context.Background(), mongoUrl, dbName)
+}
+
+// OpenPersistenceWithContext is OpenPersistence bound to the server lifecycle
+// ctx (seam S4). The ctx reaches the Mongo provider and, through it, the
+// cluster coordinator: cancelling it at shutdown cancels in-flight lease
+// heartbeats rather than letting each run out its own 5s budget. The memory
+// provider has no round-trips to cancel and ignores it.
+func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName string) (*Persistence, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.HasPrefix(mongoUrl, "memorydb:") || mongoUrl == "" {
 		mp, err := memory_provider.Open(mongoUrl, dbName)
 		if err != nil {
@@ -100,7 +116,7 @@ func OpenPersistence(mongoUrl string, dbName string) (*Persistence, error) {
 		return persistenceFromMemory(mp), nil
 	}
 
-	mp, err := mongo_provider.Open(mongoUrl, dbName)
+	mp, err := mongo_provider.OpenWithContext(ctx, mongoUrl, dbName)
 	if err != nil {
 		if strings.ToUpper(envcompat.Lookup("I2SIG_STORE_MONGO_BACKGROUND_RECONNECT", "MONGO_BACKGROUND_RECONNECT")) == "TRUE" {
 			factoryLog.Warn("Mongo connection failed. Background reconnect enabled.", "error", err)

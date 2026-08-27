@@ -23,7 +23,7 @@ func main() {
 	url := flag.Arg(0)
 
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: *insecure},
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: *insecure}, //nolint:gosec // -k is an explicit operator opt-in
 	}
 	client := &http.Client{
 		Transport: tr,

@@ -32,7 +32,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // sstpNode is one live server in the cross-server e2e suite.
@@ -119,7 +118,7 @@ func (s *SstpPairE2ESuite) bootNode(dbName string) *sstpNode {
 // operator (and the peer cascade) can drive the full pair lifecycle.
 func (n *sstpNode) adminBearer(t *testing.T) string {
 	t.Helper()
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{n.projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{n.projectId}}
 	tok, err := n.app.GetAuth().IssueStreamClientToken(client, n.projectId, true, "")
 	require.NoError(t, err)
 	return tok
@@ -132,7 +131,7 @@ func (n *sstpNode) registerPeer(t *testing.T, alias string, peer *sstpNode) {
 	t.Helper()
 	peerBearer := peer.adminBearer(t)
 	srv := &model.Server{
-		Id:          bson.NewObjectID(),
+		Id:          model.NewRecordId(),
 		Alias:       alias,
 		Type:        model.ServerTypeGosignals,
 		Host:        peer.baseURL,
@@ -502,7 +501,7 @@ func (s *SstpPairE2ESuite) TestSstpEndpoint_BearerMismatch() {
 
 	// A stream-admin token bound to a DIFFERENT project — valid signature, but its
 	// StreamIds[] do not contain this pair's SIDs.
-	wrongClient := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{"some-other-project"}}
+	wrongClient := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"some-other-project"}}
 	wrongBearer, err := s.b.app.GetAuth().IssueStreamClientToken(wrongClient, "some-other-project", true, "")
 	s.Require().NoError(err)
 

@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
 	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
 )
 
@@ -49,11 +50,14 @@ var (
 )
 
 // defaultVerifyAlgs is the AllowedAlgs default when VerifyConfig.AllowedAlgs
-// is empty: RS256 (community business SETs), ES256, EdDSA. Enterprise's
-// control-channel verifier restricted to ES256 + EdDSA; the pkg widens to
-// include RS256 because business SETs are RS256-signed (goSet.CreateSet +
-// RSA JWKS is the community norm).
-var defaultVerifyAlgs = []string{"RS256", "ES256", "EdDSA"}
+// is empty: RS256 (community business SETs), ES256, EdDSA, ML-DSA-65.
+// Enterprise's control-channel verifier restricted to ES256 + EdDSA; the pkg
+// widens to include RS256 because business SETs are RS256-signed
+// (goSet.CreateSet + RSA JWKS is the community norm). ML-DSA-65 joined with
+// RFC 9964 per-stream signing (#278): an SSTP pair whose transmit side has
+// opted into post-quantum signatures sends SETs its peer must be able to
+// verify, and this default is what the peer's inbound side uses.
+var defaultVerifyAlgs = []string{"RS256", "ES256", "EdDSA", mldsa.Alg}
 
 // VerifyConfig configures a JWKS-based SET verification. It is a flat
 // value type so callers construct one per stream, per call, from that

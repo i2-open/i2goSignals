@@ -10,16 +10,16 @@ package model
 
 type PollParameters struct {
 	// An OPTIONAL integer value indicating the maximum number of unacknowledged SETs to be returned. The SET Transmitter SHOULD NOT send more SETs than the specified maximum. If more than the maximum number of SETs are available, the SET Transmitter determines which to return first; the oldest SETs available MAY be returned first, or another selection algorithm MAY be used, such as prioritizing SETs in some manner that makes sense for the use case. A value of 0 MAY be used by SET Recipients that would like to perform an acknowledge-only request. This enables the Recipient to use separate HTTP requests for acknowledgement and reception of SETs. If this parameter is omitted, no limit is placed on the number of SETs to be returned.
-	MaxEvents         int32                   `json:"maxEvents,omitempty" bson:"maxEvents,omitempty"`
-	ReturnImmediately bool                    `json:"returnImmediately,omitempty" bson:"returnImmediately,omitempty"`
+	MaxEvents         int32                   `json:"maxEvents,omitzero" bson:"maxEvents,omitempty"`
+	ReturnImmediately bool                    `json:"returnImmediately,omitzero" bson:"returnImmediately,omitempty"`
 	Acks              []string                `json:"ack,omitempty" bson:"ack,omitempty"`
 	SetErrs           map[string]SetErrorType `json:"setErrs,omitempty" bson:"setErrs,omitempty"`
-	TimeoutSecs       int                     `json:"timeoutSecs,omitempty" bson:"timeoutSecs,omitempty"`
+	TimeoutSecs       int                     `json:"timeoutSecs,omitzero" bson:"timeoutSecs,omitempty"`
 }
 
 type PollResponse struct {
 	Sets          map[string]string `json:"sets"`
-	MoreAvailable bool              `json:"moreAvailable,omitempty"`
+	MoreAvailable bool              `json:"moreAvailable,omitzero"`
 }
 
 type SetErrorType struct {

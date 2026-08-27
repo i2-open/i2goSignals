@@ -62,7 +62,7 @@ absent:
   left untouched, since goSignals is not that issuer's key source.
 
 - **`aud` = a transmitter-assigned, fixed, immutable, opaque, URI-shaped
-  identifier**, generated once at stream creation (JTI-like: a ksuid under
+  identifier**, generated once at stream creation (JTI-like: a UUIDv7 under
   the `urn:i2-open:ssf:aud:` URN prefix), persisted on the stream record,
   and stable for the stream's lifetime. It is deliberately **opaque** — it
   does **not** leak the caller's `client_id` or `project_id`. This minted

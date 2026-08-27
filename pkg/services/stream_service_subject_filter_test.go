@@ -14,7 +14,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // newSubjectFilterTestService builds a StreamService backed by the in-memory
@@ -159,7 +158,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 // Returns the assigned stream id.
 func seedReceiverStream(t *testing.T, ctx context.Context, dao interfaces.StreamDAO) string {
 	t.Helper()
-	id := bson.NewObjectID()
+	id := model.NewRecordId()
 	rec := &model.StreamStateRecord{
 		Id:        id,
 		ProjectId: "test-project",

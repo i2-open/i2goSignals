@@ -42,3 +42,7 @@ __debug_bin*
 # source of truth for cross-repo deps, so go.work is never committed (ADR 0048).
 /go.work
 /go.work.sum
+# Transient go.mod/go.sum backups written by `make tidy-check`; the trap
+# removes them on every exit path, but a hard kill can leave them behind.
+/go.mod.qa-backup
+/go.sum.qa-backup

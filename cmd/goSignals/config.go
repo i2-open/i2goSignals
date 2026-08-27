@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -68,7 +68,7 @@ type ConfigData struct {
 	Selected      string
 	Servers       map[string]SsfServer
 	Pems          map[string][]byte
-	keys          map[string]*rsa.PrivateKey            // parsed keys - don't persist
+	keys          map[string]crypto.Signer              // parsed keys - don't persist
 	streamConfigs map[string]*model.StreamConfiguration // don't store (cached)
 	// oauthSecrets stages OAuth client secrets per server alias in memory only.
 	// It mirrors the keys/streamConfigs caches above and is NEVER persisted to
@@ -136,10 +136,14 @@ func (c *ConfigData) BuildServerRegistration(alias, flagSecret, envVar string) (
 	}, nil
 }
 
-func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
+// GetKey returns the signing key configured for issuerId, parsed from the
+// stored PEM and cached. The result is a crypto.Signer: the CLI hands it
+// straight to goSet.JWS, which is algorithm-neutral, so nothing here needs to
+// know that the PEMs happen to hold RSA keys.
+func (c *ConfigData) GetKey(issuerId string) (crypto.Signer, error) {
 	// Ensure cache map is initialized
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	// Return from cache if present
 	if key := c.keys[issuerId]; key != nil {
@@ -164,7 +168,13 @@ func (c *ConfigData) GetKey(issuerId string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := pkcs8PrivateKey.(*rsa.PrivateKey)
+	// Checked, unlike the bare assertion this replaced: a PKCS#8 file holding a
+	// key type that cannot sign (or cannot sign here) now reports that instead
+	// of panicking on a CLI command.
+	key, ok := pkcs8PrivateKey.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("PEM for issuer '%s' holds a %T, which cannot sign", issuerId, pkcs8PrivateKey)
+	}
 	c.keys[issuerId] = key // cache the result
 
 	return key, nil
@@ -370,7 +380,7 @@ func (c *ConfigData) Load(g *Globals) error {
 		c.Servers = map[string]SsfServer{}
 	}
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}
@@ -402,7 +412,7 @@ func (c *ConfigData) Load(g *Globals) error {
 		c.Servers = map[string]SsfServer{}
 	}
 	if c.keys == nil {
-		c.keys = map[string]*rsa.PrivateKey{}
+		c.keys = map[string]crypto.Signer{}
 	}
 	if c.streamConfigs == nil {
 		c.streamConfigs = map[string]*model.StreamConfiguration{}

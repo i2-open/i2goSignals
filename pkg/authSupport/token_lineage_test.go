@@ -5,7 +5,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/bson"
 	"testing"
 )
 
@@ -48,7 +47,7 @@ func TestParentLineage(t *testing.T) {
 	iatCtx := &AuthContext{Eat: &EventAuthToken{}}
 	iatCtx.Eat.ID = iat.jti
 	_, err = issuer.IssueStreamClientToken(model.SsfClient{
-		Id:         bson.NewObjectID(),
+		Id:         model.NewRecordId(),
 		ProjectIds: []string{"abc"},
 	}, "abc", false, iat.jti)
 	require.NoError(t, err)

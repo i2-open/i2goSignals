@@ -13,7 +13,6 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TokenAdminSuite drives the single-token management endpoints (/revoke,
@@ -47,7 +46,7 @@ func (s *TokenAdminSuite) issueDeliveryToken(projectId string) (string, string) 
 
 // issueAdminToken mints a stream-admin token bound to the given project.
 func (s *TokenAdminSuite) issueAdminToken(projectId string) string {
-	client := model.SsfClient{Id: bson.NewObjectID(), ProjectIds: []string{projectId}}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{projectId}}
 	tok, err := s.app.GetAuth().IssueStreamClientToken(client, projectId, true, "")
 	s.Require().NoError(err)
 	return tok

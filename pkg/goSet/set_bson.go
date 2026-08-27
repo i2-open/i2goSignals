@@ -3,9 +3,12 @@ package goSet
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -74,49 +77,74 @@ func wireBSON(v interface{}) ([]byte, error) {
 // instead of rejecting would keep such payloads storable, but it would change
 // the stored shape away from the wire shape this file exists to preserve.
 func rejectReservedKeys(j []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(j))
-	dec.UseNumber()
-	// inObject tracks the open containers; when the innermost is an object,
-	// expectKey alternates between member name and value.
-	var inObject []bool
-	expectKey := false
+	sc := reservedKeyScanners.Get().(*reservedKeyScanner)
+	defer func() {
+		sc.src.Reset(nil)
+		reservedKeyScanners.Put(sc)
+	}()
+	sc.src.Reset(j)
+	sc.dec.Reset(&sc.src)
+	dec := sc.dec
 	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
+		// Object members alternate name, value, so an even token count inside
+		// an object means the token about to be read is a member name. That is
+		// the whole of the state this scan needs: jsontext tracks the container
+		// stack itself, so there is no shadow stack to keep in step and no
+		// intermediate map[string]any — one pass over the encoder's own output.
+		kind, count := dec.StackIndex(dec.StackDepth())
+		if kind == '{' && count%2 == 0 && dec.PeekKind() == '"' {
+			raw, err := dec.ReadValue()
+			if err != nil {
+				return err
+			}
+			if name, reserved := reservedMemberName(raw); reserved {
+				return fmt.Errorf("goSet: cannot persist member %q: "+
+					"names beginning with $ are reserved by the BSON "+
+					"Extended JSON encoding and would be stored with a "+
+					"different value", name)
+			}
+			continue
 		}
-		if err != nil {
+		if _, err := dec.ReadToken(); err != nil {
+			// A clean end of input with every container closed is a document
+			// that carried no reserved member. Anything else — a truncated
+			// document, a trailing comma — is malformed and is reported rather
+			// than passed, since a scan that cannot parse its input has not
+			// established the property this guard exists to enforce.
+			if errors.Is(err, io.EOF) && dec.StackDepth() == 0 {
+				return nil
+			}
 			return err
 		}
-		switch t := tok.(type) {
-		case json.Delim:
-			switch t {
-			case '{':
-				inObject = append(inObject, true)
-				expectKey = true
-				continue
-			case '[':
-				inObject = append(inObject, false)
-				expectKey = false
-				continue
-			default: // '}' or ']' — the container itself was a value
-				inObject = inObject[:len(inObject)-1]
-			}
-		case string:
-			if expectKey {
-				if strings.HasPrefix(t, "$") {
-					return fmt.Errorf("goSet: cannot persist member %q: "+
-						"names beginning with $ are reserved by the BSON "+
-						"Extended JSON encoding and would be stored with a "+
-						"different value", t)
-				}
-				expectKey = false
-				continue
-			}
-		}
-		// A completed value: inside an object the next token is a key again.
-		expectKey = len(inObject) > 0 && inObject[len(inObject)-1]
 	}
+}
+
+// reservedMemberName reports whether raw — one member name exactly as it
+// appears in the document, quotes and escapes included — denotes a name
+// beginning with `$`, and returns the decoded name for the error message.
+//
+// The test runs on the raw bytes so the ordinary case costs no string
+// allocation: the first character of a JSON string is that byte itself unless
+// it is a backslash. Only a name that opens with an escape, or one that is
+// already known to be reserved, pays for a decode — and the escape branch has
+// to be there, because `$` has an escaped spelling (`\u0024`) and the Extended
+// JSON parser downstream unescapes before it looks for a wrapper name.
+func reservedMemberName(raw jsontext.Value) (string, bool) {
+	q := bytes.TrimSpace(raw)
+	if len(q) < 2 || q[0] != '"' {
+		return "", false
+	}
+	switch q[1] {
+	case '$', '\\':
+		// Either reserved outright, or an escape that may yet spell one.
+	default:
+		return "", false
+	}
+	var name string
+	if err := json.Unmarshal(q, &name); err != nil {
+		return "", false
+	}
+	return name, strings.HasPrefix(name, "$")
 }
 
 // widenInts returns v with every int32 replaced by the equivalent int64,
@@ -286,3 +314,24 @@ func (set *SecurityEventToken) UnmarshalBSON(data []byte) error {
 
 // securityEventTokenWire is SecurityEventToken stripped of its BSON methods.
 type securityEventTokenWire SecurityEventToken
+
+// reservedKeyScanner is one reusable jsontext decoder bound to one reusable
+// reader. A jsontext.Decoder owns a growable read buffer and a container stack,
+// and both are sized for the document it last read; constructing a decoder per
+// call throws that away and re-grows it, which is where nearly all of the
+// scan's allocation went. Resetting instead is the shape the package is built
+// for, and it takes the scan to a fixed cost independent of document size.
+//
+// The reader is a field rather than a fresh bytes.Reader so the pair can be
+// pooled as one value: NewDecoder captures the reader pointer at construction,
+// so the reader has to outlive the call as well.
+type reservedKeyScanner struct {
+	src bytes.Reader
+	dec *jsontext.Decoder
+}
+
+var reservedKeyScanners = sync.Pool{New: func() any {
+	sc := &reservedKeyScanner{}
+	sc.dec = jsontext.NewDecoder(&sc.src)
+	return sc
+}}

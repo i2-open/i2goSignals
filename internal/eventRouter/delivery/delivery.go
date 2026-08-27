@@ -13,7 +13,7 @@ package delivery
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -30,10 +30,15 @@ type PushDelivery interface {
 // routing context; Key and Kid carry the signing material for publish/import modes
 // (ignored when the stream is in RouteModeForward, where Event.Original is forwarded
 // verbatim).
+//
+// Key is a crypto.Signer, so the adapter is not typed to any one signature
+// algorithm; the algorithm travels with the jwt.SigningMethod the adapter names
+// when it calls JWS. A nil Key means "no signing material available" and must be
+// an untyped nil.
 type PushRequest struct {
 	Stream *model.StreamStateRecord
 	Event  *model.EventRecord
-	Key    *rsa.PrivateKey
+	Key    crypto.Signer
 	Kid    string
 }
 
@@ -46,7 +51,7 @@ type PushRequest struct {
 type PushOutcome struct {
 	Classification goSetPush.Classification
 	RemoteAddress  string
-	Key            *rsa.PrivateKey
+	Key            crypto.Signer
 	Kid            string
 }
 
@@ -57,5 +62,5 @@ type KeyReloader interface {
 	// InvalidateAndReload flushes any cached private key for issuer and fetches a fresh
 	// one from the underlying provider. Returns (nil, "") when reload is unavailable;
 	// the HTTP adapter then skips the retry.
-	InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, string)
+	InvalidateAndReload(streamID, issuer, alg string) (crypto.Signer, string)
 }

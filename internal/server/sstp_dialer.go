@@ -23,7 +23,7 @@ package server
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -38,6 +38,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -93,7 +94,7 @@ type SstpDialerConfig struct {
 	HeartbeatRetryDelay time.Duration
 
 	// Sleep waits for d or returns false when ctx is cancelled. Defaults to
-	// sstpDefaultSleep; tests inject a deterministic implementation.
+	// eventRouter.SleepCtx; tests inject a deterministic implementation.
 	Sleep func(ctx context.Context, d time.Duration) bool
 	// Jitter returns the takeover jitter to wait before the first
 	// connection. Defaults to a uniform draw in
@@ -272,7 +273,7 @@ func (c *SstpDialerConfig) fillDefaults() {
 		c.HeartbeatRetryDelay = 1 * time.Second
 	}
 	if c.Sleep == nil {
-		c.Sleep = sstpDefaultSleep
+		c.Sleep = eventRouter.SleepCtx
 	}
 	if c.Jitter == nil {
 		c.Jitter = defaultSstpJitter
@@ -282,26 +283,6 @@ func (c *SstpDialerConfig) fillDefaults() {
 	}
 	if c.BackfillBatch <= 0 {
 		c.BackfillBatch = 100
-	}
-}
-
-// sstpDefaultSleep waits for d or returns false when ctx is cancelled.
-func sstpDefaultSleep(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -731,12 +712,14 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 
 		if !acquired {
 			sstpDialerLog.Debug("lease not held, waiting...", "pairId", pairId)
-			select {
-			case <-time.After(d.cfg.HeartbeatInterval + d.cfg.LeaseDuration/2):
-				continue
-			case <-ctx.Done():
+			// Cancellable delay via the configured Sleep (eventRouter.SleepCtx by
+			// default) rather than time.After: this runs every loop iteration while
+			// another node holds the lease, and an unstopped timer per spin is exactly
+			// the leak Go 1.27's synchronous timer channels make visible.
+			if !d.cfg.Sleep(ctx, d.cfg.HeartbeatInterval+d.cfg.LeaseDuration/2) {
 				return
 			}
+			continue
 		}
 
 		sstpDialerLog.Info("lease acquired, opening connection", "pairId", pairId)
@@ -981,16 +964,16 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false, pending
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if len(events) > 0 && stream.GetRouteMode() != model.RouteModeForward {
-		rsaKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
 	// AC 1: carry the pending feedback in the request. Non-empty feedback alone
 	// is enough to justify a request (the idle guard above ensures we do
 	// not POST when both events AND the feedback are empty).
-	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, nil, pending)
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, nil, pending)
 
 	if ctx.Err() != nil {
 		// Cancelled in flight: release the claim so the next owner
@@ -1265,10 +1248,10 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() != model.RouteModeForward {
-		rsaKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss)
+		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
 	returnEvents := goSetSstp.BoolPtr(false)
@@ -1276,7 +1259,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	// bookkeeping (AC 1). Running Acks through both cycles risks the peer
 	// clearing an outbound entry twice and any concurrent list mutation
 	// race between the two goroutines. Empty Ack here is deliberate.
-	cls, acked, received, signErr := d.deliver(ctx, stream, events, rsaKey, kid, returnEvents, sstpPendingFeedback{})
+	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, returnEvents, sstpPendingFeedback{})
 
 	if signErr != nil {
 		// AC 5: signing failure halts even on the second-push path — never
@@ -1361,7 +1344,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 // posture and the per-pair bearer wins the Authorization header (AC 3
 // precedence). When ResolveClient is unset (tests) or errors, the dialer
 // falls back to d.cfg.HTTPClient + the raw per-pair bearer.
-func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
+func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
 	method := stream.SstpMethod
 	if method == nil || method.EndpointUrl == "" {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, nil
@@ -1444,7 +1427,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // rather than dropping SETs onto the wire with no signature. Forward-mode
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key *rsa.PrivateKey, kid string) (map[string]string, error) {
+func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string) (map[string]string, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -1467,7 +1450,7 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(jwt.SigningMethodRS256, key)
+		signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), key)
 		if err != nil {
 			// AC 5: signing failure is an ERROR — halt the dial cycle
 			// rather than send an unsigned SET (or drop it silently).

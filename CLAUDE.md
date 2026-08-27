@@ -48,7 +48,7 @@ Integration tests use `testify/suite`; some (notably under `internal/server`) st
 - **Indentation:** Go files are gofmt-canonical **tabs** — run `gofmt -w` on any `.go` file you touch; a commit must leave `gofmt -l` clean. Non-Go files (YAML, Markdown, shell, JSON) use **4 spaces, never tabs**. Do not author Go with 4-space indentation expecting a formatter to fix it.
 - **Logging:** use `pkg/logger` (wraps `slog`); create per-component sub-loggers (`var eventLogger = logger.Sub("ROUTER")`). Levels via `LOG_LEVEL`. Log-level policy (WARN vs ERROR discipline) is in `CONTEXT.md`.
 - **Package boundary:** `pkg/goSet*` packages must not import anything under `internal/` — they are standalone libraries.
-- **Pre-existing `go vet` warnings** in `internal/model`, `pkg/goScim`, `cmd/goSignals` (duplicate JSON tags, mutex copies) — don't be alarmed, don't add new ones.
+- **Static analysis:** `go vet ./...` must be clean — the repo carries no accepted pre-existing warnings; a commit must not introduce any.
 - **Don't commit** `__debug_bin*`, certs under `config/certs/`, or anything matched by `.aiignore` (`.mongo/` + some WiredTiger files). Do not read or modify `.aiignore`-matched files.
 - **Git:** `AGENTS.md` / `.junie/guidelines.md` forbid AI-driven `git commit`s — only commit when the user asks.
 - **Decisions log:** write an ADR (`docs/adr/`) for non-trivial architecture/dependency decisions worth remembering.

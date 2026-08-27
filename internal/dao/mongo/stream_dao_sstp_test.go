@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -93,6 +94,46 @@ func (suite *StreamDAOMongoSstpSuite) TestFindByPairId() {
 
 	_, err = suite.dao.FindByPairId(ctx, "missing")
 	suite.True(errors.Is(err, interfaces.ErrNotFound), "expected ErrNotFound, got %v", err)
+}
+
+// TestProductionShapedIdsRoundTrip persists a pair record built from exactly the
+// identifiers CreateSstpPair mints today and reads it back on all three lookup
+// paths. The two halves of a pair are now shaped differently on purpose: the tx
+// side is the document `_id`, so it stays Mongo-shaped and resolves through
+// ParseObjectID, while the inbound SID is a UUIDv7 that resolves through the
+// sstp_inbound.id string index and would fail ObjectID parsing outright. The
+// hard-coded SIDs in the suite's other cases cannot catch a regression there --
+// they are short strings that happen to work either way.
+func (suite *StreamDAOMongoSstpSuite) TestProductionShapedIdsRoundTrip() {
+	ctx := context.Background()
+
+	mid := model.NewRecordId()
+	pairId := mid.Hex()
+	inboundSid := ids.NewV7()
+
+	rec := suite.sstpRecord(pairId, inboundSid, pairId)
+	rec.Id = mid
+	suite.NoError(suite.dao.Create(ctx, rec))
+
+	byId, err := suite.dao.FindByID(ctx, pairId)
+	suite.NoError(err, "tx side must still resolve as an ObjectID _id")
+	suite.Require().NotNil(byId)
+	suite.Require().NotNil(byId.SstpInbound)
+	suite.Equal(inboundSid, byId.SstpInbound.Id, "the v7 SID must round-trip byte-identically")
+
+	byInbound, err := suite.dao.FindByInboundSID(ctx, inboundSid)
+	suite.NoError(err, "a v7 SID must resolve through the sstp_inbound.id index")
+	suite.Require().NotNil(byInbound)
+	suite.Equal(pairId, byInbound.PairId)
+
+	byPair, err := suite.dao.FindByPairId(ctx, pairId)
+	suite.NoError(err)
+	suite.Require().NotNil(byPair)
+	suite.Equal(inboundSid, byPair.SstpInbound.Id)
+
+	// A v7 is not 24-hex, so the _id path must miss rather than match something.
+	_, err = suite.dao.FindByID(ctx, inboundSid)
+	suite.Error(err, "a v7 SID must never resolve as a document _id")
 }
 
 func TestStreamDAOMongoSstpSuite(t *testing.T) {

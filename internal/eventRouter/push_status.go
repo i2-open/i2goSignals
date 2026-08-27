@@ -29,7 +29,7 @@ func getInsecureStatusClient() *http.Client {
 		insecureStatusClient = &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
 			},
 		}
 	})

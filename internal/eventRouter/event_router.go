@@ -3,7 +3,7 @@ package eventRouter
 import (
 	"bytes"
 	"context"
-	"crypto/rsa"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,7 +101,7 @@ type router struct {
 	cancel      context.CancelFunc
 	enabled     bool
 	nodeId      string
-	issuerKeys  map[string]*rsa.PrivateKey
+	issuerKeys  map[string]crypto.Signer
 	issuerKids  map[string]string
 	pollBuffers map[string]*buffer.EventPollBuffer
 	pushBuffers map[string]*buffer.EventPushBuffer
@@ -142,7 +142,7 @@ type router struct {
 	sstpDialer           SstpDialerHooks
 	coordinator          cluster.ClusterCoordinator
 	streamService        *services.StreamService
-	keyService           *services.KeyService
+	keyService           signerSource
 	eventService         *services.EventService
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
@@ -266,7 +266,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
 		sstpInFlight:           map[string]map[string]bool{},
-		issuerKeys:             map[string]*rsa.PrivateKey{},
+		issuerKeys:             map[string]crypto.Signer{},
 		issuerKids:             map[string]string{},
 		enabled:                false,
 		ctx:                    ctx,
@@ -386,6 +386,10 @@ const (
 	pollDefaultTimeoutSecsDefault = 30
 	pollMaxTimeoutSecsDefault     = 300
 )
+
+// leaseRetryDelay is how long a node waits before re-attempting a push-transmitter
+// lease another node currently holds.
+const leaseRetryDelay = 15 * time.Second
 
 // resolvePollTimeoutEnv reads I2SIG_POLL_DEFAULT_TIMEOUT and
 // I2SIG_POLL_MAX_TIMEOUT (with legacy POLL_DEFAULT_TIMEOUT / POLL_MAX_TIMEOUT
@@ -600,26 +604,51 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 	}
 }
 
-func (r *router) checkAndLoadKey(streamID string, issuer string) (*rsa.PrivateKey, string) {
+// signerSource is the slice of KeyService the router depends on: resolve an
+// issuer's active signing key. Declared here, at the consumer, so the router's
+// key path is pinned to GetSigner (Slice Contract rev 1, Seam S2) and a test
+// can substitute a stub to prove it.
+type signerSource interface {
+	GetSigner(ctx context.Context, issuer string, alg string) (crypto.Signer, string, error)
+}
+
+// signingCacheKey names an entry in the router's signing-key cache. An issuer
+// that has opted one stream into RFC 9964 ML-DSA while another stays on RS256
+// holds two live signing keys at once, so the cache is keyed by the pair rather
+// than by issuer alone — keying on issuer would let whichever stream loaded
+// first pin the wrong key for the other.
+func signingCacheKey(issuer, alg string) string {
+	return issuer + "\x00" + alg
+}
+
+// checkAndLoadKey returns the cached signing key + kid for issuer, loading it
+// through the KeyService on a cache miss. It returns an untyped nil signer when
+// no key is available — callers compare the result against nil, and a boxed
+// typed-nil pointer would defeat that and panic at the signing site instead.
+func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (crypto.Signer, string) {
+	cacheKey := signingCacheKey(issuer, alg)
 	r.mu.RLock()
-	key, ok := r.issuerKeys[issuer]
-	kid := r.issuerKids[issuer]
+	key, ok := r.issuerKeys[cacheKey]
+	kid := r.issuerKids[cacheKey]
 	r.mu.RUnlock()
 	if !ok {
 		r.mu.Lock()
 		// Double check
-		key, ok = r.issuerKeys[issuer]
+		key, ok = r.issuerKeys[cacheKey]
 		if !ok {
 			var err error
-			key, kid, err = r.keyService.GetPrivateKeyWithKeyname(r.ctx, issuer)
+			key, kid, err = r.keyService.GetSigner(r.ctx, issuer, alg)
 			if err != nil {
-				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer)
+				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer, "alg", alg)
 				r.mu.Unlock()
 				return nil, ""
 			}
-			copyKey := *key
-			r.issuerKeys[issuer] = &copyKey
-			r.issuerKids[issuer] = kid
+			// Cached by reference. The previous shallow struct copy of the RSA
+			// key shared the same big.Int values anyway, so it isolated
+			// nothing; a crypto.Signer is treated as immutable, and rotation
+			// goes through InvalidateAndReload rather than mutation in place.
+			r.issuerKeys[cacheKey] = key
+			r.issuerKids[cacheKey] = kid
 		}
 		r.mu.Unlock()
 	}
@@ -640,7 +669,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	issuer := stream.StreamConfiguration.Iss
 	if issuer != "" {
 		if stream.StreamConfiguration.Id == "" || stream.GetRouteMode() == model.RouteModePublish || stream.GetRouteMode() == "" {
-			r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer)
+			r.checkAndLoadKey(stream.StreamConfiguration.Id, issuer, stream.StreamConfiguration.SigningAlg)
 		}
 	}
 
@@ -923,9 +952,9 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // side would return it to the peer that sent it (#261, ADR-0031 D5). Empty for
 // locally-originated events.
 //
-// The tx SID identifies the pair in both maps below -- initiator pairs are
+// The tx SID identifies the pair in both maps below — initiator pairs are
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
-// responder pairs are keyed by the tx SID directly -- so one key works for both
+// responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
 func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTxSid string) {
 	for pairId, pair := range r.sstpClientStreams {
@@ -1178,13 +1207,13 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 	}
 
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	var kid string
 	forwardMode := false
 	if state.GetRouteMode() == model.RouteModeForward {
 		forwardMode = true
 	} else {
-		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss)
+		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss, state.StreamConfiguration.SigningAlg)
 	}
 
 	/*
@@ -1232,7 +1261,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			token.IssuedAt = jwt.NewNumericDate(time.Now())
 			token.Kid = kid
 
-			sets[jti], err = token.JWS(jwt.SigningMethodRS256, key)
+			sets[jti], err = token.JWS(goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg), key)
 			if err != nil {
 				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
 			}
@@ -1274,12 +1303,13 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 
 		if !acquired {
 			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
-			select {
-			case <-time.After(15 * time.Second): // Retry after 15s
-				continue
-			case <-r.ctx.Done():
+			// Cancellable retry delay. SleepCtx owns and stops its timer; a time.After
+			// here would arm a fresh runtime timer on every spin of this loop and hold
+			// each one to expiry even after shutdown.
+			if !SleepCtx(r.ctx, leaseRetryDelay) {
 				return
 			}
+			continue
 		}
 
 		// Lease acquired, start the actual push loop
@@ -1311,11 +1341,11 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		defer r.stats.DecLeasesHeld()
 	}
 
-	var rsaKey *rsa.PrivateKey
+	var signingKey crypto.Signer
 	var kid string
 	if stream.GetRouteMode() == model.RouteModePublish {
-		rsaKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss)
-		if rsaKey == nil {
+		signingKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss, stream.StreamConfiguration.SigningAlg)
+		if signingKey == nil {
 			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", sid, "issuer", stream.StreamConfiguration.Iss)
 		}
 	}
@@ -1324,26 +1354,22 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	heartbeatCtx, heartbeatCancel := context.WithCancel(r.ctx)
 	defer heartbeatCancel()
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				ok, _, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
-				if r.stats != nil {
-					r.stats.TrackLeaseAcquisition(resource, ok && err == nil)
-				}
-				if err != nil || !ok {
-					eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
-					heartbeatCancel()
-					return
-				}
-			case <-heartbeatCtx.Done():
-				return
+	go leaseHeartbeat{
+		Coordinator:   r.coordinator,
+		Resource:      resource,
+		NodeId:        r.nodeId,
+		Interval:      leaseRenewInterval,
+		LeaseDuration: leaseTTL,
+		OnRenew: func(renewed bool) {
+			if r.stats != nil {
+				r.stats.TrackLeaseAcquisition(resource, renewed)
 			}
-		}
-	}()
+		},
+		OnLost: func() {
+			eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
+			heartbeatCancel()
+		},
+	}.run(heartbeatCtx)
 
 	recoveryCfg := LoadRecoveryConfig()
 	statusFetcher := r.pushStatusFetcher()
@@ -1374,16 +1400,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	backfillTicker := time.NewTicker(r.backfillInterval)
 	defer backfillTicker.Stop()
 
-	// T3 idle keepalive timer. A non-positive interval disables the feature: idleC stays nil,
-	// which means the corresponding select arm is never chosen. The timer is local to this
-	// lease-holding goroutine (C1) — failover resets the idle clock to "now" naturally.
-	var idleTimer *time.Timer
-	var idleC <-chan time.Time
-	if idleVerifyInterval > 0 {
-		idleTimer = time.NewTimer(idleVerifyInterval)
-		defer idleTimer.Stop()
-		idleC = idleTimer.C
-	}
+	// T3 idle keepalive timer. A non-positive interval disables the feature, in
+	// which case newIdleKeepalive returns nil and every call below is a no-op
+	// whose select arm never fires. The timer is local to this lease-holding
+	// goroutine (C1) — failover resets the idle clock to "now" naturally.
+	idle := newIdleKeepalive(idleVerifyInterval)
+	defer idle.Stop()
 
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
@@ -1397,25 +1419,26 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 				return false // Buffer closed, stop entirely
 			}
 			jti := v.(string)
-			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, rsaKey, kid, fencingToken)
-			rsaKey, kid = newKey, newKid
+			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, signingKey, kid, fencingToken)
+			signingKey, kid = newKey, newKid
 
 			if cls.Class == goSetPush.ClassAccepted {
-				// R1: reset T3 idle timer on every successful push, including verify itself.
-				resetIdleTimer(idleTimer, idleVerifyInterval)
+				// R1: a successful push is proof the stream is alive, so the T3
+				// idle clock starts over — verify pushes included.
+				idle.Reset()
 				continue
 			}
 
 			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
 			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
 			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idleTimer, idleVerifyInterval)
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
 			// Resumed — refresh signing key in case the issuer rotated while we were paused.
 			if stream.GetRouteMode() == model.RouteModePublish {
-				rsaKey, kid = r.checkAndLoadKey(sid, stream.Iss)
+				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss, stream.StreamConfiguration.SigningAlg)
 			}
 		case <-backfillTicker.C:
 			r.backfillPushBuffer(sid, eventBuf)
@@ -1423,23 +1446,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		case <-wakeup:
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
-		case <-idleC:
+		case <-idle.C():
 			// T3 fired: no successful push in the last idleVerifyInterval. Generate a real
 			// verify event via the operational-event direct-submission path. The new JTI lands
 			// in eventBuf and the next iteration of this loop will pull it from `out` and push
 			// it via the normal path. If the push succeeds, R1 resets the timer above; if it
 			// fails, the failure dispatch stops the timer for the duration of recovery.
 			//
-			// Pre-emptively reset here so we don't fire again while the verify push is in
+			// Pre-emptively re-arm here so we don't fire again while the verify push is in
 			// flight; the success-path reset is idempotent.
 			if _, err := r.GenerateVerifyEvent(sid, ""); err != nil {
 				eventLogger.Warn("PUSH-SRV: T3 idle verify generation failed", "sid", sid, "error", err)
 			} else {
 				eventLogger.Debug("PUSH-SRV: T3 idle verify event generated", "sid", sid, "interval", idleVerifyInterval)
 			}
-			if idleTimer != nil {
-				idleTimer.Reset(idleVerifyInterval)
-			}
+			idle.Reset()
 		}
 	}
 }
@@ -1528,8 +1549,7 @@ func (r *router) dispatchPushFailure(
 	fetcher StatusFetcher,
 	cfg RecoveryConfig,
 	backfillTicker *time.Ticker,
-	idleTimer *time.Timer,
-	idleVerifyInterval time.Duration,
+	idle *idleKeepalive,
 ) (RecoveryOutcome, bool) {
 	sid := stream.StreamConfiguration.Id
 
@@ -1627,16 +1647,12 @@ func (r *router) dispatchPushFailure(
 	// idle-keepalive verify events when we are already actively probing /status. Restart both
 	// on Resumed; failure paths leave them stopped (the goroutine exits).
 	backfillTicker.Stop()
-	if idleTimer != nil {
-		idleTimer.Stop()
-	}
+	idle.Stop()
 	outcome := r.recoveryLoop(ctx, stream, mode, fetcher, cfg)
 	switch outcome {
 	case RecoveryOutcomeResumed:
 		backfillTicker.Reset(r.backfillInterval)
-		if idleTimer != nil && idleVerifyInterval > 0 {
-			idleTimer.Reset(idleVerifyInterval)
-		}
+		idle.Reset()
 		return outcome, false
 	case RecoveryOutcomeDisabled:
 		return outcome, true
@@ -1691,12 +1707,12 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 //
 // Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled
 // by the next backfill iteration once the caller has resolved any required recovery.
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, rsaKey *rsa.PrivateKey, kid string, fencingToken int64) (goSetPush.Classification, *rsa.PrivateKey, string) {
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
 	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
 	if eventRecord == nil {
 		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
 		// success so the caller advances rather than entering recovery for a stale JTI.
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
 	}
 
 	sid := config.StreamConfiguration.Id
@@ -1714,17 +1730,17 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
 		}
 		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, rsaKey, kid
+		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
 	}
 
 	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
 		Stream: config,
 		Event:  eventRecord,
-		Key:    rsaKey,
+		Key:    signingKey,
 		Kid:    kid,
 	})
 	cls := outcome.Classification
-	rsaKey, kid = outcome.Key, outcome.Kid
+	signingKey, kid = outcome.Key, outcome.Kid
 
 	isVerifyPush := isOperationalVerify(eventRecord)
 
@@ -1736,7 +1752,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 		if isVerifyPush && r.stats != nil {
 			r.stats.RecordIdleVerifyOutcome(sid, "acked")
 		}
-		return cls, rsaKey, kid
+		return cls, signingKey, kid
 	}
 
 	eventLogger.Warn("PUSH-SRV: push failed",
@@ -1752,7 +1768,7 @@ func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord
 			r.stats.RecordIdleVerifyOutcome(sid, "failed")
 		}
 	}
-	return cls, rsaKey, kid
+	return cls, signingKey, kid
 }
 
 // isOperationalVerify returns true when the event was both submitted via the operational-event
@@ -1781,20 +1797,33 @@ func (r *router) InvalidateIssuerKey(issuer string) {
 		return
 	}
 	r.mu.Lock()
-	delete(r.issuerKeys, issuer)
-	delete(r.issuerKids, issuer)
+	r.dropCachedKeysLocked(issuer)
 	r.mu.Unlock()
+}
+
+// dropCachedKeysLocked evicts every cached signing key for issuer, across all
+// signature algorithms. A revoke or rotation is an issuer-level event, so an
+// issuer that signs one stream with RS256 and another with ML-DSA-65 must lose
+// both entries — leaving one behind would keep a retired kid in service on
+// whichever stream was not named. Caller holds r.mu.
+func (r *router) dropCachedKeysLocked(issuer string) {
+	prefix := issuer + "\x00"
+	for cacheKey := range r.issuerKeys {
+		if strings.HasPrefix(cacheKey, prefix) {
+			delete(r.issuerKeys, cacheKey)
+			delete(r.issuerKids, cacheKey)
+		}
+	}
 }
 
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
 // on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
 // reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.
-func (r *router) InvalidateAndReload(streamID, issuer string) (*rsa.PrivateKey, string) {
+func (r *router) InvalidateAndReload(streamID, issuer, alg string) (crypto.Signer, string) {
 	r.mu.Lock()
-	delete(r.issuerKeys, issuer)
-	delete(r.issuerKids, issuer)
+	r.dropCachedKeysLocked(issuer)
 	r.mu.Unlock()
-	return r.checkAndLoadKey(streamID, issuer)
+	return r.checkAndLoadKey(streamID, issuer, alg)
 }
 
 func (r *router) RemoveStream(sid string) {
@@ -1895,9 +1924,18 @@ func (r *router) Shutdown() {
 	for _, sstpServerBuffer := range r.sstpServerBuffers {
 		sstpServerBuffer.Close()
 	}
+	// Poll buffers are closed here too, despite having no delivery goroutine of
+	// their own to stop. Every EventPollBuffer owns a pump goroutine that lives
+	// until its input channel is closed, so skipping them (as this loop used to,
+	// under the reasoning that polling is receiver-driven and needs no shutdown)
+	// stranded one goroutine per poll stream for the rest of the process's life.
+	// RemoveStream has always closed them on the per-stream path; Shutdown now
+	// matches it. Surfaced by the Go 1.27 goroutineleak gate in `make qa`.
+	for _, pollBuffer := range r.pollBuffers {
+		pollBuffer.Close()
+	}
 	if r.x509Source != nil {
 		_ = r.x509Source.Close()
 		r.x509Source = nil
 	}
-	// Nothing need to be done for polling.
 }

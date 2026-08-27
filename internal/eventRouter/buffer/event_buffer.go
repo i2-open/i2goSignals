@@ -64,29 +64,34 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 	// rather than re-reading buffer.in without synchronisation.
 	inCh := buffer.in
 
+	// The pump's only job is to move JTIs off `in` and into the slice that
+	// GetEvents reads. It therefore runs exactly as long as `in` is open:
+	// Close() closes `in`, the receive below reports !ok, inCh goes nil and the
+	// loop ends.
+	//
+	// The loop condition is `inCh != nil` and NOT "inCh is nil and everything
+	// has been read". Waiting for the events slice to drain looks tidier but is
+	// a goroutine leak: once inCh is nil there is nothing left to receive, so a
+	// second pass parks this goroutine on a receive from a nil channel, which
+	// blocks forever. Closing a buffer that still holds unread JTIs is routine —
+	// it is what happens whenever a stream is deleted or a node loses its lease
+	// with events pending — so that leak was reachable on an ordinary path. The
+	// Go 1.27 goroutineleak gate in `make qa` is what surfaced it; see
+	// long_poll_synctest_test.go for the regression test.
 	go func() {
-		for {
+		for inCh != nil {
+			v, ok := <-inCh
 			buffer.mutex.Lock()
-			if inCh == nil && len(buffer.events) == 0 {
-				buffer.mutex.Unlock()
-				break
+			if !ok {
+				inCh = nil
+			} else {
+				buffer.events = append(buffer.events, v)
+				if !buffer.closed {
+					close(buffer.notifier)
+					buffer.notifier = make(chan struct{})
+				}
 			}
 			buffer.mutex.Unlock()
-
-			select {
-			case v, ok := <-inCh:
-				buffer.mutex.Lock()
-				if !ok {
-					inCh = nil
-				} else {
-					buffer.events = append(buffer.events, v)
-					if !buffer.closed {
-						close(buffer.notifier)
-						buffer.notifier = make(chan struct{})
-					}
-				}
-				buffer.mutex.Unlock()
-			}
 		}
 
 		buffer.mutex.Lock()
@@ -208,6 +213,27 @@ func (b *EventPollBuffer) Clear() {
 	b.events = []string{}
 }
 
+// awaitNotify blocks until the buffer signals new events on notifier or deadline
+// fires, and reports true when a notification arrived first.
+//
+// It takes an owned *time.Timer rather than calling time.After because the
+// timeout is client-controlled: an RFC 8936 long-poll request names its own
+// timeoutSecs (up to pollMaxTimeoutSecs), so a receiver that polls with the
+// maximum timeout and is then woken immediately by a delivered event would,
+// with time.After, leave a fully-armed runtime timer behind on every poll.
+// Under Go 1.27 timer channels are unbuffered and there is no asynctimerchan
+// escape hatch, so the only correct discipline is to own the timer and stop it
+// on every exit path — which the deferred Stop here does.
+func awaitNotify(notifier <-chan struct{}, deadline *time.Timer) bool {
+	defer deadline.Stop()
+	select {
+	case <-notifier:
+		return true
+	case <-deadline.C:
+		return false
+	}
+}
+
 // GetEvents returns all events in the buffer. Events remain in buffer until acknowledged.
 func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, bool) {
 	b.mutex.Lock()
@@ -222,10 +248,10 @@ func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, boo
 			timeout := time.Duration(timeoutSecs) * time.Second
 			notifier := b.notifier
 			b.mutex.Unlock()
-			select {
-			case <-notifier:
-			case <-time.After(timeout):
-			}
+			// The return value is deliberately ignored: whether we woke on the
+			// notifier or on the deadline, the buffer is re-checked below and an
+			// empty buffer is a legitimate long-poll result either way.
+			_ = awaitNotify(notifier, time.NewTimer(timeout))
 			b.mutex.Lock()
 		}
 	}

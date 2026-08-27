@@ -6,7 +6,6 @@ import (
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type ServerDAOMemory struct {
@@ -34,7 +33,7 @@ func (d *ServerDAOMemory) Create(ctx context.Context, server *model.Server) erro
 	}
 
 	if server.Id.IsZero() {
-		server.Id = bson.NewObjectID()
+		server.Id = model.NewRecordId()
 	}
 
 	d.store.Set(server.Id.Hex(), server)

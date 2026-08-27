@@ -19,13 +19,13 @@ func dispatchPushFailureFixture(t *testing.T, h *testHarness, stream *model.Stre
 	t.Helper()
 	backfill := time.NewTicker(time.Hour)
 	t.Cleanup(backfill.Stop)
-	idle := time.NewTimer(time.Hour)
-	t.Cleanup(func() { idle.Stop() })
+	idle := newIdleKeepalive(time.Hour)
+	t.Cleanup(idle.Stop)
 
 	return h.router.dispatchPushFailure(
 		context.Background(), stream, jti, cls,
 		nil, RecoveryConfig{BaseDelay: time.Millisecond},
-		backfill, idle, 0,
+		backfill, idle,
 	)
 }
 

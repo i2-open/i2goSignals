@@ -22,7 +22,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var ssLog = logger.Sub("STREAM_SERVICE")
@@ -51,9 +50,10 @@ func isTransmitterMethod(method string) bool {
 }
 
 // mintStreamAud generates a fixed, immutable, opaque, URI-shaped audience for a
-// transmitter-assigned stream (ADR 0024). It is JTI-like (a ksuid) so it is
-// globally unique and carries no caller-identifying information; the value is
-// persisted on the stream and is stable for the stream's lifetime.
+// transmitter-assigned stream (ADR 0024). It is JTI-like (a UUIDv7, minted by
+// pkg/dao/ids) so it is globally unique, sorts into creation order, and carries
+// no caller-identifying information; the value is persisted on the stream and is
+// stable for the stream's lifetime.
 func mintStreamAud() string {
 	return CMintedAudPrefix + goSet.GenerateJti()
 }
@@ -174,6 +174,54 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 		return errors.New(
 			"signingOnly (L2=None) requires both iss and issuerJWKSUrl to be " +
 				"configured — 'None + unverified' is not a configurable state (ADR-0066 §D2)")
+	}
+	return nil
+}
+
+// validateSigningAlg rejects a stream configuration asking for a SET signature
+// algorithm this transmitter cannot produce. The accepted set is goSet's:
+// "" (unset, meaning RS256), "RS256", and "ML-DSA-65" (RFC 9964 / FIPS 204).
+//
+// Validating at create/update is what lets the signing sites treat the field as
+// already-good: a bad value is a 400 on the configuration request rather than a
+// silent fall back to RSA discovered later, per event, in a log line.
+func validateSigningAlg(alg string) error {
+	if _, err := goSet.SigningMethodFor(alg); err != nil {
+		return fmt.Errorf("invalid signing_alg: %w", err)
+	}
+	return nil
+}
+
+// applySigningAlg validates a stream's requested signing_alg and, for a
+// transmitter stream opting into a post-quantum algorithm, makes sure the
+// issuer actually holds a key of that algorithm.
+//
+// Provisioning happens here — at configuration time — rather than lazily at the
+// first signature, because the receiver has to be able to fetch the new key
+// from the issuer's JWKS *before* the first SET signed with it arrives.
+// Minting at first signing would publish the key and the token that needs it in
+// the same instant, and a receiver caching a JWKS would reject that first SET.
+//
+// A receiver stream is skipped: its `iss` names the remote transmitter, so
+// minting a local key for it would create signing material for an issuer this
+// node does not speak for.
+func (s *StreamService) applySigningAlg(ctx context.Context, cfg *model.StreamConfiguration, projectID string) error {
+	if err := validateSigningAlg(cfg.SigningAlg); err != nil {
+		return err
+	}
+	if cfg.SigningAlg == "" || cfg.Iss == "" || s.keyService == nil {
+		return nil
+	}
+	if !isTransmitterMethod(cfg.Delivery.GetMethod()) && cfg.Delivery.GetMethod() != model.DeliverySstpPair {
+		return nil
+	}
+	created, err := s.keyService.EnsureSigningKeyForAlg(ctx, cfg.Iss, cfg.SigningAlg, projectID)
+	if err != nil {
+		return fmt.Errorf("signing_alg %s: %w", cfg.SigningAlg, err)
+	}
+	if created {
+		ssLog.Info("Provisioned signing key for stream signing_alg opt-in",
+			"iss", cfg.Iss, "signing_alg", cfg.SigningAlg, "stream_id", cfg.Id)
 	}
 	return nil
 }
@@ -383,7 +431,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
-	mid := bson.NewObjectID()
+	mid := model.NewRecordId()
 
 	// var authCtx authSupport.AuthContext
 	// authCtx = ctx.Value(authSupport.AuthContextKey).(authSupport.AuthContext)
@@ -480,6 +528,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	delivery := request.Delivery
 	config.RouteMode = request.RouteMode
 	config.SigningOnly = request.SigningOnly
+	config.SigningAlg = request.SigningAlg
+	if err = validateSigningAlg(config.SigningAlg); err != nil {
+		return model.StreamConfiguration{}, err
+	}
 	config.TxWellKnownUrl = request.TxWellKnownUrl
 	if transmitAlias != "" {
 		config.TxAlias = &transmitAlias
@@ -1057,6 +1109,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		ssLog.Debug("Push transmitter stream configured to send to this receiver")
 	}
 
+	// Mint the issuer's post-quantum key now that the delivery method (and with
+	// it whether this stream transmits) is settled, so the key is published in
+	// the issuer JWKS before the stream's first SET is signed.
+	if err = s.applySigningAlg(ctx, &config, projectID); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
 	return config, nil
 }
 
@@ -1360,6 +1419,17 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 	normalizeStreamTrustFields(config)
 	if err := validateBusinessStreamSecurity(*config); err != nil {
+		return nil, err
+	}
+
+	// signing_alg is settable on update so an operator can move an existing
+	// stream onto (or off) post-quantum signatures without recreating it. An
+	// omitted value leaves the stream where it was — the same "absent means
+	// unchanged" rule the rest of this update path follows.
+	if configReq.SigningAlg != "" {
+		config.SigningAlg = configReq.SigningAlg
+	}
+	if err := s.applySigningAlg(ctx, config, streamRec.ProjectId); err != nil {
 		return nil, err
 	}
 
@@ -1969,7 +2039,11 @@ func (s *StreamService) fetchReceiverJwks(ctx context.Context, snap receiveDirec
 			ssLog.Debug("No JWKS key found for issuer", "iss", snap.iss)
 			return nil, nil
 		}
-		jwks, err := keyfunc.NewJSON(*jwksJson)
+		// NewJwksWithAKP, not keyfunc.NewJSON: an issuer with a stream opted
+		// into RFC 9964 publishes an ML-DSA "AKP" key that keyfunc silently
+		// skips, and this is the loopback path a same-server receiver stream
+		// verifies against.
+		jwks, err := goSet.NewJwksWithAKP(*jwksJson)
 		if jwks == nil && err != nil {
 			ssLog.Error("Unable to parse internal key", "iss", snap.iss, "err", err.Error())
 			return nil, err
