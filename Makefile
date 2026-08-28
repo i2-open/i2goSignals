@@ -97,7 +97,8 @@ help:
 
 # Build and install the command line console gosignals.
 console-build:
-	$(GO) build -ldflags "$(LDFLAGS)" ./$(CONSOLE_DIR)
+	@mkdir -p $(BIN_DIR)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/goSignals ./$(CONSOLE_DIR)
 	$(GO) install -ldflags "$(LDFLAGS)" ./$(CONSOLE_DIR)
 
 # Build the Go server.
