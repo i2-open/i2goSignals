@@ -65,7 +65,7 @@ BENCHTIME ?= 1x
 # here and nowhere else in the gate.
 LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... ./internal/server
 
-.PHONY: all help build run console-build server-build clean clean-scim dev-clean \
+.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench \
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
@@ -87,6 +87,7 @@ help:
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
+	@echo "  dev-bench          - end-to-end load/routing benchmark against the dev stack: BENCH_E2E_EVENTS=$(BENCH_E2E_EVENTS) BENCH_E2E_CONCURRENCY=$(BENCH_E2E_CONCURRENCY) BENCH_E2E_ARGS=..."
 	@echo "  clean              - remove build artifacts"
 	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test leak-check bench"
 	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
@@ -313,6 +314,19 @@ dev-down:
 # Tail logs from goSignals1.
 dev-logs:
 	$(DOCKER) compose -f docker-compose-dev.yml logs -f goSignals1
+
+# End-to-end benchmark of the dev stack (cmd/goSignalsBench).
+# Builds push + poll streams between goSignals1 and goSignals2, pushes
+# BENCH_E2E_EVENTS SETs into a goSignals1 receiver and measures ingest and
+# downstream delivery. Results land in bin/bench/; pass BENCH_E2E_ARGS="--pprof"
+# to capture CPU profiles of both nodes (needs the dev-stack pprof listeners), or
+# BENCH_E2E_ARGS="--history docs/perf/e2e-history.md" to record the run.
+# See docs/perf/e2e-benchmark.md.
+BENCH_E2E_EVENTS      ?= 5000
+BENCH_E2E_CONCURRENCY ?= 16
+BENCH_E2E_ARGS        ?=
+dev-bench:
+	$(GO) run ./cmd/goSignalsBench --events=$(BENCH_E2E_EVENTS) --concurrency=$(BENCH_E2E_CONCURRENCY) $(BENCH_E2E_ARGS)
 
 # Remove dev containers and caches (module/build caches).
 dev-clean:
