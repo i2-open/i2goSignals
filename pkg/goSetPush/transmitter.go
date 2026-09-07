@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -21,17 +22,7 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 
 	client := config.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-		if config.InsecureSkipVerify {
-			// Honor the stream's tx_tls_skip_verify: skip receiver cert
-			// verification entirely (dev / self-signed receivers). CheckCaInstalled
-			// is intentionally not called — verification is being disabled.
-			client.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec // per-stream tx_tls_skip_verify opt-in
-			}
-		} else {
-			tlsSupport.CheckCaInstalled(client)
-		}
+		client = defaultClient(config.InsecureSkipVerify)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.EndpointURL, strings.NewReader(tokenString))
@@ -104,4 +95,40 @@ func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) 
 		Err:        fmt.Errorf("RFC8935: HTTP %s from %s", resp.Status, config.EndpointURL),
 		RetryAfter: retryAfter,
 	}
+}
+
+// Process-wide default clients, one per TLS posture, so consecutive pushes to
+// the same receiver reuse pooled keep-alive connections. Building a client (and
+// therefore an http.Transport with its own connection pool) per PushSET call
+// forced a full TLS handshake on every event — the receiver spent ~70% of its
+// CPU in RSA certificate signing during load tests, and push throughput was
+// capped at ~40 events/s per stream. Sharing the pool removed the handshake
+// from the per-event path (measured 38 → 105 ev/s in docs/perf/e2e-benchmark.md).
+// Callers that need a bespoke posture still pass TransmitterConfig.HTTPClient.
+var (
+	defaultClientOnce [2]sync.Once
+	defaultClients    [2]*http.Client
+)
+
+func defaultClient(insecureSkipVerify bool) *http.Client {
+	idx := 0
+	if insecureSkipVerify {
+		idx = 1
+	}
+	defaultClientOnce[idx].Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConnsPerHost = 64
+		client := &http.Client{Timeout: 60 * time.Second, Transport: transport}
+		if insecureSkipVerify {
+			// Honor the stream's tx_tls_skip_verify: skip receiver cert
+			// verification entirely (dev / self-signed receivers). CheckCaInstalled
+			// is intentionally not called — verification is being disabled.
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // per-stream tx_tls_skip_verify opt-in
+		} else {
+			transport.TLSClientConfig = tlsSupport.Harden(&tls.Config{MinVersion: tls.VersionTLS12})
+			tlsSupport.CheckCaInstalled(client)
+		}
+		defaultClients[idx] = client
+	})
+	return defaultClients[idx]
 }
