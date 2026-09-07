@@ -344,7 +344,10 @@ func TestSstpDialer_BasicDialAndAck(t *testing.T) {
 		require.NoError(t, json.Unmarshal(raw, &msg), "peer must receive a well-formed SSTP request body")
 		mu.Lock()
 		requestCount++
-		lastBody = msg
+		if len(msg.Sets) > 0 {
+			// Idle long-poll cycles carry no Sets; keep the body that did.
+			lastBody = msg
+		}
 		acks := make([]string, 0, len(msg.Sets))
 		for j := range msg.Sets {
 			acks = append(acks, j)

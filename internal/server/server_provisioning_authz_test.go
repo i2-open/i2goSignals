@@ -404,9 +404,12 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpCascadeWithRegScope4
 	s.Equal(http.StatusForbidden, rr.Code, "SSTP cascade create at register scope must be denied")
 }
 
-// A responder-role bootstrap mints a long-lived pair bearer even without a peer
-// cascade, so it too must clear the elevated gate.
-func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpResponderWithStreamScope403() {
+// A local-only responder-role bootstrap (no peer_server_alias) is an ordinary
+// business stream: the pair bearer it mints is bound to its own two SIDs, so it
+// must pass the gate at stream scope just like a push receiver does. We assert
+// only that the authz gate does not reject it (the body is deliberately too
+// thin to survive CreateSstpPair's validation, which answers 400).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpResponderWithStreamScopePassesGate() {
 	tok := s.streamToken("proj-A")
 	boot := model.SstpPairBootstrap{
 		Role: model.SstpRoleResponder,
@@ -416,7 +419,7 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpResponderWithStreamS
 	}
 	body, _ := json.Marshal(boot)
 	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
-	s.Equal(http.StatusForbidden, rr.Code, "SSTP responder create (mints a pair bearer) at stream scope must be denied")
+	s.NotEqual(http.StatusForbidden, rr.Code, "local-only SSTP responder create at stream scope must not be denied by the authz gate")
 }
 
 // An admin caller must clear the SSTP cascade gate — the gate admits the same

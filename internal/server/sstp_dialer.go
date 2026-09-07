@@ -952,17 +952,12 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 
 	events := d.outbound.ResolveEvents(pairId, outJtis)
 
-	// Idle guard: no outbound events AND nothing owed to the peer means there
-	// is nothing to say this cycle. Idle a short cycle rather than open a
-	// keep-alive request that would only add load without carrying state. When
-	// pending feedback IS non-empty we still POST (empty Sets, non-empty Ack /
-	// setErrs) so the peer can clear its outbound (AC 1, and #254 so a
-	// validation rejection is reported rather than resent forever). When events
-	// is non-empty we always POST (normal outbound cycle).
-	if len(events) == 0 && pending.empty() {
-		*delay = d.cfg.BaseDelay
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false, pending
-	}
+	// No idle guard: the initiator ALWAYS opens the cycle, even with nothing
+	// to send and nothing owed. An empty-Sets request with returnEvents=true
+	// is the long poll the responder parks until it has events for us (or
+	// its poll timeout expires); without it a receive-only initiator would
+	// never learn about the peer's outbound. Empty feedback is still echoed
+	// when present (AC 1, #254) so the peer can clear its outbound.
 
 	var signingKey crypto.Signer
 	var kid string
@@ -970,9 +965,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
-	// AC 1: carry the pending feedback in the request. Non-empty feedback alone
-	// is enough to justify a request (the idle guard above ensures we do
-	// not POST when both events AND the feedback are empty).
+	// AC 1: carry the pending feedback in the request.
 	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, nil, pending)
 
 	if ctx.Err() != nil {
@@ -1031,7 +1024,9 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 			return cls, 0, false, updatedPending
 		}
 		if len(events) == 0 && len(received) == 0 {
-			// Purely idle cycle — sleep the base delay to avoid busy-loop.
+			// Empty long poll came back with nothing (responder timeout or a
+			// peer that answers immediately): pace the next one by BaseDelay
+			// so a fast-returning responder cannot drive a hot loop.
 			return cls, d.cfg.BaseDelay, false, updatedPending
 		}
 		return cls, d.cfg.BaseDelay, false, updatedPending
@@ -1228,6 +1223,13 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 // Concurrency is bounded to at most one in-flight secondary push per pair:
 // if a push is already running, this call returns ClassOK without opening a
 // third parallel request.
+//
+// The push keeps draining, batch after batch, while the peer acks everything
+// it is sent and the buffer still holds more. Wakes that arrive while a push
+// is in flight are coalesced away by the slot guard, so a single push per
+// wake would leave whatever queued up meanwhile stranded until the primary
+// long-poll returns (the responder's poll timeout, 30s by default) or the
+// next new event happens to arrive.
 func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) goSetSstp.Classification {
 	pairId := stream.PairId
 
@@ -1236,16 +1238,34 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	}
 	defer d.outbound.ReleaseSecondPushSlot(pairId)
 
+	cls := goSetSstp.Classification{Class: goSetSstp.ClassOK}
+	for ctx.Err() == nil {
+		var drained bool
+		cls, drained = d.pushBatchWhilePollHeld(ctx, stream, fencingToken)
+		if drained {
+			return cls
+		}
+	}
+	return cls
+}
+
+// pushBatchWhilePollHeld sends one batch on the second-push path. done=true
+// when there is nothing more this path should send now: the buffer is empty,
+// the peer left part of the batch unacked (the primary's retry path owns
+// those), or the exchange failed.
+func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) (goSetSstp.Classification, bool) {
+	pairId := stream.PairId
+
 	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
 	if len(outJtis) == 0 {
 		// Nothing to push (or everything already in flight in the primary
 		// cycle): do not open a second POST.
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, true
 	}
 
 	events := d.outbound.ResolveEvents(pairId, outJtis)
 	if len(events) == 0 {
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, true
 	}
 
 	var signingKey crypto.Signer
@@ -1270,7 +1290,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		sstpDialerLog.Error("egress signing failure on second push — halting",
 			"pairId", pairId, "error", signErr)
 		d.outbound.PauseOutbound(stream, reason)
-		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}
+		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, true
 	}
 
 	switch cls.Class {
@@ -1281,7 +1301,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		// deterministically — such a rejection clears the SET on the same terms
 		// as an ack, while a retryable one stays pending for a later cycle.
 		cleared, fatal := clearedOutbound(pairId, acked, cls.SetErrs)
-		d.outbound.AckOutbound(stream, cleared, events, fencingToken)
+		ackedCount := d.outbound.AckOutbound(stream, cleared, events, fencingToken)
 		// A peer whose acceptor opportunistically ships queued outbound SETs
 		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
 		// forbids long-poll waiting, not the return of already-queued SETs)
@@ -1304,7 +1324,12 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 			d.outbound.PauseOutbound(stream, fmt.Sprintf(
 				"SSTP-CLIENT: peer reports stream dead on push-while-poll-held for pair=%s: %s: %s",
 				pairId, fatal.Err, fatal.Description))
+			return cls, true
 		}
+		// Fully cleared: keep draining while the buffer holds more. Partial:
+		// stop here so the unacked remainder is retried by the primary cycle
+		// rather than re-sent immediately.
+		return cls, ackedCount < len(events)
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary
 		// long-poll (inbound) continues uninterrupted (Q12.3).
@@ -1318,7 +1343,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		sstpDialerLog.Warn("push-while-poll-held transport/transient failure",
 			"pairId", pairId, "class", cls.Class.String())
 	}
-	return cls
+	return cls, true
 }
 
 // deliver performs one SSTP HTTP cycle by calling pkg/goSetSstp.Exchange

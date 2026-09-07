@@ -212,7 +212,11 @@ support"); a `WARN` is logged at create.
 - **Push-while-poll-held**: when the primary long-poll cycle is held open, a
   *second* parallel POST (with `returnEvents=false`) flushes newly-queued
   outbound SETs without disturbing the held cycle. At most one secondary push is
-  in flight per pair.
+  in flight per pair; it keeps claiming and sending batches until the outbound
+  is empty, so wakes coalesced while it was in flight are not lost.
+- **Always opens the cycle**: the initiator POSTs even when it has nothing to
+  send and nothing to ack. That empty request with `returnEvents=true` is the
+  long poll the responder parks until it has SETs for us.
 
 ### Server (responder) side
 

@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +113,79 @@ func TestPushWhilePollHeld_DefersInboundFeedbackForTheNextRequest(t *testing.T) 
 
 	assert.True(t, dialer.takeDeferredFeedback(pairId).empty(),
 		"taking the deferred feedback must hand it over exactly once")
+}
+
+// TestPushWhilePollHeld_DrainsUntilOutboundEmpty pins the drain loop: with a
+// batch size of one and three queued SETs, one second push must POST three
+// times and clear all three, rather than sending one batch and leaving the
+// rest stranded until the primary long-poll returns.
+func TestPushWhilePollHeld_DrainsUntilOutboundEmpty(t *testing.T) {
+	const (
+		pairId = "pair-second-push-drain"
+		txSid  = "tx-second-push-drain"
+	)
+
+	var requestCount atomic.Int64
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var msg goSetSstp.Message
+		require.NoError(t, json.Unmarshal(raw, &msg))
+		require.Len(t, msg.Sets, 1, "BackfillBatch=1 must cap each second-push request at one SET")
+		requestCount.Add(1)
+		acks := make([]string, 0, 1)
+		for jti := range msg.Sets {
+			acks = append(acks, jti)
+		}
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{Ack: acks})
+	}))
+	defer peer.Close()
+
+	pair := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        txSid,
+			Iss:       "https://us.example",
+			Aud:       []string{"https://peer.example"},
+			RouteMode: model.RouteModeForward,
+		},
+		Status: model.StreamStateEnabled,
+		PairId: pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                model.SstpRoleInitiator,
+			EndpointUrl:         peer.URL,
+			AuthorizationHeader: "Bearer test-token",
+		},
+	}
+	evs := make([]*model.EventRecord, 0, 3)
+	for i := 1; i <= 3; i++ {
+		jti := fmt.Sprintf("sstp-drain-%d", i)
+		evs = append(evs, &model.EventRecord{Jti: jti, Original: `{"jti":"` + jti + `","raw":true}`})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := newFakeSstpOutbound(ctx, pair, evs...)
+
+	dialer := NewSstpDialer(&oneShotCoordinator{}, "node-second-push-drain", nil, SstpDialerConfig{
+		BaseDelay:     5 * time.Millisecond,
+		MaxDelay:      50 * time.Millisecond,
+		BackoffFactor: 2.0,
+		Jitter:        func() time.Duration { return 0 },
+		HTTPClient:    &http.Client{Timeout: 2 * time.Second},
+		BackfillBatch: 1,
+	})
+	dialer.Bind(fake)
+
+	cls := dialer.pushWhilePollHeld(ctx, &pair, 1)
+	require.Equal(t, goSetSstp.ClassOK, cls.Class)
+
+	assert.Equal(t, int64(3), requestCount.Load(),
+		"the second push must keep POSTing until the outbound buffer is empty")
+	assert.ElementsMatch(t, []string{"sstp-drain-1", "sstp-drain-2", "sstp-drain-3"}, fake.ackedCopy(),
+		"every queued SET must be acked by the drain loop")
+	assert.Empty(t, fake.ClaimOutbound(pairId, 10),
+		"nothing may be left unclaimed once the drain loop returns")
 }
 
 // The store must survive several second pushes before the pair loop drains it,
