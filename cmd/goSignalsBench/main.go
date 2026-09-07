@@ -6,10 +6,15 @@
 //
 //	harness --RFC8935 push--> goSignals1 [ingress: push-receive, FW]
 //	                              |-- aud=<push-aud> --RFC8935 push--> goSignals2 [push-receive, IM]
-//	                              `-- aud=<poll-aud> <--RFC8936 poll-- goSignals2 [poll-receive, IM]
+//	                              |-- aud=<poll-aud> <--RFC8936 poll-- goSignals2 [poll-receive, IM]
+//	                              `-- aud=<sstp-aud> ==== SSTP pair ==== goSignals2 [sstp inbound, IM]
 //
-// Each SET carries one (or both) of the two audiences, so goSignals1's
+// Each SET carries one (or all) of the three audiences, so goSignals1's
 // EventRouter has to match audience per event to pick the outbound stream.
+// The SSTP pair always carries events goSignals1 -> goSignals2; --sstp-role
+// picks which node is the HTTP initiator (goSignals1 dials and sends the SETs
+// in its requests) and which is the responder (goSignals2 dials and receives
+// them in the long-poll responses).
 // Delivery is counted on goSignals2's goSignals_router_events_in_total; the
 // poll leg cannot be counted on goSignals1 because the transmitter does not
 // increment events_out_total on poll delivery.
@@ -42,6 +47,8 @@ type options struct {
 	issuer                   string
 	issuerKeyFile            string
 	pushAud, pollAud         string
+	sstpAud                  string
+	sstpRole                 string // SSTP HTTP role played by goSignals1
 	events                   int
 	concurrency              int
 	mix                      string
@@ -66,13 +73,15 @@ func parseFlags() *options {
 	flag.StringVar(&o.caFile, "ca", "config/certs/ca-cert.pem", "CA certificate used to verify both servers")
 	flag.BoolVar(&o.insecure, "insecure", false, "skip TLS verification instead of using --ca")
 	flag.StringVar(&o.bootstrapToken, "bootstrap-token", envOr("I2SIG_BOOTSTRAP_TOKEN", "dev-bootstrap-secret"), "I2SIG_BOOTSTRAP_TOKEN shared with the servers")
-	flag.StringVar(&o.issuer, "issuer", "bench.example.com", "SET issuer; also the signing key name (kid) minted on goSignals1")
-	flag.StringVar(&o.issuerKeyFile, "issuer-key", "", "PEM file for the issuer private key (default bin/bench/<issuer>.pem; created on first run)")
-	flag.StringVar(&o.pushAud, "push-aud", "bench.push.example.com", "audience routed over the RFC 8935 push leg")
-	flag.StringVar(&o.pollAud, "poll-aud", "bench.poll.example.com", "audience routed over the RFC 8936 poll leg")
+	flag.StringVar(&o.issuer, "issuer", "https://bench.example.com", "SET issuer (URI, SSTP requires it); also the signing key name (kid) minted on goSignals1")
+	flag.StringVar(&o.issuerKeyFile, "issuer-key", "", "PEM file for the issuer private key (default bin/bench/<issuer host>.pem; created on first run)")
+	flag.StringVar(&o.pushAud, "push-aud", "https://bench.push.example.com", "audience routed over the RFC 8935 push leg")
+	flag.StringVar(&o.pollAud, "poll-aud", "https://bench.poll.example.com", "audience routed over the RFC 8936 poll leg")
+	flag.StringVar(&o.sstpAud, "sstp-aud", "https://bench.sstp.example.com", "audience routed over the SSTP leg")
+	flag.StringVar(&o.sstpRole, "sstp-role", model.SstpRoleInitiator, "SSTP HTTP role goSignals1 plays: initiator (goSignals1 dials goSignals2) or responder (goSignals2 dials goSignals1)")
 	flag.IntVar(&o.events, "events", 1000, "number of SETs to push into goSignals1")
 	flag.IntVar(&o.concurrency, "concurrency", 8, "parallel ingest connections")
-	flag.StringVar(&o.mix, "mix", string(mixAlternate), "audience mix per event: alternate|both|push|poll")
+	flag.StringVar(&o.mix, "mix", string(mixAlternate), "audience mix per event: alternate|all|push|poll|sstp")
 	flag.DurationVar(&o.drainTimeout, "drain-timeout", 5*time.Minute, "how long to wait for goSignals2 to receive everything")
 	flag.DurationVar(&o.pollInterval, "scrape-interval", 500*time.Millisecond, "how often to scrape /metrics while draining")
 	flag.BoolVar(&o.keep, "keep", false, "leave the benchmark streams in place after the run")
@@ -86,13 +95,28 @@ func parseFlags() *options {
 	flag.BoolVar(&o.verbose, "v", false, "log each stream as it is created")
 	flag.Parse()
 	if o.issuerKeyFile == "" {
-		o.issuerKeyFile = filepath.Join(o.outDir, o.issuer+".pem")
+		o.issuerKeyFile = filepath.Join(o.outDir, keyFileName(o.issuer)+".pem")
 	}
 	if o.events <= 0 || o.concurrency <= 0 {
 		fmt.Fprintln(os.Stderr, "--events and --concurrency must be positive")
 		os.Exit(2)
 	}
+	if o.sstpRole != model.SstpRoleInitiator && o.sstpRole != model.SstpRoleResponder {
+		fmt.Fprintf(os.Stderr, "--sstp-role must be %s or %s\n", model.SstpRoleInitiator, model.SstpRoleResponder)
+		os.Exit(2)
+	}
 	return o
+}
+
+// keyFileName turns an issuer (possibly a URL) into a file-system safe name:
+// the scheme is dropped and path separators become underscores.
+func keyFileName(issuer string) string {
+	name := issuer
+	if i := strings.Index(name, "://"); i >= 0 {
+		name = name[i+3:]
+	}
+	name = strings.NewReplacer("/", "_", ":", "_", "\\", "_").Replace(name)
+	return strings.Trim(name, "_")
 }
 
 func envOr(key, def string) string {
@@ -117,6 +141,8 @@ type topology struct {
 	rxPush  *model.StreamConfiguration // goSignals2 push-receive
 	txPoll  *model.StreamConfiguration // goSignals1 poll transmitter
 	rxPoll  *model.StreamConfiguration // goSignals2 poll-receive <- goSignals1
+	sstp1   *model.StreamStateRecord   // goSignals1 half of the SSTP pair (tx = PairId)
+	sstp2   *model.StreamStateRecord   // goSignals2 half of the SSTP pair (rx = SstpInbound.Id)
 }
 
 func run(o *options) error {
@@ -144,16 +170,26 @@ func run(o *options) error {
 		return err
 	}
 
+	removeOrphans(o, gs1, gs2)
 	topo, err := buildTopology(gs1, gs2, o)
 	if err != nil {
 		return err
 	}
 	if !o.keep {
-		defer teardown(gs1, gs2, topo)
+		recordInFlight(o, topo.victims(gs1, gs2))
+		cleanup := func() {
+			teardown(gs1, gs2, topo)
+			clearInFlight(o)
+		}
+		stop := onInterrupt(cleanup)
+		defer func() {
+			stop()
+			cleanup()
+		}()
 	}
 
 	logf("pre-signing %d SETs (issuer %s, mix %s)", o.events, o.issuer, mix)
-	events, err := buildEvents(o.events, o.issuer, o.pushAud, o.pollAud, mix, key)
+	events, err := buildEvents(o.events, o.issuer, o.pushAud, o.pollAud, o.sstpAud, mix, key)
 	if err != nil {
 		return err
 	}
@@ -183,11 +219,13 @@ func run(o *options) error {
 		Concurrency:   o.concurrency,
 		Mix:           string(mix),
 		Issuer:        o.issuer,
+		SstpRole:      o.sstpRole,
 		IngressStream: topo.ingress.Id,
 	}
-	expectPush, expectPoll := mix.expected(o.events)
+	expectPush, expectPoll, expectSstp := mix.expected(o.events)
 	result.Push = legResult{Transport: "PUSH", Audience: o.pushAud, TxStream: topo.txPush.Id, RxStream: topo.rxPush.Id, Expected: expectPush}
 	result.Poll = legResult{Transport: "POLL", Audience: o.pollAud, TxStream: topo.txPoll.Id, RxStream: topo.rxPoll.Id, Expected: expectPoll}
+	result.Sstp = legResult{Transport: "SSTP", Audience: o.sstpAud, TxStream: topo.sstp1.PairId, RxStream: topo.sstp2.SstpInbound.Id, Expected: expectSstp}
 
 	profiles := startProfiles(o, gs1.http)
 
@@ -232,7 +270,7 @@ func run(o *options) error {
 	// ---- drain -----------------------------------------------------------
 	drainErr := waitForDrain(gs1, gs2, before1, before2, topo, result, start, ingestEnd, o)
 	result.TotalSeconds = time.Since(start).Seconds()
-	result.Success = drainErr == nil && result.IngestErrors == 0 && result.Push.Complete && result.Poll.Complete
+	result.Success = drainErr == nil && result.IngestErrors == 0 && result.Push.Complete && result.Poll.Complete && result.Sstp.Complete
 	if drainErr != nil {
 		if result.Notes != "" {
 			result.Notes += "; "
@@ -301,7 +339,7 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 	ingress, err := gs1.createStream(streamRequest{
 		Description:     "bench ingress (harness -> goSignals1)",
 		Iss:             o.issuer,
-		Aud:             []string{o.pushAud, o.pollAud},
+		Aud:             []string{o.pushAud, o.pollAud, o.sstpAud},
 		EventsRequested: events,
 		RouteMode:       model.RouteModeForward,
 		Delivery:        map[string]any{"method": model.ReceivePush},
@@ -313,7 +351,7 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 	if err := learnInternalBase(gs1, ingress.Delivery.PushReceiveMethod.EndpointUrl); err != nil {
 		return nil, err
 	}
-	jwksURL := gs1.internalBase + "/jwks/" + o.issuer
+	jwksURL := gs1.internalBase + keyPath("/jwks/", o.issuer)
 
 	// 2. goSignals2 push receiver (needs to exist before the transmitter).
 	rxPush, err := gs2.createStream(streamRequest{
@@ -397,14 +435,91 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 	}
 	t.rxPoll = rxPoll
 
-	logf("streams: ingress=%s txPush=%s rxPush=%s txPoll=%s rxPoll=%s", ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPoll.Id)
+	// 5. SSTP pair. Events travel goSignals1 -> goSignals2 whichever HTTP
+	// role each node plays; --sstp-role only decides who dials whom.
+	sstp1, sstp2, sstpEndpoint, err := buildSstpPair(gs1, gs2, o, jwksURL, events)
+	if err != nil {
+		return nil, err
+	}
+	t.sstp1, t.sstp2 = sstp1, sstp2
+
+	logf("streams: ingress=%s txPush=%s rxPush=%s txPoll=%s rxPoll=%s sstp1=%s sstp2=%s(rx %s)",
+		ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPoll.Id, sstp1.PairId, sstp2.PairId, sstp2.SstpInbound.Id)
 	if o.verbose {
 		logf("ingress endpoint %s", ingress.Delivery.PushReceiveMethod.EndpointUrl)
 		logf("push leg  %s -> %s", txPush.Id, pushEndpoint)
 		logf("poll leg  %s <- %s", pollEndpoint, rxPoll.Id)
+		logf("sstp leg  goSignals1 is %s, initiator dials %s", o.sstpRole, sstpEndpoint)
 		logf("issuer jwks %s", jwksURL)
 	}
 	return t, nil
+}
+
+// sstpReverseAudSuffix marks the goSignals2 -> goSignals1 direction of the
+// pair, which the benchmark never exercises. SSTP validation requires a
+// URI-shaped audience on both directions, so it is derived from --sstp-aud.
+const sstpReverseAudSuffix = "/reverse"
+
+// buildSstpPair creates the two halves of the SSTP pair. The responder half
+// goes first because the server derives its endpoint from BASE_URL and mints
+// the per-pair bearer; the initiator half is then pointed at both. Which node
+// is the responder follows --sstp-role (the role goSignals1 plays).
+//
+// The business-plane directions do not depend on the HTTP role: goSignals1's
+// primary (transmit) direction carries --sstp-aud in PUBLISH mode (re-signed
+// with goSignals1's issuer key, like the push and poll transmitters) and
+// goSignals2's inbound direction imports it, verifying against goSignals1's
+// JWKS. The reverse direction exists only because a pair is bidirectional.
+func buildSstpPair(gs1, gs2 *node, o *options, jwksURL string, events []string) (half1, half2 *model.StreamStateRecord, endpoint string, err error) {
+	reverseAud := strings.TrimRight(o.sstpAud, "/") + sstpReverseAudSuffix
+	// Directions as seen from goSignals1.
+	gs1Primary := model.SstpDirection{Iss: o.issuer, Aud: []string{o.sstpAud}, Events: events, Mode: model.SstpModePublish}
+	gs1Inbound := model.SstpDirection{Iss: o.issuer, IssJwksUrl: jwksURL, Aud: []string{reverseAud}, Events: events, Mode: model.SstpModeImport}
+	// Mirrored on goSignals2: its primary is the unused reverse direction.
+	gs2Primary := model.SstpDirection{Iss: o.issuer, Aud: []string{reverseAud}, Events: events, Mode: model.SstpModeForward}
+	gs2Inbound := model.SstpDirection{Iss: o.issuer, IssJwksUrl: jwksURL, Aud: []string{o.sstpAud}, Events: events, Mode: model.SstpModeImport}
+
+	boot := func(n *node, role string) model.SstpPairBootstrap {
+		b := model.SstpPairBootstrap{Role: role, Description: "bench sstp pair (goSignals1 -> goSignals2), " + n.name + " " + role}
+		if n == gs1 {
+			b.Primary, b.Inbound = gs1Primary, gs1Inbound
+		} else {
+			b.Primary, b.Inbound = gs2Primary, gs2Inbound
+		}
+		return b
+	}
+
+	responder, initiator := gs2, gs1
+	if o.sstpRole == model.SstpRoleResponder {
+		responder, initiator = gs1, gs2
+	}
+
+	respRec, err := responder.createSstpPair(boot(responder, model.SstpRoleResponder))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("%s SSTP responder: %w", responder.name, err)
+	}
+	if respRec.SstpMethod.AuthorizationHeader == "" || respRec.SstpMethod.EndpointUrl == "" {
+		_ = responder.deleteStream(respRec.PairId)
+		return nil, nil, "", fmt.Errorf("%s SSTP responder: create response carries no endpoint/bearer", responder.name)
+	}
+	endpoint, err = rebase(respRec.SstpMethod.EndpointUrl, responder.internalBase)
+	if err != nil {
+		_ = responder.deleteStream(respRec.PairId)
+		return nil, nil, "", err
+	}
+	initBoot := boot(initiator, model.SstpRoleInitiator)
+	initBoot.EndpointUrl = endpoint
+	initBoot.AuthorizationHeader = respRec.SstpMethod.AuthorizationHeader
+	initBoot.PeerPairId = respRec.PairId
+	initRec, err := initiator.createSstpPair(initBoot)
+	if err != nil {
+		_ = responder.deleteStream(respRec.PairId)
+		return nil, nil, "", fmt.Errorf("%s SSTP initiator: %w", initiator.name, err)
+	}
+	if initiator == gs1 {
+		return initRec, respRec, endpoint, nil
+	}
+	return respRec, initRec, endpoint, nil
 }
 
 // learnInternalBase records the base URL the server advertises for itself
@@ -422,20 +537,7 @@ func learnInternalBase(n *node, endpoint string) error {
 }
 
 func teardown(gs1, gs2 *node, t *topology) {
-	type victim struct {
-		n  *node
-		id string
-	}
-	// Receivers first so no transmitter is left pointing at a deleted peer.
-	victims := []victim{{gs2, idOf(t.rxPoll)}, {gs1, idOf(t.txPoll)}, {gs1, idOf(t.txPush)}, {gs2, idOf(t.rxPush)}, {gs1, idOf(t.ingress)}}
-	for _, v := range victims {
-		if v.id == "" {
-			continue
-		}
-		if err := v.n.deleteStream(v.id); err != nil {
-			logf("warning: delete stream %s on %s: %v", v.id, v.n.name, err)
-		}
-	}
+	deleteVictims(t.victims(gs1, gs2))
 	logf("benchmark streams removed (use --keep to retain them)")
 }
 
@@ -446,11 +548,18 @@ func idOf(s *model.StreamConfiguration) string {
 	return s.Id
 }
 
+func pairOf(r *model.StreamStateRecord) string {
+	if r == nil {
+		return ""
+	}
+	return r.PairId
+}
+
 // waitForDrain scrapes both nodes until goSignals2 has counted every expected
 // event on each leg, or the timeout elapses.
 func waitForDrain(gs1, gs2 *node, before1, before2 *streamCounters, t *topology, r *benchResult, start, ingestEnd time.Time, o *options) error {
 	deadline := time.Now().Add(o.drainTimeout)
-	legs := []*legResult{&r.Push, &r.Poll}
+	legs := []*legResult{&r.Push, &r.Poll, &r.Sstp}
 	for _, leg := range legs {
 		if leg.Expected == 0 {
 			leg.Complete = true
@@ -486,7 +595,7 @@ func waitForDrain(gs1, gs2 *node, before1, before2 *streamCounters, t *topology,
 			break
 		}
 		if time.Since(lastLog) > 5*time.Second {
-			logf("draining: push %d/%d, poll %d/%d", r.Push.Delivered, r.Push.Expected, r.Poll.Delivered, r.Poll.Expected)
+			logf("draining: push %d/%d, poll %d/%d, sstp %d/%d", r.Push.Delivered, r.Push.Expected, r.Poll.Delivered, r.Poll.Expected, r.Sstp.Delivered, r.Sstp.Expected)
 			lastLog = time.Now()
 		}
 		if time.Now().After(deadline) {

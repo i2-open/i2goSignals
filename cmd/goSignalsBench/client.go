@@ -141,16 +141,24 @@ func (n *node) bootstrap(bootstrapToken string) error {
 	return nil
 }
 
+// keyPath builds a /key or /jwks path for an issuer name. The server
+// QueryUnescapes the captured segment (it publishes jwks_uri the same way, see
+// KeySummary.AdjustBase), so a URL-shaped issuer such as
+// https://bench.example.com travels as one encoded segment.
+func keyPath(prefix, issuer string) string {
+	return prefix + url.QueryEscape(issuer)
+}
+
 // hasIssuerKey reports whether the server already publishes a JWKS for issuer.
 func (n *node) hasIssuerKey(issuer string) bool {
-	status, _, err := n.do(http.MethodGet, "/jwks/"+url.PathEscape(issuer), "", "", nil)
+	status, _, err := n.do(http.MethodGet, keyPath("/jwks/", issuer), "", "", nil)
 	return err == nil && status == http.StatusOK
 }
 
 // createIssuerKey asks the server to mint an RSA signing key whose kid is the
 // issuer name and returns the PKCS#8 private key the server hands back.
 func (n *node) createIssuerKey(bootstrapToken, issuer string) (*rsa.PrivateKey, []byte, error) {
-	status, body, err := n.do(http.MethodPost, "/key/"+url.PathEscape(issuer), bootstrapToken, "", nil)
+	status, body, err := n.do(http.MethodPost, keyPath("/key/", issuer), bootstrapToken, "", nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -201,6 +209,22 @@ func (n *node) createStream(req streamRequest) (*model.StreamConfiguration, erro
 		return nil, fmt.Errorf("%s: stream create returned no stream_id", n.name)
 	}
 	return &cfg, nil
+}
+
+// createSstpPair provisions one half of an SSTP pair (draft-hunt-secevent-sstp)
+// via the same POST /stream endpoint; the role field selects the bootstrap
+// path. The responder half derives its endpoint from the server's BASE_URL and
+// mints the per-pair bearer, both of which come back in the record so the
+// initiator half can be pointed at them.
+func (n *node) createSstpPair(boot model.SstpPairBootstrap) (*model.StreamStateRecord, error) {
+	var rec model.StreamStateRecord
+	if err := n.doJSON(http.MethodPost, "/stream", n.token, boot, &rec, http.StatusCreated, http.StatusOK); err != nil {
+		return nil, err
+	}
+	if rec.PairId == "" || rec.SstpMethod == nil || rec.SstpInbound == nil {
+		return nil, fmt.Errorf("%s: SSTP %s create returned an incomplete pair record", n.name, boot.Role)
+	}
+	return &rec, nil
 }
 
 func (n *node) deleteStream(id string) error {

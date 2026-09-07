@@ -9,31 +9,49 @@ Mongo and TLS included.
 
 ## Topology
 
-Every run builds five streams and (unless `--keep`) deletes them afterwards:
+Every run builds five streams plus one SSTP pair (one half on each node) and,
+unless `--keep`, deletes them afterwards:
 
 ```
 harness ──RFC 8935 push──▶ goSignals1  ingress   (push-receive, route_mode FW,
-                                                  aud = [push-aud, poll-aud])
+                                                  aud = [push-aud, poll-aud, sstp-aud])
                               │
                               ├─ aud=push-aud ──RFC 8935 push──▶ goSignals2  push-receive (IM)
                               │   (push transmitter, PB)
                               │
-                              └─ aud=poll-aud ◀──RFC 8936 poll── goSignals2  poll-receive (IM)
-                                  (poll transmitter, PB)
+                              ├─ aud=poll-aud ◀──RFC 8936 poll── goSignals2  poll-receive (IM)
+                              │   (poll transmitter, PB)
+                              │
+                              └─ aud=sstp-aud ──SSTP pair──────▶ goSignals2  SSTP inbound (IM)
+                                  (SSTP outbound, PB)             (--sstp-role picks who dials)
 ```
 
 * The ingress stream on goSignals1 is a push receiver in **FORWARD** mode. The
   CLI default (IMPORT) stores events without routing, so it would measure nothing
   downstream.
-* The two transmitter streams have **different audiences**. Each generated SET
-  carries one audience (`--mix alternate`, the default) or both (`--mix both`),
-  so the EventRouter's audience match decides per event which leg carries it.
+* The three outbound legs have **different audiences**. Each generated SET
+  carries one audience, rotating push → poll → SSTP (`--mix alternate`, the
+  default), or all three (`--mix all`), so the EventRouter's audience match
+  decides per event which leg carries it.
+* The SSTP pair is a plain business stream: both halves are created with the
+  `stream`+`event` client token the harness registers, no admin scope. Its
+  reverse direction (goSignals2 → goSignals1, audience `<sstp-aud>/reverse`)
+  is provisioned but carries no traffic.
+* `--sstp-role` sets goSignals1's SSTP role and therefore which node is the
+  HTTP client. `initiator` (default): goSignals1 dials `POST /sstp/{id}` on
+  goSignals2 and carries the SETs in its request bodies. `responder`:
+  goSignals2 dials goSignals1 and goSignals1 hands the SETs back in the
+  long-poll responses. The audiences, modes and counting are the same in
+  both, so the two rows are directly comparable and together cover both
+  halves of the protocol.
 * goSignals2's receivers trust `https://goSignals1:8888/jwks/<issuer>` because
   the transmitters re-sign (PUBLISH mode) with goSignals1's copy of the issuer
   key.
 * The harness signs with an RSA key that goSignals1 mints on the first run
   (`POST /key/<issuer>` with the bootstrap secret). The PEM is saved to
-  `bin/bench/<issuer>.pem` and reused on later runs. After `make dev-clean` the
+  `bin/bench/<issuer host>.pem` (`bench.example.com.pem` by default; the
+  issuer and audiences are URLs because SSTP validation requires URI-shaped
+  `iss`/`aud`) and reused on later runs. After `make dev-clean` the
   server forgets the key and the harness mints a fresh one.
 
 The SETs use the SCIM profile (RFC 9967) event types rotated across
@@ -50,6 +68,7 @@ instead of minting one, pass
 | Ingress count | goSignals1 `goSignals_router_events_in_total{stream_id=ingress}` |
 | Push leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=push-receiver}` |
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
+| SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
 
 Delivery is always counted on goSignals2. goSignals1's `events_out_total` is only
 incremented on a push acknowledgement, never on a poll, so it cannot be used for
@@ -82,7 +101,9 @@ Useful flags:
 | Flag | Purpose |
 |---|---|
 | `--events`, `--concurrency` | load size and parallel ingest connections |
-| `--mix alternate\|both\|push\|poll` | which audience(s) each SET carries |
+| `--mix alternate\|all\|push\|poll\|sstp` | which audience(s) each SET carries |
+| `--sstp-role initiator\|responder` | goSignals1's SSTP role, i.e. which node opens the HTTP connection |
+| `--issuer`, `--push-aud`, `--poll-aud`, `--sstp-aud` | issuer and per-leg audiences (URLs) |
 | `--pprof`, `--pprof-seconds` | fetch `debug/pprof/profile` from goSignals1 (`:6060`) and goSignals2 (`:6061`) during the run; files land in `bin/bench/pprof/` |
 | `--history <file>` | append a summary row to a Markdown table (see below) |
 | `--label` | free text stored with the result (what changed) |
@@ -95,6 +116,17 @@ Every run writes `bin/bench/bench-<timestamp>.json` with the full result
 
 Teardown of the poll receiver waits for its in-flight long poll to expire, so
 the last log line arrives about ten seconds after the summary.
+
+### Aborted runs
+
+Leftover streams are not harmless: they match the same audiences, so every
+SET reaches goSignals2 twice and the second arrival is dropped by JTI dedup
+and never counted on the stream the new run is watching. The symptom is a run
+that stalls short of 100% on every leg. The harness therefore records its
+streams in `bin/bench/streams-in-flight.json` while a run is live, tears them
+down on Ctrl-C, and on the next start deletes whatever a killed run left
+behind before building a fresh topology. `make dev-clean` is the fallback if
+the file is gone.
 
 ## Profiling with it
 
@@ -117,8 +149,8 @@ without any extra setup. For heap, goroutine or mutex profiles use
 [e2e-history.md](e2e-history.md) is the running log. Append to it with
 `--history docs/perf/e2e-history.md` and a `--label` naming the change, then
 commit the row with the change it measures. Rows are only comparable when
-events, concurrency, mix and machine class match, so keep the default sizes
-(`5000` / `16` / `alternate`) for the rows you intend to compare and use larger
+events, concurrency, mix, SSTP role and machine class match, so keep the
+default sizes (`5000` / `16` / `alternate`) for the rows you intend to compare and use larger
 runs for profiling.
 
 The dev stack is not a quiet environment: Delve, JSON logging at `DEBUG`, a
@@ -161,6 +193,49 @@ so consecutive pushes ride pooled keep-alive connections.
 | goSignals2 CPU in TLS handshakes | 70% | under 1% |
 
 Ingest and poll were unchanged within noise, as expected.
+
+### SSTP initiator went silent when it had nothing to send (fixed)
+
+The first SSTP runs delivered the opening batch and then stalled for the
+responder's full 30 s long-poll timeout before the rest arrived. Two dialer
+behaviours combined to cause it:
+
+- **No long poll when idle.** `SstpDialer.runCycle` skipped the POST
+  entirely when the outbound buffer was empty and no acks were owed, so an
+  idle initiator never parked a long poll on the responder and could not
+  learn about new inbound SETs until its next scheduled cycle. Per the
+  protocol the initiator always opens the cycle; an empty request with
+  `returnEvents=true` *is* the long poll. The guard is gone.
+- **Second push sent one batch per wake.** With the primary long poll held,
+  a buffer wake spawns one push-while-poll-held POST. Wakes that landed
+  while it was in flight were coalesced by the single-slot guard and then
+  lost, so everything queued during that POST waited until the primary poll
+  returned. `pushWhilePollHeld` now loops, claiming batch after batch, until
+  the outbound is empty or a batch is only partially acked.
+
+| Metric (300 events, concurrency 8, `--sstp-role initiator`) | Before | After |
+|---|---|---|
+| SSTP events/s | 3 | 110 |
+| SSTP end-to-end | 30.9 s | 0.91 s |
+
+### SSTP by role (measured)
+
+5000 events, concurrency 16, `alternate` mix (rows `sstp-leg-initiator` and
+`sstp-leg-responder`):
+
+| goSignals1 role | SSTP events/s | SSTP drain after ingest | Push / poll events/s |
+|---|---|---|---|
+| initiator (goSignals1 dials) | 106 | 11.1 s | 94 / 103 |
+| responder (goSignals2 dials) | 55 | 26.3 s | 94 / 100 |
+
+As initiator, SSTP keeps pace with the poll leg: the primary cycle and the
+push-while-poll-held cycle run concurrently, so acking one batch overlaps
+delivering the next. As responder, goSignals1 serves each batch inside a
+single long-poll handler: it acks the previous batch (one Mongo round trip
+per event) and then fetches and signs the next before answering, and the
+initiator only sends the next request once that answer lands. The same
+per-event Mongo cost that bounds push and poll therefore counts twice per
+batch on the responder path, which is the next thing to batch.
 
 ### Remaining hot spots (not yet addressed)
 
@@ -209,5 +284,8 @@ serialized per event inside the push loop and the poll handler:
   the per-event cost is far smaller than the push case was, but an idle pair
   still pays a full handshake every `BaseDelay`. The fix is to resolve the
   client once per pair loop, the way the poll loop does, or to cache the
-  static-token / TLS-only clients per server alias in `oauthClient`. The
-  harness has no SSTP leg yet, so this is not measured here.
+  static-token / TLS-only clients per server alias in `oauthClient`. With
+  the SSTP leg in place this can now be measured; at 100-event batches the
+  handshake is amortised well enough that it does not show in the numbers
+  above, so it stays a latency and idle-cost concern rather than a
+  throughput one.

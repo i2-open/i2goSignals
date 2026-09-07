@@ -14,10 +14,10 @@ import (
 
 // legResult records one downstream leg (goSignals1 -> goSignals2).
 type legResult struct {
-	Transport string `json:"transport"` // PUSH or POLL
+	Transport string `json:"transport"` // PUSH, POLL or SSTP
 	Audience  string `json:"audience"`
-	TxStream  string `json:"tx_stream"` // goSignals1 transmitter stream id
-	RxStream  string `json:"rx_stream"` // goSignals2 receiver stream id
+	TxStream  string `json:"tx_stream"` // goSignals1 transmitter stream id (SSTP: goSignals1 pair id)
+	RxStream  string `json:"rx_stream"` // goSignals2 receiver stream id (SSTP: goSignals2 inbound sid)
 	Expected  int    `json:"expected"`
 	Delivered int    `json:"delivered"`
 	// DrainSeconds is measured from the END of ingest until the last event
@@ -46,6 +46,10 @@ type benchResult struct {
 	Concurrency int       `json:"concurrency"`
 	Mix         string    `json:"mix"`
 	Issuer      string    `json:"issuer"`
+	// SstpRole is the SSTP HTTP role goSignals1 plays: "initiator" (goSignals1
+	// dials goSignals2 and carries the events in its requests) or "responder"
+	// (goSignals2 dials goSignals1 and receives the events in the responses).
+	SstpRole string `json:"sstp_role"`
 
 	IngressStream string `json:"ingress_stream"`
 
@@ -58,8 +62,9 @@ type benchResult struct {
 
 	Push legResult `json:"push"`
 	Poll legResult `json:"poll"`
+	Sstp legResult `json:"sstp"`
 
-	// TotalSeconds is from first push until both legs drained (or timeout).
+	// TotalSeconds is from first push until every leg drained (or timeout).
 	TotalSeconds float64 `json:"total_seconds"`
 	Success      bool    `json:"success"`
 	Notes        string  `json:"notes,omitempty"`
@@ -117,8 +122,8 @@ const historyHeader = `# End-to-end benchmark history
 Appended by ` + "`goSignalsBench --history`" + ` (see [e2e-benchmark.md](e2e-benchmark.md)).
 One row per run; compare like with like (same events, concurrency, mix and machine class).
 
-| Date (UTC) | Revision | Label | Events | Conc | Mix | Ingest ev/s | Ingest p50/p99 ms | Push ev/s | Push drain s | Poll ev/s | Poll drain s | Total s | OK |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Date (UTC) | Revision | Label | Events | Conc | Mix | Ingest ev/s | Ingest p50/p99 ms | Push ev/s | Push drain s | Poll ev/s | Poll drain s | SSTP role | SSTP ev/s | SSTP drain s | Total s | OK |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 `
 
 // appendHistory adds one Markdown table row to path, creating the file with
@@ -145,24 +150,35 @@ func appendHistory(path string, r *benchResult) error {
 	if !r.Success {
 		ok = "**no**"
 	}
-	row := fmt.Sprintf("| %s | %s | %s | %d | %d | %s | %.0f | %.1f / %.1f | %.0f | %.1f | %.0f | %.1f | %.1f | %s |\n",
+	row := fmt.Sprintf("| %s | %s | %s | %d | %d | %s | %.0f | %.1f / %.1f | %s | %s | %s | %s | %s | %s | %s | %.1f | %s |\n",
 		r.Timestamp.UTC().Format("2006-01-02 15:04"),
 		r.GitRevision, r.Label, r.Events, r.Concurrency, r.Mix,
 		r.IngestEventsPerSecond, r.IngestLatency.P50Ms, r.IngestLatency.P99Ms,
-		r.Push.EventsPerSecond, r.Push.DrainSeconds,
-		r.Poll.EventsPerSecond, r.Poll.DrainSeconds,
+		legCell(r.Push, "%.0f", r.Push.EventsPerSecond), legCell(r.Push, "%.1f", r.Push.DrainSeconds),
+		legCell(r.Poll, "%.0f", r.Poll.EventsPerSecond), legCell(r.Poll, "%.1f", r.Poll.DrainSeconds),
+		r.SstpRole,
+		legCell(r.Sstp, "%.0f", r.Sstp.EventsPerSecond), legCell(r.Sstp, "%.1f", r.Sstp.DrainSeconds),
 		r.TotalSeconds, ok)
 	_, err = f.WriteString(row)
 	return err
 }
 
+// legCell formats one history cell, or "-" when the leg carried no events
+// (single-audience mixes leave the other legs idle).
+func legCell(leg legResult, format string, v float64) string {
+	if leg.Expected == 0 {
+		return "-"
+	}
+	return fmt.Sprintf(format, v)
+}
+
 func (r *benchResult) printSummary() {
 	fmt.Printf("\n=== goSignalsBench result (%s) ===\n", r.Timestamp.Format(time.RFC3339))
-	fmt.Printf("events=%d concurrency=%d mix=%s issuer=%s\n", r.Events, r.Concurrency, r.Mix, r.Issuer)
+	fmt.Printf("events=%d concurrency=%d mix=%s issuer=%s sstp-role(goSignals1)=%s\n", r.Events, r.Concurrency, r.Mix, r.Issuer, r.SstpRole)
 	fmt.Printf("ingest : %.2fs  %.0f ev/s  errors=%d  latency p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms  counted=%d\n",
 		r.IngestSeconds, r.IngestEventsPerSecond, r.IngestErrors,
 		r.IngestLatency.P50Ms, r.IngestLatency.P95Ms, r.IngestLatency.P99Ms, r.IngestLatency.MaxMs, r.IngressCounted)
-	for _, leg := range []legResult{r.Push, r.Poll} {
+	for _, leg := range []legResult{r.Push, r.Poll, r.Sstp} {
 		fmt.Printf("%-6s : %d/%d delivered  e2e=%.2fs  drain-after-ingest=%.2fs  %.0f ev/s  complete=%v\n",
 			leg.Transport, leg.Delivered, leg.Expected, leg.EndToEndSeconds, leg.DrainSeconds, leg.EventsPerSecond, leg.Complete)
 	}

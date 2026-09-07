@@ -13,53 +13,67 @@ import (
 )
 
 // audMix selects which downstream audience(s) each generated SET carries. The
-// goSignals1 ingress stream accepts both audiences; the two transmitter
-// streams (push, poll) each match one, so the mix decides how the router fans
+// goSignals1 ingress stream accepts every audience; the three transmitter legs
+// (push, poll, sstp) each match one, so the mix decides how the router fans
 // events out.
 type audMix string
 
 const (
-	mixAlternate audMix = "alternate" // even events -> push audience, odd -> poll audience
-	mixBoth      audMix = "both"      // every event carries both audiences (2x fan-out)
+	mixAlternate audMix = "alternate" // round-robin: push, poll, sstp, push, ...
+	mixAll       audMix = "all"       // every event carries all three audiences (3x fan-out)
 	mixPush      audMix = "push"      // push audience only
 	mixPoll      audMix = "poll"      // poll audience only
+	mixSstp      audMix = "sstp"      // sstp audience only
 )
+
+// legCount is the number of downstream legs the harness builds.
+const legCount = 3
 
 func parseAudMix(s string) (audMix, error) {
 	switch audMix(s) {
-	case mixAlternate, mixBoth, mixPush, mixPoll:
+	case mixAlternate, mixAll, mixPush, mixPoll, mixSstp:
 		return audMix(s), nil
+	case "both": // pre-SSTP spelling of "all"
+		return mixAll, nil
 	}
-	return "", fmt.Errorf("unknown --mix %q (alternate|both|push|poll)", s)
+	return "", fmt.Errorf("unknown --mix %q (alternate|all|push|poll|sstp)", s)
 }
 
 // expected returns how many of n events each leg should deliver.
-func (m audMix) expected(n int) (push, poll int) {
+func (m audMix) expected(n int) (push, poll, sstp int) {
 	switch m {
 	case mixAlternate:
-		return (n + 1) / 2, n / 2
-	case mixBoth:
-		return n, n
+		return (n + 2) / legCount, (n + 1) / legCount, n / legCount
+	case mixAll:
+		return n, n, n
 	case mixPush:
-		return n, 0
+		return n, 0, 0
+	case mixPoll:
+		return 0, n, 0
 	default:
-		return 0, n
+		return 0, 0, n
 	}
 }
 
-func (m audMix) audiences(i int, pushAud, pollAud string) []string {
+func (m audMix) audiences(i int, pushAud, pollAud, sstpAud string) []string {
 	switch m {
 	case mixAlternate:
-		if i%2 == 0 {
+		switch i % legCount {
+		case 0:
 			return []string{pushAud}
+		case 1:
+			return []string{pollAud}
+		default:
+			return []string{sstpAud}
 		}
-		return []string{pollAud}
-	case mixBoth:
-		return []string{pushAud, pollAud}
+	case mixAll:
+		return []string{pushAud, pollAud, sstpAud}
 	case mixPush:
 		return []string{pushAud}
-	default:
+	case mixPoll:
 		return []string{pollAud}
+	default:
+		return []string{sstpAud}
 	}
 }
 
@@ -120,7 +134,7 @@ func buildEvent(i int, issuer string, aud []string, key *rsa.PrivateKey) (signed
 
 // buildEvents pre-signs all n SETs in parallel so client-side RSA signing is
 // excluded from the measured ingest window.
-func buildEvents(n int, issuer, pushAud, pollAud string, mix audMix, key *rsa.PrivateKey) ([]signedEvent, error) {
+func buildEvents(n int, issuer, pushAud, pollAud, sstpAud string, mix audMix, key *rsa.PrivateKey) ([]signedEvent, error) {
 	events := make([]signedEvent, n)
 	workers := runtime.GOMAXPROCS(0)
 	var wg sync.WaitGroup
@@ -135,7 +149,7 @@ func buildEvents(n int, issuer, pushAud, pollAud string, mix audMix, key *rsa.Pr
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				ev, err := buildEvent(i, issuer, mix.audiences(i, pushAud, pollAud), key)
+				ev, err := buildEvent(i, issuer, mix.audiences(i, pushAud, pollAud, sstpAud), key)
 				if err != nil {
 					errs <- fmt.Errorf("event %d: %w", i, err)
 					return
