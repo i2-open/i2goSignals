@@ -204,6 +204,21 @@ func (s *EventService) GetEvents(ctx context.Context, jtis []string) []*goSet.Se
 	return res
 }
 
+// GetEventRecords fetches the records behind jtis in one read. Unknown JTIs
+// are simply absent from the result, whose order is unspecified; callers
+// index it by Jti. A read error logs and returns nil.
+func (s *EventService) GetEventRecords(ctx context.Context, jtis []string) []*model.EventRecord {
+	if len(jtis) == 0 {
+		return nil
+	}
+	records, err := s.eventDAO.FindByJTIs(ctx, jtis)
+	if err != nil {
+		esLog.Error("Error getting event records", "error", err)
+		return nil
+	}
+	return records
+}
+
 func (s *EventService) GetEventRecord(ctx context.Context, jti string) *model.EventRecord {
 	rec, err := s.eventDAO.FindByJTI(ctx, jti)
 	if err != nil {

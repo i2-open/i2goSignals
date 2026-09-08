@@ -166,6 +166,10 @@ type router struct {
 	outboundWakesMu     sync.Mutex
 	backfillInterval    time.Duration
 	backfillBatch       int
+	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
+	// POSTs a push stream's lease holder keeps in flight at once. The batch
+	// the loop drains from the buffer per iteration is 4x this.
+	pushConcurrency int
 	// pollDefaultTimeoutSecs is the resolved I2SIG_POLL_DEFAULT_TIMEOUT
 	// applied to every EventPollBuffer constructed for the lifetime of this
 	// router. 0 means "no implicit long-poll" — receiver omitting timeoutSecs
@@ -348,6 +352,16 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		}
 	}
 	router.backfillBatch = backfillBatch
+
+	pushConcurrency := defaultPushConcurrency
+	if val := os.Getenv("I2SIG_PUSH_CONCURRENCY"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			pushConcurrency = i
+		} else {
+			eventLogger.Warn("Ignoring invalid I2SIG_PUSH_CONCURRENCY (want a positive integer)", "value", val)
+		}
+	}
+	router.pushConcurrency = pushConcurrency
 
 	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
 	eventLogger.Info("Poll long-poll timeouts resolved",
@@ -1469,21 +1483,30 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			if !ok {
 				return false // Buffer closed, stop entirely
 			}
-			jti := v.(string)
-			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, signingKey, kid, fencingToken)
-			signingKey, kid = newKey, newKid
+			// Drain whatever else is already buffered, up to the batch cap, so the
+			// batch's Mongo reads and acks are amortized and the worker pool has
+			// something to run in parallel. A quiet stream yields a batch of one
+			// and behaves exactly as the serial loop did.
+			jtis := drainPushBatch(v.(string), out, eventBuf, r.pushBatchMax())
+			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
+			res := r.pushBatch(jtis, stream, signingKey, kid, fencingToken)
+			signingKey, kid = res.key, res.kid
 
-			if cls.Class == goSetPush.ClassAccepted {
+			if res.acked > 0 {
 				// R1: a successful push is proof the stream is alive, so the T3
 				// idle clock starts over — verify pushes included.
 				idle.Reset()
+			}
+			if res.failedJti == "" {
 				continue
 			}
 
-			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
-			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
-			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idle)
+			// T1 reactive: dispatch the first failure into the right recovery mode (or
+			// disable, or rate-limit sleep). The lease heartbeat and backfill behavior is
+			// managed here so the recovery sub-loop doesn't have to know about either.
+			// Everything the batch did not get a 202 for is still pending and comes back
+			// through backfill once the buffer drains, exactly as a serial failure did.
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, res.failedJti, res.failedCls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -1751,75 +1774,209 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 	}
 }
 
-// prepareAndSendEvent fetches the event, hands it to the PushDelivery seam for a single
-// attempt (the seam owns RFC8935 §2.4 jws_signature_failed rotate-and-retry internally),
-// and acks if the receiver returned 202. Returns the final Classification along with the
-// (possibly-rotated) signing key and kid so the caller's subsequent pushes reuse them.
+// drainPushBatch collects up to max JTIs for one push batch: first, then
+// whatever the buffer still has queued. The buffer's goroutine hands JTIs out
+// one at a time on an unbuffered channel and re-arms between sends, so a
+// non-blocking receive right after a pop almost always sees nothing and a
+// batch would stay at one or two events. Cnt() says whether more is queued,
+// but it still counts a just-sent JTI until the goroutine trims it, so a
+// positive count is only a hint: each receive waits at most drainWait so a
+// stale count on an empty buffer costs a millisecond, never a hang. A closed
+// buffer ends the batch; the loop's next receive observes the close.
+func drainPushBatch(first string, out <-chan interface{}, eventBuf *buffer.EventPushBuffer, max int) []string {
+	jtis := []string{first}
+	var wait *time.Timer
+	for len(jtis) < max && eventBuf.Cnt() > 0 {
+		if wait == nil {
+			wait = time.NewTimer(drainWait)
+			defer wait.Stop()
+		} else {
+			wait.Reset(drainWait)
+		}
+		select {
+		case more, ok := <-out:
+			if !ok {
+				return jtis
+			}
+			jtis = append(jtis, more.(string))
+		case <-wait.C:
+			return jtis
+		}
+	}
+	return jtis
+}
+
+// drainWait bounds each wait inside drainPushBatch. Under load the buffer
+// goroutine re-arms in microseconds, so this only ever fires on a stale Cnt().
+const drainWait = time.Millisecond
+
+// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: RFC 8935 POSTs a
+// push stream keeps in flight at once (ADR 0035).
+const defaultPushConcurrency = 5
+
+// pushBatchMax bounds how many JTIs one loop iteration drains from the buffer.
+// It is also the ack-deferral window: on a crash mid-batch, up to this many
+// SETs the receiver already accepted are still pending and are resent.
+func (r *router) pushBatchMax() int {
+	if r.pushConcurrency < 1 {
+		return 4
+	}
+	return 4 * r.pushConcurrency
+}
+
+// pushBatchResult is what pushBatch hands back to runPushLoop.
+type pushBatchResult struct {
+	// acked counts SETs the batch acked: 202s plus subject-filter discards.
+	acked int
+	// failedJti / failedCls describe the first (in batch order) non-Accepted
+	// classification. failedJti is empty when every dispatched push was accepted.
+	failedJti string
+	failedCls goSetPush.Classification
+	// key / kid are the signing material the next batch should use — the
+	// seam's rotated key when a jws_signature_failed rotate-and-retry fired.
+	key crypto.Signer
+	kid string
+}
+
+// pushBatch delivers a batch of JTIs for one push stream: one read for the
+// event records, one subject-filter pass, up to pushConcurrency concurrent
+// single-attempt pushes through the PushDelivery seam, then one ack for every
+// SET that got a 202 (and every filtered-out discard).
 //
-// Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled
-// by the next backfill iteration once the caller has resolved any required recovery.
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
-	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-	if eventRecord == nil {
-		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
-		// success so the caller advances rather than entering recovery for a stale JTI.
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
-	}
-
+// RFC 8935 is one SET per POST and the 202 is that SET's acknowledgement, so
+// the pool runs whole request/response exchanges side by side; nothing is held
+// open across the batch. Delivery order inside a batch is therefore not the
+// buffer order — neither RFC 8935 nor SSF promises ordering, and receivers
+// dedupe on jti. On the first failure the pool stops taking new work; pushes
+// already in flight run to completion and their 202s are acked. Failed and
+// never-dispatched JTIs stay pending for backfill.
+func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) pushBatchResult {
 	sid := config.StreamConfiguration.Id
+	res := pushBatchResult{key: signingKey, kid: kid}
 
-	// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
-	// and discarded rather than pushed, so the pending buffer stays bounded
-	// (ADR-0002); the no-op success classification advances the push loop
-	// exactly as a stale/deleted JTI does. Operational events and a disabled
-	// feature always pass — Allows handles both internally.
-	// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is the
-	// primary StreamConfiguration, so this is the pair's transmit-side subject
-	// filter — there is no separate inbound/ingest-time filter.
-	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
-		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
-			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
-		}
-		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
 	}
 
-	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
-		Stream: config,
-		Event:  eventRecord,
-		Key:    signingKey,
-		Kid:    kid,
-	})
-	cls := outcome.Classification
-	signingKey, kid = outcome.Key, outcome.Kid
-
-	isVerifyPush := isOperationalVerify(eventRecord)
-
-	if cls.Class == goSetPush.ClassAccepted {
-		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
-			eventLogger.Error("PUSH-SRV: Error acking event", "sid", sid, "jti", jti, "error", err)
+	type item struct {
+		jti string
+		rec *model.EventRecord
+	}
+	work := make([]item, 0, len(jtis))
+	ackJtis := make([]string, 0, len(jtis))
+	for _, jti := range jtis {
+		rec := byJti[jti]
+		if rec == nil {
+			// Event was deleted between buffer pop and dispatch (e.g. operator reset).
+			// Nothing to push and nothing to ack; the loop simply advances.
+			continue
 		}
-		r.IncrementCounter(config, &eventRecord.Event, false)
-		if isVerifyPush && r.stats != nil {
-			r.stats.RecordIdleVerifyOutcome(sid, "acked")
+		// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
+		// and discarded rather than pushed, so the pending buffer stays bounded
+		// (ADR-0002). Operational events and a disabled feature always pass — Allows
+		// handles both internally. For an SSTP pair the outbound side is the primary
+		// StreamConfiguration, so this is the pair's transmit-side subject filter.
+		if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, rec) {
+			eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+			ackJtis = append(ackJtis, jti)
+			continue
 		}
-		return cls, signingKey, kid
+		work = append(work, item{jti: jti, rec: rec})
 	}
 
-	eventLogger.Warn("PUSH-SRV: push failed",
-		"sid", sid,
-		"jti", jti,
-		"errClass", cls.Class.String(),
-		"rfc8935ErrCode", cls.RFC8935ErrCode,
-		"retryAfter", cls.NextDelay,
-	)
-	if r.stats != nil {
-		r.stats.RecordPushFailure(sid, cls.Class.String())
-		if isVerifyPush {
-			r.stats.RecordIdleVerifyOutcome(sid, "failed")
+	outcomes := make([]*delivery.PushOutcome, len(work))
+	if len(work) > 0 {
+		workers := r.pushConcurrency
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(work) {
+			workers = len(work)
+		}
+		var next atomic.Int64
+		var stopped atomic.Bool
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					idx := int(next.Add(1) - 1)
+					if idx >= len(work) || stopped.Load() {
+						return
+					}
+					out := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
+						Stream: config,
+						Event:  work[idx].rec,
+						Key:    signingKey,
+						Kid:    kid,
+					})
+					outcomes[idx] = &out
+					if out.Classification.Class != goSetPush.ClassAccepted {
+						stopped.Store(true)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	for i, it := range work {
+		out := outcomes[i]
+		if out == nil {
+			continue // never dispatched: still pending, backfill re-pulls it
+		}
+		if out.Key != nil && out.Key != signingKey {
+			res.key, res.kid = out.Key, out.Kid
+		}
+		cls := out.Classification
+		isVerifyPush := isOperationalVerify(it.rec)
+		if cls.Class == goSetPush.ClassAccepted {
+			ackJtis = append(ackJtis, it.jti)
+			r.IncrementCounter(config, &it.rec.Event, false)
+			if isVerifyPush && r.stats != nil {
+				r.stats.RecordIdleVerifyOutcome(sid, "acked")
+			}
+			continue
+		}
+		eventLogger.Warn("PUSH-SRV: push failed",
+			"sid", sid,
+			"jti", it.jti,
+			"errClass", cls.Class.String(),
+			"rfc8935ErrCode", cls.RFC8935ErrCode,
+			"retryAfter", cls.NextDelay,
+		)
+		if r.stats != nil {
+			r.stats.RecordPushFailure(sid, cls.Class.String())
+			if isVerifyPush {
+				r.stats.RecordIdleVerifyOutcome(sid, "failed")
+			}
+		}
+		if res.failedJti == "" {
+			res.failedJti, res.failedCls = it.jti, cls
 		}
 	}
-	return cls, signingKey, kid
+
+	if len(ackJtis) > 0 {
+		if err := r.eventService.AckEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking events", "sid", sid, "count", len(ackJtis), "error", err)
+		}
+		res.acked = len(ackJtis)
+	}
+	return res
+}
+
+// prepareAndSendEvent pushes a single JTI through pushBatch and reports its
+// Classification along with the (possibly-rotated) signing key and kid. A
+// deleted or filtered-out event reports Accepted, as a no-op the caller
+// advances past.
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
+	res := r.pushBatch([]string{jti}, config, signingKey, kid, fencingToken)
+	if res.failedJti != "" {
+		return res.failedCls, res.key, res.kid
+	}
+	return goSetPush.Classification{Class: goSetPush.ClassAccepted}, res.key, res.kid
 }
 
 // isOperationalVerify returns true when the event was both submitted via the operational-event

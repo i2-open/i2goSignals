@@ -210,6 +210,7 @@ Defaults shown as Go `time.Duration` strings (e.g. `1s`, `5m`, `6h`).
 |---------------------------------------|------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_PUSH_BACKFILL_INTERVAL`        | Interval at which the transmitter re-reads pending JTIs from MongoDB when its in-memory buffer is empty.                     | `1s`    |
 | `I2SIG_PUSH_BACKFILL_BATCH`           | Maximum number of events fetched in one backfill operation.                                                                  | `100`   |
+| `I2SIG_PUSH_CONCURRENCY`              | RFC 8935 POSTs a push stream keeps in flight at once (worker pool per stream). The loop drains up to 4x this many buffered JTIs per batch, reads and acks them as a batch, and stops dispatching on the first failure. Delivery order inside a batch is not guaranteed. See ADR 0035. | `5`     |
 | `I2SIG_PUSH_RETRY_BASE_DELAY`         | Initial delay between `/status` probes when push enters TransportBackoff recovery (transport errors / HTTP 5xx).             | `1s`    |
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR`     | Multiplier applied to the delay after each TransportBackoff probe.                                                           | `2.0`   |
 | `I2SIG_PUSH_RETRY_MAX_DELAY`          | Cap on a single TransportBackoff sleep — exponential growth never exceeds this between probes.                               | `5m`    |
