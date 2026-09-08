@@ -41,7 +41,9 @@ import (
 //     mTLS. The Server's own credential is NOT applied here (would
 //     double up on the per-pair bearer, breaking ADR-0066 precedence).
 //     c. When PeerServerAlias is empty or does not resolve, the transport
-//     is the default http.Client with a system-CA check.
+//     is the process-wide pooled SSTP client (issue #289) — one shared
+//     connection pool with the deployment CA installed once, rather than
+//     a fresh client (and fresh TLS handshake) per dial cycle.
 //
 //  2. Push / poll (stream.SstpMethod == nil): verbatim extraction of the
 //     pre-slice logic — TxAlias → TxToken → per-stream TxTLS → polling
@@ -67,7 +69,7 @@ func (sa *SignalsApplication) ResolveTransmitterClient(ctx context.Context, stre
 //     drives the Authorization header (via oauthClient.GetClientForServer,
 //     which handles the header client-side).
 //   - When neither a bearer nor a resolvable alias is present, the
-//     transport is the default http.Client + system-CA check.
+//     transport is the shared pooled SSTP client (issue #289).
 func (sa *SignalsApplication) resolveSstpBusinessClient(ctx context.Context, stream *model.StreamStateRecord) (*http.Client, string, func(), error) {
 	noop := func() {}
 	method := stream.SstpMethod
@@ -111,9 +113,12 @@ func (sa *SignalsApplication) resolveSstpBusinessClient(ctx context.Context, str
 		}
 	}
 
-	client := &http.Client{}
-	tlsSupport.CheckCaInstalled(client)
-	return client, auth, noop, nil
+	// No alias to draw posture from: the process-wide pooled SSTP client
+	// (issue #289). This is the hot path for locally provisioned pairs (Q31),
+	// so building a client here per cycle handed every exchange an empty
+	// connection pool and a fresh CA-PEM read — a guaranteed TLS handshake per
+	// dial. The shared client is never closed by a caller, so noop stays correct.
+	return sstpResolverHTTPClient(), auth, noop, nil
 }
 
 // hasAuthMechanism reports whether the Server carries at least one credential
