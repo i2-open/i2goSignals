@@ -292,6 +292,87 @@ func TestEventDAOMemory_MarkDelivered(t *testing.T) {
 	// This is acceptable for a unit test
 }
 
+// TestEventDAOMemory_RemovePendingMany asserts one batched ack removes exactly
+// the pending entries named, leaves the rest of the stream and other streams
+// untouched, skips unknown JTIs, and treats an empty batch as a no-op.
+func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+	for _, jti := range []string{"a-1", "a-2", "a-3", "b-1"} {
+		_ = dao.Insert(ctx, &model.EventRecord{Jti: jti, SortTime: time.Now()})
+	}
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA)
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB)
+
+	removed, err := dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
+	if err != nil {
+		t.Fatalf("RemovePendingMany failed: %v", err)
+	}
+	got := map[string]bool{}
+	for _, ev := range removed {
+		if ev.StreamId != streamA {
+			t.Errorf("removed entry %s carries stream %s, want %s", ev.Jti, ev.StreamId, streamA)
+		}
+		got[ev.Jti] = true
+	}
+	if len(got) != 2 || !got["a-1"] || !got["a-3"] {
+		t.Fatalf("removed = %v, want exactly a-1 and a-3", removed)
+	}
+
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	if len(jtis) != 1 || jtis[0] != "a-2" {
+		t.Errorf("stream A pending = %v, want [a-2]", jtis)
+	}
+	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	if len(jtis) != 2 {
+		t.Errorf("stream B pending = %v, must be untouched", jtis)
+	}
+
+	removed, err = dao.RemovePendingMany(ctx, nil, streamA)
+	if err != nil || removed != nil {
+		t.Errorf("empty batch: got (%v, %v), want (nil, nil)", removed, err)
+	}
+	removed, err = dao.RemovePendingMany(ctx, []string{"a-2"}, ids.NewObjectID())
+	if err != nil || removed != nil {
+		t.Errorf("unknown stream: got (%v, %v), want (nil, nil)", removed, err)
+	}
+}
+
+// TestEventDAOMemory_MarkDeliveredMany asserts a bulk delivered write is
+// visible through ListDeliveredForStream with the shared ackDate.
+func TestEventDAOMemory_MarkDeliveredMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamID := ids.NewObjectID()
+	ackDate := time.Now()
+
+	if err := dao.MarkDeliveredMany(ctx, nil, ackDate); err != nil {
+		t.Fatalf("empty MarkDeliveredMany failed: %v", err)
+	}
+	err := dao.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{
+		{Jti: "d-1", StreamId: streamID},
+		{Jti: "d-2", StreamId: streamID},
+	}, ackDate)
+	if err != nil {
+		t.Fatalf("MarkDeliveredMany failed: %v", err)
+	}
+
+	delivered, err := dao.ListDeliveredForStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("ListDeliveredForStream failed: %v", err)
+	}
+	if len(delivered) != 2 {
+		t.Fatalf("delivered count = %d, want 2", len(delivered))
+	}
+	for _, d := range delivered {
+		if !d.AckDate.Equal(ackDate) {
+			t.Errorf("jti %s ackDate = %v, want %v", d.Jti, d.AckDate, ackDate)
+		}
+	}
+}
+
 func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()

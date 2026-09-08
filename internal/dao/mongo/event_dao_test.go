@@ -322,3 +322,64 @@ func (s *EventDAOMongoSuite) TestAddPendingMany_Order() {
 	s.Require().NoError(err)
 	s.Equal(int64(len(want)), total, "empty AddPendingMany must be a no-op")
 }
+
+// TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly
+// the named JTIs of the named stream, returns them, and leaves an identical
+// JTI pending on another stream.
+func (s *EventDAOMongoSuite) TestRemovePendingMany_SubsetScopedToStream() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB))
+
+	removed, err := s.dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
+	s.Require().NoError(err)
+	got := make([]string, 0, len(removed))
+	for _, ev := range removed {
+		s.Equal(streamA, ev.StreamId)
+		got = append(got, ev.Jti)
+	}
+	s.ElementsMatch([]string{"a-1", "a-3"}, got)
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(1), total)
+	s.Equal([]string{"a-2"}, jtis)
+
+	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(2), total, "other stream must be untouched")
+
+	removed, err = s.dao.RemovePendingMany(ctx, nil, streamA)
+	s.Require().NoError(err)
+	s.Nil(removed, "empty RemovePendingMany must be a no-op")
+}
+
+// TestMarkDeliveredMany_ListsDelivered: delivered writes, single and bulk, are
+// visible via ListDeliveredForStream with their JTI, stream and ackDate. This
+// guards the document shape: an embedded-struct deliveredDoc once persisted
+// only ackDate, leaving the retention purge blind to every JTI.
+func (s *EventDAOMongoSuite) TestMarkDeliveredMany_ListsDelivered() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	ackDate := time.Now().Truncate(time.Millisecond)
+
+	s.Require().NoError(s.dao.MarkDeliveredMany(ctx, nil, ackDate))
+	s.Require().NoError(s.dao.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{
+		{Jti: "d-1", StreamId: streamID},
+		{Jti: "d-2", StreamId: streamID},
+	}, ackDate))
+	s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "d-3", StreamId: streamID}, ackDate))
+
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamID)
+	s.Require().NoError(err)
+	s.Require().Len(delivered, 3)
+	got := make([]string, 0, 3)
+	for _, d := range delivered {
+		s.Equal(streamID, d.StreamId)
+		s.True(d.AckDate.Equal(ackDate), "jti %s ackDate = %v, want %v", d.Jti, d.AckDate, ackDate)
+		got = append(got, d.Jti)
+	}
+	s.ElementsMatch([]string{"d-1", "d-2", "d-3"}, got)
+}

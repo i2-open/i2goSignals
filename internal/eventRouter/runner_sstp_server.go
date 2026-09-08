@@ -71,9 +71,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// cross-node ack and redeliver forever.
 		buf := r.sstpServerBufferFor(txSid)
 		buf.AckEvents(inbound.Ack)
-		for _, jti := range inbound.Ack {
-			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, inbound.Ack, txSid, 0)
 	}
 
 	// Outbound setErr consumption: the peer's request also carries, in
@@ -111,9 +109,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		if len(disposition.Clear) > 0 {
 			buf := r.sstpServerBufferFor(txSid)
 			buf.AckEvents(disposition.Clear)
-			for _, jti := range disposition.Clear {
-				_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
-			}
+			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, 0)
 		}
 		if len(disposition.Fatal) > 0 {
 			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing outbound",

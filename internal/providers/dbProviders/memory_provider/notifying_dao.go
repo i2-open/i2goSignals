@@ -158,6 +158,17 @@ func (d *notifyingEventDAO) RemovePending(ctx context.Context, jti string, strea
 	return ev, nil
 }
 
+func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	evs, err := d.inner.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil {
+		return evs, err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return evs, nil
+}
+
 func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
 	n, err := d.inner.ClearPendingForStream(ctx, streamID)
 	if err != nil {
@@ -172,6 +183,16 @@ func (d *notifyingEventDAO) MarkDelivered(ctx context.Context, event *interfaces
 		return err
 	}
 	d.notify()
+	return nil
+}
+
+func (d *notifyingEventDAO) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
+	if err := d.inner.MarkDeliveredMany(ctx, events, ackDate); err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		d.notify()
+	}
 	return nil
 }
 

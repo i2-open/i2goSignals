@@ -490,20 +490,21 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
 	for _, jti := range ackSet {
-		ev := sentByJti[jti]
-		if ev == nil {
+		if sentByJti[jti] == nil {
 			continue // ack for a JTI we did not send this cycle — ignore.
 		}
-		_ = r.eventService.AckEvent(r.ctx, jti, sid, fencingToken)
-		r.IncrementCounter(stream, &ev.Event, false)
 		ackedJtis = append(ackedJtis, jti)
 		count++
 	}
 
-	// Finding #1: remove the confirmed-delivered SETs from the outbound
-	// buffer so GetEvents (copy-only) never re-hands them out, and clear
-	// their in-flight claim.
+	// Finding #1: ack the confirmed-delivered SETs in the provider as one
+	// batch, remove them from the outbound buffer so GetEvents (copy-only)
+	// never re-hands them out, and clear their in-flight claim.
 	if len(ackedJtis) > 0 {
+		_ = r.eventService.AckEvents(r.ctx, ackedJtis, sid, fencingToken)
+		for _, jti := range ackedJtis {
+			r.IncrementCounter(stream, &sentByJti[jti].Event, false)
+		}
 		if eventBuf != nil {
 			eventBuf.AckEvents(ackedJtis)
 		}

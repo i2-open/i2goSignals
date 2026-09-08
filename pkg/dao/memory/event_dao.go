@@ -230,6 +230,36 @@ func (d *EventDAOMemory) RemovePending(_ context.Context, jti string, streamID s
 	return nil, nil
 }
 
+// RemovePendingMany removes every pending entry of streamID whose JTI is in
+// jtis under a single lock acquisition and returns the removed entries.
+func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	pending, ok := d.pendingEvents[streamID]
+	if !ok {
+		return nil, nil
+	}
+	want := make(map[string]struct{}, len(jtis))
+	for _, jti := range jtis {
+		want[jti] = struct{}{}
+	}
+	var removed []interfaces.DeliverableEvent
+	var newPending []interfaces.DeliverableEvent
+	for _, event := range pending {
+		if _, acked := want[event.Jti]; acked {
+			removed = append(removed, event)
+		} else {
+			newPending = append(newPending, event)
+		}
+	}
+	d.pendingEvents[streamID] = newPending
+	return removed, nil
+}
+
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -248,6 +278,24 @@ func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.Deli
 		AckDate:          ackDate,
 	}
 	d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], delivered)
+	return nil
+}
+
+// MarkDeliveredMany appends every event to its stream's delivered list under a
+// single lock acquisition.
+func (d *EventDAOMemory) MarkDeliveredMany(_ context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
+	if len(events) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, event := range events {
+		d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], interfaces.DeliveredEvent{
+			DeliverableEvent: event,
+			AckDate:          ackDate,
+		})
+	}
 	return nil
 }
 

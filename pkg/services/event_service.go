@@ -245,6 +245,30 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 	return nil
 }
 
+// AckEvents acknowledges jtis for streamID as one batch: the pending entries
+// are removed and recorded as delivered in a bounded number of DAO round trips
+// rather than three per JTI. A JTI not pending for the stream is ignored,
+// exactly as AckEvent ignores it. An empty jtis is a no-op.
+func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
+	// TODO: Use fencingToken to verify lease ownership before marking delivered
+	if len(jtis) == 0 {
+		return nil
+	}
+	events, err := s.eventDAO.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil {
+		esLog.Error("Error removing pending events", "count", len(jtis), "streamID", streamID, "error", err)
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	if err = s.eventDAO.MarkDeliveredMany(ctx, events, time.Now()); err != nil {
+		esLog.Error("Error marking events as delivered", "count", len(events), "streamID", streamID, "error", err)
+		return err
+	}
+	return nil
+}
+
 func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID string)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {

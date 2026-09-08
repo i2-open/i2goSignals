@@ -1224,9 +1224,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	if len(params.Acks) > 0 {
 		pollBuffer.AckEvents(params.Acks)
-		for _, jti := range params.Acks {
-			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, params.Acks, sid, 0)
 	}
 
 	if len(params.SetErrs) > 0 {
@@ -1235,9 +1233,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis = append(jtis, jti)
 		}
 		pollBuffer.AckEvents(jtis)
-		for _, jti := range jtis {
-			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, jtis, sid, 0)
 	}
 
 	if state.Status != model.StreamStateEnabled {

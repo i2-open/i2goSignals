@@ -79,10 +79,20 @@ type EventDAO interface {
 	AddPendingMany(ctx context.Context, jtis []string, streamID string) error
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
 	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
+	// RemovePendingMany removes every entry of jtis that is pending for
+	// streamID and returns the removed entries (a subset of jtis, order
+	// unspecified). A JTI not pending for the stream is skipped, exactly as
+	// RemovePending returns nil for it. Equivalent to RemovePending per JTI
+	// but a bounded number of round trips. An empty jtis returns (nil, nil).
+	RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]DeliverableEvent, error)
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)
 
 	// Delivered events
 	MarkDelivered(ctx context.Context, event *DeliverableEvent, ackDate time.Time) error
+	// MarkDeliveredMany records every event as delivered at ackDate as one
+	// bulk write; equivalent to MarkDelivered per event. An empty events is a
+	// no-op.
+	MarkDeliveredMany(ctx context.Context, events []DeliverableEvent, ackDate time.Time) error
 
 	// --- Ack-anchored retention purge + occupancy sampling (ADR 0055) ---
 
