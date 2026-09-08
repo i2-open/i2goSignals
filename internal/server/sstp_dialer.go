@@ -1401,7 +1401,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	// AC 5: egress signing is the SINGLE consolidated site. Sign FIRST so a
 	// failure short-circuits before any HTTP work happens; the caller then
 	// halts the dial cycle rather than sending an unsigned SET.
-	sets, signErr := buildSstpSets(stream, events, key, kid)
+	sets, signErr := buildSstpSets(stream, events, key, kid, d.outbound.SignConcurrency())
 	if signErr != nil {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, signErr
 	}
@@ -1466,7 +1466,8 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 
 // buildSstpSets renders each outbound event to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer
-// key otherwise (AC 5 — consolidated egress-signing site).
+// key otherwise (AC 5 — consolidated egress-signing site). Signing fans out
+// across up to workers goroutines (eventRouter.SignSets, ADR 0036).
 //
 // PRD #49 slice 2c AC 5: a signing failure returns an error rather than
 // silently skipping the JTI. Missing key material for a publish-mode pair
@@ -1475,7 +1476,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // rather than dropping SETs onto the wire with no signature. Forward-mode
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string) (map[string]string, error) {
+func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int) (map[string]string, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -1485,6 +1486,7 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		return nil, fmt.Errorf("sstp: no signing key for stream %s (issuer %s)", cfg.Id, cfg.Iss)
 	}
 	sets := make(map[string]string, len(events))
+	work := make([]*model.EventRecord, 0, len(events))
 	for _, ev := range events {
 		if ev == nil {
 			continue
@@ -1493,18 +1495,27 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 			sets[ev.Jti] = ev.Original
 			continue
 		}
+		work = append(work, ev)
+	}
+	if len(work) == 0 {
+		return sets, nil
+	}
+	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	signed := eventRouter.SignSets(work, workers, func(ev *model.EventRecord) (string, error) {
 		token := &ev.Event
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), key)
-		if err != nil {
+		return token.JWS(method, key)
+	})
+	for i, ev := range work {
+		if signed[i].Err != nil {
 			// AC 5: signing failure is an ERROR — halt the dial cycle
 			// rather than send an unsigned SET (or drop it silently).
-			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, err)
+			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, signed[i].Err)
 		}
-		sets[ev.Jti] = signed
+		sets[ev.Jti] = signed[i].JWS
 	}
 	return sets, nil
 }

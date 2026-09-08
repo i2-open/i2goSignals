@@ -14,7 +14,7 @@ import (
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
-// concurrencyProbe is a signPollSets sign func that holds each call for
+// concurrencyProbe is a SignSets sign func that holds each call for
 // `hold` and records the peak number of overlapping calls (ADR 0036).
 type concurrencyProbe struct {
 	mu       sync.Mutex
@@ -51,38 +51,38 @@ func probeRecords(n int) []*model.EventRecord {
 	return recs
 }
 
-// TestSignPollSets_FansOutInInputOrder: a pool of four signs more than one
+// TestSignSets_FansOutInInputOrder: a pool of four signs more than one
 // SET at a time, never more than four, and the results line up with the input.
-func TestSignPollSets_FansOutInInputOrder(t *testing.T) {
+func TestSignSets_FansOutInInputOrder(t *testing.T) {
 	recs := probeRecords(12)
 	probe := &concurrencyProbe{hold: 20 * time.Millisecond}
 
-	out := signPollSets(recs, 4, probe.sign)
+	out := SignSets(recs, 4, probe.sign)
 
 	require.Len(t, out, len(recs))
 	for i, rec := range recs {
-		require.NoError(t, out[i].err)
-		require.Equal(t, "jws:"+rec.Jti, out[i].jws)
+		require.NoError(t, out[i].Err)
+		require.Equal(t, "jws:"+rec.Jti, out[i].JWS)
 	}
 	require.LessOrEqual(t, probe.peak, 4, "pool never exceeds the configured concurrency")
 	require.GreaterOrEqual(t, probe.peak, 2, "pool actually signs side by side (peak %d)", probe.peak)
 }
 
-// TestSignPollSets_ConcurrencyOneIsSerial: I2SIG_POLL_SIGN_CONCURRENCY=1 never
+// TestSignSets_ConcurrencyOneIsSerial: I2SIG_SIGN_CONCURRENCY=1 never
 // overlaps two signatures, and a failed signature is reported in its slot
 // without disturbing the others.
-func TestSignPollSets_ConcurrencyOneIsSerial(t *testing.T) {
+func TestSignSets_ConcurrencyOneIsSerial(t *testing.T) {
 	recs := probeRecords(5)
 	probe := &concurrencyProbe{hold: 2 * time.Millisecond, failJti: "jti-2"}
 
-	out := signPollSets(recs, 1, probe.sign)
+	out := SignSets(recs, 1, probe.sign)
 
 	require.Equal(t, 1, probe.peak)
-	require.Error(t, out[2].err)
-	require.Empty(t, out[2].jws)
+	require.Error(t, out[2].Err)
+	require.Empty(t, out[2].JWS)
 	for _, i := range []int{0, 1, 3, 4} {
-		require.NoError(t, out[i].err)
-		require.Equal(t, "jws:"+recs[i].Jti, out[i].jws)
+		require.NoError(t, out[i].Err)
+		require.Equal(t, "jws:"+recs[i].Jti, out[i].JWS)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestSignPollSets_ConcurrencyOneIsSerial(t *testing.T) {
 // breaking the batch.
 func TestPollBatch_ResignsWholeBatch(t *testing.T) {
 	h := newFilterPushRouter(t)
-	require.Positive(t, h.router.pollSignConcurrency)
+	require.Positive(t, h.router.signConcurrency)
 
 	stream := h.createPollStream(t, model.DefaultSubjectsAll)
 	stream.StreamConfiguration.RouteMode = model.RouteModePublish

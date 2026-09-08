@@ -108,13 +108,25 @@ func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventR
 
 func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.EventRecord, error) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	var records []*model.EventRecord
 	for _, jti := range jtis {
 		if eventRec, ok := d.events[jti]; ok {
 			copyRec := *eventRec
 			records = append(records, &copyRec)
+		}
+	}
+	useDisk := d.useDisk
+	d.mu.RUnlock()
+
+	// Same reload as FindByJTI: with disk persistence the in-memory record
+	// drops Original, which forward-mode delivery sends verbatim.
+	if useDisk {
+		for i, rec := range records {
+			if rec.Original == "" {
+				if loaded, err := d.loadEventFromDisk(rec.Jti); err == nil {
+					records[i] = loaded
+				}
+			}
 		}
 	}
 	return records, nil

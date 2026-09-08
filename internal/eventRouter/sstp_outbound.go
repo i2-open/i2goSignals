@@ -106,6 +106,12 @@ type SstpOutbound interface {
 	// and the primary drain use the same batch size as push and poll.
 	BackfillBatch() int
 
+	// SignConcurrency is the router-configured I2SIG_SIGN_CONCURRENCY: how
+	// many SETs the dialer re-signs side by side when it builds one outbound
+	// SSTP message (ADR 0036). The same knob sizes the poll transmitter's and
+	// the SSTP responder's signing pools.
+	SignConcurrency() int
+
 	// Ctx returns the router's shutdown context. The dialer parents every
 	// cycle context on it so router.Shutdown() cancels in-flight cycles
 	// (Q14.a shutdown handoff).
@@ -248,6 +254,10 @@ func (r *router) BackfillBatch() int {
 	return r.backfillBatch
 }
 
+func (r *router) SignConcurrency() int {
+	return r.signConcurrency
+}
+
 func (r *router) Ctx() context.Context {
 	return r.ctx
 }
@@ -350,18 +360,21 @@ func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer
 }
 
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to
-// flush, skipping any that have since been deleted.
+// flush, in the claimed order, skipping any that have since been deleted.
+// One GetEventRecords read serves the whole batch (ADR 0036).
 func (r *router) resolveSstpEventsByJti(jtis []string) []*model.EventRecord {
 	if len(jtis) == 0 {
 		return nil
 	}
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
+	}
 	events := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
-		rec := r.eventService.GetEventRecord(r.ctx, jti)
-		if rec == nil {
-			continue
+		if rec := byJti[jti]; rec != nil {
+			events = append(events, rec)
 		}
-		events = append(events, rec)
 	}
 	return events
 }

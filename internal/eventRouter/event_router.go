@@ -171,9 +171,10 @@ type router struct {
 	// POSTs a push stream's lease holder keeps in flight at once. The batch
 	// the loop drains from the buffer per iteration is 4x this.
 	pushConcurrency int
-	// pollSignConcurrency is the resolved I2SIG_POLL_SIGN_CONCURRENCY: how
-	// many SETs one poll response signs side by side (ADR 0036).
-	pollSignConcurrency int
+	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
+	// one outbound message (a poll response or either SSTP leg) re-signs side
+	// by side (ADR 0036).
+	signConcurrency int
 	// pollDefaultTimeoutSecs is the resolved I2SIG_POLL_DEFAULT_TIMEOUT
 	// applied to every EventPollBuffer constructed for the lifetime of this
 	// router. 0 means "no implicit long-poll" — receiver omitting timeoutSecs
@@ -367,15 +368,15 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	router.pushConcurrency = pushConcurrency
 
-	pollSignConcurrency := runtime.GOMAXPROCS(0)
-	if val := os.Getenv("I2SIG_POLL_SIGN_CONCURRENCY"); val != "" {
+	signConcurrency := runtime.GOMAXPROCS(0)
+	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
 		if i, err := strconv.Atoi(val); err == nil && i > 0 {
-			pollSignConcurrency = i
+			signConcurrency = i
 		} else {
-			eventLogger.Warn("Ignoring invalid I2SIG_POLL_SIGN_CONCURRENCY (want a positive integer)", "value", val)
+			eventLogger.Warn("Ignoring invalid I2SIG_SIGN_CONCURRENCY (want a positive integer)", "value", val)
 		}
 	}
-	router.pollSignConcurrency = pollSignConcurrency
+	router.signConcurrency = signConcurrency
 
 	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
 	eventLogger.Info("Poll long-poll timeouts resolved",
@@ -1318,7 +1319,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 // assemblePollResponse builds the "sets" member of one RFC 8936 poll response:
 // one read for the batch's records, one subject-filter pass whose discards are
 // acked together, then the surviving records are re-signed across a worker
-// pool of pollSignConcurrency (forward mode returns the stored JWS unchanged).
+// pool of signConcurrency (forward mode returns the stored JWS unchanged).
 // A JTI whose record is gone is skipped and left in the buffer; a SET that
 // fails to sign is left out of this response and stays pending (ADR 0036).
 func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, jtis []string, forwardMode bool, key crypto.Signer, kid string) map[string]string {
@@ -1363,7 +1364,7 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 
 	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
 	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
-	signed := signPollSets(work, r.pollSignConcurrency, func(rec *model.EventRecord) (string, error) {
+	signed := SignSets(work, r.signConcurrency, func(rec *model.EventRecord) (string, error) {
 		token := &rec.Event
 		token.Issuer = iss
 		token.Audience = aud
@@ -1372,35 +1373,36 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 		return token.JWS(method, key)
 	})
 	for i, rec := range work {
-		if signed[i].err != nil {
-			eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "jti", rec.Jti, "error", signed[i].err)
+		if signed[i].Err != nil {
+			eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "jti", rec.Jti, "error", signed[i].Err)
 			continue
 		}
-		sets[rec.Jti] = signed[i].jws
+		sets[rec.Jti] = signed[i].JWS
 	}
 	return sets
 }
 
-// signedSet is one signPollSets result, positionally matching its input.
-type signedSet struct {
-	jws string
-	err error
+// SignedSet is one SignSets result, positionally matching its input.
+type SignedSet struct {
+	JWS string
+	Err error
 }
 
-// signPollSets runs sign over recs with up to workers goroutines and returns
-// the results in input order. Signing is CPU-bound (an RS256 signature costs
-// about a millisecond) and a poll response used to sign every SET in series
-// on the handler goroutine, so a large response spent nearly all its time on
+// SignSets runs sign over recs with up to workers goroutines and returns the
+// results in input order. Signing is CPU-bound (an RS256 signature costs
+// about a millisecond) and every outbound leg (RFC 8936 poll response, SSTP
+// responder response, SSTP initiator request) used to sign its batch in
+// series on one goroutine, so a large message spent nearly all its time on
 // one core (ADR 0036). Each record is a distinct copy from the DAO read and
 // the signer is read-only, so the workers share nothing.
-func signPollSets(recs []*model.EventRecord, workers int, sign func(*model.EventRecord) (string, error)) []signedSet {
-	out := make([]signedSet, len(recs))
+func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventRecord) (string, error)) []SignedSet {
+	out := make([]SignedSet, len(recs))
 	if workers > len(recs) {
 		workers = len(recs)
 	}
 	if workers <= 1 {
 		for i, rec := range recs {
-			out[i].jws, out[i].err = sign(rec)
+			out[i].JWS, out[i].Err = sign(rec)
 		}
 		return out
 	}
@@ -1415,7 +1417,7 @@ func signPollSets(recs []*model.EventRecord, workers int, sign func(*model.Event
 				if idx >= len(recs) {
 					return
 				}
-				out[idx].jws, out[idx].err = sign(recs[idx])
+				out[idx].JWS, out[idx].Err = sign(recs[idx])
 			}
 		}()
 	}

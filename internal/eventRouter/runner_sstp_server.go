@@ -229,7 +229,11 @@ func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
 
 // buildSstpOutboundSets renders each outbound JTI to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer key
-// otherwise. Mirrors the poll-transmitter's signing path (PollStreamHandler).
+// otherwise. Same shape as the poll transmitter's assemblePollResponse: one
+// read for the batch's records, then the re-signing fans out across the
+// signConcurrency pool (ADR 0036). A JTI whose record is gone is skipped and
+// stays in the buffer; a SET that fails to sign is left out of this response
+// and stays pending.
 func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) map[string]string {
 	forward := rec.GetRouteMode() == model.RouteModeForward
 	var key crypto.Signer
@@ -238,9 +242,15 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, rec.StreamConfiguration.SigningAlg)
 	}
 
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, eventRecord := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[eventRecord.Jti] = eventRecord
+	}
+
 	sets := make(map[string]string, len(jtis))
+	work := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
-		eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
+		eventRecord := byJti[jti]
 		if eventRecord == nil {
 			continue
 		}
@@ -248,17 +258,28 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 			sets[jti] = eventRecord.Original
 			continue
 		}
+		work = append(work, eventRecord)
+	}
+	if len(work) == 0 {
+		return sets
+	}
+
+	cfg := rec.StreamConfiguration
+	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
 		token := &eventRecord.Event
-		token.Issuer = rec.StreamConfiguration.Iss
-		token.Audience = rec.StreamConfiguration.Aud
+		token.Issuer = cfg.Iss
+		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.SigningMethodOrRS256(rec.StreamConfiguration.SigningAlg), key)
-		if err != nil {
-			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", rec.StreamConfiguration.Id, "jti", jti, "error", err)
+		return token.JWS(method, key)
+	})
+	for i, eventRecord := range work {
+		if signed[i].Err != nil {
+			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", cfg.Id, "jti", eventRecord.Jti, "error", signed[i].Err)
 			continue
 		}
-		sets[jti] = signed
+		sets[eventRecord.Jti] = signed[i].JWS
 	}
 	return sets
 }

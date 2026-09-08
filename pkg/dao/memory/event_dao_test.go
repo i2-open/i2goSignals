@@ -193,6 +193,38 @@ func TestEventDAOMemory_FindByJTIs(t *testing.T) {
 	}
 }
 
+// TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk: with disk
+// persistence the in-memory record drops Original after Insert; the batched
+// read must reload it the way FindByJTI does, or forward-mode delivery would
+// send empty SETs.
+func TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk(t *testing.T) {
+	dao := NewEventDAO()
+	dao.SetPersistDir(t.TempDir())
+	ctx := context.Background()
+
+	for _, jti := range []string{"disk-1", "disk-2"} {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		event.ID = jti
+		if err := dao.Insert(ctx, &model.EventRecord{Jti: jti, Event: *event, Original: `{"jti":"` + jti + `"}`, SortTime: time.Now()}); err != nil {
+			t.Fatalf("Insert failed: %v", err)
+		}
+	}
+
+	records, err := dao.FindByJTIs(ctx, []string{"disk-1", "disk-2", "missing"})
+	if err != nil {
+		t.Fatalf("FindByJTIs failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("Expected 2 records, got %d", len(records))
+	}
+	for _, rec := range records {
+		want := `{"jti":"` + rec.Jti + `"}`
+		if rec.Original != want {
+			t.Errorf("record %s: Original = %q, want %q", rec.Jti, rec.Original, want)
+		}
+	}
+}
+
 func TestEventDAOMemory_AddPending(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()

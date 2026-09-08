@@ -241,6 +241,7 @@ func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer, alg string) (crypto.
 func (f *fakeSstpOutbound) AcquireSecondPushSlot(pairId string) bool { return true }
 func (f *fakeSstpOutbound) ReleaseSecondPushSlot(pairId string)      {}
 func (f *fakeSstpOutbound) BackfillBatch() int                       { return 100 }
+func (f *fakeSstpOutbound) SignConcurrency() int                     { return 2 }
 func (f *fakeSstpOutbound) Ctx() context.Context                     { return f.ctx }
 
 // PRD #49 slice 2c AC 2: inbound-half hooks. InboundVerifyConfig returns the
