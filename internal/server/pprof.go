@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,6 +18,24 @@ import (
 // only be bound to a loopback/private address in development environments.
 // Leave unset in production.
 const PprofAddrEnv = "I2SIG_PPROF_ADDR"
+
+// PprofMutexFractionEnv names the environment variable that turns on mutex
+// profiling, so /debug/pprof/mutex reports contention instead of an empty
+// profile. The value is the fraction passed to runtime.SetMutexProfileFraction:
+// 1 samples every contention event, N samples roughly one in N. It is read only
+// when PprofAddrEnv is set, and defaults to off, so a deployment that has not
+// asked for profiling never pays the sampling cost.
+const PprofMutexFractionEnv = "I2SIG_PPROF_MUTEX_FRACTION"
+
+// PprofBlockRateEnv names the environment variable that turns on block
+// profiling, so /debug/pprof/block shows where goroutines wait on channels and
+// sync primitives. The value is the rate passed to runtime.SetBlockProfileRate,
+// in nanoseconds of blocking per sample: 1 samples every blocking event, N
+// samples roughly one event per N nanoseconds blocked. Like the mutex knob it
+// is read only when PprofAddrEnv is set and defaults to off. Block profiling
+// instruments every blocking operation and has measurable overhead — enable it
+// for a diagnostic run, not permanently.
+const PprofBlockRateEnv = "I2SIG_PPROF_BLOCK_RATE"
 
 // newPprofMux returns a mux serving the net/http/pprof handlers. Kept separate
 // from the main router so profiling never rides on the authenticated API
@@ -37,6 +58,8 @@ func (sa *SignalsApplication) startPprofServer() {
 		return
 	}
 
+	applyPprofSamplingRates()
+
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: newPprofMux(),
@@ -52,4 +75,45 @@ func (sa *SignalsApplication) startPprofServer() {
 			serverLog.Error("pprof listener failed", "error", err)
 		}
 	}()
+}
+
+// applyPprofSamplingRates turns on mutex and/or block profiling when the opt-in
+// env vars ask for it. The runtime setters are called only for a positive rate,
+// so leaving the variables unset costs exactly what it did before.
+func applyPprofSamplingRates() {
+	mutexFraction, blockRate := pprofSamplingRates()
+
+	if mutexFraction > 0 {
+		runtime.SetMutexProfileFraction(mutexFraction)
+		serverLog.Warn("mutex profiling enabled — sampling adds overhead on contended locks",
+			"env", PprofMutexFractionEnv, "fraction", mutexFraction)
+	}
+
+	if blockRate > 0 {
+		runtime.SetBlockProfileRate(blockRate)
+		serverLog.Warn("block profiling enabled — sampling adds measurable overhead on every blocking operation",
+			"env", PprofBlockRateEnv, "rateNanos", blockRate)
+	}
+}
+
+// pprofSamplingRates reads the mutex and block profiling knobs. Anything that
+// is not a positive integer — unset, zero, negative, or unparseable — means
+// "leave this profile off".
+func pprofSamplingRates() (mutexFraction int, blockRate int) {
+	return pprofSamplingRate(PprofMutexFractionEnv), pprofSamplingRate(PprofBlockRateEnv)
+}
+
+func pprofSamplingRate(env string) int {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return 0
+	}
+
+	rate, err := strconv.Atoi(raw)
+	if err != nil || rate < 0 {
+		serverLog.Warn("ignoring profiling rate that is not a non-negative integer; profile stays off",
+			"env", env, "value", raw)
+		return 0
+	}
+	return rate
 }

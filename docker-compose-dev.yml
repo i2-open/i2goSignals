@@ -287,6 +287,10 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
+      # Mutex/block profiling: off unless the shell exports these. e.g.
+      # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
+      - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
+      - I2SIG_PPROF_BLOCK_RATE=${I2SIG_PPROF_BLOCK_RATE:-}
       # Authenticated bootstrap (PRD #120 / slice #121): the anonymous /iat door
       # is closed. A bearer equal to I2SIG_BOOTSTRAP_TOKEN resolves to the narrow
       # "key" scope so scimSsfSetup can mint an issuer key + IAT unattended.
@@ -334,6 +338,10 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
+      # Mutex/block profiling: off unless the shell exports these. e.g.
+      # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
+      - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
+      - I2SIG_PPROF_BLOCK_RATE=${I2SIG_PPROF_BLOCK_RATE:-}
       # Same authenticated-bootstrap secret as goSignals1 (PRD #120 / slice #121).
       - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
       - I2SIG_CLI_CLIENT_ID=gosignals-cli
@@ -379,6 +387,10 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
+      # Mutex/block profiling: off unless the shell exports these. e.g.
+      # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
+      - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
+      - I2SIG_PPROF_BLOCK_RATE=${I2SIG_PPROF_BLOCK_RATE:-}
     command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
