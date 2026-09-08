@@ -268,6 +268,7 @@ services:
     ports:
       - "8888:8888"
       - "2345:2345"
+      - "6060:6060"   # pprof (I2SIG_PPROF_ADDR)
     # Optional DNS override can help if Docker Desktop DNS is flaky on your network/VPN
     dns:
       - 8.8.8.8
@@ -282,6 +283,10 @@ services:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
       - I2SIG_SUBJECT_FILTERING=ENABLED
+      # Go pprof listener (plain HTTP, unauthenticated) — dev stack only.
+      # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
+      # See `make dev-pprof` / docs/perf/pprof.md.
+      - I2SIG_PPROF_ADDR=:6060
       # Authenticated bootstrap (PRD #120 / slice #121): the anonymous /iat door
       # is closed. A bearer equal to I2SIG_BOOTSTRAP_TOKEN resolves to the narrow
       # "key" scope so scimSsfSetup can mint an issuer key + IAT unattended.
@@ -311,6 +316,7 @@ services:
     ports:
       - "8889:8889"
       - "2346:2345"
+      - "6061:6060"   # pprof (I2SIG_PPROF_ADDR)
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -324,6 +330,10 @@ services:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
       - I2SIG_SUBJECT_FILTERING=ENABLED
+      # Go pprof listener (plain HTTP, unauthenticated) — dev stack only.
+      # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
+      # See `make dev-pprof` / docs/perf/pprof.md.
+      - I2SIG_PPROF_ADDR=:6060
       # Same authenticated-bootstrap secret as goSignals1 (PRD #120 / slice #121).
       - I2SIG_BOOTSTRAP_TOKEN=${I2SIG_BOOTSTRAP_TOKEN:-dev-bootstrap-secret}
       - I2SIG_CLI_CLIENT_ID=gosignals-cli
@@ -351,6 +361,7 @@ services:
     ports:
       - "8890:8890"
       - "2347:2345"
+      - "6062:6060"   # pprof (I2SIG_PPROF_ADDR)
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -364,6 +375,10 @@ services:
       - LOG_FORMAT=json
       - I2SIG_CLUSTER_NAME=dev-local
       - I2SIG_SUBJECT_FILTERING=ENABLED
+      # Go pprof listener (plain HTTP, unauthenticated) — dev stack only.
+      # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
+      # See `make dev-pprof` / docs/perf/pprof.md.
+      - I2SIG_PPROF_ADDR=:6060
     command: ["dlv", "debug", "./cmd/goSsfServer", "--headless=true", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--continue"]
 
   scimSsfSetup:
