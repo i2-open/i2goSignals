@@ -308,3 +308,64 @@ func TestDeleteBodyIfUnreferenced_RefcountUsesIndex(t *testing.T) {
 		}
 	}
 }
+
+// TestEventRefIndexes_BuiltOnExistingDatabase is the upgrade path: a server
+// that starts against a database it has seen before must still build indexes
+// a later release added. createIndexes used to run only for a brand-new
+// database, so on any existing deployment the collections already existed,
+// the branch was skipped, and a newly added index was never built — the fix
+// shipped inert. Reconnecting to a database whose new indexes are missing
+// must restore them.
+func TestEventRefIndexes_BuiltOnExistingDatabase(t *testing.T) {
+	p := openEventIdxProvider(t)
+	ctx := context.Background()
+
+	// Simulate the pre-upgrade on-disk state: the database exists and holds
+	// only the index set the older release built.
+	for _, col := range []*mongo.Collection{p.pendingCol, p.deliveredCol} {
+		for _, n := range []string{
+			pendingSidJtiIndexName, pendingJtiIndexName,
+			deliveredSidJtiIndexName, deliveredJtiIndexName,
+		} {
+			_ = col.Indexes().DropOne(ctx, n)
+		}
+		if _, err := col.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys:    bson.D{{Key: "sid", Value: 1}},
+			Options: options.Index().SetName(legacySidIndexName),
+		}); err != nil {
+			t.Fatalf("could not stage legacy index: %v", err)
+		}
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Restart against the SAME database — dbExists is true this time.
+	p2, err := Open(ttlMongoURL(), "eventidxtest")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = p2.Close() })
+
+	for _, tc := range []struct {
+		col            *mongo.Collection
+		name           string
+		sidJti, jtiIdx string
+	}{
+		{p2.pendingCol, CDbPending, pendingSidJtiIndexName, pendingJtiIndexName},
+		{p2.deliveredCol, CDbDelivered, deliveredSidJtiIndexName, deliveredJtiIndexName},
+	} {
+		names := indexNames(t, tc.col)
+		if !names[tc.sidJti] {
+			t.Errorf("%s: compound index %q not built on restart against an existing database (have %v)",
+				tc.name, tc.sidJti, keysOf(names))
+		}
+		if !names[tc.jtiIdx] {
+			t.Errorf("%s: jti index %q not built on restart against an existing database (have %v)",
+				tc.name, tc.jtiIdx, keysOf(names))
+		}
+		if names[legacySidIndexName] {
+			t.Errorf("%s: legacy %q index not retired on restart", tc.name, legacySidIndexName)
+		}
+	}
+}

@@ -91,6 +91,13 @@ type MongoProvider struct {
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
 
+	// indexesEnsured records whether createIndexes has run in THIS process.
+	// It runs on every start (not just for a brand-new database) so a release
+	// that adds an index reaches deployments that already have the collection,
+	// and is a no-op after the first connect. Accessed under m.mu (initialize()
+	// runs while the lock is held). Reset to false for a fresh database.
+	indexesEnsured bool
+
 	// tokenTTLEnsured records whether the token TTL index has been reconciled in
 	// THIS process. The desired expireAfterSeconds comes from I2SIG_TOKEN_RETENTION
 	// which is fixed for the process lifetime, so once reconciled, reconnects can
@@ -291,16 +298,26 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	}
 	m.coordinator.SetCollections(m.leaseCol, m.nodeCol)
 
-	// Create indexes
 	if !dbExists {
-		err = m.createIndexes(ctx)
-		if err != nil {
+		// A fresh database (first connect, or after a ResetDb that dropped it)
+		// carries none of the indexes, even if a prior connect in this process
+		// already ensured them.
+		m.indexesEnsured = false
+		m.tokenTTLEnsured = false
+	}
+
+	// Create indexes. This used to run only for a brand-new database, which
+	// meant an index added by a later release was never built on an existing
+	// deployment: its collections already existed, so the branch was skipped
+	// and the new access path stayed unindexed for the life of the database.
+	// Index creation is idempotent for an already-present identical spec, so
+	// it is safe on every start; indexesEnsured keeps reconnects within one
+	// process from repeating the round trips.
+	if !m.indexesEnsured {
+		if err = m.createIndexes(ctx); err != nil {
 			return err
 		}
-		// A fresh database (first connect, or after a ResetDb that dropped it)
-		// has no TTL index; force the reconcile below to run even if a prior
-		// connect in this process had already ensured it.
-		m.tokenTTLEnsured = false
+		m.indexesEnsured = true
 	}
 
 	// Ensure the token TTL index. After the first successful reconcile in this
