@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -170,6 +171,9 @@ type router struct {
 	// POSTs a push stream's lease holder keeps in flight at once. The batch
 	// the loop drains from the buffer per iteration is 4x this.
 	pushConcurrency int
+	// pollSignConcurrency is the resolved I2SIG_POLL_SIGN_CONCURRENCY: how
+	// many SETs one poll response signs side by side (ADR 0036).
+	pollSignConcurrency int
 	// pollDefaultTimeoutSecs is the resolved I2SIG_POLL_DEFAULT_TIMEOUT
 	// applied to every EventPollBuffer constructed for the lifetime of this
 	// router. 0 means "no implicit long-poll" — receiver omitting timeoutSecs
@@ -362,6 +366,16 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		}
 	}
 	router.pushConcurrency = pushConcurrency
+
+	pollSignConcurrency := runtime.GOMAXPROCS(0)
+	if val := os.Getenv("I2SIG_POLL_SIGN_CONCURRENCY"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			pollSignConcurrency = i
+		} else {
+			eventLogger.Warn("Ignoring invalid I2SIG_POLL_SIGN_CONCURRENCY (want a positive integer)", "value", val)
+		}
+	}
+	router.pollSignConcurrency = pollSignConcurrency
 
 	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
 	eventLogger.Info("Poll long-poll timeouts resolved",
@@ -1295,54 +1309,127 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		jtiSize = len(*jtiSlice)
 	}
 
-	var err error
 	if jtiSize > 0 {
-		sets := make(map[string]string, jtiSize)
-		for _, jti := range *jtiSlice {
-			eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-			if eventRecord == nil {
-				eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
-				continue
-			}
-			// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
-			// serve a poll, so the filter is consulted here at poll-response
-			// time; a filtered-out event is discarded (acked) rather than
-			// returned, so the poll buffer stays bounded (ADR-0002).
-			// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
-			// the primary StreamConfiguration, so this is the pair's transmit-side
-			// subject filter — there is no separate inbound/ingest-time filter.
-			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
-				r.discardPolledEvent(sid, jti, pollBuffer)
-				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-				continue
-			}
-			if forwardMode {
-				sets[jti] = eventRecord.Original
-				continue
-			}
-			token := &eventRecord.Event
-			token.Issuer = state.StreamConfiguration.Iss
-			token.Audience = state.StreamConfiguration.Aud
-			token.IssuedAt = jwt.NewNumericDate(time.Now())
-			token.Kid = kid
-
-			sets[jti], err = token.JWS(goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg), key)
-			if err != nil {
-				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
-			}
-		}
-		return sets, more, http.StatusOK
+		return r.assemblePollResponse(sid, &state, pollBuffer, *jtiSlice, forwardMode, key, kid), more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
 }
 
-// discardPolledEvent drops a filtered-out event from a poll stream: it is acked
-// in the poll buffer and the provider so it is neither returned now nor on a
-// later poll, keeping the pending buffer bounded.
-func (r *router) discardPolledEvent(sid, jti string, pollBuffer *buffer.EventPollBuffer) {
-	pollBuffer.AckEvents([]string{jti})
-	if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
-		eventLogger.Error("POLL-SRV: Error discarding filtered-out event", "sid", sid, "jti", jti, "error", err)
+// assemblePollResponse builds the "sets" member of one RFC 8936 poll response:
+// one read for the batch's records, one subject-filter pass whose discards are
+// acked together, then the surviving records are re-signed across a worker
+// pool of pollSignConcurrency (forward mode returns the stored JWS unchanged).
+// A JTI whose record is gone is skipped and left in the buffer; a SET that
+// fails to sign is left out of this response and stays pending (ADR 0036).
+func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, jtis []string, forwardMode bool, key crypto.Signer, kid string) map[string]string {
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
+	}
+
+	sets := make(map[string]string, len(jtis))
+	work := make([]*model.EventRecord, 0, len(jtis))
+	var discards []string
+	for _, jti := range jtis {
+		rec := byJti[jti]
+		if rec == nil {
+			eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
+			continue
+		}
+		// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
+		// serve a poll, so the filter is consulted here at poll-response
+		// time; a filtered-out event is discarded (acked) rather than
+		// returned, so the poll buffer stays bounded (ADR-0002).
+		// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
+		// the primary StreamConfiguration, so this is the pair's transmit-side
+		// subject filter — there is no separate inbound/ingest-time filter.
+		if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, state, rec) {
+			discards = append(discards, jti)
+			eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+			continue
+		}
+		if forwardMode {
+			sets[jti] = rec.Original
+			continue
+		}
+		work = append(work, rec)
+	}
+	if len(discards) > 0 {
+		r.discardPolledEvents(sid, discards, pollBuffer)
+	}
+	if len(work) == 0 {
+		return sets
+	}
+
+	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
+	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
+	signed := signPollSets(work, r.pollSignConcurrency, func(rec *model.EventRecord) (string, error) {
+		token := &rec.Event
+		token.Issuer = iss
+		token.Audience = aud
+		token.IssuedAt = jwt.NewNumericDate(time.Now())
+		token.Kid = kid
+		return token.JWS(method, key)
+	})
+	for i, rec := range work {
+		if signed[i].err != nil {
+			eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "jti", rec.Jti, "error", signed[i].err)
+			continue
+		}
+		sets[rec.Jti] = signed[i].jws
+	}
+	return sets
+}
+
+// signedSet is one signPollSets result, positionally matching its input.
+type signedSet struct {
+	jws string
+	err error
+}
+
+// signPollSets runs sign over recs with up to workers goroutines and returns
+// the results in input order. Signing is CPU-bound (an RS256 signature costs
+// about a millisecond) and a poll response used to sign every SET in series
+// on the handler goroutine, so a large response spent nearly all its time on
+// one core (ADR 0036). Each record is a distinct copy from the DAO read and
+// the signer is read-only, so the workers share nothing.
+func signPollSets(recs []*model.EventRecord, workers int, sign func(*model.EventRecord) (string, error)) []signedSet {
+	out := make([]signedSet, len(recs))
+	if workers > len(recs) {
+		workers = len(recs)
+	}
+	if workers <= 1 {
+		for i, rec := range recs {
+			out[i].jws, out[i].err = sign(rec)
+		}
+		return out
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				idx := int(next.Add(1) - 1)
+				if idx >= len(recs) {
+					return
+				}
+				out[idx].jws, out[idx].err = sign(recs[idx])
+			}
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// discardPolledEvents drops filtered-out events from a poll stream: they are
+// acked in the poll buffer and the provider as one batch so they are neither
+// returned now nor on a later poll, keeping the pending buffer bounded.
+func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
+	pollBuffer.AckEvents(jtis)
+	if err := r.eventService.AckEvents(r.ctx, jtis, sid, 0); err != nil {
+		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }
 
