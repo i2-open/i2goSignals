@@ -180,7 +180,8 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 
 // validateSigningAlg rejects a stream configuration asking for a SET signature
 // algorithm this transmitter cannot produce. The accepted set is goSet's:
-// "" (unset, meaning RS256), "RS256", and "ML-DSA-65" (RFC 9964 / FIPS 204).
+// "" (unset, meaning RS256), "RS256", "ES256" (ECDSA P-256, the throughput
+// opt-in — i2goSignals#284), and "ML-DSA-65" (RFC 9964 / FIPS 204).
 //
 // Validating at create/update is what lets the signing sites treat the field as
 // already-good: a bad value is a 400 on the configuration request rather than a

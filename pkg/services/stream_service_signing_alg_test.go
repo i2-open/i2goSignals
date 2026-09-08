@@ -1,9 +1,11 @@
 package services
 
-// Per-stream signing_alg validation and provisioning (i2goSignals#278).
+// Per-stream signing_alg validation and provisioning (i2goSignals#278, and the
+// ES256 opt-in of i2goSignals#284).
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,10 +18,10 @@ import (
 )
 
 func TestValidateSigningAlg_AcceptsOnlyWhatThisTransmitterCanProduce(t *testing.T) {
-	for _, alg := range []string{"", "RS256", mldsa.Alg} {
+	for _, alg := range []string{"", "RS256", "ES256", mldsa.Alg} {
 		assert.NoError(t, validateSigningAlg(alg), "signing_alg %q must be accepted", alg)
 	}
-	for _, alg := range []string{"HS256", "none", "ML-DSA-44", "ES256", "rs256"} {
+	for _, alg := range []string{"HS256", "none", "ML-DSA-44", "ES384", "es256", "rs256"} {
 		err := validateSigningAlg(alg)
 		require.Error(t, err, "signing_alg %q must be rejected at configuration time", alg)
 		assert.Contains(t, err.Error(), "invalid signing_alg")
@@ -72,6 +74,32 @@ func TestApplySigningAlg_DoesNotMintForAReceiverStream(t *testing.T) {
 
 	_, _, err := keySvc.GetSigner(ctx, "https://someone-else.example.com", mldsa.Alg)
 	assert.ErrorIs(t, err, interfaces.ErrKeyNotFound)
+}
+
+// TestApplySigningAlg_ProvisionsAnECKeyForAnES256Stream is the #284 half of the
+// same promise: the EC key must be published before the first ES256 SET, for
+// exactly the reason the ML-DSA key is — a receiver caching the issuer's JWKS
+// cannot fetch a key that is minted in the same instant as the token needing it.
+func TestApplySigningAlg_ProvisionsAnECKeyForAnES256Stream(t *testing.T) {
+	ctx := context.Background()
+	dao := memory.NewKeyDAO()
+	keySvc := NewKeyService(dao, "DEFAULT", nil, nil)
+	require.NoError(t, keySvc.InitializeTokenKey(ctx, rtIssuer))
+	svc := NewStreamService(nil, keySvc, rtIssuer, StreamServiceConfig{})
+
+	cfg := &model.StreamConfiguration{
+		Id:         "stream-ec",
+		Iss:        rtIssuer,
+		SigningAlg: "ES256",
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			PushTransmitMethod: &model.PushTransmitMethod{Method: model.DeliveryPush},
+		},
+	}
+	require.NoError(t, svc.applySigningAlg(ctx, cfg, ""))
+
+	key, _, err := keySvc.GetSigner(ctx, rtIssuer, "ES256")
+	require.NoError(t, err, "the transmitter stream's opt-in must leave a usable ES256 signer behind")
+	assert.IsType(t, &ecdsa.PrivateKey{}, key)
 }
 
 func TestApplySigningAlg_RejectsAnUnsupportedAlgBeforeTouchingTheKeyStore(t *testing.T) {

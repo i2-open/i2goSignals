@@ -21,3 +21,7 @@ One row per run; compare like with like (same events, concurrency, mix and machi
 | 2026-09-08 21:43 | v0.12.0-alpha.19-17-ge700ac2-dirty | spec102-289-after-initiator-run2 | 5000 | 16 | sstp | 568 | 23.5 / 94.2 | - | - | - | - | initiator | 462 | 2.0 | 10.8 | yes |
 | 2026-09-08 21:43 | v0.12.0-alpha.19-17-ge700ac2-dirty | spec102-289-after-responder | 5000 | 16 | sstp | 815 | 16.6 / 52.1 | - | - | - | - | responder | 752 | 0.5 | 6.7 | yes |
 | 2026-09-08 21:44 | v0.12.0-alpha.19-17-ge700ac2-dirty | spec102-289-after-responder-run2 | 5000 | 16 | sstp | 674 | 20.1 / 66.3 | - | - | - | - | responder | 631 | 0.5 | 7.9 | yes |
+| 2026-09-08 22:16 | v0.12.0-alpha.19-20-g029f907-dirty | spec102-284-before-rs256 | 5000 | 16 | push | 676 | 20.0 / 117.2 | 345 | 7.1 | - | - | initiator | - | - | 14.5 | yes |
+| 2026-09-08 22:16 | v0.12.0-alpha.19-20-g029f907-dirty | spec102-284-after-es256-run1 | 5000 | 16 | push | 892 | 16.2 / 48.2 | 492 | 4.5 | - | - | initiator | - | - | 10.2 | yes |
+| 2026-09-08 22:17 | v0.12.0-alpha.19-20-g029f907-dirty | spec102-284-after-es256-run2 | 5000 | 16 | push | 937 | 16.5 / 28.9 | 481 | 5.1 | - | - | initiator | - | - | 10.4 | yes |
+| 2026-09-08 22:17 | v0.12.0-alpha.19-20-g029f907-dirty | spec102-284-before-rs256-run2 | 5000 | 16 | push | 829 | 18.0 / 40.8 | 367 | 7.6 | - | - | initiator | - | - | 13.6 | yes |

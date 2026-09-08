@@ -265,6 +265,8 @@ type JwkKeyRec struct {
 	//   ""          RSA (the pre-RFC-9964 shape, and what every existing
 	//               record decodes as): KeyBytes is PKCS#1 private, PubKeyBytes
 	//               PKCS#1 public.
+	//   "ES256"     ECDSA on P-256: KeyBytes is the SEC 1 private key,
+	//               PubKeyBytes the PKIX public key (PKCS#1 is RSA-only).
 	//   "ML-DSA-65" FIPS 204 / RFC 9964: KeyBytes is the 32-byte ML-DSA seed,
 	//               PubKeyBytes the 1952-byte public key encoding.
 	//

@@ -220,7 +220,20 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
 Which JWS algorithm a stream's SETs are signed with, chosen per stream
 rather than per server (ADR 0034, RFC 9964). `""` and `RS256` are the
 same thing — RSA-2048, what every stream signed with before the field
-existed — and `ML-DSA-65` opts the stream into post-quantum signatures.
+existed, and still the default. `ES256` opts the stream into ECDSA
+P-256 and `ML-DSA-65` into post-quantum signatures.
+
+Each opt-in trades differently, which is why the choice is per stream:
+
+- **`ES256`** buys transmitter throughput. Signing runs once per event
+  per outbound stream, and RSA-2048 signing measured ~0.822 ms against
+  P-256's ~0.019 ms on the same host — enough to make RSA the single
+  largest consumer of transmitter CPU and the dominant source of
+  allocation churn. Verification moves the other way (ES256 verify is
+  slightly dearer than RS256), so the receiver pays a little of what the
+  transmitter saves a lot of.
+- **`ML-DSA-65`** buys post-quantum resistance and costs wire size: its
+  signature is 3309 bytes against RS256's 256.
 
 The vocabulary that hangs off it:
 
@@ -228,20 +241,24 @@ The vocabulary that hangs off it:
   (`kty:"AKP"`), whose parameter set lives in `alg` rather than in
   `kty`. `pkg/goSet/mldsa` owns the codec and the `jwt.SigningMethod`,
   because golang-jwt/keyfunc/jwkset have none.
-- **Dual-key JWKS** — an issuer with any ML-DSA stream publishes *both*
-  its RSA and its AKP key, under distinct kids. A receiver that has
-  never heard of AKP skips it and keeps verifying its RS256 stream
-  unchanged; that is what makes the opt-in per-stream rather than a
-  flag day.
+- **Dual-key JWKS** — an issuer with any ES256 or ML-DSA stream
+  publishes its RSA key *and* the opted-in key, under distinct kids. A
+  receiver that has never heard of AKP skips it and keeps verifying its
+  RS256 stream unchanged; that is what makes the opt-in per-stream
+  rather than a flag day. `JwkKeyRec.Alg` is the store's discriminator
+  and its encoding contract: `""` RSA/PKCS#1, `ES256` SEC 1 + PKIX,
+  `ML-DSA-65` raw seed + public bytes.
 - **`GetSigner(ctx, issuer, alg)`** — the transmitter's key-acquisition
-  seam. Selection is **by algorithm, not by recency**: the ML-DSA record
-  is the newer one, and picking newest would hand an RS256 stream a key
-  RS256 cannot use. The router caches per `(issuer, alg)` for the same
+  seam. Selection is **by algorithm, not by recency**: an opted-in
+  record is always the newer one, and picking newest would hand an RS256
+  stream a key RS256 cannot use. The router caches per `(issuer, alg)` for the same
   reason; invalidation stays issuer-level and evicts both.
 - **`goSet.AllowedAlgs()`** — `{RS256, ES256, ML-DSA-65}` on every node
   whether or not it transmits ML-DSA. The allow-list gates the token
   header before key lookup, and a receiver must be able to verify a
-  PQ-signed SET from a peer regardless of what it signs itself.
+  PQ-signed SET from a peer regardless of what it signs itself. It is
+  now exactly the set `goSet.SigningMethodFor` will select, because the
+  key store provisions a key for each.
 
 Independent of all of the above: `CERT_KEY_ALG` selects the key
 algorithm for the **internal mTLS** certificates `cmd/genTlsKeys`
