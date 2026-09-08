@@ -60,8 +60,8 @@ func (s *EventService) AddOperationalEvent(ctx context.Context, event *goSet.Sec
 	return s.addEvent(ctx, event, sid, raw, true)
 }
 
-func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string, operational bool) (*model.EventRecord, error) {
-	jti := event.ID
+// newEventRecord builds the persisted record for one inbound SET.
+func newEventRecord(event *goSet.SecurityEventToken, sid string, raw string, operational bool) *model.EventRecord {
 	keys := make([]string, 0, len(event.Events))
 	for k := range event.Events {
 		keys = append(keys, k)
@@ -77,8 +77,8 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 		sortTime = time.Now()
 	}
 
-	rec := &model.EventRecord{
-		Jti:         jti,
+	return &model.EventRecord{
+		Jti:         event.ID,
 		Event:       *event,
 		Original:    raw,
 		Types:       keys,
@@ -86,24 +86,14 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 		SortTime:    sortTime,
 		Operational: operational,
 	}
+}
 
+func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string, operational bool) (*model.EventRecord, error) {
+	rec := newEventRecord(event, sid, raw, operational)
 	err := s.eventDAO.Insert(ctx, rec)
 	if err != nil {
-		// JTI dedup: the record already exists. Load the original and surface
-		// the typed sentinel so callers (router) can short-circuit without
-		// counting the inbound or fanning out to outbound streams again.
 		if errors.Is(err, interfaces.ErrDuplicateJTI) {
-			esLog.Info("Duplicate JTI ingestion suppressed", "jti", jti, "sid", sid)
-			existing, findErr := s.eventDAO.FindByJTI(ctx, jti)
-			if findErr != nil {
-				// Surface the lookup failure rather than the dup sentinel.
-				// A nil record paired with the sentinel would let SubmitOperationalEvent
-				// return (nil, nil) to its caller — indistinguishable from a successful
-				// submission — and panic any caller that dereferences the record.
-				esLog.Error("Error loading existing record after duplicate JTI", "jti", jti, "sid", sid, "error", findErr)
-				return nil, findErr
-			}
-			return existing, interfaces.ErrDuplicateJTI
+			return s.existingAfterDuplicate(ctx, rec.Jti, sid)
 		}
 		esLog.Error("Error inserting event", "error", err)
 		return nil, err
@@ -112,10 +102,77 @@ func (s *EventService) addEvent(ctx context.Context, event *goSet.SecurityEventT
 	return rec, nil
 }
 
+// existingAfterDuplicate handles JTI dedup: the record already exists. Load the
+// original and surface the typed sentinel so callers (router) can short-circuit
+// without counting the inbound or fanning out to outbound streams again.
+func (s *EventService) existingAfterDuplicate(ctx context.Context, jti string, sid string) (*model.EventRecord, error) {
+	esLog.Info("Duplicate JTI ingestion suppressed", "jti", jti, "sid", sid)
+	existing, findErr := s.eventDAO.FindByJTI(ctx, jti)
+	if findErr != nil {
+		// Surface the lookup failure rather than the dup sentinel.
+		// A nil record paired with the sentinel would let SubmitOperationalEvent
+		// return (nil, nil) to its caller — indistinguishable from a successful
+		// submission — and panic any caller that dereferences the record.
+		esLog.Error("Error loading existing record after duplicate JTI", "jti", jti, "sid", sid, "error", findErr)
+		return nil, findErr
+	}
+	return existing, interfaces.ErrDuplicateJTI
+}
+
+// AddEvents persists a batch of inbound SETs in one DAO round trip. events and
+// raws are index-aligned; the returned records and errors are index-aligned
+// with them. A record whose JTI already exists comes back as the existing
+// record paired with ErrDuplicateJTI, exactly as AddEvent reports it. When the
+// batch itself fails before any record is attempted, every position carries
+// that error and every record is nil.
+func (s *EventService) AddEvents(ctx context.Context, events []*goSet.SecurityEventToken, sid string, raws []string) ([]*model.EventRecord, []error) {
+	recs := make([]*model.EventRecord, len(events))
+	errs := make([]error, len(events))
+	if len(events) == 0 {
+		return recs, errs
+	}
+	for i, ev := range events {
+		recs[i] = newEventRecord(ev, sid, raws[i], false)
+	}
+	perRec, batchErr := s.eventDAO.InsertMany(ctx, recs)
+	if batchErr != nil {
+		esLog.Error("Error inserting event batch", "sid", sid, "count", len(recs), "error", batchErr)
+		for i := range errs {
+			recs[i], errs[i] = nil, batchErr
+		}
+		return recs, errs
+	}
+	for i, err := range perRec {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, interfaces.ErrDuplicateJTI) {
+			recs[i], errs[i] = s.existingAfterDuplicate(ctx, recs[i].Jti, sid)
+			continue
+		}
+		esLog.Error("Error inserting event", "jti", recs[i].Jti, "error", err)
+		recs[i], errs[i] = nil, err
+	}
+	return recs, errs
+}
+
 func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
 	err := s.eventDAO.AddPending(ctx, jti, streamID)
 	if err != nil {
 		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
+	}
+	return err
+}
+
+// AddEventsToStream appends a batch of already-persisted JTIs to a stream's
+// pending list in one DAO round trip, preserving order.
+func (s *EventService) AddEventsToStream(ctx context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	err := s.eventDAO.AddPendingMany(ctx, jtis, streamID)
+	if err != nil {
+		esLog.Error("Error adding pending events to stream", "count", len(jtis), "streamID", streamID, "error", err)
 	}
 	return err
 }

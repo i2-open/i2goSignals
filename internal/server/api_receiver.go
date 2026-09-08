@@ -20,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -1692,7 +1693,12 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			setErrs[jti] = setErr
 		}
 
-		// Process successfully parsed and validated SETs
+		// Process successfully parsed and validated SETs. Rejections are decided
+		// per JTI below; what survives is ingested as one batch (one bulk insert,
+		// one pending-list write per matching outbound stream) via HandleEvents.
+		batchJtis := make([]string, 0, len(parsed.ParsedSETs))
+		batchTokens := make([]*goSet.SecurityEventToken, 0, len(parsed.ParsedSETs))
+		batchRaws := make([]string, 0, len(parsed.ParsedSETs))
 		for jti, token := range parsed.ParsedSETs {
 			// Apply the stream's event_validation mode to the dispositions
 			// goSetPoll computed (spec #247 #251). A rejected jti is reported in
@@ -1725,13 +1731,21 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			}
 
 			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
-			err = ps.sa.EventRouter.HandleEvent(token, parsed.Sets[jti], ps.stream.StreamConfiguration.Id)
-			if err != nil {
-				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti, "error", err)
+			batchJtis = append(batchJtis, jti)
+			batchTokens = append(batchTokens, token)
+			batchRaws = append(batchRaws, parsed.Sets[jti])
+		}
+		var ingestErrs []error
+		if len(batchTokens) > 0 {
+			ingestErrs = ps.sa.EventRouter.HandleEvents(batchTokens, batchRaws, ps.stream.StreamConfiguration.Id)
+		}
+		for i, ingestErr := range ingestErrs {
+			if ingestErr != nil {
+				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", batchJtis[i], "error", ingestErr)
 				// We don't acknowledge if we couldn't handle it
 				continue
 			}
-			acks = append(acks, jti)
+			acks = append(acks, batchJtis[i])
 		}
 
 		// Persist the resolved peer address on first connection or when it changes

@@ -59,12 +59,24 @@ type EventDAO interface {
 	// existing record. Callers MUST handle ErrDuplicateJTI; the existing
 	// record is retrievable via FindByJTI(jti).
 	Insert(ctx context.Context, record *model.EventRecord) error
+	// InsertMany persists records in slice order as one bulk write, continuing
+	// past per-record failures. The returned slice is index-aligned with
+	// records: nil for a stored record, ErrDuplicateJTI when that JTI already
+	// existed (the existing record is untouched and retrievable via
+	// FindByJTI), or the record's own write error. A non-nil error means the
+	// batch as a whole could not be attempted (the per-record slice is then
+	// nil). An empty batch returns (nil, nil).
+	InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error)
 	FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error)
 	FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error)
 	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
 
 	// Pending events
 	AddPending(ctx context.Context, jti string, streamID string) error
+	// AddPendingMany appends jtis, in order, to streamID's pending list as one
+	// bulk write; equivalent to AddPending per JTI but one round trip. An
+	// empty jtis is a no-op.
+	AddPendingMany(ctx context.Context, jtis []string, streamID string) error
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
 	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)

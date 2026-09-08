@@ -165,8 +165,10 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 func verifySstpInboundSets(msg goSetSstp.Message, cfg goSetSstp.VerifyConfig, policy sstpValidationPolicy) ([]eventRouter.SstpInboundSet, map[string]goSetSstp.SetErr) {
 	parsed := make([]eventRouter.SstpInboundSet, 0, len(msg.Sets))
 	setErrs := map[string]goSetSstp.SetErr{}
-	for jti, raw := range msg.Sets {
-		verified, vErr := goSetSstp.VerifySET(raw, cfg)
+	// Signature verification is the CPU cost of an inbound message; VerifyAll
+	// spreads it across the cores and hands the outcomes back in JTI order.
+	for _, entry := range goSetSstp.VerifyAll(msg.Sets, cfg, 0) {
+		jti, verified, vErr := entry.JTI, entry.Verified, entry.Err
 		if vErr != nil {
 			setErrs[jti] = classifyVerifyErrorForAcceptor(vErr)
 			continue

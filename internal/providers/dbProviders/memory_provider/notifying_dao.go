@@ -106,6 +106,15 @@ func (d *notifyingEventDAO) Insert(ctx context.Context, record *model.EventRecor
 	return nil
 }
 
+func (d *notifyingEventDAO) InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error) {
+	results, err := d.inner.InsertMany(ctx, records)
+	if err != nil {
+		return results, err
+	}
+	d.notify()
+	return results, nil
+}
+
 func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	return d.inner.FindByJTI(ctx, jti)
 }
@@ -123,6 +132,16 @@ func (d *notifyingEventDAO) AddPending(ctx context.Context, jti string, streamID
 		return err
 	}
 	d.notify()
+	return nil
+}
+
+func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
+	if err := d.inner.AddPendingMany(ctx, jtis, streamID); err != nil {
+		return err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
 	return nil
 }
 

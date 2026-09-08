@@ -48,7 +48,26 @@ func (d *EventDAOMemory) SetPersistDir(dir string) {
 func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.insertLocked(record)
+}
 
+// InsertMany stores records in order under a single lock acquisition; the
+// returned slice is index-aligned with records (nil or ErrDuplicateJTI).
+func (d *EventDAOMemory) InsertMany(_ context.Context, records []*model.EventRecord) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	results := make([]error, len(records))
+	for i, rec := range records {
+		results[i] = d.insertLocked(rec)
+	}
+	return results, nil
+}
+
+// insertLocked applies the single-record insert semantics; d.mu must be held.
+func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// JTI is the persistence-layer dedup key. Reject the new write and leave
 	// the existing record untouched (matches Mongo's reject-new-write semantic).
 	if _, exists := d.events[record.Jti]; exists {
@@ -142,6 +161,24 @@ func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID stri
 			StreamId: streamID,
 		}
 		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], deliverable)
+	}
+	return nil
+}
+
+func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, jti := range jtis {
+		if _, ok := d.events[jti]; ok {
+			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+				Jti:      jti,
+				StreamId: streamID,
+			})
+		}
 	}
 	return nil
 }

@@ -79,6 +79,11 @@ type BusinessRouter interface {
 	// out to matching transmitter streams. It fires the registered metering
 	// observer once for the ingress and once per egress.
 	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	// HandleEvents is the batch form of HandleEvent for SETs that arrived
+	// together: one stream lookup, one bulk insert, one pending-list write per
+	// matching outbound stream. rawEvents is index-aligned with eventTokens and
+	// so is the returned slice; a nil entry means the SET was accepted.
+	HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
 	// UpdateStreamState (re)syncs a stream's state into the router.
 	UpdateStreamState(stream *model.StreamStateRecord)
 	// RegisterMeteringObserver installs the subject-carrying metering observer.

@@ -128,6 +128,12 @@ type SstpOutbound interface {
 	// verified via VerifySET at ingest and fed to router.HandleEvent via
 	// VerifiedSET.Token without re-parse).
 	HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error
+	// HandleInboundEvents is the batch form of HandleInboundEvent for the SETs
+	// one response carried: they are persisted in one bulk write and fanned out
+	// with one pending-list write per matching outbound stream. raws is
+	// index-aligned with tokens and so is the returned slice; a nil entry means
+	// the SET may be acked.
+	HandleInboundEvents(tokens []*goSet.SecurityEventToken, raws []string, sid string) []error
 }
 
 // SstpDialerHooks is the hook interface the router calls when SSTP-client
@@ -273,6 +279,11 @@ func (r *router) InboundVerifyConfig(rec *model.StreamStateRecord) goSetSstp.Ver
 // stream_id=rxSid (Q46), matching the SSTP-server runner's ingest.
 func (r *router) HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error {
 	return r.HandleEvent(token, raw, sid)
+}
+
+// HandleInboundEvents delegates to the router's batch ingest path, HandleEvents.
+func (r *router) HandleInboundEvents(tokens []*goSet.SecurityEventToken, raws []string, sid string) []error {
+	return r.HandleEvents(tokens, raws, sid)
 }
 
 // Compile-time assertion: the router satisfies SstpOutbound. This is the

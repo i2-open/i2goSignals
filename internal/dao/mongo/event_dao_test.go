@@ -258,3 +258,67 @@ func rawKeys(t *testing.T, doc bson.Raw) []string {
 	}
 	return keys
 }
+
+// TestInsertMany_DuplicateInMiddle: an unordered bulk insert where the middle
+// JTI already exists returns [nil, ErrDuplicateJTI, nil], stores the other two
+// records, and leaves the pre-existing record untouched.
+func (s *EventDAOMongoSuite) TestInsertMany_DuplicateInMiddle() {
+	ctx := context.Background()
+	existing := &model.EventRecord{
+		Jti:      "bulk-b",
+		Original: `{"jti":"bulk-b","first":true}`,
+		SortTime: time.Now(),
+	}
+	s.Require().NoError(s.dao.Insert(ctx, existing))
+
+	batch := []*model.EventRecord{
+		{Jti: "bulk-a", Original: `{"jti":"bulk-a"}`, SortTime: time.Now()},
+		{Jti: "bulk-b", Original: `{"jti":"bulk-b","second":true}`, SortTime: time.Now()},
+		{Jti: "bulk-c", Original: `{"jti":"bulk-c"}`, SortTime: time.Now()},
+	}
+	results, err := s.dao.InsertMany(ctx, batch)
+	s.Require().NoError(err)
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.Require().Error(results[1])
+	s.True(errors.Is(results[1], interfaces.ErrDuplicateJTI), "expected ErrDuplicateJTI, got %v", results[1])
+	s.NoError(results[2])
+
+	for _, jti := range []string{"bulk-a", "bulk-c"} {
+		got, err := s.dao.FindByJTI(ctx, jti)
+		s.Require().NoError(err)
+		s.Require().NotNil(got, "record %s must be stored", jti)
+	}
+	got, err := s.dao.FindByJTI(ctx, "bulk-b")
+	s.Require().NoError(err)
+	s.Require().NotNil(got)
+	s.Equal(existing.Original, got.Original, "duplicate must not overwrite existing record")
+
+	count, err := s.eventCol.CountDocuments(ctx, bson.M{})
+	s.Require().NoError(err)
+	s.Equal(int64(3), count)
+
+	results, err = s.dao.InsertMany(ctx, nil)
+	s.NoError(err)
+	s.Nil(results)
+}
+
+// TestAddPendingMany_Order: a bulk pending insert followed by
+// GetPendingForStream returns the JTIs in insertion order.
+func (s *EventDAOMongoSuite) TestAddPendingMany_Order() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	want := []string{"pend-3", "pend-1", "pend-2"}
+
+	s.Require().NoError(s.dao.AddPendingMany(ctx, want, streamID))
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamID, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(len(want)), total)
+	s.Equal(want, jtis)
+
+	s.Require().NoError(s.dao.AddPendingMany(ctx, nil, streamID))
+	_, total, err = s.dao.GetPendingForStream(ctx, streamID, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(len(want)), total, "empty AddPendingMany must be a no-op")
+}

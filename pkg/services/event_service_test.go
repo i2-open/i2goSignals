@@ -64,7 +64,13 @@ func (f *fakeEventDAO) FindByTimeRange(_ context.Context, _ time.Time, _ *time.T
 	return nil, nil
 }
 
+func (f *fakeEventDAO) InsertMany(_ context.Context, _ []*model.EventRecord) ([]error, error) {
+	return nil, nil
+}
 func (f *fakeEventDAO) AddPending(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeEventDAO) AddPendingMany(_ context.Context, _ []string, _ string) error {
+	return nil
+}
 func (f *fakeEventDAO) GetPendingForStream(_ context.Context, _ string, _ int32) ([]string, int64, error) {
 	return nil, 0, nil
 }

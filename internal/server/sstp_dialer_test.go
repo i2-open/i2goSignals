@@ -263,6 +263,16 @@ func (f *fakeSstpOutbound) HandleInboundEvent(token *goSet.SecurityEventToken, r
 	return nil
 }
 
+// HandleInboundEvents records the batch one SET at a time so assertions written
+// against ingested keep working; ingestErr fails every SET of the batch.
+func (f *fakeSstpOutbound) HandleInboundEvents(tokens []*goSet.SecurityEventToken, raws []string, sid string) []error {
+	errs := make([]error, len(tokens))
+	for i, tok := range tokens {
+		errs[i] = f.HandleInboundEvent(tok, raws[i], sid)
+	}
+	return errs
+}
+
 func (f *fakeSstpOutbound) ingestedCopy() []ingestedInboundSet {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1014,4 +1024,104 @@ func signResponseSet(t *testing.T, key *rsa.PrivateKey, kid, iss, aud, jti strin
 	signed, err := set.JWS(jwt.SigningMethodRS256, key)
 	require.NoError(t, err)
 	return signed
+}
+
+// TestSstpDialer_ReceiveOnlyCycleIsNotPaced proves a cycle that received
+// SETs but sent nothing goes straight back to the peer for the next batch.
+// The responder parks an empty request as a long poll once its outbound is
+// drained, so the initiator has no hot-loop to guard against here; pacing
+// every received batch by BaseDelay bounded the receive rate at
+// batch/BaseDelay no matter how fast ingest was. The peer here hands one
+// SET per response for five cycles then goes empty; with BaseDelay far
+// longer than the test budget, six requests can only complete if the
+// receive-only cycles were not paced.
+func TestSstpDialer_ReceiveOnlyCycleIsNotPaced(t *testing.T) {
+	const (
+		pairId       = "pair-receive-pacing"
+		txSid        = "tx-receive-pacing"
+		peerIssuer   = "https://peer.issuer.example"
+		peerAudience = "https://us.example"
+		responseKid  = "peer-kid-pacing"
+		batches      = 5
+	)
+
+	peerKey, err := rsaTestKey()
+	require.NoError(t, err)
+	jwks := makeGivenJwks(t, responseKid, &peerKey.PublicKey)
+	tokens := make([]string, batches)
+	for i := range tokens {
+		tokens[i] = signResponseSet(t, peerKey, responseKid, peerIssuer, peerAudience, "sstp-pacing-"+strings.Repeat("x", i+1))
+	}
+
+	var requestCount atomic.Int64
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		n := int(requestCount.Add(1)) - 1
+		resp := goSetSstp.Message{}
+		if n < batches {
+			resp.Sets = map[string]string{"sstp-pacing-" + strings.Repeat("x", n+1): tokens[n]}
+		}
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer peer.Close()
+
+	pair := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:        txSid,
+			Iss:       "https://us.example",
+			Aud:       []string{peerIssuer},
+			RouteMode: model.RouteModeForward,
+		},
+		SstpInbound: &model.StreamConfiguration{
+			Id:  "rx-sid-pacing",
+			Iss: peerIssuer,
+			Aud: []string{peerAudience},
+		},
+		Status: model.StreamStateEnabled,
+		PairId: pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                model.SstpRoleInitiator,
+			EndpointUrl:         peer.URL,
+			AuthorizationHeader: "Bearer test-token",
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Nothing outbound: every cycle is receive-only.
+	fake := newFakeSstpOutbound(ctx, pair)
+	fake.verifyCfg = goSetSstp.VerifyConfig{
+		JWKS:              jwks,
+		ExpectedIssuer:    peerIssuer,
+		ExpectedAudiences: []string{peerAudience},
+		RequireSignature:  true,
+	}
+	coord := &oneShotCoordinator{}
+
+	// BaseDelay is deliberately longer than the whole assertion window: a
+	// paced receive-only cycle would allow at most one more request.
+	cfg := SstpDialerConfig{
+		BaseDelay:           2 * time.Second,
+		MaxDelay:            4 * time.Second,
+		BackoffFactor:       2.0,
+		LeaseDuration:       500 * time.Millisecond,
+		HeartbeatInterval:   200 * time.Millisecond,
+		HeartbeatRetryDelay: 10 * time.Millisecond,
+		Jitter:              func() time.Duration { return 0 },
+		HTTPClient:          &http.Client{Timeout: 2 * time.Second},
+		BackfillBatch:       10,
+	}
+
+	dialer := NewSstpDialer(coord, "node-pacing", nil, cfg)
+	dialer.Bind(fake)
+	dialer.RegisterPair(pairId)
+	t.Cleanup(func() { dialer.UnregisterPair(pairId) })
+
+	require.Eventually(t, func() bool {
+		return requestCount.Load() >= batches+1
+	}, 1500*time.Millisecond, 10*time.Millisecond,
+		"a receive-only cycle must not be paced by BaseDelay: all %d batches plus the trailing empty poll should complete well inside one BaseDelay", batches)
+	assert.Len(t, fake.ingestedCopy(), batches, "every received SET must have been ingested")
 }

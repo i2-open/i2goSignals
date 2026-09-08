@@ -66,6 +66,9 @@ func (rr *recordingRouter) RemoveStream(string)                        {}
 func (rr *recordingRouter) HandleEvent(*goSet.SecurityEventToken, string, string) error {
 	return nil
 }
+func (rr *recordingRouter) HandleEvents(tokens []*goSet.SecurityEventToken, _ []string, _ string) []error {
+	return make([]error, len(tokens))
+}
 func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
 	return nil, nil
 }

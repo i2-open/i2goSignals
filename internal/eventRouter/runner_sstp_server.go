@@ -124,10 +124,10 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		}
 	}
 
-	// Inbound ingest: persist-then-process each parsed SET via HandleEvent, keyed
-	// on the rx-side SID so the inbound counter carries stream_id=rxSid (Q46). A
-	// duplicate JTI is swallowed silently by HandleEvent's #153 short-circuit; we
-	// still ack it so the sender stops resending.
+	// Inbound ingest: persist-then-process the parsed SETs as one batch via
+	// HandleEvents, keyed on the rx-side SID so the inbound counter carries
+	// stream_id=rxSid (Q46). A duplicate JTI is swallowed silently by the #153
+	// short-circuit; we still ack it so the sender stops resending.
 	rxSid := ""
 	if rec.SstpInbound != nil {
 		rxSid = rec.SstpInbound.Id
@@ -136,15 +136,23 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// paused/disabled we decline to ingest (the sender's SETs stay un-acked and are
 	// resent on a later cycle once the direction resumes).
 	if rec.InboundStatus == model.StreamStateEnabled {
+		batch := make([]SstpInboundSet, 0, len(parsedIn))
 		for _, in := range parsedIn {
-			if in.Token == nil {
+			if in.Token != nil {
+				batch = append(batch, in)
+			}
+		}
+		tokens := make([]*goSet.SecurityEventToken, len(batch))
+		raws := make([]string, len(batch))
+		for i, in := range batch {
+			tokens[i], raws[i] = in.Token, in.Raw
+		}
+		for i, ingestErr := range r.HandleEvents(tokens, raws, rxSid) {
+			if ingestErr != nil {
+				resp.SetErrs = appendSstpSetErr(resp.SetErrs, batch[i].Jti, ingestErr)
 				continue
 			}
-			if ingestErr := r.HandleEvent(in.Token, in.Raw, rxSid); ingestErr != nil {
-				resp.SetErrs = appendSstpSetErr(resp.SetErrs, in.Jti, ingestErr)
-				continue
-			}
-			resp.Ack = append(resp.Ack, in.Jti)
+			resp.Ack = append(resp.Ack, batch[i].Jti)
 		}
 	}
 

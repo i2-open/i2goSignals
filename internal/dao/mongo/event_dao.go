@@ -100,6 +100,48 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) e
 	return err
 }
 
+// InsertMany persists records as one unordered bulk insert. Per-record
+// outcomes are index-aligned with records; a duplicate JTI is reported as
+// interfaces.ErrDuplicateJTI at its index while the other records still land.
+func (d *EventDAOMongo) InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	c, err := d.eventColLoad()
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]any, len(records))
+	for i, rec := range records {
+		docs[i] = rec
+	}
+	_, err = c.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	if err == nil {
+		return make([]error, len(records)), nil
+	}
+	var bwe mongo.BulkWriteException
+	if !errors.As(err, &bwe) {
+		eLog.Error("Error bulk inserting events", "error", err)
+		return nil, err
+	}
+	if bwe.WriteConcernError != nil {
+		eLog.Error("Write concern error bulk inserting events", "error", bwe.WriteConcernError)
+		return nil, bwe.WriteConcernError
+	}
+	results := make([]error, len(records))
+	for _, we := range bwe.WriteErrors {
+		if we.Index < 0 || we.Index >= len(results) {
+			continue
+		}
+		if mongo.IsDuplicateKeyError(we.WriteError) {
+			results[we.Index] = interfaces.ErrDuplicateJTI
+		} else {
+			results[we.Index] = errors.New(we.WriteError.Error())
+		}
+	}
+	return results, nil
+}
+
 func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	c, err := d.eventColLoad()
 	if err != nil {
@@ -198,6 +240,26 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID str
 	}
 	doc := pendingDoc{Jti: jti, Sid: sid}
 	_, err = c.InsertOne(ctx, &doc)
+	return err
+}
+
+func (d *EventDAOMongo) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	c, err := d.pendingColLoad()
+	if err != nil {
+		return err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return err
+	}
+	docs := make([]any, len(jtis))
+	for i, jti := range jtis {
+		docs[i] = &pendingDoc{Jti: jti, Sid: sid}
+	}
+	_, err = c.InsertMany(ctx, docs)
 	return err
 }
 

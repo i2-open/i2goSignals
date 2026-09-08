@@ -1023,7 +1023,16 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		if len(events) > 0 && ackedCount >= len(events) {
 			return cls, 0, false, updatedPending
 		}
-		if len(events) == 0 && len(received) == 0 {
+		if len(received) > 0 {
+			// The peer had SETs for us: go straight back for the next batch.
+			// The acks for this batch ride that request, and a receive-only
+			// cycle cannot hot-loop because the responder parks an empty
+			// request as a long poll once its outbound is drained. Pausing
+			// here would cost BaseDelay per received batch and bound the
+			// receive rate at batch/BaseDelay regardless of ingest speed.
+			return cls, 0, false, updatedPending
+		}
+		if len(events) == 0 {
 			// Empty long poll came back with nothing (responder timeout or a
 			// peer that answers immediately): pace the next one by BaseDelay
 			// so a fast-returning responder cannot drive a hot loop.
@@ -1111,8 +1120,14 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 		return sstpPendingFeedback{}
 	}
 	feedback := sstpPendingFeedback{Acks: make([]string, 0, len(received))}
-	for jti, raw := range received {
-		verified, vErr := goSetSstp.VerifySET(raw, cfg)
+	// Verify across the cores, then ingest what survived as one batch: one
+	// bulk insert and one pending-list write per matching outbound stream
+	// instead of the same round trips per SET.
+	jtis := make([]string, 0, len(received))
+	tokens := make([]*goSet.SecurityEventToken, 0, len(received))
+	raws := make([]string, 0, len(received))
+	for _, entry := range goSetSstp.VerifyAll(received, cfg, 0) {
+		jti, verified, vErr := entry.JTI, entry.Verified, entry.Err
 		if vErr != nil {
 			sstpDialerLog.Warn("inbound response SET failed verify — dropping",
 				"pairId", stream.PairId, "jti", jti, "error", vErr)
@@ -1131,12 +1146,20 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 			feedback.addSetErr(jti, *vsErr)
 			continue
 		}
-		if iErr := d.outbound.HandleInboundEvent(verified.Token, verified.Raw, rxSid); iErr != nil {
-			sstpDialerLog.Warn("HandleInboundEvent failed — dropping ack for JTI",
-				"pairId", stream.PairId, "jti", jti, "error", iErr)
+		jtis = append(jtis, jti)
+		tokens = append(tokens, verified.Token)
+		raws = append(raws, verified.Raw)
+	}
+	if len(tokens) == 0 {
+		return feedback
+	}
+	for i, iErr := range d.outbound.HandleInboundEvents(tokens, raws, rxSid) {
+		if iErr != nil {
+			sstpDialerLog.Warn("HandleInboundEvents failed — dropping ack for JTI",
+				"pairId", stream.PairId, "jti", jtis[i], "error", iErr)
 			continue
 		}
-		feedback.Acks = append(feedback.Acks, jti)
+		feedback.Acks = append(feedback.Acks, jtis[i])
 	}
 	return feedback
 }

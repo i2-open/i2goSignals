@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"runtime"
 	"slices"
+	"sort"
+	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetValidate"
@@ -105,96 +109,146 @@ func Poll(ctx context.Context, request PollRequest, config ReceiverConfig) (*Par
 		result.Validations = make(map[string]goSetValidate.SetResult, len(rawResp.Sets))
 	}
 
-	for jti, setString := range rawResp.Sets {
-		// Per ADR-0066 §D2 the "None + unverified" state is unrepresentable:
-		// every business stream MUST have at least one active authentication
-		// layer. Stream-config validation enforces this at configure time
-		// (i2goSignals#235); this poll receiver enforces it defensively at
-		// runtime — nil JWKS is always a rejection, an unverified parse is
-		// never the accepted token. Signature failures are expected peer
-		// events (WARN, CONTEXT.md log-level policy).
-		if config.JWKS == nil {
-			if config.RequireSignature {
-				log.Warn("RFC8936: SET signature required but no JWKS available to verify (signing-only)", "jti", jti)
-				result.Errors[jti] = SetErrType{
-					Error:       "jws_signature_failed",
-					Description: "The SET signature could not be validated.",
+	// Signature verification is the CPU cost of a poll response and has no
+	// shared state, so the SETs are verified across the cores; the outcomes
+	// are merged into the result maps on this goroutine.
+	jtis := make([]string, 0, len(rawResp.Sets))
+	for jti := range rawResp.Sets {
+		jtis = append(jtis, jti)
+	}
+	sort.Strings(jtis)
+	outcomes := make([]pollSetOutcome, len(jtis))
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(jtis) {
+		workers = len(jtis)
+	}
+	if workers <= 1 {
+		for i, jti := range jtis {
+			outcomes[i] = verifyPollSet(log, config, jti, rawResp.Sets[jti])
+		}
+	} else {
+		next := make(chan int, len(jtis))
+		for i := range jtis {
+			next <- i
+		}
+		close(next)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for i := range next {
+					outcomes[i] = verifyPollSet(log, config, jtis[i], rawResp.Sets[jtis[i]])
 				}
-				continue
-			}
-			// Defense in depth for ADR-0066 §D2 — see receiver.go in goSetPush.
-			log.Warn("RFC8936: no JWKS configured; refusing to accept unverified SET (ADR-0066)", "jti", jti)
-			result.Errors[jti] = SetErrType{
-				Error:       "invalid_request",
-				Description: "The SET could not be verified: no trust anchor is configured.",
-			}
+			}()
+		}
+		wg.Wait()
+	}
+	for i, jti := range jtis {
+		o := outcomes[i]
+		if o.setErr != nil {
+			result.Errors[jti] = *o.setErr
 			continue
 		}
-
-		token, err := goSet.Parse(setString, config.JWKS)
-		if err != nil {
-			// When verifying against a JWKS under the signing-only posture, a parse
-			// failure is a bad signature → jws_signature_failed (the RFC8935 §2.4
-			// rotate-and-retry signal). Otherwise the prior invalid_request is kept.
-			if config.RequireSignature {
-				log.Warn("RFC8936: SET signature verification failed (signing-only)", "jti", jti, "error", err)
-				result.Errors[jti] = SetErrType{
-					Error:       "jws_signature_failed",
-					Description: "The SET signature could not be validated.",
-				}
-				continue
-			}
-			log.Warn("RFC8936: SET parsing error", "jti", jti, "error", err)
-			result.Errors[jti] = SetErrType{
-				Error:       "invalid_request",
-				Description: "The SET could not be parsed: " + err.Error(),
-			}
-			continue
-		}
-
-		// Validate issuer
-		if config.ExpectedIssuer != "" {
-			if token.Issuer != config.ExpectedIssuer {
-				log.Warn("RFC8936: Invalid issuer", "jti", jti, "expected", config.ExpectedIssuer, "actual", token.Issuer)
-				result.Errors[jti] = SetErrType{
-					Error:       "invalid_issuer",
-					Description: "The SET Issuer is invalid for the SET Recipient.",
-				}
-				continue
-			}
-		}
-
-		// Validate audience
-		if len(config.ExpectedAudiences) > 0 {
-			audMatch := false
-			for _, aud := range config.ExpectedAudiences {
-				if slices.Contains([]string(token.Audience), aud) {
-					audMatch = true
-					break
-				}
-			}
-			if !audMatch {
-				log.Warn("RFC8936: Audience mismatch", "jti", jti, "actual", token.Audience)
-				result.Errors[jti] = SetErrType{
-					Error:       "invalid_audience",
-					Description: "The SET Audience does not correspond to the SET Recipient.",
-				}
-				continue
-			}
-		}
-
-		// Event-payload validation (spec #247). Runs only once the SET is fully
-		// trusted — signature, iss and aud are all settled above — and only
-		// reports: the JTI still lands in ParsedSETs whatever the disposition, so
-		// this package never silently drops or nacks an event. The caller reads
-		// Validations, applies the stream's event_validation mode, and decides
-		// between ack and setErrs.
 		if config.Validators != nil {
-			result.Validations[jti] = config.Validators.Validate(token)
+			result.Validations[jti] = o.validation
 		}
-
-		result.ParsedSETs[jti] = token
+		result.ParsedSETs[jti] = o.token
 	}
 
 	return result, statusCode, nil
+}
+
+// pollSetOutcome is the disposition of one SET of a poll response: either a
+// setErr to report back, or the verified token (with its event-payload
+// validation when a validator set is configured).
+type pollSetOutcome struct {
+	token      *goSet.SecurityEventToken
+	validation goSetValidate.SetResult
+	setErr     *SetErrType
+}
+
+// verifyPollSet applies the receiver's trust checks to one SET: JWKS presence,
+// signature (goSet.Parse), issuer, audience, then event-payload validation.
+func verifyPollSet(log *slog.Logger, config ReceiverConfig, jti, setString string) pollSetOutcome {
+	// Per ADR-0066 §D2 the "None + unverified" state is unrepresentable:
+	// every business stream MUST have at least one active authentication
+	// layer. Stream-config validation enforces this at configure time
+	// (i2goSignals#235); this poll receiver enforces it defensively at
+	// runtime — nil JWKS is always a rejection, an unverified parse is
+	// never the accepted token. Signature failures are expected peer
+	// events (WARN, CONTEXT.md log-level policy).
+	if config.JWKS == nil {
+		if config.RequireSignature {
+			log.Warn("RFC8936: SET signature required but no JWKS available to verify (signing-only)", "jti", jti)
+			return pollSetOutcome{setErr: &SetErrType{
+				Error:       "jws_signature_failed",
+				Description: "The SET signature could not be validated.",
+			}}
+		}
+		// Defense in depth for ADR-0066 §D2 — see receiver.go in goSetPush.
+		log.Warn("RFC8936: no JWKS configured; refusing to accept unverified SET (ADR-0066)", "jti", jti)
+		return pollSetOutcome{setErr: &SetErrType{
+			Error:       "invalid_request",
+			Description: "The SET could not be verified: no trust anchor is configured.",
+		}}
+	}
+
+	token, err := goSet.Parse(setString, config.JWKS)
+	if err != nil {
+		// When verifying against a JWKS under the signing-only posture, a parse
+		// failure is a bad signature → jws_signature_failed (the RFC8935 §2.4
+		// rotate-and-retry signal). Otherwise the prior invalid_request is kept.
+		if config.RequireSignature {
+			log.Warn("RFC8936: SET signature verification failed (signing-only)", "jti", jti, "error", err)
+			return pollSetOutcome{setErr: &SetErrType{
+				Error:       "jws_signature_failed",
+				Description: "The SET signature could not be validated.",
+			}}
+		}
+		log.Warn("RFC8936: SET parsing error", "jti", jti, "error", err)
+		return pollSetOutcome{setErr: &SetErrType{
+			Error:       "invalid_request",
+			Description: "The SET could not be parsed: " + err.Error(),
+		}}
+	}
+
+	// Validate issuer
+	if config.ExpectedIssuer != "" && token.Issuer != config.ExpectedIssuer {
+		log.Warn("RFC8936: Invalid issuer", "jti", jti, "expected", config.ExpectedIssuer, "actual", token.Issuer)
+		return pollSetOutcome{setErr: &SetErrType{
+			Error:       "invalid_issuer",
+			Description: "The SET Issuer is invalid for the SET Recipient.",
+		}}
+	}
+
+	// Validate audience
+	if len(config.ExpectedAudiences) > 0 {
+		audMatch := false
+		for _, aud := range config.ExpectedAudiences {
+			if slices.Contains([]string(token.Audience), aud) {
+				audMatch = true
+				break
+			}
+		}
+		if !audMatch {
+			log.Warn("RFC8936: Audience mismatch", "jti", jti, "actual", token.Audience)
+			return pollSetOutcome{setErr: &SetErrType{
+				Error:       "invalid_audience",
+				Description: "The SET Audience does not correspond to the SET Recipient.",
+			}}
+		}
+	}
+
+	out := pollSetOutcome{token: token}
+	// Event-payload validation (spec #247). Runs only once the SET is fully
+	// trusted — signature, iss and aud are all settled above — and only
+	// reports: the JTI still lands in ParsedSETs whatever the disposition, so
+	// this package never silently drops or nacks an event. The caller reads
+	// Validations, applies the stream's event_validation mode, and decides
+	// between ack and setErrs.
+	if config.Validators != nil {
+		out.validation = config.Validators.Validate(token)
+	}
+	return out
 }
