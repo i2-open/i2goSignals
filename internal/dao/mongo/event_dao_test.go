@@ -323,6 +323,39 @@ func (s *EventDAOMongoSuite) TestAddPendingMany_Order() {
 	s.Equal(int64(len(want)), total, "empty AddPendingMany must be a no-op")
 }
 
+// TestRetractPending_UndoesOneMarkerPerJti: a retraction removes the newest
+// pending entry per JTI, leaves an earlier entry for the same JTI in place and
+// in its original position, skips an unknown JTI, and never touches another
+// stream (ADR 0038).
+func (s *EventDAOMongoSuite) TestRetractPending_UndoesOneMarkerPerJti() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+
+	// "dup" is recorded twice on streamA: a real delivery intent, then a
+	// speculative one whose body write was rejected.
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "keep-1", "keep-2"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "spec-only"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup"}, streamB))
+
+	s.Require().NoError(s.dao.RetractPending(ctx, []string{"dup", "spec-only", "never-seen"}, streamA))
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(3), total)
+	s.Equal([]string{"dup", "keep-1", "keep-2"}, jtis,
+		"the older intent for dup survives, in place, and only the speculative markers go")
+
+	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(1), total, "another stream's intent for the same JTI is untouched")
+
+	s.Require().NoError(s.dao.RetractPending(ctx, nil, streamA))
+	_, total, err = s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(3), total, "empty RetractPending must be a no-op")
+}
+
 // TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly
 // the named JTIs of the named stream, returns them, and leaves an identical
 // JTI pending on another stream.

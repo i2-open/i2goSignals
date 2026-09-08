@@ -397,6 +397,37 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 	return removed, nil
 }
 
+// RetractPending removes, for each JTI, the newest pending entry of streamID
+// and leaves any older entry for the same JTI alone (ADR 0038). Sorting the
+// FindOneAndDelete by descending _id picks the most recently inserted
+// document, so an earlier still-undelivered intent for the same JTI keeps both
+// its existence and its position in the natural-order pending list. Retraction
+// is the exceptional path — it only runs when a speculative marker's body was
+// rejected — so it costs one round trip per JTI rather than a batched delete.
+func (d *EventDAOMongo) RetractPending(ctx context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	c, err := d.pendingColLoad()
+	if err != nil {
+		return err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return err
+	}
+	opts := options.FindOneAndDelete().SetSort(bson.D{{Key: "_id", Value: -1}})
+	for _, jti := range jtis {
+		res := c.FindOneAndDelete(ctx, bson.M{"sid": sid, "jti": jti}, opts)
+		if res.Err() == nil || errors.Is(res.Err(), mongo.ErrNoDocuments) {
+			continue
+		}
+		eLog.Error("Error retracting pending event", "jti", jti, "error", res.Err())
+		return res.Err()
+	}
+	return nil
+}
+
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
 	c, err := d.pendingColLoad()
 	if err != nil {

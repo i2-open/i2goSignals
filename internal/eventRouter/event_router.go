@@ -874,6 +874,13 @@ response). The stream is resolved once, the batch is persisted in one bulk write
 one pending-list write per matching outbound stream instead of one per SET. The returned errors are
 index-aligned with eventTokens; a nil entry means the SET was accepted (or was a duplicate JTI, which is
 swallowed exactly as HandleEvent swallows it) and may be acked.
+
+The body write and the delivery-intent writes are issued CONCURRENTLY rather than one after the other
+(ADR 0038), so ingest pays roughly one majority-acked replica-set round trip instead of two. That means a
+pending marker can be written for a SET whose body write later turns out to have been rejected — a
+duplicate JTI, or a failed insert — so the markers are speculative until ingest.Wait() reports the
+outcome. commitFanoutLocked retracts the markers of rejected SETs before any stream is woken, and no
+stream is woken, metered as egress, or handed a JTI until the body write has been joined.
 */
 func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
 	results := make([]error, len(eventTokens))
@@ -889,8 +896,61 @@ func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents
 		return results
 	}
 
-	recs, errs := r.eventService.AddEvents(r.ctx, eventTokens, sid, rawEvents)
-	accepted := make([]*model.EventRecord, 0, len(recs))
+	// Leg A: the event bodies. Starts here and runs in the background; the
+	// candidate records are available immediately because they are built from
+	// the inbound tokens, not from anything the database returns.
+	ingest := r.eventService.BeginAddEvents(r.ctx, eventTokens, sid, rawEvents)
+
+	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
+	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
+	// the push path, the forward-verbatim vs re-sign choice is NOT made here —
+	// it is made per outbound stream at delivery time (ADR-0031 D2).
+	//
+	// excludeSstpTxSid names the pair the SET arrived on, so the fan-out below
+	// does not send it straight back to the peer that just delivered it: that
+	// pair's own tx side frequently matches the event on aud (ADR-0031 D5).
+	// The tx SID is the exclusion key because it is what both fan-out maps are
+	// keyed by, and unlike PairId it is always populated.
+	//
+	// The route mode is a property of the inbound stream alone, so it is
+	// settled without waiting for leg A.
+	importOnly := false
+	excludeSstpTxSid := ""
+	if sstpPair != nil {
+		// sstpInboundRouteMode has already folded "no inbound mode" into IMPORT.
+		importOnly = sstpInboundRouteMode(sstpPair) == model.RouteModeImport
+		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
+	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
+		importOnly = true
+	}
+
+	// Leg B: the delivery intents, written while leg A is still in flight.
+	var targets []*fanoutTarget
+	if !importOnly {
+		r.mu.RLock()
+		targets = r.planFanoutLocked(dedupeCandidatesByJti(ingest.Candidates()), excludeSstpTxSid)
+		r.mu.RUnlock()
+	}
+
+	// Join leg A. Only now is it known which candidates were accepted.
+	accepted := r.reconcileIngest(ingest, results, streamState, eventTokens)
+	if len(targets) == 0 {
+		return results
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.commitFanoutLocked(targets, accepted)
+	return results
+}
+
+// reconcileIngest joins the in-flight body write, records the per-SET outcome
+// in results, meters the accepted SETs as ingress, and returns the accepted
+// records keyed by JTI so the fan-out can tell an accepted delivery intent
+// from a speculative one.
+func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, streamState *model.StreamStateRecord, eventTokens []*goSet.SecurityEventToken) map[string]*model.EventRecord {
+	recs, errs := ingest.Wait()
+	accepted := make(map[string]*model.EventRecord, len(recs))
 	for i, rec := range recs {
 		if errs[i] != nil {
 			// JTI dedup short-circuit: the persistence layer rejected this JTI
@@ -906,101 +966,182 @@ func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents
 		}
 		r.IncrementCounter(streamState, eventTokens[i], true)
 		r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventTokens[i])
-		accepted = append(accepted, rec)
+		accepted[rec.Jti] = rec
 	}
-	if len(accepted) == 0 {
-		return results
-	}
+	return accepted
+}
 
-	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
-	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
-	// the push path, the forward-verbatim vs re-sign choice is NOT made here —
-	// it is made per outbound stream at delivery time (ADR-0031 D2).
-	//
-	// excludeSstpTxSid names the pair the SET arrived on, so the fan-out below
-	// does not send it straight back to the peer that just delivered it: that
-	// pair's own tx side frequently matches the event on aud (ADR-0031 D5).
-	// The tx SID is the exclusion key because it is what both fan-out maps are
-	// keyed by, and unlike PairId it is always populated.
-	excludeSstpTxSid := ""
-	if sstpPair != nil {
-		// Same test the push path makes below; sstpInboundRouteMode has already
-		// folded "no inbound mode" into IMPORT.
-		if sstpInboundRouteMode(sstpPair) == model.RouteModeImport {
-			return results
+// dedupeCandidatesByJti drops the later repeats of a JTI that appears more than
+// once in one inbound batch. Only one copy can ever be accepted — the second
+// insert of the same JTI reports ErrDuplicateJTI — so queueing both would leave
+// two identical pending markers that the compensating removal cannot tell
+// apart, and one of them would be delivered a second time.
+func dedupeCandidatesByJti(recs []*model.EventRecord) []*model.EventRecord {
+	seen := make(map[string]struct{}, len(recs))
+	out := make([]*model.EventRecord, 0, len(recs))
+	for _, rec := range recs {
+		if _, dup := seen[rec.Jti]; dup {
+			continue
 		}
-		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
-	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
-		// nothing more to do
-		return results
+		seen[rec.Jti] = struct{}{}
+		out = append(out, rec)
 	}
+	return out
+}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// fanoutTarget is one outbound stream a batch has been speculatively queued to:
+// its pending markers are written, but its buffer has not been woken and its
+// events have not been metered as egress. commitFanoutLocked finishes the job
+// once the body write has been joined.
+type fanoutTarget struct {
+	mode   string // PUSH | POLL | SSTP-CLIENT | SSTP-SERVER — selects the commit action and labels logs
+	key    string // buffer-map key: the SID for push/poll, the PairId for sstp-client, the tx SID for sstp-server
+	docID  string // stream document id the pending markers were written under
+	stream model.StreamStateRecord
+	jtis   []string
+}
+
+// planFanoutLocked selects, for every outbound stream this router knows about,
+// the events of the batch that match it and writes their pending markers. It
+// wakes nothing: the batch's bodies may still be in flight. The caller must
+// hold r.mu (at least RLock).
+func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid string) []*fanoutTarget {
+	var targets []*fanoutTarget
 
 	// Check to see if the events should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
-		jtis := r.queueMatchingLocked(&stream, accepted, "PUSH")
-		if len(jtis) == 0 {
-			continue
-		}
-		// Lease-aware routing
-		resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
-
-		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			// Local owner or no owner (we'll try to take it or backfill will find it)
-			buf := r.pushBuffers[stream.StreamConfiguration.Id]
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
-			}
-		} else {
-			// Remote owner, send one wake-up for the batch
-			go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId, "")
+		if t := r.queueMatchingLocked(&stream, batch, "PUSH", stream.StreamConfiguration.Id); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
 	// Check to see if the events should be routed to outbound polling streams
 	for k, pollStream := range r.pollStreams {
 		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
-		jtis := r.queueMatchingLocked(&pollStream, accepted, "POLL")
-		// For poll streams, every node serving a long poll should be woken up.
-		// Since we don't have a transmitter lease for poll, we just submit locally.
-		// Ideally we'd broadcast to all nodes, but let's start with local.
-		buf := r.pollBuffers[pollStream.StreamConfiguration.Id]
-		for _, jti := range jtis {
-			buf.SubmitEvent(jti)
+		if t := r.queueMatchingLocked(&pollStream, batch, "POLL", pollStream.StreamConfiguration.Id); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
-	r.routeEventsToSstpPairsLocked(accepted, excludeSstpTxSid)
-	return results
+	return append(targets, r.planSstpFanoutLocked(batch, excludeSstpTxSid)...)
 }
 
 // queueMatchingLocked selects the events of a batch that match an outbound
-// stream, meters them as egress, and appends them to the stream's pending list
-// in one write. It returns the JTIs queued, in batch order. The caller must
+// stream and appends them to the stream's pending list in one write, returning
+// the target the commit phase needs (nil when nothing matched). The caller must
 // hold r.mu (at least RLock). A pending-list write failure is logged and the
-// JTIs are still returned, as the per-event path did: the buffer submit gives
+// target is still returned, as the per-event path did: the buffer submit gives
 // the runner a chance to deliver from the event store.
-func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string) []string {
+//
+// Egress metering is deliberately NOT done here. These markers are speculative
+// until the body write is joined, and a SET whose body was rejected must not be
+// counted as outbound.
+func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string, key string) *fanoutTarget {
 	var jtis []string
 	for _, event := range batch {
 		if !r.eventService.MatchesStream(stream, event) {
 			continue
 		}
 		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", mode, "types", event.Types)
-		r.observeMeteredEvent(stream.StreamConfiguration.Id, DirectionEgress, &event.Event)
 		jtis = append(jtis, event.Jti)
 	}
 	if len(jtis) == 0 {
 		return nil
 	}
+	docID := stream.Id.Hex()
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-	if err := r.eventService.AddEventsToStream(r.ctx, jtis, stream.Id.Hex()); err != nil {
+	if err := r.eventService.AddEventsToStream(r.ctx, jtis, docID); err != nil {
 		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
 	}
-	return jtis
+	return &fanoutTarget{mode: mode, key: key, docID: docID, stream: *stream, jtis: jtis}
+}
+
+// commitFanoutLocked finishes the fan-out once the body write has been joined:
+// it retracts the pending markers of every SET the body write rejected, meters
+// the survivors as egress, and wakes each target the way its delivery method
+// requires. The caller must hold r.mu (at least RLock).
+func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string]*model.EventRecord) {
+	for _, t := range targets {
+		keep := make([]string, 0, len(t.jtis))
+		var drop []string
+		for _, jti := range t.jtis {
+			if _, ok := accepted[jti]; ok {
+				keep = append(keep, jti)
+			} else {
+				drop = append(drop, jti)
+			}
+		}
+		if len(drop) > 0 {
+			// Compensating write (ADR 0038). The marker was written before the
+			// body write reported this JTI rejected, so the delivery intent is
+			// retracted before anything can act on it — leaving it would
+			// re-deliver a SET whose first copy was already fanned out.
+			if err := r.eventService.DiscardPending(r.ctx, drop, t.docID); err != nil {
+				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.stream.StreamConfiguration.Id, "mode", t.mode, "count", len(drop), "error", err)
+			}
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		for _, jti := range keep {
+			r.observeMeteredEvent(t.stream.StreamConfiguration.Id, DirectionEgress, &accepted[jti].Event)
+		}
+		r.wakeTargetLocked(t, keep)
+	}
+}
+
+// wakeTargetLocked hands one target's accepted JTIs to whichever runner owns
+// its delivery method. The caller must hold r.mu (at least RLock).
+func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
+	switch t.mode {
+	case "PUSH":
+		// Lease-aware routing
+		resource := fmt.Sprintf("push-transmitter:%s", t.key)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			// Local owner or no owner (we'll try to take it or backfill will find it)
+			buf := r.pushBuffers[t.key]
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
+		} else {
+			// Remote owner, send one wake-up for the batch
+			go r.sendWakeup(t.key, "push", ownerNodeId, "")
+		}
+
+	case "POLL":
+		// For poll streams, every node serving a long poll should be woken up.
+		// Since we don't have a transmitter lease for poll, we just submit locally.
+		// Ideally we'd broadcast to all nodes, but let's start with local.
+		buf := r.pollBuffers[t.key]
+		for _, jti := range jtis {
+			buf.SubmitEvent(jti)
+		}
+
+	case "SSTP-CLIENT":
+		resource := fmt.Sprintf("sstp-client:%s", t.key)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			if buf, ok := r.sstpBuffers[t.key]; ok {
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
+				buf.Wakeup()
+			}
+		} else {
+			go r.broadcastSstpClientWake(t.key)
+		}
+
+	case "SSTP-SERVER":
+		if buf, ok := r.sstpServerBuffers[t.key]; ok {
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
+			buf.Wakeup()
+		}
+		go r.broadcastSstpServerWake(t.key)
+	}
 }
 
 // sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
@@ -1027,9 +1168,10 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 	return pair.SstpInbound.RouteMode
 }
 
-// routeEventsToSstpPairsLocked fans a batch of outbound events out to the SSTP
-// pairs this router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must
-// hold r.mu (at least RLock).
+// planSstpFanoutLocked selects the batch's events for the SSTP pairs this
+// router knows about (PRD #154 Q11.1, Q11.2, #167) and writes their pending
+// markers; wakeTargetLocked does the waking once the bodies have landed. The
+// caller must hold r.mu (at least RLock).
 //
 //   - SSTP-client (initiator) pairs: when an event matches and the
 //     sstp-client:<PairId> lease is held by a different node, broadcast
@@ -1042,6 +1184,12 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // The matching events of the batch are appended to a pair's pending list in
 // one write and the pair is woken once per batch, not once per event.
 //
+// Finding #6: the JTI is persisted into the tx-side pending list BEFORE the
+// runner is woken — exactly as the push/poll branches do. Without this the JTI
+// is never AddPending'd for the tx SID, so the runner's GetEventIds(txSid)
+// fallback finds nothing and the event is silently lost (not even
+// backfill-recoverable). The body insert only stores the token.
+//
 // excludeTxSid, when non-empty, is the tx-side SID of a pair to skip: the SETs
 // arrived on that pair's rx side, and sending them back down the same pair's tx
 // side would return them to the peer that sent them (#261, ADR-0031 D5). Empty
@@ -1051,31 +1199,14 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
 // responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
-func (r *router) routeEventsToSstpPairsLocked(batch []*model.EventRecord, excludeTxSid string) {
+func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid string) []*fanoutTarget {
+	var targets []*fanoutTarget
 	for pairId, pair := range r.sstpClientStreams {
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		// Finding #6: persist the JTI into the tx-side pending list BEFORE waking the
-		// runner — exactly as the push/poll branches do with AddEventToStream. Without
-		// this the JTI is never AddPending'd for the tx SID, so the runner's
-		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
-		// (not even backfill-recoverable). AddEvent only Insert()s the token.
-		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT")
-		if len(jtis) == 0 {
-			continue
-		}
-		resource := fmt.Sprintf("sstp-client:%s", pairId)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
-		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			if buf, ok := r.sstpBuffers[pairId]; ok {
-				for _, jti := range jtis {
-					buf.SubmitEvent(jti)
-				}
-				buf.Wakeup()
-			}
-		} else {
-			go r.broadcastSstpClientWake(pairId)
+		if t := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT", pairId); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
@@ -1083,22 +1214,13 @@ func (r *router) routeEventsToSstpPairsLocked(batch []*model.EventRecord, exclud
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		// Finding #6 (server side): add the JTI to the tx-side pending list so the
-		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
-		// server takes no client lease — every node may serve the long-poll — so we do
-		// not gate this on lease ownership.
-		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER")
-		if len(jtis) == 0 {
-			continue
+		// The server takes no client lease — every node may serve the
+		// long-poll — so the wake is not gated on lease ownership.
+		if t := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER", txSid); t != nil {
+			targets = append(targets, t)
 		}
-		if buf, ok := r.sstpServerBuffers[txSid]; ok {
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
-			}
-			buf.Wakeup()
-		}
-		go r.broadcastSstpServerWake(txSid)
 	}
+	return targets
 }
 
 // SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to

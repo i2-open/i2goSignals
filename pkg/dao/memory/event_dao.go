@@ -163,20 +163,25 @@ func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *
 	return sortedEvents, nil
 }
 
+// AddPending records a delivery intent for jti on streamID. The pending marker
+// is written independently of the event body — the body may not be stored yet,
+// or may never be, because ingest issues the two writes concurrently (ADR
+// 0038). This mirrors the Mongo DAO, whose pendingEvents insert has never
+// consulted the events collection. Every delivery path treats a pending JTI
+// with no body as a skip: it is neither delivered nor acked.
 func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, ok := d.events[jti]; ok {
-		deliverable := interfaces.DeliverableEvent{
-			Jti:      jti,
-			StreamId: streamID,
-		}
-		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], deliverable)
-	}
+	d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+		Jti:      jti,
+		StreamId: streamID,
+	})
 	return nil
 }
 
+// AddPendingMany is AddPending for a batch, appending in the given order. As
+// with AddPending, a JTI whose body is not (yet) stored is still recorded.
 func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, streamID string) error {
 	if len(jtis) == 0 {
 		return nil
@@ -185,12 +190,10 @@ func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, stream
 	defer d.mu.Unlock()
 
 	for _, jti := range jtis {
-		if _, ok := d.events[jti]; ok {
-			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
-				Jti:      jti,
-				StreamId: streamID,
-			})
-		}
+		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+			Jti:      jti,
+			StreamId: streamID,
+		})
 	}
 	return nil
 }
@@ -270,6 +273,45 @@ func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, str
 	}
 	d.pendingEvents[streamID] = newPending
 	return removed, nil
+}
+
+// RetractPending removes the last-appended pending entry for each JTI and
+// leaves any earlier entry for the same JTI in its original position (ADR
+// 0038), so retracting a speculative delivery intent cannot drop an older
+// intent that is still awaiting delivery.
+func (d *EventDAOMemory) RetractPending(_ context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	pending, ok := d.pendingEvents[streamID]
+	if !ok {
+		return nil
+	}
+	drop := make(map[int]struct{}, len(jtis))
+	for _, jti := range jtis {
+		for i := len(pending) - 1; i >= 0; i-- {
+			if _, taken := drop[i]; taken || pending[i].Jti != jti {
+				continue
+			}
+			drop[i] = struct{}{}
+			break
+		}
+	}
+	if len(drop) == 0 {
+		return nil
+	}
+	kept := make([]interfaces.DeliverableEvent, 0, len(pending)-len(drop))
+	for i, event := range pending {
+		if _, dropped := drop[i]; dropped {
+			continue
+		}
+		kept = append(kept, event)
+	}
+	d.pendingEvents[streamID] = kept
+	return nil
 }
 
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
