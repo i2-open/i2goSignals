@@ -168,8 +168,9 @@ type router struct {
 	backfillInterval    time.Duration
 	backfillBatch       int
 	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
-	// POSTs a push stream's lease holder keeps in flight at once. The batch
-	// the loop drains from the buffer per iteration is 4x this.
+	// POSTs a push stream's lease holder keeps in flight at once. Unset, it is
+	// derived from the available processors (ADR 0037). The batch the loop
+	// drains from the buffer per iteration is 4x this.
 	pushConcurrency int
 	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
 	// one outbound message (a poll response or either SSTP leg) re-signs side
@@ -358,15 +359,22 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	router.backfillBatch = backfillBatch
 
-	pushConcurrency := defaultPushConcurrency
+	pushConcurrency := defaultPushConcurrency()
+	pushConcurrencySource := "derived"
 	if val := os.Getenv("I2SIG_PUSH_CONCURRENCY"); val != "" {
 		if i, err := strconv.Atoi(val); err == nil && i > 0 {
 			pushConcurrency = i
+			pushConcurrencySource = "I2SIG_PUSH_CONCURRENCY"
 		} else {
 			eventLogger.Warn("Ignoring invalid I2SIG_PUSH_CONCURRENCY (want a positive integer)", "value", val)
 		}
 	}
 	router.pushConcurrency = pushConcurrency
+	eventLogger.Info("Push delivery concurrency resolved (ADR 0037)",
+		"concurrency", pushConcurrency,
+		"source", pushConcurrencySource,
+		"gomaxprocs", runtime.GOMAXPROCS(0),
+		"ackDeferralWindow", router.pushBatchMax())
 
 	signConcurrency := runtime.GOMAXPROCS(0)
 	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
@@ -1899,13 +1907,50 @@ func drainPushBatch(first string, out <-chan interface{}, eventBuf *buffer.Event
 // goroutine re-arms in microseconds, so this only ever fires on a stale Cnt().
 const drainWait = time.Millisecond
 
-// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: RFC 8935 POSTs a
-// push stream keeps in flight at once (ADR 0035).
-const defaultPushConcurrency = 5
+// minPushConcurrency and maxPushConcurrency clamp the derived
+// I2SIG_PUSH_CONCURRENCY default into the plateau the ADR 0037 sweep measured.
+//
+// The floor is there because push is latency-bound: below eight POSTs in
+// flight the push leg is the bottleneck on every host shape measured, so a
+// two-processor container must not inherit a near-serial default for work that
+// is not CPU-bound. The ceiling is there because past ~24 the delivery curve is
+// flat within the benchmark's noise band while ingest keeps falling and the
+// ack-deferral window keeps growing: 32 holds pushBatchMax() at 128 SETs, the
+// most a crash mid-batch can resend.
+const (
+	minPushConcurrency = 8
+	maxPushConcurrency = 32
+)
+
+// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: how many
+// RFC 8935 POSTs a push stream keeps in flight when the operator sets nothing.
+// ADR 0035 pinned this at 5; ADR 0037 derives it from the processors the
+// process can see, the same idiom I2SIG_SIGN_CONCURRENCY, the poll receiver
+// and the SSTP batch verifier already use.
+//
+// Delivery and ingest compete for those processors — the sweep has ingest
+// falling monotonically as push concurrency rises — so the transmitter should
+// not keep more POSTs open than the machine can also receive events for.
+func defaultPushConcurrency() int {
+	return clampPushConcurrency(runtime.GOMAXPROCS(0))
+}
+
+// clampPushConcurrency holds a processor count inside the measured plateau.
+func clampPushConcurrency(procs int) int {
+	if procs < minPushConcurrency {
+		return minPushConcurrency
+	}
+	if procs > maxPushConcurrency {
+		return maxPushConcurrency
+	}
+	return procs
+}
 
 // pushBatchMax bounds how many JTIs one loop iteration drains from the buffer.
 // It is also the ack-deferral window: on a crash mid-batch, up to this many
-// SETs the receiver already accepted are still pending and are resent.
+// SETs the receiver already accepted are still pending and are resent. The
+// ceiling on the derived default therefore caps the window at 128 SETs
+// (ADR 0037); an explicit I2SIG_PUSH_CONCURRENCY sets it to 4x that value.
 func (r *router) pushBatchMax() int {
 	if r.pushConcurrency < 1 {
 		return 4

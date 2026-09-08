@@ -164,6 +164,29 @@ Numbers below come from the history table (5000 events, concurrency 16,
 `alternate` mix, Apple M-series laptop, Docker Desktop dev stack). They are
 the record for release notes; the corresponding rows carry the same labels.
 
+### Push delivery ran five POSTs in flight when the link wanted fourteen (fixed)
+
+`I2SIG_PUSH_CONCURRENCY` defaulted to a fixed 5 (ADR 0035). A `--mix push`
+sweep over 1/5/8/16/24/32/64, run twice — once on the full fourteen-processor
+host and once with the transmitter held to `GOMAXPROCS=4` — put the knee
+between 5 and 16 and a noise-flat plateau from 16 up, and moved by under 1%
+when ten processors were taken away: push is latency-bound, so the optimum
+belongs to the link, not to the transmitter's CPU. The default is now
+`GOMAXPROCS` clamped to 8..32 (**14** on this host), which takes push from
+**414-419 to 536-589 ev/s** and drain-after-ingest from 6.8s to 2.3s, paid for
+with about 22% of ingest — delivery and ingest compete for the same processors.
+Both sweeps and the trade are in [ADR 0037](../adr/0037-push-concurrency-derived-from-processors.md);
+the rows are labelled `spec102-285-*`.
+
+To reproduce a sweep point, the dev stack passes both knobs through:
+
+```bash
+I2SIG_PUSH_CONCURRENCY=32 GOMAXPROCS=4 docker compose -f docker-compose-dev.yml up -d goSignals1
+make dev-bench BENCH_E2E_ARGS="--mix push"
+```
+
+Unset both and bring `goSignals1` back up to return to the derived default.
+
 ### Push delivery reused no HTTP connections (fixed)
 
 The baseline run drained the push leg at **38 events/s** while the poll leg,

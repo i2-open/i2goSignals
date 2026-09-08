@@ -2,6 +2,7 @@ package eventRouter
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -104,7 +105,7 @@ func (h *filterPushHarness) addPendingEvents(t *testing.T, sid string, n int) []
 func TestPushBatch_PoolFansOutAndAcksTheBatch(t *testing.T) {
 	seam := &inflightAdapter{hold: 50 * time.Millisecond}
 	h := newPushBatchHarness(t, seam)
-	require.Equal(t, defaultPushConcurrency, h.router.pushConcurrency)
+	require.Equal(t, defaultPushConcurrency(), h.router.pushConcurrency)
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
@@ -119,7 +120,7 @@ func TestPushBatch_PoolFansOutAndAcksTheBatch(t *testing.T) {
 
 	calls, peak := seam.stats()
 	require.Equal(t, 10, calls)
-	require.LessOrEqual(t, peak, defaultPushConcurrency, "pool never exceeds I2SIG_PUSH_CONCURRENCY")
+	require.LessOrEqual(t, peak, defaultPushConcurrency(), "pool never exceeds I2SIG_PUSH_CONCURRENCY")
 	require.GreaterOrEqual(t, peak, 2, "pool actually runs pushes side by side (peak %d)", peak)
 }
 
@@ -202,8 +203,47 @@ func TestNewRouter_PushConcurrencyEnv(t *testing.T) {
 	t.Run("invalid", func(t *testing.T) {
 		t.Setenv("I2SIG_PUSH_CONCURRENCY", "0")
 		h := newPushBatchHarness(t, delivery.NewMemoryAdapter(delivery.PushOutcome{}))
-		require.Equal(t, defaultPushConcurrency, h.router.pushConcurrency)
+		require.Equal(t, defaultPushConcurrency(), h.router.pushConcurrency)
 	})
+}
+
+// TestClampPushConcurrency_HoldsTheMeasuredPlateau: the ADR 0037 derivation is
+// the processor count clamped into the range the sweep measured, so a small
+// container is not left near-serial on latency-bound work and a large one does
+// not grow the ack-deferral window past 128 SETs for no measured gain.
+func TestClampPushConcurrency_HoldsTheMeasuredPlateau(t *testing.T) {
+	for _, tc := range []struct {
+		procs int
+		want  int
+	}{
+		{procs: 1, want: minPushConcurrency},
+		{procs: 4, want: minPushConcurrency},
+		{procs: minPushConcurrency, want: minPushConcurrency},
+		{procs: 14, want: 14},
+		{procs: maxPushConcurrency, want: maxPushConcurrency},
+		{procs: 64, want: maxPushConcurrency},
+		{procs: 256, want: maxPushConcurrency},
+	} {
+		require.Equal(t, tc.want, clampPushConcurrency(tc.procs), "procs=%d", tc.procs)
+	}
+}
+
+// TestDefaultPushConcurrency_FollowsGOMAXPROCS: the default is read from the
+// processors the process can actually see, not from a constant.
+func TestDefaultPushConcurrency_FollowsGOMAXPROCS(t *testing.T) {
+	restore := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(restore) })
+
+	runtime.GOMAXPROCS(1)
+	require.Equal(t, minPushConcurrency, defaultPushConcurrency(), "a one-processor host takes the floor")
+
+	runtime.GOMAXPROCS(maxPushConcurrency + 8)
+	require.Equal(t, maxPushConcurrency, defaultPushConcurrency(), "a large host takes the ceiling")
+
+	runtime.GOMAXPROCS(12)
+	require.Equal(t, 12, defaultPushConcurrency(), "in between, the processor count is the default")
+	require.Equal(t, 48, (&router{pushConcurrency: defaultPushConcurrency()}).pushBatchMax(),
+		"the ack-deferral window is 4x the derived default")
 }
 
 // TestDrainPushBatch_FillsFromQueuedBuffer: fifty queued JTIs come out of the
