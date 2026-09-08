@@ -65,7 +65,7 @@ BENCHTIME ?= 1x
 # here and nowhere else in the gate.
 LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... ./internal/server
 
-.PHONY: all help build run console-build server-build clean clean-scim dev-clean \
+.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-pprof \
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
@@ -87,6 +87,7 @@ help:
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
+	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
 	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test leak-check bench"
 	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
@@ -313,6 +314,32 @@ dev-down:
 # Tail logs from goSignals1.
 dev-logs:
 	$(DOCKER) compose -f docker-compose-dev.yml logs -f goSignals1
+
+# Profile a running dev-stack node with `go tool pprof`.
+# The dev compose file sets I2SIG_PPROF_ADDR=:6060 on every goSignals node and
+# publishes it on host ports 6060 (goSignals1), 6061 (goSignals2), 6062 (goSsfServer).
+#   PPROF_KIND    profile | heap | goroutine | allocs | block | mutex | trace
+#   PPROF_SECONDS sampling window for the cpu `profile` and `trace` kinds
+# Examples:
+#   make dev-pprof                                   # 30s CPU profile of goSignals1, interactive
+#   make dev-pprof PPROF_KIND=heap PPROF_PORT=6061   # heap of goSignals2
+#   make dev-pprof PPROF_UI=1                        # open the web UI on :8081
+# Profiles are saved under bin/pprof/ so they can be re-opened with `go tool pprof`.
+PPROF_PORT    ?= 6060
+PPROF_KIND    ?= profile
+PPROF_SECONDS ?= 30
+PPROF_UI      ?=
+PPROF_UI_ADDR ?= localhost:8081
+PPROF_DIR     := $(BIN_DIR)/pprof
+dev-pprof:
+	@mkdir -p $(PPROF_DIR)
+	@if [ "$(PPROF_KIND)" = "profile" ] || [ "$(PPROF_KIND)" = "trace" ]; then q="?seconds=$(PPROF_SECONDS)"; else q=""; fi; \
+	out="$(PPROF_DIR)/$(PPROF_KIND)-$(PPROF_PORT)-$$(date +%Y%m%dT%H%M%S).pb.gz"; \
+	echo ">> fetching $(PPROF_KIND) from http://localhost:$(PPROF_PORT)/debug/pprof/$(PPROF_KIND)$$q -> $$out"; \
+	curl -sf "http://localhost:$(PPROF_PORT)/debug/pprof/$(PPROF_KIND)$$q" -o "$$out" || { echo "pprof fetch failed: is the dev stack up (make dev-up)?"; exit 1; }; \
+	if [ "$(PPROF_KIND)" = "trace" ]; then go tool trace "$$out"; \
+	elif [ -n "$(PPROF_UI)" ]; then go tool pprof -http=$(PPROF_UI_ADDR) "$$out"; \
+	else go tool pprof "$$out"; fi
 
 # Remove dev containers and caches (module/build caches).
 dev-clean:

@@ -84,6 +84,8 @@ type SignalsApplication struct {
 	StartedAt            time.Time
 	stopSync             chan struct{}
 	InternalServer       *http.Server
+	// PprofServer is the optional net/http/pprof listener (I2SIG_PPROF_ADDR).
+	PprofServer *http.Server
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -297,6 +299,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	// Start internal cluster server if requested on a different port
 	sa.startInternalServer()
 
+	// Start the pprof listener if requested (dev/profiling only)
+	sa.startPprofServer()
+
 	return sa
 }
 
@@ -433,6 +438,10 @@ func (sa *SignalsApplication) Shutdown() {
 
 	if sa.InternalServer != nil {
 		_ = sa.InternalServer.Shutdown(context.Background())
+	}
+
+	if sa.PprofServer != nil {
+		_ = sa.PprofServer.Shutdown(context.Background())
 	}
 
 	// Turn off client connections

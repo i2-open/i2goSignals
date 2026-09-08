@@ -285,6 +285,7 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 | Variable              | Description                                                                                          | Default |
 |-----------------------|------------------------------------------------------------------------------------------------------|---------|
 | `PAUSE_FOR_DEBUG`     | Mongo provider pauses for a debugger attach if set to `TRUE`. Development use only — never set in production. | _unset_ |
+| `I2SIG_PPROF_ADDR`    | When set to a listen address (e.g. `:6060`, `127.0.0.1:6060`) the server starts a separate **plain-HTTP, unauthenticated** listener serving Go's `net/http/pprof` endpoints under `/debug/pprof/` (cpu `profile`, `heap`, `goroutine`, `allocs`, `block`, `mutex`, `trace`). Applies to both `goSignalsServer` and `goSsfServer`. Bind only to loopback/private addresses; never set in production. `docker-compose-dev.yml` sets it on every node — see [`perf/pprof.md`](perf/pprof.md). | _unset_ |
 
 ## `goSignals` CLI
 

@@ -175,6 +175,10 @@ to Viewer.
 
 Use `make dev-logs` to follow logs and `make dev-down` to stop the stack.
 
+Every Go node in the dev stack also exposes a Go `pprof` listener (host ports
+6060 / 6061 / 6062 for goSignals1 / goSignals2 / goSsfServer). `make dev-pprof`
+captures and opens a profile; see [`docs/perf/pprof.md`](docs/perf/pprof.md).
+
 ## Building Container Images
 
 All container image builds go through the `Makefile`. `pkg/constants/version.txt`
