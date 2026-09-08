@@ -174,6 +174,9 @@ to Viewer.
    - Set breakpoints and click Debug.
 
 Use `make dev-logs` to follow logs and `make dev-down` to stop the stack.
+`make dev-bench` runs an end-to-end load and routing benchmark against the stack
+(push and poll streams between goSignals1 and goSignals2) and can record results
+over time; see [`docs/perf/e2e-benchmark.md`](docs/perf/e2e-benchmark.md).
 
 Every Go node in the dev stack also exposes a Go `pprof` listener (host ports
 6060 / 6061 / 6062 for goSignals1 / goSignals2 / goSsfServer). `make dev-pprof`

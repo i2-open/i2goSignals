@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -114,16 +115,20 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	}
 	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...", authCtx.StreamId, wait))
 
-	// First, process the acknowledgements
-	for _, jti := range request.Acks {
-		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking: Jti[%s]", authCtx.StreamId, jti))
-		err = sa.GetEventService().AckEvent(r.Context(), jti, authCtx.StreamId, 0)
-		if err != nil {
-			serverLog.Error("Error acking event in poll", "sid", authCtx.StreamId, "jti", jti, "error", err)
+	// First, count the acknowledged events on the outbound metric. The acks
+	// themselves are applied once, as a batch, by PollStreamHandler below;
+	// acking here as well doubled the provider round trips per delivered event.
+	if len(request.Acks) > 0 {
+		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking %d events", authCtx.StreamId, len(request.Acks)))
+		tokens := sa.GetEventService().GetEvents(r.Context(), request.Acks)
+		byJti := make(map[string]*goSet.SecurityEventToken, len(tokens))
+		for _, token := range tokens {
+			byJti[token.ID] = token
 		}
-		event := sa.GetEventService().GetEvent(r.Context(), jti)
-		serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
-		sa.GetEventRouter().IncrementCounter(streamState, event, false)
+		for _, jti := range request.Acks {
+			serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
+			sa.GetEventRouter().IncrementCounter(streamState, byJti[jti], false)
+		}
 	}
 
 	// Second, log any errors received

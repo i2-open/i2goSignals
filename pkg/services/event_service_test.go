@@ -26,6 +26,13 @@ type fakeEventDAO struct {
 	// findErr, if set, makes FindByJTI return (nil, findErr) so the
 	// "dup detected then lookup fails" edge can be exercised.
 	findErr error
+	// pending is the set of JTIs RemovePendingMany reports as removed;
+	// delivered records what MarkDeliveredMany was handed.
+	pending                map[string]struct{}
+	removePendingErr       error
+	removePendingManyCalls int
+	markDeliveredManyCalls int
+	delivered              []interfaces.DeliverableEvent
 }
 
 func (f *fakeEventDAO) Insert(_ context.Context, record *model.EventRecord) error {
@@ -64,17 +71,41 @@ func (f *fakeEventDAO) FindByTimeRange(_ context.Context, _ time.Time, _ *time.T
 	return nil, nil
 }
 
+func (f *fakeEventDAO) InsertMany(_ context.Context, _ []*model.EventRecord) ([]error, error) {
+	return nil, nil
+}
 func (f *fakeEventDAO) AddPending(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeEventDAO) AddPendingMany(_ context.Context, _ []string, _ string) error {
+	return nil
+}
 func (f *fakeEventDAO) GetPendingForStream(_ context.Context, _ string, _ int32) ([]string, int64, error) {
 	return nil, 0, nil
 }
 func (f *fakeEventDAO) RemovePending(_ context.Context, _ string, _ string) (*interfaces.DeliverableEvent, error) {
 	return nil, nil
 }
+func (f *fakeEventDAO) RemovePendingMany(_ context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	f.removePendingManyCalls++
+	if f.removePendingErr != nil {
+		return nil, f.removePendingErr
+	}
+	var removed []interfaces.DeliverableEvent
+	for _, jti := range jtis {
+		if _, ok := f.pending[jti]; ok {
+			removed = append(removed, interfaces.DeliverableEvent{Jti: jti, StreamId: streamID})
+		}
+	}
+	return removed, nil
+}
 func (f *fakeEventDAO) ClearPendingForStream(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
 func (f *fakeEventDAO) MarkDelivered(_ context.Context, _ *interfaces.DeliverableEvent, _ time.Time) error {
+	return nil
+}
+func (f *fakeEventDAO) MarkDeliveredMany(_ context.Context, events []interfaces.DeliverableEvent, _ time.Time) error {
+	f.markDeliveredManyCalls++
+	f.delivered = append(f.delivered, events...)
 	return nil
 }
 func (f *fakeEventDAO) WatchPending(_ context.Context, _ func(jti string, streamID string)) error {
@@ -206,5 +237,68 @@ func TestAddOperationalEvent_HappyPathReturnsNewRecord(t *testing.T) {
 	}
 	if rec == nil || !rec.Operational {
 		t.Fatalf("AddOperationalEvent must flag the record as Operational; got %+v", rec)
+	}
+}
+
+// TestAckEvents_MarksOnlyRemovedDelivered asserts one AckEvents call makes one
+// batched RemovePendingMany call and one MarkDeliveredMany call carrying
+// exactly the JTIs that were actually pending — never the unknown ones.
+func TestAckEvents_MarksOnlyRemovedDelivered(t *testing.T) {
+	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}, "j-3": {}}}
+	svc := NewEventService(fake)
+
+	err := svc.AckEvents(context.Background(), []string{"j-1", "j-2", "j-3"}, "stream-1", 0)
+	if err != nil {
+		t.Fatalf("AckEvents: %v", err)
+	}
+	if fake.removePendingManyCalls != 1 || fake.markDeliveredManyCalls != 1 {
+		t.Fatalf("calls: removePendingMany=%d markDeliveredMany=%d, want 1 and 1",
+			fake.removePendingManyCalls, fake.markDeliveredManyCalls)
+	}
+	if len(fake.delivered) != 2 {
+		t.Fatalf("delivered = %v, want j-1 and j-3 only", fake.delivered)
+	}
+	for _, ev := range fake.delivered {
+		if ev.StreamId != "stream-1" || (ev.Jti != "j-1" && ev.Jti != "j-3") {
+			t.Errorf("unexpected delivered entry %+v", ev)
+		}
+	}
+}
+
+// TestAckEvents_NothingPendingSkipsDelivered: when no JTI was pending nothing
+// is marked delivered; an empty batch touches the DAO not at all.
+func TestAckEvents_NothingPendingSkipsDelivered(t *testing.T) {
+	fake := &fakeEventDAO{}
+	svc := NewEventService(fake)
+
+	if err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1", 0); err != nil {
+		t.Fatalf("AckEvents: %v", err)
+	}
+	if fake.removePendingManyCalls != 1 || fake.markDeliveredManyCalls != 0 {
+		t.Errorf("calls: removePendingMany=%d markDeliveredMany=%d, want 1 and 0",
+			fake.removePendingManyCalls, fake.markDeliveredManyCalls)
+	}
+
+	if err := svc.AckEvents(context.Background(), nil, "stream-1", 0); err != nil {
+		t.Fatalf("AckEvents empty: %v", err)
+	}
+	if fake.removePendingManyCalls != 1 {
+		t.Errorf("empty AckEvents must not call the DAO, got %d calls", fake.removePendingManyCalls)
+	}
+}
+
+// TestAckEvents_RemoveErrorPropagates: a RemovePendingMany failure is returned
+// and nothing is marked delivered.
+func TestAckEvents_RemoveErrorPropagates(t *testing.T) {
+	boom := errors.New("boom")
+	fake := &fakeEventDAO{removePendingErr: boom}
+	svc := NewEventService(fake)
+
+	err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1", 0)
+	if !errors.Is(err, boom) {
+		t.Fatalf("AckEvents err = %v, want %v", err, boom)
+	}
+	if fake.markDeliveredManyCalls != 0 {
+		t.Errorf("MarkDeliveredMany must not run after a remove failure")
 	}
 }

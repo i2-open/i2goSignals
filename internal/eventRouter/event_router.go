@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,12 @@ type EventRouter interface {
 	UpdateStreamState(stream *model.StreamStateRecord)
 	RemoveStream(sid string)
 	HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	// HandleEvents is the batch form of HandleEvent for SETs that arrived together
+	// (an SSTP message, a poll response): one stream lookup, one bulk insert, one
+	// pending-list write per matching outbound stream. rawEvents is index-aligned
+	// with eventTokens and so is the returned slice; a nil entry means the SET may
+	// be acked.
+	HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
 	// SubmitOperationalEvent persists an operational event (Operational=true) and submits it directly
 	// to the target stream's pending list, bypassing the MatchesStream predicate. Operational events
 	// are point-to-point SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify,
@@ -160,6 +167,14 @@ type router struct {
 	outboundWakesMu     sync.Mutex
 	backfillInterval    time.Duration
 	backfillBatch       int
+	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
+	// POSTs a push stream's lease holder keeps in flight at once. The batch
+	// the loop drains from the buffer per iteration is 4x this.
+	pushConcurrency int
+	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
+	// one outbound message (a poll response or either SSTP leg) re-signs side
+	// by side (ADR 0036).
+	signConcurrency int
 	// pollDefaultTimeoutSecs is the resolved I2SIG_POLL_DEFAULT_TIMEOUT
 	// applied to every EventPollBuffer constructed for the lifetime of this
 	// router. 0 means "no implicit long-poll" — receiver omitting timeoutSecs
@@ -342,6 +357,26 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		}
 	}
 	router.backfillBatch = backfillBatch
+
+	pushConcurrency := defaultPushConcurrency
+	if val := os.Getenv("I2SIG_PUSH_CONCURRENCY"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			pushConcurrency = i
+		} else {
+			eventLogger.Warn("Ignoring invalid I2SIG_PUSH_CONCURRENCY (want a positive integer)", "value", val)
+		}
+	}
+	router.pushConcurrency = pushConcurrency
+
+	signConcurrency := runtime.GOMAXPROCS(0)
+	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			signConcurrency = i
+		} else {
+			eventLogger.Warn("Ignoring invalid I2SIG_SIGN_CONCURRENCY (want a positive integer)", "value", val)
+		}
+	}
+	router.signConcurrency = signConcurrency
 
 	router.pollDefaultTimeoutSecs, router.pollMaxTimeoutSecs = resolvePollTimeoutEnv()
 	eventLogger.Info("Poll long-poll timeouts resolved",
@@ -798,41 +833,76 @@ func (r *router) initPushStreamLocked(sid string, state *model.StreamStateRecord
 /*
 HandleEvent takes a new event received and adds it to the local token store. It then looks at the event to
 evaluates if it should be added to any streams for outgoing propagation. `sid` is the inbound stream id.
+
+It is the one-SET form of HandleEvents and shares its code path.
 */
 func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
-	// eventLogger.Println("\n", event.Event.String())
+	return r.HandleEvents([]*goSet.SecurityEventToken{eventToken}, []string{rawEvent}, sid)[0]
+}
 
-	var sstpPair *model.StreamStateRecord
+// resolveIngressStream resolves the stream an inbound SET arrived on. For an
+// SSTP pair the second value is the pair record and the first is the rx-side
+// counter view of it; for every other stream the second value is nil.
+func (r *router) resolveIngressStream(sid string) (*model.StreamStateRecord, *model.StreamStateRecord, error) {
 	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
-	if err != nil {
-		// SSTP-server inbound (PRD #154 Q5.1, Q46): an inbound SET is keyed on the
-		// pair's rx-side SID, which is NOT the document _id, so the plain FindByID
-		// lookup above misses. Resolve the pair by either direction and relabel the
-		// inbound counter to the rx-side SID that was passed in, so eventsIn carries
-		// stream_id=rxSid rather than the tx-side SID.
-		pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
-		if pairErr != nil || pair == nil {
-			return err
-		}
-		streamState = sstpInboundCounterRecord(pair, sid)
-		sstpPair = pair
+	if err == nil {
+		return streamState, nil, nil
+	}
+	// SSTP-server inbound (PRD #154 Q5.1, Q46): an inbound SET is keyed on the
+	// pair's rx-side SID, which is NOT the document _id, so the plain FindByID
+	// lookup above misses. Resolve the pair by either direction and relabel the
+	// inbound counter to the rx-side SID that was passed in, so eventsIn carries
+	// stream_id=rxSid rather than the tx-side SID.
+	pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
+	if pairErr != nil || pair == nil {
+		return nil, nil, err
+	}
+	return sstpInboundCounterRecord(pair, sid), pair, nil
+}
+
+/*
+HandleEvents ingests a batch of SETs that arrived together on inbound stream `sid` (an SSTP message, a poll
+response). The stream is resolved once, the batch is persisted in one bulk write, and the fan-out appends
+one pending-list write per matching outbound stream instead of one per SET. The returned errors are
+index-aligned with eventTokens; a nil entry means the SET was accepted (or was a duplicate JTI, which is
+swallowed exactly as HandleEvent swallows it) and may be acked.
+*/
+func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
+	results := make([]error, len(eventTokens))
+	if len(eventTokens) == 0 {
+		return results
 	}
 
-	event, err := r.eventService.AddEvent(r.ctx, eventToken, sid, rawEvent)
+	streamState, sstpPair, err := r.resolveIngressStream(sid)
 	if err != nil {
-		// JTI dedup short-circuit: the persistence layer rejected this JTI
-		// because it was already stored. Reply 202 (nil) without counting the
-		// inbound or fanning out to outbound streams again. The receiver may
-		// retry safely; the second arrival is observable only as the single
-		// INFO log emitted by the event service ("Duplicate JTI ingestion
-		// suppressed").
-		if errors.Is(err, interfaces.ErrDuplicateJTI) {
-			return nil
+		for i := range results {
+			results[i] = err
 		}
-		return err
+		return results
 	}
-	r.IncrementCounter(streamState, eventToken, true)
-	r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventToken)
+
+	recs, errs := r.eventService.AddEvents(r.ctx, eventTokens, sid, rawEvents)
+	accepted := make([]*model.EventRecord, 0, len(recs))
+	for i, rec := range recs {
+		if errs[i] != nil {
+			// JTI dedup short-circuit: the persistence layer rejected this JTI
+			// because it was already stored. Reply 202 (nil) without counting the
+			// inbound or fanning out to outbound streams again. The receiver may
+			// retry safely; the second arrival is observable only as the single
+			// INFO log emitted by the event service ("Duplicate JTI ingestion
+			// suppressed").
+			if !errors.Is(errs[i], interfaces.ErrDuplicateJTI) {
+				results[i] = errs[i]
+			}
+			continue
+		}
+		r.IncrementCounter(streamState, eventTokens[i], true)
+		r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventTokens[i])
+		accepted = append(accepted, rec)
+	}
+	if len(accepted) == 0 {
+		return results
+	}
 
 	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
 	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
@@ -849,66 +919,80 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 		// Same test the push path makes below; sstpInboundRouteMode has already
 		// folded "no inbound mode" into IMPORT.
 		if sstpInboundRouteMode(sstpPair) == model.RouteModeImport {
-			return nil
+			return results
 		}
 		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
 	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		// nothing more to do
-		return nil
+		return results
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Check to see if the event should be routed to outbound push streams
+	// Check to see if the events should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
-		if r.eventService.MatchesStream(&stream, event) {
+		jtis := r.queueMatchingLocked(&stream, accepted, "PUSH")
+		if len(jtis) == 0 {
+			continue
+		}
+		// Lease-aware routing
+		resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
+		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 
-			eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", "PUSH", "types", event.Types)
-			r.observeMeteredEvent(stream.StreamConfiguration.Id, DirectionEgress, eventToken)
-
-			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.eventService.AddEventToStream(r.ctx, event.Jti, stream.Id.Hex())
-			if err != nil {
-				eventLogger.Error("ROUTER: Error adding event to push stream", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			// Local owner or no owner (we'll try to take it or backfill will find it)
+			buf := r.pushBuffers[stream.StreamConfiguration.Id]
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
 			}
-
-			// Lease-aware routing
-			resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
-			ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
-
-			if ownerNodeId == "" || ownerNodeId == r.nodeId {
-				// Local owner or no owner (we'll try to take it or backfill will find it)
-				r.pushBuffers[stream.StreamConfiguration.Id].SubmitEvent(event.Jti)
-			} else {
-				// Remote owner, send wake-up
-				go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId, "")
-			}
+		} else {
+			// Remote owner, send one wake-up for the batch
+			go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId, "")
 		}
 	}
 
-	// Check to see if the event should be routed to outbound polling stream
+	// Check to see if the events should be routed to outbound polling streams
 	for k, pollStream := range r.pollStreams {
 		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
-
-		if r.eventService.MatchesStream(&pollStream, event) {
-			eventLogger.Info("ROUTER: Selected", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "mode", "POLL", "types", event.Types)
-			r.observeMeteredEvent(pollStream.StreamConfiguration.Id, DirectionEgress, eventToken)
-
-			// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-			err = r.eventService.AddEventToStream(r.ctx, event.Jti, pollStream.Id.Hex())
-			if err != nil {
-				eventLogger.Error("ROUTER: Error adding event to poll stream", "sid", pollStream.StreamConfiguration.Id, "jti", event.Jti, "error", err)
-			}
-			// For poll streams, every node serving a long poll should be woken up.
-			// Since we don't have a transmitter lease for poll, we just submit locally.
-			// Ideally we'd broadcast to all nodes, but let's start with local.
-			r.pollBuffers[pollStream.StreamConfiguration.Id].SubmitEvent(event.Jti)
+		jtis := r.queueMatchingLocked(&pollStream, accepted, "POLL")
+		// For poll streams, every node serving a long poll should be woken up.
+		// Since we don't have a transmitter lease for poll, we just submit locally.
+		// Ideally we'd broadcast to all nodes, but let's start with local.
+		buf := r.pollBuffers[pollStream.StreamConfiguration.Id]
+		for _, jti := range jtis {
+			buf.SubmitEvent(jti)
 		}
 	}
 
-	r.routeEventToSstpPairsLocked(event, excludeSstpTxSid)
-	return nil
+	r.routeEventsToSstpPairsLocked(accepted, excludeSstpTxSid)
+	return results
+}
+
+// queueMatchingLocked selects the events of a batch that match an outbound
+// stream, meters them as egress, and appends them to the stream's pending list
+// in one write. It returns the JTIs queued, in batch order. The caller must
+// hold r.mu (at least RLock). A pending-list write failure is logged and the
+// JTIs are still returned, as the per-event path did: the buffer submit gives
+// the runner a chance to deliver from the event store.
+func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string) []string {
+	var jtis []string
+	for _, event := range batch {
+		if !r.eventService.MatchesStream(stream, event) {
+			continue
+		}
+		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", mode, "types", event.Types)
+		r.observeMeteredEvent(stream.StreamConfiguration.Id, DirectionEgress, &event.Event)
+		jtis = append(jtis, event.Jti)
+	}
+	if len(jtis) == 0 {
+		return nil
+	}
+	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
+	if err := r.eventService.AddEventsToStream(r.ctx, jtis, stream.Id.Hex()); err != nil {
+		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
+	}
+	return jtis
 }
 
 // sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
@@ -935,33 +1019,33 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 	return pair.SstpInbound.RouteMode
 }
 
-// routeEventToSstpPairsLocked fans an outbound event out to the SSTP pairs this
-// router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must hold r.mu (at
-// least RLock).
+// routeEventsToSstpPairsLocked fans a batch of outbound events out to the SSTP
+// pairs this router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must
+// hold r.mu (at least RLock).
 //
-//   - SSTP-client (initiator) pairs: when the event matches and the
+//   - SSTP-client (initiator) pairs: when an event matches and the
 //     sstp-client:<PairId> lease is held by a different node, broadcast
 //     wake-sstp-client so the owner drains the pending event into the next cycle;
 //     when the lease is local or unheld, wake the local outbound buffer directly.
-//   - SSTP-server (responder) pairs: when the event matches, broadcast
+//   - SSTP-server (responder) pairs: when an event matches, broadcast
 //     wake-sstp-server to active nodes (the server side takes no lease, so any node
 //     may be holding the long-poll) and wake the local long-poll buffer.
 //
-// excludeTxSid, when non-empty, is the tx-side SID of a pair to skip: the SET
-// arrived on that pair's rx side, and sending it back down the same pair's tx
-// side would return it to the peer that sent it (#261, ADR-0031 D5). Empty for
-// locally-originated events.
+// The matching events of the batch are appended to a pair's pending list in
+// one write and the pair is woken once per batch, not once per event.
+//
+// excludeTxSid, when non-empty, is the tx-side SID of a pair to skip: the SETs
+// arrived on that pair's rx side, and sending them back down the same pair's tx
+// side would return them to the peer that sent them (#261, ADR-0031 D5). Empty
+// for locally-originated events.
 //
 // The tx SID identifies the pair in both maps below — initiator pairs are
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
 // responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
-func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTxSid string) {
+func (r *router) routeEventsToSstpPairsLocked(batch []*model.EventRecord, excludeTxSid string) {
 	for pairId, pair := range r.sstpClientStreams {
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
-			continue
-		}
-		if !r.eventService.MatchesStream(&pair, event) {
 			continue
 		}
 		// Finding #6: persist the JTI into the tx-side pending list BEFORE waking the
@@ -969,16 +1053,17 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTx
 		// this the JTI is never AddPending'd for the tx SID, so the runner's
 		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
 		// (not even backfill-recoverable). AddEvent only Insert()s the token.
-		txSid := pair.StreamConfiguration.Id
-		r.observeMeteredEvent(txSid, DirectionEgress, &event.Event)
-		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
-			eventLogger.Error("ROUTER: Error adding event to SSTP-client pair", "pairId", pairId, "sid", txSid, "jti", event.Jti, "error", err)
+		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT")
+		if len(jtis) == 0 {
+			continue
 		}
 		resource := fmt.Sprintf("sstp-client:%s", pairId)
 		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[pairId]; ok {
-				buf.SubmitEvent(event.Jti)
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
 				buf.Wakeup()
 			}
 		} else {
@@ -990,19 +1075,18 @@ func (r *router) routeEventToSstpPairsLocked(event *model.EventRecord, excludeTx
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		if !r.eventService.MatchesStream(&pair, event) {
-			continue
-		}
 		// Finding #6 (server side): add the JTI to the tx-side pending list so the
 		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
 		// server takes no client lease — every node may serve the long-poll — so we do
 		// not gate this on lease ownership.
-		r.observeMeteredEvent(txSid, DirectionEgress, &event.Event)
-		if err := r.eventService.AddEventToStream(r.ctx, event.Jti, txSid); err != nil {
-			eventLogger.Error("ROUTER: Error adding event to SSTP-server pair", "sid", txSid, "jti", event.Jti, "error", err)
+		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER")
+		if len(jtis) == 0 {
+			continue
 		}
 		if buf, ok := r.sstpServerBuffers[txSid]; ok {
-			buf.SubmitEvent(event.Jti)
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
 			buf.Wakeup()
 		}
 		go r.broadcastSstpServerWake(txSid)
@@ -1169,9 +1253,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	if len(params.Acks) > 0 {
 		pollBuffer.AckEvents(params.Acks)
-		for _, jti := range params.Acks {
-			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, params.Acks, sid, 0)
 	}
 
 	if len(params.SetErrs) > 0 {
@@ -1180,9 +1262,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis = append(jtis, jti)
 		}
 		pollBuffer.AckEvents(jtis)
-		for _, jti := range jtis {
-			_ = r.eventService.AckEvent(r.ctx, jti, sid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, jtis, sid, 0)
 	}
 
 	if state.Status != model.StreamStateEnabled {
@@ -1230,54 +1310,128 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		jtiSize = len(*jtiSlice)
 	}
 
-	var err error
 	if jtiSize > 0 {
-		sets := make(map[string]string, jtiSize)
-		for _, jti := range *jtiSlice {
-			eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-			if eventRecord == nil {
-				eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
-				continue
-			}
-			// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
-			// serve a poll, so the filter is consulted here at poll-response
-			// time; a filtered-out event is discarded (acked) rather than
-			// returned, so the poll buffer stays bounded (ADR-0002).
-			// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
-			// the primary StreamConfiguration, so this is the pair's transmit-side
-			// subject filter — there is no separate inbound/ingest-time filter.
-			if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, &state, eventRecord) {
-				r.discardPolledEvent(sid, jti, pollBuffer)
-				eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-				continue
-			}
-			if forwardMode {
-				sets[jti] = eventRecord.Original
-				continue
-			}
-			token := &eventRecord.Event
-			token.Issuer = state.StreamConfiguration.Iss
-			token.Audience = state.StreamConfiguration.Aud
-			token.IssuedAt = jwt.NewNumericDate(time.Now())
-			token.Kid = kid
-
-			sets[jti], err = token.JWS(goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg), key)
-			if err != nil {
-				eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "error", err)
-			}
-		}
-		return sets, more, http.StatusOK
+		return r.assemblePollResponse(sid, &state, pollBuffer, *jtiSlice, forwardMode, key, kid), more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
 }
 
-// discardPolledEvent drops a filtered-out event from a poll stream: it is acked
-// in the poll buffer and the provider so it is neither returned now nor on a
-// later poll, keeping the pending buffer bounded.
-func (r *router) discardPolledEvent(sid, jti string, pollBuffer *buffer.EventPollBuffer) {
-	pollBuffer.AckEvents([]string{jti})
-	if err := r.eventService.AckEvent(r.ctx, jti, sid, 0); err != nil {
-		eventLogger.Error("POLL-SRV: Error discarding filtered-out event", "sid", sid, "jti", jti, "error", err)
+// assemblePollResponse builds the "sets" member of one RFC 8936 poll response:
+// one read for the batch's records, one subject-filter pass whose discards are
+// acked together, then the surviving records are re-signed across a worker
+// pool of signConcurrency (forward mode returns the stored JWS unchanged).
+// A JTI whose record is gone is skipped and left in the buffer; a SET that
+// fails to sign is left out of this response and stays pending (ADR 0036).
+func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, jtis []string, forwardMode bool, key crypto.Signer, kid string) map[string]string {
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
+	}
+
+	sets := make(map[string]string, len(jtis))
+	work := make([]*model.EventRecord, 0, len(jtis))
+	var discards []string
+	for _, jti := range jtis {
+		rec := byJti[jti]
+		if rec == nil {
+			eventLogger.Warn("POLL-SRV: JTI Not found", "sid", sid, "jti", jti)
+			continue
+		}
+		// SSF §8.1.3 delivery-time subject filtering for POLL. Any node may
+		// serve a poll, so the filter is consulted here at poll-response
+		// time; a filtered-out event is discarded (acked) rather than
+		// returned, so the poll buffer stays bounded (ADR-0002).
+		// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is
+		// the primary StreamConfiguration, so this is the pair's transmit-side
+		// subject filter — there is no separate inbound/ingest-time filter.
+		if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, state, rec) {
+			discards = append(discards, jti)
+			eventLogger.Debug("POLL-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+			continue
+		}
+		if forwardMode {
+			sets[jti] = rec.Original
+			continue
+		}
+		work = append(work, rec)
+	}
+	if len(discards) > 0 {
+		r.discardPolledEvents(sid, discards, pollBuffer)
+	}
+	if len(work) == 0 {
+		return sets
+	}
+
+	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
+	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
+	signed := SignSets(work, r.signConcurrency, func(rec *model.EventRecord) (string, error) {
+		token := &rec.Event
+		token.Issuer = iss
+		token.Audience = aud
+		token.IssuedAt = jwt.NewNumericDate(time.Now())
+		token.Kid = kid
+		return token.JWS(method, key)
+	})
+	for i, rec := range work {
+		if signed[i].Err != nil {
+			eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "jti", rec.Jti, "error", signed[i].Err)
+			continue
+		}
+		sets[rec.Jti] = signed[i].JWS
+	}
+	return sets
+}
+
+// SignedSet is one SignSets result, positionally matching its input.
+type SignedSet struct {
+	JWS string
+	Err error
+}
+
+// SignSets runs sign over recs with up to workers goroutines and returns the
+// results in input order. Signing is CPU-bound (an RS256 signature costs
+// about a millisecond) and every outbound leg (RFC 8936 poll response, SSTP
+// responder response, SSTP initiator request) used to sign its batch in
+// series on one goroutine, so a large message spent nearly all its time on
+// one core (ADR 0036). Each record is a distinct copy from the DAO read and
+// the signer is read-only, so the workers share nothing.
+func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventRecord) (string, error)) []SignedSet {
+	out := make([]SignedSet, len(recs))
+	if workers > len(recs) {
+		workers = len(recs)
+	}
+	if workers <= 1 {
+		for i, rec := range recs {
+			out[i].JWS, out[i].Err = sign(rec)
+		}
+		return out
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				idx := int(next.Add(1) - 1)
+				if idx >= len(recs) {
+					return
+				}
+				out[idx].JWS, out[idx].Err = sign(recs[idx])
+			}
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// discardPolledEvents drops filtered-out events from a poll stream: they are
+// acked in the poll buffer and the provider as one batch so they are neither
+// returned now nor on a later poll, keeping the pending buffer bounded.
+func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
+	pollBuffer.AckEvents(jtis)
+	if err := r.eventService.AckEvents(r.ctx, jtis, sid, 0); err != nil {
+		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }
 
@@ -1418,21 +1572,30 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			if !ok {
 				return false // Buffer closed, stop entirely
 			}
-			jti := v.(string)
-			cls, newKey, newKid := r.prepareAndSendEvent(jti, stream, signingKey, kid, fencingToken)
-			signingKey, kid = newKey, newKid
+			// Drain whatever else is already buffered, up to the batch cap, so the
+			// batch's Mongo reads and acks are amortized and the worker pool has
+			// something to run in parallel. A quiet stream yields a batch of one
+			// and behaves exactly as the serial loop did.
+			jtis := drainPushBatch(v.(string), out, eventBuf, r.pushBatchMax())
+			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
+			res := r.pushBatch(jtis, stream, signingKey, kid, fencingToken)
+			signingKey, kid = res.key, res.kid
 
-			if cls.Class == goSetPush.ClassAccepted {
+			if res.acked > 0 {
 				// R1: a successful push is proof the stream is alive, so the T3
 				// idle clock starts over — verify pushes included.
 				idle.Reset()
+			}
+			if res.failedJti == "" {
 				continue
 			}
 
-			// T1 reactive: dispatch the failure into the right recovery mode (or disable, or
-			// rate-limit sleep). The lease heartbeat and backfill behavior is managed here so
-			// the recovery sub-loop doesn't have to know about either.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, jti, cls, statusFetcher, recoveryCfg, backfillTicker, idle)
+			// T1 reactive: dispatch the first failure into the right recovery mode (or
+			// disable, or rate-limit sleep). The lease heartbeat and backfill behavior is
+			// managed here so the recovery sub-loop doesn't have to know about either.
+			// Everything the batch did not get a 202 for is still pending and comes back
+			// through backfill once the buffer drains, exactly as a serial failure did.
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, res.failedJti, res.failedCls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -1700,75 +1863,209 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 	}
 }
 
-// prepareAndSendEvent fetches the event, hands it to the PushDelivery seam for a single
-// attempt (the seam owns RFC8935 §2.4 jws_signature_failed rotate-and-retry internally),
-// and acks if the receiver returned 202. Returns the final Classification along with the
-// (possibly-rotated) signing key and kid so the caller's subsequent pushes reuse them.
+// drainPushBatch collects up to max JTIs for one push batch: first, then
+// whatever the buffer still has queued. The buffer's goroutine hands JTIs out
+// one at a time on an unbuffered channel and re-arms between sends, so a
+// non-blocking receive right after a pop almost always sees nothing and a
+// batch would stay at one or two events. Cnt() says whether more is queued,
+// but it still counts a just-sent JTI until the goroutine trims it, so a
+// positive count is only a hint: each receive waits at most drainWait so a
+// stale count on an empty buffer costs a millisecond, never a hang. A closed
+// buffer ends the batch; the loop's next receive observes the close.
+func drainPushBatch(first string, out <-chan interface{}, eventBuf *buffer.EventPushBuffer, max int) []string {
+	jtis := []string{first}
+	var wait *time.Timer
+	for len(jtis) < max && eventBuf.Cnt() > 0 {
+		if wait == nil {
+			wait = time.NewTimer(drainWait)
+			defer wait.Stop()
+		} else {
+			wait.Reset(drainWait)
+		}
+		select {
+		case more, ok := <-out:
+			if !ok {
+				return jtis
+			}
+			jtis = append(jtis, more.(string))
+		case <-wait.C:
+			return jtis
+		}
+	}
+	return jtis
+}
+
+// drainWait bounds each wait inside drainPushBatch. Under load the buffer
+// goroutine re-arms in microseconds, so this only ever fires on a stale Cnt().
+const drainWait = time.Millisecond
+
+// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: RFC 8935 POSTs a
+// push stream keeps in flight at once (ADR 0035).
+const defaultPushConcurrency = 5
+
+// pushBatchMax bounds how many JTIs one loop iteration drains from the buffer.
+// It is also the ack-deferral window: on a crash mid-batch, up to this many
+// SETs the receiver already accepted are still pending and are resent.
+func (r *router) pushBatchMax() int {
+	if r.pushConcurrency < 1 {
+		return 4
+	}
+	return 4 * r.pushConcurrency
+}
+
+// pushBatchResult is what pushBatch hands back to runPushLoop.
+type pushBatchResult struct {
+	// acked counts SETs the batch acked: 202s plus subject-filter discards.
+	acked int
+	// failedJti / failedCls describe the first (in batch order) non-Accepted
+	// classification. failedJti is empty when every dispatched push was accepted.
+	failedJti string
+	failedCls goSetPush.Classification
+	// key / kid are the signing material the next batch should use — the
+	// seam's rotated key when a jws_signature_failed rotate-and-retry fired.
+	key crypto.Signer
+	kid string
+}
+
+// pushBatch delivers a batch of JTIs for one push stream: one read for the
+// event records, one subject-filter pass, up to pushConcurrency concurrent
+// single-attempt pushes through the PushDelivery seam, then one ack for every
+// SET that got a 202 (and every filtered-out discard).
 //
-// Failures are not acked. The JTI stays in the provider's pending list and will be re-pulled
-// by the next backfill iteration once the caller has resolved any required recovery.
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
-	eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
-	if eventRecord == nil {
-		// Event was deleted between buffer pop and dispatch (e.g. operator reset). Treat as a no-op
-		// success so the caller advances rather than entering recovery for a stale JTI.
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
-	}
-
+// RFC 8935 is one SET per POST and the 202 is that SET's acknowledgement, so
+// the pool runs whole request/response exchanges side by side; nothing is held
+// open across the batch. Delivery order inside a batch is therefore not the
+// buffer order — neither RFC 8935 nor SSF promises ordering, and receivers
+// dedupe on jti. On the first failure the pool stops taking new work; pushes
+// already in flight run to completion and their 202s are acked. Failed and
+// never-dispatched JTIs stay pending for backfill.
+func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) pushBatchResult {
 	sid := config.StreamConfiguration.Id
+	res := pushBatchResult{key: signingKey, kid: kid}
 
-	// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
-	// and discarded rather than pushed, so the pending buffer stays bounded
-	// (ADR-0002); the no-op success classification advances the push loop
-	// exactly as a stale/deleted JTI does. Operational events and a disabled
-	// feature always pass — Allows handles both internally.
-	// SSTP slice 11 (PRD #154 Q45): for an SSTP pair the outbound side is the
-	// primary StreamConfiguration, so this is the pair's transmit-side subject
-	// filter — there is no separate inbound/ingest-time filter.
-	if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, eventRecord) {
-		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
-			eventLogger.Error("PUSH-SRV: Error acking filtered-out event", "sid", sid, "jti", jti, "error", err)
-		}
-		eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
-		return goSetPush.Classification{Class: goSetPush.ClassAccepted}, signingKey, kid
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
 	}
 
-	outcome := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
-		Stream: config,
-		Event:  eventRecord,
-		Key:    signingKey,
-		Kid:    kid,
-	})
-	cls := outcome.Classification
-	signingKey, kid = outcome.Key, outcome.Kid
-
-	isVerifyPush := isOperationalVerify(eventRecord)
-
-	if cls.Class == goSetPush.ClassAccepted {
-		if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
-			eventLogger.Error("PUSH-SRV: Error acking event", "sid", sid, "jti", jti, "error", err)
+	type item struct {
+		jti string
+		rec *model.EventRecord
+	}
+	work := make([]item, 0, len(jtis))
+	ackJtis := make([]string, 0, len(jtis))
+	for _, jti := range jtis {
+		rec := byJti[jti]
+		if rec == nil {
+			// Event was deleted between buffer pop and dispatch (e.g. operator reset).
+			// Nothing to push and nothing to ack; the loop simply advances.
+			continue
 		}
-		r.IncrementCounter(config, &eventRecord.Event, false)
-		if isVerifyPush && r.stats != nil {
-			r.stats.RecordIdleVerifyOutcome(sid, "acked")
+		// SSF §8.1.3 delivery-time subject filtering. A filtered-out event is acked
+		// and discarded rather than pushed, so the pending buffer stays bounded
+		// (ADR-0002). Operational events and a disabled feature always pass — Allows
+		// handles both internally. For an SSTP pair the outbound side is the primary
+		// StreamConfiguration, so this is the pair's transmit-side subject filter.
+		if r.subjectFilterService != nil && !r.subjectFilterService.Allows(r.ctx, config, rec) {
+			eventLogger.Debug("PUSH-SRV: event filtered out by subject filter, discarded", "sid", sid, "jti", jti)
+			ackJtis = append(ackJtis, jti)
+			continue
 		}
-		return cls, signingKey, kid
+		work = append(work, item{jti: jti, rec: rec})
 	}
 
-	eventLogger.Warn("PUSH-SRV: push failed",
-		"sid", sid,
-		"jti", jti,
-		"errClass", cls.Class.String(),
-		"rfc8935ErrCode", cls.RFC8935ErrCode,
-		"retryAfter", cls.NextDelay,
-	)
-	if r.stats != nil {
-		r.stats.RecordPushFailure(sid, cls.Class.String())
-		if isVerifyPush {
-			r.stats.RecordIdleVerifyOutcome(sid, "failed")
+	outcomes := make([]*delivery.PushOutcome, len(work))
+	if len(work) > 0 {
+		workers := r.pushConcurrency
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(work) {
+			workers = len(work)
+		}
+		var next atomic.Int64
+		var stopped atomic.Bool
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					idx := int(next.Add(1) - 1)
+					if idx >= len(work) || stopped.Load() {
+						return
+					}
+					out := r.pushDelivery.Deliver(r.ctx, delivery.PushRequest{
+						Stream: config,
+						Event:  work[idx].rec,
+						Key:    signingKey,
+						Kid:    kid,
+					})
+					outcomes[idx] = &out
+					if out.Classification.Class != goSetPush.ClassAccepted {
+						stopped.Store(true)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	for i, it := range work {
+		out := outcomes[i]
+		if out == nil {
+			continue // never dispatched: still pending, backfill re-pulls it
+		}
+		if out.Key != nil && out.Key != signingKey {
+			res.key, res.kid = out.Key, out.Kid
+		}
+		cls := out.Classification
+		isVerifyPush := isOperationalVerify(it.rec)
+		if cls.Class == goSetPush.ClassAccepted {
+			ackJtis = append(ackJtis, it.jti)
+			r.IncrementCounter(config, &it.rec.Event, false)
+			if isVerifyPush && r.stats != nil {
+				r.stats.RecordIdleVerifyOutcome(sid, "acked")
+			}
+			continue
+		}
+		eventLogger.Warn("PUSH-SRV: push failed",
+			"sid", sid,
+			"jti", it.jti,
+			"errClass", cls.Class.String(),
+			"rfc8935ErrCode", cls.RFC8935ErrCode,
+			"retryAfter", cls.NextDelay,
+		)
+		if r.stats != nil {
+			r.stats.RecordPushFailure(sid, cls.Class.String())
+			if isVerifyPush {
+				r.stats.RecordIdleVerifyOutcome(sid, "failed")
+			}
+		}
+		if res.failedJti == "" {
+			res.failedJti, res.failedCls = it.jti, cls
 		}
 	}
-	return cls, signingKey, kid
+
+	if len(ackJtis) > 0 {
+		if err := r.eventService.AckEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
+			eventLogger.Error("PUSH-SRV: Error acking events", "sid", sid, "count", len(ackJtis), "error", err)
+		}
+		res.acked = len(ackJtis)
+	}
+	return res
+}
+
+// prepareAndSendEvent pushes a single JTI through pushBatch and reports its
+// Classification along with the (possibly-rotated) signing key and kid. A
+// deleted or filtered-out event reports Accepted, as a no-op the caller
+// advances past.
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
+	res := r.pushBatch([]string{jti}, config, signingKey, kid, fencingToken)
+	if res.failedJti != "" {
+		return res.failedCls, res.key, res.kid
+	}
+	return goSetPush.Classification{Class: goSetPush.ClassAccepted}, res.key, res.kid
 }
 
 // isOperationalVerify returns true when the event was both submitted via the operational-event

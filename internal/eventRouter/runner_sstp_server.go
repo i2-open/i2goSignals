@@ -71,9 +71,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// cross-node ack and redeliver forever.
 		buf := r.sstpServerBufferFor(txSid)
 		buf.AckEvents(inbound.Ack)
-		for _, jti := range inbound.Ack {
-			_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
-		}
+		_ = r.eventService.AckEvents(r.ctx, inbound.Ack, txSid, 0)
 	}
 
 	// Outbound setErr consumption: the peer's request also carries, in
@@ -111,9 +109,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		if len(disposition.Clear) > 0 {
 			buf := r.sstpServerBufferFor(txSid)
 			buf.AckEvents(disposition.Clear)
-			for _, jti := range disposition.Clear {
-				_ = r.eventService.AckEvent(r.ctx, jti, txSid, 0)
-			}
+			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, 0)
 		}
 		if len(disposition.Fatal) > 0 {
 			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing outbound",
@@ -124,10 +120,10 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		}
 	}
 
-	// Inbound ingest: persist-then-process each parsed SET via HandleEvent, keyed
-	// on the rx-side SID so the inbound counter carries stream_id=rxSid (Q46). A
-	// duplicate JTI is swallowed silently by HandleEvent's #153 short-circuit; we
-	// still ack it so the sender stops resending.
+	// Inbound ingest: persist-then-process the parsed SETs as one batch via
+	// HandleEvents, keyed on the rx-side SID so the inbound counter carries
+	// stream_id=rxSid (Q46). A duplicate JTI is swallowed silently by the #153
+	// short-circuit; we still ack it so the sender stops resending.
 	rxSid := ""
 	if rec.SstpInbound != nil {
 		rxSid = rec.SstpInbound.Id
@@ -136,15 +132,23 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// paused/disabled we decline to ingest (the sender's SETs stay un-acked and are
 	// resent on a later cycle once the direction resumes).
 	if rec.InboundStatus == model.StreamStateEnabled {
+		batch := make([]SstpInboundSet, 0, len(parsedIn))
 		for _, in := range parsedIn {
-			if in.Token == nil {
+			if in.Token != nil {
+				batch = append(batch, in)
+			}
+		}
+		tokens := make([]*goSet.SecurityEventToken, len(batch))
+		raws := make([]string, len(batch))
+		for i, in := range batch {
+			tokens[i], raws[i] = in.Token, in.Raw
+		}
+		for i, ingestErr := range r.HandleEvents(tokens, raws, rxSid) {
+			if ingestErr != nil {
+				resp.SetErrs = appendSstpSetErr(resp.SetErrs, batch[i].Jti, ingestErr)
 				continue
 			}
-			if ingestErr := r.HandleEvent(in.Token, in.Raw, rxSid); ingestErr != nil {
-				resp.SetErrs = appendSstpSetErr(resp.SetErrs, in.Jti, ingestErr)
-				continue
-			}
-			resp.Ack = append(resp.Ack, in.Jti)
+			resp.Ack = append(resp.Ack, batch[i].Jti)
 		}
 	}
 
@@ -225,7 +229,11 @@ func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
 
 // buildSstpOutboundSets renders each outbound JTI to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer key
-// otherwise. Mirrors the poll-transmitter's signing path (PollStreamHandler).
+// otherwise. Same shape as the poll transmitter's assemblePollResponse: one
+// read for the batch's records, then the re-signing fans out across the
+// signConcurrency pool (ADR 0036). A JTI whose record is gone is skipped and
+// stays in the buffer; a SET that fails to sign is left out of this response
+// and stays pending.
 func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) map[string]string {
 	forward := rec.GetRouteMode() == model.RouteModeForward
 	var key crypto.Signer
@@ -234,9 +242,15 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, rec.StreamConfiguration.SigningAlg)
 	}
 
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, eventRecord := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[eventRecord.Jti] = eventRecord
+	}
+
 	sets := make(map[string]string, len(jtis))
+	work := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
-		eventRecord := r.eventService.GetEventRecord(r.ctx, jti)
+		eventRecord := byJti[jti]
 		if eventRecord == nil {
 			continue
 		}
@@ -244,17 +258,28 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 			sets[jti] = eventRecord.Original
 			continue
 		}
+		work = append(work, eventRecord)
+	}
+	if len(work) == 0 {
+		return sets
+	}
+
+	cfg := rec.StreamConfiguration
+	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
 		token := &eventRecord.Event
-		token.Issuer = rec.StreamConfiguration.Iss
-		token.Audience = rec.StreamConfiguration.Aud
+		token.Issuer = cfg.Iss
+		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.SigningMethodOrRS256(rec.StreamConfiguration.SigningAlg), key)
-		if err != nil {
-			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", rec.StreamConfiguration.Id, "jti", jti, "error", err)
+		return token.JWS(method, key)
+	})
+	for i, eventRecord := range work {
+		if signed[i].Err != nil {
+			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", cfg.Id, "jti", eventRecord.Jti, "error", signed[i].Err)
 			continue
 		}
-		sets[jti] = signed
+		sets[eventRecord.Jti] = signed[i].JWS
 	}
 	return sets
 }

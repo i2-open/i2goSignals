@@ -258,3 +258,128 @@ func rawKeys(t *testing.T, doc bson.Raw) []string {
 	}
 	return keys
 }
+
+// TestInsertMany_DuplicateInMiddle: an unordered bulk insert where the middle
+// JTI already exists returns [nil, ErrDuplicateJTI, nil], stores the other two
+// records, and leaves the pre-existing record untouched.
+func (s *EventDAOMongoSuite) TestInsertMany_DuplicateInMiddle() {
+	ctx := context.Background()
+	existing := &model.EventRecord{
+		Jti:      "bulk-b",
+		Original: `{"jti":"bulk-b","first":true}`,
+		SortTime: time.Now(),
+	}
+	s.Require().NoError(s.dao.Insert(ctx, existing))
+
+	batch := []*model.EventRecord{
+		{Jti: "bulk-a", Original: `{"jti":"bulk-a"}`, SortTime: time.Now()},
+		{Jti: "bulk-b", Original: `{"jti":"bulk-b","second":true}`, SortTime: time.Now()},
+		{Jti: "bulk-c", Original: `{"jti":"bulk-c"}`, SortTime: time.Now()},
+	}
+	results, err := s.dao.InsertMany(ctx, batch)
+	s.Require().NoError(err)
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.Require().Error(results[1])
+	s.True(errors.Is(results[1], interfaces.ErrDuplicateJTI), "expected ErrDuplicateJTI, got %v", results[1])
+	s.NoError(results[2])
+
+	for _, jti := range []string{"bulk-a", "bulk-c"} {
+		got, err := s.dao.FindByJTI(ctx, jti)
+		s.Require().NoError(err)
+		s.Require().NotNil(got, "record %s must be stored", jti)
+	}
+	got, err := s.dao.FindByJTI(ctx, "bulk-b")
+	s.Require().NoError(err)
+	s.Require().NotNil(got)
+	s.Equal(existing.Original, got.Original, "duplicate must not overwrite existing record")
+
+	count, err := s.eventCol.CountDocuments(ctx, bson.M{})
+	s.Require().NoError(err)
+	s.Equal(int64(3), count)
+
+	results, err = s.dao.InsertMany(ctx, nil)
+	s.NoError(err)
+	s.Nil(results)
+}
+
+// TestAddPendingMany_Order: a bulk pending insert followed by
+// GetPendingForStream returns the JTIs in insertion order.
+func (s *EventDAOMongoSuite) TestAddPendingMany_Order() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	want := []string{"pend-3", "pend-1", "pend-2"}
+
+	s.Require().NoError(s.dao.AddPendingMany(ctx, want, streamID))
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamID, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(len(want)), total)
+	s.Equal(want, jtis)
+
+	s.Require().NoError(s.dao.AddPendingMany(ctx, nil, streamID))
+	_, total, err = s.dao.GetPendingForStream(ctx, streamID, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(len(want)), total, "empty AddPendingMany must be a no-op")
+}
+
+// TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly
+// the named JTIs of the named stream, returns them, and leaves an identical
+// JTI pending on another stream.
+func (s *EventDAOMongoSuite) TestRemovePendingMany_SubsetScopedToStream() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB))
+
+	removed, err := s.dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
+	s.Require().NoError(err)
+	got := make([]string, 0, len(removed))
+	for _, ev := range removed {
+		s.Equal(streamA, ev.StreamId)
+		got = append(got, ev.Jti)
+	}
+	s.ElementsMatch([]string{"a-1", "a-3"}, got)
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(1), total)
+	s.Equal([]string{"a-2"}, jtis)
+
+	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(2), total, "other stream must be untouched")
+
+	removed, err = s.dao.RemovePendingMany(ctx, nil, streamA)
+	s.Require().NoError(err)
+	s.Nil(removed, "empty RemovePendingMany must be a no-op")
+}
+
+// TestMarkDeliveredMany_ListsDelivered: delivered writes, single and bulk, are
+// visible via ListDeliveredForStream with their JTI, stream and ackDate. This
+// guards the document shape: an embedded-struct deliveredDoc once persisted
+// only ackDate, leaving the retention purge blind to every JTI.
+func (s *EventDAOMongoSuite) TestMarkDeliveredMany_ListsDelivered() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	ackDate := time.Now().Truncate(time.Millisecond)
+
+	s.Require().NoError(s.dao.MarkDeliveredMany(ctx, nil, ackDate))
+	s.Require().NoError(s.dao.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{
+		{Jti: "d-1", StreamId: streamID},
+		{Jti: "d-2", StreamId: streamID},
+	}, ackDate))
+	s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "d-3", StreamId: streamID}, ackDate))
+
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamID)
+	s.Require().NoError(err)
+	s.Require().Len(delivered, 3)
+	got := make([]string, 0, 3)
+	for _, d := range delivered {
+		s.Equal(streamID, d.StreamId)
+		s.True(d.AckDate.Equal(ackDate), "jti %s ackDate = %v, want %v", d.Jti, d.AckDate, ackDate)
+		got = append(got, d.Jti)
+	}
+	s.ElementsMatch([]string{"d-1", "d-2", "d-3"}, got)
+}

@@ -23,10 +23,14 @@ type pendingDoc struct {
 	Sid bson.ObjectID `bson:"sid"`
 }
 
-// deliveredDoc is the on-disk shape of a DeliveredEvent.
+// deliveredDoc is the on-disk shape of a DeliveredEvent. The fields are spelled
+// out rather than embedding pendingDoc: the driver's struct codec ignores an
+// unexported embedded struct even with `bson:",inline"`, which silently wrote
+// documents carrying only ackDate.
 type deliveredDoc struct {
-	pendingDoc `bson:",inline"`
-	AckDate    time.Time `bson:"ackDate"`
+	Jti     string        `bson:"jti"`
+	Sid     bson.ObjectID `bson:"sid"`
+	AckDate time.Time     `bson:"ackDate"`
 }
 
 var errEventNotInit = errors.New("mongo collection not initialized")
@@ -98,6 +102,48 @@ func (d *EventDAOMongo) Insert(ctx context.Context, record *model.EventRecord) e
 		eLog.Error("Error inserting event", "error", err)
 	}
 	return err
+}
+
+// InsertMany persists records as one unordered bulk insert. Per-record
+// outcomes are index-aligned with records; a duplicate JTI is reported as
+// interfaces.ErrDuplicateJTI at its index while the other records still land.
+func (d *EventDAOMongo) InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	c, err := d.eventColLoad()
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]any, len(records))
+	for i, rec := range records {
+		docs[i] = rec
+	}
+	_, err = c.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	if err == nil {
+		return make([]error, len(records)), nil
+	}
+	var bwe mongo.BulkWriteException
+	if !errors.As(err, &bwe) {
+		eLog.Error("Error bulk inserting events", "error", err)
+		return nil, err
+	}
+	if bwe.WriteConcernError != nil {
+		eLog.Error("Write concern error bulk inserting events", "error", bwe.WriteConcernError)
+		return nil, bwe.WriteConcernError
+	}
+	results := make([]error, len(records))
+	for _, we := range bwe.WriteErrors {
+		if we.Index < 0 || we.Index >= len(results) {
+			continue
+		}
+		if mongo.IsDuplicateKeyError(we.WriteError) {
+			results[we.Index] = interfaces.ErrDuplicateJTI
+		} else {
+			results[we.Index] = errors.New(we.WriteError.Error())
+		}
+	}
+	return results, nil
 }
 
 func (d *EventDAOMongo) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
@@ -201,6 +247,26 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID str
 	return err
 }
 
+func (d *EventDAOMongo) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	c, err := d.pendingColLoad()
+	if err != nil {
+		return err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return err
+	}
+	docs := make([]any, len(jtis))
+	for i, jti := range jtis {
+		docs[i] = &pendingDoc{Jti: jti, Sid: sid}
+	}
+	_, err = c.InsertMany(ctx, docs)
+	return err
+}
+
 func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
 	c, err := d.pendingColLoad()
 	if err != nil {
@@ -288,6 +354,49 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 	return &interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()}, nil
 }
 
+// RemovePendingMany finds streamID's pending entries for jtis in one query,
+// deletes exactly those in one DeleteMany, and returns them — two round trips
+// for the batch instead of two per JTI.
+func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	c, err := d.pendingColLoad()
+	if err != nil {
+		return nil, err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return nil, err
+	}
+
+	cursor, err := c.Find(ctx, bson.M{"sid": sid, "jti": bson.M{"$in": jtis}})
+	if err != nil {
+		eLog.Error("Error finding pending events", "error", err)
+		return nil, err
+	}
+	var docs []pendingDoc
+	if err = cursor.All(ctx, &docs); err != nil {
+		eLog.Error("Error decoding pending events", "error", err)
+		return nil, err
+	}
+	if len(docs) == 0 {
+		return nil, nil
+	}
+
+	removed := make([]interfaces.DeliverableEvent, len(docs))
+	found := make([]string, len(docs))
+	for i, doc := range docs {
+		removed[i] = interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()}
+		found[i] = doc.Jti
+	}
+	if _, err = c.DeleteMany(ctx, bson.M{"sid": sid, "jti": bson.M{"$in": found}}); err != nil {
+		eLog.Error("Error deleting pending events", "error", err)
+		return nil, err
+	}
+	return removed, nil
+}
+
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
 	c, err := d.pendingColLoad()
 	if err != nil {
@@ -316,11 +425,30 @@ func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.Del
 	if err != nil {
 		return err
 	}
-	doc := deliveredDoc{
-		pendingDoc: pendingDoc{Jti: event.Jti, Sid: sid},
-		AckDate:    ackDate,
-	}
+	doc := deliveredDoc{Jti: event.Jti, Sid: sid, AckDate: ackDate}
 	_, err = c.InsertOne(ctx, &doc)
+	return err
+}
+
+// MarkDeliveredMany inserts one delivered document per event in a single
+// InsertMany.
+func (d *EventDAOMongo) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
+	if len(events) == 0 {
+		return nil
+	}
+	c, err := d.deliveredColLoad()
+	if err != nil {
+		return err
+	}
+	docs := make([]any, len(events))
+	for i, event := range events {
+		sid, err := ParseObjectID(event.StreamId)
+		if err != nil {
+			return err
+		}
+		docs[i] = &deliveredDoc{Jti: event.Jti, Sid: sid, AckDate: ackDate}
+	}
+	_, err = c.InsertMany(ctx, docs)
 	return err
 }
 

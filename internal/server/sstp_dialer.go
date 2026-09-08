@@ -952,17 +952,12 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 
 	events := d.outbound.ResolveEvents(pairId, outJtis)
 
-	// Idle guard: no outbound events AND nothing owed to the peer means there
-	// is nothing to say this cycle. Idle a short cycle rather than open a
-	// keep-alive request that would only add load without carrying state. When
-	// pending feedback IS non-empty we still POST (empty Sets, non-empty Ack /
-	// setErrs) so the peer can clear its outbound (AC 1, and #254 so a
-	// validation rejection is reported rather than resent forever). When events
-	// is non-empty we always POST (normal outbound cycle).
-	if len(events) == 0 && pending.empty() {
-		*delay = d.cfg.BaseDelay
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, d.cfg.BaseDelay, false, pending
-	}
+	// No idle guard: the initiator ALWAYS opens the cycle, even with nothing
+	// to send and nothing owed. An empty-Sets request with returnEvents=true
+	// is the long poll the responder parks until it has events for us (or
+	// its poll timeout expires); without it a receive-only initiator would
+	// never learn about the peer's outbound. Empty feedback is still echoed
+	// when present (AC 1, #254) so the peer can clear its outbound.
 
 	var signingKey crypto.Signer
 	var kid string
@@ -970,9 +965,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		signingKey, kid = d.outbound.LoadSigningKey(stream.StreamConfiguration.Id, stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
 	}
 
-	// AC 1: carry the pending feedback in the request. Non-empty feedback alone
-	// is enough to justify a request (the idle guard above ensures we do
-	// not POST when both events AND the feedback are empty).
+	// AC 1: carry the pending feedback in the request.
 	cls, acked, received, signErr := d.deliver(ctx, stream, events, signingKey, kid, nil, pending)
 
 	if ctx.Err() != nil {
@@ -1030,8 +1023,19 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		if len(events) > 0 && ackedCount >= len(events) {
 			return cls, 0, false, updatedPending
 		}
-		if len(events) == 0 && len(received) == 0 {
-			// Purely idle cycle — sleep the base delay to avoid busy-loop.
+		if len(received) > 0 {
+			// The peer had SETs for us: go straight back for the next batch.
+			// The acks for this batch ride that request, and a receive-only
+			// cycle cannot hot-loop because the responder parks an empty
+			// request as a long poll once its outbound is drained. Pausing
+			// here would cost BaseDelay per received batch and bound the
+			// receive rate at batch/BaseDelay regardless of ingest speed.
+			return cls, 0, false, updatedPending
+		}
+		if len(events) == 0 {
+			// Empty long poll came back with nothing (responder timeout or a
+			// peer that answers immediately): pace the next one by BaseDelay
+			// so a fast-returning responder cannot drive a hot loop.
 			return cls, d.cfg.BaseDelay, false, updatedPending
 		}
 		return cls, d.cfg.BaseDelay, false, updatedPending
@@ -1116,8 +1120,14 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 		return sstpPendingFeedback{}
 	}
 	feedback := sstpPendingFeedback{Acks: make([]string, 0, len(received))}
-	for jti, raw := range received {
-		verified, vErr := goSetSstp.VerifySET(raw, cfg)
+	// Verify across the cores, then ingest what survived as one batch: one
+	// bulk insert and one pending-list write per matching outbound stream
+	// instead of the same round trips per SET.
+	jtis := make([]string, 0, len(received))
+	tokens := make([]*goSet.SecurityEventToken, 0, len(received))
+	raws := make([]string, 0, len(received))
+	for _, entry := range goSetSstp.VerifyAll(received, cfg, 0) {
+		jti, verified, vErr := entry.JTI, entry.Verified, entry.Err
 		if vErr != nil {
 			sstpDialerLog.Warn("inbound response SET failed verify — dropping",
 				"pairId", stream.PairId, "jti", jti, "error", vErr)
@@ -1136,12 +1146,20 @@ func (d *SstpDialer) runInboundHalf(stream *model.StreamStateRecord, received ma
 			feedback.addSetErr(jti, *vsErr)
 			continue
 		}
-		if iErr := d.outbound.HandleInboundEvent(verified.Token, verified.Raw, rxSid); iErr != nil {
-			sstpDialerLog.Warn("HandleInboundEvent failed — dropping ack for JTI",
-				"pairId", stream.PairId, "jti", jti, "error", iErr)
+		jtis = append(jtis, jti)
+		tokens = append(tokens, verified.Token)
+		raws = append(raws, verified.Raw)
+	}
+	if len(tokens) == 0 {
+		return feedback
+	}
+	for i, iErr := range d.outbound.HandleInboundEvents(tokens, raws, rxSid) {
+		if iErr != nil {
+			sstpDialerLog.Warn("HandleInboundEvents failed — dropping ack for JTI",
+				"pairId", stream.PairId, "jti", jtis[i], "error", iErr)
 			continue
 		}
-		feedback.Acks = append(feedback.Acks, jti)
+		feedback.Acks = append(feedback.Acks, jtis[i])
 	}
 	return feedback
 }
@@ -1228,6 +1246,13 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 // Concurrency is bounded to at most one in-flight secondary push per pair:
 // if a push is already running, this call returns ClassOK without opening a
 // third parallel request.
+//
+// The push keeps draining, batch after batch, while the peer acks everything
+// it is sent and the buffer still holds more. Wakes that arrive while a push
+// is in flight are coalesced away by the slot guard, so a single push per
+// wake would leave whatever queued up meanwhile stranded until the primary
+// long-poll returns (the responder's poll timeout, 30s by default) or the
+// next new event happens to arrive.
 func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) goSetSstp.Classification {
 	pairId := stream.PairId
 
@@ -1236,16 +1261,34 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 	}
 	defer d.outbound.ReleaseSecondPushSlot(pairId)
 
+	cls := goSetSstp.Classification{Class: goSetSstp.ClassOK}
+	for ctx.Err() == nil {
+		var drained bool
+		cls, drained = d.pushBatchWhilePollHeld(ctx, stream, fencingToken)
+		if drained {
+			return cls
+		}
+	}
+	return cls
+}
+
+// pushBatchWhilePollHeld sends one batch on the second-push path. done=true
+// when there is nothing more this path should send now: the buffer is empty,
+// the peer left part of the batch unacked (the primary's retry path owns
+// those), or the exchange failed.
+func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) (goSetSstp.Classification, bool) {
+	pairId := stream.PairId
+
 	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
 	if len(outJtis) == 0 {
 		// Nothing to push (or everything already in flight in the primary
 		// cycle): do not open a second POST.
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, true
 	}
 
 	events := d.outbound.ResolveEvents(pairId, outJtis)
 	if len(events) == 0 {
-		return goSetSstp.Classification{Class: goSetSstp.ClassOK}
+		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, true
 	}
 
 	var signingKey crypto.Signer
@@ -1270,7 +1313,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		sstpDialerLog.Error("egress signing failure on second push — halting",
 			"pairId", pairId, "error", signErr)
 		d.outbound.PauseOutbound(stream, reason)
-		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}
+		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, true
 	}
 
 	switch cls.Class {
@@ -1281,7 +1324,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		// deterministically — such a rejection clears the SET on the same terms
 		// as an ack, while a retryable one stays pending for a later cycle.
 		cleared, fatal := clearedOutbound(pairId, acked, cls.SetErrs)
-		d.outbound.AckOutbound(stream, cleared, events, fencingToken)
+		ackedCount := d.outbound.AckOutbound(stream, cleared, events, fencingToken)
 		// A peer whose acceptor opportunistically ships queued outbound SETs
 		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
 		// forbids long-poll waiting, not the return of already-queued SETs)
@@ -1304,7 +1347,12 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 			d.outbound.PauseOutbound(stream, fmt.Sprintf(
 				"SSTP-CLIENT: peer reports stream dead on push-while-poll-held for pair=%s: %s: %s",
 				pairId, fatal.Err, fatal.Description))
+			return cls, true
 		}
+		// Fully cleared: keep draining while the buffer holds more. Partial:
+		// stop here so the unacked remainder is retried by the primary cycle
+		// rather than re-sent immediately.
+		return cls, ackedCount < len(events)
 	case goSetSstp.ClassRequestError:
 		// 4xx on second push pauses ONLY outbound; the held primary
 		// long-poll (inbound) continues uninterrupted (Q12.3).
@@ -1318,7 +1366,7 @@ func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.Stream
 		sstpDialerLog.Warn("push-while-poll-held transport/transient failure",
 			"pairId", pairId, "class", cls.Class.String())
 	}
-	return cls
+	return cls, true
 }
 
 // deliver performs one SSTP HTTP cycle by calling pkg/goSetSstp.Exchange
@@ -1353,7 +1401,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	// AC 5: egress signing is the SINGLE consolidated site. Sign FIRST so a
 	// failure short-circuits before any HTTP work happens; the caller then
 	// halts the dial cycle rather than sending an unsigned SET.
-	sets, signErr := buildSstpSets(stream, events, key, kid)
+	sets, signErr := buildSstpSets(stream, events, key, kid, d.outbound.SignConcurrency())
 	if signErr != nil {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, signErr
 	}
@@ -1418,7 +1466,8 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 
 // buildSstpSets renders each outbound event to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer
-// key otherwise (AC 5 — consolidated egress-signing site).
+// key otherwise (AC 5 — consolidated egress-signing site). Signing fans out
+// across up to workers goroutines (eventRouter.SignSets, ADR 0036).
 //
 // PRD #49 slice 2c AC 5: a signing failure returns an error rather than
 // silently skipping the JTI. Missing key material for a publish-mode pair
@@ -1427,7 +1476,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // rather than dropping SETs onto the wire with no signature. Forward-mode
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string) (map[string]string, error) {
+func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int) (map[string]string, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -1437,6 +1486,7 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		return nil, fmt.Errorf("sstp: no signing key for stream %s (issuer %s)", cfg.Id, cfg.Iss)
 	}
 	sets := make(map[string]string, len(events))
+	work := make([]*model.EventRecord, 0, len(events))
 	for _, ev := range events {
 		if ev == nil {
 			continue
@@ -1445,18 +1495,27 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 			sets[ev.Jti] = ev.Original
 			continue
 		}
+		work = append(work, ev)
+	}
+	if len(work) == 0 {
+		return sets, nil
+	}
+	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	signed := eventRouter.SignSets(work, workers, func(ev *model.EventRecord) (string, error) {
 		token := &ev.Event
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
-		signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), key)
-		if err != nil {
+		return token.JWS(method, key)
+	})
+	for i, ev := range work {
+		if signed[i].Err != nil {
 			// AC 5: signing failure is an ERROR — halt the dial cycle
 			// rather than send an unsigned SET (or drop it silently).
-			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, err)
+			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, signed[i].Err)
 		}
-		sets[ev.Jti] = signed
+		sets[ev.Jti] = signed[i].JWS
 	}
 	return sets, nil
 }

@@ -48,7 +48,26 @@ func (d *EventDAOMemory) SetPersistDir(dir string) {
 func (d *EventDAOMemory) Insert(_ context.Context, record *model.EventRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.insertLocked(record)
+}
 
+// InsertMany stores records in order under a single lock acquisition; the
+// returned slice is index-aligned with records (nil or ErrDuplicateJTI).
+func (d *EventDAOMemory) InsertMany(_ context.Context, records []*model.EventRecord) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	results := make([]error, len(records))
+	for i, rec := range records {
+		results[i] = d.insertLocked(rec)
+	}
+	return results, nil
+}
+
+// insertLocked applies the single-record insert semantics; d.mu must be held.
+func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// JTI is the persistence-layer dedup key. Reject the new write and leave
 	// the existing record untouched (matches Mongo's reject-new-write semantic).
 	if _, exists := d.events[record.Jti]; exists {
@@ -89,13 +108,25 @@ func (d *EventDAOMemory) FindByJTI(_ context.Context, jti string) (*model.EventR
 
 func (d *EventDAOMemory) FindByJTIs(_ context.Context, jtis []string) ([]*model.EventRecord, error) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	var records []*model.EventRecord
 	for _, jti := range jtis {
 		if eventRec, ok := d.events[jti]; ok {
 			copyRec := *eventRec
 			records = append(records, &copyRec)
+		}
+	}
+	useDisk := d.useDisk
+	d.mu.RUnlock()
+
+	// Same reload as FindByJTI: with disk persistence the in-memory record
+	// drops Original, which forward-mode delivery sends verbatim.
+	if useDisk {
+		for i, rec := range records {
+			if rec.Original == "" {
+				if loaded, err := d.loadEventFromDisk(rec.Jti); err == nil {
+					records[i] = loaded
+				}
+			}
 		}
 	}
 	return records, nil
@@ -142,6 +173,24 @@ func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID stri
 			StreamId: streamID,
 		}
 		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], deliverable)
+	}
+	return nil
+}
+
+func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, streamID string) error {
+	if len(jtis) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, jti := range jtis {
+		if _, ok := d.events[jti]; ok {
+			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+				Jti:      jti,
+				StreamId: streamID,
+			})
+		}
 	}
 	return nil
 }
@@ -193,6 +242,36 @@ func (d *EventDAOMemory) RemovePending(_ context.Context, jti string, streamID s
 	return nil, nil
 }
 
+// RemovePendingMany removes every pending entry of streamID whose JTI is in
+// jtis under a single lock acquisition and returns the removed entries.
+func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	pending, ok := d.pendingEvents[streamID]
+	if !ok {
+		return nil, nil
+	}
+	want := make(map[string]struct{}, len(jtis))
+	for _, jti := range jtis {
+		want[jti] = struct{}{}
+	}
+	var removed []interfaces.DeliverableEvent
+	var newPending []interfaces.DeliverableEvent
+	for _, event := range pending {
+		if _, acked := want[event.Jti]; acked {
+			removed = append(removed, event)
+		} else {
+			newPending = append(newPending, event)
+		}
+	}
+	d.pendingEvents[streamID] = newPending
+	return removed, nil
+}
+
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -211,6 +290,24 @@ func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.Deli
 		AckDate:          ackDate,
 	}
 	d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], delivered)
+	return nil
+}
+
+// MarkDeliveredMany appends every event to its stream's delivered list under a
+// single lock acquisition.
+func (d *EventDAOMemory) MarkDeliveredMany(_ context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
+	if len(events) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, event := range events {
+		d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], interfaces.DeliveredEvent{
+			DeliverableEvent: event,
+			AckDate:          ackDate,
+		})
+	}
 	return nil
 }
 

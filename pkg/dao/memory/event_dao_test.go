@@ -193,6 +193,38 @@ func TestEventDAOMemory_FindByJTIs(t *testing.T) {
 	}
 }
 
+// TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk: with disk
+// persistence the in-memory record drops Original after Insert; the batched
+// read must reload it the way FindByJTI does, or forward-mode delivery would
+// send empty SETs.
+func TestEventDAOMemory_FindByJTIs_ReloadsOriginalFromDisk(t *testing.T) {
+	dao := NewEventDAO()
+	dao.SetPersistDir(t.TempDir())
+	ctx := context.Background()
+
+	for _, jti := range []string{"disk-1", "disk-2"} {
+		event := &goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+		event.ID = jti
+		if err := dao.Insert(ctx, &model.EventRecord{Jti: jti, Event: *event, Original: `{"jti":"` + jti + `"}`, SortTime: time.Now()}); err != nil {
+			t.Fatalf("Insert failed: %v", err)
+		}
+	}
+
+	records, err := dao.FindByJTIs(ctx, []string{"disk-1", "disk-2", "missing"})
+	if err != nil {
+		t.Fatalf("FindByJTIs failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("Expected 2 records, got %d", len(records))
+	}
+	for _, rec := range records {
+		want := `{"jti":"` + rec.Jti + `"}`
+		if rec.Original != want {
+			t.Errorf("record %s: Original = %q, want %q", rec.Jti, rec.Original, want)
+		}
+	}
+}
+
 func TestEventDAOMemory_AddPending(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
@@ -290,6 +322,87 @@ func TestEventDAOMemory_MarkDelivered(t *testing.T) {
 
 	// Note: We can't verify delivered events without exposing internal state
 	// This is acceptable for a unit test
+}
+
+// TestEventDAOMemory_RemovePendingMany asserts one batched ack removes exactly
+// the pending entries named, leaves the rest of the stream and other streams
+// untouched, skips unknown JTIs, and treats an empty batch as a no-op.
+func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+	for _, jti := range []string{"a-1", "a-2", "a-3", "b-1"} {
+		_ = dao.Insert(ctx, &model.EventRecord{Jti: jti, SortTime: time.Now()})
+	}
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA)
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB)
+
+	removed, err := dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
+	if err != nil {
+		t.Fatalf("RemovePendingMany failed: %v", err)
+	}
+	got := map[string]bool{}
+	for _, ev := range removed {
+		if ev.StreamId != streamA {
+			t.Errorf("removed entry %s carries stream %s, want %s", ev.Jti, ev.StreamId, streamA)
+		}
+		got[ev.Jti] = true
+	}
+	if len(got) != 2 || !got["a-1"] || !got["a-3"] {
+		t.Fatalf("removed = %v, want exactly a-1 and a-3", removed)
+	}
+
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	if len(jtis) != 1 || jtis[0] != "a-2" {
+		t.Errorf("stream A pending = %v, want [a-2]", jtis)
+	}
+	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	if len(jtis) != 2 {
+		t.Errorf("stream B pending = %v, must be untouched", jtis)
+	}
+
+	removed, err = dao.RemovePendingMany(ctx, nil, streamA)
+	if err != nil || removed != nil {
+		t.Errorf("empty batch: got (%v, %v), want (nil, nil)", removed, err)
+	}
+	removed, err = dao.RemovePendingMany(ctx, []string{"a-2"}, ids.NewObjectID())
+	if err != nil || removed != nil {
+		t.Errorf("unknown stream: got (%v, %v), want (nil, nil)", removed, err)
+	}
+}
+
+// TestEventDAOMemory_MarkDeliveredMany asserts a bulk delivered write is
+// visible through ListDeliveredForStream with the shared ackDate.
+func TestEventDAOMemory_MarkDeliveredMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamID := ids.NewObjectID()
+	ackDate := time.Now()
+
+	if err := dao.MarkDeliveredMany(ctx, nil, ackDate); err != nil {
+		t.Fatalf("empty MarkDeliveredMany failed: %v", err)
+	}
+	err := dao.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{
+		{Jti: "d-1", StreamId: streamID},
+		{Jti: "d-2", StreamId: streamID},
+	}, ackDate)
+	if err != nil {
+		t.Fatalf("MarkDeliveredMany failed: %v", err)
+	}
+
+	delivered, err := dao.ListDeliveredForStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("ListDeliveredForStream failed: %v", err)
+	}
+	if len(delivered) != 2 {
+		t.Fatalf("delivered count = %d, want 2", len(delivered))
+	}
+	for _, d := range delivered {
+		if !d.AckDate.Equal(ackDate) {
+			t.Errorf("jti %s ackDate = %v, want %v", d.Jti, d.AckDate, ackDate)
+		}
+	}
 }
 
 func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
@@ -414,5 +527,113 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 
 	if total != 5 {
 		t.Errorf("Expected total 5, got %d", total)
+	}
+}
+
+func newMemTestRecord(jti, original string) *model.EventRecord {
+	event := goSet.SecurityEventToken{Events: map[string]interface{}{"test": "event"}}
+	event.ID = jti
+	return &model.EventRecord{
+		Jti:      jti,
+		Event:    event,
+		Original: original,
+		SortTime: time.Now(),
+	}
+}
+
+// TestEventDAOMemory_InsertMany verifies records are stored in slice order
+// and that a duplicate JTI is reported at its index without overwriting the
+// existing record while the remaining records still land.
+func TestEventDAOMemory_InsertMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	existing := newMemTestRecord("jti-b", `{"jti":"jti-b","first":true}`)
+	if err := dao.Insert(ctx, existing); err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
+
+	batch := []*model.EventRecord{
+		newMemTestRecord("jti-a", `{"jti":"jti-a"}`),
+		newMemTestRecord("jti-b", `{"jti":"jti-b","second":true}`),
+		newMemTestRecord("jti-c", `{"jti":"jti-c"}`),
+	}
+	results, err := dao.InsertMany(ctx, batch)
+	if err != nil {
+		t.Fatalf("InsertMany failed: %v", err)
+	}
+	if len(results) != len(batch) {
+		t.Fatalf("Expected %d per-record results, got %d", len(batch), len(results))
+	}
+	if results[0] != nil || results[2] != nil {
+		t.Errorf("Expected nil for new records, got [%v, _, %v]", results[0], results[2])
+	}
+	if !errors.Is(results[1], interfaces.ErrDuplicateJTI) {
+		t.Errorf("Expected ErrDuplicateJTI at index 1, got %v", results[1])
+	}
+
+	for _, jti := range []string{"jti-a", "jti-c"} {
+		got, err := dao.FindByJTI(ctx, jti)
+		if err != nil || got == nil {
+			t.Fatalf("FindByJTI(%s) = %v, %v", jti, got, err)
+		}
+	}
+	got, err := dao.FindByJTI(ctx, "jti-b")
+	if err != nil || got == nil {
+		t.Fatalf("FindByJTI(jti-b) = %v, %v", got, err)
+	}
+	if got.Original != existing.Original {
+		t.Errorf("Duplicate must not overwrite existing record: got %q", got.Original)
+	}
+
+	// Empty batch is a no-op.
+	results, err = dao.InsertMany(ctx, nil)
+	if results != nil || err != nil {
+		t.Errorf("Expected (nil, nil) for empty batch, got (%v, %v)", results, err)
+	}
+}
+
+// TestEventDAOMemory_AddPendingMany verifies JTIs are appended in the given
+// order and JTIs with no stored event are skipped.
+func TestEventDAOMemory_AddPendingMany(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+
+	for _, jti := range []string{"jti-1", "jti-2", "jti-3"} {
+		if err := dao.Insert(ctx, newMemTestRecord(jti, `{"jti":"`+jti+`"}`)); err != nil {
+			t.Fatalf("Insert(%s) failed: %v", jti, err)
+		}
+	}
+
+	streamID := ids.NewObjectID()
+	err := dao.AddPendingMany(ctx, []string{"jti-3", "jti-missing", "jti-1", "jti-2"}, streamID)
+	if err != nil {
+		t.Fatalf("AddPendingMany failed: %v", err)
+	}
+
+	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 10)
+	if err != nil {
+		t.Fatalf("GetPendingForStream failed: %v", err)
+	}
+	want := []string{"jti-3", "jti-1", "jti-2"}
+	if total != int64(len(want)) {
+		t.Errorf("Expected total %d, got %d", len(want), total)
+	}
+	if len(jtis) != len(want) {
+		t.Fatalf("Expected %d pending JTIs, got %d: %v", len(want), len(jtis), jtis)
+	}
+	for i := range want {
+		if jtis[i] != want[i] {
+			t.Errorf("Pending[%d]: expected %s, got %s", i, want[i], jtis[i])
+		}
+	}
+
+	// Empty input is a no-op.
+	if err := dao.AddPendingMany(ctx, nil, streamID); err != nil {
+		t.Errorf("AddPendingMany(nil) failed: %v", err)
+	}
+	_, total, _ = dao.GetPendingForStream(ctx, streamID, 10)
+	if total != int64(len(want)) {
+		t.Errorf("Empty AddPendingMany must not change pending count: got %d", total)
 	}
 }

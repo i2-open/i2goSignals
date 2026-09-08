@@ -106,6 +106,15 @@ func (d *notifyingEventDAO) Insert(ctx context.Context, record *model.EventRecor
 	return nil
 }
 
+func (d *notifyingEventDAO) InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error) {
+	results, err := d.inner.InsertMany(ctx, records)
+	if err != nil {
+		return results, err
+	}
+	d.notify()
+	return results, nil
+}
+
 func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	return d.inner.FindByJTI(ctx, jti)
 }
@@ -126,6 +135,16 @@ func (d *notifyingEventDAO) AddPending(ctx context.Context, jti string, streamID
 	return nil
 }
 
+func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
+	if err := d.inner.AddPendingMany(ctx, jtis, streamID); err != nil {
+		return err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return nil
+}
+
 func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
 	return d.inner.GetPendingForStream(ctx, streamID, limit)
 }
@@ -137,6 +156,17 @@ func (d *notifyingEventDAO) RemovePending(ctx context.Context, jti string, strea
 	}
 	d.notify()
 	return ev, nil
+}
+
+func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	evs, err := d.inner.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil {
+		return evs, err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return evs, nil
 }
 
 func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
@@ -153,6 +183,16 @@ func (d *notifyingEventDAO) MarkDelivered(ctx context.Context, event *interfaces
 		return err
 	}
 	d.notify()
+	return nil
+}
+
+func (d *notifyingEventDAO) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
+	if err := d.inner.MarkDeliveredMany(ctx, events, ackDate); err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		d.notify()
+	}
 	return nil
 }
 

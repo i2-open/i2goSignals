@@ -106,6 +106,12 @@ type SstpOutbound interface {
 	// and the primary drain use the same batch size as push and poll.
 	BackfillBatch() int
 
+	// SignConcurrency is the router-configured I2SIG_SIGN_CONCURRENCY: how
+	// many SETs the dialer re-signs side by side when it builds one outbound
+	// SSTP message (ADR 0036). The same knob sizes the poll transmitter's and
+	// the SSTP responder's signing pools.
+	SignConcurrency() int
+
 	// Ctx returns the router's shutdown context. The dialer parents every
 	// cycle context on it so router.Shutdown() cancels in-flight cycles
 	// (Q14.a shutdown handoff).
@@ -128,6 +134,12 @@ type SstpOutbound interface {
 	// verified via VerifySET at ingest and fed to router.HandleEvent via
 	// VerifiedSET.Token without re-parse).
 	HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error
+	// HandleInboundEvents is the batch form of HandleInboundEvent for the SETs
+	// one response carried: they are persisted in one bulk write and fanned out
+	// with one pending-list write per matching outbound stream. raws is
+	// index-aligned with tokens and so is the returned slice; a nil entry means
+	// the SET may be acked.
+	HandleInboundEvents(tokens []*goSet.SecurityEventToken, raws []string, sid string) []error
 }
 
 // SstpDialerHooks is the hook interface the router calls when SSTP-client
@@ -242,6 +254,10 @@ func (r *router) BackfillBatch() int {
 	return r.backfillBatch
 }
 
+func (r *router) SignConcurrency() int {
+	return r.signConcurrency
+}
+
 func (r *router) Ctx() context.Context {
 	return r.ctx
 }
@@ -273,6 +289,11 @@ func (r *router) InboundVerifyConfig(rec *model.StreamStateRecord) goSetSstp.Ver
 // stream_id=rxSid (Q46), matching the SSTP-server runner's ingest.
 func (r *router) HandleInboundEvent(token *goSet.SecurityEventToken, raw string, sid string) error {
 	return r.HandleEvent(token, raw, sid)
+}
+
+// HandleInboundEvents delegates to the router's batch ingest path, HandleEvents.
+func (r *router) HandleInboundEvents(tokens []*goSet.SecurityEventToken, raws []string, sid string) []error {
+	return r.HandleEvents(tokens, raws, sid)
 }
 
 // Compile-time assertion: the router satisfies SstpOutbound. This is the
@@ -339,18 +360,21 @@ func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer
 }
 
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to
-// flush, skipping any that have since been deleted.
+// flush, in the claimed order, skipping any that have since been deleted.
+// One GetEventRecords read serves the whole batch (ADR 0036).
 func (r *router) resolveSstpEventsByJti(jtis []string) []*model.EventRecord {
 	if len(jtis) == 0 {
 		return nil
 	}
+	byJti := make(map[string]*model.EventRecord, len(jtis))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
+	}
 	events := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
-		rec := r.eventService.GetEventRecord(r.ctx, jti)
-		if rec == nil {
-			continue
+		if rec := byJti[jti]; rec != nil {
+			events = append(events, rec)
 		}
-		events = append(events, rec)
 	}
 	return events
 }
@@ -479,20 +503,21 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
 	for _, jti := range ackSet {
-		ev := sentByJti[jti]
-		if ev == nil {
+		if sentByJti[jti] == nil {
 			continue // ack for a JTI we did not send this cycle — ignore.
 		}
-		_ = r.eventService.AckEvent(r.ctx, jti, sid, fencingToken)
-		r.IncrementCounter(stream, &ev.Event, false)
 		ackedJtis = append(ackedJtis, jti)
 		count++
 	}
 
-	// Finding #1: remove the confirmed-delivered SETs from the outbound
-	// buffer so GetEvents (copy-only) never re-hands them out, and clear
-	// their in-flight claim.
+	// Finding #1: ack the confirmed-delivered SETs in the provider as one
+	// batch, remove them from the outbound buffer so GetEvents (copy-only)
+	// never re-hands them out, and clear their in-flight claim.
 	if len(ackedJtis) > 0 {
+		_ = r.eventService.AckEvents(r.ctx, ackedJtis, sid, fencingToken)
+		for _, jti := range ackedJtis {
+			r.IncrementCounter(stream, &sentByJti[jti].Event, false)
+		}
 		if eventBuf != nil {
 			eventBuf.AckEvents(ackedJtis)
 		}

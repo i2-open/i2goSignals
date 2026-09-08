@@ -210,6 +210,7 @@ Defaults shown as Go `time.Duration` strings (e.g. `1s`, `5m`, `6h`).
 |---------------------------------------|------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_PUSH_BACKFILL_INTERVAL`        | Interval at which the transmitter re-reads pending JTIs from MongoDB when its in-memory buffer is empty.                     | `1s`    |
 | `I2SIG_PUSH_BACKFILL_BATCH`           | Maximum number of events fetched in one backfill operation.                                                                  | `100`   |
+| `I2SIG_PUSH_CONCURRENCY`              | RFC 8935 POSTs a push stream keeps in flight at once (worker pool per stream). The loop drains up to 4x this many buffered JTIs per batch, reads and acks them as a batch, and stops dispatching on the first failure. Delivery order inside a batch is not guaranteed. See ADR 0035. | `5`     |
 | `I2SIG_PUSH_RETRY_BASE_DELAY`         | Initial delay between `/status` probes when push enters TransportBackoff recovery (transport errors / HTTP 5xx).             | `1s`    |
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR`     | Multiplier applied to the delay after each TransportBackoff probe.                                                           | `2.0`   |
 | `I2SIG_PUSH_RETRY_MAX_DELAY`          | Cap on a single TransportBackoff sleep — exponential growth never exceeds this between probes.                               | `5m`    |
@@ -235,7 +236,7 @@ as floating-point seconds.
 | `I2SIG_POLL_AUTH_RETRY_LIMIT`       | Max auth-rejection retry attempts before disabling the stream.                                                               | `10`           |
 | `I2SIG_POLL_RESPECT_STATUS`         | `true` (default) — pause polling when the transmitter reports `paused`/`disabled`. `false` — keep polling regardless.        | `true`         |
 
-### Poll transmitter — long-poll timeouts
+### Poll transmitter — long-poll timeouts and response assembly
 
 Inbound poll requests served by this transmitter. Read once at server startup;
 must be set uniformly across cluster nodes to avoid receiver-visible variance.
@@ -244,6 +245,7 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 |--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `I2SIG_POLL_DEFAULT_TIMEOUT`   | Integer seconds. Long-poll timeout applied when the receiver omits `timeoutSecs` (or sends `0`). Set to `0` to disable implicit long-polling — empty buffer + omitted `timeoutSecs` returns immediately.                                                          | `30`    |
 | `I2SIG_POLL_MAX_TIMEOUT`       | Integer seconds. Cap applied to receiver-supplied `timeoutSecs`. Values above this are silently clamped (RFC8936 §2.4 makes `timeoutSecs` a SHOULD, so clamping is spec-compliant). Set to `0` to disable the cap entirely.                                       | `300`   |
+| `I2SIG_SIGN_CONCURRENCY`       | Worker pool that re-signs the SETs of one outbound message: an RFC 8936 poll response, an SSTP responder response, or an SSTP initiator request. The message's event records are read in one query and signed this many at a time; forward-mode streams do not sign and are unaffected. Set to `1` to sign serially. See ADR 0036.                    | `GOMAXPROCS` |
 
 > **SSTP reuses the poll knobs.** SSTP defines **no** delivery-timeout or
 > retry env vars of its own. The SSTP **server (responder)** side applies
