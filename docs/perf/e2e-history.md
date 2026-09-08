@@ -9,3 +9,7 @@ One row per run; compare like with like (same events, concurrency, mix and machi
 | 2026-09-07 21:18 | v0.12.0-alpha.19-1-gda1c658-dirty | shared-push-transport | 5000 | 16 | alternate | 1211 | 12.8 / 22.8 | 105 | 19.7 | 112 | 18.2 | - | - | - | 23.8 | yes |
 | 2026-09-07 22:03 | v0.12.0-alpha.19-2-gf88eb08-dirty | sstp-leg-initiator | 5000 | 16 | alternate | 1084 | 13.6 / 33.5 | 94 | 13.1 | 103 | 11.6 | initiator | 106 | 11.1 | 17.7 | yes |
 | 2026-09-07 22:03 | v0.12.0-alpha.19-2-gf88eb08-dirty | sstp-leg-responder | 5000 | 16 | alternate | 1234 | 11.9 / 34.0 | 94 | 13.6 | 100 | 12.6 | responder | 55 | 26.3 | 30.4 | yes |
+| 2026-09-08 21:19 | v0.12.0-alpha.19-14-g72d48de | spec102-288-before-sid-only-index | 5000 | 16 | alternate | 623 | 23.4 / 60.6 | 195 | 0.5 | 195 | 0.5 | initiator | 195 | 0.5 | 8.5 | yes |
+| 2026-09-08 21:19 | v0.12.0-alpha.19-14-g72d48de | spec102-288-before-run2 | 5000 | 16 | alternate | 675 | 22.0 / 52.0 | 210 | 0.5 | 210 | 0.5 | initiator | 210 | 0.5 | 7.9 | yes |
+| 2026-09-08 21:23 | v0.12.0-alpha.19-15-g77d677f-dirty | spec102-288-after-run1 | 5000 | 16 | alternate | 598 | 24.3 / 61.8 | 188 | 0.5 | 188 | 0.5 | initiator | 188 | 0.5 | 8.9 | yes |
+| 2026-09-08 21:24 | v0.12.0-alpha.19-15-g77d677f-dirty | spec102-288-after-run2 | 5000 | 16 | alternate | 726 | 20.2 / 49.9 | 225 | 0.5 | 225 | 0.5 | initiator | 225 | 0.5 | 7.4 | yes |
