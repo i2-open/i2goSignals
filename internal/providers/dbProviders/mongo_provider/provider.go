@@ -353,26 +353,98 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 // operational records missing the field are not rejected.
 const eventJtiIndexName = "eventJtiUnique"
 
-func (m *MongoProvider) createIndexes(ctx context.Context) error {
-	indexSid := mongo.IndexModel{
-		Keys: bson.M{"sid": 1},
-	}
+// Index names for the per-stream event reference collections
+// (pendingEvents, deliveredEvents). Named explicitly so they can be
+// asserted on and so the legacy single-field index can be retired by name.
+const (
+	pendingSidJtiIndexName   = "pendingSidJti"
+	pendingJtiIndexName      = "pendingJti"
+	deliveredSidJtiIndexName = "deliveredSidJti"
+	deliveredJtiIndexName    = "deliveredJti"
 
-	_, err := m.pendingCol.Indexes().CreateOne(ctx, indexSid)
-	if err != nil {
-		pLog.Error("Error creating index for pendingCol", "error", err)
+	// legacySidIndexName is Mongo's auto-generated name for the {sid:1}
+	// index this package used to create on both reference collections. The
+	// compound {sid:1,jti:1} index serves every query that one served (sid
+	// is its prefix), so it is retired to save the per-write index
+	// maintenance on the ingest path.
+	legacySidIndexName = "sid_1"
+)
+
+// ensureEventRefIndexes installs the access-path indexes on a per-stream event
+// reference collection (pendingEvents or deliveredEvents) and retires the
+// legacy sid-only index.
+//
+//   - {sid:1, jti:1} — the batched-ack filter {sid, jti:{$in:[...]}} used by
+//     EventDAO.RemovePendingMany can only seek on the sid prefix of a
+//     single-field {sid:1} index, so it examined every pending document for
+//     the stream. The compound index bounds the scan by the $in list instead,
+//     and its sid prefix still serves the sid-only queries
+//     (ClearPendingForStream, CountRetainedForStream, the poll/push reads).
+//   - {jti:1} — EventDAO.DeleteBodyIfUnreferenced counts references by jti
+//     alone on the retention purge path. With no jti index that count is a
+//     full collection scan of a collection that can hold hundreds of
+//     thousands of documents.
+//
+// CreateOne is idempotent for an already-present identical spec, so this is
+// additive on an existing deployment and needs no migration step. The legacy
+// index is dropped only AFTER the compound index exists, so the sid access
+// path is never left unindexed, and only when it is actually present, so a
+// fresh database and a restart are both no-ops.
+func (m *MongoProvider) ensureEventRefIndexes(ctx context.Context, col *mongo.Collection, colName, sidJtiName, jtiName string) error {
+	models := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+			Options: options.Index().SetName(sidJtiName),
+		},
+		{
+			Keys:    bson.D{{Key: "jti", Value: 1}},
+			Options: options.Index().SetName(jtiName),
+		},
+	}
+	if _, err := col.Indexes().CreateMany(ctx, models); err != nil {
+		pLog.Error("Error creating indexes for event reference collection",
+			"collection", colName, "error", err)
 		return err
 	}
-	_, err = m.deliveredCol.Indexes().CreateOne(ctx, indexSid)
+
+	specs, err := col.Indexes().ListSpecifications(ctx, nil)
 	if err != nil {
-		pLog.Error("Error creating index for deliveredCol", "error", err)
+		pLog.Error("Error listing indexes for event reference collection",
+			"collection", colName, "error", err)
+		return err
+	}
+	for _, s := range specs {
+		if s.Name != legacySidIndexName {
+			continue
+		}
+		if err := col.Indexes().DropOne(ctx, legacySidIndexName); err != nil {
+			// Not fatal: the compound index already covers the sid access
+			// path, so the only cost of a failed drop is a redundant index.
+			pLog.Warn("Could not drop superseded sid-only index; it is redundant but harmless",
+				"collection", colName, "index", legacySidIndexName, "error", err)
+			break
+		}
+		pLog.Info("Dropped superseded sid-only index (covered by compound index)",
+			"collection", colName, "index", legacySidIndexName, "supersededBy", sidJtiName)
+		break
+	}
+	return nil
+}
+
+func (m *MongoProvider) createIndexes(ctx context.Context) error {
+	if err := m.ensureEventRefIndexes(ctx, m.pendingCol, CDbPending,
+		pendingSidJtiIndexName, pendingJtiIndexName); err != nil {
+		return err
+	}
+	if err := m.ensureEventRefIndexes(ctx, m.deliveredCol, CDbDelivered,
+		deliveredSidJtiIndexName, deliveredJtiIndexName); err != nil {
 		return err
 	}
 
 	indexIss := mongo.IndexModel{
 		Keys: bson.M{"iss": 1},
 	}
-	_, err = m.keyCol.Indexes().CreateOne(ctx, indexIss)
+	_, err := m.keyCol.Indexes().CreateOne(ctx, indexIss)
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
 		return err
