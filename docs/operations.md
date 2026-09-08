@@ -21,7 +21,8 @@ behavior** once the system is running.
 5. [Idle keepalive (verify events)](#idle-keepalive-verify-events)
 6. [Operational events](#operational-events)
 7. [Recovery playbook](#recovery-playbook)
-8. [Configuration knobs](#configuration-knobs)
+8. [Event retention](#event-retention)
+9. [Configuration knobs](#configuration-knobs)
 
 ## Delivery semantics invariant
 
@@ -372,6 +373,84 @@ window — your recovery is not polluted with stale heartbeats.
 The system never invokes `ResetDate`/`ResetJti` on its own. Auto-recovery
 relies exclusively on the unacked-JTI mechanism (failed JTIs stay pending
 and replay automatically when the stream re-enables).
+
+## Event retention
+
+> **A community deployment keeps every event forever.** Nothing in the shipped
+> configuration ever expires a SET. That is intentional (ADR 0055), not a
+> defect — but it is *silent*, so an operator who never opts in does not find
+> out until the collections are already large.
+
+### Why nothing expires
+
+Retention is resolved per stream, in days, from the `retention_window_days`
+field on the stream state record. A `nil` or non-positive window means
+keep-forever, and `RetentionEngine.PurgeExpired` skips such a stream entirely.
+
+Two independent things hold community at keep-forever:
+
+1. **The default resolver is dormant.** `services.DefaultEffectiveWindow`
+   honours only the per-stream `retention_window_days` override, which is unset
+   unless somebody set it. There is no server-wide default window and no env var
+   that supplies one — the finite window is expected to come from the per-stream
+   override, or from an enterprise resolver that folds in an enrollment-bundle
+   default and cap.
+2. **No purge engine is bound.** `services.NewRetentionEngine` has no caller in
+   community. `dbProviders.Persistence.EventDAO` exposes the live event store
+   precisely so an embedder can bind one, but the community server does not. So
+   even a stream that *does* carry a window has nothing running to act on it.
+
+Because the second condition holds regardless of the first, **setting a window
+on a community server today changes nothing about what is stored.**
+
+### What it costs
+
+Both `events` (the global SET bodies) and `deliveredEvents` (the per-stream
+acked index) grow monotonically. One benchmark sweep of the dev cluster — 5000
+events, 16 concurrent clients — left roughly **274,000** documents in `events`
+and **263,000** in `deliveredEvents`. A long-running server ingesting
+continuously has no ceiling other than the volume it sits on.
+
+### There is no operator knob for it today
+
+`retention_window_days` is a goSignals operator field on the stream state
+record. It is deliberately **not** an RFC 8935 `StreamConfiguration` field, and
+unlike its sibling operator knobs — `default_subjects`, `subject_filter_mode`,
+`event_source`, `subject_removal_grace_seconds`, `event_validation` — it is
+**not** applied by `StreamService.CreateStream` or `StreamService.UpdateStream`,
+and the `goSignals` CLI exposes no flag for it. The field is persisted and
+round-trippable, so an embedder can set it programmatically, but the community
+server offers no supported operator path. Binding the retention engine to the
+running store, and with it a real operator knob, is tracked separately and is
+not part of this build.
+
+### What an operator should do instead
+
+- **Size for unbounded growth.** Capacity-plan the MongoDB volume against
+  `events` + `deliveredEvents` at your steady-state ingest rate, and alarm on
+  volume utilisation rather than on document counts.
+- **Check the startup line.** Every server logs its retention posture once at
+  startup, at `INFO`:
+
+    ```
+    level=INFO msg="Event retention posture: no purge engine is bound, so no event expires"
+        streams=12 keep_forever=12 windowed=0 doc=docs/operations.md#event-retention
+    ```
+
+    `keep_forever` is the count of configured streams with no finite window.
+    The counts are informational: with no engine bound, `windowed` streams do
+    not expire either.
+- **Prune out of band if you must.** Any manual cleanup of `events` /
+  `deliveredEvents` is unsupported and must respect the refcount rule the purge
+  engine encodes — a body in `events` may only be deleted once **no** stream
+  still references its JTI, pending or delivered. Deleting a body that a stream
+  still has pending loses an undelivered event.
+- **Run the enterprise superset** if you need enforced retention: it supplies
+  the resolver (bundle default + cap) and binds the purge engine to the live
+  store.
+- **Do not mistake `I2SIG_TOKEN_RETENTION` for event retention.** That variable
+  governs the management-plane *token* collection only. See
+  `docs/configuration_properties.md`.
 
 ## Configuration knobs
 

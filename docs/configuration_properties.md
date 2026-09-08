@@ -195,6 +195,14 @@ already negotiated it.
 | `I2SIG_STORE_MONGO_WATCH_ENABLED`         | If `true`, the server uses MongoDB Change Streams to watch for new events. Deprecated in favour of cluster wake-ups + backfill.              | `false`                                                |
 | `I2SIG_TOKEN_RETENTION`                   | How long (in seconds, measured from a token's `exp`) an expired token record is retained in the management-plane token collection before MongoDB's TTL reaper deletes it. A revoked-but-unexpired record stays visible (reporting `active:false`) until retention lapses, so revocations remain auditable. Applied via a TTL index on `exp`; changing the value on a live deployment updates the index in place via `collMod` (no data migration). Mongo-only. | `2592000` _(30 days)_ |
 
+> **`I2SIG_TOKEN_RETENTION` is not event retention.** It expires records in the
+> management-plane *token* collection and nothing else. **Event** retention has
+> no environment variable at all: a community deployment keeps every SET
+> forever, because the per-stream `retention_window_days` window is unset by
+> default and no purge engine is bound to the live store. See
+> [Event retention](operations.md#event-retention) in the Operations Guide for
+> the consequences and what to do about it.
+
 ## Store_Mem
 
 | Variable                       | Description                                                                                              | Default                       |

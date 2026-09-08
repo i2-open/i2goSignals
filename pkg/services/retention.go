@@ -28,6 +28,45 @@ func DefaultEffectiveWindow(stream *model.StreamStateRecord) *int {
 	return stream.RetentionWindowDays
 }
 
+// RetentionPosture is the startup-visible summary of whether a server's streams
+// would ever expire an event. It exists because keep-forever is community's
+// SILENT default (ADR 0055 decision 3): an operator who never set a window has
+// no signal that `events` and `deliveredEvents` grow without bound. Counts are
+// resolver-driven, so an enterprise superset that folds in a bundle default
+// reports its own posture from the same summary.
+type RetentionPosture struct {
+	// Streams is every stream the summary saw.
+	Streams int
+	// KeepForever counts streams PurgeExpired would skip — no finite window.
+	KeepForever int
+	// Windowed counts streams with a finite (positive) effective window.
+	Windowed int
+}
+
+// SummarizeRetention classifies streams by their effective retention window,
+// resolved through window (nil defaults to DefaultEffectiveWindow, exactly as
+// PurgeExpired does). It applies the SAME keep-forever rule as the purge pass —
+// nil or non-positive — so the reported posture can never claim an expiry the
+// engine would not perform. It is a pure count over an already-loaded stream
+// set: no store access, no allocation per stream, safe to call on the startup
+// path with a nil or empty slice.
+func SummarizeRetention(streams []model.StreamStateRecord, window EffectiveWindowFunc) RetentionPosture {
+	if window == nil {
+		window = DefaultEffectiveWindow
+	}
+
+	posture := RetentionPosture{Streams: len(streams)}
+	for i := range streams {
+		days := window(&streams[i])
+		if days == nil || *days <= 0 {
+			posture.KeepForever++
+			continue
+		}
+		posture.Windowed++
+	}
+	return posture
+}
+
 // OccupancySample is one daily per-stream retained-occupancy observation — the
 // community→enterprise contract feeding ADR 0055's Mean Retained Events (MRE)
 // aggregation. The idempotency key is (ServerURN, StreamURN, SampleDate); every
