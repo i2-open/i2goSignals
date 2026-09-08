@@ -148,6 +148,54 @@ func (e *receiverCacheEntry) resetRetryLadder() {
 	e.nextRetry = time.Time{}
 }
 
+// endJwksBackground stops the keyfunc background refresh goroutine behind jwks,
+// if there is one. keyfunc.Get starts that goroutine bound to
+// context.Background() for every JWKS loaded from a URL, and the loader in
+// pkg/goSet sets RefreshInterval, so every URL-sourced JWKS this service holds
+// carries one. Nothing in keyfunc ever ends it on its own: the reference that
+// dropped the JWKS is the only thing that can (GH #290).
+//
+// It is safe on nil, safe to call twice (the cancel func is idempotent), and a
+// no-op on a JWKS built by keyfunc.NewJSON — the internal-issuer branch of
+// fetchReceiverJwks — whose cancel is nil because it never had a refresher.
+//
+// Ending the refresher does NOT invalidate the keys: EndBackground cancels only
+// the refresh loop, so a caller still verifying a SET against the discarded set
+// keeps working and simply stops seeing rotations for a set nothing will
+// consult again.
+func endJwksBackground(jwks *keyfunc.JWKS) {
+	if jwks == nil {
+		return
+	}
+	jwks.EndBackground()
+}
+
+// setJwks installs jwks as this entry's verification material, ending the
+// refresher of whatever it displaces. Every write to e.jwks goes through here:
+// a bare assignment drops the previous JWKS on the floor with its refresher
+// still running, which is the per-entry half of GH #290 (the map-rebuild half
+// is in LoadReceiverStreams).
+func (e *receiverCacheEntry) setJwks(jwks *keyfunc.JWKS) {
+	if e.jwks != jwks {
+		endJwksBackground(e.jwks)
+	}
+	e.jwks = jwks
+}
+
+// endBackground releases the entry's JWKS refresher. Call it on every entry
+// that leaves the cache — replaced by a receiver-cache rebuild, evicted by a
+// stream delete, or beaten to its slot by a concurrent writer — because the
+// cache slot is the only reference that would ever have ended it. A sibling
+// stream that happens to share the issuer holds its own entry with its own
+// separately loaded JWKS, so this never silences a refresher another stream is
+// still relying on.
+func (e *receiverCacheEntry) endBackground() {
+	if e == nil {
+		return
+	}
+	endJwksBackground(e.jwks)
+}
+
 // recordAttempt folds the outcome of one resolution attempt into the entry and,
 // on a retryable failure, schedules the next attempt with exponential backoff.
 func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, err error) {
@@ -155,7 +203,7 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 		// No URL configured: a valid resting state. The internal key lookup is
 		// authoritative and its result — including "no key at all" — is
 		// legitimate, so this direction is never unresolved and never retried.
-		e.jwks = jwks
+		e.setJwks(jwks)
 		return
 	}
 
@@ -165,7 +213,7 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 		// re-enable is picked up on the very next lookup: re-checking a
 		// disabled direction returns here again without touching the network,
 		// so there is no endpoint to hammer and no deadline to wait out.
-		e.jwks = nil
+		e.setJwks(nil)
 		e.lastErr = errDirectionNotEnabled.Error()
 		e.permanent = false
 		e.backoff = 0
@@ -174,7 +222,7 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 	}
 
 	if jwksIsUsable(jwks) {
-		e.jwks = jwks
+		e.setJwks(jwks)
 		e.lastErr = ""
 		e.permanent = false
 		e.backoff = 0
@@ -182,7 +230,13 @@ func (e *receiverCacheEntry) recordAttempt(now time.Time, jwks *keyfunc.JWKS, er
 		return
 	}
 
-	e.jwks = nil
+	// The fetch failed or resolved zero keys. When it resolved zero keys the
+	// JWKS object still exists and still carries a live refresher — an issuer
+	// serving {"keys":[]} produces exactly that — so the unusable set has to be
+	// ended here as well as dropped, or a permanently empty issuer accretes a
+	// refresher per attempt (GH #290).
+	e.setJwks(nil)
+	endJwksBackground(jwks)
 	switch {
 	case err != nil:
 		e.lastErr = err.Error()

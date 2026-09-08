@@ -952,8 +952,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	if streamRec.IsReceiver() {
 		entry := s.newReceiverEntry(ctx, streamRec)
 		s.mu.Lock()
+		displaced := s.receiverStreams[config.Id]
 		s.receiverStreams[config.Id] = entry
 		s.mu.Unlock()
+		// Nothing should occupy a brand-new stream's slot, but installing over
+		// an entry without ending its refresher is the GH #290 leak, so the
+		// install site owns the teardown rather than trusting the invariant.
+		displaced.endBackground()
 		ssLog.Debug("Receiver started", "id", streamRec.Id)
 	}
 
@@ -1512,12 +1517,25 @@ func (s *StreamService) evictReceiverEntries(streamID string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.receiverStreams, streamID)
+	var dropped []*receiverCacheEntry
+	if entry, ok := s.receiverStreams[streamID]; ok {
+		dropped = append(dropped, entry)
+		delete(s.receiverStreams, streamID)
+	}
 	for sid, entry := range s.receiverStreams {
 		if entry != nil && recordIdentifiedBy(entry.record, streamID) {
+			dropped = append(dropped, entry)
 			delete(s.receiverStreams, sid)
 		}
+	}
+	s.mu.Unlock()
+
+	// Outside the lock: the stream is gone, so its issuer's hourly JWKS refresh
+	// must go with it rather than outlive the stream that justified it (GH
+	// #290). Another stream on the same issuer is unaffected — it holds its own
+	// entry, loaded by its own keyfunc.Get, with its own refresher.
+	for _, entry := range dropped {
+		entry.endBackground()
 	}
 }
 
@@ -1793,8 +1811,28 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 		res[streamState.StreamConfiguration.Id] = s.newReceiverEntry(ctx, &state)
 	}
 	s.mu.Lock()
+	displaced := s.receiverStreams
 	s.receiverStreams = res
 	s.mu.Unlock()
+
+	// The rebuild swaps the whole map, so every entry that was in it is now
+	// unreachable — and each URL-sourced entry carries a keyfunc background
+	// refresher nothing else will ever end. Left running they accumulate one
+	// goroutine and one hourly outbound JWKS fetch per rebuild, for streams that
+	// may no longer exist; the leak is bounded by rebuild count rather than by
+	// request volume, which is why it shows as slow growth rather than a spike
+	// (GH #290). Ending them here is safe because the new entries were each
+	// built by their own keyfunc.Get and share no JWKS with the old ones — the
+	// identity check below states that rather than assuming it.
+	retained := make(map[*receiverCacheEntry]struct{}, len(res))
+	for _, entry := range res {
+		retained[entry] = struct{}{}
+	}
+	for _, entry := range displaced {
+		if _, keep := retained[entry]; !keep {
+			entry.endBackground()
+		}
+	}
 
 	out := make(map[string]*model.StreamStateRecord, len(res))
 	for sid, entry := range res {
@@ -2120,8 +2158,13 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 		inboundView := *pair
 		newEntry := s.newReceiverEntry(ctx, &inboundView)
 		s.mu.Lock()
+		displaced := s.receiverStreams[sid]
 		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
+		// The fetch above ran unlocked, so a concurrent miss may have installed
+		// an entry in the meantime. Last writer still wins, but the entry it
+		// displaces takes its keyfunc refresher with it (GH #290).
+		displaced.endBackground()
 		return newEntry.jwks
 	}
 
@@ -2135,8 +2178,10 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	if streamState.IsReceiver() {
 		newEntry := s.newReceiverEntry(ctx, streamState)
 		s.mu.Lock()
+		displaced := s.receiverStreams[sid]
 		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
+		displaced.endBackground()
 		return newEntry.jwks
 	}
 
@@ -2180,21 +2225,27 @@ func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyf
 	if !stillCached {
 		// Evicted (DeleteStream) while the fetch was in flight. The outcome is
 		// dropped rather than applied: writing a permanent-failure disable here
-		// would resurrect a record the DAO has already deleted.
+		// would resurrect a record the DAO has already deleted. Dropping the
+		// outcome must also drop the refresher the fetch just started, or the
+		// deleted stream keeps re-fetching its issuer forever (GH #290) —
+		// likewise on the two lost-race branches below.
 		s.mu.Unlock()
+		endJwksBackground(jwks)
 		return nil
 	}
 	if current != entry {
 		// A concurrent writer replaced the entry; its result wins.
-		jwks := current.jwks
+		winner := current.jwks
 		s.mu.Unlock()
-		return jwks
+		endJwksBackground(jwks)
+		return winner
 	}
 	if entry.resolved() {
 		// A concurrent writer resolved this same entry while we were fetching.
-		jwks := entry.jwks
+		resolved := entry.jwks
 		s.mu.Unlock()
-		return jwks
+		endJwksBackground(jwks)
+		return resolved
 	}
 	entry.recordAttempt(s.now(), jwks, err)
 	rec.ValidateJwks = entry.jwks
