@@ -10,6 +10,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -50,6 +51,16 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// an empty response rather than panicking or re-looking-up.
 		return resp
 	}
+
+	// Seed the request memo with the pair the HTTP handler already resolved
+	// (issue #287). Without it resolveIngressStream re-derives the very same
+	// record from the rx-side SID at a cost of three stream-store round trips:
+	// FindByID(rxSid) misses, GetStreamStateBySID probes FindByID(rxSid) a second
+	// time, and only FindByInboundSID(rxSid) hits. Seeded, all three are served
+	// from memory for the life of this request, and nothing is asserted about a
+	// SID this record does not carry.
+	ctx = services.WithRequestStreamCache(ctx)
+	services.SeedRequestStream(ctx, rec)
 
 	// Outbound ack consumption (Finding #5): the peer's request carries, in
 	// Message.Ack, the JTIs of outbound SETs it received on a previous cycle. Ack
@@ -143,7 +154,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		for i, in := range batch {
 			tokens[i], raws[i] = in.Token, in.Raw
 		}
-		for i, ingestErr := range r.HandleEvents(tokens, raws, rxSid) {
+		for i, ingestErr := range r.HandleEventsCtx(ctx, tokens, raws, rxSid) {
 			if ingestErr != nil {
 				resp.SetErrs = appendSstpSetErr(resp.SetErrs, batch[i].Jti, ingestErr)
 				continue

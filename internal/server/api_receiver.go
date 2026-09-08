@@ -1878,7 +1878,13 @@ func resolveSigningOnlyPush(sa SsfApplicationInterface, r *http.Request) (string
 // (#184) signature verification is mandatory (RequireSignature); otherwise the behavior
 // is unchanged.
 func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, sid string) {
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), sid)
+	// Resolve the stream once for the whole request (issue #287). Everything
+	// below that needs it — the JWKS lookup here and resolveIngressStream inside
+	// the router — reads through this memo, so one delivery costs one stream
+	// lookup instead of two. The memo dies with the request, so a stream
+	// configuration change is live for the next delivery with no TTL to wait on.
+	ctx := services.WithRequestStreamCache(r.Context())
+	streamState, err := sa.GetStreamService().GetStreamState(ctx, sid)
 	if streamState == nil || err != nil {
 		serverLog.Error("PUSH-RCV: Stream not found", "sid", sid)
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrNotFound, "Stream "+sid+" could not be located or was deleted")
@@ -1887,7 +1893,7 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 
 	remoteIP := model.BuildRemoteIPFromRequest(r)
 	if !remoteIP.Equals(streamState.RemoteAddress) {
-		sa.GetStreamService().UpdateRemoteAddress(r.Context(), sid, remoteIP)
+		sa.GetStreamService().UpdateRemoteAddress(ctx, sid, remoteIP)
 	}
 
 	// Resolve this receiver's event_validation mode and engage the matching
@@ -1897,7 +1903,7 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 	validators := buildReceiveValidatorSet(streamState, validationMode)
 
 	// Use goSetPush to handle RFC8935 protocol parsing and validation
-	jwksKey := sa.GetStreamService().GetIssuerJwksForReceiver(r.Context(), sid)
+	jwksKey := sa.GetStreamService().GetIssuerJwksForReceiver(ctx, sid)
 	received, deliveryErr := goSetPush.ParseReceivedSET(r, goSetPush.ReceiverConfig{
 		JWKS:              jwksKey,
 		ExpectedIssuer:    streamState.Iss,
@@ -1947,7 +1953,7 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 	}
 
 	// Application-layer: route the event
-	err = sa.GetEventRouter().HandleEvent(received.Token, received.TokenString, sid)
+	err = sa.GetEventRouter().HandleEventCtx(ctx, received.Token, received.TokenString, sid)
 	if err != nil {
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrInvalidRequest, "Unexpected error: "+err.Error())
 		return

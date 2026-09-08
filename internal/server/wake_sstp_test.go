@@ -69,6 +69,12 @@ func (rr *recordingRouter) HandleEvent(*goSet.SecurityEventToken, string, string
 func (rr *recordingRouter) HandleEvents(tokens []*goSet.SecurityEventToken, _ []string, _ string) []error {
 	return make([]error, len(tokens))
 }
+func (rr *recordingRouter) HandleEventCtx(context.Context, *goSet.SecurityEventToken, string, string) error {
+	return nil
+}
+func (rr *recordingRouter) HandleEventsCtx(_ context.Context, tokens []*goSet.SecurityEventToken, _ []string, _ string) []error {
+	return make([]error, len(tokens))
+}
 func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
 	return nil, nil
 }

@@ -50,6 +50,17 @@ type EventRouter interface {
 	// with eventTokens and so is the returned slice; a nil entry means the SET may
 	// be acked.
 	HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
+	// HandleEventCtx and HandleEventsCtx are HandleEvent/HandleEvents for a
+	// caller that is servicing an inbound request and has already resolved the
+	// ingress stream on that request's context (issue #287). The context is used
+	// for ONE thing — resolving the ingress stream, which then comes from the
+	// request-scoped memo (services.WithRequestStreamCache) instead of a second
+	// round trip to the stream store. It deliberately does NOT become the context
+	// of the ingest writes: those stay on the router's own lifetime context, so a
+	// client that hangs up mid-request cannot cancel a majority-acked write that
+	// is already in flight.
+	HandleEventCtx(ctx context.Context, eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	HandleEventsCtx(ctx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
 	// SubmitOperationalEvent persists an operational event (Operational=true) and submits it directly
 	// to the target stream's pending list, bypassing the MatchesStream predicate. Operational events
 	// are point-to-point SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify,
@@ -146,8 +157,14 @@ type router struct {
 	// the relocated dialer, which starts a per-pair goroutine on RegisterPair and
 	// stops it on UnregisterPair. Nil ⇒ no SSTP dialer goroutine ever starts (unit
 	// tests that do not need the dialer skip the callback).
-	sstpDialer           SstpDialerHooks
-	coordinator          cluster.ClusterCoordinator
+	sstpDialer  SstpDialerHooks
+	coordinator cluster.ClusterCoordinator
+	// leaseOwners memoises push-transmitter lease ownership for the fan-out
+	// wake-up decision (issue #287). This node's own push lifecycle keeps it
+	// honest on every transition it drives; leaseOwnerCacheTTL is the backstop
+	// for a peer takeover. Never consulted to authorise delivery — see
+	// lease_owner_cache.go.
+	leaseOwners          *leaseOwnerCache
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -290,6 +307,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
 		recentOutboundWakes:    make(map[string]time.Time),
+		leaseOwners:            newLeaseOwnerCache(),
 	}
 
 	// Route reset re-deliveries through this router's metering observer. A stream
@@ -848,11 +866,22 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	return r.HandleEvents([]*goSet.SecurityEventToken{eventToken}, []string{rawEvent}, sid)[0]
 }
 
+// HandleEventCtx is HandleEvent for a caller holding a request context; see the
+// EventRouter interface for what the context is and is not used for.
+func (r *router) HandleEventCtx(ctx context.Context, eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
+	return r.HandleEventsCtx(ctx, []*goSet.SecurityEventToken{eventToken}, []string{rawEvent}, sid)[0]
+}
+
+// HandleEventsCtx is HandleEvents for a caller holding a request context.
+func (r *router) HandleEventsCtx(ctx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
+	return r.handleEvents(ctx, eventTokens, rawEvents, sid)
+}
+
 // resolveIngressStream resolves the stream an inbound SET arrived on. For an
 // SSTP pair the second value is the pair record and the first is the rx-side
 // counter view of it; for every other stream the second value is nil.
-func (r *router) resolveIngressStream(sid string) (*model.StreamStateRecord, *model.StreamStateRecord, error) {
-	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
+func (r *router) resolveIngressStream(ctx context.Context, sid string) (*model.StreamStateRecord, *model.StreamStateRecord, error) {
+	streamState, err := r.streamService.GetStreamState(ctx, sid)
 	if err == nil {
 		return streamState, nil, nil
 	}
@@ -861,7 +890,7 @@ func (r *router) resolveIngressStream(sid string) (*model.StreamStateRecord, *mo
 	// lookup above misses. Resolve the pair by either direction and relabel the
 	// inbound counter to the rx-side SID that was passed in, so eventsIn carries
 	// stream_id=rxSid rather than the tx-side SID.
-	pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
+	pair, pairErr := r.streamService.GetStreamStateBySID(ctx, sid)
 	if pairErr != nil || pair == nil {
 		return nil, nil, err
 	}
@@ -883,12 +912,20 @@ outcome. commitFanoutLocked retracts the markers of rejected SETs before any str
 stream is woken, metered as egress, or handed a JTI until the body write has been joined.
 */
 func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
+	return r.handleEvents(r.ctx, eventTokens, rawEvents, sid)
+}
+
+// handleEvents is the shared body of HandleEvents and HandleEventsCtx.
+// lookupCtx resolves the ingress stream and nothing else; every write below is
+// issued on r.ctx so ingest durability does not depend on the caller's request
+// staying connected.
+func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
 	results := make([]error, len(eventTokens))
 	if len(eventTokens) == 0 {
 		return results
 	}
 
-	streamState, sstpPair, err := r.resolveIngressStream(sid)
+	streamState, sstpPair, err := r.resolveIngressStream(lookupCtx, sid)
 	if err != nil {
 		for i := range results {
 			results[i] = err
@@ -1095,9 +1132,17 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 	switch t.mode {
 	case "PUSH":
-		// Lease-aware routing
+		// Lease-aware routing. The owner is read through leaseOwners rather than
+		// straight from the coordinator: one inbound SET produced one
+		// cluster_leases round trip inside the request, and the answer changes
+		// only when a lease changes hands (issue #287). The cache is kept honest
+		// by this node's own push lifecycle and expires within leaseOwnerCacheTTL
+		// otherwise; it steers a wake-up and never authorises a delivery.
 		resource := fmt.Sprintf("push-transmitter:%s", t.key)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+		ownerNodeId := r.leaseOwners.owner(resource, func() (string, error) {
+			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+			return owner, err
+		})
 
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			// Local owner or no owner (we'll try to take it or backfill will find it)
@@ -1120,6 +1165,12 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		}
 
 	case "SSTP-CLIENT":
+		// Deliberately NOT cached. The sstp-client lease is acquired, renewed and
+		// released by the dialer in internal/server, not by this router, so there
+		// is no first-hand transition for a cache here to hook — it would be a
+		// bare TTL with no invalidation story, which issue #287 rules out. The
+		// per-event cluster_leases cost the profiler measured was on the push
+		// leg; this read happens once per SSTP fan-out batch.
 		resource := fmt.Sprintf("sstp-client:%s", t.key)
 		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
@@ -1584,6 +1635,15 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 		if err != nil {
 			eventLogger.Error("PUSH-SRV: Node lease acquisition error", "sid", sid, "error", err)
 		}
+		// Lease-owner cache invalidation hook (issue #287): this is the moment
+		// ownership is settled first-hand. Acquiring names this node the owner;
+		// failing to acquire says only that somebody else does, so the entry is
+		// dropped and the next wake-up re-reads who.
+		if acquired && err == nil {
+			r.leaseOwners.note(resource, r.nodeId)
+		} else {
+			r.leaseOwners.forget(resource)
+		}
 
 		if !acquired {
 			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
@@ -1624,6 +1684,10 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		r.stats.IncLeasesHeld()
 		defer r.stats.DecLeasesHeld()
 	}
+	// However this loop exits — lease lost, stream disabled, shutdown — this
+	// node can no longer speak for the resource, so the cached ownership claim
+	// goes with it (issue #287).
+	defer r.leaseOwners.forget(resource)
 
 	var signingKey crypto.Signer
 	var kid string
@@ -1648,9 +1712,16 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			if r.stats != nil {
 				r.stats.TrackLeaseAcquisition(resource, renewed)
 			}
+			// Every renewal re-confirms ownership first-hand, so it refreshes
+			// the cached owner rather than letting the TTL lapse into a
+			// coordinator read that would only say the same thing.
+			if renewed {
+				r.leaseOwners.note(resource, r.nodeId)
+			}
 		},
 		OnLost: func() {
 			eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
+			r.leaseOwners.forget(resource)
 			heartbeatCancel()
 		},
 	}.run(heartbeatCtx)

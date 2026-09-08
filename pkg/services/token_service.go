@@ -21,10 +21,14 @@ const tokenListCap = 1000
 type TokenService struct {
 	dao       interfaces.TokenDAO
 	streamDAO interfaces.StreamDAO
+
+	// revocations memoises IsRevoked decisions (issue #287). See
+	// token_revocation_cache.go for the TTL and the invalidation hooks.
+	revocations *revocationCache
 }
 
 func NewTokenService(dao interfaces.TokenDAO) *TokenService {
-	return &TokenService{dao: dao}
+	return &TokenService{dao: dao, revocations: newRevocationCache()}
 }
 
 // SetStreamDAO supplies the stream store used to join the last-seen IP onto
@@ -127,22 +131,49 @@ func (s *TokenService) RecordRedemption(ctx context.Context, jti string, ip stri
 	return s.dao.RecordRedemption(ctx, jti, ip, at)
 }
 
+// IsRevoked reports whether the token identified by jti is currently revoked.
+//
+// The answer is served from a short-lived memo (issue #287): every
+// authenticated request asked this question, and every one of them cost a
+// FindByJTI round trip inside the request. A store error is never cached — a
+// momentarily unreachable token store must not pin an answer — and a revoke
+// issued through this service drops the entry, so only a peer node's revoke is
+// subject to revocationCacheTTL.
 func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) {
+	if revoked, ok := s.revocations.get(jti); ok {
+		return revoked, nil
+	}
 	record, err := s.dao.FindByJTI(ctx, jti)
 	if err != nil {
 		if err.Error() == "token not found" {
-			return false, nil // Not found means not tracked or already expired/deleted
+			// Not found means not tracked or already expired/deleted. Worth
+			// remembering: an untracked bearer is re-presented as often as a
+			// tracked one, and a token that appears later cannot already be
+			// revoked in less time than the TTL.
+			s.revocations.put(jti, false, time.Time{})
+			return false, nil
 		}
 		return false, err
 	}
 	// Deferred revocation (ADR 0022 §2): a token is revoked only once revoked_at
 	// is in the past. A future-dated revoked_at (a rotation grace window) is not
-	// yet revoked, so the old bearer keeps validating during the window.
-	return record.IsRevoked(), nil
+	// yet revoked, so the old bearer keeps validating during the window — and the
+	// memo entry is capped at that instant so the window ends on time.
+	revoked := record.IsRevoked()
+	s.revocations.put(jti, revoked, record.RevokedAt)
+	return revoked, nil
 }
 
 func (s *TokenService) RevokeToken(ctx context.Context, jti string) error {
-	return s.dao.Revoke(ctx, jti)
+	// Invalidation hook (issue #287): drop before AND after the write. Before,
+	// so a concurrent IsRevoked cannot install a "not revoked" entry read from
+	// the pre-revoke record; after, so the entry this revoke supersedes is gone
+	// once the write is durable. A revoke made here is therefore effective
+	// immediately, not revocationCacheTTL later.
+	s.revocations.forget(jti)
+	err := s.dao.Revoke(ctx, jti)
+	s.revocations.forget(jti)
+	return err
 }
 
 // RevokeTokenAt stamps the token's revoked_at to a caller-supplied instant. A
@@ -150,7 +181,10 @@ func (s *TokenService) RevokeToken(ctx context.Context, jti string) error {
 // the old bearer keeps validating until the instant elapses. A now/past instant
 // revokes immediately, matching RevokeToken.
 func (s *TokenService) RevokeTokenAt(ctx context.Context, jti string, at time.Time) error {
-	return s.dao.RevokeAt(ctx, jti, at)
+	s.revocations.forget(jti)
+	err := s.dao.RevokeAt(ctx, jti, at)
+	s.revocations.forget(jti)
+	return err
 }
 
 // FindByJTI returns the tracked token record for a JTI, or (nil, nil) when no

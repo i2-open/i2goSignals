@@ -139,6 +139,16 @@ func (a *adminRouterAdapter) HandleEvents([]*goSet.SecurityEventToken, []string,
 	return nil
 }
 
+func (a *adminRouterAdapter) HandleEventCtx(context.Context, *goSet.SecurityEventToken, string, string) error {
+	a.unsupported("HandleEventCtx")
+	return nil
+}
+
+func (a *adminRouterAdapter) HandleEventsCtx(context.Context, []*goSet.SecurityEventToken, []string, string) []error {
+	a.unsupported("HandleEventsCtx")
+	return nil
+}
+
 func (a *adminRouterAdapter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
 	a.unsupported("SubmitOperationalEvent")
 	return nil, nil

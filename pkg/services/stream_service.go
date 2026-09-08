@@ -389,6 +389,7 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 // knobs (subject-filtering fields) can be supplied alongside the SSF
 // wire-format configuration without leaking into it.
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamStateRecord, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
+	invalidateRequestStreams(ctx)
 	// Resolve tx_alias → Server when the caller didn't pre-resolve it. This
 	// logic was previously in BaseProvider.CreateStream; it lives here now
 	// so the provider façade can be a pass-through.
@@ -1267,6 +1268,7 @@ func copyEvents(events []string) []string {
 // admin token authorized purely by scope, as goSignalsAdmin uses); such a
 // caller addresses the stream by stream_id and is not project-confined.
 func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	invalidateRequestStreams(ctx)
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		// An SSTP pair's receive-side SID is not its document _id; fall back to the
@@ -1491,6 +1493,7 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 }
 
 func (s *StreamService) DeleteStream(ctx context.Context, streamID string) error {
+	invalidateRequestStreams(ctx)
 	s.evictReceiverEntries(streamID)
 	return s.streamDAO.Delete(ctx, streamID)
 }
@@ -1540,7 +1543,7 @@ func (s *StreamService) evictReceiverEntries(streamID string) {
 }
 
 func (s *StreamService) GetStream(ctx context.Context, id string) (*model.StreamConfiguration, error) {
-	rec, err := s.streamDAO.FindByID(ctx, id)
+	rec, err := s.findByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1581,7 +1584,24 @@ func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfigura
 }
 
 func (s *StreamService) GetStreamState(ctx context.Context, id string) (*model.StreamStateRecord, error) {
-	return s.streamDAO.FindByID(ctx, id)
+	return s.findByID(ctx, id)
+}
+
+// findByID and findByInboundSID are the read-side stream-store lookups, served
+// from the per-request memo when the caller installed one (issue #287) and
+// straight from the DAO when it did not. Every read path that can run twice for
+// the same SID inside one ingest request goes through them; write paths go to
+// the DAO directly, because they mutate what they read.
+func (s *StreamService) findByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
+	return cachedStreamLookup(ctx, lookupByID, id, func() (*model.StreamStateRecord, error) {
+		return s.streamDAO.FindByID(ctx, id)
+	})
+}
+
+func (s *StreamService) findByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return cachedStreamLookup(ctx, lookupByInboundSID, sid, func() (*model.StreamStateRecord, error) {
+		return s.streamDAO.FindByInboundSID(ctx, sid)
+	})
 }
 
 // GetStreamStateBySID resolves a SID to its StreamStateRecord, routing SSTP
@@ -1594,13 +1614,13 @@ func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*m
 	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
 		return rec, nil
 	}
-	return s.streamDAO.FindByID(ctx, sid)
+	return s.findByID(ctx, sid)
 }
 
 // GetStreamStateByInboundSID returns the SSTP pair record whose receive-side
 // SID (SstpInbound.Id) equals sid, or interfaces.ErrNotFound. (PRD #154 Q24)
 func (s *StreamService) GetStreamStateByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
-	return s.streamDAO.FindByInboundSID(ctx, sid)
+	return s.findByInboundSID(ctx, sid)
 }
 
 // GetStreamStateByPairId returns the record whose PairId equals pairId, or
@@ -1615,13 +1635,15 @@ func (s *StreamService) GetStreamStateByPairId(ctx context.Context, pairId strin
 // uses it only to exercise the bidirectional record round-trip across both
 // providers. (PRD #154 Q24)
 func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model.StreamStateRecord) error {
+	invalidateRequestStreams(ctx)
 	return s.streamDAO.Create(ctx, rec)
 }
 
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	invalidateRequestStreams(ctx)
 	// SSTP pairs route status per direction (Q39, Q41) and Disabled couples both
 	// directions. When the SID belongs to a pair, the SSTP path owns the update.
-	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
 		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
 		return
 	}
@@ -1665,6 +1687,7 @@ func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg st
 }
 
 func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP) {
+	invalidateRequestStreams(ctx)
 	err := s.streamDAO.UpdateRemoteAddress(ctx, streamID, addr)
 	if err != nil {
 		ssLog.Error("Error updating remote address", "streamID", streamID, "error", err)
