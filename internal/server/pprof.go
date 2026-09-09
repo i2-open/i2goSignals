@@ -85,13 +85,16 @@ func applyPprofSamplingRates() {
 
 	if mutexFraction > 0 {
 		runtime.SetMutexProfileFraction(mutexFraction)
-		serverLog.Warn("mutex profiling enabled — sampling adds overhead on contended locks",
+		// INFO, not WARN: CONTEXT.md "Log-level policy" reserves WARN for
+		// recoverable abnormal conditions. An operator deliberately turning on a
+		// profile is a steady-state operational fact, like "lease acquired".
+		serverLog.Info("mutex profiling enabled — sampling adds overhead on contended locks",
 			"env", PprofMutexFractionEnv, "fraction", mutexFraction)
 	}
 
 	if blockRate > 0 {
 		runtime.SetBlockProfileRate(blockRate)
-		serverLog.Warn("block profiling enabled — sampling adds measurable overhead on every blocking operation",
+		serverLog.Info("block profiling enabled — sampling adds measurable overhead on every blocking operation",
 			"env", PprofBlockRateEnv, "rateNanos", blockRate)
 	}
 }

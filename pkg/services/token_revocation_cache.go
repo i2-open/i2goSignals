@@ -45,6 +45,17 @@ type revocationCache struct {
 	ttl     time.Duration
 	max     int
 
+	// gen counts invalidations. A reader captures it before its store read and
+	// hands it back to putIfCurrent, which refuses to install a decision that
+	// an intervening forget has already superseded. Without it a revoke can be
+	// straddled: a reader loads a not-yet-revoked record, the revoke runs both
+	// its forgets against an empty map, and the reader then installs "not
+	// revoked" for the full TTL — the exact stale-accept the TTL is bounded to
+	// prevent. One counter for the whole cache rather than one per JTI: revokes
+	// are rare, so over-invalidating in-flight reads costs a re-read, never a
+	// wrong answer, and it keeps no per-JTI state alive after a forget.
+	gen uint64
+
 	// now is the clock the TTL is measured against. A field rather than a
 	// direct time.Now call so expiry and the deferred-revocation boundary can
 	// be driven deterministically from tests without sleeping.
@@ -82,6 +93,24 @@ func (c *revocationCache) get(jti string) (bool, bool) {
 // a past one is already the reason the decision is `true`, which cannot become
 // stale in the other direction.
 func (c *revocationCache) put(jti string, revoked bool, revokedAt time.Time) {
+	c.putIfCurrent(jti, revoked, revokedAt, c.generation())
+}
+
+// generation reads the current invalidation counter. Callers capture it BEFORE
+// the store read whose result they intend to cache.
+func (c *revocationCache) generation() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
+}
+
+// putIfCurrent records a decision unless the cache was invalidated after gen
+// was captured, in which case the decision is dropped and the next caller
+// re-reads the store.
+func (c *revocationCache) putIfCurrent(jti string, revoked bool, revokedAt time.Time, gen uint64) {
 	if c == nil || jti == "" {
 		return
 	}
@@ -93,6 +122,9 @@ func (c *revocationCache) put(jti string, revoked bool, revokedAt time.Time) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.gen != gen {
+		return
+	}
 	if len(c.entries) >= c.max {
 		c.sweepLocked(now)
 		if len(c.entries) >= c.max {
@@ -112,6 +144,8 @@ func (c *revocationCache) forget(jti string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.entries, jti)
+	// Bump AFTER the delete so any read still in flight is superseded too.
+	c.gen++
 }
 
 func (c *revocationCache) sweepLocked(now time.Time) {

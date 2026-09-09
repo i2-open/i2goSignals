@@ -220,3 +220,68 @@ func TestRevocationCacheEvictsWhenFull(t *testing.T) {
 	}
 	assert.LessOrEqual(t, len(c.entries), c.max)
 }
+
+// blockingTokenDAO lets a test hold FindByJTI open so a revoke can land in the
+// middle of an in-flight revocation read — the straddle the cache generation
+// exists to defeat.
+type blockingTokenDAO struct {
+	interfaces.TokenDAO
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingTokenDAO) FindByJTI(ctx context.Context, jti string) (*model.TokenRecord, error) {
+	rec, err := d.TokenDAO.FindByJTI(ctx, jti)
+	// Snapshot before blocking. The memory store hands back a live pointer, and
+	// the revoke this test interleaves mutates it in place — without the copy
+	// the caller would observe the revoke through the pointer and the straddle
+	// under test could not occur at all.
+	if rec != nil {
+		snapshot := *rec
+		rec = &snapshot
+	}
+	// Signal once, then wait: the caller has read a pre-revoke record and has
+	// not yet cached it.
+	d.once.Do(func() { close(d.entered) })
+	<-d.release
+	return rec, err
+}
+
+// TestRevokeDuringInFlightReadIsNotStraddled pins the ordering that would
+// otherwise install a stale "not revoked" for the whole TTL: the reader loads
+// the pre-revoke record, RevokeToken runs both its invalidations against a memo
+// that has no entry yet, and only then does the reader cache what it read.
+func TestRevokeDuringInFlightReadIsNotStraddled(t *testing.T) {
+	dao := &blockingTokenDAO{
+		TokenDAO: memory.NewTokenDAO(),
+		release:  make(chan struct{}),
+		entered:  make(chan struct{}),
+	}
+	svc := NewTokenService(dao)
+	nowVal := time.Now()
+	svc.revocations.now = func() time.Time { return nowVal }
+	insertToken(t, dao, "jti-straddled")
+	ctx := context.Background()
+
+	readDone := make(chan bool, 1)
+	go func() {
+		revoked, err := svc.IsRevoked(ctx, "jti-straddled")
+		require.NoError(t, err)
+		readDone <- revoked
+	}()
+
+	<-dao.entered
+	require.NoError(t, svc.RevokeToken(ctx, "jti-straddled"))
+	close(dao.release)
+
+	// The in-flight read legitimately returns the pre-revoke answer; what it
+	// must NOT do is leave that answer in the memo.
+	<-readDone
+
+	// Same instant on the memo's clock, so nothing has expired. A cached
+	// "not revoked" here would survive revocationCacheTTL.
+	revoked, err := svc.IsRevoked(ctx, "jti-straddled")
+	require.NoError(t, err)
+	assert.True(t, revoked, "a revoke that landed during an in-flight read must not be overwritten by that read")
+}

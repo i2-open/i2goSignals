@@ -1036,6 +1036,13 @@ type fanoutTarget struct {
 	docID  string // stream document id the pending markers were written under
 	stream model.StreamStateRecord
 	jtis   []string
+
+	// queued records whether this target's marker write actually succeeded.
+	// Retraction is a compensating write (ADR 0038) and may only undo a marker
+	// this batch wrote: when the write failed there is nothing of ours to undo,
+	// and retracting anyway would delete an OLDER still-undelivered intent for
+	// the same JTI — silently dropping an event that was already accepted.
+	queued bool
 }
 
 // planFanoutLocked selects, for every outbound stream this router knows about,
@@ -1087,10 +1094,12 @@ func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*m
 	}
 	docID := stream.Id.Hex()
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
+	queued := true
 	if err := r.eventService.AddEventsToStream(r.ctx, jtis, docID); err != nil {
 		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
+		queued = false
 	}
-	return &fanoutTarget{mode: mode, key: key, docID: docID, stream: *stream, jtis: jtis}
+	return &fanoutTarget{mode: mode, key: key, docID: docID, stream: *stream, jtis: jtis, queued: queued}
 }
 
 // commitFanoutLocked finishes the fan-out once the body write has been joined:
@@ -1108,11 +1117,15 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 				drop = append(drop, jti)
 			}
 		}
-		if len(drop) > 0 {
+		if len(drop) > 0 && t.queued {
 			// Compensating write (ADR 0038). The marker was written before the
 			// body write reported this JTI rejected, so the delivery intent is
 			// retracted before anything can act on it — leaving it would
 			// re-deliver a SET whose first copy was already fanned out.
+			//
+			// Guarded by t.queued: retraction deletes the NEWEST marker for the
+			// JTI, so running it after a failed marker write would consume an
+			// older, still-undelivered intent that this batch never created.
 			if err := r.eventService.DiscardPending(r.ctx, drop, t.docID); err != nil {
 				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.stream.StreamConfiguration.Id, "mode", t.mode, "count", len(drop), "error", err)
 			}
@@ -1145,10 +1158,16 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		})
 
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			// Local owner or no owner (we'll try to take it or backfill will find it)
-			buf := r.pushBuffers[t.key]
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
+			// Local owner or no owner (we'll try to take it or backfill will find it).
+			// The comma-ok is load-bearing since the fan-out was split in two: the
+			// plan phase saw this stream under an earlier RLock, r.mu was released
+			// across the body-write join, and RemoveStream may have deleted the
+			// buffer in that window. The markers are already durable, so backfill
+			// still delivers them; only the wake-up is lost.
+			if buf, ok := r.pushBuffers[t.key]; ok {
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
 			}
 		} else {
 			// Remote owner, send one wake-up for the batch
@@ -1159,9 +1178,12 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		// For poll streams, every node serving a long poll should be woken up.
 		// Since we don't have a transmitter lease for poll, we just submit locally.
 		// Ideally we'd broadcast to all nodes, but let's start with local.
-		buf := r.pollBuffers[t.key]
-		for _, jti := range jtis {
-			buf.SubmitEvent(jti)
+		// Comma-ok for the same reason as the push arm above: the stream may have
+		// been removed while r.mu was released across the body-write join.
+		if buf, ok := r.pollBuffers[t.key]; ok {
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
 		}
 
 	case "SSTP-CLIENT":

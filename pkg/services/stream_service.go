@@ -1912,9 +1912,13 @@ func (s *StreamService) disableInvariantViolation(
 		"sid", sid, "leg", leg, "invariant", invariantErr.Error())
 	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable,
 		"ADR-0066 §D2 invariant violation ("+leg+"): "+invariantErr.Error())
+	// Same reason as persistDisabledRecord: a fail-closed disable is a write, so
+	// the request memo must not serve the pre-disable record afterwards.
+	invalidateRequestStreams(ctx)
 	if err := s.streamDAO.Update(ctx, rec); err != nil {
 		return fmt.Errorf("persist disabled state: %w", err)
 	}
+	invalidateRequestStreams(ctx)
 	return nil
 }
 
@@ -2080,9 +2084,16 @@ func (s *StreamService) persistDisabledRecord(ctx context.Context, rec *model.St
 	if rec == nil {
 		return
 	}
+	// Disabling is a write, so the request memo (issue #287) must not keep
+	// serving the pre-disable record to a later read in this same request —
+	// resolveIngressStream would otherwise ingest onto a stream this call just
+	// disabled. Dropped unconditionally: on a failed write the memo is merely
+	// re-read, which is always safe.
+	invalidateRequestStreams(ctx)
 	if uErr := s.streamDAO.Update(ctx, rec); uErr != nil {
 		ssLog.Error("Error updating stream status in database", "sid", sid, "error", uErr)
 	}
+	invalidateRequestStreams(ctx)
 }
 
 // fetchReceiverJwks resolves the verification JWKS for a snapshotted receive

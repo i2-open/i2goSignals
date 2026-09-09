@@ -143,6 +143,10 @@ func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) 
 	if revoked, ok := s.revocations.get(jti); ok {
 		return revoked, nil
 	}
+	// Captured before the read: a revoke that lands while FindByJTI is in flight
+	// bumps the generation, and the decision read from the pre-revoke record is
+	// then discarded instead of being installed for the full TTL.
+	gen := s.revocations.generation()
 	record, err := s.dao.FindByJTI(ctx, jti)
 	if err != nil {
 		if err.Error() == "token not found" {
@@ -150,7 +154,7 @@ func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) 
 			// remembering: an untracked bearer is re-presented as often as a
 			// tracked one, and a token that appears later cannot already be
 			// revoked in less time than the TTL.
-			s.revocations.put(jti, false, time.Time{})
+			s.revocations.putIfCurrent(jti, false, time.Time{}, gen)
 			return false, nil
 		}
 		return false, err
@@ -160,7 +164,7 @@ func (s *TokenService) IsRevoked(ctx context.Context, jti string) (bool, error) 
 	// yet revoked, so the old bearer keeps validating during the window — and the
 	// memo entry is capped at that instant so the window ends on time.
 	revoked := record.IsRevoked()
-	s.revocations.put(jti, revoked, record.RevokedAt)
+	s.revocations.putIfCurrent(jti, revoked, record.RevokedAt, gen)
 	return revoked, nil
 }
 
