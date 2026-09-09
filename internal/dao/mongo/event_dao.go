@@ -289,7 +289,16 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 		return []string{}, 0, nil
 	}
 
-	opts := options.Find()
+	// Sort by jti, explicitly. jtis are UUIDv7 (goSet.GenerateJti), so
+	// ascending jti IS ascending issue order, and the {sid:1,jti:1} index
+	// supplies that order directly — the sort adds no blocking stage and no
+	// round trip. The sort is stated rather than inherited because without it
+	// the order is whatever plan the query planner happens to pick: an
+	// unsorted find on this filter returned insertion order when the
+	// collection carried the legacy {sid:1} index and returns jti order under
+	// the compound one. Delivery order is a contract receivers reason about
+	// (ADR 0040), so it may not be a side effect of index selection.
+	opts := options.Find().SetSort(bson.D{{Key: "jti", Value: 1}})
 	if limit > 0 {
 		opts.SetLimit(int64(limit))
 	}
@@ -397,13 +406,19 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 	return removed, nil
 }
 
-// RetractPending removes, for each JTI, the newest pending entry of streamID
-// and leaves any older entry for the same JTI alone (ADR 0038). Sorting the
-// FindOneAndDelete by descending _id picks the most recently inserted
-// document, so an earlier still-undelivered intent for the same JTI keeps both
-// its existence and its position in the natural-order pending list. Retraction
-// is the exceptional path — it only runs when a speculative marker's body was
+// RetractPending removes, for each JTI, exactly one pending entry of streamID
+// and leaves any other entry for the same JTI alone (ADR 0038). Retraction is
+// the exceptional path — it only runs when a speculative marker's body was
 // rejected — so it costs one round trip per JTI rather than a batched delete.
+//
+// WHICH duplicate is deleted does not matter. A pendingDoc carries only sid
+// and jti, so two markers for the same (sid, jti) are indistinguishable in
+// content, and GetPendingForStream now orders by jti (ADR 0040), which the two
+// share — the survivor holds the same position either way. The descending _id
+// sort is kept only to make the choice deterministic within a node. It is NOT
+// a "most recently inserted" guarantee across nodes: an ObjectID is a
+// second-granularity timestamp plus a per-process random value, so two nodes
+// marking the same JTI in the same second sort arbitrarily against each other.
 func (d *EventDAOMongo) RetractPending(ctx context.Context, jtis []string, streamID string) error {
 	if len(jtis) == 0 {
 		return nil
