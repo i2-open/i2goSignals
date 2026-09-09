@@ -35,3 +35,9 @@ One row per run; compare like with like (same events, concurrency, mix and machi
 | 2026-09-08 23:24 | v0.12.0-alpha.19-23-gd630c27-dirty | spec102-286-after-run1 | 5000 | 16 | push | 719 | 18.7 / 78.5 | 454 | 4.1 | - | - | initiator | - | - | 11.0 | yes |
 | 2026-09-08 23:24 | v0.12.0-alpha.19-23-gd630c27-dirty | spec102-286-after-run2 | 5000 | 16 | push | 844 | 16.5 / 48.6 | 558 | 3.0 | - | - | initiator | - | - | 9.0 | yes |
 | 2026-09-08 23:24 | v0.12.0-alpha.19-23-gd630c27-dirty | spec102-286-after-run3 | 5000 | 16 | push | 834 | 16.6 / 50.5 | 553 | 3.0 | - | - | initiator | - | - | 9.0 | yes |
+| 2026-09-08 23:45 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-before-run1 | 5000 | 16 | push | 742 | 19.3 / 51.9 | 511 | 3.1 | - | - | initiator | - | - | 9.8 | yes |
+| 2026-09-08 23:46 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-before-run2 | 5000 | 16 | push | 763 | 18.5 / 50.5 | 521 | 3.0 | - | - | initiator | - | - | 9.6 | yes |
+| 2026-09-08 23:46 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-before-run3 | 5000 | 16 | push | 782 | 17.9 / 54.2 | 530 | 3.0 | - | - | initiator | - | - | 9.4 | yes |
+| 2026-09-08 23:47 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-after-run1 | 5000 | 16 | push | 935 | 15.1 / 43.1 | 562 | 3.5 | - | - | initiator | - | - | 8.9 | yes |
+| 2026-09-08 23:48 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-after-run2 | 5000 | 16 | push | 1041 | 13.0 / 43.6 | 638 | 3.0 | - | - | initiator | - | - | 7.8 | yes |
+| 2026-09-08 23:48 | v0.12.0-alpha.19-25-g1aa9f48-dirty | spec102-287-after-run3 | 5000 | 16 | push | 1006 | 14.1 / 40.4 | 587 | 3.5 | - | - | initiator | - | - | 8.5 | yes |
