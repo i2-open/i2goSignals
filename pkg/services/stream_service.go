@@ -180,7 +180,8 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 
 // validateSigningAlg rejects a stream configuration asking for a SET signature
 // algorithm this transmitter cannot produce. The accepted set is goSet's:
-// "" (unset, meaning RS256), "RS256", and "ML-DSA-65" (RFC 9964 / FIPS 204).
+// "" (unset, meaning RS256), "RS256", "ES256" (ECDSA P-256, the throughput
+// opt-in — i2goSignals#284), and "ML-DSA-65" (RFC 9964 / FIPS 204).
 //
 // Validating at create/update is what lets the signing sites treat the field as
 // already-good: a bad value is a 400 on the configuration request rather than a
@@ -388,6 +389,7 @@ func (s *StreamService) getFullUrl(relativePath string) string {
 // knobs (subject-filtering fields) can be supplied alongside the SSF
 // wire-format configuration without leaking into it.
 func (s *StreamService) CreateStream(ctx context.Context, request model.StreamStateRecord, projectID string, txServer *model.Server) (model.StreamConfiguration, error) {
+	invalidateRequestStreams(ctx)
 	// Resolve tx_alias → Server when the caller didn't pre-resolve it. This
 	// logic was previously in BaseProvider.CreateStream; it lives here now
 	// so the provider façade can be a pass-through.
@@ -951,8 +953,13 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	if streamRec.IsReceiver() {
 		entry := s.newReceiverEntry(ctx, streamRec)
 		s.mu.Lock()
+		displaced := s.receiverStreams[config.Id]
 		s.receiverStreams[config.Id] = entry
 		s.mu.Unlock()
+		// Nothing should occupy a brand-new stream's slot, but installing over
+		// an entry without ending its refresher is the GH #290 leak, so the
+		// install site owns the teardown rather than trusting the invariant.
+		displaced.endBackground()
 		ssLog.Debug("Receiver started", "id", streamRec.Id)
 	}
 
@@ -1261,6 +1268,7 @@ func copyEvents(events []string) []string {
 // admin token authorized purely by scope, as goSignalsAdmin uses); such a
 // caller addresses the stream by stream_id and is not project-confined.
 func (s *StreamService) UpdateStream(ctx context.Context, streamID string, projectID string, configReq model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	invalidateRequestStreams(ctx)
 	streamRec, err := s.streamDAO.FindByID(ctx, streamID)
 	if err != nil {
 		// An SSTP pair's receive-side SID is not its document _id; fall back to the
@@ -1485,6 +1493,7 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 }
 
 func (s *StreamService) DeleteStream(ctx context.Context, streamID string) error {
+	invalidateRequestStreams(ctx)
 	s.evictReceiverEntries(streamID)
 	return s.streamDAO.Delete(ctx, streamID)
 }
@@ -1511,17 +1520,30 @@ func (s *StreamService) evictReceiverEntries(streamID string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.receiverStreams, streamID)
+	var dropped []*receiverCacheEntry
+	if entry, ok := s.receiverStreams[streamID]; ok {
+		dropped = append(dropped, entry)
+		delete(s.receiverStreams, streamID)
+	}
 	for sid, entry := range s.receiverStreams {
 		if entry != nil && recordIdentifiedBy(entry.record, streamID) {
+			dropped = append(dropped, entry)
 			delete(s.receiverStreams, sid)
 		}
+	}
+	s.mu.Unlock()
+
+	// Outside the lock: the stream is gone, so its issuer's hourly JWKS refresh
+	// must go with it rather than outlive the stream that justified it (GH
+	// #290). Another stream on the same issuer is unaffected — it holds its own
+	// entry, loaded by its own keyfunc.Get, with its own refresher.
+	for _, entry := range dropped {
+		entry.endBackground()
 	}
 }
 
 func (s *StreamService) GetStream(ctx context.Context, id string) (*model.StreamConfiguration, error) {
-	rec, err := s.streamDAO.FindByID(ctx, id)
+	rec, err := s.findByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1562,7 +1584,24 @@ func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfigura
 }
 
 func (s *StreamService) GetStreamState(ctx context.Context, id string) (*model.StreamStateRecord, error) {
-	return s.streamDAO.FindByID(ctx, id)
+	return s.findByID(ctx, id)
+}
+
+// findByID and findByInboundSID are the read-side stream-store lookups, served
+// from the per-request memo when the caller installed one (issue #287) and
+// straight from the DAO when it did not. Every read path that can run twice for
+// the same SID inside one ingest request goes through them; write paths go to
+// the DAO directly, because they mutate what they read.
+func (s *StreamService) findByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
+	return cachedStreamLookup(ctx, lookupByID, id, func() (*model.StreamStateRecord, error) {
+		return s.streamDAO.FindByID(ctx, id)
+	})
+}
+
+func (s *StreamService) findByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	return cachedStreamLookup(ctx, lookupByInboundSID, sid, func() (*model.StreamStateRecord, error) {
+		return s.streamDAO.FindByInboundSID(ctx, sid)
+	})
 }
 
 // GetStreamStateBySID resolves a SID to its StreamStateRecord, routing SSTP
@@ -1575,13 +1614,13 @@ func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*m
 	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
 		return rec, nil
 	}
-	return s.streamDAO.FindByID(ctx, sid)
+	return s.findByID(ctx, sid)
 }
 
 // GetStreamStateByInboundSID returns the SSTP pair record whose receive-side
 // SID (SstpInbound.Id) equals sid, or interfaces.ErrNotFound. (PRD #154 Q24)
 func (s *StreamService) GetStreamStateByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
-	return s.streamDAO.FindByInboundSID(ctx, sid)
+	return s.findByInboundSID(ctx, sid)
 }
 
 // GetStreamStateByPairId returns the record whose PairId equals pairId, or
@@ -1596,13 +1635,15 @@ func (s *StreamService) GetStreamStateByPairId(ctx context.Context, pairId strin
 // uses it only to exercise the bidirectional record round-trip across both
 // providers. (PRD #154 Q24)
 func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model.StreamStateRecord) error {
+	invalidateRequestStreams(ctx)
 	return s.streamDAO.Create(ctx, rec)
 }
 
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	invalidateRequestStreams(ctx)
 	// SSTP pairs route status per direction (Q39, Q41) and Disabled couples both
 	// directions. When the SID belongs to a pair, the SSTP path owns the update.
-	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
 		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
 		return
 	}
@@ -1646,6 +1687,7 @@ func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg st
 }
 
 func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP) {
+	invalidateRequestStreams(ctx)
 	err := s.streamDAO.UpdateRemoteAddress(ctx, streamID, addr)
 	if err != nil {
 		ssLog.Error("Error updating remote address", "streamID", streamID, "error", err)
@@ -1792,8 +1834,28 @@ func (s *StreamService) LoadReceiverStreams(ctx context.Context) map[string]*mod
 		res[streamState.StreamConfiguration.Id] = s.newReceiverEntry(ctx, &state)
 	}
 	s.mu.Lock()
+	displaced := s.receiverStreams
 	s.receiverStreams = res
 	s.mu.Unlock()
+
+	// The rebuild swaps the whole map, so every entry that was in it is now
+	// unreachable — and each URL-sourced entry carries a keyfunc background
+	// refresher nothing else will ever end. Left running they accumulate one
+	// goroutine and one hourly outbound JWKS fetch per rebuild, for streams that
+	// may no longer exist; the leak is bounded by rebuild count rather than by
+	// request volume, which is why it shows as slow growth rather than a spike
+	// (GH #290). Ending them here is safe because the new entries were each
+	// built by their own keyfunc.Get and share no JWKS with the old ones — the
+	// identity check below states that rather than assuming it.
+	retained := make(map[*receiverCacheEntry]struct{}, len(res))
+	for _, entry := range res {
+		retained[entry] = struct{}{}
+	}
+	for _, entry := range displaced {
+		if _, keep := retained[entry]; !keep {
+			entry.endBackground()
+		}
+	}
 
 	out := make(map[string]*model.StreamStateRecord, len(res))
 	for sid, entry := range res {
@@ -1850,9 +1912,13 @@ func (s *StreamService) disableInvariantViolation(
 		"sid", sid, "leg", leg, "invariant", invariantErr.Error())
 	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable,
 		"ADR-0066 §D2 invariant violation ("+leg+"): "+invariantErr.Error())
+	// Same reason as persistDisabledRecord: a fail-closed disable is a write, so
+	// the request memo must not serve the pre-disable record afterwards.
+	invalidateRequestStreams(ctx)
 	if err := s.streamDAO.Update(ctx, rec); err != nil {
 		return fmt.Errorf("persist disabled state: %w", err)
 	}
+	invalidateRequestStreams(ctx)
 	return nil
 }
 
@@ -2018,9 +2084,16 @@ func (s *StreamService) persistDisabledRecord(ctx context.Context, rec *model.St
 	if rec == nil {
 		return
 	}
+	// Disabling is a write, so the request memo (issue #287) must not keep
+	// serving the pre-disable record to a later read in this same request —
+	// resolveIngressStream would otherwise ingest onto a stream this call just
+	// disabled. Dropped unconditionally: on a failed write the memo is merely
+	// re-read, which is always safe.
+	invalidateRequestStreams(ctx)
 	if uErr := s.streamDAO.Update(ctx, rec); uErr != nil {
 		ssLog.Error("Error updating stream status in database", "sid", sid, "error", uErr)
 	}
+	invalidateRequestStreams(ctx)
 }
 
 // fetchReceiverJwks resolves the verification JWKS for a snapshotted receive
@@ -2119,8 +2192,13 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 		inboundView := *pair
 		newEntry := s.newReceiverEntry(ctx, &inboundView)
 		s.mu.Lock()
+		displaced := s.receiverStreams[sid]
 		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
+		// The fetch above ran unlocked, so a concurrent miss may have installed
+		// an entry in the meantime. Last writer still wins, but the entry it
+		// displaces takes its keyfunc refresher with it (GH #290).
+		displaced.endBackground()
 		return newEntry.jwks
 	}
 
@@ -2134,8 +2212,10 @@ func (s *StreamService) GetIssuerJwksForReceiver(ctx context.Context, sid string
 	if streamState.IsReceiver() {
 		newEntry := s.newReceiverEntry(ctx, streamState)
 		s.mu.Lock()
+		displaced := s.receiverStreams[sid]
 		s.receiverStreams[sid] = newEntry
 		s.mu.Unlock()
+		displaced.endBackground()
 		return newEntry.jwks
 	}
 
@@ -2179,21 +2259,27 @@ func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyf
 	if !stillCached {
 		// Evicted (DeleteStream) while the fetch was in flight. The outcome is
 		// dropped rather than applied: writing a permanent-failure disable here
-		// would resurrect a record the DAO has already deleted.
+		// would resurrect a record the DAO has already deleted. Dropping the
+		// outcome must also drop the refresher the fetch just started, or the
+		// deleted stream keeps re-fetching its issuer forever (GH #290) —
+		// likewise on the two lost-race branches below.
 		s.mu.Unlock()
+		endJwksBackground(jwks)
 		return nil
 	}
 	if current != entry {
 		// A concurrent writer replaced the entry; its result wins.
-		jwks := current.jwks
+		winner := current.jwks
 		s.mu.Unlock()
-		return jwks
+		endJwksBackground(jwks)
+		return winner
 	}
 	if entry.resolved() {
 		// A concurrent writer resolved this same entry while we were fetching.
-		jwks := entry.jwks
+		resolved := entry.jwks
 		s.mu.Unlock()
-		return jwks
+		endJwksBackground(jwks)
+		return resolved
 	}
 	entry.recordAttempt(s.now(), jwks, err)
 	rec.ValidateJwks = entry.jwks

@@ -91,6 +91,13 @@ type MongoProvider struct {
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
 
+	// indexesEnsured records whether createIndexes has run in THIS process.
+	// It runs on every start (not just for a brand-new database) so a release
+	// that adds an index reaches deployments that already have the collection,
+	// and is a no-op after the first connect. Accessed under m.mu (initialize()
+	// runs while the lock is held). Reset to false for a fresh database.
+	indexesEnsured bool
+
 	// tokenTTLEnsured records whether the token TTL index has been reconciled in
 	// THIS process. The desired expireAfterSeconds comes from I2SIG_TOKEN_RETENTION
 	// which is fixed for the process lifetime, so once reconciled, reconnects can
@@ -291,16 +298,26 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	}
 	m.coordinator.SetCollections(m.leaseCol, m.nodeCol)
 
-	// Create indexes
 	if !dbExists {
-		err = m.createIndexes(ctx)
-		if err != nil {
+		// A fresh database (first connect, or after a ResetDb that dropped it)
+		// carries none of the indexes, even if a prior connect in this process
+		// already ensured them.
+		m.indexesEnsured = false
+		m.tokenTTLEnsured = false
+	}
+
+	// Create indexes. This used to run only for a brand-new database, which
+	// meant an index added by a later release was never built on an existing
+	// deployment: its collections already existed, so the branch was skipped
+	// and the new access path stayed unindexed for the life of the database.
+	// Index creation is idempotent for an already-present identical spec, so
+	// it is safe on every start; indexesEnsured keeps reconnects within one
+	// process from repeating the round trips.
+	if !m.indexesEnsured {
+		if err = m.createIndexes(ctx); err != nil {
 			return err
 		}
-		// A fresh database (first connect, or after a ResetDb that dropped it)
-		// has no TTL index; force the reconcile below to run even if a prior
-		// connect in this process had already ensured it.
-		m.tokenTTLEnsured = false
+		m.indexesEnsured = true
 	}
 
 	// Ensure the token TTL index. After the first successful reconcile in this
@@ -353,26 +370,98 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 // operational records missing the field are not rejected.
 const eventJtiIndexName = "eventJtiUnique"
 
-func (m *MongoProvider) createIndexes(ctx context.Context) error {
-	indexSid := mongo.IndexModel{
-		Keys: bson.M{"sid": 1},
-	}
+// Index names for the per-stream event reference collections
+// (pendingEvents, deliveredEvents). Named explicitly so they can be
+// asserted on and so the legacy single-field index can be retired by name.
+const (
+	pendingSidJtiIndexName   = "pendingSidJti"
+	pendingJtiIndexName      = "pendingJti"
+	deliveredSidJtiIndexName = "deliveredSidJti"
+	deliveredJtiIndexName    = "deliveredJti"
 
-	_, err := m.pendingCol.Indexes().CreateOne(ctx, indexSid)
-	if err != nil {
-		pLog.Error("Error creating index for pendingCol", "error", err)
+	// legacySidIndexName is Mongo's auto-generated name for the {sid:1}
+	// index this package used to create on both reference collections. The
+	// compound {sid:1,jti:1} index serves every query that one served (sid
+	// is its prefix), so it is retired to save the per-write index
+	// maintenance on the ingest path.
+	legacySidIndexName = "sid_1"
+)
+
+// ensureEventRefIndexes installs the access-path indexes on a per-stream event
+// reference collection (pendingEvents or deliveredEvents) and retires the
+// legacy sid-only index.
+//
+//   - {sid:1, jti:1} — the batched-ack filter {sid, jti:{$in:[...]}} used by
+//     EventDAO.RemovePendingMany can only seek on the sid prefix of a
+//     single-field {sid:1} index, so it examined every pending document for
+//     the stream. The compound index bounds the scan by the $in list instead,
+//     and its sid prefix still serves the sid-only queries
+//     (ClearPendingForStream, CountRetainedForStream, the poll/push reads).
+//   - {jti:1} — EventDAO.DeleteBodyIfUnreferenced counts references by jti
+//     alone on the retention purge path. With no jti index that count is a
+//     full collection scan of a collection that can hold hundreds of
+//     thousands of documents.
+//
+// CreateOne is idempotent for an already-present identical spec, so this is
+// additive on an existing deployment and needs no migration step. The legacy
+// index is dropped only AFTER the compound index exists, so the sid access
+// path is never left unindexed, and only when it is actually present, so a
+// fresh database and a restart are both no-ops.
+func (m *MongoProvider) ensureEventRefIndexes(ctx context.Context, col *mongo.Collection, colName, sidJtiName, jtiName string) error {
+	models := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+			Options: options.Index().SetName(sidJtiName),
+		},
+		{
+			Keys:    bson.D{{Key: "jti", Value: 1}},
+			Options: options.Index().SetName(jtiName),
+		},
+	}
+	if _, err := col.Indexes().CreateMany(ctx, models); err != nil {
+		pLog.Error("Error creating indexes for event reference collection",
+			"collection", colName, "error", err)
 		return err
 	}
-	_, err = m.deliveredCol.Indexes().CreateOne(ctx, indexSid)
+
+	specs, err := col.Indexes().ListSpecifications(ctx, nil)
 	if err != nil {
-		pLog.Error("Error creating index for deliveredCol", "error", err)
+		pLog.Error("Error listing indexes for event reference collection",
+			"collection", colName, "error", err)
+		return err
+	}
+	for _, s := range specs {
+		if s.Name != legacySidIndexName {
+			continue
+		}
+		if err := col.Indexes().DropOne(ctx, legacySidIndexName); err != nil {
+			// Not fatal: the compound index already covers the sid access
+			// path, so the only cost of a failed drop is a redundant index.
+			pLog.Warn("Could not drop superseded sid-only index; it is redundant but harmless",
+				"collection", colName, "index", legacySidIndexName, "error", err)
+			break
+		}
+		pLog.Info("Dropped superseded sid-only index (covered by compound index)",
+			"collection", colName, "index", legacySidIndexName, "supersededBy", sidJtiName)
+		break
+	}
+	return nil
+}
+
+func (m *MongoProvider) createIndexes(ctx context.Context) error {
+	if err := m.ensureEventRefIndexes(ctx, m.pendingCol, CDbPending,
+		pendingSidJtiIndexName, pendingJtiIndexName); err != nil {
+		return err
+	}
+	if err := m.ensureEventRefIndexes(ctx, m.deliveredCol, CDbDelivered,
+		deliveredSidJtiIndexName, deliveredJtiIndexName); err != nil {
 		return err
 	}
 
 	indexIss := mongo.IndexModel{
 		Keys: bson.M{"iss": 1},
 	}
-	_, err = m.keyCol.Indexes().CreateOne(ctx, indexIss)
+	_, err := m.keyCol.Indexes().CreateOne(ctx, indexIss)
 	if err != nil {
 		pLog.Error("Error creating index for keyCol", "error", err)
 		return err

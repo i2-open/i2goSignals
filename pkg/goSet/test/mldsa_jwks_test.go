@@ -150,8 +150,21 @@ func TestSigningMethodFor_MapsTheStreamConfiguredAlg(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ML-DSA-65", pq.Alg())
 
+	// ES256 became selectable with the transmitter-throughput opt-in
+	// (i2goSignals#284); it is no longer verify-only.
+	ec, err := goSet.SigningMethodFor("ES256")
+	require.NoError(t, err)
+	assert.Equal(t, "ES256", ec.Alg())
+
 	_, err = goSet.SigningMethodFor("HS256")
 	assert.Error(t, err, "an algorithm this transmitter cannot produce is a configuration error")
+
+	// Every alg the parser will accept must also be one a stream can select,
+	// so the allow-list and the selector cannot drift apart.
+	for _, alg := range goSet.AllowedAlgs() {
+		_, err = goSet.SigningMethodFor(alg)
+		assert.NoError(t, err, "AllowedAlgs member %q must be selectable as signing_alg", alg)
+	}
 }
 
 func TestJWS_SignsWithMLDSAThroughTheSharedSigningEntryPoint(t *testing.T) {

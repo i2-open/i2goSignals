@@ -113,6 +113,7 @@ func requireUriShaped(field, value string) error {
 // bootstrap.PeerServerAlias via the ServerService. When no peer alias is given,
 // only the local half is provisioned (Q31).
 func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.SstpPairBootstrap, projectID string, peerServer *model.Server) (model.StreamStateRecord, error) {
+	invalidateRequestStreams(ctx)
 	// Role is required at create with no default (Q30).
 	switch bootstrap.Role {
 	case model.SstpRoleInitiator, model.SstpRoleResponder:
@@ -319,7 +320,8 @@ func (o SstpDeleteOutcome) PartialFailure() bool {
 // not fail the local delete — it is surfaced in the outcome so the handler can
 // answer 207 Multi-Status.
 func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadePeer bool, peerServer *model.Server) (SstpDeleteOutcome, error) {
-	rec := s.findSstpPairBySID(ctx, sid)
+	invalidateRequestStreams(ctx)
+	rec := s.findSstpPairBySIDFresh(ctx, sid)
 	if rec == nil {
 		return SstpDeleteOutcome{}, errors.New("not found")
 	}
@@ -390,10 +392,29 @@ func (s *StreamService) cascadeSstpPeerDelete(ctx context.Context, rec *model.St
 // tx side (== PairId == document _id) or the rx side (== SstpInbound.Id), or
 // returns nil when sid is not an SSTP pair SID. (Q39, Q41)
 func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *model.StreamStateRecord {
-	if rec, err := s.streamDAO.FindByID(ctx, sid); err == nil && rec.GetType() == model.DeliverySstpPair {
+	return sstpPairBySID(ctx, sid, s.findByID, s.findByInboundSID)
+}
+
+// findSstpPairBySIDFresh is findSstpPairBySID with the request memo bypassed
+// (issue #287). Write paths use it because they MUTATE the record they are
+// handed before persisting it, so they must own a private decode rather than
+// the pointer other readers in the same request are still holding.
+func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) *model.StreamStateRecord {
+	return sstpPairBySID(ctx, sid, s.streamDAO.FindByID, s.streamDAO.FindByInboundSID)
+}
+
+// sstpPairBySID is the shared resolution order, parameterised by the two
+// lookups so the memoised and fresh forms cannot drift apart.
+func sstpPairBySID(
+	ctx context.Context,
+	sid string,
+	byID func(context.Context, string) (*model.StreamStateRecord, error),
+	byInboundSID func(context.Context, string) (*model.StreamStateRecord, error),
+) *model.StreamStateRecord {
+	if rec, err := byID(ctx, sid); err == nil && rec.GetType() == model.DeliverySstpPair {
 		return rec
 	}
-	if rec, err := s.streamDAO.FindByInboundSID(ctx, sid); err == nil {
+	if rec, err := byInboundSID(ctx, sid); err == nil {
 		return rec
 	}
 	return nil

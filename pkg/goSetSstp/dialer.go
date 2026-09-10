@@ -3,13 +3,16 @@ package goSetSstp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // DialerConfig configures one SSTP HTTP cycle. Loop cadence, backoff, and
@@ -29,19 +32,31 @@ type DialerConfig struct {
 	Authorization string
 
 	// HTTPClient is the injected client that carries TLS posture and any
-	// OAuth transport wrapping. Nil ⇒ a default *http.Client with a 60s
-	// timeout is used.
+	// OAuth transport wrapping. Nil ⇒ the process-wide pooled default client
+	// for the configured TLS posture is used (see defaultDialerClient).
 	HTTPClient *http.Client
 
 	// Timeout bounds the whole cycle when HTTPClient is nil; ignored when
 	// HTTPClient is supplied (the caller's client owns its own timeout).
-	// Zero ⇒ 60s default.
+	// Zero ⇒ 60s default. A non-default value still borrows the shared
+	// pooled transport, so a custom timeout never costs connection reuse.
 	Timeout time.Duration
+
+	// InsecureSkipVerify, when true and HTTPClient is nil, selects the
+	// skip-verify default client instead of the verifying one. Ignored when
+	// HTTPClient is supplied — an injected client owns its own TLS posture.
+	// Mirrors goSetPush.TransmitterConfig.InsecureSkipVerify.
+	InsecureSkipVerify bool
 }
 
 // defaultDialerTimeout is the value used when DialerConfig.Timeout is zero
 // AND DialerConfig.HTTPClient is nil. It matches goSetPush.PushSET's default.
 const defaultDialerTimeout = 60 * time.Second
+
+// sstpMaxIdleConnsPerHost sizes the shared pool for the expected number of
+// concurrent SSTP peers and in-flight cycles per peer. net/http's default is
+// 2, which forced SSTP long-poll cycles to re-handshake TLS constantly.
+const sstpMaxIdleConnsPerHost = 64
 
 // Exchange executes one SSTP request/response cycle: marshal msg to the
 // application/sstp+json body, POST it to EndpointURL with the configured
@@ -58,11 +73,7 @@ const defaultDialerTimeout = 60 * time.Second
 func Exchange(ctx context.Context, msg Message, config DialerConfig) Result {
 	client := config.HTTPClient
 	if client == nil {
-		timeout := config.Timeout
-		if timeout <= 0 {
-			timeout = defaultDialerTimeout
-		}
-		client = &http.Client{Timeout: timeout}
+		client = dialerClientFor(config)
 	}
 
 	body, err := json.Marshal(msg)
@@ -136,5 +147,85 @@ func Exchange(ctx context.Context, msg Message, config DialerConfig) Result {
 		StatusCode: resp.StatusCode,
 		Message:    &out,
 		RetryAfter: retryAfter,
+	}
+}
+
+// Process-wide default clients and transports, one pair per TLS posture, so
+// consecutive SSTP cycles to the same peer reuse pooled keep-alive
+// connections. Building an http.Client (and therefore an http.Transport with
+// its own connection pool) per Exchange call forced a full TLS handshake on
+// every cycle: profiling the dev cluster's SSTP legs put ~17% of the receiver
+// node's CPU in crypto/tls.(*Conn).clientHandshake, with matching handshake
+// cost on the transmitter side. This is the same shape push delivery adopted
+// in goSetPush.defaultClient (commit f88eb08).
+//
+// The pool lives in the transport, so a caller that needs a non-default
+// Timeout still gets connection reuse — dialerClientFor wraps the shared
+// transport in a per-call client rather than building a new transport.
+// Callers that need a bespoke posture entirely still pass
+// DialerConfig.HTTPClient, which is used verbatim.
+var (
+	dialerTransportOnce [2]sync.Once
+	dialerTransports    [2]*http.Transport
+	dialerClientOnce    [2]sync.Once
+	dialerClients       [2]*http.Client
+)
+
+// postureIndex maps a TLS posture onto its slot in the singleton arrays.
+func postureIndex(insecureSkipVerify bool) int {
+	if insecureSkipVerify {
+		return 1
+	}
+	return 0
+}
+
+// pooledDialerTransport returns the shared transport for the given TLS posture.
+func pooledDialerTransport(insecureSkipVerify bool) *http.Transport {
+	idx := postureIndex(insecureSkipVerify)
+	dialerTransportOnce[idx].Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConnsPerHost = sstpMaxIdleConnsPerHost
+		if insecureSkipVerify {
+			// Certificate verification is being disabled deliberately, so
+			// CheckCaInstalled is intentionally not called.
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // per-stream skip-verify opt-in
+		} else {
+			transport.TLSClientConfig = tlsSupport.Harden(&tls.Config{MinVersion: tls.VersionTLS12})
+			// Install the deployment CA once into the shared transport rather
+			// than re-reading the PEM off disk on every cycle.
+			tlsSupport.CheckCaInstalled(&http.Client{Transport: transport})
+		}
+		dialerTransports[idx] = transport
+	})
+	return dialerTransports[idx]
+}
+
+// defaultDialerClient returns the process-wide client for the given TLS
+// posture, carrying defaultDialerTimeout.
+func defaultDialerClient(insecureSkipVerify bool) *http.Client {
+	idx := postureIndex(insecureSkipVerify)
+	dialerClientOnce[idx].Do(func() {
+		dialerClients[idx] = &http.Client{
+			Transport: pooledDialerTransport(insecureSkipVerify),
+			Timeout:   defaultDialerTimeout,
+		}
+	})
+	return dialerClients[idx]
+}
+
+// dialerClientFor resolves the client Exchange uses when no HTTPClient is
+// injected. The default timeout resolves to the shared singleton; any other
+// timeout gets its own client over the same pooled transport.
+func dialerClientFor(config DialerConfig) *http.Client {
+	timeout := config.Timeout
+	if timeout <= 0 {
+		timeout = defaultDialerTimeout
+	}
+	if timeout == defaultDialerTimeout {
+		return defaultDialerClient(config.InsecureSkipVerify)
+	}
+	return &http.Client{
+		Transport: pooledDialerTransport(config.InsecureSkipVerify),
+		Timeout:   timeout,
 	}
 }

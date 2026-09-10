@@ -73,6 +73,19 @@ func (s *EventDAOMongoSuite) SetupTest() {
 			SetSparse(true),
 	})
 	s.Require().NoError(err)
+
+	// Install the pending/delivered access-path indexes that
+	// mongo_provider.ensureEventRefIndexes installs in production. The
+	// {sid:1,jti:1} index is what supplies GetPendingForStream's jti ordering
+	// without a blocking sort stage, so a suite that omitted it would exercise
+	// a plan production never runs.
+	for _, col := range []*mongo.Collection{s.pendingCol, s.deliveredCol} {
+		_, err = col.Indexes().CreateMany(ctx, []mongo.IndexModel{
+			{Keys: bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}}},
+			{Keys: bson.D{{Key: "jti", Value: 1}}},
+		})
+		s.Require().NoError(err)
+	}
 }
 
 func TestEventDAOMongoSuite(t *testing.T) {
@@ -303,24 +316,86 @@ func (s *EventDAOMongoSuite) TestInsertMany_DuplicateInMiddle() {
 	s.Nil(results)
 }
 
-// TestAddPendingMany_Order: a bulk pending insert followed by
-// GetPendingForStream returns the JTIs in insertion order.
+// TestAddPendingMany_Order: GetPendingForStream returns the JTIs in ascending
+// jti order, which for the UUIDv7 jtis goSet.GenerateJti mints is issue order
+// (ADR 0040). Insertion order is deliberately NOT jti order here, so a
+// regression to natural ordering fails this test rather than passing by
+// coincidence.
 func (s *EventDAOMongoSuite) TestAddPendingMany_Order() {
 	ctx := context.Background()
 	streamID := bson.NewObjectID().Hex()
-	want := []string{"pend-3", "pend-1", "pend-2"}
+	inserted := []string{"pend-3", "pend-1", "pend-2"}
+	want := []string{"pend-1", "pend-2", "pend-3"}
 
-	s.Require().NoError(s.dao.AddPendingMany(ctx, want, streamID))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, inserted, streamID))
 
 	jtis, total, err := s.dao.GetPendingForStream(ctx, streamID, 10)
 	s.Require().NoError(err)
 	s.Equal(int64(len(want)), total)
-	s.Equal(want, jtis)
+	s.Equal(want, jtis, "delivery order is ascending jti, not insertion order")
 
 	s.Require().NoError(s.dao.AddPendingMany(ctx, nil, streamID))
 	_, total, err = s.dao.GetPendingForStream(ctx, streamID, 10)
 	s.Require().NoError(err)
 	s.Equal(int64(len(want)), total, "empty AddPendingMany must be a no-op")
+}
+
+// TestGetPendingForStream_OrderIsStatedNotInherited: delivery order must come
+// from GetPendingForStream's own sort, not from whichever plan the query
+// planner picks. With the {sid:1,jti:1} index dropped the filter falls back to
+// a collection scan, which yields natural (insertion) order — so this fails if
+// the explicit sort is ever removed, where TestAddPendingMany_Order would still
+// pass on the index's inherited ordering.
+func (s *EventDAOMongoSuite) TestGetPendingForStream_OrderIsStatedNotInherited() {
+	ctx := context.Background()
+	specs, err := s.pendingCol.Indexes().ListSpecifications(ctx, nil)
+	s.Require().NoError(err)
+	for _, spec := range specs {
+		if spec.Name != "_id_" {
+			s.Require().NoError(s.pendingCol.Indexes().DropOne(ctx, spec.Name))
+		}
+	}
+
+	streamID := bson.NewObjectID().Hex()
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"pend-3", "pend-1", "pend-2"}, streamID))
+
+	jtis, _, err := s.dao.GetPendingForStream(ctx, streamID, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"pend-1", "pend-2", "pend-3"}, jtis,
+		"jti order must survive an unindexed collection scan")
+}
+
+// TestRetractPending_UndoesOneMarkerPerJti: a retraction removes the newest
+// pending entry per JTI, leaves an earlier entry for the same JTI in place and
+// in its original position, skips an unknown JTI, and never touches another
+// stream (ADR 0038).
+func (s *EventDAOMongoSuite) TestRetractPending_UndoesOneMarkerPerJti() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+
+	// "dup" is recorded twice on streamA: a real delivery intent, then a
+	// speculative one whose body write was rejected.
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "keep-1", "keep-2"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "spec-only"}, streamA))
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup"}, streamB))
+
+	s.Require().NoError(s.dao.RetractPending(ctx, []string{"dup", "spec-only", "never-seen"}, streamA))
+
+	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(3), total)
+	s.Equal([]string{"dup", "keep-1", "keep-2"}, jtis,
+		"the older intent for dup survives, in place, and only the speculative markers go")
+
+	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(1), total, "another stream's intent for the same JTI is untouched")
+
+	s.Require().NoError(s.dao.RetractPending(ctx, nil, streamA))
+	_, total, err = s.dao.GetPendingForStream(ctx, streamA, 10)
+	s.Require().NoError(err)
+	s.Equal(int64(3), total, "empty RetractPending must be a no-op")
 }
 
 // TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly

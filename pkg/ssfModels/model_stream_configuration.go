@@ -78,17 +78,25 @@ type StreamConfiguration struct {
 
 	// SigningAlg selects the JWS algorithm this stream's SETs are signed with
 	// (Slice Contract rev 1, Seam S3). "" and "RS256" both mean RSA-2048/RS256,
-	// which is what every stream signed with before RFC 9964 became selectable;
-	// "ML-DSA-65" opts the stream into post-quantum signatures (FIPS 204,
-	// RFC 9964), for which the transmitter mints and publishes an additional
-	// AKP key alongside its RSA key.
+	// which is what every stream signed with before RFC 9964 became selectable
+	// and remains the default; "ES256" opts the stream into ECDSA P-256, and
+	// "ML-DSA-65" into post-quantum signatures (FIPS 204, RFC 9964). For either
+	// opt-in the transmitter mints and publishes an additional key alongside
+	// its RSA key, under its own kid.
 	//
-	// It is per-stream rather than server-wide because the cost is per-SET and
-	// paid by the receiver: an ML-DSA-65 signature is 3309 bytes against
-	// RS256's 256, so every event grows by roughly 3.3 KB of base64. A receiver
-	// that cannot verify ML-DSA, or that cannot afford the size, keeps its own
-	// stream on RS256 while a PQ-ready peer opts in — on the same issuer and
-	// the same JWKS.
+	// It is per-stream rather than server-wide because each choice trades
+	// differently and the trade is paid per SET:
+	//
+	//   - ES256 is a transmitter-throughput choice. RSA-2048 signing measured
+	//     ~0.822 ms against P-256's ~0.019 ms, and signing runs once per event
+	//     per outbound stream, so a high fan-out stream saves far more CPU than
+	//     the receiver pays in slightly dearer verification (i2goSignals#284).
+	//   - ML-DSA-65 is a size cost paid by the receiver: its signature is 3309
+	//     bytes against RS256's 256, so every event grows by roughly 3.3 KB of
+	//     base64.
+	//
+	// A receiver that cannot verify EC or ML-DSA keeps its own stream on RS256
+	// while a capable peer opts in — on the same issuer and the same JWKS.
 	//
 	// omitzero, so a stream that never opts in is byte-identical on the wire to
 	// one configured before this field existed.

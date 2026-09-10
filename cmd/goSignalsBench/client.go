@@ -197,6 +197,7 @@ type streamRequest struct {
 	RouteMode       string         `json:"route_mode,omitempty"`
 	Description     string         `json:"description,omitempty"`
 	DefaultSubjects string         `json:"default_subjects,omitempty"`
+	SigningAlg      string         `json:"signing_alg,omitempty"`
 	Delivery        map[string]any `json:"delivery"`
 }
 

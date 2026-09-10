@@ -49,6 +49,7 @@ type options struct {
 	pushAud, pollAud         string
 	sstpAud                  string
 	sstpRole                 string // SSTP HTTP role played by goSignals1
+	signingAlg               string // signing_alg on the push and poll transmitter streams
 	events                   int
 	concurrency              int
 	mix                      string
@@ -79,6 +80,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.pollAud, "poll-aud", "https://bench.poll.example.com", "audience routed over the RFC 8936 poll leg")
 	flag.StringVar(&o.sstpAud, "sstp-aud", "https://bench.sstp.example.com", "audience routed over the SSTP leg")
 	flag.StringVar(&o.sstpRole, "sstp-role", model.SstpRoleInitiator, "SSTP HTTP role goSignals1 plays: initiator (goSignals1 dials goSignals2) or responder (goSignals2 dials goSignals1)")
+	flag.StringVar(&o.signingAlg, "signing-alg", "", "signing_alg for the push and poll transmitter streams: \"\" or RS256 (default), ES256, ML-DSA-65")
 	flag.IntVar(&o.events, "events", 1000, "number of SETs to push into goSignals1")
 	flag.IntVar(&o.concurrency, "concurrency", 8, "parallel ingest connections")
 	flag.StringVar(&o.mix, "mix", string(mixAlternate), "audience mix per event: alternate|all|push|poll|sstp")
@@ -383,6 +385,7 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 		EventsRequested: events,
 		RouteMode:       model.RouteModePublish,
 		DefaultSubjects: "ALL",
+		SigningAlg:      o.signingAlg,
 		Delivery: map[string]any{
 			"method":               model.DeliveryPush,
 			"endpoint_url":         pushEndpoint,
@@ -402,6 +405,7 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 		EventsRequested: events,
 		RouteMode:       model.RouteModePublish,
 		DefaultSubjects: "ALL",
+		SigningAlg:      o.signingAlg,
 		Delivery:        map[string]any{"method": model.DeliveryPoll},
 	})
 	if err != nil {

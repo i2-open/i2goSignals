@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	cryptomldsa "crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
@@ -359,11 +361,15 @@ func (s *KeyService) GetSigner(ctx context.Context, issuer string, alg string) (
 
 // storedAlgFor maps a stream's configured signing_alg to the JwkKeyRec.Alg
 // value that identifies the key material it needs. The empty stored alg means
-// RSA, so both "" and an explicit "RS256" collapse to it.
+// RSA, so both "" and an explicit "RS256" collapse to it. Every other algorithm
+// stores under its own JWS name, which is what lets one issuer hold an RSA, an
+// EC and an ML-DSA signing key side by side and select between them.
 func storedAlgFor(alg string) (string, error) {
 	switch alg {
 	case "", jwtRS256:
 		return "", nil
+	case jwtES256:
+		return jwtES256, nil
 	case mldsa.Alg:
 		return mldsa.Alg, nil
 	default:
@@ -371,17 +377,24 @@ func storedAlgFor(alg string) (string, error) {
 	}
 }
 
-// jwtRS256 is spelled out rather than pulled from golang-jwt so this file's
-// key-store vocabulary does not depend on the JWT library.
-const jwtRS256 = "RS256"
+// jwtRS256 and jwtES256 are spelled out rather than pulled from golang-jwt so
+// this file's key-store vocabulary does not depend on the JWT library.
+//
+// Only RSA may claim the empty stored Alg: that is how a record written before
+// the discriminator existed decodes, so every algorithm added since carries its
+// name explicitly.
+const (
+	jwtRS256 = "RS256"
+	jwtES256 = "ES256"
+)
 
 // EnsureSigningKeyForAlg idempotently guarantees keyName has a "sig" key pair
 // for signature algorithm alg, minting one only when genuinely absent. It is
-// the provisioning half of the per-stream ML-DSA opt-in: a stream created or
-// updated with signing_alg = ML-DSA-65 calls this so the issuer's AKP key
-// exists — and is published in the issuer's JWKS — before the first PQ-signed
-// SET is emitted, rather than at first signing when a receiver is already
-// waiting on the key.
+// the provisioning half of every per-stream signing_alg opt-in: a stream
+// created or updated with signing_alg = ES256 or ML-DSA-65 calls this so the
+// issuer's EC or AKP key exists — and is published in the issuer's JWKS —
+// before the first SET signed with it is emitted, rather than at first signing
+// when a receiver is already waiting on the key.
 //
 // It mirrors EnsureSigningKey's ADR 0028 discipline: a suspended or revoked key
 // of the same algorithm is never silently replaced, because recreating it would
@@ -410,19 +423,37 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 		return false, nil
 	}
 
-	privateKey, err := mldsa.GenerateKey()
+	privateKey, err := generateSigningKey(storedAlg)
 	if err != nil {
 		return false, fmt.Errorf("failed to generate %s signing key %q: %w", alg, keyName, err)
 	}
 	// A distinct kid is mandatory, not cosmetic: the issuer's RSA key already
-	// occupies the kid that equals keyName, and both keys are published in the
+	// occupies the kid that equals keyName, and every key is published in the
 	// same JWKS, so a receiver resolves the right one only if they differ.
-	kid := fmt.Sprintf("%s-%s-%s", keyName, mldsa.Alg, ids.NewObjectID())
+	kid := fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
 	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId); err != nil {
 		return false, fmt.Errorf("failed to store %s signing key %q: %w", alg, keyName, err)
 	}
-	ksLog.Info("Minted post-quantum signing key for issuer", "keyName", keyName, "alg", alg, "kid", kid)
+	ksLog.Info("Minted signing key for issuer", "keyName", keyName, "alg", storedAlg, "kid", kid)
 	return true, nil
+}
+
+// generateSigningKey mints a fresh private key for a stored algorithm, and is
+// the single place a newly selectable signature algorithm gains key material.
+// It takes the stored alg rather than the stream's signing_alg because the RSA
+// case ("" stored) is routed to EnsureSigningKey by the caller and never
+// reaches here.
+func generateSigningKey(storedAlg string) (crypto.Signer, error) {
+	switch storedAlg {
+	case jwtES256:
+		// The curve is not a separate knob: "ES256" names ECDSA on P-256 with
+		// SHA-256, so a different curve would be a different algorithm.
+		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case mldsa.Alg:
+		return mldsa.GenerateKey()
+	default:
+		return nil, fmt.Errorf("unsupported SET signing algorithm %q", storedAlg)
+	}
 }
 
 // rsaSigningKey narrows an algorithm-neutral signer back to the *rsa.PrivateKey
@@ -442,19 +473,30 @@ func rsaSigningKey(privateKey crypto.Signer) (*rsa.PrivateKey, error) {
 //
 // RSA keeps PKCS#1 and an empty alg so records written before RFC 9964 and
 // records written now are byte-identical — the store must not need a migration
-// to gain a second algorithm. ML-DSA cannot use PKCS#1 (which is defined for
-// RSA only) and does not need an ASN.1 wrapper at all: FIPS 204 private keys
-// are reconstructed from a fixed 32-byte seed and public keys are a fixed-size
+// to gain a second algorithm. EC uses the two stdlib encodings defined for it —
+// SEC 1 for the private half, PKIX for the public — because PKCS#1 is defined
+// for RSA only. ML-DSA needs no ASN.1 wrapper at all: FIPS 204 private keys are
+// reconstructed from a fixed 32-byte seed and public keys are a fixed-size
 // encoding, so the raw bytes plus the alg name are a complete description.
 func encodeSigningKey(privateKey crypto.Signer) (alg string, priv []byte, pub []byte, err error) {
 	switch key := privateKey.(type) {
 	case *rsa.PrivateKey:
 		publicKey := key.PublicKey
 		return "", x509.MarshalPKCS1PrivateKey(key), x509.MarshalPKCS1PublicKey(&publicKey), nil
+	case *ecdsa.PrivateKey:
+		privDER, err := x509.MarshalECPrivateKey(key)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("encoding %s private key: %w", jwtES256, err)
+		}
+		pubDER, err := x509.MarshalPKIXPublicKey(key.Public())
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("encoding %s public key: %w", jwtES256, err)
+		}
+		return jwtES256, privDER, pubDER, nil
 	case *cryptomldsa.PrivateKey:
 		return mldsa.Alg, key.Bytes(), key.PublicKey().Bytes(), nil
 	default:
-		return "", nil, nil, fmt.Errorf("unsupported signing key type %T; the key store persists RSA (PKCS#1) and %s keys", privateKey, mldsa.Alg)
+		return "", nil, nil, fmt.Errorf("unsupported signing key type %T; the key store persists RSA (PKCS#1), %s (SEC 1/PKIX) and %s keys", privateKey, jwtES256, mldsa.Alg)
 	}
 }
 
@@ -469,6 +511,8 @@ func parseSigningRec(rec *interfaces.JwkKeyRec) (crypto.Signer, string, error) {
 	case "":
 		// Absent alg is the pre-RFC-9964 shape: PKCS#1 RSA.
 		key, err = x509.ParsePKCS1PrivateKey(rec.KeyBytes)
+	case jwtES256:
+		key, err = x509.ParseECPrivateKey(rec.KeyBytes)
 	case mldsa.Alg:
 		key, err = cryptomldsa.NewPrivateKey(mldsa.Params(), rec.KeyBytes)
 	default:
@@ -491,11 +535,30 @@ func recPublicKey(rec *interfaces.JwkKeyRec) (crypto.PublicKey, error) {
 	switch rec.Alg {
 	case "":
 		return x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
+	case jwtES256:
+		return ecdsaPublicKey(rec.PubKeyBytes)
 	case mldsa.Alg:
 		return cryptomldsa.NewPublicKey(mldsa.Params(), rec.PubKeyBytes)
 	default:
 		return nil, fmt.Errorf("key record %q has unknown alg %q", rec.Kid, rec.Alg)
 	}
+}
+
+// ecdsaPublicKey decodes a stored PKIX EC public key. Bytes that parse as some
+// other key type are an error rather than a returned crypto.PublicKey: a record
+// discriminated ES256 must never hand an RSA key to a verification pinned to
+// ES256, which is the same algorithm-confusion guard givenKeyFor applies at the
+// key and AllowedAlgs applies at the header.
+func ecdsaPublicKey(der []byte) (*ecdsa.PublicKey, error) {
+	pub, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, err
+	}
+	ecKey, ok := pub.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("stored %s public key is a %T, not an ECDSA key", jwtES256, pub)
+	}
+	return ecKey, nil
 }
 
 // recKid is a record's key id, defaulting to its keyName when it has never
@@ -724,11 +787,12 @@ func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
 
 // GetPublicJWKS returns the JWKS JSON for the public keys associated with keyName.
 //
-// An issuer with a stream opted into RFC 9964 holds two signing keys, and both
-// are published here side by side under distinct kids: the RSA key so every
-// existing receiver keeps verifying exactly as before, and the ML-DSA "AKP" key
-// so a PQ-capable receiver can verify the opted-in stream. Nothing about the
-// RSA half of the document changes when the AKP key appears.
+// An issuer with a stream opted into ES256 or RFC 9964 holds more than one
+// signing key, and every one of them is published here side by side under
+// distinct kids: the RSA key so every existing receiver keeps verifying exactly
+// as before, the EC key for a stream signing ES256 (i2goSignals#284), and the
+// ML-DSA "AKP" key so a PQ-capable receiver can verify a post-quantum stream.
+// Nothing about the RSA half of the document changes when another key appears.
 //
 // The AKP keys are spliced in after jwkset has produced the classical set,
 // because MicahParks/jwkset has no ML-DSA support (the same upstream gap that
@@ -800,7 +864,11 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 				continue
 			}
 
-			pubKey, err := x509.ParsePKCS1PublicKey(rec.PubKeyBytes)
+			// recPublicKey is the same decoder the verification side uses, so
+			// what is published and what this node would verify against can
+			// never disagree about the stored bytes. jwkset renders RSA and EC
+			// natively; only ML-DSA needs the splice above.
+			pubKey, err := recPublicKey(rec)
 			if err != nil {
 				ksLog.Error("Error parsing public key", "kid", rec.Kid, "error", err)
 				continue
@@ -820,7 +888,7 @@ func (s *KeyService) GetPublicJWKS(ctx context.Context, keyName string) *json.Ra
 
 			jwkSet, err = jwkset.NewJWKFromKey(pubKey, jwkOptions)
 			if err != nil {
-				ksLog.Error("Error parsing rsa key into jwk", "error", err)
+				ksLog.Error("Error parsing public key into jwk", "kid", kid, "alg", algLabel(rec.Alg), "error", err)
 				continue
 			}
 			err = jwkstore.KeyWrite(context.Background(), jwkSet)
@@ -966,7 +1034,8 @@ func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signin
 // project's two signature algorithms meet one verification set: RSA goes
 // through NewGivenRSA, ML-DSA through NewGivenCustom, which is keyfunc's
 // documented escape hatch for a signing method registered with golang-jwt (and
-// mldsa registers "ML-DSA-65" in its init).
+// mldsa registers "ML-DSA-65" in its init). EC keys need no escape hatch:
+// keyfunc has NewGivenECDSA.
 //
 // Pinning Algorithm matters as much as the key itself: keyfunc compares it to
 // the token's own "alg" header before returning the key, so an RSA key can
@@ -975,6 +1044,8 @@ func givenKeyFor(pub crypto.PublicKey) (keyfunc.GivenKey, error) {
 	switch key := pub.(type) {
 	case *rsa.PublicKey:
 		return keyfunc.NewGivenRSA(key, keyfunc.GivenKeyOptions{Algorithm: jwtRS256}), nil
+	case *ecdsa.PublicKey:
+		return keyfunc.NewGivenECDSA(key, keyfunc.GivenKeyOptions{Algorithm: jwtES256}), nil
 	case *cryptomldsa.PublicKey:
 		return keyfunc.NewGivenCustom(key, keyfunc.GivenKeyOptions{Algorithm: mldsa.Alg}), nil
 	default:

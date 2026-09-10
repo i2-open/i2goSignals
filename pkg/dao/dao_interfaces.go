@@ -85,6 +85,19 @@ type EventDAO interface {
 	// RemovePending returns nil for it. Equivalent to RemovePending per JTI
 	// but a bounded number of round trips. An empty jtis returns (nil, nil).
 	RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]DeliverableEvent, error)
+	// RetractPending undoes exactly one AddPending per JTI: for each of jtis it
+	// removes exactly one pending entry of streamID and leaves any other entry
+	// for the same JTI in place. WHICH entry is removed is unspecified — an
+	// implementation picks deterministically within a node, but the choice is
+	// not ordered across nodes, and it does not matter: a pending entry carries
+	// only the stream and the JTI, so two entries for the same pair are
+	// indistinguishable, and GetPendingForStream orders by JTI (ADR 0040), which
+	// both share. It is the compensating write for a speculative delivery intent
+	// whose event body turned out to be rejected (ADR 0038); removing every
+	// entry instead would silently drop an older, still-undelivered intent for
+	// the same JTI. A JTI with no pending entry is skipped. An empty jtis is a
+	// no-op.
+	RetractPending(ctx context.Context, jtis []string, streamID string) error
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)
 
 	// Delivered events
@@ -265,6 +278,8 @@ type JwkKeyRec struct {
 	//   ""          RSA (the pre-RFC-9964 shape, and what every existing
 	//               record decodes as): KeyBytes is PKCS#1 private, PubKeyBytes
 	//               PKCS#1 public.
+	//   "ES256"     ECDSA on P-256: KeyBytes is the SEC 1 private key,
+	//               PubKeyBytes the PKIX public key (PKCS#1 is RSA-only).
 	//   "ML-DSA-65" FIPS 204 / RFC 9964: KeyBytes is the 32-byte ML-DSA seed,
 	//               PubKeyBytes the 1952-byte public key encoding.
 	//

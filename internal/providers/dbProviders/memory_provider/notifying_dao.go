@@ -169,6 +169,16 @@ func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string
 	return evs, nil
 }
 
+func (d *notifyingEventDAO) RetractPending(ctx context.Context, jtis []string, streamID string) error {
+	if err := d.inner.RetractPending(ctx, jtis, streamID); err != nil {
+		return err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return nil
+}
+
 func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
 	n, err := d.inner.ClearPendingForStream(ctx, streamID)
 	if err != nil {

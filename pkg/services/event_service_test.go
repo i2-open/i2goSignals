@@ -31,6 +31,9 @@ type fakeEventDAO struct {
 	pending                map[string]struct{}
 	removePendingErr       error
 	removePendingManyCalls int
+	retractPendingErr      error
+	retractPendingCalls    int
+	retractedJtis          []string
 	markDeliveredManyCalls int
 	delivered              []interfaces.DeliverableEvent
 }
@@ -96,6 +99,11 @@ func (f *fakeEventDAO) RemovePendingMany(_ context.Context, jtis []string, strea
 		}
 	}
 	return removed, nil
+}
+func (f *fakeEventDAO) RetractPending(_ context.Context, jtis []string, _ string) error {
+	f.retractPendingCalls++
+	f.retractedJtis = append(f.retractedJtis, jtis...)
+	return f.retractPendingErr
 }
 func (f *fakeEventDAO) ClearPendingForStream(_ context.Context, _ string) (int64, error) {
 	return 0, nil

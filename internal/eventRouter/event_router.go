@@ -50,6 +50,17 @@ type EventRouter interface {
 	// with eventTokens and so is the returned slice; a nil entry means the SET may
 	// be acked.
 	HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
+	// HandleEventCtx and HandleEventsCtx are HandleEvent/HandleEvents for a
+	// caller that is servicing an inbound request and has already resolved the
+	// ingress stream on that request's context (issue #287). The context is used
+	// for ONE thing — resolving the ingress stream, which then comes from the
+	// request-scoped memo (services.WithRequestStreamCache) instead of a second
+	// round trip to the stream store. It deliberately does NOT become the context
+	// of the ingest writes: those stay on the router's own lifetime context, so a
+	// client that hangs up mid-request cannot cancel a majority-acked write that
+	// is already in flight.
+	HandleEventCtx(ctx context.Context, eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
+	HandleEventsCtx(ctx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error
 	// SubmitOperationalEvent persists an operational event (Operational=true) and submits it directly
 	// to the target stream's pending list, bypassing the MatchesStream predicate. Operational events
 	// are point-to-point SSF protocol events scoped to a single SSF endpoint relationship (e.g. verify,
@@ -146,8 +157,14 @@ type router struct {
 	// the relocated dialer, which starts a per-pair goroutine on RegisterPair and
 	// stops it on UnregisterPair. Nil ⇒ no SSTP dialer goroutine ever starts (unit
 	// tests that do not need the dialer skip the callback).
-	sstpDialer           SstpDialerHooks
-	coordinator          cluster.ClusterCoordinator
+	sstpDialer  SstpDialerHooks
+	coordinator cluster.ClusterCoordinator
+	// leaseOwners memoises push-transmitter lease ownership for the fan-out
+	// wake-up decision (issue #287). This node's own push lifecycle keeps it
+	// honest on every transition it drives; leaseOwnerCacheTTL is the backstop
+	// for a peer takeover. Never consulted to authorise delivery — see
+	// lease_owner_cache.go.
+	leaseOwners          *leaseOwnerCache
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -168,8 +185,9 @@ type router struct {
 	backfillInterval    time.Duration
 	backfillBatch       int
 	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
-	// POSTs a push stream's lease holder keeps in flight at once. The batch
-	// the loop drains from the buffer per iteration is 4x this.
+	// POSTs a push stream's lease holder keeps in flight at once. Unset, it is
+	// derived from the available processors (ADR 0037). The batch the loop
+	// drains from the buffer per iteration is 4x this.
 	pushConcurrency int
 	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
 	// one outbound message (a poll response or either SSTP leg) re-signs side
@@ -289,6 +307,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
 		recentOutboundWakes:    make(map[string]time.Time),
+		leaseOwners:            newLeaseOwnerCache(),
 	}
 
 	// Route reset re-deliveries through this router's metering observer. A stream
@@ -358,15 +377,22 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	router.backfillBatch = backfillBatch
 
-	pushConcurrency := defaultPushConcurrency
+	pushConcurrency := defaultPushConcurrency()
+	pushConcurrencySource := "derived"
 	if val := os.Getenv("I2SIG_PUSH_CONCURRENCY"); val != "" {
 		if i, err := strconv.Atoi(val); err == nil && i > 0 {
 			pushConcurrency = i
+			pushConcurrencySource = "I2SIG_PUSH_CONCURRENCY"
 		} else {
 			eventLogger.Warn("Ignoring invalid I2SIG_PUSH_CONCURRENCY (want a positive integer)", "value", val)
 		}
 	}
 	router.pushConcurrency = pushConcurrency
+	eventLogger.Info("Push delivery concurrency resolved (ADR 0037)",
+		"concurrency", pushConcurrency,
+		"source", pushConcurrencySource,
+		"gomaxprocs", runtime.GOMAXPROCS(0),
+		"ackDeferralWindow", router.pushBatchMax())
 
 	signConcurrency := runtime.GOMAXPROCS(0)
 	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
@@ -840,11 +866,22 @@ func (r *router) HandleEvent(eventToken *goSet.SecurityEventToken, rawEvent stri
 	return r.HandleEvents([]*goSet.SecurityEventToken{eventToken}, []string{rawEvent}, sid)[0]
 }
 
+// HandleEventCtx is HandleEvent for a caller holding a request context; see the
+// EventRouter interface for what the context is and is not used for.
+func (r *router) HandleEventCtx(ctx context.Context, eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error {
+	return r.HandleEventsCtx(ctx, []*goSet.SecurityEventToken{eventToken}, []string{rawEvent}, sid)[0]
+}
+
+// HandleEventsCtx is HandleEvents for a caller holding a request context.
+func (r *router) HandleEventsCtx(ctx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
+	return r.handleEvents(ctx, eventTokens, rawEvents, sid)
+}
+
 // resolveIngressStream resolves the stream an inbound SET arrived on. For an
 // SSTP pair the second value is the pair record and the first is the rx-side
 // counter view of it; for every other stream the second value is nil.
-func (r *router) resolveIngressStream(sid string) (*model.StreamStateRecord, *model.StreamStateRecord, error) {
-	streamState, err := r.streamService.GetStreamState(r.ctx, sid)
+func (r *router) resolveIngressStream(ctx context.Context, sid string) (*model.StreamStateRecord, *model.StreamStateRecord, error) {
+	streamState, err := r.streamService.GetStreamState(ctx, sid)
 	if err == nil {
 		return streamState, nil, nil
 	}
@@ -853,7 +890,7 @@ func (r *router) resolveIngressStream(sid string) (*model.StreamStateRecord, *mo
 	// lookup above misses. Resolve the pair by either direction and relabel the
 	// inbound counter to the rx-side SID that was passed in, so eventsIn carries
 	// stream_id=rxSid rather than the tx-side SID.
-	pair, pairErr := r.streamService.GetStreamStateBySID(r.ctx, sid)
+	pair, pairErr := r.streamService.GetStreamStateBySID(ctx, sid)
 	if pairErr != nil || pair == nil {
 		return nil, nil, err
 	}
@@ -866,14 +903,29 @@ response). The stream is resolved once, the batch is persisted in one bulk write
 one pending-list write per matching outbound stream instead of one per SET. The returned errors are
 index-aligned with eventTokens; a nil entry means the SET was accepted (or was a duplicate JTI, which is
 swallowed exactly as HandleEvent swallows it) and may be acked.
+
+The body write and the delivery-intent writes are issued CONCURRENTLY rather than one after the other
+(ADR 0038), so ingest pays roughly one majority-acked replica-set round trip instead of two. That means a
+pending marker can be written for a SET whose body write later turns out to have been rejected — a
+duplicate JTI, or a failed insert — so the markers are speculative until ingest.Wait() reports the
+outcome. commitFanoutLocked retracts the markers of rejected SETs before any stream is woken, and no
+stream is woken, metered as egress, or handed a JTI until the body write has been joined.
 */
 func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
+	return r.handleEvents(r.ctx, eventTokens, rawEvents, sid)
+}
+
+// handleEvents is the shared body of HandleEvents and HandleEventsCtx.
+// lookupCtx resolves the ingress stream and nothing else; every write below is
+// issued on r.ctx so ingest durability does not depend on the caller's request
+// staying connected.
+func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
 	results := make([]error, len(eventTokens))
 	if len(eventTokens) == 0 {
 		return results
 	}
 
-	streamState, sstpPair, err := r.resolveIngressStream(sid)
+	streamState, sstpPair, err := r.resolveIngressStream(lookupCtx, sid)
 	if err != nil {
 		for i := range results {
 			results[i] = err
@@ -881,8 +933,61 @@ func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents
 		return results
 	}
 
-	recs, errs := r.eventService.AddEvents(r.ctx, eventTokens, sid, rawEvents)
-	accepted := make([]*model.EventRecord, 0, len(recs))
+	// Leg A: the event bodies. Starts here and runs in the background; the
+	// candidate records are available immediately because they are built from
+	// the inbound tokens, not from anything the database returns.
+	ingest := r.eventService.BeginAddEvents(r.ctx, eventTokens, sid, rawEvents)
+
+	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
+	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
+	// the push path, the forward-verbatim vs re-sign choice is NOT made here —
+	// it is made per outbound stream at delivery time (ADR-0031 D2).
+	//
+	// excludeSstpTxSid names the pair the SET arrived on, so the fan-out below
+	// does not send it straight back to the peer that just delivered it: that
+	// pair's own tx side frequently matches the event on aud (ADR-0031 D5).
+	// The tx SID is the exclusion key because it is what both fan-out maps are
+	// keyed by, and unlike PairId it is always populated.
+	//
+	// The route mode is a property of the inbound stream alone, so it is
+	// settled without waiting for leg A.
+	importOnly := false
+	excludeSstpTxSid := ""
+	if sstpPair != nil {
+		// sstpInboundRouteMode has already folded "no inbound mode" into IMPORT.
+		importOnly = sstpInboundRouteMode(sstpPair) == model.RouteModeImport
+		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
+	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
+		importOnly = true
+	}
+
+	// Leg B: the delivery intents, written while leg A is still in flight.
+	var targets []*fanoutTarget
+	if !importOnly {
+		r.mu.RLock()
+		targets = r.planFanoutLocked(dedupeCandidatesByJti(ingest.Candidates()), excludeSstpTxSid)
+		r.mu.RUnlock()
+	}
+
+	// Join leg A. Only now is it known which candidates were accepted.
+	accepted := r.reconcileIngest(ingest, results, streamState, eventTokens)
+	if len(targets) == 0 {
+		return results
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.commitFanoutLocked(targets, accepted)
+	return results
+}
+
+// reconcileIngest joins the in-flight body write, records the per-SET outcome
+// in results, meters the accepted SETs as ingress, and returns the accepted
+// records keyed by JTI so the fan-out can tell an accepted delivery intent
+// from a speculative one.
+func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, streamState *model.StreamStateRecord, eventTokens []*goSet.SecurityEventToken) map[string]*model.EventRecord {
+	recs, errs := ingest.Wait()
+	accepted := make(map[string]*model.EventRecord, len(recs))
 	for i, rec := range recs {
 		if errs[i] != nil {
 			// JTI dedup short-circuit: the persistence layer rejected this JTI
@@ -898,101 +1003,224 @@ func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents
 		}
 		r.IncrementCounter(streamState, eventTokens[i], true)
 		r.observeMeteredEvent(streamState.StreamConfiguration.Id, DirectionIngress, eventTokens[i])
-		accepted = append(accepted, rec)
+		accepted[rec.Jti] = rec
 	}
-	if len(accepted) == 0 {
-		return results
-	}
+	return accepted
+}
 
-	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
-	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
-	// the push path, the forward-verbatim vs re-sign choice is NOT made here —
-	// it is made per outbound stream at delivery time (ADR-0031 D2).
-	//
-	// excludeSstpTxSid names the pair the SET arrived on, so the fan-out below
-	// does not send it straight back to the peer that just delivered it: that
-	// pair's own tx side frequently matches the event on aud (ADR-0031 D5).
-	// The tx SID is the exclusion key because it is what both fan-out maps are
-	// keyed by, and unlike PairId it is always populated.
-	excludeSstpTxSid := ""
-	if sstpPair != nil {
-		// Same test the push path makes below; sstpInboundRouteMode has already
-		// folded "no inbound mode" into IMPORT.
-		if sstpInboundRouteMode(sstpPair) == model.RouteModeImport {
-			return results
+// dedupeCandidatesByJti drops the later repeats of a JTI that appears more than
+// once in one inbound batch. Only one copy can ever be accepted — the second
+// insert of the same JTI reports ErrDuplicateJTI — so queueing both would leave
+// two identical pending markers that the compensating removal cannot tell
+// apart, and one of them would be delivered a second time.
+func dedupeCandidatesByJti(recs []*model.EventRecord) []*model.EventRecord {
+	seen := make(map[string]struct{}, len(recs))
+	out := make([]*model.EventRecord, 0, len(recs))
+	for _, rec := range recs {
+		if _, dup := seen[rec.Jti]; dup {
+			continue
 		}
-		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
-	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
-		// nothing more to do
-		return results
+		seen[rec.Jti] = struct{}{}
+		out = append(out, rec)
 	}
+	return out
+}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// fanoutTarget is one outbound stream a batch has been speculatively queued to:
+// its pending markers are written, but its buffer has not been woken and its
+// events have not been metered as egress. commitFanoutLocked finishes the job
+// once the body write has been joined.
+type fanoutTarget struct {
+	mode  string // PUSH | POLL | SSTP-CLIENT | SSTP-SERVER — selects the commit action and labels logs
+	key   string // buffer-map key: the SID for push/poll, the PairId for sstp-client, the tx SID for sstp-server
+	docID string // stream document id the pending markers were written under
+	sid   string // StreamConfiguration.Id — the stream identity logs and metering use
+	jtis  []string
+
+	// queued records whether this target's marker write actually succeeded.
+	// Retraction is a compensating write (ADR 0038) and may only undo a marker
+	// this batch wrote: when the write failed there is nothing of ours to undo,
+	// and retracting anyway would delete an OLDER still-undelivered intent for
+	// the same JTI — silently dropping an event that was already accepted.
+	queued bool
+}
+
+// planFanoutLocked selects, for every outbound stream this router knows about,
+// the events of the batch that match it and writes their pending markers. It
+// wakes nothing: the batch's bodies may still be in flight. The caller must
+// hold r.mu (at least RLock).
+func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid string) []*fanoutTarget {
+	var targets []*fanoutTarget
 
 	// Check to see if the events should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
-		jtis := r.queueMatchingLocked(&stream, accepted, "PUSH")
-		if len(jtis) == 0 {
-			continue
-		}
-		// Lease-aware routing
-		resource := fmt.Sprintf("push-transmitter:%s", stream.StreamConfiguration.Id)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
-
-		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			// Local owner or no owner (we'll try to take it or backfill will find it)
-			buf := r.pushBuffers[stream.StreamConfiguration.Id]
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
-			}
-		} else {
-			// Remote owner, send one wake-up for the batch
-			go r.sendWakeup(stream.StreamConfiguration.Id, "push", ownerNodeId, "")
+		if t := r.queueMatchingLocked(&stream, batch, "PUSH", stream.StreamConfiguration.Id); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
 	// Check to see if the events should be routed to outbound polling streams
 	for k, pollStream := range r.pollStreams {
 		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
-		jtis := r.queueMatchingLocked(&pollStream, accepted, "POLL")
-		// For poll streams, every node serving a long poll should be woken up.
-		// Since we don't have a transmitter lease for poll, we just submit locally.
-		// Ideally we'd broadcast to all nodes, but let's start with local.
-		buf := r.pollBuffers[pollStream.StreamConfiguration.Id]
-		for _, jti := range jtis {
-			buf.SubmitEvent(jti)
+		if t := r.queueMatchingLocked(&pollStream, batch, "POLL", pollStream.StreamConfiguration.Id); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
-	r.routeEventsToSstpPairsLocked(accepted, excludeSstpTxSid)
-	return results
+	return append(targets, r.planSstpFanoutLocked(batch, excludeSstpTxSid)...)
 }
 
 // queueMatchingLocked selects the events of a batch that match an outbound
-// stream, meters them as egress, and appends them to the stream's pending list
-// in one write. It returns the JTIs queued, in batch order. The caller must
+// stream and appends them to the stream's pending list in one write, returning
+// the target the commit phase needs (nil when nothing matched). The caller must
 // hold r.mu (at least RLock). A pending-list write failure is logged and the
-// JTIs are still returned, as the per-event path did: the buffer submit gives
+// target is still returned, as the per-event path did: the buffer submit gives
 // the runner a chance to deliver from the event store.
-func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string) []string {
+//
+// Egress metering is deliberately NOT done here. These markers are speculative
+// until the body write is joined, and a SET whose body was rejected must not be
+// counted as outbound.
+func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string, key string) *fanoutTarget {
 	var jtis []string
 	for _, event := range batch {
 		if !r.eventService.MatchesStream(stream, event) {
 			continue
 		}
 		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", mode, "types", event.Types)
-		r.observeMeteredEvent(stream.StreamConfiguration.Id, DirectionEgress, &event.Event)
 		jtis = append(jtis, event.Jti)
 	}
 	if len(jtis) == 0 {
 		return nil
 	}
+	docID := stream.Id.Hex()
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-	if err := r.eventService.AddEventsToStream(r.ctx, jtis, stream.Id.Hex()); err != nil {
+	queued := true
+	if err := r.eventService.AddEventsToStream(r.ctx, jtis, docID); err != nil {
 		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
+		queued = false
 	}
-	return jtis
+	return &fanoutTarget{mode: mode, key: key, docID: docID, sid: stream.StreamConfiguration.Id, jtis: jtis, queued: queued}
+}
+
+// commitFanoutLocked finishes the fan-out once the body write has been joined:
+// it retracts the pending markers of every SET the body write rejected, meters
+// the survivors as egress, and wakes each target the way its delivery method
+// requires. The caller must hold r.mu (at least RLock).
+func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string]*model.EventRecord) {
+	for _, t := range targets {
+		keep := make([]string, 0, len(t.jtis))
+		var drop []string
+		for _, jti := range t.jtis {
+			if _, ok := accepted[jti]; ok {
+				keep = append(keep, jti)
+			} else {
+				drop = append(drop, jti)
+			}
+		}
+		if len(drop) > 0 && t.queued {
+			// Compensating write (ADR 0038). The marker was written before the
+			// body write reported this JTI rejected, so the delivery intent is
+			// retracted before anything can act on it — leaving it would
+			// re-deliver a SET whose first copy was already fanned out.
+			//
+			// Guarded by t.queued: retraction deletes the NEWEST marker for the
+			// JTI, so running it after a failed marker write would consume an
+			// older, still-undelivered intent that this batch never created.
+			if err := r.eventService.DiscardPending(r.ctx, drop, t.docID); err != nil {
+				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.sid, "mode", t.mode, "count", len(drop), "error", err)
+			}
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		for _, jti := range keep {
+			r.observeMeteredEvent(t.sid, DirectionEgress, &accepted[jti].Event)
+		}
+		r.wakeTargetLocked(t, keep)
+	}
+}
+
+// wakeTargetLocked hands one target's accepted JTIs to whichever runner owns
+// its delivery method. The caller must hold r.mu (at least RLock).
+func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
+	switch t.mode {
+	case "PUSH":
+		// Lease-aware routing. The owner is read through leaseOwners rather than
+		// straight from the coordinator: one inbound SET produced one
+		// cluster_leases round trip inside the request, and the answer changes
+		// only when a lease changes hands (issue #287). The cache is kept honest
+		// by this node's own push lifecycle and expires within leaseOwnerCacheTTL
+		// otherwise; it steers a wake-up and never authorises a delivery.
+		resource := fmt.Sprintf("push-transmitter:%s", t.key)
+		ownerNodeId := r.leaseOwners.owner(resource, func() (string, error) {
+			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+			return owner, err
+		})
+
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			// Local owner or no owner (we'll try to take it or backfill will find it).
+			// The comma-ok is load-bearing since the fan-out was split in two: the
+			// plan phase saw this stream under an earlier RLock, r.mu was released
+			// across the body-write join, and RemoveStream may have deleted the
+			// buffer in that window. The markers are already durable, so backfill
+			// still delivers them; only the wake-up is lost.
+			if buf, ok := r.pushBuffers[t.key]; ok {
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
+			}
+		} else {
+			// Remote owner, send one wake-up for the batch
+			go r.sendWakeup(t.key, "push", ownerNodeId, "")
+		}
+
+	case "POLL":
+		// For poll streams, every node serving a long poll should be woken up.
+		// Since we don't have a transmitter lease for poll, we just submit locally.
+		// Ideally we'd broadcast to all nodes, but let's start with local.
+		// Comma-ok for the same reason as the push arm above: the stream may have
+		// been removed while r.mu was released across the body-write join.
+		if buf, ok := r.pollBuffers[t.key]; ok {
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
+		}
+
+	case "SSTP-CLIENT":
+		// Deliberately NOT cached. The sstp-client lease is acquired, renewed and
+		// released by the dialer in internal/server, not by this router, so there
+		// is no first-hand transition for a cache here to hook — it would be a
+		// bare TTL with no invalidation story, which issue #287 rules out. The
+		// per-event cluster_leases cost the profiler measured was on the push
+		// leg; this read happens once per SSTP fan-out batch.
+		resource := fmt.Sprintf("sstp-client:%s", t.key)
+		ownerNodeId, _, _, leaseErr := r.coordinator.GetLeaseOwner(resource)
+		if leaseErr != nil {
+			// A coordinator read failure otherwise reads as "no owner", which
+			// silently makes every node deliver. Say so; the push arm reports
+			// its equivalent through leaseOwners.
+			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
+		}
+		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			if buf, ok := r.sstpBuffers[t.key]; ok {
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
+				buf.Wakeup()
+			}
+		} else {
+			go r.broadcastSstpClientWake(t.key)
+		}
+
+	case "SSTP-SERVER":
+		if buf, ok := r.sstpServerBuffers[t.key]; ok {
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
+			}
+			buf.Wakeup()
+		}
+		go r.broadcastSstpServerWake(t.key)
+	}
 }
 
 // sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
@@ -1019,9 +1247,10 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 	return pair.SstpInbound.RouteMode
 }
 
-// routeEventsToSstpPairsLocked fans a batch of outbound events out to the SSTP
-// pairs this router knows about (PRD #154 Q11.1, Q11.2, #167). The caller must
-// hold r.mu (at least RLock).
+// planSstpFanoutLocked selects the batch's events for the SSTP pairs this
+// router knows about (PRD #154 Q11.1, Q11.2, #167) and writes their pending
+// markers; wakeTargetLocked does the waking once the bodies have landed. The
+// caller must hold r.mu (at least RLock).
 //
 //   - SSTP-client (initiator) pairs: when an event matches and the
 //     sstp-client:<PairId> lease is held by a different node, broadcast
@@ -1034,6 +1263,12 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // The matching events of the batch are appended to a pair's pending list in
 // one write and the pair is woken once per batch, not once per event.
 //
+// Finding #6: the JTI is persisted into the tx-side pending list BEFORE the
+// runner is woken — exactly as the push/poll branches do. Without this the JTI
+// is never AddPending'd for the tx SID, so the runner's GetEventIds(txSid)
+// fallback finds nothing and the event is silently lost (not even
+// backfill-recoverable). The body insert only stores the token.
+//
 // excludeTxSid, when non-empty, is the tx-side SID of a pair to skip: the SETs
 // arrived on that pair's rx side, and sending them back down the same pair's tx
 // side would return them to the peer that sent them (#261, ADR-0031 D5). Empty
@@ -1043,31 +1278,14 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
 // responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
-func (r *router) routeEventsToSstpPairsLocked(batch []*model.EventRecord, excludeTxSid string) {
+func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid string) []*fanoutTarget {
+	var targets []*fanoutTarget
 	for pairId, pair := range r.sstpClientStreams {
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		// Finding #6: persist the JTI into the tx-side pending list BEFORE waking the
-		// runner — exactly as the push/poll branches do with AddEventToStream. Without
-		// this the JTI is never AddPending'd for the tx SID, so the runner's
-		// GetEventIds(txSid) fallback finds nothing and the event is silently lost
-		// (not even backfill-recoverable). AddEvent only Insert()s the token.
-		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT")
-		if len(jtis) == 0 {
-			continue
-		}
-		resource := fmt.Sprintf("sstp-client:%s", pairId)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
-		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			if buf, ok := r.sstpBuffers[pairId]; ok {
-				for _, jti := range jtis {
-					buf.SubmitEvent(jti)
-				}
-				buf.Wakeup()
-			}
-		} else {
-			go r.broadcastSstpClientWake(pairId)
+		if t := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT", pairId); t != nil {
+			targets = append(targets, t)
 		}
 	}
 
@@ -1075,22 +1293,13 @@ func (r *router) routeEventsToSstpPairsLocked(batch []*model.EventRecord, exclud
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		// Finding #6 (server side): add the JTI to the tx-side pending list so the
-		// server runner's drainSstpOutbound GetEventIds(txSid) fallback finds it. The
-		// server takes no client lease — every node may serve the long-poll — so we do
-		// not gate this on lease ownership.
-		jtis := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER")
-		if len(jtis) == 0 {
-			continue
+		// The server takes no client lease — every node may serve the
+		// long-poll — so the wake is not gated on lease ownership.
+		if t := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER", txSid); t != nil {
+			targets = append(targets, t)
 		}
-		if buf, ok := r.sstpServerBuffers[txSid]; ok {
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
-			}
-			buf.Wakeup()
-		}
-		go r.broadcastSstpServerWake(txSid)
 	}
+	return targets
 }
 
 // SubmitOperationalEvent persists an operational event with Operational=true and submits the JTI directly to
@@ -1454,6 +1663,15 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 		if err != nil {
 			eventLogger.Error("PUSH-SRV: Node lease acquisition error", "sid", sid, "error", err)
 		}
+		// Lease-owner cache invalidation hook (issue #287): this is the moment
+		// ownership is settled first-hand. Acquiring names this node the owner;
+		// failing to acquire says only that somebody else does, so the entry is
+		// dropped and the next wake-up re-reads who.
+		if acquired && err == nil {
+			r.leaseOwners.note(resource, r.nodeId)
+		} else {
+			r.leaseOwners.forget(resource)
+		}
 
 		if !acquired {
 			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
@@ -1494,6 +1712,10 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		r.stats.IncLeasesHeld()
 		defer r.stats.DecLeasesHeld()
 	}
+	// However this loop exits — lease lost, stream disabled, shutdown — this
+	// node can no longer speak for the resource, so the cached ownership claim
+	// goes with it (issue #287).
+	defer r.leaseOwners.forget(resource)
 
 	var signingKey crypto.Signer
 	var kid string
@@ -1518,9 +1740,16 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			if r.stats != nil {
 				r.stats.TrackLeaseAcquisition(resource, renewed)
 			}
+			// Every renewal re-confirms ownership first-hand, so it refreshes
+			// the cached owner rather than letting the TTL lapse into a
+			// coordinator read that would only say the same thing.
+			if renewed {
+				r.leaseOwners.note(resource, r.nodeId)
+			}
 		},
 		OnLost: func() {
 			eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
+			r.leaseOwners.forget(resource)
 			heartbeatCancel()
 		},
 	}.run(heartbeatCtx)
@@ -1899,13 +2128,50 @@ func drainPushBatch(first string, out <-chan interface{}, eventBuf *buffer.Event
 // goroutine re-arms in microseconds, so this only ever fires on a stale Cnt().
 const drainWait = time.Millisecond
 
-// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: RFC 8935 POSTs a
-// push stream keeps in flight at once (ADR 0035).
-const defaultPushConcurrency = 5
+// minPushConcurrency and maxPushConcurrency clamp the derived
+// I2SIG_PUSH_CONCURRENCY default into the plateau the ADR 0037 sweep measured.
+//
+// The floor is there because push is latency-bound: below eight POSTs in
+// flight the push leg is the bottleneck on every host shape measured, so a
+// two-processor container must not inherit a near-serial default for work that
+// is not CPU-bound. The ceiling is there because past ~24 the delivery curve is
+// flat within the benchmark's noise band while ingest keeps falling and the
+// ack-deferral window keeps growing: 32 holds pushBatchMax() at 128 SETs, the
+// most a crash mid-batch can resend.
+const (
+	minPushConcurrency = 8
+	maxPushConcurrency = 32
+)
+
+// defaultPushConcurrency is the I2SIG_PUSH_CONCURRENCY default: how many
+// RFC 8935 POSTs a push stream keeps in flight when the operator sets nothing.
+// ADR 0035 pinned this at 5; ADR 0037 derives it from the processors the
+// process can see, the same idiom I2SIG_SIGN_CONCURRENCY, the poll receiver
+// and the SSTP batch verifier already use.
+//
+// Delivery and ingest compete for those processors — the sweep has ingest
+// falling monotonically as push concurrency rises — so the transmitter should
+// not keep more POSTs open than the machine can also receive events for.
+func defaultPushConcurrency() int {
+	return clampPushConcurrency(runtime.GOMAXPROCS(0))
+}
+
+// clampPushConcurrency holds a processor count inside the measured plateau.
+func clampPushConcurrency(procs int) int {
+	if procs < minPushConcurrency {
+		return minPushConcurrency
+	}
+	if procs > maxPushConcurrency {
+		return maxPushConcurrency
+	}
+	return procs
+}
 
 // pushBatchMax bounds how many JTIs one loop iteration drains from the buffer.
 // It is also the ack-deferral window: on a crash mid-batch, up to this many
-// SETs the receiver already accepted are still pending and are resent.
+// SETs the receiver already accepted are still pending and are resent. The
+// ceiling on the derived default therefore caps the window at 128 SETs
+// (ADR 0037); an explicit I2SIG_PUSH_CONCURRENCY sets it to 4x that value.
 func (r *router) pushBatchMax() int {
 	if r.pushConcurrency < 1 {
 		return 4

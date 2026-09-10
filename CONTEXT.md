@@ -220,7 +220,20 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
 Which JWS algorithm a stream's SETs are signed with, chosen per stream
 rather than per server (ADR 0034, RFC 9964). `""` and `RS256` are the
 same thing — RSA-2048, what every stream signed with before the field
-existed — and `ML-DSA-65` opts the stream into post-quantum signatures.
+existed, and still the default. `ES256` opts the stream into ECDSA
+P-256 and `ML-DSA-65` into post-quantum signatures.
+
+Each opt-in trades differently, which is why the choice is per stream:
+
+- **`ES256`** buys transmitter throughput. Signing runs once per event
+  per outbound stream, and RSA-2048 signing measured ~0.822 ms against
+  P-256's ~0.019 ms on the same host — enough to make RSA the single
+  largest consumer of transmitter CPU and the dominant source of
+  allocation churn. Verification moves the other way (ES256 verify is
+  slightly dearer than RS256), so the receiver pays a little of what the
+  transmitter saves a lot of.
+- **`ML-DSA-65`** buys post-quantum resistance and costs wire size: its
+  signature is 3309 bytes against RS256's 256.
 
 The vocabulary that hangs off it:
 
@@ -228,20 +241,24 @@ The vocabulary that hangs off it:
   (`kty:"AKP"`), whose parameter set lives in `alg` rather than in
   `kty`. `pkg/goSet/mldsa` owns the codec and the `jwt.SigningMethod`,
   because golang-jwt/keyfunc/jwkset have none.
-- **Dual-key JWKS** — an issuer with any ML-DSA stream publishes *both*
-  its RSA and its AKP key, under distinct kids. A receiver that has
-  never heard of AKP skips it and keeps verifying its RS256 stream
-  unchanged; that is what makes the opt-in per-stream rather than a
-  flag day.
+- **Dual-key JWKS** — an issuer with any ES256 or ML-DSA stream
+  publishes its RSA key *and* the opted-in key, under distinct kids. A
+  receiver that has never heard of AKP skips it and keeps verifying its
+  RS256 stream unchanged; that is what makes the opt-in per-stream
+  rather than a flag day. `JwkKeyRec.Alg` is the store's discriminator
+  and its encoding contract: `""` RSA/PKCS#1, `ES256` SEC 1 + PKIX,
+  `ML-DSA-65` raw seed + public bytes.
 - **`GetSigner(ctx, issuer, alg)`** — the transmitter's key-acquisition
-  seam. Selection is **by algorithm, not by recency**: the ML-DSA record
-  is the newer one, and picking newest would hand an RS256 stream a key
-  RS256 cannot use. The router caches per `(issuer, alg)` for the same
+  seam. Selection is **by algorithm, not by recency**: an opted-in
+  record is always the newer one, and picking newest would hand an RS256
+  stream a key RS256 cannot use. The router caches per `(issuer, alg)` for the same
   reason; invalidation stays issuer-level and evicts both.
 - **`goSet.AllowedAlgs()`** — `{RS256, ES256, ML-DSA-65}` on every node
   whether or not it transmits ML-DSA. The allow-list gates the token
   header before key lookup, and a receiver must be able to verify a
-  PQ-signed SET from a peer regardless of what it signs itself.
+  PQ-signed SET from a peer regardless of what it signs itself. It is
+  now exactly the set `goSet.SigningMethodFor` will select, because the
+  key store provisions a key for each.
 
 Independent of all of the above: `CERT_KEY_ALG` selects the key
 algorithm for the **internal mTLS** certificates `cmd/genTlsKeys`
@@ -320,6 +337,55 @@ cadence, lease heartbeats, retry policy, backfill, and cluster
 wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
+
+### Speculative delivery intent
+
+A pending marker written **before** the event body it refers to is known to be
+stored. Ingest issues the body write and the pending-marker writes concurrently
+rather than in series (ADR 0038), so between the two a marker exists whose body
+may still be in flight, or may turn out to be rejected as a duplicate `jti`.
+
+The router's ingest path is therefore in two phases with the join between them:
+`planFanoutLocked` selects the matching streams and writes their markers,
+`IngestBatch.Wait` joins the body write, and `commitFanoutLocked` retracts the
+markers of every rejected candidate, meters the survivors as egress, and only
+then wakes the streams. `EventService.Candidates` is what makes the first phase
+possible: it hands the router the candidate records before the write completes,
+and those records must not be mutated while it holds them.
+
+Two consequences worth knowing before debugging a delivery oddity. First, a
+crash between the two writes can leave a **body-less marker** — every delivery
+leg skips one without acking it, but nothing retires it (ADR 0038 bounds the
+exposure). Second, the pending list is cluster-visible, so a marker for a
+duplicate `jti` whose body already exists can be delivered a second time before
+it is retracted; `jti` dedup at the receiver (ADR 0017) is what covers that.
+
+### Ingest read caches
+
+Three separate caches serve the per-event reads on the ingest path, each scoped
+to its own staleness tolerance rather than sharing one TTL (ADR 0039). Reach for
+the right one by what it answers, not by name:
+
+- **Request-scoped stream memo** (`pkg/services/stream_request_cache.go`) —
+  "which stream is this?", memoised for the life of one request. No expiry, since
+  it cannot outlive the handler. It is a **correctness surface**: every
+  `StreamService` write calls `invalidateRequestStreams`, and any new write path
+  that reaches the DAO directly owes it the same. Opt-in — a context with no memo
+  installed is byte-for-byte the old read path.
+- **Token revocation cache** (`pkg/services/token_revocation_cache.go`) — "is
+  this bearer revoked?", 2 s TTL. Bounds exactly one case: a *peer* node revoking
+  a token this node recently validated. A local revoke drops the entry as part of
+  the revoke, and an entry is capped at the token's own `revoked_at`, so the
+  rotate-on-GET grace window (ADR 0022 §2) stays exact rather than approximate. It
+  carries an invalidation **generation** so a revoke landing during an in-flight
+  read cannot be straddled; `putIfCurrent` is the only writer, and callers sample
+  the generation BEFORE the store read they intend to cache.
+- **Lease-owner cache** (`internal/eventRouter/lease_owner_cache.go`) — "who owns
+  this push transmitter lease?", 2 s TTL. A backstop behind this node's own
+  acquire / renew / lose / exit transitions, which keep it honest. It steers a
+  wake-up and **never authorises a delivery**. The SSTP-client lease is
+  deliberately not cached: it is owned by the dialer in `internal/server`, so a
+  cache here would be a bare TTL with no invalidation hook.
 
 ### EventService.MatchesStream
 

@@ -9,6 +9,14 @@ Date: 2026-08-27
 
 Accepted (GH #278, planning spec #101 — Go 1.27 adoption).
 
+Extended by [ADR 0041](0041-es256-set-signing.md) (community #284): `signing_alg`
+now carries a third selectable value, `ES256`, and the key store's encoding
+contract widens to a third discriminated shape. Where this ADR describes the
+seam as `""`/`RS256` default plus an `ML-DSA-65` opt-in, read it as `""`/`RS256`
+default plus independent `ES256` and `ML-DSA-65` opt-ins. Everything else here —
+the dual-key JWKS, the `Alg` discriminator whose empty value means RSA, the
+`AllowedAlgs()` posture — is unchanged.
+
 ## Context
 
 Go 1.27 ships `crypto/mldsa`, an implementation of ML-DSA (FIPS 204) — the

@@ -279,7 +279,9 @@ func (c *SstpDialerConfig) fillDefaults() {
 		c.Jitter = defaultSstpJitter
 	}
 	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: 60 * time.Second}
+		// Shared pooled transport (issue #289) — a per-config client would give
+		// every dialer its own 2-idle-conn pool and re-handshake TLS per cycle.
+		c.HTTPClient = sstpFallbackHTTPClient()
 	}
 	if c.BackfillBatch <= 0 {
 		c.BackfillBatch = 100

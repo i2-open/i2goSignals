@@ -293,7 +293,8 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.S
 // Handing this list to jwt.WithValidMethods closes that by construction: the
 // header alg is checked before the key is ever resolved.
 //
-// RS256 and ES256 are what this project signs with by default (see JWS).
+// RS256 is the default a stream signs with and ES256 the per-stream opt-in for
+// transmitter throughput (i2goSignals#284).
 // ML-DSA-65 (RFC 9964, FIPS 204) is accepted for streams that opt into
 // post-quantum signatures via StreamConfiguration.signing_alg; it is listed
 // unconditionally because the allow-list gates the *header*, and a receiver
@@ -317,17 +318,31 @@ func AllowedAlgs() []string {
 // outbound both directions, CLI) each say `goSet.SigningMethodFor(cfg.SigningAlg)`
 // instead of hard-coding jwt.SigningMethodRS256, and so an unknown alg is one
 // error here rather than a silent fall-through to RSA at each of them. The
-// accepted set is AllowedAlgs minus ES256: this node verifies ES256 tokens from
-// peers but has no EC signing key of its own to select.
+// accepted set is now exactly AllowedAlgs: the key store provisions and
+// publishes a key for each of RS256, ES256 and ML-DSA-65, so anything this node
+// will verify it can also be configured to sign.
+//
+// ES256 is a throughput choice, not a security downgrade. Signing runs once per
+// event per outbound stream, and RSA-2048 signing measured ~43x the cost of
+// P-256 on the same host (0.822 ms against 0.019 ms), which made it the single
+// largest consumer of transmitter CPU and the dominant source of allocation
+// churn (i2goSignals#284). Verification moves the other way — ES256 verify is
+// slightly dearer than RS256 — so the receiver's side of the trade is real but
+// small next to the transmitter's saving.
+//
+// RS256 remains the default: a stream that never sets signing_alg keeps signing
+// exactly as it always did, and ES256 is opted into per stream.
 func SigningMethodFor(alg string) (jwt.SigningMethod, error) {
 	switch alg {
 	case "", jwt.SigningMethodRS256.Alg():
 		return jwt.SigningMethodRS256, nil
+	case jwt.SigningMethodES256.Alg():
+		return jwt.SigningMethodES256, nil
 	case mldsa.Alg:
 		return mldsa.SigningMethodMLDSA65, nil
 	default:
-		return nil, fmt.Errorf("unsupported SET signing algorithm %q; want one of \"\", %q, %q",
-			alg, jwt.SigningMethodRS256.Alg(), mldsa.Alg)
+		return nil, fmt.Errorf("unsupported SET signing algorithm %q; want one of \"\", %q, %q, %q",
+			alg, jwt.SigningMethodRS256.Alg(), jwt.SigningMethodES256.Alg(), mldsa.Alg)
 	}
 }
 
