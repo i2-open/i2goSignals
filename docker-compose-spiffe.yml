@@ -510,10 +510,10 @@ services:
   # Keycloak (OAuth2 AS) — same as docker-compose-dev.yml
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:alpine
+    image: postgres:18-alpine
     container_name: postgres
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
       - spire_sockets:/run/spire/sockets
     networks:
       - backend
@@ -527,7 +527,7 @@ services:
       I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.6.4
+    image: quay.io/keycloak/keycloak:26.7.3
     container_name: keycloak-signals
     hostname: keycloak
     networks:
@@ -537,19 +537,19 @@ services:
     environment:
       KC_HEALTH_ENABLED: true
       KC_HOSTNAME_STRICT: false
-      KC_HOSTNAME_URL: https://keycloak:9080
+      KC_HOSTNAME: https://keycloak:9080
       KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/server-cert.pem
       KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/server-key.pem
       KC_HTTPS_PORT: 9080
       KC_FEATURES: scripts
       KC_SCRIPT_UPLOAD_ENABLED: "true"
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      QUARKUS_HTTP_HOST: 0.0.0.0
+      KC_HTTP_HOST: 0.0.0.0
       SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
       I2SIG_SPIFFE_TRUST_DOMAIN: cluster.i2gosignals.internal
     ports:
