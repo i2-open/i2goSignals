@@ -78,8 +78,9 @@ record described by ADR 0018:
   (or `http` when `I2SIG_INSECURE_SSTP_HTTP=true`, a new env var defaulting to
   false), non-empty host, no query or fragment. No network probe; reachability
   is the runner's concern, matching push/poll create semantics.
-- Each half is validated for a non-empty, URI-shaped `iss` and `aud` and a
-  recognized `mode`. **No reciprocity is enforced between halves** so asymmetric
+- Each half is validated for a non-empty `iss` and `aud` and a recognized
+  `mode`. Shape is deliberately not checked: both are JWT `StringOrURI` values,
+  so a non-URI value is accepted with a WARN rather than refused. **No reciprocity is enforced between halves** so asymmetric
   multi-hop pairs are legitimate. `events` is accepted loosely (no URI-registry
   check, empty allowed); `EventsDelivered` is recomputed. `Status` is always
   `Enabled` at create — the runner self-pauses on first failure.

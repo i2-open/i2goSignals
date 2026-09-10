@@ -94,9 +94,12 @@ Fields:
 - `EndpointUrl` is validated **syntactically only** — scheme `https` (or `http`
   when `I2SIG_INSECURE_SSTP_HTTP=true`), non-empty host, no query/fragment. No
   network probe; reachability is the runner's concern (matching push/poll).
-- Each half needs a non-empty URI-shaped `iss` and `aud` and a recognized
-  `mode`. **No reciprocity is enforced between halves**, so asymmetric/multi-hop
-  pairs are first-class.
+- Each half needs a non-empty `iss` and `aud` and a recognized `mode`. Both are
+  JWT `StringOrURI` values (RFC 7519 §2), so a bare hostname is legal: a non-URI
+  value is accepted with a WARN rather than refused, because the SSF profile's
+  use of URIs is a convention and a strict peer refusing it is an interop fact
+  worth logging, not a create-time rule. **No reciprocity is enforced between
+  halves**, so asymmetric/multi-hop pairs are first-class.
 - `Status`/`InboundStatus` are always `Enabled` at create — the runner
   self-pauses on first failure. There is **no "pending" state**.
 

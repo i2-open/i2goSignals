@@ -50,8 +50,8 @@ harness ──RFC 8935 push──▶ goSignals1  ingress   (push-receive, route_
 * The harness signs with an RSA key that goSignals1 mints on the first run
   (`POST /key/<issuer>` with the bootstrap secret). The PEM is saved to
   `bin/bench/<issuer host>.pem` (`bench.example.com.pem` by default; the
-  issuer and audiences are URLs because SSTP validation requires URI-shaped
-  `iss`/`aud`) and reused on later runs. After `make dev-clean` the
+  issuer and audiences are URLs because the SSF profile uses URIs throughout,
+  not because SSTP validation requires them) and reused on later runs. After `make dev-clean` the
   server forgets the key and the harness mints a fresh one.
 
 The SETs use the SCIM profile (RFC 9967) event types rotated across
