@@ -94,7 +94,12 @@ type StreamStateRecord struct {
 	// or SubjectFilterModeHybrid.
 	SubjectFilterMode string `json:"subject_filter_mode,omitempty" bson:"subject_filter_mode,omitempty"`
 
-	// EventSource describes where a transmitter stream's events originate.
+	// EventSource describes where a transmitter stream's events originate. It is
+	// the field MatchesStream consults, against this record's inlined
+	// StreamConfiguration, so on a bidirectional SSTP pair record (ADR COM-0018)
+	// it governs the PRIMARY (outbound) leg — the mirror image of EventValidation
+	// below, which is receive-side and governs the inbound leg. The inbound leg's
+	// own descriptor lives on InboundEventSource (issue #296).
 	EventSource *EventSource `json:"event_source,omitempty" bson:"event_source,omitempty"`
 
 	// SubjectRemovalGraceSeconds is the per-transmitter-stream override of the
@@ -152,6 +157,20 @@ type StreamStateRecord struct {
 
 	// InboundErrorMsg mirrors ErrorMsg for the receive (inbound) direction.
 	InboundErrorMsg string `json:"inbound_error_msg,omitempty" bson:"inbound_error_msg,omitempty"`
+
+	// InboundEventSource is the inbound twin of EventSource, following the
+	// InboundStatus/InboundErrorMsg convention: it carries the receive (inbound)
+	// direction's ADR 0004 routing descriptor, because one record-level field
+	// cannot describe two logical streams (issue #296).
+	//
+	// This node's own router never reads it — MatchesStream decides egress, and
+	// the inbound leg has no egress. It is meaningful because the transmitting
+	// end of that logical stream is the PEER, where mirrorSstpBootstrap delivers
+	// this same descriptor as the peer's primary. So it is the local, readable
+	// record of how the other end was asked to source what it sends here, and the
+	// value the cascade carries. Nil means the leg was configured before #296, or
+	// with no descriptor, and behaves as DIRECT.
+	InboundEventSource *EventSource `json:"inbound_event_source,omitempty" bson:"inbound_event_source,omitempty"`
 
 	// --- Node-local JWKS readiness (ADR 0033) ---
 	// Derived, never persisted (bson:"-"), and NOT part of the SSF wire-format
@@ -252,6 +271,7 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res := *ss
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
+	res.InboundEventSource = ss.InboundEventSource.DeepCopy()
 	if ss.RetentionWindowDays != nil {
 		v := *ss.RetentionWindowDays
 		res.RetentionWindowDays = &v
@@ -289,6 +309,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.PairId = mod.PairId
 	ss.InboundStatus = mod.InboundStatus
 	ss.InboundErrorMsg = mod.InboundErrorMsg
+	ss.InboundEventSource = mod.InboundEventSource
 	ss.JwksReadiness = mod.JwksReadiness
 	ss.InboundJwksReadiness = mod.InboundJwksReadiness
 }

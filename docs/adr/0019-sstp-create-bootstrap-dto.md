@@ -54,10 +54,17 @@ The DTO carries pair-level connectivity plus per-direction business-plane inputs
 - Pair-level: `role`, `endpoint_url`, `authorization_header`,
   `peer_server_alias`, `peer_pair_id`, `description`.
 - Per direction (`primary` = transmit, `inbound` = receive): `iss`,
-  `iss_jwks_url`, `aud`, `events`, `mode`. `mode` accepts
+  `iss_jwks_url`, `aud`, `events`, `mode`, `event_source`. `mode` accepts
   `FORWARD | PUBLISH | IMPORT` and maps to the existing `RouteMode`
   (`SstpModeToRouteMode`): `FORWARD` preserves the upstream `iss`, `PUBLISH`
   re-signs with goSignals' `iss`, `IMPORT` keeps events local.
+- `event_source` (issue #296) is the second ADR 0004 axis, independent of `mode`:
+  `mode` says whether a direction re-signs, `event_source.type`
+  (`DIRECT | AUDIENCE | EXPLICIT`) says where its events come from. It sits per
+  direction because the two halves are two independent logical streams, so a
+  pair can be, say, `FORWARD` + `EXPLICIT` outbound and `PUBLISH` + `AUDIENCE`
+  inbound. Absent means the leg routes as `DIRECT`, which is what every SSTP
+  direction did before the field existed.
 
 `StreamService.CreateSstpPair` expands a validated bootstrap into the bidirectional
 record described by ADR 0018:

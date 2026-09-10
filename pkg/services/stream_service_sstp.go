@@ -96,6 +96,41 @@ func validateSstpDirection(name string, d model.SstpDirection) error {
 	if err := model.ValidateEventPatterns(d.Events); err != nil {
 		return fmt.Errorf("invalid %s.events: %v", name, err)
 	}
+	if err := validateSstpDirectionEventSource(name, d.EventSource); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateSstpDirectionEventSource applies the ADR 0004 event_source rules to
+// one direction of a bootstrap (issue #296). A nil descriptor is the pre-#296
+// shape and passes.
+//
+// The two shared rules — EXPLICIT must name at least one source stream, and
+// source_stream_ids is meaningless on anything else — are validateEventSource's,
+// called rather than restated so a pair can never build a direction that the
+// push and poll paths would refuse. Its subject-filter-mode argument is empty
+// because a bootstrap carries no subject_filter_mode for a DIRECT leg to
+// conflict with, so that rule does not arise here.
+//
+// The unknown-type rejection is this validator's own. validateEventSource
+// tolerates an unrecognized type and effectiveEventSourceType then routes it as
+// DIRECT; loosening or tightening that for push and poll is not this change's
+// business. A pair bootstrap has no such history, so a mistyped type is refused
+// at the door instead of silently becoming DIRECT.
+func validateSstpDirectionEventSource(name string, es *model.EventSource) error {
+	if es == nil {
+		return nil
+	}
+	switch es.Type {
+	case "", model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit:
+	default:
+		return fmt.Errorf("%s: invalid event_source.type %q: must be one of %s, %s, %s",
+			name, es.Type, model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit)
+	}
+	if err := validateEventSource(es, ""); err != nil {
+		return fmt.Errorf("%s: %v", name, err)
+	}
 	return nil
 }
 
@@ -556,6 +591,14 @@ func resolveSstpDirectionEvents(pairId, direction string, requested, supported [
 // PairId), preserving the existing aliasing invariant; the inbound side uses the
 // caller-provided inboundSid so the SID the pair bearer authorizes and the SID
 // persisted on SstpInbound are the same value (finding #7).
+//
+// It does not go through applyEventSource, the shared push/poll helper that drops
+// a descriptor with a WARN on a receiver stream. That helper is keyed on
+// IsReceiver(), which reads the primary Delivery method and so is false for a
+// pair (its marker is DeliverySstp, neither ReceivePush nor ReceivePoll) — and
+// the SSTP create and update paths are separate branches that never call it. So a
+// pair keeps both of its descriptors, which is the intended answer for a record
+// that is transmitter and receiver at once (issue #296).
 func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
 	now := time.Now()
 
@@ -619,6 +662,16 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		ModifiedAt:    now,
 		Status:        model.StreamStateEnabled,
 		InboundStatus: model.StreamStateEnabled,
+
+		// Each direction's ADR 0004 descriptor lands on the half it describes
+		// (issue #296). The primary's is the record-level EventSource, which is
+		// what MatchesStream reads when deciding what this pair transmits; the
+		// inbound's is the InboundEventSource twin, which this node stores and
+		// mirrors but never routes on, because the transmitting end of that
+		// logical stream is the peer. DeepCopy so the stored record does not
+		// alias the caller's request body.
+		EventSource:        b.Primary.EventSource.DeepCopy(),
+		InboundEventSource: b.Inbound.EventSource.DeepCopy(),
 	}
 }
 
@@ -682,6 +735,13 @@ func (s *StreamService) cascadeSstpPeer(ctx context.Context, rec *model.StreamSt
 // role and the two directions swapped, so the peer's outbound is this node's
 // inbound. The peer's responder will derive its own EndpointUrl and mint its own
 // bearer; an initiator-bound mirror carries this responder's endpoint+bearer.
+//
+// The swap is whole-struct, so a per-direction event_source (issue #296) crosses
+// with the direction that owns it and needs no handling of its own here. That is
+// the point of the descriptor being a field of SstpDirection: this node's inbound
+// event_source is exactly what the peer's primary should route on, and the swap
+// puts it there. Keep the swap struct-level if this function is ever rewritten —
+// copying fields individually would silently drop it.
 func mirrorSstpBootstrap(rec *model.StreamStateRecord, b model.SstpPairBootstrap) model.SstpPairBootstrap {
 	mirror := model.SstpPairBootstrap{
 		Description: b.Description,
