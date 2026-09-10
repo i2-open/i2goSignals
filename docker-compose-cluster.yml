@@ -29,7 +29,7 @@ services:
       - scim_cluster2
 
   mongo1:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -46,7 +46,7 @@ services:
       timeout: 5s
       retries: 5
   mongo2:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -63,7 +63,7 @@ services:
       timeout: 5s
       retries: 5
   mongo3:
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -80,7 +80,7 @@ services:
       timeout: 5s
       retries: 5
   mongo-init:
-    image: mongo:latest
+    image: mongo:8.0.13
     container_name: mongo-init
     depends_on:
       mongo1:

@@ -38,7 +38,7 @@ services:
   # ---------------------------------------------------------------------------
   mongo1:
     container_name: mongo1
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -67,7 +67,7 @@ services:
 
   mongo2:
     container_name: mongo2
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -96,7 +96,7 @@ services:
 
   mongo3:
     container_name: mongo3
-    image: mongo:latest
+    image: mongo:8.0.13
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=dockTest
@@ -125,7 +125,7 @@ services:
 
   # Combined helper and setup service
   mongo-init:
-    image: mongo:latest
+    image: mongo:8.0.13
     container_name: mongo-init
     depends_on:
       spire-registration:
