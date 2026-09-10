@@ -59,16 +59,35 @@ the candidate records. `HandleEvents` then:
    rejected candidate, metering the survivors as egress, and only then waking
    the streams.
 
-Nothing observable happens on a speculative marker: no stream is woken, no SET
-is metered as egress and no error is reported until the body write has been
-joined.
+Within the ingesting call path nothing observable happens on a speculative
+marker: `handleEvents` wakes no stream, meters no SET as egress and reports no
+error until the body write has been joined.
 
+The pending list itself is not private to that call path. It is cluster-visible
+state, and the delivery legs read it on their own schedule — push backfill
+(`backfillPushBuffer`, once a second by default), the poll prefetch, the SSTP
+responder drain and the SSTP initiator pull, on this node and on every peer. So
+a marker CAN be observed between step 1 and step 3, on one path: a JTI whose
+body already exists from an earlier ingest is rejected as a duplicate, but its
+marker was already written, and a delivery leg that reads the list in that
+window will find a resolvable body and send the SET a second time before
+`commitFanoutLocked` retracts the marker.
+
+That is a re-delivery, not a delivery of something that was never accepted, and
+it is bounded by the same guarantee the rest of the system rests on: `jti` is
+the dedup key (ADR 0017), so a receiver that sees the duplicate discards it.
+Delivery is at-least-once here, as it already was across retries.
 Retraction undoes exactly one `AddPending` per JTI. `EventDAO.RetractPending`
-removes the **newest** pending entry for a JTI and leaves any earlier entry in
-place and in its original position, because the two entries are otherwise
-identical and removing both would silently drop a real, still-undelivered
-delivery intent — the case where a receiver re-sends a SET that is still pending
-on the same outbound stream.
+removes exactly one pending entry for a JTI and leaves any other entry in place,
+because removing both would silently drop a real, still-undelivered delivery
+intent — the case where a receiver re-sends a SET that is still pending on the
+same outbound stream. WHICH entry is removed is deliberately unspecified: a
+pending entry carries only the stream and the JTI, so two entries for the same
+pair are indistinguishable, and `GetPendingForStream` orders by `jti` (ADR
+0040), which both share. The Mongo DAO's descending `_id` sort makes the choice
+deterministic within a node; it is not a "most recently inserted" guarantee
+across nodes, because an ObjectID is a second-granularity timestamp plus a
+per-process random value.
 
 The in-memory `EventDAO` previously recorded a pending marker only if the body
 was already stored. That guard is removed: it made the marker's fate depend on
@@ -101,9 +120,26 @@ test in `internal/eventRouter/ingest_crash_consistency_test.go`:
 | SSTP initiator (`resolveSstpEventsByJti`) | skipped; dropped from the flush |
 
 None of them acks what it did not send, so nothing confirms delivery of a SET
-that does not exist. The orphaned marker is inert rather than harmful: it is
-never delivered and never acked, and it is retired when the stream's pending
-list is cleared or the stream is deleted.
+that does not exist.
+
+The orphaned marker is never delivered and never acked. It is not, however,
+self-clearing, and that has a cost worth stating plainly rather than calling it
+inert. Because `GetPendingForStream` reads in ascending `jti` order and the
+delivery legs skip an orphan without removing it, an orphan sits at the head of
+the read window on every subsequent pass. Poll and SSTP copy out of the list
+rather than removing from it, and push backfill re-reads the same head each
+tick. So orphans accumulate at the head, and a stream that has collected as many
+orphans as its read window is wide — `backfillBatch` for push, `MaxEvents` for
+poll — stops making progress: every pass fills the window with orphans and
+delivers nothing behind them.
+
+Reaching that state takes as many crashes-mid-ingest as the window is wide, on
+one stream, with no operator intervention in between, so it is remote rather
+than impossible. Today the only remedies are `ClearPendingForStream` or deleting
+the stream. A reaper that retires body-less markers after a grace period is the
+right fix and is **not** part of this change; it is tracked separately. Until it
+lands, an operator seeing a stream stall with a non-zero pending count and no
+egress should check for markers whose bodies are absent.
 
 This is a durability *contract* change, not a durability *loss*: the number of
 inbound SETs that survive a crash is unchanged, because both writes still run at

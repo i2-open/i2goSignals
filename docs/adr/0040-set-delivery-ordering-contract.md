@@ -79,7 +79,7 @@ query rather than to the index.
 | Leg | Ordering |
 |---|---|
 | Poll (RFC 8936), SSTP | Batch is atomic, messages are serial, full issue order recoverable by sorting `jti` |
-| Push, `I2SIG_PUSH_CONCURRENCY=1` | In issue order on the happy path; a failure leaves JTIs pending, so a retry reorders them relative to later successes |
+| Push, `I2SIG_PUSH_CONCURRENCY=1` | In issue order **within one ingest batch** on the happy path; see the qualification below. A failure leaves JTIs pending, so a retry reorders them relative to later successes |
 | Push, concurrency above 1 | Reordered at the receiver by factors the transmitter cannot see |
 
 Go's `encoding/json` emits map keys sorted, so a poll or SSTP `sets` object is
@@ -87,9 +87,32 @@ in fact serialised in `jti` order today. That is a convenience, not part of the
 contract: JSON object member order is not significant, and a receiver must sort
 rather than depend on parse order.
 
+**Qualification: concurrency 1 serialises dispatch, not issue order.**
+`I2SIG_PUSH_CONCURRENCY=1` guarantees one POST in flight at a time. It does not
+by itself guarantee that POSTs leave in `jti` order, because it does not control
+the order events are *submitted* to the push buffer. Two submit paths feed it,
+and they differ:
+
+- **Backfill** (`backfillPushBuffer`) reads through `GetPendingForStream`, which
+  is `jti`-sorted by clause 2. This path is in issue order.
+- **Live fan-out** (`commitFanoutLocked` → `wakeTargetLocked`) submits a batch
+  only after that batch's body write has been joined (ADR 0038). Within a batch
+  the JTIs are submitted in issue order. Across batches ingested concurrently —
+  the multi-client case the ingest work in this release optimises — the
+  interleaving is body-write completion order, not `jti` order.
+
+So the strongest honest statement is: with concurrency 1, a receiver sees SETs
+one at a time, and sees each ingest batch internally in issue order; it does not
+see a total `jti` order across batches that were ingested concurrently. A
+receiver that needs a total order must sort on `jti`, which clause 1 makes
+possible on every leg. This is a further reason the guidance below puts poll and
+SSTP first rather than treating concurrency 1 as the ordering lever.
+
 **4. Receiver guidance.** For an order-sensitive receiver, in preference order:
 prefer poll or SSTP, where order is fully recoverable at no throughput cost; if
-push is mandatory and order is important, set `I2SIG_PUSH_CONCURRENCY=1`;
+push is mandatory and order is important, set `I2SIG_PUSH_CONCURRENCY=1` and
+sort the received SETs on `jti`, since concurrency 1 serialises dispatch without
+imposing a total order across concurrent ingest batches;
 and in all cases prefer reconciling on resource state or version over relying
 on arrival order, which is the only approach that also survives redelivery.
 

@@ -85,7 +85,18 @@ measured was on the push leg, and the SSTP read happens once per fan-out batch.
   unaffected. Deferred revocation is exact, not approximate.
 - **The stream memo can serve a stale record only to a caller that bypasses
   `StreamService` to write.** Any new write path must invalidate; the memo is a
-  correctness surface, not a convenience.
+  correctness surface, not a convenience. `bearer_rotation.go`'s rotate-on-GET
+  write is the one path that reached `streamDAO.Update` without going through a
+  `StreamService` method, and it now invalidates explicitly.
+- **The memo is installed on two of the four ingest entry points, deliberately.**
+  It is opt-in — a context without a memo is byte-for-byte the old read path —
+  and it is installed where the profiler measured the duplicate read: the push
+  receive handler (`api_receiver.go`) and the SSTP responder
+  (`runner_sstp_server.go`). The poll-receiver ingest and the SSTP-initiator
+  inbound path still take the uncached read. The saving there is per *batch*
+  rather than per event, so it is small, and leaving those two on the plain path
+  keeps the opt-in surface narrow while the memo's invalidation story is young.
+  Installing it on them later is additive and needs no contract change.
 - Measured on the dev replica set, three runs each side: ingest p50 19.3, 18.5,
   17.9 → 15.1, 13.0, 14.1 ms and 742, 763, 782 → 935, 1041, 1006 ev/s. Profiler
   counts per 5000 events: `streams` 10021 → 5033, `tokens` 5015 → 25,

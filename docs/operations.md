@@ -418,11 +418,33 @@ record. It is deliberately **not** an RFC 8935 `StreamConfiguration` field, and
 unlike its sibling operator knobs — `default_subjects`, `subject_filter_mode`,
 `event_source`, `subject_removal_grace_seconds`, `event_validation` — it is
 **not** applied by `StreamService.CreateStream` or `StreamService.UpdateStream`,
-and the `goSignals` CLI exposes no flag for it. The field is persisted and
-round-trippable, so an embedder can set it programmatically, but the community
-server offers no supported operator path. Binding the retention engine to the
-running store, and with it a real operator knob, is tracked separately and is
-not part of this build.
+and the `goSignals` CLI exposes no flag for it. So there is no supported
+operator path in the community server: no API call, no CLI flag, no environment
+variable sets it.
+
+The field is persisted and round-trippable, so an **embedder** — code that links
+this server as a library rather than running the binary — can set it directly on
+the stream state record and update the stream through the DAO:
+
+```go
+// ssfModels.StreamStateRecord.RetentionWindowDays is *int:
+//   nil  => keep forever (the community default)
+//   0    => keep forever, stated explicitly
+//   n>0  => retain for n days
+days := 30
+rec.RetentionWindowDays = &days
+err := streamDAO.Update(ctx, rec)
+```
+
+Setting it changes what `RetentionEngine.PurgeExpired` *would* purge. It does
+not by itself cause anything to expire, because no purge engine is bound in this
+build — see the section above. Treat the field as forward-compatible
+configuration, not as an enforcement switch.
+
+Binding the retention engine to the running store, and with it a real operator
+knob, is the subject of planning issue
+[independentid/i2gosignals-planning#75](https://github.com/independentid/i2gosignals-planning/issues/75)
+(event-family retention, ADR 0055 Amendments 7-8). It is not part of this build.
 
 ### What an operator should do instead
 

@@ -338,6 +338,55 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
+### Speculative delivery intent
+
+A pending marker written **before** the event body it refers to is known to be
+stored. Ingest issues the body write and the pending-marker writes concurrently
+rather than in series (ADR 0038), so between the two a marker exists whose body
+may still be in flight, or may turn out to be rejected as a duplicate `jti`.
+
+The router's ingest path is therefore in two phases with the join between them:
+`planFanoutLocked` selects the matching streams and writes their markers,
+`IngestBatch.Wait` joins the body write, and `commitFanoutLocked` retracts the
+markers of every rejected candidate, meters the survivors as egress, and only
+then wakes the streams. `EventService.Candidates` is what makes the first phase
+possible: it hands the router the candidate records before the write completes,
+and those records must not be mutated while it holds them.
+
+Two consequences worth knowing before debugging a delivery oddity. First, a
+crash between the two writes can leave a **body-less marker** — every delivery
+leg skips one without acking it, but nothing retires it (ADR 0038 bounds the
+exposure). Second, the pending list is cluster-visible, so a marker for a
+duplicate `jti` whose body already exists can be delivered a second time before
+it is retracted; `jti` dedup at the receiver (ADR 0017) is what covers that.
+
+### Ingest read caches
+
+Three separate caches serve the per-event reads on the ingest path, each scoped
+to its own staleness tolerance rather than sharing one TTL (ADR 0039). Reach for
+the right one by what it answers, not by name:
+
+- **Request-scoped stream memo** (`pkg/services/stream_request_cache.go`) —
+  "which stream is this?", memoised for the life of one request. No expiry, since
+  it cannot outlive the handler. It is a **correctness surface**: every
+  `StreamService` write calls `invalidateRequestStreams`, and any new write path
+  that reaches the DAO directly owes it the same. Opt-in — a context with no memo
+  installed is byte-for-byte the old read path.
+- **Token revocation cache** (`pkg/services/token_revocation_cache.go`) — "is
+  this bearer revoked?", 2 s TTL. Bounds exactly one case: a *peer* node revoking
+  a token this node recently validated. A local revoke drops the entry as part of
+  the revoke, and an entry is capped at the token's own `revoked_at`, so the
+  rotate-on-GET grace window (ADR 0022 §2) stays exact rather than approximate. It
+  carries an invalidation **generation** so a revoke landing during an in-flight
+  read cannot be straddled; `putIfCurrent` is the only writer, and callers sample
+  the generation BEFORE the store read they intend to cache.
+- **Lease-owner cache** (`internal/eventRouter/lease_owner_cache.go`) — "who owns
+  this push transmitter lease?", 2 s TTL. A backstop behind this node's own
+  acquire / renew / lose / exit transitions, which keep it honest. It steers a
+  wake-up and **never authorises a delivery**. The SSTP-client lease is
+  deliberately not cached: it is owned by the dialer in `internal/server`, so a
+  cache here would be a bare TTL with no invalidation hook.
+
 ### EventService.MatchesStream
 
 `(*EventService).MatchesStream(stream, event) bool` — the SET-to-stream
