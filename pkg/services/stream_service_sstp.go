@@ -16,6 +16,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
@@ -25,6 +26,8 @@ import (
 // insecureSstpHttpEnabled reports whether plain-http SSTP EndpointUrls are
 // permitted. Controlled by the I2SIG_INSECURE_SSTP_HTTP env var (default false,
 // PRD #154 Q28). Read per-call so tests can flip it with t.Setenv.
+var sstpLog = logger.Sub("SSTP")
+
 func insecureSstpHttpEnabled() bool {
 	return strings.EqualFold(os.Getenv("I2SIG_INSECURE_SSTP_HTTP"), "true")
 }
@@ -57,20 +60,32 @@ func validateSstpEndpointUrl(raw string) error {
 }
 
 // validateSstpDirection enforces the minimal structural validation on a single
-// half of an SSTP pair (PRD #154 Q27, Q29): non-empty URI-shaped Iss and Aud,
-// and a recognized mode. Events are accepted loosely (no registry check, empty
+// half of an SSTP pair (PRD #154 Q27, Q29): non-empty Iss and Aud, and a
+// recognized mode. Events are accepted loosely (no registry check, empty
 // allowed). No reciprocity is enforced against the other half.
+//
+// Iss and Aud are checked for PRESENCE, not shape. They are JWT StringOrURI
+// values (RFC 7519 s2, s4.1.1, s4.1.3): a value containing a colon MUST be a
+// URI, and anything else is an arbitrary string. Using URIs throughout is an
+// SSF convention, not a validity rule, and enforcing it here refused legal
+// deployments — most obviously a FORWARD direction, which carries the issuer
+// its UPSTREAM asserts rather than one this server chose, so a fleet whose
+// issuers are bare hostnames could not be relayed at all. A non-URI value is
+// warned about instead: a strict SSF peer may still reject the stream, and that
+// is worth saying without being worth refusing.
 func validateSstpDirection(name string, d model.SstpDirection) error {
-	if err := requireUriShaped(name+".iss", d.Iss); err != nil {
+	if err := requireNonEmpty(name+".iss", d.Iss); err != nil {
 		return err
 	}
+	warnIfNotUriShaped(name+".iss", d.Iss)
 	if len(d.Aud) == 0 {
 		return fmt.Errorf("invalid %s.aud: must be non-empty", name)
 	}
 	for _, a := range d.Aud {
-		if err := requireUriShaped(name+".aud", a); err != nil {
+		if err := requireNonEmpty(name+".aud", a); err != nil {
 			return err
 		}
+		warnIfNotUriShaped(name+".aud", a)
 	}
 	if _, ok := model.SstpModeToRouteMode(d.Mode); !ok {
 		return fmt.Errorf("invalid %s.mode: must be one of FORWARD, PUBLISH, IMPORT", name)
@@ -84,17 +99,34 @@ func validateSstpDirection(name string, d model.SstpDirection) error {
 	return nil
 }
 
-// requireUriShaped rejects an empty or non-URI-shaped value. URI-shaped means a
-// parseable absolute URI with a scheme — matching the SSF iss/aud convention.
-func requireUriShaped(field, value string) error {
+// requireNonEmpty rejects an empty value. This is the whole of the create-time
+// rule for a StringOrURI claim — see validateSstpDirection for why shape is not
+// part of it.
+func requireNonEmpty(field, value string) error {
 	if value == "" {
 		return fmt.Errorf("invalid %s: must be non-empty", field)
 	}
-	u, err := url.Parse(value)
-	if err != nil || u.Scheme == "" {
-		return fmt.Errorf("invalid %s: must be URI-shaped, got %q", field, value)
-	}
 	return nil
+}
+
+// isUriShaped reports whether value is already an absolute URI. Per RFC 7519 s2
+// a StringOrURI containing a colon MUST be a URI, so this asks whether the
+// value IS one, not whether it is allowed to be.
+func isUriShaped(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && u.Scheme != ""
+}
+
+// warnIfNotUriShaped records that a legal-but-unconventional claim went by. The
+// bootstrap is accepted either way; the log line exists so an interop failure
+// against a strict SSF peer is diagnosable from this server's own output rather
+// than from the peer's refusal.
+func warnIfNotUriShaped(field, value string) {
+	if isUriShaped(value) {
+		return
+	}
+	sstpLog.Warn("SSTP bootstrap claim is not URI-shaped; legal per RFC 7519 but the SSF profile uses URIs, so a strict SSF peer may reject this stream",
+		"field", field, "value", value)
 }
 
 // CreateSstpPair expands an SstpPairBootstrap into one node's half of a

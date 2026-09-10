@@ -72,13 +72,16 @@ type SstpPairBootstrap struct {
 // loosely per half (no URI-registry check, empty allowed); mode maps to the
 // existing RouteMode semantics via SstpModeToRouteMode.
 type SstpDirection struct {
-	// Iss is the issuer asserted for this direction. Non-empty, URI-shaped.
+	// Iss is the issuer asserted for this direction. Non-empty. A JWT
+	// StringOrURI (RFC 7519 s4.1.1), so a URI by convention but not by rule —
+	// validateSstpDirection warns about a non-URI value rather than refusing it.
 	Iss string `json:"iss,omitempty"`
 
 	// IssJwksUrl is the issuer's JWKS URL for SET validation on this direction.
 	IssJwksUrl string `json:"iss_jwks_url,omitempty"`
 
-	// Aud is the audience for this direction. Non-empty, URI-shaped.
+	// Aud is the audience for this direction. Non-empty. StringOrURI per
+	// RFC 7519 s4.1.3, with the same convention-not-rule caveat as Iss.
 	Aud []string `json:"aud,omitempty"`
 
 	// Events is the requested event-type set for this direction (loose, may be
