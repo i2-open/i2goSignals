@@ -1031,11 +1031,11 @@ func dedupeCandidatesByJti(recs []*model.EventRecord) []*model.EventRecord {
 // events have not been metered as egress. commitFanoutLocked finishes the job
 // once the body write has been joined.
 type fanoutTarget struct {
-	mode   string // PUSH | POLL | SSTP-CLIENT | SSTP-SERVER — selects the commit action and labels logs
-	key    string // buffer-map key: the SID for push/poll, the PairId for sstp-client, the tx SID for sstp-server
-	docID  string // stream document id the pending markers were written under
-	stream model.StreamStateRecord
-	jtis   []string
+	mode  string // PUSH | POLL | SSTP-CLIENT | SSTP-SERVER — selects the commit action and labels logs
+	key   string // buffer-map key: the SID for push/poll, the PairId for sstp-client, the tx SID for sstp-server
+	docID string // stream document id the pending markers were written under
+	sid   string // StreamConfiguration.Id — the stream identity logs and metering use
+	jtis  []string
 
 	// queued records whether this target's marker write actually succeeded.
 	// Retraction is a compensating write (ADR 0038) and may only undo a marker
@@ -1099,7 +1099,7 @@ func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*m
 		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
 		queued = false
 	}
-	return &fanoutTarget{mode: mode, key: key, docID: docID, stream: *stream, jtis: jtis, queued: queued}
+	return &fanoutTarget{mode: mode, key: key, docID: docID, sid: stream.StreamConfiguration.Id, jtis: jtis, queued: queued}
 }
 
 // commitFanoutLocked finishes the fan-out once the body write has been joined:
@@ -1127,14 +1127,14 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 			// JTI, so running it after a failed marker write would consume an
 			// older, still-undelivered intent that this batch never created.
 			if err := r.eventService.DiscardPending(r.ctx, drop, t.docID); err != nil {
-				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.stream.StreamConfiguration.Id, "mode", t.mode, "count", len(drop), "error", err)
+				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.sid, "mode", t.mode, "count", len(drop), "error", err)
 			}
 		}
 		if len(keep) == 0 {
 			continue
 		}
 		for _, jti := range keep {
-			r.observeMeteredEvent(t.stream.StreamConfiguration.Id, DirectionEgress, &accepted[jti].Event)
+			r.observeMeteredEvent(t.sid, DirectionEgress, &accepted[jti].Event)
 		}
 		r.wakeTargetLocked(t, keep)
 	}
@@ -1194,7 +1194,13 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		// per-event cluster_leases cost the profiler measured was on the push
 		// leg; this read happens once per SSTP fan-out batch.
 		resource := fmt.Sprintf("sstp-client:%s", t.key)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+		ownerNodeId, _, _, leaseErr := r.coordinator.GetLeaseOwner(resource)
+		if leaseErr != nil {
+			// A coordinator read failure otherwise reads as "no owner", which
+			// silently makes every node deliver. Say so; the push arm reports
+			// its equivalent through leaseOwners.
+			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
+		}
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[t.key]; ok {
 				for _, jti := range jtis {

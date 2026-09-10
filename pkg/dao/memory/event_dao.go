@@ -75,11 +75,18 @@ func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	}
 
 	if d.useDisk {
-		err := d.saveEventToDiskLocked(record)
-		if err == nil {
-			// Memory optimization: clear large fields if on disk
-			// We keep Event for filtering/matching as it's often used
-			record.Original = ""
+		if err := d.saveEventToDiskLocked(record); err == nil {
+			// Memory optimization: with the body on disk the in-memory copy
+			// drops Original (FindByJTI/FindByJTIs reload it). Strip a COPY,
+			// never the caller's record: under concurrent ingest the caller
+			// still owns that pointer and routing reads it while the body
+			// write is in flight (ADR 0038, EventService.Candidates), so
+			// mutating it here would be a write racing those reads.
+			// We keep Event for filtering/matching as it's often used.
+			stored := *record
+			stored.Original = ""
+			d.events[stored.Jti] = &stored
+			return nil
 		}
 	}
 
@@ -212,12 +219,23 @@ func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string,
 		maxEvents = 10
 	}
 
-	var jtiList []string
+	// Sort by jti, matching the Mongo DAO's explicit ascending-jti sort. jtis
+	// are UUIDv7 (goSet.GenerateJti), so ascending jti IS ascending issue
+	// order. Delivery order is a contract receivers reason about (ADR 0040),
+	// so both providers must publish the same one — insertion order here would
+	// make the contract hold on Mongo and quietly not hold on memory.
+	ordered := make([]string, len(pending))
 	for i, event := range pending {
+		ordered[i] = event.Jti
+	}
+	sort.Strings(ordered)
+
+	var jtiList []string
+	for i, jti := range ordered {
 		if int32(i) >= maxEvents {
 			break
 		}
-		jtiList = append(jtiList, event.Jti)
+		jtiList = append(jtiList, jti)
 	}
 
 	return jtiList, int64(len(pending)), nil

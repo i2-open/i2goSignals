@@ -193,16 +193,16 @@ func TestRevocationCacheCapsEntryAtGraceInstant(t *testing.T) {
 	c.now = func() time.Time { return base }
 
 	grace := revocationCacheTTL / 4
-	c.put("deferred", false, base.Add(grace))
-	c.put("plain", false, time.Time{})
-	c.put("already-revoked", true, base.Add(-time.Hour))
+	c.putIfCurrent("deferred", false, base.Add(grace), c.generation())
+	c.putIfCurrent("plain", false, time.Time{}, c.generation())
+	c.putIfCurrent("already-revoked", true, base.Add(-time.Hour), c.generation())
 
 	assert.Equal(t, base.Add(grace), c.entries["deferred"].expires)
 	assert.Equal(t, base.Add(revocationCacheTTL), c.entries["plain"].expires)
 	assert.Equal(t, base.Add(revocationCacheTTL), c.entries["already-revoked"].expires)
 
 	// A revoked_at beyond the TTL cannot lengthen the entry.
-	c.put("far-future", false, base.Add(time.Hour))
+	c.putIfCurrent("far-future", false, base.Add(time.Hour), c.generation())
 	assert.Equal(t, base.Add(revocationCacheTTL), c.entries["far-future"].expires)
 }
 
@@ -216,7 +216,7 @@ func TestRevocationCacheEvictsWhenFull(t *testing.T) {
 	c.now = func() time.Time { return base }
 
 	for i := 0; i < 40; i++ {
-		c.put(string(rune('a'+i%26))+string(rune('0'+i/26)), false, time.Time{})
+		c.putIfCurrent(string(rune('a'+i%26))+string(rune('0'+i/26)), false, time.Time{}, c.generation())
 	}
 	assert.LessOrEqual(t, len(c.entries), c.max)
 }

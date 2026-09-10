@@ -180,6 +180,11 @@ func (s *StreamService) RotateBearerOnGet(ctx context.Context, sid string, prese
 	if uErr := s.streamDAO.Update(ctx, rec); uErr != nil {
 		return nil, false, uErr
 	}
+	// This is a StreamService write, so it owes the request-scoped stream memo
+	// an invalidation (ADR 0039): the memo is a correctness surface, and a
+	// handler that resolved the stream earlier in this request would otherwise
+	// keep serving the pre-rotation credential.
+	invalidateRequestStreams(ctx)
 
 	// Schedule the old token for deferred revocation. grace==0 revokes immediately.
 	revokeAt := time.Now().Add(BearerRotateGrace())

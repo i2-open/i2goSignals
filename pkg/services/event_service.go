@@ -226,11 +226,10 @@ func (s *EventService) DiscardPending(ctx context.Context, jtis []string, stream
 	if len(jtis) == 0 {
 		return nil
 	}
-	if err := s.eventDAO.RetractPending(ctx, jtis, streamID); err != nil {
-		esLog.Error("Error retracting speculative pending events", "count", len(jtis), "streamID", streamID, "error", err)
-		return err
-	}
-	return nil
+	// The error is returned, not logged: the router's commit phase logs it with
+	// the stream and delivery mode attached, and CONTEXT.md's log-level policy
+	// keeps ERROR an attention signal rather than a noise floor.
+	return s.eventDAO.RetractPending(ctx, jtis, streamID)
 }
 
 func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {

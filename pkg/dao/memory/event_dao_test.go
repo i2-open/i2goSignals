@@ -608,6 +608,9 @@ func TestEventDAOMemory_AddPendingMany(t *testing.T) {
 	}
 
 	streamID := ids.NewObjectID()
+	// Deliberately added out of jti order: GetPendingForStream publishes
+	// ascending jti order (ADR 0040), the same sort the Mongo DAO states
+	// explicitly, so the read must not echo insertion order back.
 	err := dao.AddPendingMany(ctx, []string{"jti-3", "jti-missing", "jti-1", "jti-2"}, streamID)
 	if err != nil {
 		t.Fatalf("AddPendingMany failed: %v", err)
@@ -617,7 +620,7 @@ func TestEventDAOMemory_AddPendingMany(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPendingForStream failed: %v", err)
 	}
-	want := []string{"jti-3", "jti-missing", "jti-1", "jti-2"}
+	want := []string{"jti-1", "jti-2", "jti-3", "jti-missing"}
 	if total != int64(len(want)) {
 		t.Errorf("Expected total %d, got %d", len(want), total)
 	}

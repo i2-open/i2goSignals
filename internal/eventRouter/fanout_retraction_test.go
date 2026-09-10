@@ -46,7 +46,7 @@ func TestCommitFanout_FailedMarkerWriteDoesNotRetract(t *testing.T) {
 		mode:   "PUSH",
 		key:    sid,
 		docID:  stream.Id.Hex(),
-		stream: *stream,
+		sid:    stream.StreamConfiguration.Id,
 		jtis:   []string{jti},
 		queued: false,
 	}
@@ -74,7 +74,7 @@ func TestCommitFanout_SpeculativeMarkerIsRetracted(t *testing.T) {
 		mode:   "PUSH",
 		key:    sid,
 		docID:  stream.Id.Hex(),
-		stream: *stream,
+		sid:    stream.StreamConfiguration.Id,
 		jtis:   []string{jti},
 		queued: true,
 	}
@@ -112,7 +112,7 @@ func TestCommitFanout_MissingBufferDoesNotPanic(t *testing.T) {
 				mode:   mode,
 				key:    sid,
 				docID:  stream.Id.Hex(),
-				stream: *stream,
+				sid:    stream.StreamConfiguration.Id,
 				jtis:   []string{jti},
 				queued: true,
 			}

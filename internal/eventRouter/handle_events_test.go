@@ -46,12 +46,16 @@ func TestHandleEvents_BatchIngestsAndFansOut(t *testing.T) {
 	// 4 new SETs counted on top of the seed; the duplicate is not.
 	assert.InDelta(t, 5.0, inCounterValue(t, s.inCounter, s.streamID), 0.0001)
 
-	// 3 matching SETs queued on top of the seed, in batch order.
+	// 3 matching SETs queued on top of the seed, read back in jti order.
 	require.Eventually(t, func() bool { return s.pollBufferCh() == 4 }, time.Second, 5*time.Millisecond,
 		"the three matching SETs of the batch must be queued once each")
 	pending, _ := s.h.router.eventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-	assert.Equal(t, []string{"batch-seed", "batch-1", "batch-2", "batch-3"}, pending,
-		"pending list must hold the seed then the batch's matching SETs in batch order")
+	// GetPendingForStream publishes ascending jti order on BOTH providers (ADR
+	// 0040), not insertion order. These are literal test jtis rather than the
+	// UUIDv7s a real ingest mints, so "batch-seed" sorts last here where a real
+	// seed — minted before the batch — would sort first.
+	assert.Equal(t, []string{"batch-1", "batch-2", "batch-3", "batch-seed"}, pending,
+		"pending list must hold the seed and the batch's matching SETs, in jti order")
 
 	// Every non-duplicate SET was persisted, including the unmatched one.
 	for _, jti := range []string{"batch-1", "batch-2", "batch-3", "batch-other"} {

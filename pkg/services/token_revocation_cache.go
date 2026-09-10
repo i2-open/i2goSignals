@@ -86,16 +86,6 @@ func (c *revocationCache) get(jti string) (bool, bool) {
 	return entry.revoked, true
 }
 
-// put records a decision. revokedAt is the token's stored revoked_at, and it
-// shortens the entry when it names a FUTURE instant: the cached "not revoked"
-// then lapses exactly when the grace window does (ADR 0022 §2) instead of
-// running the full TTL past it. A zero or past revoked_at imposes no such cap —
-// a past one is already the reason the decision is `true`, which cannot become
-// stale in the other direction.
-func (c *revocationCache) put(jti string, revoked bool, revokedAt time.Time) {
-	c.putIfCurrent(jti, revoked, revokedAt, c.generation())
-}
-
 // generation reads the current invalidation counter. Callers capture it BEFORE
 // the store read whose result they intend to cache.
 func (c *revocationCache) generation() uint64 {
@@ -109,7 +99,16 @@ func (c *revocationCache) generation() uint64 {
 
 // putIfCurrent records a decision unless the cache was invalidated after gen
 // was captured, in which case the decision is dropped and the next caller
-// re-reads the store.
+// re-reads the store. It is the only writer: a put that sampled gen itself
+// would sample it AFTER the caller's store read, reopening exactly the
+// straddle the counter exists to close.
+//
+// revokedAt is the token's stored revoked_at, and it shortens the entry when it
+// names a FUTURE instant: the cached "not revoked" then lapses exactly when the
+// grace window does (ADR 0022 §2) instead of running the full TTL past it. A
+// zero or past revoked_at imposes no such cap — a past one is already the
+// reason the decision is `true`, which cannot become stale in the other
+// direction.
 func (c *revocationCache) putIfCurrent(jti string, revoked bool, revokedAt time.Time, gen uint64) {
 	if c == nil || jti == "" {
 		return

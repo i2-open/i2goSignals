@@ -437,7 +437,10 @@ func (d *EventDAOMongo) RetractPending(ctx context.Context, jtis []string, strea
 		if res.Err() == nil || errors.Is(res.Err(), mongo.ErrNoDocuments) {
 			continue
 		}
-		eLog.Error("Error retracting pending event", "jti", jti, "error", res.Err())
+		// Warn, not Error: the caller (router commit) logs this at ERROR with
+		// the stream and delivery mode attached. This is the low-level detail
+		// under that one signal, not a second one.
+		eLog.Warn("Error retracting pending event", "jti", jti, "error", res.Err())
 		return res.Err()
 	}
 	return nil
