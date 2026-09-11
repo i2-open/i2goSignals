@@ -258,9 +258,14 @@ func applyRemovalGraceOverride(streamRec *model.StreamStateRecord, requested int
 
 // validateEventSource enforces the ADR 0004 event_source.type rules against a
 // transmitter stream's resolved configuration (issue #117). It is a pure shape
-// check that mutates no state, and is a no-op for a nil descriptor or for the
-// silent-AUDIENCE default (empty type with no source_stream_ids), so pre-
-// existing streams keep working with no error and no warning. R4's WARN-and-
+// check that mutates no state, and is a no-op for a nil descriptor or for an
+// empty type carrying no source_stream_ids, so pre-existing streams keep
+// working with no error and no warning. Both of those resolve to DIRECT at the
+// matcher (effectiveEventSourceType, issue #199), and DIRECT is the branch that
+// keeps the historical iss/aud/event-type filter — so "pre-existing streams are
+// undisturbed" and "unset means DIRECT" are the same statement. Do not read
+// AUDIENCE as the compatible default: it is the branch that *drops* the aud
+// filter, treating aud as a routing handle instead. R4's WARN-and-
 // drop for receiver streams is handled by applyEventSource before this runs, so
 // a receiver stream never reaches this validation with a non-nil EventSource.
 func validateEventSource(es *model.EventSource, mode string) error {
@@ -275,8 +280,8 @@ func validateEventSource(es *model.EventSource, mode string) error {
 		return nil
 	}
 	// R3: source_stream_ids is only meaningful for EXPLICIT. Every non-EXPLICIT
-	// type — DIRECT, AUDIENCE, and the unset/empty silent-AUDIENCE default —
-	// must leave it empty.
+	// type — DIRECT, AUDIENCE, and the unset/empty default, which the matcher
+	// resolves to DIRECT — must leave it empty.
 	if len(es.SourceStreamIds) > 0 {
 		return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
 	}
