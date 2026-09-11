@@ -182,7 +182,7 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 
 	dbUrl := "memorydb:"
 	if os.Getenv("TEST_MONGO_CLUSTER") != "" {
-		// MONGO_URL is set by CI (single-node mongo:7); local devs running the
+		// MONGO_URL is set by CI (single-node mongo:8.0.13); local devs running the
 		// docker-compose cluster fall back to TestDbUrl.
 		if u := os.Getenv("MONGO_URL"); u != "" {
 			dbUrl = u

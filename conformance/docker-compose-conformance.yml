@@ -20,7 +20,7 @@ networks:
 
 services:
   mongo:
-    image: mongo:6.0.13
+    image: mongo:8.0.13
     container_name: ssfconf-mongo
     networks: [ssfconf]
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -33,7 +33,7 @@ services:
       retries: 5
 
   mongo-init:
-    image: mongo:6.0.13
+    image: mongo:8.0.13
     container_name: ssfconf-mongo-init
     networks: [ssfconf]
     restart: "no"
