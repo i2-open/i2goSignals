@@ -57,7 +57,9 @@ func TestPersistence(t *testing.T) {
 	// Verify state reloaded
 	streams := provider2.streamService.ListStreams(context.Background())
 	assert.Len(t, streams, 1)
-	assert.Equal(t, streamID, streams[0].Id)
+	// ListStreams returns full StreamStateRecords (#300), whose own Id is the
+	// Mongo object id — the SSF stream_id is the embedded configuration's.
+	assert.Equal(t, streamID, streams[0].StreamConfiguration.Id)
 
 	eventRec2 := provider2.eventService.GetEventRecord(context.Background(), eventRec.Jti)
 	assert.NotNil(t, eventRec2)
