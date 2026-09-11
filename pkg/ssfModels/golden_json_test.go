@@ -190,6 +190,7 @@ func goldenCases() []goldenCase {
 		PairId:               "pair-golden-1",
 		InboundStatus:        "enabled",
 		InboundErrorMsg:      "",
+		InboundEventSource:   &EventSource{Type: EventSourceAudience},
 		JwksReadiness:        &JwksReadiness{State: JwksReadinessReady},
 		InboundJwksReadiness: &JwksReadiness{State: JwksReadinessUnresolved, LastError: "dial tcp", NextRetryAt: goldenPtr(goldenTime2)},
 	}

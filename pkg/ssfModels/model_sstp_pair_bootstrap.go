@@ -70,7 +70,8 @@ type SstpPairBootstrap struct {
 // SstpDirection holds the per-direction business-plane inputs of an SSTP pair
 // bootstrap. iss/aud ride the business plane (Q27, Q29); events are accepted
 // loosely per half (no URI-registry check, empty allowed); mode maps to the
-// existing RouteMode semantics via SstpModeToRouteMode.
+// existing RouteMode semantics via SstpModeToRouteMode; event_source answers the
+// other ADR 0004 axis for this half alone (issue #296).
 type SstpDirection struct {
 	// Iss is the issuer asserted for this direction. Non-empty. A JWT
 	// StringOrURI (RFC 7519 s4.1.1), so a URI by convention but not by rule —
@@ -91,6 +92,21 @@ type SstpDirection struct {
 	// Mode is one of SstpModeForward, SstpModePublish, SstpModeImport, mapped to
 	// the existing RouteMode by SstpModeToRouteMode.
 	Mode string `json:"mode,omitempty"`
+
+	// EventSource says where THIS direction's events come from — the second of
+	// the two orthogonal axes ADR 0004 defines, Mode above being the first. Mode
+	// answers whether the direction re-signs; EventSource answers what it
+	// carries. The two halves of a pair are independent logical streams, so each
+	// one answers both questions for itself (issue #296).
+	//
+	// Nil preserves the behaviour from before the field existed: the leg falls
+	// through effectiveEventSourceType to the DIRECT default.
+	//
+	// Where a direction's descriptor lands on the record: the primary's becomes
+	// StreamStateRecord.EventSource, which is the one MatchesStream consults when
+	// deciding what this pair transmits; the inbound's becomes
+	// StreamStateRecord.InboundEventSource. See buildSstpRecord.
+	EventSource *EventSource `json:"event_source,omitempty"`
 }
 
 const (

@@ -201,8 +201,10 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
 
 - **The routing selector is `EventSource`** — not `RemoteStreamId`, which is
   the *protocol pairing pointer* connecting stream halves for delete-cascade.
-  `AUDIENCE` selects by `aud`; `EXPLICIT` selects by
-  `event.Sid ∈ SourceStreamIds`; `DIRECT` is not fanned in.
+  `EXPLICIT` selects by `event.Sid ∈ SourceStreamIds`; `DIRECT` (which is
+  also where unset resolves, issue #199) keeps the full `iss`/`aud`/event-type
+  filter; `AUDIENCE` drops the `aud` filter, the stream's own `aud` being a
+  routing handle. See **Event source** below.
 - **`iss` is a selection constraint only in Forward mode.** A forwarded SET
   keeps its original signature, so its `iss` must match what the downstream
   validates against. In **Publish mode goSignals re-signs under its own
@@ -549,14 +551,19 @@ discovery metadata, and (b) an unambiguous relay target — see
 ### Event source
 
 How a transmitter stream selects the events it sends. A new axis,
-distinct from `RouteMode` (IM/FW/PB):
+distinct from `RouteMode` (IM/FW/PB). An unset source resolves to
+**Direct** (issue #199), the branch that keeps the historical filter
+— not to Audience-routed, which drops half of it:
 
-- **Direct** — no routed source; events arrive in Mongo by other
-  means (e.g. direct POST). Relay is impossible → `LOCAL` only.
-- **Audience-routed** — events matched in by `iss`/`aud`/event-type
-  (the current behavior). For relay, the feeding receiver stream is
-  found by matching the transmitter stream's `iss` to a receiver
-  stream's `iss`.
+- **Direct** — the operator's declaration that there is no routed
+  SSF source; events arrive in Mongo by other means (e.g. direct
+  POST), so relay is impossible → `LOCAL` only. At the matcher this
+  is the branch applying the full `iss`/`aud`/event-type filter.
+- **Audience-routed** — the stream's own `aud` is a routing handle
+  rather than a value the event must carry, so the matcher **drops**
+  the `aud` filter and keeps `iss` and event type. For relay, the
+  feeding receiver stream is found by matching the transmitter
+  stream's `iss` to a receiver stream's `iss`.
 - **Explicit (SID) source** — the transmitter stream names the
   specific source stream SID(s) it forwards/republishes from.
 

@@ -23,11 +23,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+var sstpLog = logger.Sub("SSTP")
+
 // insecureSstpHttpEnabled reports whether plain-http SSTP EndpointUrls are
 // permitted. Controlled by the I2SIG_INSECURE_SSTP_HTTP env var (default false,
 // PRD #154 Q28). Read per-call so tests can flip it with t.Setenv.
-var sstpLog = logger.Sub("SSTP")
-
 func insecureSstpHttpEnabled() bool {
 	return strings.EqualFold(os.Getenv("I2SIG_INSECURE_SSTP_HTTP"), "true")
 }
@@ -96,6 +96,41 @@ func validateSstpDirection(name string, d model.SstpDirection) error {
 	if err := model.ValidateEventPatterns(d.Events); err != nil {
 		return fmt.Errorf("invalid %s.events: %v", name, err)
 	}
+	if err := validateSstpDirectionEventSource(name, d.EventSource); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateSstpDirectionEventSource applies the ADR 0004 event_source rules to
+// one direction of a bootstrap (issue #296). A nil descriptor is the pre-#296
+// shape and passes.
+//
+// The two shared rules — EXPLICIT must name at least one source stream, and
+// source_stream_ids is meaningless on anything else — are validateEventSource's,
+// called rather than restated so a pair can never build a direction that the
+// push and poll paths would refuse. Its subject-filter-mode argument is empty
+// because a bootstrap carries no subject_filter_mode for a DIRECT leg to
+// conflict with, so that rule does not arise here.
+//
+// The unknown-type rejection is this validator's own. validateEventSource
+// tolerates an unrecognized type and effectiveEventSourceType then routes it as
+// DIRECT; loosening or tightening that for push and poll is not this change's
+// business. A pair bootstrap has no such history, so a mistyped type is refused
+// at the door instead of silently becoming DIRECT.
+func validateSstpDirectionEventSource(name string, es *model.EventSource) error {
+	if es == nil {
+		return nil
+	}
+	switch es.Type {
+	case "", model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit:
+	default:
+		return fmt.Errorf("%s: invalid event_source.type %q: must be one of %s, %s, %s",
+			name, es.Type, model.EventSourceDirect, model.EventSourceAudience, model.EventSourceExplicit)
+	}
+	if err := validateEventSource(es, ""); err != nil {
+		return fmt.Errorf("%s: %v", name, err)
+	}
 	return nil
 }
 
@@ -109,10 +144,17 @@ func requireNonEmpty(field, value string) error {
 	return nil
 }
 
-// isUriShaped reports whether value is already an absolute URI. Per RFC 7519 s2
-// a StringOrURI containing a colon MUST be a URI, so this asks whether the
-// value IS one, not whether it is allowed to be.
+// isUriShaped reports whether value is already an absolute URI: it parses, it
+// carries a scheme, and it holds none of the space or control characters RFC
+// 3986 forbids anywhere in a URI. That last check has to be explicit because
+// url.Parse tolerates them in an opaque part — "a:b c" parses with scheme "a"
+// — and a value that colonises but does not parse cleanly is exactly the one
+// worth warning about. Per RFC 7519 s2 a StringOrURI containing a colon MUST be
+// a URI, so this asks whether the value IS one, not whether it is allowed to be.
 func isUriShaped(value string) bool {
+	if strings.ContainsFunc(value, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return false
+	}
 	u, err := url.Parse(value)
 	return err == nil && u.Scheme != ""
 }
@@ -264,9 +306,20 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 // PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
 //
 // Immutable (rejected with a 4xx-shaped error): SstpMethod.Role, an already-set
-// EndpointUrl/PeerPairId, and all IDs. UPDATE never re-triggers the peer cascade
+// EndpointUrl/PeerPairId, either direction's event_source descriptor, and all
+// IDs. UPDATE never re-triggers the peer cascade
 // — delete-and-recreate is the path for that (Q35a).
 func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	// Both event_source descriptors are immutable on a pair (issue #296).
+	// Changing one would have to be mirrored to the peer for the two halves to
+	// keep agreeing about where each direction's events come from, and this path
+	// has no cascade. Refused rather than dropped, so an operator learns the
+	// patch did nothing instead of believing it landed; recreate the pair to
+	// change it.
+	if patch.EventSource != nil || patch.InboundEventSource != nil {
+		return nil, errors.New("invalid patch: sstp event_source is immutable")
+	}
+
 	if patch.SstpMethod != nil {
 		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
 			return nil, errors.New("invalid patch: sstp role is immutable")
@@ -556,6 +609,14 @@ func resolveSstpDirectionEvents(pairId, direction string, requested, supported [
 // PairId), preserving the existing aliasing invariant; the inbound side uses the
 // caller-provided inboundSid so the SID the pair bearer authorizes and the SID
 // persisted on SstpInbound are the same value (finding #7).
+//
+// It does not go through applyEventSource, the shared push/poll helper that drops
+// a descriptor with a WARN on a receiver stream. That helper is keyed on
+// IsReceiver(), which reads the primary Delivery method and so is false for a
+// pair (its marker is DeliverySstp, neither ReceivePush nor ReceivePoll) — and
+// the SSTP create and update paths are separate branches that never call it. So a
+// pair keeps both of its descriptors, which is the intended answer for a record
+// that is transmitter and receiver at once (issue #296).
 func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
 	now := time.Now()
 
@@ -619,6 +680,16 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		ModifiedAt:    now,
 		Status:        model.StreamStateEnabled,
 		InboundStatus: model.StreamStateEnabled,
+
+		// Each direction's ADR 0004 descriptor lands on the half it describes
+		// (issue #296). The primary's is the record-level EventSource, which is
+		// what MatchesStream reads when deciding what this pair transmits; the
+		// inbound's is the InboundEventSource twin, which this node stores and
+		// mirrors but never routes on, because the transmitting end of that
+		// logical stream is the peer. DeepCopy so the stored record does not
+		// alias the caller's request body.
+		EventSource:        b.Primary.EventSource.DeepCopy(),
+		InboundEventSource: b.Inbound.EventSource.DeepCopy(),
 	}
 }
 
@@ -682,6 +753,13 @@ func (s *StreamService) cascadeSstpPeer(ctx context.Context, rec *model.StreamSt
 // role and the two directions swapped, so the peer's outbound is this node's
 // inbound. The peer's responder will derive its own EndpointUrl and mint its own
 // bearer; an initiator-bound mirror carries this responder's endpoint+bearer.
+//
+// The swap is whole-struct, so a per-direction event_source (issue #296) crosses
+// with the direction that owns it and needs no handling of its own here. That is
+// the point of the descriptor being a field of SstpDirection: this node's inbound
+// event_source is exactly what the peer's primary should route on, and the swap
+// puts it there. Keep the swap struct-level if this function is ever rewritten —
+// copying fields individually would silently drop it.
 func mirrorSstpBootstrap(rec *model.StreamStateRecord, b model.SstpPairBootstrap) model.SstpPairBootstrap {
 	mirror := model.SstpPairBootstrap{
 		Description: b.Description,

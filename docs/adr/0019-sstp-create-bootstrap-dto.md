@@ -147,3 +147,35 @@ patched later via UPDATE (slice #162).
 - ADR 0011 — environment-variable taxonomy; `I2SIG_INSECURE_SSTP_HTTP` follows it.
 - `pkg/ssfModels/model_sstp_pair_bootstrap.go`,
   `internal/services/stream_service_sstp.go`, draft-hunt-secevent-sstp-00.
+
+## Update (2026-09-10): per-direction `event_source`, and iss/aud are StringOrURI
+
+Two amendments, both landed together because both touch `SstpDirection` and
+`validateSstpDirection`.
+
+**A per-direction `event_source` joins the DTO (issue #296).** The Decision's
+per-direction field list gains `event_source` alongside `iss`, `iss_jwks_url`,
+`aud`, `events` and `mode`. It is the second ADR 0004 axis and is independent of
+`mode`: `mode` says whether a direction re-signs, `event_source.type`
+(`DIRECT | AUDIENCE | EXPLICIT`) says where its events come from. It sits per
+direction because the two halves of a pair are two independent logical streams,
+so a pair can be `FORWARD` + `EXPLICIT` outbound and `PUBLISH` + `AUDIENCE`
+inbound. An absent `event_source` routes that leg as `DIRECT`, which is what
+every SSTP direction did before the field existed, so existing pairs are
+undisturbed.
+
+The two descriptors are stored on the halves they describe: the primary's on the
+record-level `StreamStateRecord.EventSource`, the inbound's on a new
+`InboundEventSource` twin that follows the `InboundStatus` / `InboundErrorMsg`
+convention of ADR 0018. This node routes only on the primary one; the inbound
+descriptor is mirrored to the peer by `mirrorSstpBootstrap`, where it becomes
+that peer's primary and is live.
+
+**The `iss`/`aud` URI-shape rule is withdrawn (a reversal of the bullet above).**
+Both are JWT `StringOrURI` values (RFC 7519 §2, §4.1.1, §4.1.3), which are URIs
+only when they contain a colon and are otherwise any string. Requiring URI shape
+refused legal deployments — most clearly a `FORWARD` direction, which carries the
+issuer its upstream asserts rather than one this server chose. Presence is still
+required. A non-URI value is now accepted with a WARN naming the field and the
+value, so an interop failure against a strict SSF peer is diagnosable from this
+server's own output rather than only from the peer's refusal.

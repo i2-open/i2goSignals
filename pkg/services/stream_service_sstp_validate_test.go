@@ -36,6 +36,11 @@ func TestValidateSstpDirectionAcceptsNonUriIssAndAud(t *testing.T) {
 			Aud:  []string{"https://beta.example.com"},
 			Mode: model.SstpModePublish,
 		}},
+		{"colonised but malformed issuer is warned, not refused", model.SstpDirection{
+			Iss:  "a:b c",
+			Aud:  []string{"https://beta.example.com"},
+			Mode: model.SstpModeForward,
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,7 +92,11 @@ func TestIsUriShaped(t *testing.T) {
 			t.Errorf("%q should be URI-shaped", v)
 		}
 	}
-	plain := []string{"alpha", "cluster.scim.example.com", "a b", ""}
+	// The last two colonise, so RFC 7519 s2 says they MUST be URIs and they are
+	// not. url.Parse alone reports "a:b c" as scheme "a", so without the explicit
+	// character check the values likeliest to break a strict SSF peer would be
+	// the ones that passed unwarned.
+	plain := []string{"alpha", "cluster.scim.example.com", "a b", "", "a:b c", "%zz:bad"}
 	for _, v := range plain {
 		if isUriShaped(v) {
 			t.Errorf("%q should not be URI-shaped", v)

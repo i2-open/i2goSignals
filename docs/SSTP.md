@@ -79,7 +79,10 @@ Fields:
 - **Pair-level**: `role`, `endpoint_url`, `authorization_header`,
   `peer_server_alias`, `peer_pair_id`, `description`.
 - **Per direction** (`primary` = transmit, `inbound` = receive): `iss`,
-  `iss_jwks_url`, `aud`, `events`, `mode`.
+  `iss_jwks_url`, `aud`, `events`, `mode`, `event_source`. `mode` and
+  `event_source.type` are the two independent ADR 0004 axes — whether the
+  direction re-signs, and where its events come from — and each half answers both
+  for itself (#296). An absent `event_source` routes that leg as `DIRECT`.
 
 `StreamService.CreateSstpPair` validates and expands the bootstrap:
 
@@ -94,9 +97,23 @@ Fields:
 - `EndpointUrl` is validated **syntactically only** — scheme `https` (or `http`
   when `I2SIG_INSECURE_SSTP_HTTP=true`), non-empty host, no query/fragment. No
   network probe; reachability is the runner's concern (matching push/poll).
-- Each half needs a non-empty URI-shaped `iss` and `aud` and a recognized
-  `mode`. **No reciprocity is enforced between halves**, so asymmetric/multi-hop
-  pairs are first-class.
+- Each half needs a non-empty `iss` and `aud` and a recognized `mode`. Both are
+  JWT `StringOrURI` values (RFC 7519 §2), so a bare hostname is legal: a non-URI
+  value is accepted with a WARN rather than refused, because the SSF profile's
+  use of URIs is a convention and a strict peer refusing it is an interop fact
+  worth logging, not a create-time rule. A present `event_source` must carry a
+  recognized `type`, and must name at least one `source_stream_ids` entry under
+  `EXPLICIT` — the rules `validateEventSource` already applies to push and poll,
+  so a pair cannot build a direction those two would refuse. **No reciprocity is
+  enforced between halves**, so asymmetric/multi-hop pairs are first-class.
+- The two `event_source` descriptors are stored on the halves they describe: the
+  primary's on the record-level `StreamStateRecord.EventSource`, which is what
+  `MatchesStream` reads when deciding what the pair transmits, and the inbound's
+  on the `InboundEventSource` twin, following the
+  `InboundStatus`/`InboundErrorMsg` convention. This node never routes on the
+  inbound one — the transmitting end of that logical stream is the peer, and
+  `mirrorSstpBootstrap` delivers the same descriptor there as the peer's primary,
+  where it is live.
 - `Status`/`InboundStatus` are always `Enabled` at create — the runner
   self-pauses on first failure. There is **no "pending" state**.
 
