@@ -360,10 +360,15 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverr
 // TestReviewSurfacesEffectiveEventSourceAndGrace verifies that when a stream
 // carries Go zero-values — EventSource==nil and SubjectRemovalGraceSeconds==0 —
 // the admin review response still ALWAYS carries both fields on the wire (GH
-// #118): event_source resolves to the effective {"type":"AUDIENCE"} default and
+// #118): event_source resolves to the effective {"type":"DIRECT"} default and
 // subject_removal_grace_seconds is present as an explicit integer (the
 // configured I2SIG_SUBJECT_REMOVAL_GRACE default). goSignalsAdmin's Subjects
 // overview relies on these columns never being silently omitted.
+//
+// The effective type is DIRECT because that is what the router resolves an unset
+// descriptor to (effectiveEventSourceType, GH #199), per ADR 0004's update of
+// 2026-09-10; the review must not report the opposite of what delivery does (GH
+// #299). #118's key-presence guarantee is a separate decision and is unchanged.
 func (suite *SubjectFilterReviewSuite) TestReviewSurfacesEffectiveEventSourceAndGrace() {
 	t := suite.T()
 	t.Setenv("I2SIG_SUBJECT_REMOVAL_GRACE", "45")
@@ -399,8 +404,8 @@ func (suite *SubjectFilterReviewSuite) TestReviewSurfacesEffectiveEventSourceAnd
 	require.True(t, esPresent, "event_source key must always be present: %s", string(raw))
 	var es model.EventSource
 	require.NoError(t, json.Unmarshal(esRaw, &es))
-	assert.Equal(t, model.EventSourceAudience, es.Type,
-		"nil stream EventSource must resolve to effective AUDIENCE")
+	assert.Equal(t, model.EventSourceDirect, es.Type,
+		"nil stream EventSource must resolve to effective DIRECT, matching the router's effectiveEventSourceType")
 
 	graceRaw, gracePresent := wire["subject_removal_grace_seconds"]
 	require.True(t, gracePresent, "subject_removal_grace_seconds key must always be present: %s", string(raw))
