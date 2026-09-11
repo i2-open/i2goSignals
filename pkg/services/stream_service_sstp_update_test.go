@@ -189,3 +189,49 @@ func TestUpdateSstpPair_IDsAreImmutable(t *testing.T) {
 	// The legitimate Iss patch still applied.
 	assert.Equal(t, "https://still-patches.example", got.StreamConfiguration.Iss)
 }
+
+// TestUpdateSstpPair_EventSourceIsImmutable: neither direction's event_source
+// descriptor can be patched. A change would have to reach the peer for the two
+// halves to keep agreeing about where each direction's events come from, and
+// UPDATE has no cascade, so the patch is refused rather than silently dropped
+// and the stored descriptors are untouched. (issue #296)
+func TestUpdateSstpPair_EventSourceIsImmutable(t *testing.T) {
+	boot := responderBootstrap()
+	boot.Primary.EventSource = &model.EventSource{
+		Type:            model.EventSourceExplicit,
+		SourceStreamIds: []string{"upstream-sid"},
+	}
+	boot.Inbound.EventSource = &model.EventSource{Type: model.EventSourceAudience}
+
+	svc, _ := sstpFixture(t)
+	rec, err := svc.CreateSstpPair(context.Background(), boot, "proj-1", nil)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		patch model.StreamStateRecord
+	}{
+		{
+			name:  "primary",
+			patch: model.StreamStateRecord{EventSource: &model.EventSource{Type: model.EventSourceDirect}},
+		},
+		{
+			name:  "inbound",
+			patch: model.StreamStateRecord{InboundEventSource: &model.EventSource{Type: model.EventSourceDirect}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.UpdateStream(context.Background(), rec.PairId, "proj-1", tc.patch)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "event_source")
+		})
+	}
+
+	got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
+	require.NoError(t, err)
+	require.NotNil(t, got.EventSource)
+	assert.Equal(t, model.EventSourceExplicit, got.EventSource.Type, "primary descriptor must be unchanged")
+	assert.Equal(t, []string{"upstream-sid"}, got.EventSource.SourceStreamIds)
+	require.NotNil(t, got.InboundEventSource)
+	assert.Equal(t, model.EventSourceAudience, got.InboundEventSource.Type, "inbound descriptor must be unchanged")
+}

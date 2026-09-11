@@ -23,11 +23,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+var sstpLog = logger.Sub("SSTP")
+
 // insecureSstpHttpEnabled reports whether plain-http SSTP EndpointUrls are
 // permitted. Controlled by the I2SIG_INSECURE_SSTP_HTTP env var (default false,
 // PRD #154 Q28). Read per-call so tests can flip it with t.Setenv.
-var sstpLog = logger.Sub("SSTP")
-
 func insecureSstpHttpEnabled() bool {
 	return strings.EqualFold(os.Getenv("I2SIG_INSECURE_SSTP_HTTP"), "true")
 }
@@ -144,10 +144,17 @@ func requireNonEmpty(field, value string) error {
 	return nil
 }
 
-// isUriShaped reports whether value is already an absolute URI. Per RFC 7519 s2
-// a StringOrURI containing a colon MUST be a URI, so this asks whether the
-// value IS one, not whether it is allowed to be.
+// isUriShaped reports whether value is already an absolute URI: it parses, it
+// carries a scheme, and it holds none of the space or control characters RFC
+// 3986 forbids anywhere in a URI. That last check has to be explicit because
+// url.Parse tolerates them in an opaque part — "a:b c" parses with scheme "a"
+// — and a value that colonises but does not parse cleanly is exactly the one
+// worth warning about. Per RFC 7519 s2 a StringOrURI containing a colon MUST be
+// a URI, so this asks whether the value IS one, not whether it is allowed to be.
 func isUriShaped(value string) bool {
+	if strings.ContainsFunc(value, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return false
+	}
 	u, err := url.Parse(value)
 	return err == nil && u.Scheme != ""
 }
@@ -299,9 +306,20 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 // PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
 //
 // Immutable (rejected with a 4xx-shaped error): SstpMethod.Role, an already-set
-// EndpointUrl/PeerPairId, and all IDs. UPDATE never re-triggers the peer cascade
+// EndpointUrl/PeerPairId, either direction's event_source descriptor, and all
+// IDs. UPDATE never re-triggers the peer cascade
 // — delete-and-recreate is the path for that (Q35a).
 func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
+	// Both event_source descriptors are immutable on a pair (issue #296).
+	// Changing one would have to be mirrored to the peer for the two halves to
+	// keep agreeing about where each direction's events come from, and this path
+	// has no cascade. Refused rather than dropped, so an operator learns the
+	// patch did nothing instead of believing it landed; recreate the pair to
+	// change it.
+	if patch.EventSource != nil || patch.InboundEventSource != nil {
+		return nil, errors.New("invalid patch: sstp event_source is immutable")
+	}
+
 	if patch.SstpMethod != nil {
 		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
 			return nil, errors.New("invalid patch: sstp role is immutable")
