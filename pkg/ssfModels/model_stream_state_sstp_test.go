@@ -245,3 +245,39 @@ func TestSstpMethod_PeerServerAlias_OmitEmpty(t *testing.T) {
 		t.Errorf("peer_server_alias should be omitempty when unset, got %s", raw)
 	}
 }
+
+// TestStreamStateRecord_DirectionStatus pins the per-direction status selection
+// (Q41) that GET /status reports and POST /status compares against (#303): the
+// rx-side SID of a pair names the inbound half, every other SID names the
+// primary (outbound) half, and a record that is not a pair has only that one.
+func TestStreamStateRecord_DirectionStatus(t *testing.T) {
+	pair := newSstpPairRecord()
+	pair.Status = StreamStateDisable
+	pair.ErrorMsg = "operator stop"
+
+	plain := &StreamStateRecord{
+		StreamConfiguration: StreamConfiguration{Id: "plain-sid"},
+		Status:              StreamStatePause,
+		ErrorMsg:            "maintenance",
+	}
+
+	tests := []struct {
+		name string
+		rec  *StreamStateRecord
+		sid  string
+		want StreamStatus
+	}{
+		{"pair inbound SID reports the inbound half", pair, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "peer unreachable"}},
+		{"pair outbound SID reports the outbound half", pair, "tx-sid-1", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"pair wire SID reports the outbound half", pair, "pair-abc123", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"non-pair record reports its only half", plain, "plain-sid", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+		{"non-pair record ignores an unrelated SID", plain, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.DirectionStatus(tt.sid); got != tt.want {
+				t.Errorf("DirectionStatus(%q) = %+v, want %+v", tt.sid, got, tt.want)
+			}
+		})
+	}
+}

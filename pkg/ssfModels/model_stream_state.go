@@ -363,6 +363,23 @@ func (ss *StreamStateRecord) HasOutbound() bool {
 	return ss.IsTransmitter()
 }
 
+// DirectionStatus returns the status and reason of the direction sid names.
+// On an SSTP pair the rx-side SID (SstpInbound.Id) names the inbound half,
+// InboundStatus/InboundErrorMsg; every other SID names the primary (outbound)
+// half, Status/ErrorMsg (Q41). A record that is not a pair has only the primary
+// half, so it always reports Status/ErrorMsg.
+//
+// It is the single home of that selection for status READS: GET /status
+// reports it and POST /status compares a request against it (#303), so the two
+// cannot disagree about which half a SID names. Writes route through the
+// services layer's applyStreamStatusToRecord, which follows the same rule.
+func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
+	if ss.SstpInbound != nil && sid == ss.SstpInbound.Id {
+		return StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg}
+	}
+	return StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}
+}
+
 func (ss *StreamStateRecord) HasTxServer() bool {
 	if ss.TxAlias != nil && *ss.TxAlias != "" {
 		return true

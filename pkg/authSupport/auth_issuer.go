@@ -720,6 +720,31 @@ func peekKid(tokenString string) string {
 	return ""
 }
 
+// tokenStreamFallback resolves the stream an authorized request acts on, which
+// becomes AuthContext.StreamId (#303). The stream the request names — the
+// stream_id query parameter, then the mux path var — always wins: an
+// administrator holds a broad-scope token and names the target. When the
+// request names none, a stream client's limited-scope token that binds exactly
+// one stream supplies it, so the client reaches its own stream without having
+// to repeat what its token already says.
+//
+// The fallback never widens authorization. It only ever yields the token's own
+// single binding, which the token is by construction authorized for; a
+// broad-scope token (empty StreamIds), a token binding several streams (an SSTP
+// pair bearer carries tx and rx SIDs) and the StreamAny wildcard name no one
+// stream, so they leave StreamId empty and handlers that need a stream still
+// refuse the request. Bootstrap and OAuth/STS contexts carry no stream binding
+// and never reach this.
+func tokenStreamFallback(streamRequested string, tkn *EventAuthToken) string {
+	if streamRequested != "" || tkn == nil || len(tkn.StreamIds) != 1 {
+		return streamRequested
+	}
+	if bound := tkn.StreamIds[0]; !strings.EqualFold(bound, StreamAny) {
+		return bound
+	}
+	return ""
+}
+
 // validateLocalToken runs the local-issuer validation path and produces a single
 // terminal log on failure. It does not fall through to OAuth — kid routing has
 // already decided this is a local token.
@@ -730,7 +755,7 @@ func (a *AuthIssuer) validateLocalToken(tokenString, streamRequested string, sco
 		return nil, http.StatusUnauthorized
 	}
 	if tkn.IsAuthorized(streamRequested, scopes) {
-		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
+		return &AuthContext{StreamId: tokenStreamFallback(streamRequested, tkn), ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
 	}
 	authLog.Warn("Local token authorization scope/stream mismatch", "streamId", streamRequested, "tokenStreams", tkn.StreamIds, "tokenRoles", tkn.Roles, "requiredScopes", scopes)
 	return nil, http.StatusForbidden

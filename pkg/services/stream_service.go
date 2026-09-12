@@ -1740,22 +1740,13 @@ func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string
 }
 
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
-	// SSTP pairs report status per direction (Q41). When streamID names the rx
-	// (inbound) side, report InboundStatus/InboundErrorMsg; when it names the tx
-	// side, report Status/ErrorMsg. findSstpPairBySID resolves either direction;
-	// non-SSTP streams fall through to the plain FindByID path below.
+	// SSTP pairs report status per direction (Q41): DirectionStatus reports
+	// InboundStatus/InboundErrorMsg when streamID names the rx (inbound) side and
+	// Status/ErrorMsg otherwise. findSstpPairBySID resolves either direction;
+	// non-SSTP streams fall through to the plain FindByID path below, where
+	// DirectionStatus always reports the one primary half.
 	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
-		if rec.SstpInbound != nil && streamID == rec.SstpInbound.Id {
-			status := model.StreamStatus{Status: rec.InboundStatus}
-			if rec.InboundErrorMsg != "" {
-				status.Reason = rec.InboundErrorMsg
-			}
-			return &status, nil
-		}
-		status := model.StreamStatus{Status: rec.Status}
-		if rec.ErrorMsg != "" {
-			status.Reason = rec.ErrorMsg
-		}
+		status := rec.DirectionStatus(streamID)
 		return &status, nil
 	}
 
@@ -1764,12 +1755,7 @@ func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.
 		return nil, err
 	}
 
-	status := model.StreamStatus{
-		Status: state.Status,
-	}
-	if state.ErrorMsg != "" {
-		status.Reason = state.ErrorMsg
-	}
+	status := state.DirectionStatus(streamID)
 	return &status, nil
 }
 

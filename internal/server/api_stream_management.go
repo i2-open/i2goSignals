@@ -896,7 +896,11 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	modified := false
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	// Resolve the SID the way GetStatus does (#303): GetStreamState is a document
+	// _id lookup, so the inbound SID of an SSTP pair 404'd here while GET /status
+	// read it. GetStreamStateBySID routes a pair by either direction and falls
+	// through to the same _id lookup for every other stream.
+	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -913,12 +917,17 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	if jsonRequest.Status != "" {
-		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
+		// Judge "no change" against the half the SID names (#303) — the inbound
+		// half when it is a pair's rx-side SID — the same selection GET /status
+		// reports. Comparing the outbound half unconditionally called an
+		// inbound-only change a no-op, and a genuine inbound no-op a change.
+		current := streamState.DirectionStatus(authCtx.StreamId)
+		if current.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, current.Reason) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
 				sa.GetStreamService().UpdateStreamStatus(r.Context(), authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
 				// Refresh streamState after update
-				updatedState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+				updatedState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 				if err == nil && updatedState != nil {
 					streamState = updatedState
 				}
