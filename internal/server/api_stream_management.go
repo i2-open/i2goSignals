@@ -88,7 +88,8 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	// When the token is bound to a specific stream it must match the request;
 	// the handler always operates on that stream (same rule as VerificationRequest).
-	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+	// A stream-bound token may also name only its own bound streams (#303).
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -764,6 +765,16 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// parameter (e.g. the OpenID conformance suite) leave authCtx.StreamId empty.
 	// Fall back to the body's stream_id in that case. Earlier SSF drafts encoded
 	// the stream id in the token, which is why authCtx.StreamId exists at all.
+	//
+	// A stream-bound token operates only on its bound streams (#303): a body
+	// stream_id outside the binding, or other than the stream the request
+	// resolved to (including via the token fallback), is refused rather than
+	// silently applied to another stream. An unbound token keeps the rule
+	// above: the parameter's stream wins over the body.
+	if !authCtx.BoundTokenPermits(jsonRequest.StreamConfiguration.Id) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	streamId := authCtx.StreamId
 	if streamId == "" {
 		streamId = jsonRequest.StreamConfiguration.Id
@@ -780,7 +791,13 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// sentinel on every read, so an UPDATE body that echoes a masked credential
 	// must NOT clobber the stored live value. Restore any sentinel-marked
 	// credential field from the stored record before the update is applied.
-	if stored, sErr := sa.GetStreamService().GetStreamState(r.Context(), streamId); sErr == nil && stored != nil {
+	//
+	// Every lookup in this handler resolves the SID the way UpdateStream does
+	// (#303): an SSTP pair's rx-side SID is not its document _id, so an _id
+	// lookup found nothing. The merge was then skipped, letting an echoed mask
+	// overwrite the pair's peer bearer, and the refresh below handed
+	// HandleReceiver a nil record.
+	if stored, sErr := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId); sErr == nil && stored != nil {
 		jsonRequest.MergeUnchangedCredentials(stored)
 	}
 
@@ -809,7 +826,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
+	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state after update", "id", streamId, "error", err)
 	}
@@ -834,15 +851,19 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
+	state, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state for event router update", "id", streamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
 		sa.GetEventRouter().RemoveStream(streamId)
 	}
-	sa.GetEventRouter().UpdateStreamState(state)
-	sa.HandleReceiver(state)
+	// The update is already stored; a failed re-read skips the refresh rather
+	// than passing HandleReceiver a nil record.
+	if state != nil {
+		sa.GetEventRouter().UpdateStreamState(state)
+		sa.HandleReceiver(state)
+	}
 
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 
@@ -896,7 +917,11 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	modified := false
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+	// Resolve the SID the way GetStatus does (#303): GetStreamState is a document
+	// _id lookup, so the inbound SID of an SSTP pair 404'd here while GET /status
+	// read it. GetStreamStateBySID routes a pair by either direction and falls
+	// through to the same _id lookup for every other stream.
+	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
 		if err.Error() == "not found" {
 			w.WriteHeader(http.StatusNotFound)
@@ -913,12 +938,16 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	if jsonRequest.Status != "" {
-		if streamState.Status != jsonRequest.Status || !strings.EqualFold(jsonRequest.Reason, streamState.ErrorMsg) {
+		// Judge "no change" against what the write would do (#303): on an SSTP
+		// pair it moves both halves whichever SID is named, so it is a change
+		// when EITHER half differs (a legacy split record heals); any other
+		// stream is judged on its one status.
+		if streamState.IsStatusChange(jsonRequest.Status, jsonRequest.Reason) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
 				sa.GetStreamService().UpdateStreamStatus(r.Context(), authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true
 				// Refresh streamState after update
-				updatedState, err := sa.GetStreamService().GetStreamState(r.Context(), authCtx.StreamId)
+				updatedState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 				if err == nil && updatedState != nil {
 					streamState = updatedState
 				}

@@ -103,6 +103,33 @@ bearer once OAuth is configured — is deferred to the bearer-rotation work in
 GH #152 (Q38); today the static `SstpMethod.AuthorizationHeader` is used when
 present.
 
+### Which stream a request acts on
+
+**Governing rule: a stream-bound token operates only on its bound streams.** A
+local token with non-empty `StreamIds` may act only on those streams, however
+the stream is named (#303):
+
+- **Parameter or path var:** `ValidateAuthorizationAny` refuses (`403`) a
+    `stream_id` query parameter or path var outside the binding.
+- **Body `stream_id`:** subject add/remove, subject-filter review, verify and
+    `PUT`/`PATCH /stream` refuse (`403`) a body stream outside the binding, or
+    other than the stream the request resolved to, so a bound token cannot
+    resolve one stream and act on another. A pair bearer may name either SID.
+- **Unbound callers** (a broad-scope token with empty `StreamIds`, the `any`
+    wildcard, OAuth/STS, bootstrap) are not confined by a binding and keep each
+    handler's own rule.
+
+`AuthContext.StreamId` is the stream the request names: the `stream_id` query
+parameter, then the path var. **For backwards compatibility**, when the request
+names none, a local token binding exactly one stream supplies it, so a stream
+requestor can, for example, check a transmitter's status without repeating its
+SID. The fallback yields only the token's own stream, so it never widens
+authorization; a pair bearer (two SIDs), the `any` wildcard and unbound callers
+get no fallback. With no parameter, a single-stream token now resolves where it
+used to get `403` at `GET`/`POST /status`, `GET /stream` (including
+rotate-on-GET) and `DELETE /stream`, and `400` at admin `GET /state`. Poll
+(`/poll/{id}`) and push (`/events/{id}`) always name the stream on the path.
+
 ### The bootstrap secret
 
 `I2SIG_BOOTSTRAP_TOKEN` is a shared secret. On the server, a bearer that

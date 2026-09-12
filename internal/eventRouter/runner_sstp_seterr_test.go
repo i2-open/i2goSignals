@@ -80,9 +80,11 @@ func TestSstpServer_RetryableSetErrHoldsOutbound(t *testing.T) {
 }
 
 // binding-revoked is stream-fatal: every subsequent send is rejected the same
-// way. Pausing the outbound direction makes that visible to an operator and keeps
-// the queue replayable, instead of acking the backlog away one cycle at a time.
-func TestSstpServer_StreamFatalSetErrPausesOutbound(t *testing.T) {
+// way. Pausing the pair makes that visible to an operator and keeps the queue
+// replayable, instead of acking the backlog away one cycle at a time. The pause
+// covers both halves, in the store and on the record the runner holds, because
+// the pair shares one HTTP exchange (#303).
+func TestSstpServer_StreamFatalSetErrPausesPair(t *testing.T) {
 	h := newSstpRunnerHarness(t)
 
 	txSid, rxSid, pairId := "sstp-tx-err-fatal", "sstp-rx-err-fatal", "pair-err-fatal"
@@ -107,4 +109,43 @@ func TestSstpServer_StreamFatalSetErrPausesOutbound(t *testing.T) {
 		"a stream the peer says is dead must stop, visibly")
 	assert.Contains(t, persisted.ErrorMsg, "stream dead",
 		"the operator needs the peer's own reason")
+	assert.Equal(t, model.StreamStatePause, persisted.InboundStatus, "the pause covers the inbound half too")
+	assert.Equal(t, persisted.ErrorMsg, persisted.InboundErrorMsg)
+	assert.Equal(t, model.StreamStatePause, resolved.InboundStatus,
+		"the runner's in-memory record must match the store")
+}
+
+// TestPauseSstpPair_PausesBothHalvesInMemoryAndClientMap: pauseSstpPair moves
+// both halves of the pair (#303) on the caller's record and in the
+// sstpClientStreams source-of-truth map the dialer's RefreshPair reads, so
+// neither copy is left with an enabled half the store no longer carries.
+func TestPauseSstpPair_PausesBothHalvesInMemoryAndClientMap(t *testing.T) {
+	h := newSstpRunnerHarness(t)
+	r := h.router
+
+	txSid, rxSid, pairId := "sstp-tx-pause-pair", "sstp-rx-pause-pair", "pair-pause-pair"
+	rec := sstpServerPairState(txSid, rxSid, pairId)
+	rec.SstpMethod.Role = model.SstpRoleInitiator
+	require.NoError(t, r.streamService.PersistStreamStateRecord(context.Background(), rec))
+	r.mu.Lock()
+	r.sstpClientStreams[pairId] = *rec
+	r.mu.Unlock()
+
+	reason := "SSTP-CLIENT: 4xx request error on pair=" + pairId
+	r.pauseSstpPair(rec, reason)
+
+	paused := model.StreamStatus{Status: model.StreamStatePause, Reason: reason}
+	assert.Equal(t, paused, model.StreamStatus{Status: rec.Status, Reason: rec.ErrorMsg}, "caller's record, outbound half")
+	assert.Equal(t, paused, model.StreamStatus{Status: rec.InboundStatus, Reason: rec.InboundErrorMsg}, "caller's record, inbound half")
+
+	r.mu.RLock()
+	mapped := r.sstpClientStreams[pairId]
+	r.mu.RUnlock()
+	assert.Equal(t, paused, model.StreamStatus{Status: mapped.Status, Reason: mapped.ErrorMsg}, "client map, outbound half")
+	assert.Equal(t, paused, model.StreamStatus{Status: mapped.InboundStatus, Reason: mapped.InboundErrorMsg}, "client map, inbound half")
+
+	stored, err := r.streamService.GetStreamStateByPairId(context.Background(), pairId)
+	require.NoError(t, err)
+	assert.Equal(t, paused, model.StreamStatus{Status: stored.Status, Reason: stored.ErrorMsg}, "store, outbound half")
+	assert.Equal(t, paused, model.StreamStatus{Status: stored.InboundStatus, Reason: stored.InboundErrorMsg}, "store, inbound half")
 }

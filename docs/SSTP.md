@@ -12,9 +12,9 @@ inbound SETs in the response.
 
 Unlike push and poll — each a single direction modelled by one
 `StreamStateRecord` — an SSTP **pair** is one bidirectional relationship. This
-doc covers the pair model, bootstrap, the peer cascade, per-direction mode and
-status semantics, and the operator runbook. The wire format and error taxonomy
-live in `pkg/goSetSstp` and the source spec.
+doc covers the pair model, bootstrap, the peer cascade, per-direction mode,
+pair status semantics, and the operator runbook. The wire format and error
+taxonomy live in `pkg/goSetSstp` and the source spec.
 
 > The focused per-direction status/verify runbook (formerly a standalone
 > rider doc) is folded into this document — see the
@@ -41,7 +41,7 @@ An SSTP pair is **one `StreamStateRecord` per node**, carrying both directions
 | **rxSid** (receive / inbound) | `SstpInbound.Id` | Its `Delivery` is a marker only (`urn:i2-open:secevent:delivery:sstp:receive`). |
 | **PairId** | `PairId` | A fresh `ObjectID` hex; the **on-wire SSF `stream_id`** and the `{id}` in `POST /sstp/{id}`. Equals txSid. |
 | Pair-scoped connectivity | `SstpMethod` | `Role`, `EndpointUrl`, `AuthorizationHeader`, `PeerPairId`. Secrets/endpoints live here, **not** in the per-direction `Delivery` objects, so SSF discovery/management responses never leak per-pair credentials. |
-| Per-direction status | `Status`/`ErrorMsg` (tx) and `InboundStatus`/`InboundErrorMsg` (rx) | The two directions report and pause **independently**. |
+| Pair status | `Status`/`ErrorMsg` (tx) and `InboundStatus`/`InboundErrorMsg` (rx) | Every status write — `enabled`, `paused`, `disabled` — moves **both** halves, because the two directions share one HTTP exchange (the same single status a push or poll stream has). |
 
 `GetType()` returns the goSignals-**internal** discriminator `DeliverySstpPair`
 whenever `SstpMethod` is set. That is *not* an SSF wire URN — the advertised URN
@@ -222,8 +222,8 @@ support"); a `WARN` is logged at create.
     (a stray ack for an unsent JTI is ignored; an empty ack list means
     "all sent SETs accepted"). Increments the outbound counter
     (`tfr=SSTP`, `stream_id=txSid`).
-  - **4xx (request error)**: **pause only the outbound direction**. Inbound keeps
-    running independently.
+  - **4xx (request error)**: **pause the pair** — both directions, since they
+    share the one HTTP exchange.
   - **5xx / transport**: exponential backoff per `POLL_RETRY_*`; **does not
     pause**.
 - **Push-while-poll-held**: when the primary long-poll cycle is held open, a
@@ -250,9 +250,9 @@ support"); a `WARN` is logged at create.
   knob). The wait does **not** honor request-context cancellation — it waits the
   full buffer timeout even if the client aborts, symmetric with the RFC 8936
   poll-transmitter handler.
-- A **paused (or disabled) direction returns 200 with `returnEvents=false`**, so
-  the cycle keeps running and resumes on unpause. A 4xx is reserved for the
-  **deleted/unknown pair** case — HTTP status is the primary error signal.
+- A **paused or disabled pair returns 200 with `returnEvents=false`**, so the
+  cycle keeps running and resumes on unpause or re-enable. A 4xx is reserved for
+  the **deleted/unknown pair** case — HTTP status is the primary error signal.
 
 ### Cluster wake-ups
 
@@ -314,26 +314,30 @@ The command prints the `PairId`, both pair SIDs, and the resolved
 `EndpointUrl`s. The issuing side plays `initiator`; the named server alias is the
 responder the bootstrap cascades to.
 
-### Status — per direction
+### Status
 
 SSTP pairs appear in the **existing flat `GET /states` listing** — there is no
 `/pairs` endpoint. Tools expand each pair record into two rows (txSid + rxSid)
 grouped client-side by `PairId`.
 
-`GET /status?stream_id=<sid>` reports exactly the direction named:
+`GET /status?stream_id=<sid>` accepts either SID of the pair:
 
 - `stream_id=<txSid>` → `Status` + `ErrorMsg` (outbound).
 - `stream_id=<rxSid>` → `InboundStatus` + `InboundErrorMsg` (inbound).
 
-The two directions report independently. (`disabled` is a pair-level lifecycle
-state and couples both directions.)
+Status writes keep the two halves equal (see below), so both SIDs report the
+same status and reason.
 
-### Pause / resume — per direction
+### Pause / resume / disable — pair-level
 
-Per-direction status writes route the same way (`UpdateStreamStatus` keyed by the
-`stream_id` you name): pausing txSid pauses **only** the outbound direction;
-inbound keeps running, and vice versa. A paused direction's `POST /sstp/{id}`
-returns 200 with `returnEvents=false` so the cycle resumes cleanly on unpause.
+`POST /status` accepts either SID too, and **every status is pair-level**:
+pausing, resuming (`enabled`), or disabling through txSid or rxSid moves both
+directions together. Pausing an SSTP pair pauses its HTTP exchange, so both
+logical streams stop — consistent with a push or poll stream, which has one
+status. A paused pair's `POST /sstp/{id}` returns 200 with
+`returnEvents=false` so the cycle resumes cleanly on unpause. A legacy record
+whose halves differ heals on its next status write. A one-way (single-direction)
+pause is not supported today.
 
 UPDATE enforces a **patchable-fields whitelist**: `Role`, an already-set
 `EndpointUrl`/`PeerPairId`, and all IDs are immutable, so a live pair can never

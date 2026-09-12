@@ -76,13 +76,12 @@ type SstpOutbound interface {
 	// caller only has JTIs (e.g. dropping a claimed-but-unresolvable JTI).
 	ReleaseJtis(pairId string, jtis []string)
 
-	// PauseOutbound pauses ONLY the outbound (client) direction of the pair
-	// by setting the record's Status to paused via the single transition
-	// point. The inbound side (InboundStatus) is owned by the SSTP-server
-	// runner and is untouched here (Q12.3). The pause is written back into
-	// the source-of-truth map so the runner's next-cycle RefreshPair
-	// observes it (Finding #9).
-	PauseOutbound(stream *model.StreamStateRecord, reason string)
+	// PausePair pauses the pair — both its outbound and inbound halves — via
+	// the single transition point. The two logical streams share one HTTP
+	// exchange, so a pause stops both, as it does a push or poll stream's one
+	// status (#303). The pause is written back into the source-of-truth map so
+	// the runner's next-cycle RefreshPair observes it (Finding #9).
+	PausePair(stream *model.StreamStateRecord, reason string)
 
 	// LoadSigningKey returns the issuer's private signing key + kid,
 	// consulting the router's issuer-key cache (or loading it once and
@@ -164,7 +163,7 @@ type SstpDialerHooks interface {
 // SstpOutbound is implemented by *router. The methods below are thin
 // facades over pre-existing router helpers (drainSstpBuffer, handleSstpAcks,
 // releaseSstpClaims, resolveSstpEventsByJti, releaseUnresolvedSstpClaims,
-// pauseSstpOutbound, refreshSstpClientStream, acquireSstpSecondPushSlot,
+// pauseSstpPair, refreshSstpClientStream, acquireSstpSecondPushSlot,
 // releaseSstpSecondPushSlot, checkAndLoadKey, claimSstpJtis) so the
 // migration preserves behavior verbatim (AC 1) while the loop itself moves
 // to internal/server.
@@ -234,8 +233,8 @@ func (r *router) ReleaseJtis(pairId string, jtis []string) {
 	r.releaseSstpClaims(pairId, jtis)
 }
 
-func (r *router) PauseOutbound(stream *model.StreamStateRecord, reason string) {
-	r.pauseSstpOutbound(stream, reason)
+func (r *router) PausePair(stream *model.StreamStateRecord, reason string) {
+	r.pauseSstpPair(stream, reason)
 }
 
 func (r *router) LoadSigningKey(streamID, issuer, alg string) (crypto.Signer, string) {
@@ -542,19 +541,17 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 	return count
 }
 
-// pauseSstpOutbound pauses ONLY the outbound (client) direction of the pair
-// by setting the record's Status to paused via the single transition point.
-// The inbound side (InboundStatus) is owned by the SSTP-server runner and is
-// untouched here (Q12.3).
-func (r *router) pauseSstpOutbound(stream *model.StreamStateRecord, reason string) {
+// pauseSstpPair pauses the pair — both halves, Status and InboundStatus — via
+// the single transition point. The pair's two logical streams share one HTTP
+// exchange, so pausing it pauses both (#303).
+func (r *router) pauseSstpPair(stream *model.StreamStateRecord, reason string) {
 	r.updateStream(stream, model.StreamStatePause, reason)
 	// Finding #9: write the pause back into the source-of-truth map so the
 	// dialer's next-cycle RefreshPair observes it (and the cycle exits)
 	// rather than reverting to the stale enabled status held in the map.
 	r.mu.Lock()
 	if rec, ok := r.sstpClientStreams[stream.PairId]; ok {
-		rec.Status = stream.Status
-		rec.ErrorMsg = stream.ErrorMsg
+		rec.SetStatus(stream.Status, stream.ErrorMsg)
 		r.sstpClientStreams[stream.PairId] = rec
 	}
 	r.mu.Unlock()

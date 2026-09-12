@@ -226,11 +226,11 @@ func (f *fakeSstpOutbound) ReleaseJtis(pairId string, jtis []string) {
 	}
 }
 
-func (f *fakeSstpOutbound) PauseOutbound(stream *model.StreamStateRecord, reason string) {
+func (f *fakeSstpOutbound) PausePair(stream *model.StreamStateRecord, reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.paused = reason
-	f.pair.Status = model.StreamStatePause
+	f.pair.SetStatus(model.StreamStatePause, reason)
 }
 
 func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer, alg string) (crypto.Signer, string) {
@@ -744,7 +744,7 @@ func TestSstpDialer_SignFailureIsError(t *testing.T) {
 	dialer.RegisterPair(pairId)
 	t.Cleanup(func() { dialer.UnregisterPair(pairId) })
 
-	// The dialer should observe the sign error, pause outbound, and exit.
+	// The dialer should observe the sign error, pause the pair, and exit.
 	// We assert on the pause reason (visible via fake.paused) — the sign
 	// error's presence in the reason string proves the sign-failure code
 	// path was hit.
@@ -753,7 +753,7 @@ func TestSstpDialer_SignFailureIsError(t *testing.T) {
 		defer fake.mu.Unlock()
 		return strings.Contains(fake.paused, "signing failure")
 	}, 3*time.Second, 20*time.Millisecond,
-		"sign failure must halt the dial cycle by pausing outbound with a signing-failure reason")
+		"sign failure must halt the dial cycle by pausing the pair with a signing-failure reason")
 
 	// AC 5: the sign error MUST short-circuit before any HTTP request.
 	// If the peer's counter is non-zero we sent an unsigned SET — which is

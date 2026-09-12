@@ -55,7 +55,8 @@ func VerificationRequestHandler(sa SsfApplicationInterface, w http.ResponseWrite
 	}
 
 	// The authorization token may already have a stream ID. If it does, it must match.
-	if authCtx.StreamId != "" && authCtx.StreamId != payload.StreamId {
+	// A stream-bound token may also name only its own bound streams (#303).
+	if !authCtx.BoundTokenPermits(payload.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != payload.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}

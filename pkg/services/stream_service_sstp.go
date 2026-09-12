@@ -505,56 +505,9 @@ func sstpPairBySID(
 	return nil
 }
 
-// applyStreamStatusToRecord writes a status change onto rec in memory. It does
-// not persist: callers that need the change durable follow it with a DAO write,
-// which on the JWKS paths has to happen with the receiver-cache lock released.
-//
-// This is the single home of the direction-routing rule (Q39, Q41): naming an
-// SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
-// side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
-// ALWAYS couples both directions regardless of which SID is named. The coupling
-// is PRD #154's decision verbatim — "Disable always couples both directions" —
-// stated with no operator-only carve-out, so a fault-driven disable (a
-// permanent JWKS failure, an ADR-0066 §D2 violation) takes the same rule as an
-// administrative one. A record that is not a pair has one direction, so it
-// always takes Status/ErrorMsg.
-//
-// "Is a pair" is EITHER signal, because findSstpPairBySID admits on either and
-// neither implies the other at this layer: its FindByID branch requires
-// GetType() == DeliverySstpPair (SstpMethod != nil) while its FindByInboundSID
-// branch matches on SstpInbound.Id with no GetType check at all. buildSstpRecord
-// always sets both, so the two coincide on every record created today — but a
-// single-signal test silently mis-routes whichever half-formed shape reaches
-// here, and the failure is fail-open in both directions: on SstpMethod alone a
-// pair would stop coupling on Disable, and on SstpInbound alone naming the rx
-// SID would write the TX leg's Status. A plain receiver has neither, so it is
-// never a pair. Only the rx-routing branch needs SstpInbound specifically,
-// because only it needs a SID to compare against.
-func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorMsg string) {
-	if rec == nil {
-		return
-	}
-	isPair := rec.GetType() == model.DeliverySstpPair || rec.SstpInbound != nil
-
-	if isPair && status == model.StreamStateDisable {
-		// Pair-level: couple both directions.
-		rec.Status = status
-		rec.ErrorMsg = errorMsg
-		rec.InboundStatus = status
-		rec.InboundErrorMsg = errorMsg
-		return
-	}
-	if isPair && rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
-		rec.InboundStatus = status
-		rec.InboundErrorMsg = errorMsg
-		return
-	}
-	rec.Status = status
-	rec.ErrorMsg = errorMsg
-}
-
-// updateSstpPairStatus applies a status change to an SSTP pair with
-// per-direction routing (Q39, Q41) and persists the result.
+// updateSstpPairStatus applies a status change to an SSTP pair and persists the
+// result. StreamStateRecord.SetStatus moves both halves whichever SID named the
+// pair (#303), so sid only steers the receiver-cache match.
 //
 // The mutation runs under s.mu so that the status fields have ONE locking story
 // across the service: the JWKS paths read and write Status/InboundStatus on a
@@ -567,7 +520,7 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 // mutex is on the inbound verification path.
 func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
 	s.mu.Lock()
-	applyStreamStatusToRecord(rec, sid, status, errorMsg)
+	rec.SetStatus(status, errorMsg)
 	// rec is DAO-bound; the receiver cache holds its own copy of the pair
 	// record under the inbound SID, and the retry machinery reads THAT copy.
 	s.applyStatusToReceiverCache(sid, status, errorMsg)

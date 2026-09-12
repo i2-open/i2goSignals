@@ -9,143 +9,119 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUpdateStreamStatus_SstpPerDirectionRouting: naming the tx-side SID writes
-// Status/ErrorMsg; naming the rx-side SID writes InboundStatus/InboundErrorMsg.
-// (Q39, Q41)
-func TestUpdateStreamStatus_SstpPerDirectionRouting(t *testing.T) {
-	t.Run("tx side writes Status", func(t *testing.T) {
-		svc, rec := createdPair(t)
-		svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStatePause, "tx throttled")
-
-		got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-		require.NoError(t, err)
-		assert.Equal(t, model.StreamStatePause, got.Status)
-		assert.Equal(t, "tx throttled", got.ErrorMsg)
-		// inbound untouched
-		assert.Equal(t, model.StreamStateEnabled, got.InboundStatus)
-		assert.Empty(t, got.InboundErrorMsg)
-	})
-
-	t.Run("rx side writes InboundStatus", func(t *testing.T) {
-		svc, rec := createdPair(t)
-		svc.UpdateStreamStatus(context.Background(), rec.SstpInbound.Id, model.StreamStatePause, "rx throttled")
-
-		got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-		require.NoError(t, err)
-		assert.Equal(t, model.StreamStatePause, got.InboundStatus)
-		assert.Equal(t, "rx throttled", got.InboundErrorMsg)
-		// tx untouched
-		assert.Equal(t, model.StreamStateEnabled, got.Status)
-		assert.Empty(t, got.ErrorMsg)
-	})
-}
-
-// TestUpdateStreamStatus_SstpPausePerDirectionLeavesOtherUnchanged: Pause on one
-// direction does not touch the other. (Q39, Q41)
-func TestUpdateStreamStatus_SstpPausePerDirectionLeavesOtherUnchanged(t *testing.T) {
-	svc, rec := createdPair(t)
-	svc.UpdateStreamStatus(context.Background(), rec.SstpInbound.Id, model.StreamStatePause, "")
-
-	got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-	require.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, got.InboundStatus)
-	assert.Equal(t, model.StreamStateEnabled, got.Status, "tx must stay enabled")
-}
-
-// TestUpdateStreamStatus_SstpDisableCouplesBothDirections: Disabled is a
-// pair-level lifecycle event — naming only the tx SID (or only the rx SID) still
-// disables BOTH directions. (Q39)
-func TestUpdateStreamStatus_SstpDisableCouplesBothDirections(t *testing.T) {
-	t.Run("named via tx SID", func(t *testing.T) {
-		svc, rec := createdPair(t)
-		svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStateDisable, "shutting down")
-
-		got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-		require.NoError(t, err)
-		assert.Equal(t, model.StreamStateDisable, got.Status)
-		assert.Equal(t, model.StreamStateDisable, got.InboundStatus)
-	})
-
-	t.Run("named via rx SID", func(t *testing.T) {
-		svc, rec := createdPair(t)
-		svc.UpdateStreamStatus(context.Background(), rec.SstpInbound.Id, model.StreamStateDisable, "shutting down")
-
-		got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-		require.NoError(t, err)
-		assert.Equal(t, model.StreamStateDisable, got.Status)
-		assert.Equal(t, model.StreamStateDisable, got.InboundStatus)
-	})
-}
-
-// TestUpdateStreamStatus_SstpEnablePerDirection: Enabled honors per-direction
-// routing — re-enable one direction without affecting the other. (Q39, Q41)
-func TestUpdateStreamStatus_SstpEnablePerDirection(t *testing.T) {
-	svc, rec := createdPair(t)
-	// Pause both, then re-enable only the tx side.
-	svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStatePause, "")
-	svc.UpdateStreamStatus(context.Background(), rec.SstpInbound.Id, model.StreamStatePause, "")
-
-	svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStateEnabled, "")
-
-	got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
-	require.NoError(t, err)
-	assert.Equal(t, model.StreamStateEnabled, got.Status)
-	assert.Equal(t, model.StreamStatePause, got.InboundStatus, "rx must stay paused")
-}
-
-// TestApplyStreamStatusToRecord_PairPredicateAcceptsEitherSignal exercises the
-// routing helper directly, on the two half-formed record shapes findSstpPairBySID
-// can admit but buildSstpRecord never produces: SstpMethod without an inbound
-// leg (its FindByID branch checks GetType only) and an inbound leg without
-// SstpMethod (its FindByInboundSID branch checks SstpInbound.Id only). Neither
-// is reachable from today's construction site, which is exactly why a
-// single-signal "is a pair" test survives the integration tests while silently
-// mis-routing here — both single-signal spellings fail open, in opposite
-// directions.
-func TestApplyStreamStatusToRecord_PairPredicateAcceptsEitherSignal(t *testing.T) {
-	const rxSid = "rx-sid"
-
-	inboundLeg := func() *model.StreamConfiguration {
-		return &model.StreamConfiguration{Id: rxSid}
+// TestUpdateStreamStatus_SstpPairCouplesBothHalves: a pair shares one HTTP
+// exchange, so every status write (enabled, paused, disabled) moves BOTH halves,
+// reason included, whichever SID names the pair — the same single status a
+// push/poll stream carries (#303). GET /status then reads the same status and
+// reason back through either SID.
+func TestUpdateStreamStatus_SstpPairCouplesBothHalves(t *testing.T) {
+	transitions := []struct{ from, to string }{
+		{model.StreamStateEnabled, model.StreamStatePause},
+		{model.StreamStateEnabled, model.StreamStateDisable},
+		{model.StreamStatePause, model.StreamStateEnabled},
+		{model.StreamStatePause, model.StreamStateDisable},
+		{model.StreamStateDisable, model.StreamStateEnabled},
+		{model.StreamStateDisable, model.StreamStatePause},
 	}
+	for _, tr := range transitions {
+		for _, side := range []string{"tx", "rx"} {
+			t.Run(tr.from+" to "+tr.to+" via "+side+" SID", func(t *testing.T) {
+				ctx := context.Background()
+				svc, rec := createdPair(t)
+				txSid, rxSid := rec.StreamConfiguration.Id, rec.SstpInbound.Id
+				// Seed both halves at the starting status through both SIDs, so the
+				// start does not depend on the rule under test.
+				if tr.from != model.StreamStateEnabled {
+					svc.UpdateStreamStatus(ctx, txSid, tr.from, "start")
+					svc.UpdateStreamStatus(ctx, rxSid, tr.from, "start")
+				}
+				sid := txSid
+				if side == "rx" {
+					sid = rxSid
+				}
 
-	t.Run("SstpMethod with no inbound leg still couples on Disable", func(t *testing.T) {
-		rec := &model.StreamStateRecord{
-			SstpMethod:    &model.SstpMethod{Role: model.SstpRoleResponder},
-			Status:        model.StreamStateEnabled,
-			InboundStatus: model.StreamStateEnabled,
+				svc.UpdateStreamStatus(ctx, sid, tr.to, "operator action")
+
+				got, err := svc.GetStreamStateByPairId(ctx, rec.PairId)
+				require.NoError(t, err)
+				want := model.StreamStatus{Status: tr.to, Reason: "operator action"}
+				assert.Equal(t, want, model.StreamStatus{Status: got.Status, Reason: got.ErrorMsg}, "outbound half")
+				assert.Equal(t, want, model.StreamStatus{Status: got.InboundStatus, Reason: got.InboundErrorMsg}, "inbound half")
+				for _, readSid := range []string{txSid, rxSid} {
+					status, err := svc.GetStatus(ctx, readSid)
+					require.NoError(t, err)
+					assert.Equal(t, want, *status, "GET /status via %s", readSid)
+				}
+			})
 		}
-		applyStreamStatusToRecord(rec, "tx-sid", model.StreamStateDisable, "gone")
+	}
+}
 
-		assert.Equal(t, model.StreamStateDisable, rec.Status)
-		assert.Equal(t, model.StreamStateDisable, rec.InboundStatus,
-			"a disable is pair-level (Q39); gating on SstpInbound alone would drop the coupling")
-		assert.Equal(t, "gone", rec.InboundErrorMsg)
-	})
+// TestUpdateStreamStatus_PairPredicateAcceptsEitherSignal drives the two
+// half-formed record shapes findSstpPairBySID can admit but buildSstpRecord
+// never produces — SstpMethod without an inbound leg (its FindByID branch
+// checks GetType only) and an inbound leg without SstpMethod (its
+// FindByInboundSID branch checks SstpInbound.Id only) — through the SID that
+// resolves each. Both must couple the halves; a plain stream has only its
+// primary half and must not gain an inbound status.
+func TestUpdateStreamStatus_PairPredicateAcceptsEitherSignal(t *testing.T) {
+	tests := []struct {
+		name     string
+		rec      *model.StreamStateRecord
+		sid      string
+		wantPair bool
+	}{
+		{
+			name: "SstpMethod with no inbound leg, named by its tx SID",
+			rec: &model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{Id: "method-only-tx"},
+				SstpMethod:          &model.SstpMethod{Role: model.SstpRoleResponder},
+				Status:              model.StreamStateEnabled,
+				InboundStatus:       model.StreamStateEnabled,
+			},
+			sid:      "method-only-tx",
+			wantPair: true,
+		},
+		{
+			name: "inbound leg with no SstpMethod, named by its rx SID",
+			rec: &model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{Id: "inbound-only-tx"},
+				SstpInbound:         &model.StreamConfiguration{Id: "inbound-only-rx"},
+				Status:              model.StreamStateEnabled,
+				InboundStatus:       model.StreamStateEnabled,
+			},
+			sid:      "inbound-only-rx",
+			wantPair: true,
+		},
+		{
+			name: "a plain stream is never a pair",
+			rec: &model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{Id: "plain-sid"},
+				Status:              model.StreamStateEnabled,
+			},
+			sid:      "plain-sid",
+			wantPair: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			svc, _ := sstpFixture(t)
+			require.NoError(t, svc.PersistStreamStateRecord(ctx, tt.rec))
 
-	t.Run("inbound leg with no SstpMethod still routes the rx SID inbound", func(t *testing.T) {
-		rec := &model.StreamStateRecord{
-			SstpInbound:   inboundLeg(),
-			Status:        model.StreamStateEnabled,
-			InboundStatus: model.StreamStateEnabled,
-		}
-		applyStreamStatusToRecord(rec, rxSid, model.StreamStatePause, "quiesced")
+			svc.UpdateStreamStatus(ctx, tt.sid, model.StreamStatePause, "quiesced")
 
-		assert.Equal(t, model.StreamStatePause, rec.InboundStatus,
-			"naming the rx SID must write the inbound leg")
-		assert.Equal(t, "quiesced", rec.InboundErrorMsg)
-		assert.Equal(t, model.StreamStateEnabled, rec.Status,
-			"gating on GetType alone would have written the TX leg instead")
-		assert.Empty(t, rec.ErrorMsg)
-	})
-
-	t.Run("a plain receiver is never a pair", func(t *testing.T) {
-		rec := &model.StreamStateRecord{Status: model.StreamStateEnabled}
-		applyStreamStatusToRecord(rec, "sid", model.StreamStateDisable, "boom")
-
-		assert.Equal(t, model.StreamStateDisable, rec.Status)
-		assert.Empty(t, rec.InboundStatus,
-			"a receiver has one direction and must not gain an inbound status")
-		assert.Empty(t, rec.InboundErrorMsg)
-	})
+			got, err := svc.GetStreamState(ctx, tt.rec.StreamConfiguration.Id)
+			require.NoError(t, err)
+			assert.Equal(t, model.StreamStatePause, got.Status)
+			assert.Equal(t, "quiesced", got.ErrorMsg)
+			if tt.wantPair {
+				assert.Equal(t, model.StreamStatePause, got.InboundStatus, "a pair couples the inbound half")
+				assert.Equal(t, "quiesced", got.InboundErrorMsg)
+				return
+			}
+			assert.Empty(t, got.InboundStatus, "a plain stream has one half and must not gain an inbound status")
+			assert.Empty(t, got.InboundErrorMsg)
+		})
+	}
 }

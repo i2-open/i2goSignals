@@ -9,41 +9,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetStatus_SstpTxSideReturnsOutboundStatus: GET /status?stream_id=<txSid>
-// returns Status+ErrorMsg for an SSTP record. (Q41)
-func TestGetStatus_SstpTxSideReturnsOutboundStatus(t *testing.T) {
-	svc, rec := createdPair(t)
-	svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStatePause, "tx throttled")
+// TestGetStatus_SstpReadsTheHalfTheSidNames: GET /status?stream_id=<txSid>
+// reports Status+ErrorMsg and stream_id=<rxSid> reports
+// InboundStatus+InboundErrorMsg. Status writes keep the two halves equal
+// (#303), so they differ only on a legacy split record — used here to tell the
+// two reads apart. Coupled read-back through both SIDs is pinned by
+// TestUpdateStreamStatus_SstpPairCouplesBothHalves.
+func TestGetStatus_SstpReadsTheHalfTheSidNames(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := sstpFixture(t)
+	rec, txSid, rxSid := newSstpPairFixture(t, "https://issuer.example/jwks.json")
+	rec.Status, rec.ErrorMsg = model.StreamStatePause, "tx throttled"
+	rec.InboundStatus, rec.InboundErrorMsg = model.StreamStateDisable, "rx gone"
+	require.NoError(t, svc.PersistStreamStateRecord(ctx, rec))
 
-	got, err := svc.GetStatus(context.Background(), rec.StreamConfiguration.Id)
+	got, err := svc.GetStatus(ctx, txSid)
 	require.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, got.Status)
-	assert.Equal(t, "tx throttled", got.Reason)
-}
+	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: "tx throttled"}, *got)
 
-// TestGetStatus_SstpRxSideReturnsInboundStatus: GET /status?stream_id=<rxSid>
-// returns InboundStatus+InboundErrorMsg for the same record. (Q41)
-func TestGetStatus_SstpRxSideReturnsInboundStatus(t *testing.T) {
-	svc, rec := createdPair(t)
-	svc.UpdateStreamStatus(context.Background(), rec.SstpInbound.Id, model.StreamStatePause, "rx throttled")
-
-	got, err := svc.GetStatus(context.Background(), rec.SstpInbound.Id)
+	got, err = svc.GetStatus(ctx, rxSid)
 	require.NoError(t, err)
-	assert.Equal(t, model.StreamStatePause, got.Status)
-	assert.Equal(t, "rx throttled", got.Reason)
-}
-
-// TestGetStatus_SstpRxSideDistinctFromTxSide: the two directions report
-// independently — naming the rx SID must not leak the tx Status. (Q41)
-func TestGetStatus_SstpRxSideDistinctFromTxSide(t *testing.T) {
-	svc, rec := createdPair(t)
-	svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStatePause, "tx throttled")
-
-	// rx side untouched -> still enabled, no reason
-	got, err := svc.GetStatus(context.Background(), rec.SstpInbound.Id)
-	require.NoError(t, err)
-	assert.Equal(t, model.StreamStateEnabled, got.Status)
-	assert.Empty(t, got.Reason)
+	assert.Equal(t, model.StreamStatus{Status: model.StreamStateDisable, Reason: "rx gone"}, *got)
 }
 
 // TestGetStreamConfigBySID_SstpTxSide: verify (Q40) resolves the outbound side

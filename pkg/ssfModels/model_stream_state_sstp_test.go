@@ -245,3 +245,152 @@ func TestSstpMethod_PeerServerAlias_OmitEmpty(t *testing.T) {
 		t.Errorf("peer_server_alias should be omitempty when unset, got %s", raw)
 	}
 }
+
+// TestStreamStateRecord_DirectionStatus pins the status selection GET /status
+// reports (#303): the rx-side SID of a pair names the inbound half, every other
+// SID names the primary (outbound) half, and a record that is not a pair has
+// only that one. The pair fixture is a legacy split record so the two halves
+// are distinguishable; SetStatus keeps them equal on every write.
+func TestStreamStateRecord_DirectionStatus(t *testing.T) {
+	pair := newSstpPairRecord()
+	pair.Status = StreamStateDisable
+	pair.ErrorMsg = "operator stop"
+
+	plain := &StreamStateRecord{
+		StreamConfiguration: StreamConfiguration{Id: "plain-sid"},
+		Status:              StreamStatePause,
+		ErrorMsg:            "maintenance",
+	}
+
+	tests := []struct {
+		name string
+		rec  *StreamStateRecord
+		sid  string
+		want StreamStatus
+	}{
+		{"pair inbound SID reports the inbound half", pair, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "peer unreachable"}},
+		{"pair outbound SID reports the outbound half", pair, "tx-sid-1", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"pair wire SID reports the outbound half", pair, "pair-abc123", StreamStatus{Status: StreamStateDisable, Reason: "operator stop"}},
+		{"non-pair record reports its only half", plain, "plain-sid", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+		{"non-pair record ignores an unrelated SID", plain, "rx-sid-1", StreamStatus{Status: StreamStatePause, Reason: "maintenance"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.DirectionStatus(tt.sid); got != tt.want {
+				t.Errorf("DirectionStatus(%q) = %+v, want %+v", tt.sid, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStreamStateRecord_SetStatus pins the pair status rule (#303): a pair
+// shares one HTTP exchange, so every status (enabled, paused, disabled) moves
+// both halves, the same single status a push/poll stream carries. Either pair
+// signal alone counts as a pair, a legacy split record heals, and a record that
+// is not a pair has only its primary half to write.
+func TestStreamStateRecord_SetStatus(t *testing.T) {
+	pairWith := func(outStatus, inStatus string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.ErrorMsg = outStatus, "was "+outStatus
+		rec.InboundStatus, rec.InboundErrorMsg = inStatus, "was "+inStatus
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		SstpMethod:    &SstpMethod{Role: SstpRoleResponder},
+		Status:        StreamStateEnabled,
+		InboundStatus: StreamStateEnabled,
+	}
+	inboundOnlyPair := &StreamStateRecord{
+		SstpInbound:   &StreamConfiguration{Id: "rx-sid-1"},
+		Status:        StreamStateEnabled,
+		InboundStatus: StreamStateEnabled,
+	}
+	plain := &StreamStateRecord{Status: StreamStateEnabled, ErrorMsg: "was enabled"}
+
+	now := func(status string) StreamStatus { return StreamStatus{Status: status, Reason: "now"} }
+	tests := []struct {
+		name            string
+		rec             *StreamStateRecord
+		status          string
+		wantOut, wantIn StreamStatus
+	}{
+		{"paused on a pair moves both halves", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"enabled on a pair moves both halves", pairWith(StreamStatePause, StreamStatePause), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"disabled on a pair moves both halves", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStateDisable, now(StreamStateDisable), now(StreamStateDisable)},
+		{"enabled takes a disabled pair out on both halves", pairWith(StreamStateDisable, StreamStateDisable), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"a legacy split pair heals", pairWith(StreamStateEnabled, StreamStateDisable), StreamStateEnabled, now(StreamStateEnabled), now(StreamStateEnabled)},
+		{"a pair signalled by SstpMethod alone moves both halves", methodOnlyPair, StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"a pair signalled by SstpInbound alone moves both halves", inboundOnlyPair, StreamStatePause, now(StreamStatePause), now(StreamStatePause)},
+		{"a plain record writes only its primary half", plain, StreamStatePause, now(StreamStatePause), StreamStatus{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.rec.SetStatus(tt.status, "now")
+			if got := (StreamStatus{Status: tt.rec.Status, Reason: tt.rec.ErrorMsg}); got != tt.wantOut {
+				t.Errorf("outbound half = %+v, want %+v", got, tt.wantOut)
+			}
+			if got := (StreamStatus{Status: tt.rec.InboundStatus, Reason: tt.rec.InboundErrorMsg}); got != tt.wantIn {
+				t.Errorf("inbound half = %+v, want %+v", got, tt.wantIn)
+			}
+		})
+	}
+}
+
+// TestStreamStateRecord_IsStatusChange pins the POST /status "no change" test
+// (#303) against what SetStatus writes: on a pair both halves take the status
+// and reason, so it is a change when EITHER half differs (a legacy split record
+// heals); a record that is not a pair is judged on its primary half only.
+// Reasons compare case-insensitively.
+func TestStreamStateRecord_IsStatusChange(t *testing.T) {
+	pairWith := func(outStatus, outReason, inStatus, inReason string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.ErrorMsg = outStatus, outReason
+		rec.InboundStatus, rec.InboundErrorMsg = inStatus, inReason
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		SstpMethod:    &SstpMethod{Role: SstpRoleResponder},
+		Status:        StreamStatePause,
+		ErrorMsg:      "hold",
+		InboundStatus: StreamStateEnabled,
+	}
+	inboundOnlyPair := &StreamStateRecord{
+		SstpInbound:   &StreamConfiguration{Id: "rx-sid-1"},
+		Status:        StreamStatePause,
+		ErrorMsg:      "hold",
+		InboundStatus: StreamStateEnabled,
+	}
+	plain := &StreamStateRecord{
+		Status:          StreamStatePause,
+		ErrorMsg:        "hold",
+		InboundStatus:   StreamStateEnabled,
+		InboundErrorMsg: "ignored",
+	}
+
+	tests := []struct {
+		name   string
+		rec    *StreamStateRecord
+		status string
+		reason string
+		want   bool
+	}{
+		{"both halves already match is not a change", pairWith(StreamStatePause, "hold", StreamStatePause, "hold"), StreamStatePause, "hold", false},
+		{"reasons compare case-insensitively", pairWith(StreamStateDisable, "Stop", StreamStateDisable, "STOP"), StreamStateDisable, "stop", false},
+		{"only the outbound half differing is a change", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), StreamStatePause, "hold", true},
+		{"only the inbound half differing is a change", pairWith(StreamStatePause, "hold", StreamStateEnabled, ""), StreamStatePause, "hold", true},
+		{"only the other half's reason differing is a change", pairWith(StreamStateDisable, "other", StreamStateDisable, "stop"), StreamStateDisable, "stop", true},
+		{"both halves differing is a change", pairWith(StreamStateEnabled, "", StreamStateEnabled, ""), StreamStatePause, "hold", true},
+		{"a legacy split pair heals", pairWith(StreamStateEnabled, "", StreamStateDisable, "stop"), StreamStateEnabled, "", true},
+		{"a pair signalled by SstpMethod alone compares both halves", methodOnlyPair, StreamStatePause, "hold", true},
+		{"a pair signalled by SstpInbound alone compares both halves", inboundOnlyPair, StreamStatePause, "hold", true},
+		{"a plain record matching its primary half is not a change", plain, StreamStatePause, "hold", false},
+		{"a plain record differing from its primary half is a change", plain, StreamStateDisable, "hold", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.IsStatusChange(tt.status, tt.reason); got != tt.want {
+				t.Errorf("IsStatusChange(%q, %q) = %v, want %v", tt.status, tt.reason, got, tt.want)
+			}
+		})
+	}
+}

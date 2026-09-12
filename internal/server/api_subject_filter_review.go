@@ -115,9 +115,10 @@ func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// A stream-bound token (mgmt) must match the requested stream; an admin
-	// token has no stream binding and authorizes targeting any stream.
-	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+	// A stream-bound token (mgmt) must match the requested stream and may name
+	// only its own bound streams (#303); an admin token has no stream binding and
+	// authorizes targeting any stream.
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -203,27 +204,27 @@ func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *s
 }
 
 // effectiveEventSource resolves a stream's stored EventSource to the value the
-// admin review wire contract surfaces. A nil descriptor has EFFECTIVE type
+// admin review wire contract surfaces. An unset descriptor has EFFECTIVE type
 // DIRECT, per ADR 0004's update of 2026-09-10 ("unset Type resolves to DIRECT,
 // not AUDIENCE"), which supersedes that ADR's original nil→AUDIENCE Decision
-// text. For a nil descriptor this agrees with effectiveEventSourceType in
-// pkg/services/event_service.go, the resolution the router actually routes on,
-// so the review reports the same effective source delivery applies rather than
-// its inverse.
+// text. Unset has two spellings, and both resolve: a nil descriptor, and a
+// present descriptor with an empty Type — the shape a request carrying
+// "event_source": {} stores, since validateEventSource accepts it and
+// applyEventSource keeps it verbatim. That is exactly the resolution
+// effectiveEventSourceType in pkg/services/event_service.go applies, the one the
+// router actually routes on, so the review reports the same effective source
+// delivery applies rather than an empty type or its inverse (GH #299, #302).
 //
-// A non-nil descriptor is surfaced unchanged, and that is deliberately narrower
-// than the router's resolver, which folds a non-nil descriptor with an empty
-// Type into DIRECT as well. A stream storing {} therefore still reviews as
-// {"type":""} while delivery routes it DIRECT. validateEventSource accepts that
-// shape, so it is reachable. Closing the remaining case is out of scope here —
-// #299 pins "a non-nil descriptor is still surfaced unchanged" — and needs its
-// own issue.
+// Returning a fresh descriptor for the empty-Type spelling loses nothing:
+// EventSource carries only Type and SourceStreamIds, and validateEventSource's
+// R3 forbids source_stream_ids on every non-EXPLICIT type, the empty default
+// included. A descriptor with a non-empty Type is surfaced unchanged.
 //
 // The key is emitted either way (GH #118): that is the separate, still-standing
 // guarantee that event_source is never omitted from the wire, and it is about
 // key presence, not which type an unset descriptor resolves to.
 func effectiveEventSource(es *model.EventSource) *model.EventSource {
-	if es == nil {
+	if es == nil || es.Type == "" {
 		return &model.EventSource{Type: model.EventSourceDirect}
 	}
 	return es

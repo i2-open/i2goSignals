@@ -105,6 +105,33 @@ func (a *AuthContext) IsAuthorizedForStream(streamId string, scopes ...string) b
 	return a.Eat != nil && a.Eat.IsAuthorized(streamId, scopes)
 }
 
+// BoundTokenPermits reports whether the caller may name sid as a request body's
+// stream_id (#303). A stream-bound token — a local EAT with non-empty StreamIds —
+// operates only on its bound streams however the stream is named: the stream_id
+// parameter and path var are already confined by EventAuthToken.IsAuthorized in
+// ValidateAuthorizationAny, and this confines the body. sid must be one of the
+// token's bound streams and, when the request already resolved a target
+// (AuthContext.StreamId), that same stream, so a bound token cannot resolve one
+// stream and act on another. A caller with no binding — a broad-scope token, the
+// StreamAny wildcard, an OAuth/STS or bootstrap context — is not confined here
+// and keeps the handler's own rule. An empty sid names nothing and is permitted.
+func (a *AuthContext) BoundTokenPermits(sid string) bool {
+	if a == nil {
+		return false
+	}
+	if sid == "" || a.IsOAuthClient || a.Eat == nil || len(a.Eat.StreamIds) == 0 {
+		return true
+	}
+	permitted := false
+	for _, bound := range a.Eat.StreamIds {
+		if strings.EqualFold(bound, StreamAny) {
+			return true
+		}
+		permitted = permitted || strings.EqualFold(bound, sid)
+	}
+	return permitted && (a.StreamId == "" || a.StreamId == sid)
+}
+
 type AuthIssuer struct {
 	mu           sync.RWMutex
 	TokenIssuer  string
@@ -720,6 +747,31 @@ func peekKid(tokenString string) string {
 	return ""
 }
 
+// tokenStreamFallback resolves the stream an authorized request acts on, which
+// becomes AuthContext.StreamId (#303). The stream the request names — the
+// stream_id query parameter, then the mux path var — always wins: an
+// administrator holds a broad-scope token and names the target. When the
+// request names none, a stream client's limited-scope token that binds exactly
+// one stream supplies it, so the client reaches its own stream without having
+// to repeat what its token already says.
+//
+// The fallback never widens authorization. It only ever yields the token's own
+// single binding, which the token is by construction authorized for; a
+// broad-scope token (empty StreamIds), a token binding several streams (an SSTP
+// pair bearer carries tx and rx SIDs) and the StreamAny wildcard name no one
+// stream, so they leave StreamId empty and handlers that need a stream still
+// refuse the request. Bootstrap and OAuth/STS contexts carry no stream binding
+// and never reach this.
+func tokenStreamFallback(streamRequested string, tkn *EventAuthToken) string {
+	if streamRequested != "" || tkn == nil || len(tkn.StreamIds) != 1 {
+		return streamRequested
+	}
+	if bound := tkn.StreamIds[0]; !strings.EqualFold(bound, StreamAny) {
+		return bound
+	}
+	return ""
+}
+
 // validateLocalToken runs the local-issuer validation path and produces a single
 // terminal log on failure. It does not fall through to OAuth — kid routing has
 // already decided this is a local token.
@@ -730,7 +782,7 @@ func (a *AuthIssuer) validateLocalToken(tokenString, streamRequested string, sco
 		return nil, http.StatusUnauthorized
 	}
 	if tkn.IsAuthorized(streamRequested, scopes) {
-		return &AuthContext{StreamId: streamRequested, ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
+		return &AuthContext{StreamId: tokenStreamFallback(streamRequested, tkn), ProjectId: tkn.ProjectId, Eat: tkn, IsOAuthClient: false}, http.StatusOK
 	}
 	authLog.Warn("Local token authorization scope/stream mismatch", "streamId", streamRequested, "tokenStreams", tkn.StreamIds, "tokenRoles", tkn.Roles, "requiredScopes", scopes)
 	return nil, http.StatusForbidden

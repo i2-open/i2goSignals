@@ -344,13 +344,14 @@ func (s *SstpPairE2ESuite) TestVerify_PerDirection() {
 // Scenario 4: Auto-pause propagation on a request-level (4xx) error.
 // ---------------------------------------------------------------------------
 
-// TestAutoPause_OutboundOnly verifies that a request-level (4xx) error on the
-// SSTP-client's outbound cycle pauses ONLY the outbound (tx) direction of the
-// pair while the inbound (rx) direction keeps running (Q12.3, Q20). We induce the
-// 4xx by deleting the pair on the responder (so its /sstp/{id} answers 404), then
-// queue an outbound SET on the initiator; the initiator's runner POSTs, classifies
-// the 404 as a request error, and pauses its outbound direction.
-func (s *SstpPairE2ESuite) TestAutoPause_OutboundOnly() {
+// TestAutoPause_Pair verifies that a request-level (4xx) error on the
+// SSTP-client's cycle pauses the PAIR — both the outbound (tx) and inbound (rx)
+// halves — because the two logical streams share one HTTP exchange, just as a
+// push or poll stream has one status (#303). We induce the 4xx by deleting the
+// pair on the responder (so its /sstp/{id} answers 404), then queue an outbound
+// SET on the initiator; the initiator's runner POSTs, classifies the 404 as a
+// request error, and pauses its pair.
+func (s *SstpPairE2ESuite) TestAutoPause_Pair() {
 	rec := s.createPairResponder(s.b, s.a, "peerA")
 	peerPairId := rec.SstpMethod.PeerPairId // the initiator (node A) pair id
 
@@ -369,17 +370,18 @@ func (s *SstpPairE2ESuite) TestAutoPause_OutboundOnly() {
 	vStatus, _ := s.a.httpDo(s.T(), http.MethodPost, "/verify", s.a.adminBearer(s.T()), body)
 	s.Require().Equal(http.StatusNoContent, vStatus)
 
-	// The initiator's outbound direction pauses; the inbound direction stays enabled.
+	// The initiator's pair pauses: both halves.
 	require.Eventually(s.T(), func() bool {
 		cur, e := s.a.app.GetStreamService().GetStreamStateByPairId(context.Background(), peerPairId)
 		if e != nil || cur == nil {
 			return false
 		}
-		return cur.Status == model.StreamStatePause && cur.InboundStatus == model.StreamStateEnabled
-	}, 15*time.Second, 200*time.Millisecond, "initiator outbound should auto-pause on 4xx while inbound stays enabled")
+		return cur.Status == model.StreamStatePause && cur.InboundStatus == model.StreamStatePause
+	}, 15*time.Second, 200*time.Millisecond, "initiator pair should auto-pause on 4xx, both halves")
 
 	cur, _ := s.a.app.GetStreamService().GetStreamStateByPairId(context.Background(), peerPairId)
-	s.NotEmpty(cur.ErrorMsg, "the paused outbound direction carries a clear ErrorMsg")
+	s.NotEmpty(cur.ErrorMsg, "the paused pair carries a clear ErrorMsg")
+	s.Equal(cur.ErrorMsg, cur.InboundErrorMsg, "both halves carry the same reason")
 }
 
 // ---------------------------------------------------------------------------
