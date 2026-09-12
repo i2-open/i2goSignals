@@ -204,10 +204,16 @@ func decodeStatus(t *testing.T, rr *httptest.ResponseRecorder) model.StreamStatu
 // either SID resolves (no 404), paused moves only the half the SID names, and
 // disabled couples both halves whichever SID is named (applyStreamStatusToRecord).
 // Every write round-trips through GET /status on both SIDs.
+//
+// A disable is judged against BOTH halves: when the named half is already
+// disabled with the requested reason but the other half is not, it is still a
+// change, or the coupling is silently lost.
 func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 	const reason = "operator action"
 	tests := []struct {
 		name        string
+		startOut    model.StreamStatus
+		startIn     model.StreamStatus
 		sid         string
 		status      string
 		wantOut     model.StreamStatus
@@ -216,6 +222,8 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 	}{
 		{
 			name:        "outbound SID paused moves only the outbound half",
+			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
 			sid:         statusPairTxSid,
 			status:      model.StreamStatePause,
 			wantOut:     model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
@@ -224,6 +232,8 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 		},
 		{
 			name:        "inbound SID paused moves only the inbound half",
+			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
 			sid:         statusPairRxSid,
 			status:      model.StreamStatePause,
 			wantOut:     model.StreamStatus{Status: model.StreamStateEnabled},
@@ -232,6 +242,8 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 		},
 		{
 			name:        "outbound SID disabled couples both halves",
+			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
 			sid:         statusPairTxSid,
 			status:      model.StreamStateDisable,
 			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
@@ -240,6 +252,18 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 		},
 		{
 			name:        "inbound SID disabled couples both halves",
+			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
+			sid:         statusPairRxSid,
+			status:      model.StreamStateDisable,
+			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
+			wantIn:      model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
+			wantRespond: model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
+		},
+		{
+			name:        "inbound SID disabled re-couples an outbound half that was re-enabled",
+			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
 			sid:         statusPairRxSid,
 			status:      model.StreamStateDisable,
 			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
@@ -250,7 +274,7 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := newStatusRefreshApp(t)
-			persistStatusPair(t, app, model.StreamStateEnabled, "", model.StreamStateEnabled, "")
+			persistStatusPair(t, app, tt.startOut.Status, tt.startOut.Reason, tt.startIn.Status, tt.startIn.Reason)
 			bearer := app.pairBearer(t)
 
 			rr := app.postStatus(t, bearer, tt.sid, tt.status, reason)

@@ -281,3 +281,55 @@ func TestStreamStateRecord_DirectionStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamStateRecord_IsStatusChange pins the POST /status "no change" test
+// (#303) against what applyStreamStatusToRecord writes: disabled couples both
+// halves of a pair, so it is a change when EITHER half differs in status or
+// reason; any other status is judged on the half the SID names only.
+func TestStreamStateRecord_IsStatusChange(t *testing.T) {
+	pairWith := func(outStatus, outReason, inStatus, inReason string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.ErrorMsg = outStatus, outReason
+		rec.InboundStatus, rec.InboundErrorMsg = inStatus, inReason
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		StreamConfiguration: StreamConfiguration{Id: "tx-sid-1"},
+		SstpMethod:          &SstpMethod{Role: SstpRoleResponder},
+		Status:              StreamStateDisable,
+		ErrorMsg:            "stop",
+		InboundStatus:       StreamStateEnabled,
+	}
+	plain := &StreamStateRecord{
+		StreamConfiguration: StreamConfiguration{Id: "plain-sid"},
+		Status:              StreamStateDisable,
+		ErrorMsg:            "stop",
+	}
+
+	tests := []struct {
+		name   string
+		rec    *StreamStateRecord
+		sid    string
+		status string
+		reason string
+		want   bool
+	}{
+		{"disable on rx SID with only the outbound half differing is a change", pairWith(StreamStateEnabled, "", StreamStateDisable, "stop"), "rx-sid-1", StreamStateDisable, "stop", true},
+		{"disable on tx SID with only the inbound half differing is a change", pairWith(StreamStateDisable, "stop", StreamStateEnabled, ""), "tx-sid-1", StreamStateDisable, "stop", true},
+		{"disable with the other half's reason differing is a change", pairWith(StreamStateDisable, "other", StreamStateDisable, "stop"), "rx-sid-1", StreamStateDisable, "stop", true},
+		{"disable with both halves already disabled is not a change", pairWith(StreamStateDisable, "stop", StreamStateDisable, "stop"), "rx-sid-1", StreamStateDisable, "stop", false},
+		{"reasons compare case-insensitively", pairWith(StreamStateDisable, "Stop", StreamStateDisable, "STOP"), "tx-sid-1", StreamStateDisable, "stop", false},
+		{"pause on rx SID is judged on the inbound half only", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), "rx-sid-1", StreamStatePause, "hold", false},
+		{"pause on tx SID is judged on the outbound half only", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), "tx-sid-1", StreamStatePause, "hold", true},
+		{"a pair signalled by SstpMethod alone still couples on disable", methodOnlyPair, "tx-sid-1", StreamStateDisable, "stop", true},
+		{"a plain record matching its only half is not a change", plain, "plain-sid", StreamStateDisable, "stop", false},
+		{"a plain record differing from its only half is a change", plain, "plain-sid", StreamStatePause, "stop", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.IsStatusChange(tt.sid, tt.status, tt.reason); got != tt.want {
+				t.Errorf("IsStatusChange(%q, %q, %q) = %v, want %v", tt.sid, tt.status, tt.reason, got, tt.want)
+			}
+		})
+	}
+}

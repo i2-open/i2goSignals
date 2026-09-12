@@ -509,7 +509,7 @@ func sstpPairBySID(
 // not persist: callers that need the change durable follow it with a DAO write,
 // which on the JWKS paths has to happen with the receiver-cache lock released.
 //
-// This is the single home of the direction-routing rule (Q39, Q41): naming an
+// It applies the direction-routing rule for writes (Q39, Q41): naming an
 // SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
 // side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
 // ALWAYS couples both directions regardless of which SID is named. The coupling
@@ -517,7 +517,8 @@ func sstpPairBySID(
 // stated with no operator-only carve-out, so a fault-driven disable (a
 // permanent JWKS failure, an ADR-0066 §D2 violation) takes the same rule as an
 // administrative one. A record that is not a pair has one direction, so it
-// always takes Status/ErrorMsg.
+// always takes Status/ErrorMsg. StreamStateRecord.IsStatusChange mirrors this
+// rule to judge a POST /status no-op (#303), so the two change together.
 //
 // "Is a pair" is EITHER signal, because findSstpPairBySID admits on either and
 // neither implies the other at this layer: its FindByID branch requires
@@ -544,7 +545,7 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 		rec.InboundErrorMsg = errorMsg
 		return
 	}
-	if isPair && rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
+	if isPair && rec.NamesInbound(sid) {
 		rec.InboundStatus = status
 		rec.InboundErrorMsg = errorMsg
 		return

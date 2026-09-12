@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -363,21 +364,44 @@ func (ss *StreamStateRecord) HasOutbound() bool {
 	return ss.IsTransmitter()
 }
 
-// DirectionStatus returns the status and reason of the direction sid names.
-// On an SSTP pair the rx-side SID (SstpInbound.Id) names the inbound half,
-// InboundStatus/InboundErrorMsg; every other SID names the primary (outbound)
-// half, Status/ErrorMsg (Q41). A record that is not a pair has only the primary
-// half, so it always reports Status/ErrorMsg.
-//
-// It is the single home of that selection for status READS: GET /status
-// reports it and POST /status compares a request against it (#303), so the two
-// cannot disagree about which half a SID names. Writes route through the
-// services layer's applyStreamStatusToRecord, which follows the same rule.
+// NamesInbound reports whether sid is the rx-side SID (SstpInbound.Id) of an
+// SSTP pair, which names the inbound half (Q41). Every other SID names the
+// primary (outbound) half. Status reads (DirectionStatus) and the services
+// layer's status writes (applyStreamStatusToRecord) both route by it, so the
+// two cannot disagree about which half a SID names.
+func (ss *StreamStateRecord) NamesInbound(sid string) bool {
+	return ss.SstpInbound != nil && sid == ss.SstpInbound.Id
+}
+
+// DirectionStatus returns the status and reason of the direction sid names:
+// InboundStatus/InboundErrorMsg when NamesInbound, Status/ErrorMsg otherwise. A
+// record that is not a pair has only the primary half, so it always reports
+// Status/ErrorMsg. GET /status reports it and POST /status compares a request
+// against it (#303), so the two cannot disagree about which half a SID names.
 func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
-	if ss.SstpInbound != nil && sid == ss.SstpInbound.Id {
+	if ss.NamesInbound(sid) {
 		return StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg}
 	}
 	return StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}
+}
+
+// IsStatusChange reports whether writing status and reason through sid would
+// change the record, which is POST /status's "no change" test (#303). It
+// mirrors applyStreamStatusToRecord: disabled on a pair couples both halves,
+// writing the same status and reason to each, so it is a change when EITHER
+// half differs; any other status moves only the half sid names, so only that
+// half is compared. "Is a pair" is either signal, as there. Reasons compare
+// case-insensitively.
+func (ss *StreamStateRecord) IsStatusChange(sid, status, reason string) bool {
+	differs := func(half StreamStatus) bool {
+		return half.Status != status || !strings.EqualFold(reason, half.Reason)
+	}
+	isPair := ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
+	if isPair && status == StreamStateDisable {
+		return differs(StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}) ||
+			differs(StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg})
+	}
+	return differs(ss.DirectionStatus(sid))
 }
 
 func (ss *StreamStateRecord) HasTxServer() bool {
