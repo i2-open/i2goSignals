@@ -365,19 +365,18 @@ func (ss *StreamStateRecord) HasOutbound() bool {
 }
 
 // NamesInbound reports whether sid is the rx-side SID (SstpInbound.Id) of an
-// SSTP pair, which names the inbound half (Q41). Every other SID names the
-// primary (outbound) half. Status reads (DirectionStatus) and the services
-// layer's status writes (applyStreamStatusToRecord) both route by it, so the
-// two cannot disagree about which half a SID names.
+// SSTP pair, which names the inbound half. Every other SID names the primary
+// (outbound) half. DirectionStatus routes status reads by it.
 func (ss *StreamStateRecord) NamesInbound(sid string) bool {
 	return ss.SstpInbound != nil && sid == ss.SstpInbound.Id
 }
 
-// DirectionStatus returns the status and reason of the direction sid names:
+// DirectionStatus returns the status and reason of the half sid names:
 // InboundStatus/InboundErrorMsg when NamesInbound, Status/ErrorMsg otherwise. A
 // record that is not a pair has only the primary half, so it always reports
-// Status/ErrorMsg. GET /status reports it and POST /status compares a request
-// against it (#303), so the two cannot disagree about which half a SID names.
+// Status/ErrorMsg. GET /status reports it (#303). SetStatus keeps a pair's
+// halves equal, so they differ only on a legacy split record, which the next
+// status write heals.
 func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
 	if ss.NamesInbound(sid) {
 		return StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg}
@@ -385,34 +384,44 @@ func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
 	return StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}
 }
 
-// IsPairLevelStatus reports whether writing status moves BOTH halves of an SSTP
-// pair rather than the half a SID names (#303). Disabled is pair-level in both
-// directions of transition, so a pair is never left with one half disabled: a
-// request for disabled couples the halves, and while EITHER half is disabled
-// (which heals a legacy split record) an enabled or paused request moves both.
-// Enabled <-> paused between non-disabled halves stays per-direction (Q41).
-// "Is a pair" is either signal (see applyStreamStatusToRecord); a record that
-// is not a pair has one half, so it is never pair-level.
-func (ss *StreamStateRecord) IsPairLevelStatus(status string) bool {
-	isPair := ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
-	return isPair && (status == StreamStateDisable || ss.Status == StreamStateDisable || ss.InboundStatus == StreamStateDisable)
+// isPair reports whether the record is an SSTP pair for status purposes. It is
+// EITHER signal — GetType() == DeliverySstpPair (SstpMethod set) or SstpInbound
+// set — because the services layer's SID lookup admits a pair on either and
+// neither implies the other there. Every record created today carries both, but
+// a single-signal test would fail open on a half-formed record: it would leave
+// one half behind on every status write. A plain stream has neither.
+func (ss *StreamStateRecord) isPair() bool {
+	return ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
 }
 
-// IsStatusChange reports whether writing status and reason through sid would
-// change the record, which is POST /status's "no change" test (#303). It agrees
-// with applyStreamStatusToRecord by sharing IsPairLevelStatus: a pair-level
-// write gives both halves the same status and reason, so it is a change when
-// EITHER half differs; any other write moves only the half sid names, so only
-// that half is compared. Reasons compare case-insensitively.
-func (ss *StreamStateRecord) IsStatusChange(sid, status, reason string) bool {
-	differs := func(half StreamStatus) bool {
-		return half.Status != status || !strings.EqualFold(reason, half.Reason)
+// SetStatus writes status and reason onto the record in memory; it does not
+// persist. It always writes Status/ErrorMsg, and on an SSTP pair it also writes
+// InboundStatus/InboundErrorMsg. A pair's two logical streams share one HTTP
+// exchange, so every status — enabled, paused, or disabled — moves both, the
+// same single status a push or poll stream carries (#303), whichever SID named
+// the pair. A one-way logical pause would be a later enhancement.
+func (ss *StreamStateRecord) SetStatus(status, reason string) {
+	ss.Status = status
+	ss.ErrorMsg = reason
+	if ss.isPair() {
+		ss.InboundStatus = status
+		ss.InboundErrorMsg = reason
 	}
-	if ss.IsPairLevelStatus(status) {
-		return differs(StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}) ||
-			differs(StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg})
+}
+
+// IsStatusChange reports whether SetStatus(status, reason) would change the
+// record, which is POST /status's "no change" test (#303). On a pair both halves
+// take the write, so it is a change when EITHER half differs — which also lets a
+// legacy split record heal; otherwise only the primary half is compared. Reasons
+// compare case-insensitively.
+func (ss *StreamStateRecord) IsStatusChange(status, reason string) bool {
+	differs := func(halfStatus, halfReason string) bool {
+		return halfStatus != status || !strings.EqualFold(reason, halfReason)
 	}
-	return differs(ss.DirectionStatus(sid))
+	if ss.isPair() && differs(ss.InboundStatus, ss.InboundErrorMsg) {
+		return true
+	}
+	return differs(ss.Status, ss.ErrorMsg)
 }
 
 func (ss *StreamStateRecord) HasTxServer() bool {

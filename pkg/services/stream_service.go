@@ -1679,8 +1679,9 @@ func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model
 
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
 	invalidateRequestStreams(ctx)
-	// SSTP pairs route status per direction (Q39, Q41) and Disabled couples both
-	// directions. When the SID belongs to a pair, the SSTP path owns the update.
+	// A status write moves both halves of an SSTP pair whichever SID names it
+	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
+	// belongs to a pair, the SSTP path owns the update.
 	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
 		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
 		return
@@ -1704,10 +1705,11 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 // symptom through the re-enable path. Matching is by record identity, not map
 // key, because a pair's entry is keyed by its inbound SID (ADR 0018) while a
 // caller may name any of the record's identities. The status lands through
-// applyStreamStatusToRecord so the cached copy takes the same Q39/Q41 routing
-// as the DAO record, and when the change transitions the entry's receive
-// direction to enabled the retry ladder is reset — including out of the
-// permanent latch, which nothing else clears.
+// StreamStateRecord.SetStatus so the cached copy takes the same rule as the DAO
+// record — both halves of a pair move whichever SID is named (#303) — and when
+// the change transitions the entry's receive direction to enabled the retry
+// ladder is reset — including out of the permanent latch, which nothing else
+// clears.
 //
 // The caller must hold s.mu.
 func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg string) {
@@ -1716,7 +1718,7 @@ func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg st
 			continue
 		}
 		wasEnabled := snapshotReceiveDirection(entry.record).enabled
-		applyStreamStatusToRecord(entry.record, streamID, status, errorMsg)
+		entry.record.SetStatus(status, errorMsg)
 		snap := snapshotReceiveDirection(entry.record)
 		if snap.present && snap.enabled && !wasEnabled {
 			entry.resetRetryLadder()
@@ -1740,10 +1742,11 @@ func (s *StreamService) UpdateRemoteAddress(ctx context.Context, streamID string
 }
 
 func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.StreamStatus, error) {
-	// SSTP pairs report status per direction (Q41): DirectionStatus reports
-	// InboundStatus/InboundErrorMsg when streamID names the rx (inbound) side and
-	// Status/ErrorMsg otherwise. findSstpPairBySID resolves either direction;
-	// non-SSTP streams fall through to the plain FindByID path below, where
+	// DirectionStatus reports the half streamID names: InboundStatus/
+	// InboundErrorMsg for a pair's rx (inbound) SID, Status/ErrorMsg otherwise.
+	// Status writes keep a pair's halves equal (#303), so both SIDs read the same
+	// status except on a legacy split record. findSstpPairBySID resolves either
+	// SID; non-SSTP streams fall through to the plain FindByID path below, where
 	// DirectionStatus always reports the one primary half.
 	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
 		status := rec.DirectionStatus(streamID)
@@ -1921,20 +1924,20 @@ func (s *StreamService) disableIfSecurityInvariantViolated(
 // disableIfSecurityInvariantViolated so both legs share the same disable
 // path.
 //
-// The disable routes through applyStreamStatusToRecord so a pair is disabled in
+// The disable goes through StreamStateRecord.SetStatus so a pair is disabled in
 // BOTH directions, which is what fail-closed requires here: inbound ingest is
 // gated on InboundStatus ALONE (runner_sstp_server.go), so a pair carrying a
 // disable only on Status would go on accepting inbound events on the very leg
-// whose trust root is missing. Which leg the violation is on does not steer the
-// routing, because a disable is pair-level either way (Q39); the leg is carried
-// in the reason instead.
+// whose trust root is missing. Which leg the violation is on does not matter,
+// because every status write moves both halves of a pair (#303); the leg is
+// carried in the reason instead.
 func (s *StreamService) disableInvariantViolation(
 	ctx context.Context, rec *model.StreamStateRecord, leg string, invariantErr error,
 ) error {
 	sid := rec.StreamConfiguration.Id
 	ssLog.Warn("Fail-closed: disabling receiver stream that violates ADR-0066 §D2 (None + unverified)",
 		"sid", sid, "leg", leg, "invariant", invariantErr.Error())
-	applyStreamStatusToRecord(rec, sid, model.StreamStateDisable,
+	rec.SetStatus(model.StreamStateDisable,
 		"ADR-0066 §D2 invariant violation ("+leg+"): "+invariantErr.Error())
 	// Same reason as persistDisabledRecord: a fail-closed disable is a write, so
 	// the request memo must not serve the pre-disable record afterwards.
@@ -2063,9 +2066,9 @@ func (s *StreamService) newReceiverEntry(ctx context.Context, rec *model.StreamS
 	jwks, err := s.resolveSnapshotJwks(ctx, snap)
 	entry.recordAttempt(s.now(), jwks, err)
 	if reason, permanent := permanentJwksFailure(err); permanent {
-		// snap.sid names the direction that failed, so the disable routes
-		// through the same Q39 rule as every other status change.
-		applyStreamStatusToRecord(rec, snap.sid, model.StreamStateDisable, reason)
+		// The disable takes the same rule as every other status change: on a
+		// pair it moves both halves, whichever direction failed (#303).
+		rec.SetStatus(model.StreamStateDisable, reason)
 		s.persistDisabledRecord(ctx, rec, snap.sid)
 	}
 	// Keep the record's ValidateJwks in step with the entry so nothing reading
@@ -2312,7 +2315,7 @@ func (s *StreamService) retryReceiverJwks(ctx context.Context, sid string) *keyf
 	var persistCopy *model.StreamStateRecord
 	if permanent {
 		// Still under s.mu: these are the fields UpdateStreamStatus writes.
-		applyStreamStatusToRecord(rec, snap.sid, model.StreamStateDisable, reason)
+		rec.SetStatus(model.StreamStateDisable, reason)
 		snapshotRec := *rec
 		persistCopy = &snapshotRec
 	}

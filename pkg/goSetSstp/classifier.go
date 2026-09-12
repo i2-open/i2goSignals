@@ -24,8 +24,8 @@ const (
 	ClassTransient
 
 	// ClassRequestError: HTTP 4xx (auth/path/content-type/JSON-parse, exhausted-auth-retries,
-	// deleted pair). Request-level failure; the caller pauses ONLY the affected direction of the
-	// pair (Q12.3). A paused pair is signaled differently — 200 with returnEvents=false, not 4xx.
+	// deleted pair). Request-level failure; the caller pauses the pair, both directions (#303).
+	// A paused pair is signaled differently — 200 with returnEvents=false, not 4xx.
 	ClassRequestError
 
 	// ClassPerJTI: HTTP 200 with a non-empty "setErrs" object. The cycle itself succeeded but one

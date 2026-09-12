@@ -97,7 +97,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// (ProblemSignatureInvalid / ProblemUnknownKID / jwtCrypto — what a peer emits
 	// while our signing key rotates or its JWKS cache is briefly stale) stays
 	// pending so the very same SET is re-sent once the key material settles, and a
-	// stream-fatal one (binding-revoked) pauses the outbound direction instead of
+	// stream-fatal one (binding-revoked) pauses the pair instead of
 	// draining the queue into a stream the peer says is dead. Every rejection is
 	// logged so the operator sees what the peer refused and why.
 	if len(inbound.SetErrs) > 0 {
@@ -123,10 +123,10 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, 0)
 		}
 		if len(disposition.Fatal) > 0 {
-			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing outbound",
+			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing pair",
 				"sid", txSid, "jti", disposition.Fatal[0],
 				"err", disposition.FatalErr.Err, "description", disposition.FatalErr.Description)
-			r.pauseSstpOutbound(rec, fmt.Sprintf("SSTP-SRV: peer reports stream dead on pair=%s: %s: %s",
+			r.pauseSstpPair(rec, fmt.Sprintf("SSTP-SRV: peer reports stream dead on pair=%s: %s: %s",
 				rec.PairId, disposition.FatalErr.Err, disposition.FatalErr.Description))
 		}
 	}

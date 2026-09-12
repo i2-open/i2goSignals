@@ -938,12 +938,11 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 	if jsonRequest.Status != "" {
-		// Judge "no change" against the half the SID names (#303) — the inbound
-		// half when it is a pair's rx-side SID — the same selection GET /status
-		// reports, and against BOTH halves for a pair-level disable. Comparing
-		// the outbound half unconditionally called an inbound-only change a
-		// no-op, and a genuine inbound no-op a change.
-		if streamState.IsStatusChange(authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason) {
+		// Judge "no change" against what the write would do (#303): on an SSTP
+		// pair it moves both halves whichever SID is named, so it is a change
+		// when EITHER half differs (a legacy split record heals); any other
+		// stream is judged on its one status.
+		if streamState.IsStatusChange(jsonRequest.Status, jsonRequest.Reason) {
 			if jsonRequest.Status == model.StreamStatePause || jsonRequest.Status == model.StreamStateDisable || jsonRequest.Status == model.StreamStateEnabled {
 				sa.GetStreamService().UpdateStreamStatus(r.Context(), authCtx.StreamId, jsonRequest.Status, jsonRequest.Reason)
 				modified = true

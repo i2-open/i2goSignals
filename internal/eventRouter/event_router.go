@@ -763,7 +763,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			r.sstpClientStreams[pairId] = current
 			// If the pair transitioned back to enabled from pause/disable,
 			// the previous dialer goroutine may have exited (runPair returns
-			// when Status != Enabled, and PauseOutbound / sign-error paths
+			// when Status != Enabled, and PausePair / sign-error paths
 			// force that exit). Re-register so a fresh goroutine picks up
 			// the enabled config; RegisterPair is idempotent when a
 			// goroutine is already running for the pair.

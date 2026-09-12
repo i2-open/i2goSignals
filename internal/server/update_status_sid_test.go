@@ -20,8 +20,8 @@ import (
 )
 
 // Issue #303: POST /status must resolve the SID the way GET /status does, so an
-// SSTP pair's inbound half can be set as well as read, and must judge "no
-// change" against the half the SID names.
+// SSTP pair can be set through its inbound SID as well as read, and a status
+// write moves both halves of the pair, so "no change" is judged against both.
 
 const (
 	statusPairTxSid   = "status-pair-tx"
@@ -204,136 +204,101 @@ func decodeStatus(t *testing.T, rr *httptest.ResponseRecorder) model.StreamStatu
 }
 
 // TestUpdateStatus_SstpPairBySID is the SID × status table over an SSTP pair:
-// either SID resolves (no 404), paused/enabled between non-disabled halves
-// moves only the half the SID names, and disabled is pair-level into and out
-// of — whichever SID is named, entering disabled, or leaving it via enabled or
-// paused, moves both halves (applyStreamStatusToRecord). Every write
-// round-trips through GET /status on both SIDs.
-//
-// A pair-level write is judged against BOTH halves: when the named half already
-// holds the requested status and reason but the other half does not, it is
-// still a change, so a legacy split record (one half disabled) heals.
+// either SID resolves (no 404), and every status — enabled, paused, disabled —
+// moves both halves whichever SID names it, the same single status a push/poll
+// stream carries (#303). A status POSTed on either SID reads back identically
+// through GET /status on BOTH SIDs, and the response reports it.
 func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 	const reason = "operator action"
+	transitions := []struct{ from, to string }{
+		{model.StreamStateEnabled, model.StreamStatePause},
+		{model.StreamStateEnabled, model.StreamStateDisable},
+		{model.StreamStatePause, model.StreamStateEnabled},
+		{model.StreamStatePause, model.StreamStateDisable},
+		{model.StreamStateDisable, model.StreamStateEnabled},
+		{model.StreamStateDisable, model.StreamStatePause},
+	}
+	for _, tr := range transitions {
+		for _, sid := range []string{statusPairTxSid, statusPairRxSid} {
+			t.Run(tr.from+" to "+tr.to+" via "+sid, func(t *testing.T) {
+				app := newStatusRefreshApp(t)
+				persistStatusPair(t, app, tr.from, "start", tr.from, "start")
+				bearer := app.pairBearer(t)
+
+				rr := app.postStatus(t, bearer, sid, tr.to, reason)
+				require.Equal(t, http.StatusOK, rr.Code, "POST /status on %s: %s", sid, rr.Body.String())
+				want := model.StreamStatus{Status: tr.to, Reason: reason}
+				assert.Equal(t, want, decodeStatus(t, rr), "the response reports the pair's status")
+				assert.Len(t, app.router.updated, 1, "a status change refreshes the router")
+				assert.Len(t, app.handled, 1, "a status change refreshes the receiver")
+
+				assert.Equal(t, want, app.getStatus(t, bearer, statusPairTxSid), "outbound half via GET /status")
+				assert.Equal(t, want, app.getStatus(t, bearer, statusPairRxSid), "inbound half via GET /status")
+			})
+		}
+	}
+}
+
+// TestUpdateStatus_SstpPauseByRxSidPausesPair: a pause named by the rx SID
+// pauses the whole pair — both halves — and refreshes the pair in the router
+// exactly once (#303).
+func TestUpdateStatus_SstpPauseByRxSidPausesPair(t *testing.T) {
+	const reason = "peer maintenance"
+	app := newStatusRefreshApp(t)
+	persistStatusPair(t, app, model.StreamStateEnabled, "", model.StreamStateEnabled, "")
+	bearer := app.pairBearer(t)
+
+	rr := app.postStatus(t, bearer, statusPairRxSid, model.StreamStatePause, reason)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	assert.Equal(t, []string{statusPairTxSid}, app.router.updated, "the pair record is refreshed in the router once")
+	assert.Len(t, app.handled, 1, "the pair record is refreshed in the receiver once")
+	paused := model.StreamStatus{Status: model.StreamStatePause, Reason: reason}
+	assert.Equal(t, paused, app.getStatus(t, bearer, statusPairTxSid), "the outbound half is paused too")
+	assert.Equal(t, paused, app.getStatus(t, bearer, statusPairRxSid))
+}
+
+// TestUpdateStatus_SstpSplitRecordHeals: a legacy split record — halves that
+// differ, as the superseded per-direction routing could leave behind — is
+// healed by a write that matches only ONE half. The write moves both halves, so
+// it is a change whichever half already matched and whichever SID names it, and
+// the router and receiver are refreshed.
+func TestUpdateStatus_SstpSplitRecordHeals(t *testing.T) {
+	const reason = "peer maintenance"
 	tests := []struct {
-		name        string
-		startOut    model.StreamStatus
-		startIn     model.StreamStatus
-		sid         string
-		status      string
-		wantOut     model.StreamStatus
-		wantIn      model.StreamStatus
-		wantRespond model.StreamStatus
+		name     string
+		startOut model.StreamStatus
+		startIn  model.StreamStatus
+		sid      string
+		status   string
 	}{
 		{
-			name:        "outbound SID paused moves only the outbound half",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
-			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
-			sid:         statusPairTxSid,
-			status:      model.StreamStatePause,
-			wantOut:     model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateEnabled},
-			wantRespond: model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
+			name:     "inbound half already matches, named by the rx SID",
+			startOut: model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:  model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
+			sid:      statusPairRxSid,
+			status:   model.StreamStatePause,
 		},
 		{
-			name:        "inbound SID paused moves only the inbound half",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
-			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
-			sid:         statusPairRxSid,
-			status:      model.StreamStatePause,
-			wantOut:     model.StreamStatus{Status: model.StreamStateEnabled},
-			wantIn:      model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
+			name:     "outbound half already matches, named by the rx SID",
+			startOut: model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
+			startIn:  model.StreamStatus{Status: model.StreamStateEnabled},
+			sid:      statusPairRxSid,
+			status:   model.StreamStatePause,
 		},
 		{
-			name:        "outbound SID disabled couples both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
-			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
-			sid:         statusPairTxSid,
-			status:      model.StreamStateDisable,
-			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
+			name:     "outbound half already matches, named by the tx SID",
+			startOut: model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
+			startIn:  model.StreamStatus{Status: model.StreamStatePause},
+			sid:      statusPairTxSid,
+			status:   model.StreamStateEnabled,
 		},
 		{
-			name:        "inbound SID disabled couples both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
-			startIn:     model.StreamStatus{Status: model.StreamStateEnabled},
-			sid:         statusPairRxSid,
-			status:      model.StreamStateDisable,
-			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-		},
-		{
-			name:        "inbound SID enabled on a paused pair moves only the inbound half",
-			startOut:    model.StreamStatus{Status: model.StreamStatePause},
-			startIn:     model.StreamStatus{Status: model.StreamStatePause},
-			sid:         statusPairRxSid,
-			status:      model.StreamStateEnabled,
-			wantOut:     model.StreamStatus{Status: model.StreamStatePause},
-			wantIn:      model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-		},
-		{
-			name:        "outbound SID enabled takes a disabled pair out of disabled on both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			sid:         statusPairTxSid,
-			status:      model.StreamStateEnabled,
-			wantOut:     model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-		},
-		{
-			name:        "inbound SID enabled takes a disabled pair out of disabled on both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			sid:         statusPairRxSid,
-			status:      model.StreamStateEnabled,
-			wantOut:     model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-		},
-		{
-			name:        "outbound SID paused takes a disabled pair out of disabled on both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			sid:         statusPairTxSid,
-			status:      model.StreamStatePause,
-			wantOut:     model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-		},
-		{
-			name:        "inbound SID paused takes a disabled pair out of disabled on both halves",
-			startOut:    model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			sid:         statusPairRxSid,
-			status:      model.StreamStatePause,
-			wantOut:     model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStatePause, Reason: reason},
-		},
-		{
-			name:        "legacy split pair heals when disabled via its already-disabled inbound SID",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			sid:         statusPairRxSid,
-			status:      model.StreamStateDisable,
-			wantOut:     model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
-		},
-		{
-			name:        "legacy split pair heals when enabled via its already-enabled outbound SID",
-			startOut:    model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			startIn:     model.StreamStatus{Status: model.StreamStateDisable, Reason: "outage"},
-			sid:         statusPairTxSid,
-			status:      model.StreamStateEnabled,
-			wantOut:     model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantIn:      model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
-			wantRespond: model.StreamStatus{Status: model.StreamStateEnabled, Reason: reason},
+			name:     "a half-disabled pair named by its already-disabled rx SID",
+			startOut: model.StreamStatus{Status: model.StreamStateEnabled},
+			startIn:  model.StreamStatus{Status: model.StreamStateDisable, Reason: reason},
+			sid:      statusPairRxSid,
+			status:   model.StreamStateDisable,
 		},
 	}
 	for _, tt := range tests {
@@ -343,72 +308,39 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 			bearer := app.pairBearer(t)
 
 			rr := app.postStatus(t, bearer, tt.sid, tt.status, reason)
-			require.Equal(t, http.StatusOK, rr.Code, "POST /status on %s: %s", tt.sid, rr.Body.String())
-			assert.Equal(t, tt.wantRespond, decodeStatus(t, rr), "the response reports the named half")
-			assert.Len(t, app.router.updated, 1, "a status change refreshes the router")
-			assert.Len(t, app.handled, 1, "a status change refreshes the receiver")
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-			assert.Equal(t, tt.wantOut, app.getStatus(t, bearer, statusPairTxSid), "outbound half via GET /status")
-			assert.Equal(t, tt.wantIn, app.getStatus(t, bearer, statusPairRxSid), "inbound half via GET /status")
+			assert.Len(t, app.router.updated, 1, "healing a split record is a change and refreshes the router")
+			assert.Len(t, app.handled, 1, "healing a split record is a change and refreshes the receiver")
+			want := model.StreamStatus{Status: tt.status, Reason: reason}
+			assert.Equal(t, want, app.getStatus(t, bearer, statusPairTxSid), "outbound half via GET /status")
+			assert.Equal(t, want, app.getStatus(t, bearer, statusPairRxSid), "inbound half via GET /status")
 		})
 	}
 }
 
-// TestUpdateStatus_InboundOnlyChangeIsModified is the case the outbound-only
-// comparison judged a no-op: the outbound half already holds the requested
-// status and reason, the inbound half does not. Naming the inbound SID must
-// change the inbound half and run the router/receiver refresh.
-func TestUpdateStatus_InboundOnlyChangeIsModified(t *testing.T) {
-	const reason = "peer maintenance"
-	app := newStatusRefreshApp(t)
-	persistStatusPair(t, app, model.StreamStatePause, reason, model.StreamStateEnabled, "")
-	bearer := app.pairBearer(t)
-
-	rr := app.postStatus(t, bearer, statusPairRxSid, model.StreamStatePause, reason)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	assert.Len(t, app.router.updated, 1, "an inbound-only change must refresh the router")
-	assert.Len(t, app.handled, 1, "an inbound-only change must refresh the receiver")
-	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, bearer, statusPairRxSid))
-	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, bearer, statusPairTxSid))
-}
-
-// TestUpdateStatus_InboundNoOpStaysNoOp is the converse: the halves differ, the
-// inbound half already holds the requested status and reason. Comparing the
-// outbound half would call that a change; it is not one.
-func TestUpdateStatus_InboundNoOpStaysNoOp(t *testing.T) {
-	const reason = "peer maintenance"
-	app := newStatusRefreshApp(t)
-	persistStatusPair(t, app, model.StreamStateEnabled, "", model.StreamStatePause, reason)
-	bearer := app.pairBearer(t)
-
-	rr := app.postStatus(t, bearer, statusPairRxSid, model.StreamStatePause, reason)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	assert.Equal(t, 0, app.refreshes(), "a genuine inbound no-op must not refresh the router or receiver")
-	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, decodeStatus(t, rr))
-	assert.Equal(t, model.StreamStatus{Status: model.StreamStateEnabled}, app.getStatus(t, bearer, statusPairTxSid))
-}
-
-// TestUpdateStatus_DisabledPairNoOpStaysNoOp: disabling a pair whose halves are
-// both already disabled with the requested reason is a no-op through either
-// SID — the pair-level comparison finds nothing to change.
-func TestUpdateStatus_DisabledPairNoOpStaysNoOp(t *testing.T) {
+// TestUpdateStatus_SstpPairNoOpStaysNoOp: a write whose status and reason
+// already match BOTH halves is a no-op through either SID — nothing to change,
+// so no router or receiver refresh.
+func TestUpdateStatus_SstpPairNoOpStaysNoOp(t *testing.T) {
 	const reason = "outage"
-	for _, sid := range []string{statusPairTxSid, statusPairRxSid} {
-		t.Run(sid, func(t *testing.T) {
-			app := newStatusRefreshApp(t)
-			persistStatusPair(t, app, model.StreamStateDisable, reason, model.StreamStateDisable, reason)
-			bearer := app.pairBearer(t)
+	for _, status := range []string{model.StreamStateEnabled, model.StreamStatePause, model.StreamStateDisable} {
+		for _, sid := range []string{statusPairTxSid, statusPairRxSid} {
+			t.Run(status+" via "+sid, func(t *testing.T) {
+				app := newStatusRefreshApp(t)
+				persistStatusPair(t, app, status, reason, status, reason)
+				bearer := app.pairBearer(t)
 
-			rr := app.postStatus(t, bearer, sid, model.StreamStateDisable, reason)
-			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+				rr := app.postStatus(t, bearer, sid, status, reason)
+				require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-			assert.Equal(t, 0, app.refreshes(), "a no-op disable must not refresh the router or receiver")
-			disabled := model.StreamStatus{Status: model.StreamStateDisable, Reason: reason}
-			assert.Equal(t, disabled, app.getStatus(t, bearer, statusPairTxSid))
-			assert.Equal(t, disabled, app.getStatus(t, bearer, statusPairRxSid))
-		})
+				assert.Equal(t, 0, app.refreshes(), "a no-op must not refresh the router or receiver")
+				want := model.StreamStatus{Status: status, Reason: reason}
+				assert.Equal(t, want, decodeStatus(t, rr))
+				assert.Equal(t, want, app.getStatus(t, bearer, statusPairTxSid))
+				assert.Equal(t, want, app.getStatus(t, bearer, statusPairRxSid))
+			})
+		}
 	}
 }
 
@@ -452,15 +384,16 @@ func TestUpdateStatus_TokenBindingFallback(t *testing.T) {
 		assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, app.adminBearer(t), statusPlainSid))
 	})
 
-	t.Run("stream-bound token on a pair's inbound SID resolves to that half", func(t *testing.T) {
+	t.Run("stream-bound token on a pair's inbound SID resolves to the pair", func(t *testing.T) {
 		app := newStatusRefreshApp(t)
 		persistStatusPair(t, app, model.StreamStateEnabled, "", model.StreamStateEnabled, "")
 
 		rr := app.postStatus(t, app.boundMgmtBearer(t, statusPairRxSid), "", model.StreamStatePause, reason)
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 		bearer := app.pairBearer(t)
-		assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, bearer, statusPairRxSid))
-		assert.Equal(t, model.StreamStatus{Status: model.StreamStateEnabled}, app.getStatus(t, bearer, statusPairTxSid))
+		paused := model.StreamStatus{Status: model.StreamStatePause, Reason: reason}
+		assert.Equal(t, paused, app.getStatus(t, bearer, statusPairRxSid))
+		assert.Equal(t, paused, app.getStatus(t, bearer, statusPairTxSid), "a status write moves both halves (#303)")
 	})
 
 	t.Run("broad-scope token with no parameter is forbidden", func(t *testing.T) {

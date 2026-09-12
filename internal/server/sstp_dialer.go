@@ -978,7 +978,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	}
 
 	// AC 5: signing failure is an error, not a skip. Halt the dial cycle
-	// (release the claim, pause outbound so an operator investigates the
+	// (release the claim, pause the pair so an operator investigates the
 	// broken key material, exit the loop) rather than send an unsigned SET.
 	// Signing runs BEFORE Exchange, so nothing has been sent — the pending
 	// feedback is preserved verbatim (no request reached the peer, nothing owed
@@ -988,7 +988,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on pair=%s: %s", pairId, signErr.Error())
 		sstpDialerLog.Error("egress signing failure — halting dial cycle",
 			"pairId", pairId, "error", signErr)
-		d.outbound.PauseOutbound(stream, reason)
+		d.outbound.PausePair(stream, reason)
 		return cls, 0, true, pending
 	}
 
@@ -1010,13 +1010,13 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		updatedPending := newFeedback
 
 		// A stream-fatal setErr (binding-revoked) says every subsequent send is
-		// rejected the same way. Pause outbound and exit rather than spend the
+		// rejected the same way. Pause the pair and exit rather than spend the
 		// next cycles draining the queue into a dead stream; the SETs stay
 		// pending, so a resume replays them.
 		if fatal != nil {
 			reason := fmt.Sprintf("SSTP-CLIENT: peer reports stream dead on pair=%s: %s: %s",
 				stream.PairId, fatal.Err, fatal.Description)
-			d.outbound.PauseOutbound(stream, reason)
+			d.outbound.PausePair(stream, reason)
 			return cls, 0, true, updatedPending
 		}
 
@@ -1043,12 +1043,12 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		return cls, d.cfg.BaseDelay, false, updatedPending
 
 	case goSetSstp.ClassRequestError:
-		// 4xx: pause ONLY the outbound (client) direction of the pair.
+		// 4xx: pause the pair — both halves share this HTTP exchange (#303).
 		// Release the claim so a later resume re-drains and retries.
 		// Pending feedback preserved so it retries after resume.
 		d.outbound.ReleaseOutbound(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: 4xx request error on pair=%s", pairId)
-		d.outbound.PauseOutbound(stream, reason)
+		d.outbound.PausePair(stream, reason)
 		return cls, 0, true, pending
 
 	case goSetSstp.ClassTransient, goSetSstp.ClassTransport:
@@ -1071,7 +1071,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	default: // ClassWeirdResponse
 		d.outbound.ReleaseOutbound(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: weird response on pair=%s", pairId)
-		d.outbound.PauseOutbound(stream, reason)
+		d.outbound.PausePair(stream, reason)
 		return cls, 0, true, pending
 	}
 }
@@ -1241,9 +1241,10 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 // pushWhilePollHeld performs a SECOND, parallel SSTP POST to flush queued
 // outbound SETs while the pair's primary long-poll cycle is held open by
 // the peer (Q7.2, #166). It carries returnEvents=false so the peer returns
-// immediately. On 4xx it pauses ONLY the outbound direction (Q12.3); on
+// immediately. On 4xx it pauses the pair, both halves (#303); on
 // 5xx/transport it does not pause (the primary owns backoff). The held
-// primary is unaffected.
+// primary request is not cancelled; its loop observes the pause on its next
+// RefreshPair and exits.
 //
 // Concurrency is bounded to at most one in-flight secondary push per pair:
 // if a push is already running, this call returns ClassOK without opening a
@@ -1308,13 +1309,13 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 
 	if signErr != nil {
 		// AC 5: signing failure halts even on the second-push path — never
-		// send an unsigned SET. Pause outbound and log; the primary loop
+		// send an unsigned SET. Pause the pair and log; the primary loop
 		// will observe the pause on its next RefreshPair and exit.
 		d.outbound.ReleaseOutbound(pairId, events)
 		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on push-while-poll-held for pair=%s: %s", pairId, signErr.Error())
 		sstpDialerLog.Error("egress signing failure on second push — halting",
 			"pairId", pairId, "error", signErr)
-		d.outbound.PauseOutbound(stream, reason)
+		d.outbound.PausePair(stream, reason)
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, true
 	}
 
@@ -1341,12 +1342,12 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 			// exists to break.
 			d.deferFeedback(pairId, d.runInboundHalf(stream, received))
 		}
-		// A stream-fatal setErr pauses ONLY outbound, like the 4xx case below:
-		// every subsequent send is rejected the same way, so stop pushing rather
-		// than drain the queue into a dead stream. The held primary long-poll
-		// (inbound) is untouched, and the SETs stay pending for a resume.
+		// A stream-fatal setErr pauses the pair, like the 4xx case below: every
+		// subsequent send is rejected the same way, so stop pushing rather than
+		// drain the queue into a dead stream. The held primary request is not
+		// cancelled, and the SETs stay pending for a resume.
 		if fatal != nil {
-			d.outbound.PauseOutbound(stream, fmt.Sprintf(
+			d.outbound.PausePair(stream, fmt.Sprintf(
 				"SSTP-CLIENT: peer reports stream dead on push-while-poll-held for pair=%s: %s: %s",
 				pairId, fatal.Err, fatal.Description))
 			return cls, true
@@ -1356,13 +1357,13 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 		// rather than re-sent immediately.
 		return cls, ackedCount < len(events)
 	case goSetSstp.ClassRequestError:
-		// 4xx on second push pauses ONLY outbound; the held primary
-		// long-poll (inbound) continues uninterrupted (Q12.3).
+		// 4xx on second push pauses the pair (#303); the held primary request
+		// is not cancelled, and its loop exits on the next RefreshPair.
 		d.outbound.ReleaseOutbound(pairId, events)
-		d.outbound.PauseOutbound(stream, fmt.Sprintf("SSTP-CLIENT: 4xx on push-while-poll-held for pair=%s", pairId))
+		d.outbound.PausePair(stream, fmt.Sprintf("SSTP-CLIENT: 4xx on push-while-poll-held for pair=%s", pairId))
 	case goSetSstp.ClassWeirdResponse:
 		d.outbound.ReleaseOutbound(pairId, events)
-		d.outbound.PauseOutbound(stream, fmt.Sprintf("SSTP-CLIENT: weird response on push-while-poll-held for pair=%s", pairId))
+		d.outbound.PausePair(stream, fmt.Sprintf("SSTP-CLIENT: weird response on push-while-poll-held for pair=%s", pairId))
 	default: // ClassTransient / ClassTransport: do not pause; primary owns backoff.
 		d.outbound.ReleaseOutbound(pairId, events)
 		sstpDialerLog.Warn("push-while-poll-held transport/transient failure",

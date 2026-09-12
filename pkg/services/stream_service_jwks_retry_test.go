@@ -571,7 +571,7 @@ func TestGetIssuerJwksForReceiver_RetryDoesNotRaceStatusUpdate(t *testing.T) {
 // (ADR 0018) — so the disable and its reason must reach
 // InboundStatus/InboundErrorMsg, or querying the pair by the SID that actually
 // failed reports a healthy stream. The failure routes through the same rule as
-// every other status change (Q39), so the transmit direction is coupled too.
+// every other status change (#303), so the transmit direction is coupled too.
 func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound(t *testing.T) {
 	h := newRetryHarness(t)
 	ctx := context.Background()
@@ -589,7 +589,7 @@ func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound
 	assert.Contains(t, stored.InboundErrorMsg, "Error retrieving issuer JWKS public key",
 		"the inbound leg must carry the reason an operator needs")
 	assert.Equal(t, model.StreamStateDisable, stored.Status,
-		"a disable is a pair-level lifecycle event and couples both directions (Q39)")
+		"a status write moves both halves of the pair (#303)")
 	assert.Contains(t, stored.ErrorMsg, "Error retrieving issuer JWKS public key")
 
 	status, err := h.svc.GetStatus(ctx, rxSid)
@@ -610,40 +610,52 @@ func TestGetIssuerJwksForReceiver_SstpPairPermanentInboundFailureDisablesInbound
 // nothing until restart — GH #264's symptom resurrected through the re-enable
 // path. A plain receiver never hit this because UpdateStreamStatus updates its
 // cache entry in place.
+//
+// A status write moves both halves of a pair whichever SID names it (#303), so
+// re-enabling through EITHER SID must reach the cached inbound leg and reset
+// its retry ladder, from paused as well as from disabled.
 func TestGetIssuerJwksForReceiver_SstpPairReEnabledInboundResolves(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	const kid = "pair-reenable"
-	jwksSrv := newFlakyJwksServer(t, kid, &key.PublicKey)
-	jwksSrv.healthy.Store(true)
+	for _, from := range []string{model.StreamStateDisable, model.StreamStatePause} {
+		for _, side := range []string{"rx", "tx"} {
+			t.Run(from+" re-enabled via "+side+" SID", func(t *testing.T) {
+				key, err := rsa.GenerateKey(rand.Reader, 2048)
+				require.NoError(t, err)
+				const kid = "pair-reenable"
+				jwksSrv := newFlakyJwksServer(t, kid, &key.PublicKey)
+				jwksSrv.healthy.Store(true)
 
-	h := newRetryHarness(t)
-	ctx := context.Background()
+				h := newRetryHarness(t)
+				ctx := context.Background()
 
-	rec, txSid, rxSid := newSstpPairFixture(t, jwksSrv.URL)
-	rec.InboundStatus = model.StreamStateDisable
-	require.NoError(t, h.streamDAO.Create(ctx, rec))
+				rec, txSid, rxSid := newSstpPairFixture(t, jwksSrv.URL)
+				rec.Status, rec.InboundStatus = from, from
+				require.NoError(t, h.streamDAO.Create(ctx, rec))
 
-	h.svc.LoadReceiverStreams(ctx)
-	require.Zero(t, jwksSrv.attempts.Load(),
-		"a disabled inbound leg must not be fetched at load")
-	require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, rxSid),
-		"fail-closed: a disabled inbound leg hands out no verification material")
+				h.svc.LoadReceiverStreams(ctx)
+				require.Zero(t, jwksSrv.attempts.Load(),
+					"an inbound leg that is not enabled must not be fetched at load")
+				require.Nil(t, h.svc.GetIssuerJwksForReceiver(ctx, rxSid),
+					"fail-closed: an inbound leg that is not enabled hands out no verification material")
 
-	// The operator re-enables the inbound leg by its own SID. Enable routes per
-	// direction (Q39): only Disable couples the pair.
-	h.svc.UpdateStreamStatus(ctx, rxSid, model.StreamStateEnabled, "")
+				sid := rxSid
+				if side == "tx" {
+					sid = txSid
+				}
+				h.svc.UpdateStreamStatus(ctx, sid, model.StreamStateEnabled, "")
 
-	jwks := h.svc.GetIssuerJwksForReceiver(ctx, rxSid)
-	require.NotNil(t, jwks,
-		"a re-enabled inbound leg must resolve on the next lookup, not wait for a restart")
-	assert.Contains(t, jwks.KIDs(), kid)
+				jwks := h.svc.GetIssuerJwksForReceiver(ctx, rxSid)
+				require.NotNil(t, jwks,
+					"a re-enabled inbound leg must resolve on the next lookup, not wait for a restart")
+				assert.Contains(t, jwks.KIDs(), kid)
 
-	stored, err := h.streamDAO.FindByID(ctx, txSid)
-	require.NoError(t, err)
-	assert.Equal(t, model.StreamStateEnabled, stored.InboundStatus)
-	assert.Equal(t, model.StreamStateEnabled, stored.Status,
-		"enable routes per direction: the tx leg was never named and never touched")
+				stored, err := h.streamDAO.FindByID(ctx, txSid)
+				require.NoError(t, err)
+				assert.Equal(t, model.StreamStateEnabled, stored.InboundStatus)
+				assert.Equal(t, model.StreamStateEnabled, stored.Status,
+					"an enable moves both halves of the pair (#303)")
+			})
+		}
+	}
 }
 
 // TestGetIssuerJwksForReceiver_ReEnableClearsPermanentFailure: a permanent

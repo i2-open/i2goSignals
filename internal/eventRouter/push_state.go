@@ -30,8 +30,8 @@ func (r *router) updateStream(stream *model.StreamStateRecord, newState string, 
 
 	sid := stream.StreamConfiguration.Id
 	r.streamService.UpdateStreamStatus(r.ctx, sid, newState, reason)
-	stream.Status = newState
-	stream.ErrorMsg = reason
+	// SetStatus mirrors the store: on an SSTP pair both halves move (#303).
+	stream.SetStatus(newState, reason)
 
 	eventLogger.Info("PUSH-SRV: state transition",
 		"sid", sid,

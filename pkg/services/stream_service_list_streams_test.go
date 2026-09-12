@@ -41,8 +41,12 @@ func TestListStreams_SstpPairRoundTripsBothDirections(t *testing.T) {
 	svc, rec := createdPair(t)
 	ctx := context.Background()
 
-	// Pause only the receive direction, naming the rx-side SID.
-	svc.UpdateStreamStatus(ctx, rec.SstpInbound.Id, model.StreamStatePause, "rx throttled")
+	// Give the receive direction its own status and reason so a projection that
+	// dropped or conflated a half is visible. Status writes keep a pair's halves
+	// equal (#303), so this legacy split is seeded on the stored record directly.
+	split := rec
+	split.InboundStatus, split.InboundErrorMsg = model.StreamStatePause, "rx throttled"
+	require.NoError(t, svc.streamDAO.Update(ctx, &split))
 
 	list := svc.ListStreams(ctx)
 	require.Len(t, list, 1)
