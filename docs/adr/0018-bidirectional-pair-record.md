@@ -136,3 +136,27 @@ both directions, so there is one peer address to track.
   `internal/dao/interfaces/dao_interfaces.go`,
   `internal/providers/dbProviders/mongo_provider/provider.go` (sparse-unique
   indexes), draft-hunt-secevent-sstp-00.
+
+## Update (2026-09-12): every status on a pair moves both halves
+
+The Decision keeps two status pairs on the record: `Status`/`ErrorMsg` for the
+transmit side and `InboundStatus`/`InboundErrorMsg` for the receive side. The
+fields are unchanged. What changed is how they are written. Under PRD #154
+Q39/Q41 an operator could pause one direction by naming its SID, and under
+Q12.3 a request-level error paused only the affected direction. Only
+`disabled` coupled both halves.
+
+Issue #303 (PR #304) supersedes that. SSTP carries both directions over one
+HTTP exchange, so pausing a pair means pausing that exchange, the same as
+pausing a push or poll stream. Every status write on a pair now sets both
+halves, whichever SID names the pair. That covers `enabled`, `paused` and
+`disabled`, and it covers automatic pauses as well as operator requests.
+`StreamStateRecord.SetStatus` (`pkg/ssfModels/model_stream_state.go`) is the
+one place the rule lives.
+
+Reads are unchanged. `GET /status` still returns the half the SID names
+(Q41), so a surface that reads each direction keeps working. A record saved
+with differing halves before this change is healed by its next status write.
+
+A one-way logical pause is not ruled out. If one is needed, it comes as a
+later enhancement with its own design, not by reviving per-direction writes.

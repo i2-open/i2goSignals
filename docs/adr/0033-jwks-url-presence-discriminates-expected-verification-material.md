@@ -82,7 +82,9 @@ rule is recorded here rather than left implicit in the retry code.
   refined.** `isPermanentJwksError` still disables the record and persists the
   reason, and that path stays visible to operators and out of the retry ladder.
   It no longer writes `Status`/`ErrorMsg` directly, though: the disable goes
-  through the shared per-direction status rule (Q39/Q41), so an SSTP pair whose
+  through the shared status rule (per-direction under Q39/Q41 when this was
+  written; pair-level for every status since ADR 0018's update of 2026-09-12),
+  so an SSTP pair whose
   *inbound* leg cannot resolve a key carries the disable and its reason on
   `InboundStatus`/`InboundErrorMsg` as well. This matters because the cache is
   keyed by the inbound SID (ADR 0018) — the failing leg is the inbound one — and
