@@ -394,3 +394,42 @@ func TestUpdateStatus_TokenBindingFallback(t *testing.T) {
 		assert.Equal(t, 0, app.refreshes())
 	})
 }
+
+// TestStreamUpdate_BoundTokenRejectsMismatchedBodyStreamId pins the update
+// handler against the #303 token fallback: a single-stream token that names no
+// stream_id parameter now resolves authCtx.StreamId to its own stream, so a body
+// stream_id naming a DIFFERENT stream must be refused (as verify, subject
+// add/remove and subject-filter review refuse it) rather than silently applied
+// to the token's stream. PUT (replace) and PATCH share the handler.
+func TestStreamUpdate_BoundTokenRejectsMismatchedBodyStreamId(t *testing.T) {
+	const otherSid = "status-plain-other"
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			app := newStatusRefreshApp(t)
+			persistStatusPlain(t, app, model.StreamStateEnabled, "")
+			require.NoError(t, app.StreamService.PersistStreamStateRecord(context.Background(), &model.StreamStateRecord{
+				ProjectId: statusTestProject,
+				StreamConfiguration: model.StreamConfiguration{
+					Id:       otherSid,
+					Delivery: &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll}},
+				},
+				Status: model.StreamStateEnabled,
+			}))
+
+			body, err := json.Marshal(map[string]any{"stream_id": otherSid, "description": "retargeted"})
+			require.NoError(t, err)
+			req := httptest.NewRequest(method, "/stream", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+app.boundMgmtBearer(t, statusPlainSid))
+			rr := httptest.NewRecorder()
+			StreamUpdateHandler(app, rr, req)
+
+			assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+			assert.Equal(t, 0, app.refreshes(), "a refused update must not refresh the router or receiver")
+			for _, sid := range []string{statusPlainSid, otherSid} {
+				stored, err := app.StreamService.GetStreamState(context.Background(), sid)
+				require.NoError(t, err)
+				assert.Empty(t, stored.Description, "stream %s must not be modified", sid)
+			}
+		})
+	}
+}

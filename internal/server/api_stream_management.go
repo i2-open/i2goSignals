@@ -764,6 +764,15 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// parameter (e.g. the OpenID conformance suite) leave authCtx.StreamId empty.
 	// Fall back to the body's stream_id in that case. Earlier SSF drafts encoded
 	// the stream id in the token, which is why authCtx.StreamId exists at all.
+	//
+	// authCtx.StreamId may now come from a single-stream token rather than the
+	// request (#303), so a body stream_id naming a different stream is refused
+	// rather than silently applied to the token's stream (same rule as
+	// VerificationRequest).
+	if authCtx.StreamId != "" && jsonRequest.StreamConfiguration.Id != "" && authCtx.StreamId != jsonRequest.StreamConfiguration.Id {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	streamId := authCtx.StreamId
 	if streamId == "" {
 		streamId = jsonRequest.StreamConfiguration.Id
