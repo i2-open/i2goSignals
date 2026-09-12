@@ -358,8 +358,8 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverr
 }
 
 // TestReviewSurfacesEffectiveEventSourceAndGrace verifies that when a stream
-// carries Go zero-values — EventSource==nil and SubjectRemovalGraceSeconds==0 —
-// the admin review response still ALWAYS carries both fields on the wire (GH
+// carries Go zero-values — an unset EventSource and SubjectRemovalGraceSeconds==0
+// — the admin review response still ALWAYS carries both fields on the wire (GH
 // #118): event_source resolves to the effective {"type":"DIRECT"} default and
 // subject_removal_grace_seconds is present as an explicit integer (the
 // configured I2SIG_SUBJECT_REMOVAL_GRACE default). goSignalsAdmin's Subjects
@@ -368,51 +368,118 @@ func (suite *SubjectFilterReviewSuite) TestReviewReturnsEventSourceAndGraceOverr
 // The effective type is DIRECT because that is what the router resolves an unset
 // descriptor to (effectiveEventSourceType, GH #199), per ADR 0004's update of
 // 2026-09-10; the review must not report the opposite of what delivery does (GH
-// #299). #118's key-presence guarantee is a separate decision and is unchanged.
+// #299). The router folds both unset spellings — a nil descriptor and a present
+// descriptor with an empty Type, which a request carrying "event_source": {}
+// stores — into DIRECT, so the review resolves both (GH #302). Before #302 the
+// empty-Type spelling reviewed as "event_source": {} (Type is omitempty) while
+// delivery routed it DIRECT. #118's key-presence guarantee is a separate
+// decision and is unchanged.
 func (suite *SubjectFilterReviewSuite) TestReviewSurfacesEffectiveEventSourceAndGrace() {
-	t := suite.T()
-	t.Setenv("I2SIG_SUBJECT_REMOVAL_GRACE", "45")
-	instance := suite.instance
-	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
-		&authSupport.AuthContext{ProjectId: instance.projectId})
-	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
-		StreamConfiguration: model.StreamConfiguration{
-			Iss: "DEFAULT",
-			Aud: []string{"https://receiver.example.com"},
-			Delivery: &model.OneOfStreamConfigurationDelivery{
-				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
-			},
-		},
-		DefaultSubjects:   model.DefaultSubjectsNone,
-		SubjectFilterMode: model.SubjectFilterModeLocal,
-		// EventSource left nil and SubjectRemovalGraceSeconds left 0 — the
-		// zero-values that previously got omitted from the wire.
-	}, instance.projectId, nil)
-	require.NoError(t, err)
+	suite.T().Setenv("I2SIG_SUBJECT_REMOVAL_GRACE", "45")
+	cases := []struct {
+		name        string
+		eventSource *model.EventSource
+	}{
+		{name: "nil descriptor", eventSource: nil},
+		{name: "empty-type descriptor", eventSource: &model.EventSource{}},
+	}
+	for _, tc := range cases {
+		suite.Run(tc.name, func() {
+			t := suite.T()
+			instance := suite.instance
+			ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+				&authSupport.AuthContext{ProjectId: instance.projectId})
+			created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{
+					Iss: "DEFAULT",
+					Aud: []string{"https://receiver.example.com"},
+					Delivery: &model.OneOfStreamConfigurationDelivery{
+						PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+					},
+				},
+				DefaultSubjects:   model.DefaultSubjectsNone,
+				SubjectFilterMode: model.SubjectFilterModeLocal,
+				EventSource:       tc.eventSource,
+				// SubjectRemovalGraceSeconds left 0 — with an unset EventSource,
+				// the zero-values that previously got omitted from the wire.
+			}, instance.projectId, nil)
+			require.NoError(t, err)
 
-	body := `{"stream_id":"` + created.Id + `"}`
-	resp := suite.postReview(suite.instance.streamMgmtToken, body)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+			body := `{"stream_id":"` + created.Id + `"}`
+			resp := suite.postReview(suite.instance.streamMgmtToken, body)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	raw, _ := io.ReadAll(resp.Body)
-	// Decode into a presence-sensitive map: the typed reviewResponse uses
-	// omitempty, which cannot distinguish "key absent" from "zero value".
-	var wire map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw, &wire), "response must be JSON: %s", string(raw))
+			raw, _ := io.ReadAll(resp.Body)
+			// Decode into a presence-sensitive map: the typed reviewResponse uses
+			// omitempty, which cannot distinguish "key absent" from "zero value".
+			var wire map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &wire), "response must be JSON: %s", string(raw))
 
-	esRaw, esPresent := wire["event_source"]
-	require.True(t, esPresent, "event_source key must always be present: %s", string(raw))
-	var es model.EventSource
-	require.NoError(t, json.Unmarshal(esRaw, &es))
-	assert.Equal(t, model.EventSourceDirect, es.Type,
-		"nil stream EventSource must resolve to effective DIRECT, matching the router's effectiveEventSourceType")
+			esRaw, esPresent := wire["event_source"]
+			require.True(t, esPresent, "event_source key must always be present: %s", string(raw))
+			var es model.EventSource
+			require.NoError(t, json.Unmarshal(esRaw, &es))
+			assert.Equal(t, model.EventSourceDirect, es.Type,
+				"unset stream EventSource must resolve to effective DIRECT, matching the router's effectiveEventSourceType: %s", string(esRaw))
 
-	graceRaw, gracePresent := wire["subject_removal_grace_seconds"]
-	require.True(t, gracePresent, "subject_removal_grace_seconds key must always be present: %s", string(raw))
-	var grace int
-	require.NoError(t, json.Unmarshal(graceRaw, &grace))
-	assert.Equal(t, 45, grace,
-		"zero per-stream grace must resolve to the configured I2SIG_SUBJECT_REMOVAL_GRACE default")
+			graceRaw, gracePresent := wire["subject_removal_grace_seconds"]
+			require.True(t, gracePresent, "subject_removal_grace_seconds key must always be present: %s", string(raw))
+			var grace int
+			require.NoError(t, json.Unmarshal(graceRaw, &grace))
+			assert.Equal(t, 45, grace,
+				"zero per-stream grace must resolve to the configured I2SIG_SUBJECT_REMOVAL_GRACE default")
+		})
+	}
+}
+
+// TestReviewSurfacesSetEventSourceUnchanged pins the other side of GH #302's
+// widened resolution: only an unset descriptor (nil or empty Type) resolves to
+// DIRECT. A descriptor that names a type — DIRECT, AUDIENCE, or EXPLICIT — is
+// surfaced exactly as stored, and EXPLICIT keeps its source_stream_ids.
+func (suite *SubjectFilterReviewSuite) TestReviewSurfacesSetEventSourceUnchanged() {
+	cases := []struct {
+		name        string
+		eventSource *model.EventSource
+	}{
+		{name: "DIRECT", eventSource: &model.EventSource{Type: model.EventSourceDirect}},
+		{name: "AUDIENCE", eventSource: &model.EventSource{Type: model.EventSourceAudience}},
+		{name: "EXPLICIT", eventSource: &model.EventSource{
+			Type:            model.EventSourceExplicit,
+			SourceStreamIds: []string{"upstream-a", "upstream-b"},
+		}},
+	}
+	for _, tc := range cases {
+		suite.Run(tc.name, func() {
+			t := suite.T()
+			instance := suite.instance
+			ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
+				&authSupport.AuthContext{ProjectId: instance.projectId})
+			created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{
+					Iss: "DEFAULT",
+					Aud: []string{"https://receiver.example.com"},
+					Delivery: &model.OneOfStreamConfigurationDelivery{
+						PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+					},
+				},
+				DefaultSubjects:   model.DefaultSubjectsNone,
+				SubjectFilterMode: model.SubjectFilterModeLocal,
+				EventSource:       tc.eventSource,
+			}, instance.projectId, nil)
+			require.NoError(t, err)
+
+			body := `{"stream_id":"` + created.Id + `"}`
+			resp := suite.postReview(suite.instance.streamMgmtToken, body)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			var review reviewResponse
+			raw, _ := io.ReadAll(resp.Body)
+			require.NoError(t, json.Unmarshal(raw, &review), "response must be JSON: %s", string(raw))
+			require.NotNil(t, review.EventSource, "review must include the stream's event_source: %s", string(raw))
+			assert.Equal(t, *tc.eventSource, *review.EventSource,
+				"a descriptor with a non-empty type must be surfaced unchanged")
+		})
+	}
 }
 
 // reviewResponse mirrors the wire shape of the admin review endpoint. It is
