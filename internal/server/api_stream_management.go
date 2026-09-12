@@ -791,7 +791,13 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// sentinel on every read, so an UPDATE body that echoes a masked credential
 	// must NOT clobber the stored live value. Restore any sentinel-marked
 	// credential field from the stored record before the update is applied.
-	if stored, sErr := sa.GetStreamService().GetStreamState(r.Context(), streamId); sErr == nil && stored != nil {
+	//
+	// Every lookup in this handler resolves the SID the way UpdateStream does
+	// (#303): an SSTP pair's rx-side SID is not its document _id, so an _id
+	// lookup found nothing. The merge was then skipped, letting an echoed mask
+	// overwrite the pair's peer bearer, and the refresh below handed
+	// HandleReceiver a nil record.
+	if stored, sErr := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId); sErr == nil && stored != nil {
 		jsonRequest.MergeUnchangedCredentials(stored)
 	}
 
@@ -820,7 +826,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	streamState, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
+	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state after update", "id", streamId, "error", err)
 	}
@@ -845,15 +851,19 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 
 	// Update the event router
-	state, err := sa.GetStreamService().GetStreamState(r.Context(), streamId)
+	state, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
 	if err != nil {
 		serverLog.Error("Error getting stream state for event router update", "id", streamId, "error", err)
 	}
 	if resetDate != nil || resetJti != "" {
 		sa.GetEventRouter().RemoveStream(streamId)
 	}
-	sa.GetEventRouter().UpdateStreamState(state)
-	sa.HandleReceiver(state)
+	// The update is already stored; a failed re-read skips the refresh rather
+	// than passing HandleReceiver a nil record.
+	if state != nil {
+		sa.GetEventRouter().UpdateStreamState(state)
+		sa.HandleReceiver(state)
+	}
 
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 

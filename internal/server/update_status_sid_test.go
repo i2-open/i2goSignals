@@ -40,6 +40,9 @@ type routerStateSpy struct {
 }
 
 func (r *routerStateSpy) UpdateStreamState(stream *model.StreamStateRecord) {
+	if stream == nil { // the real router ignores a nil record
+		return
+	}
 	r.updated = append(r.updated, stream.StreamConfiguration.Id)
 }
 
