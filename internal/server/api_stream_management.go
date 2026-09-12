@@ -88,7 +88,8 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	// When the token is bound to a specific stream it must match the request;
 	// the handler always operates on that stream (same rule as VerificationRequest).
-	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+	// A stream-bound token may also name only its own bound streams (#303).
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -765,11 +766,12 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// Fall back to the body's stream_id in that case. Earlier SSF drafts encoded
 	// the stream id in the token, which is why authCtx.StreamId exists at all.
 	//
-	// authCtx.StreamId may now come from a single-stream token rather than the
-	// request (#303), so a body stream_id naming a different stream is refused
-	// rather than silently applied to the token's stream (same rule as
-	// VerificationRequest).
-	if authCtx.StreamId != "" && jsonRequest.StreamConfiguration.Id != "" && authCtx.StreamId != jsonRequest.StreamConfiguration.Id {
+	// A stream-bound token operates only on its bound streams (#303): a body
+	// stream_id outside the binding, or other than the stream the request
+	// resolved to (including via the token fallback), is refused rather than
+	// silently applied to another stream. An unbound token keeps the rule
+	// above: the parameter's stream wins over the body.
+	if !authCtx.BoundTokenPermits(jsonRequest.StreamConfiguration.Id) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}

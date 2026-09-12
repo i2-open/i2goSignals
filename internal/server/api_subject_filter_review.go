@@ -115,9 +115,10 @@ func ReviewSubjectFilterHandler(sa SsfApplicationInterface, w http.ResponseWrite
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// A stream-bound token (mgmt) must match the requested stream; an admin
-	// token has no stream binding and authorizes targeting any stream.
-	if authCtx.StreamId != "" && authCtx.StreamId != req.StreamId {
+	// A stream-bound token (mgmt) must match the requested stream and may name
+	// only its own bound streams (#303); an admin token has no stream binding and
+	// authorizes targeting any stream.
+	if !authCtx.BoundTokenPermits(req.StreamId) || (authCtx.StreamId != "" && authCtx.StreamId != req.StreamId) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}

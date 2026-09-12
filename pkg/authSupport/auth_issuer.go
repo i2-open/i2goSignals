@@ -105,6 +105,33 @@ func (a *AuthContext) IsAuthorizedForStream(streamId string, scopes ...string) b
 	return a.Eat != nil && a.Eat.IsAuthorized(streamId, scopes)
 }
 
+// BoundTokenPermits reports whether the caller may name sid as a request body's
+// stream_id (#303). A stream-bound token — a local EAT with non-empty StreamIds —
+// operates only on its bound streams however the stream is named: the stream_id
+// parameter and path var are already confined by EventAuthToken.IsAuthorized in
+// ValidateAuthorizationAny, and this confines the body. sid must be one of the
+// token's bound streams and, when the request already resolved a target
+// (AuthContext.StreamId), that same stream, so a bound token cannot resolve one
+// stream and act on another. A caller with no binding — a broad-scope token, the
+// StreamAny wildcard, an OAuth/STS or bootstrap context — is not confined here
+// and keeps the handler's own rule. An empty sid names nothing and is permitted.
+func (a *AuthContext) BoundTokenPermits(sid string) bool {
+	if a == nil {
+		return false
+	}
+	if sid == "" || a.IsOAuthClient || a.Eat == nil || len(a.Eat.StreamIds) == 0 {
+		return true
+	}
+	permitted := false
+	for _, bound := range a.Eat.StreamIds {
+		if strings.EqualFold(bound, StreamAny) {
+			return true
+		}
+		permitted = permitted || strings.EqualFold(bound, sid)
+	}
+	return permitted && (a.StreamId == "" || a.StreamId == sid)
+}
+
 type AuthIssuer struct {
 	mu           sync.RWMutex
 	TokenIssuer  string
