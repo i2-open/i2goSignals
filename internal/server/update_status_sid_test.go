@@ -280,8 +280,8 @@ func TestUpdateStatus_SstpPairBySID(t *testing.T) {
 			rr := app.postStatus(t, bearer, tt.sid, tt.status, reason)
 			require.Equal(t, http.StatusOK, rr.Code, "POST /status on %s: %s", tt.sid, rr.Body.String())
 			assert.Equal(t, tt.wantRespond, decodeStatus(t, rr), "the response reports the named half")
-			assert.Equal(t, 1, len(app.router.updated), "a status change refreshes the router")
-			assert.Equal(t, 1, len(app.handled), "a status change refreshes the receiver")
+			assert.Len(t, app.router.updated, 1, "a status change refreshes the router")
+			assert.Len(t, app.handled, 1, "a status change refreshes the receiver")
 
 			assert.Equal(t, tt.wantOut, app.getStatus(t, bearer, statusPairTxSid), "outbound half via GET /status")
 			assert.Equal(t, tt.wantIn, app.getStatus(t, bearer, statusPairRxSid), "inbound half via GET /status")
@@ -302,8 +302,8 @@ func TestUpdateStatus_InboundOnlyChangeIsModified(t *testing.T) {
 	rr := app.postStatus(t, bearer, statusPairRxSid, model.StreamStatePause, reason)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	assert.Equal(t, 1, len(app.router.updated), "an inbound-only change must refresh the router")
-	assert.Equal(t, 1, len(app.handled), "an inbound-only change must refresh the receiver")
+	assert.Len(t, app.router.updated, 1, "an inbound-only change must refresh the router")
+	assert.Len(t, app.handled, 1, "an inbound-only change must refresh the receiver")
 	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, bearer, statusPairRxSid))
 	assert.Equal(t, model.StreamStatus{Status: model.StreamStatePause, Reason: reason}, app.getStatus(t, bearer, statusPairTxSid))
 }
