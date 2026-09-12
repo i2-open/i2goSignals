@@ -103,6 +103,28 @@ bearer once OAuth is configured — is deferred to the bearer-rotation work in
 GH #152 (Q38); today the static `SstpMethod.AuthorizationHeader` is used when
 present.
 
+### Which stream a request acts on (token-stream fallback)
+
+`ValidateAuthorizationAny` resolves `AuthContext.StreamId` in this order (#303):
+
+- **A request-named stream always wins:** the `stream_id` query parameter, then
+    the path var. An administrator names the target this way.
+- **Otherwise a local token binding exactly one stream supplies it**, so a
+    stream client reaches its own stream without repeating its SID.
+- **No fallback** for a multi-SID bearer (an SSTP pair bearer), the `any`
+    wildcard, a broad-scope token (empty `StreamIds`), or an OAuth/STS or
+    bootstrap context. `StreamId` stays empty and stream handlers still refuse.
+
+The fallback never widens authorization: it only yields the stream the token is
+already bound to. It tightens the body-`stream_id` checks, because a
+single-stream token that omits the parameter can no longer target a different
+body `stream_id`: subject add/remove, subject-filter review, verify and
+`PUT`/`PATCH /stream` answer `403`. With no parameter, such a token now
+resolves where it used to get `403` at `GET`/`POST /status`, `GET /stream`
+(including rotate-on-GET) and `DELETE /stream`, and `400` at admin
+`GET /state`. Poll (`/poll/{id}`) and push (`/events/{id}`) always name the
+stream on the path, so the fallback never applies to them.
+
 ### The bootstrap secret
 
 `I2SIG_BOOTSTRAP_TOKEN` is a shared secret. On the server, a bearer that
