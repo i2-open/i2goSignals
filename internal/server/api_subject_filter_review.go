@@ -206,10 +206,18 @@ func buildSubjectFilterReviewResponse(stream *model.StreamStateRecord, review *s
 // admin review wire contract surfaces. A nil descriptor has EFFECTIVE type
 // DIRECT, per ADR 0004's update of 2026-09-10 ("unset Type resolves to DIRECT,
 // not AUDIENCE"), which supersedes that ADR's original nil→AUDIENCE Decision
-// text. This mirrors effectiveEventSourceType in pkg/services/event_service.go,
-// the resolution the router actually routes on, so the review reports the same
-// effective source delivery applies rather than its inverse. A non-nil
-// descriptor is surfaced unchanged.
+// text. For a nil descriptor this agrees with effectiveEventSourceType in
+// pkg/services/event_service.go, the resolution the router actually routes on,
+// so the review reports the same effective source delivery applies rather than
+// its inverse.
+//
+// A non-nil descriptor is surfaced unchanged, and that is deliberately narrower
+// than the router's resolver, which folds a non-nil descriptor with an empty
+// Type into DIRECT as well. A stream storing {} therefore still reviews as
+// {"type":""} while delivery routes it DIRECT. validateEventSource accepts that
+// shape, so it is reachable. Closing the remaining case is out of scope here —
+// #299 pins "a non-nil descriptor is still surfaced unchanged" — and needs its
+// own issue.
 //
 // The key is emitted either way (GH #118): that is the separate, still-standing
 // guarantee that event_source is never omitted from the wire, and it is about

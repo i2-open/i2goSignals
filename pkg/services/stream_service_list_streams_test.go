@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/i2-open/i2goSignals/pkg/dao"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -15,7 +15,7 @@ import (
 
 // listFixture is a StreamService over an in-memory stream DAO, plus the DAO
 // itself so a test can seed records ListStreams has to project.
-func listFixture(t *testing.T) (*StreamService, dao.StreamDAO) {
+func listFixture(t *testing.T) (*StreamService, interfaces.StreamDAO) {
 	t.Helper()
 	streamDAO := memory.NewStreamDAO()
 	keyService := NewKeyService(memory.NewKeyDAO(), "https://local.example", nil, nil)
@@ -191,14 +191,29 @@ func TestListStreams_OverlaysJwksReadinessOnReceiveDirectionsOnly(t *testing.T) 
 	assert.Equal(t, model.JwksReadinessUnresolved, sstp.InboundJwksReadiness.State)
 	assert.Nil(t, sstp.JwksReadiness,
 		"a pair's outbound half transmits; it must not carry readiness")
+
+	// The receive direction's readiness reaches the wire under `jwks_readiness`.
+	// Its inbound twin is pinned in TestListStreams_PinsWireKeyNames, whose
+	// fixture is an SSTP pair and so has no outbound half to carry this one.
+	raw, err := json.Marshal(rx)
+	require.NoError(t, err)
+	var keys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &keys))
+	require.Contains(t, keys, "jwks_readiness",
+		"a receiver's overlaid readiness must serialize as `jwks_readiness`")
+	var readiness map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(keys["jwks_readiness"], &readiness))
+	assert.Contains(t, readiness, "state")
 }
 
 // fixedOrderStreamDAO hands back a known sequence from List, so a test can
 // observe whether ListStreams reorders it. The in-memory DAO iterates a map and
 // its order is not reproducible between calls, which is precisely why ordering
-// cannot be pinned against it.
+// cannot be pinned against it. Only List is stubbed; the embedded DAO is a real
+// memory store so anything else passes straight through rather than panicking
+// on a nil interface.
 type fixedOrderStreamDAO struct {
-	dao.StreamDAO
+	interfaces.StreamDAO
 	recs []model.StreamStateRecord
 }
 
@@ -229,7 +244,7 @@ func TestListStreams_PreservesDaoOrder(t *testing.T) {
 
 	keyService := NewKeyService(memory.NewKeyDAO(), "https://local.example", nil, nil)
 	require.NoError(t, keyService.InitializeTokenKey(context.Background(), "https://local.example"))
-	svc := NewStreamService(&fixedOrderStreamDAO{recs: recs}, keyService, "https://local.example", StreamServiceConfig{})
+	svc := NewStreamService(&fixedOrderStreamDAO{StreamDAO: memory.NewStreamDAO(), recs: recs}, keyService, "https://local.example", StreamServiceConfig{})
 
 	got := make([]string, 0, len(sids))
 	for _, rec := range svc.ListStreams(context.Background()) {

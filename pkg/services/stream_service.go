@@ -1599,6 +1599,12 @@ func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*
 // Delivery endpoints are returned as stored: the base-URL rewrite the HTTP
 // route applies is scoped to that listener's externally visible base and does
 // not apply on this path.
+//
+// A failed DAO read is logged and returns a nil slice, so this signature cannot
+// tell a caller "there are no streams" apart from "the store did not answer".
+// That is the pre-existing contract of the narrow ListStreams and of its
+// neighbours GetStateMap and LoadReceiverStreams; the sibling queries
+// ListReceiverStreams and ListTransmitterStreams return an error instead.
 func (s *StreamService) ListStreams(ctx context.Context) []model.StreamStateRecord {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
