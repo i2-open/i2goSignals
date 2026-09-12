@@ -282,10 +282,52 @@ func TestStreamStateRecord_DirectionStatus(t *testing.T) {
 	}
 }
 
+// TestStreamStateRecord_IsPairLevelStatus pins which status writes move BOTH
+// halves of a pair (#303): disabled is pair-level into and out of, so a request
+// for disabled, or any request while either half is disabled, couples the
+// halves; enabled <-> paused between non-disabled halves stays per-direction.
+func TestStreamStateRecord_IsPairLevelStatus(t *testing.T) {
+	pairWith := func(outStatus, inStatus string) *StreamStateRecord {
+		rec := newSstpPairRecord()
+		rec.Status, rec.InboundStatus = outStatus, inStatus
+		return rec
+	}
+	methodOnlyPair := &StreamStateRecord{
+		SstpMethod: &SstpMethod{Role: SstpRoleResponder},
+		Status:     StreamStateDisable,
+	}
+	plain := &StreamStateRecord{Status: StreamStateDisable}
+
+	tests := []struct {
+		name   string
+		rec    *StreamStateRecord
+		status string
+		want   bool
+	}{
+		{"into disabled from enabled halves", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStateDisable, true},
+		{"out of disabled via enabled", pairWith(StreamStateDisable, StreamStateDisable), StreamStateEnabled, true},
+		{"out of disabled via paused", pairWith(StreamStateDisable, StreamStateDisable), StreamStatePause, true},
+		{"a legacy split pair with only the inbound half disabled", pairWith(StreamStateEnabled, StreamStateDisable), StreamStateEnabled, true},
+		{"a legacy split pair with only the outbound half disabled", pairWith(StreamStateDisable, StreamStatePause), StreamStatePause, true},
+		{"paused between non-disabled halves stays per-direction", pairWith(StreamStateEnabled, StreamStateEnabled), StreamStatePause, false},
+		{"enabled between non-disabled halves stays per-direction", pairWith(StreamStatePause, StreamStatePause), StreamStateEnabled, false},
+		{"a pair signalled by SstpMethod alone", methodOnlyPair, StreamStateEnabled, true},
+		{"a plain record is never pair-level", plain, StreamStateEnabled, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.IsPairLevelStatus(tt.status); got != tt.want {
+				t.Errorf("IsPairLevelStatus(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestStreamStateRecord_IsStatusChange pins the POST /status "no change" test
-// (#303) against what applyStreamStatusToRecord writes: disabled couples both
-// halves of a pair, so it is a change when EITHER half differs in status or
-// reason; any other status is judged on the half the SID names only.
+// (#303) against what applyStreamStatusToRecord writes: a pair-level write
+// (IsPairLevelStatus) moves both halves, so it is a change when EITHER half
+// differs in status or reason; any other write is judged on the half the SID
+// names only.
 func TestStreamStateRecord_IsStatusChange(t *testing.T) {
 	pairWith := func(outStatus, outReason, inStatus, inReason string) *StreamStateRecord {
 		rec := newSstpPairRecord()
@@ -321,6 +363,9 @@ func TestStreamStateRecord_IsStatusChange(t *testing.T) {
 		{"reasons compare case-insensitively", pairWith(StreamStateDisable, "Stop", StreamStateDisable, "STOP"), "tx-sid-1", StreamStateDisable, "stop", false},
 		{"pause on rx SID is judged on the inbound half only", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), "rx-sid-1", StreamStatePause, "hold", false},
 		{"pause on tx SID is judged on the outbound half only", pairWith(StreamStateEnabled, "", StreamStatePause, "hold"), "tx-sid-1", StreamStatePause, "hold", true},
+		{"enable on a disabled pair is a change", pairWith(StreamStateDisable, "stop", StreamStateDisable, "stop"), "rx-sid-1", StreamStateEnabled, "", true},
+		{"enable on a legacy split pair whose named half already matches heals it", pairWith(StreamStateEnabled, "", StreamStateDisable, "stop"), "tx-sid-1", StreamStateEnabled, "", true},
+		{"pause on a legacy split pair whose named half already matches heals it", pairWith(StreamStateDisable, "stop", StreamStatePause, "hold"), "rx-sid-1", StreamStatePause, "hold", true},
 		{"a pair signalled by SstpMethod alone still couples on disable", methodOnlyPair, "tx-sid-1", StreamStateDisable, "stop", true},
 		{"a plain record matching its only half is not a change", plain, "plain-sid", StreamStateDisable, "stop", false},
 		{"a plain record differing from its only half is a change", plain, "plain-sid", StreamStatePause, "stop", true},

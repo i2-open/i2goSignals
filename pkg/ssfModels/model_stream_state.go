@@ -385,19 +385,30 @@ func (ss *StreamStateRecord) DirectionStatus(sid string) StreamStatus {
 	return StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}
 }
 
+// IsPairLevelStatus reports whether writing status moves BOTH halves of an SSTP
+// pair rather than the half a SID names (#303). Disabled is pair-level in both
+// directions of transition, so a pair is never left with one half disabled: a
+// request for disabled couples the halves, and while EITHER half is disabled
+// (which heals a legacy split record) an enabled or paused request moves both.
+// Enabled <-> paused between non-disabled halves stays per-direction (Q41).
+// "Is a pair" is either signal (see applyStreamStatusToRecord); a record that
+// is not a pair has one half, so it is never pair-level.
+func (ss *StreamStateRecord) IsPairLevelStatus(status string) bool {
+	isPair := ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
+	return isPair && (status == StreamStateDisable || ss.Status == StreamStateDisable || ss.InboundStatus == StreamStateDisable)
+}
+
 // IsStatusChange reports whether writing status and reason through sid would
-// change the record, which is POST /status's "no change" test (#303). It
-// mirrors applyStreamStatusToRecord: disabled on a pair couples both halves,
-// writing the same status and reason to each, so it is a change when EITHER
-// half differs; any other status moves only the half sid names, so only that
-// half is compared. "Is a pair" is either signal, as there. Reasons compare
-// case-insensitively.
+// change the record, which is POST /status's "no change" test (#303). It agrees
+// with applyStreamStatusToRecord by sharing IsPairLevelStatus: a pair-level
+// write gives both halves the same status and reason, so it is a change when
+// EITHER half differs; any other write moves only the half sid names, so only
+// that half is compared. Reasons compare case-insensitively.
 func (ss *StreamStateRecord) IsStatusChange(sid, status, reason string) bool {
 	differs := func(half StreamStatus) bool {
 		return half.Status != status || !strings.EqualFold(reason, half.Reason)
 	}
-	isPair := ss.GetType() == DeliverySstpPair || ss.SstpInbound != nil
-	if isPair && status == StreamStateDisable {
+	if ss.IsPairLevelStatus(status) {
 		return differs(StreamStatus{Status: ss.Status, Reason: ss.ErrorMsg}) ||
 			differs(StreamStatus{Status: ss.InboundStatus, Reason: ss.InboundErrorMsg})
 	}

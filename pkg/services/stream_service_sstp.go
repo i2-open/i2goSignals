@@ -509,16 +509,19 @@ func sstpPairBySID(
 // not persist: callers that need the change durable follow it with a DAO write,
 // which on the JWKS paths has to happen with the receiver-cache lock released.
 //
-// It applies the direction-routing rule for writes (Q39, Q41): naming an
-// SSTP pair's rx-side SID writes InboundStatus/InboundErrorMsg and naming its tx
-// side writes Status/ErrorMsg, but Disabled is a pair-level lifecycle event and
-// ALWAYS couples both directions regardless of which SID is named. The coupling
-// is PRD #154's decision verbatim — "Disable always couples both directions" —
-// stated with no operator-only carve-out, so a fault-driven disable (a
-// permanent JWKS failure, an ADR-0066 §D2 violation) takes the same rule as an
-// administrative one. A record that is not a pair has one direction, so it
-// always takes Status/ErrorMsg. StreamStateRecord.IsStatusChange mirrors this
-// rule to judge a POST /status no-op (#303), so the two change together.
+// It is where the pair status rule is applied to writes. Disabled is pair-level
+// in both directions of transition, so an SSTP pair is never left with only one
+// half disabled (#303, superseding Q39/Q41's "only disabled couples"): a request
+// for disabled writes both halves, and while either half is disabled an enabled
+// or paused request writes both too, which also heals a legacy split record.
+// The coupling holds whichever SID is named and with no operator-only carve-out,
+// so a fault-driven disable (a permanent JWKS failure, an ADR-0066 §D2
+// violation) takes the same rule as an administrative one. Between non-disabled
+// halves, enabled <-> paused is per-direction: naming the rx-side SID writes
+// InboundStatus/InboundErrorMsg and naming the tx side writes Status/ErrorMsg. A
+// record that is not a pair has one direction, so it always takes
+// Status/ErrorMsg. StreamStateRecord.IsPairLevelStatus decides "pair-level?"
+// here and in IsStatusChange, POST /status's no-op test, so the two agree.
 //
 // "Is a pair" is EITHER signal, because findSstpPairBySID admits on either and
 // neither implies the other at this layer: its FindByID branch requires
@@ -535,9 +538,7 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 	if rec == nil {
 		return
 	}
-	isPair := rec.GetType() == model.DeliverySstpPair || rec.SstpInbound != nil
-
-	if isPair && status == model.StreamStateDisable {
+	if rec.IsPairLevelStatus(status) {
 		// Pair-level: couple both directions.
 		rec.Status = status
 		rec.ErrorMsg = errorMsg
@@ -545,7 +546,7 @@ func applyStreamStatusToRecord(rec *model.StreamStateRecord, sid, status, errorM
 		rec.InboundErrorMsg = errorMsg
 		return
 	}
-	if isPair && rec.NamesInbound(sid) {
+	if rec.NamesInbound(sid) {
 		rec.InboundStatus = status
 		rec.InboundErrorMsg = errorMsg
 		return

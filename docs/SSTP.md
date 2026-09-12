@@ -41,7 +41,7 @@ An SSTP pair is **one `StreamStateRecord` per node**, carrying both directions
 | **rxSid** (receive / inbound) | `SstpInbound.Id` | Its `Delivery` is a marker only (`urn:i2-open:secevent:delivery:sstp:receive`). |
 | **PairId** | `PairId` | A fresh `ObjectID` hex; the **on-wire SSF `stream_id`** and the `{id}` in `POST /sstp/{id}`. Equals txSid. |
 | Pair-scoped connectivity | `SstpMethod` | `Role`, `EndpointUrl`, `AuthorizationHeader`, `PeerPairId`. Secrets/endpoints live here, **not** in the per-direction `Delivery` objects, so SSF discovery/management responses never leak per-pair credentials. |
-| Per-direction status | `Status`/`ErrorMsg` (tx) and `InboundStatus`/`InboundErrorMsg` (rx) | The two directions report and pause **independently**. |
+| Per-direction status | `Status`/`ErrorMsg` (tx) and `InboundStatus`/`InboundErrorMsg` (rx) | The two directions report and pause **independently**; `disabled` is **pair-level** and always covers both. |
 
 `GetType()` returns the goSignals-**internal** discriminator `DeliverySstpPair`
 whenever `SstpMethod` is set. That is *not* an SSF wire URN — the advertised URN
@@ -250,8 +250,9 @@ support"); a `WARN` is logged at create.
   knob). The wait does **not** honor request-context cancellation — it waits the
   full buffer timeout even if the client aborts, symmetric with the RFC 8936
   poll-transmitter handler.
-- A **paused (or disabled) direction returns 200 with `returnEvents=false`**, so
-  the cycle keeps running and resumes on unpause. A 4xx is reserved for the
+- A **paused direction, or a disabled pair, returns 200 with
+  `returnEvents=false`**, so the cycle keeps running and resumes on unpause or
+  re-enable. A 4xx is reserved for the
   **deleted/unknown pair** case — HTTP status is the primary error signal.
 
 ### Cluster wake-ups
@@ -325,15 +326,23 @@ grouped client-side by `PairId`.
 - `stream_id=<txSid>` → `Status` + `ErrorMsg` (outbound).
 - `stream_id=<rxSid>` → `InboundStatus` + `InboundErrorMsg` (inbound).
 
-The two directions report independently. (`disabled` is a pair-level lifecycle
-state and couples both directions.)
+The two directions report independently, but `disabled` is pair-level: both
+halves always report it together (see below).
 
 ### Pause / resume — per direction
 
-Per-direction status writes route the same way (`UpdateStreamStatus` keyed by the
-`stream_id` you name): pausing txSid pauses **only** the outbound direction;
-inbound keeps running, and vice versa. A paused direction's `POST /sstp/{id}`
-returns 200 with `returnEvents=false` so the cycle resumes cleanly on unpause.
+Status writes route the same way (`UpdateStreamStatus` keyed by the `stream_id`
+you name). **Pause is per-direction:** pausing txSid pauses **only** the outbound
+direction; inbound keeps running, and vice versa, and `enabled` resumes only the
+direction named. A paused direction's `POST /sstp/{id}` returns 200 with
+`returnEvents=false` so the cycle resumes cleanly on unpause.
+
+**Disable is pair-level.** A pair is never left with only one half disabled:
+`disabled` on either SID disables both directions, and while either half is
+disabled, `enabled` or `paused` on either SID applies to both halves (so a legacy
+record with one half disabled heals on its next status write). Disablement is
+usually an operator-initiated outage, which stops HTTP in both directions
+anyway.
 
 UPDATE enforces a **patchable-fields whitelist**: `Role`, an already-set
 `EndpointUrl`/`PeerPairId`, and all IDs are immutable, so a live pair can never

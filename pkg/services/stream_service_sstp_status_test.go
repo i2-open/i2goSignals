@@ -77,8 +77,9 @@ func TestUpdateStreamStatus_SstpDisableCouplesBothDirections(t *testing.T) {
 	})
 }
 
-// TestUpdateStreamStatus_SstpEnablePerDirection: Enabled honors per-direction
-// routing — re-enable one direction without affecting the other. (Q39, Q41)
+// TestUpdateStreamStatus_SstpEnablePerDirection: between non-disabled halves,
+// Enabled honors per-direction routing — re-enable one direction without
+// affecting the other. (Q39, Q41)
 func TestUpdateStreamStatus_SstpEnablePerDirection(t *testing.T) {
 	svc, rec := createdPair(t)
 	// Pause both, then re-enable only the tx side.
@@ -91,6 +92,87 @@ func TestUpdateStreamStatus_SstpEnablePerDirection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.StreamStateEnabled, got.Status)
 	assert.Equal(t, model.StreamStatePause, got.InboundStatus, "rx must stay paused")
+}
+
+// TestUpdateStreamStatus_SstpLeavingDisabledCouplesBothDirections: disabled is
+// pair-level on the way OUT as well as in (#303), so enabling or pausing a
+// disabled pair through either SID moves both halves, reason included — a pair
+// is never left with one half disabled.
+func TestUpdateStreamStatus_SstpLeavingDisabledCouplesBothDirections(t *testing.T) {
+	for _, status := range []string{model.StreamStateEnabled, model.StreamStatePause} {
+		for _, side := range []string{"tx", "rx"} {
+			t.Run(status+" via "+side+" SID", func(t *testing.T) {
+				svc, rec := createdPair(t)
+				sid := rec.StreamConfiguration.Id
+				if side == "rx" {
+					sid = rec.SstpInbound.Id
+				}
+				svc.UpdateStreamStatus(context.Background(), rec.StreamConfiguration.Id, model.StreamStateDisable, "outage")
+				svc.UpdateStreamStatus(context.Background(), sid, status, "recovering")
+
+				got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
+				require.NoError(t, err)
+				assert.Equal(t, status, got.Status, "outbound half leaves disabled too")
+				assert.Equal(t, "recovering", got.ErrorMsg)
+				assert.Equal(t, status, got.InboundStatus, "inbound half leaves disabled too")
+				assert.Equal(t, "recovering", got.InboundErrorMsg)
+			})
+		}
+	}
+}
+
+// TestApplyStreamStatusToRecord_DisabledIsPairLevel exercises the rule on the
+// record directly, including the legacy split shape (one half disabled) that
+// the old per-direction exit could leave behind: any status write heals it,
+// through either SID, while pause/enable between non-disabled halves stays
+// per-direction.
+func TestApplyStreamStatusToRecord_DisabledIsPairLevel(t *testing.T) {
+	pair := func(outStatus, inStatus string) *model.StreamStateRecord {
+		return &model.StreamStateRecord{
+			StreamConfiguration: model.StreamConfiguration{Id: "tx-sid"},
+			SstpInbound:         &model.StreamConfiguration{Id: "rx-sid"},
+			SstpMethod:          &model.SstpMethod{Role: model.SstpRoleResponder},
+			Status:              outStatus,
+			ErrorMsg:            "was " + outStatus,
+			InboundStatus:       inStatus,
+			InboundErrorMsg:     "was " + inStatus,
+		}
+	}
+	type half struct{ status, reason string }
+	tests := []struct {
+		name            string
+		rec             *model.StreamStateRecord
+		sid, status     string
+		wantOut, wantIn half
+	}{
+		{"into disabled via tx", pair(model.StreamStateEnabled, model.StreamStatePause), "tx-sid", model.StreamStateDisable,
+			half{model.StreamStateDisable, "now"}, half{model.StreamStateDisable, "now"}},
+		{"into disabled via rx", pair(model.StreamStateEnabled, model.StreamStatePause), "rx-sid", model.StreamStateDisable,
+			half{model.StreamStateDisable, "now"}, half{model.StreamStateDisable, "now"}},
+		{"out of disabled via enabled on tx", pair(model.StreamStateDisable, model.StreamStateDisable), "tx-sid", model.StreamStateEnabled,
+			half{model.StreamStateEnabled, "now"}, half{model.StreamStateEnabled, "now"}},
+		{"out of disabled via enabled on rx", pair(model.StreamStateDisable, model.StreamStateDisable), "rx-sid", model.StreamStateEnabled,
+			half{model.StreamStateEnabled, "now"}, half{model.StreamStateEnabled, "now"}},
+		{"out of disabled via paused on tx", pair(model.StreamStateDisable, model.StreamStateDisable), "tx-sid", model.StreamStatePause,
+			half{model.StreamStatePause, "now"}, half{model.StreamStatePause, "now"}},
+		{"out of disabled via paused on rx", pair(model.StreamStateDisable, model.StreamStateDisable), "rx-sid", model.StreamStatePause,
+			half{model.StreamStatePause, "now"}, half{model.StreamStatePause, "now"}},
+		{"legacy split heals when its enabled half is named", pair(model.StreamStateEnabled, model.StreamStateDisable), "tx-sid", model.StreamStateEnabled,
+			half{model.StreamStateEnabled, "now"}, half{model.StreamStateEnabled, "now"}},
+		{"legacy split heals when its disabled half is named", pair(model.StreamStateDisable, model.StreamStatePause), "tx-sid", model.StreamStatePause,
+			half{model.StreamStatePause, "now"}, half{model.StreamStatePause, "now"}},
+		{"pause between non-disabled halves stays on rx", pair(model.StreamStateEnabled, model.StreamStateEnabled), "rx-sid", model.StreamStatePause,
+			half{model.StreamStateEnabled, "was enabled"}, half{model.StreamStatePause, "now"}},
+		{"enable between non-disabled halves stays on tx", pair(model.StreamStatePause, model.StreamStatePause), "tx-sid", model.StreamStateEnabled,
+			half{model.StreamStateEnabled, "now"}, half{model.StreamStatePause, "was paused"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			applyStreamStatusToRecord(tt.rec, tt.sid, tt.status, "now")
+			assert.Equal(t, tt.wantOut, half{tt.rec.Status, tt.rec.ErrorMsg}, "outbound half")
+			assert.Equal(t, tt.wantIn, half{tt.rec.InboundStatus, tt.rec.InboundErrorMsg}, "inbound half")
+		})
+	}
 }
 
 // TestApplyStreamStatusToRecord_PairPredicateAcceptsEitherSignal exercises the
