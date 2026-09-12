@@ -128,7 +128,9 @@ func (s *MongoProviderSuite) TestB_StreamConfig() {
 	configs := s.provider.GetStreamService().ListStreams(context.Background())
 	s.Equal(1, len(configs), "should be one registered")
 
-	s.Equal(s.stream.Id, configs[0].Id, "should be the same s.stream id")
+	// ListStreams returns full StreamStateRecords (#300), whose own Id is the
+	// Mongo object id — the SSF stream_id is the embedded configuration's.
+	s.Equal(s.stream.Id, configs[0].StreamConfiguration.Id, "should be the same s.stream id")
 	// 12 SCIM + 5 CAEP + 9 RISC + 4 WISE — update this when GetSupportedEvents changes.
 	s.Equal(30, len(configs[0].EventsDelivered), "Should be 30 events configured for delivery")
 	events, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{

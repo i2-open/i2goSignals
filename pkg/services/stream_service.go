@@ -1574,16 +1574,49 @@ func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*
 	return s.GetStream(ctx, sid)
 }
 
-func (s *StreamService) ListStreams(ctx context.Context) []model.StreamConfiguration {
+// ListStreams returns every stored stream as a full StreamStateRecord, in the
+// DAO's order.
+//
+// It returns records rather than the embedded StreamConfiguration because a
+// StreamConfiguration describes ONE logical stream, and an SSTP pair is two of
+// them in one record (ADR 0018): the transmit direction inline and the receive
+// direction under SstpInbound, each with its own status, error reason, event
+// source and JWKS readiness. Projecting a record down to its configuration drops
+// the entire inbound direction along with every other record-level field —
+// including PairId and SstpMethod.PeerPairId, the only key that joins one node's
+// record for a pair to the peer's (ADR COM-0018) — so a consumer could see only
+// half of every bidirectional stream (#300).
+//
+// Each element is prepared exactly as the ListStreamStates HTTP route prepares
+// its own, and in the same order:
+//
+//   - MaskCredentials first, on a deep copy, so no live bearer ever leaves this
+//     surface (ADR 0022 §3) and the stored record is left untouched;
+//   - OverlayJwksReadiness second, onto that masked copy. Readiness is
+//     node-local and derived (bson:"-"), so records read from the DAO never
+//     carry it and it is absent unless overlaid (ADR 0033).
+//
+// Delivery endpoints are returned as stored: the base-URL rewrite the HTTP
+// route applies is scoped to that listener's externally visible base and does
+// not apply on this path.
+//
+// A failed DAO read is logged and returns a nil slice, so this signature cannot
+// tell a caller "there are no streams" apart from "the store did not answer".
+// That is the pre-existing contract of the narrow ListStreams and of its
+// neighbours GetStateMap and LoadReceiverStreams; the sibling queries
+// ListReceiverStreams and ListTransmitterStreams return an error instead.
+func (s *StreamService) ListStreams(ctx context.Context) []model.StreamStateRecord {
 	recs, err := s.streamDAO.List(ctx)
 	if err != nil {
 		ssLog.Error("Error listing streams", "error", err)
 		return nil
 	}
 
-	res := make([]model.StreamConfiguration, len(recs))
-	for i, v := range recs {
-		res[i] = v.StreamConfiguration
+	res := make([]model.StreamStateRecord, len(recs))
+	for i := range recs {
+		masked := recs[i].MaskCredentials()
+		s.OverlayJwksReadiness(masked)
+		res[i] = *masked
 	}
 	return res
 }
