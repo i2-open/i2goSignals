@@ -103,27 +103,32 @@ bearer once OAuth is configured — is deferred to the bearer-rotation work in
 GH #152 (Q38); today the static `SstpMethod.AuthorizationHeader` is used when
 present.
 
-### Which stream a request acts on (token-stream fallback)
+### Which stream a request acts on
 
-`ValidateAuthorizationAny` resolves `AuthContext.StreamId` in this order (#303):
+**Governing rule: a stream-bound token operates only on its bound streams.** A
+local token with non-empty `StreamIds` may act only on those streams, however
+the stream is named (#303):
 
-- **A request-named stream always wins:** the `stream_id` query parameter, then
-    the path var. An administrator names the target this way.
-- **Otherwise a local token binding exactly one stream supplies it**, so a
-    stream client reaches its own stream without repeating its SID.
-- **No fallback** for a multi-SID bearer (an SSTP pair bearer), the `any`
-    wildcard, a broad-scope token (empty `StreamIds`), or an OAuth/STS or
-    bootstrap context. `StreamId` stays empty and stream handlers still refuse.
+- **Parameter or path var:** `ValidateAuthorizationAny` refuses (`403`) a
+    `stream_id` query parameter or path var outside the binding.
+- **Body `stream_id`:** subject add/remove, subject-filter review, verify and
+    `PUT`/`PATCH /stream` refuse (`403`) a body stream outside the binding, or
+    other than the stream the request resolved to, so a bound token cannot
+    resolve one stream and act on another. A pair bearer may name either SID.
+- **Unbound callers** (a broad-scope token with empty `StreamIds`, the `any`
+    wildcard, OAuth/STS, bootstrap) are not confined by a binding and keep each
+    handler's own rule.
 
-The fallback never widens authorization: it only yields the stream the token is
-already bound to. It tightens the body-`stream_id` checks, because a
-single-stream token that omits the parameter can no longer target a different
-body `stream_id`: subject add/remove, subject-filter review, verify and
-`PUT`/`PATCH /stream` answer `403`. With no parameter, such a token now
-resolves where it used to get `403` at `GET`/`POST /status`, `GET /stream`
-(including rotate-on-GET) and `DELETE /stream`, and `400` at admin
-`GET /state`. Poll (`/poll/{id}`) and push (`/events/{id}`) always name the
-stream on the path, so the fallback never applies to them.
+`AuthContext.StreamId` is the stream the request names: the `stream_id` query
+parameter, then the path var. **For backwards compatibility**, when the request
+names none, a local token binding exactly one stream supplies it, so a stream
+requestor can, for example, check a transmitter's status without repeating its
+SID. The fallback yields only the token's own stream, so it never widens
+authorization; a pair bearer (two SIDs), the `any` wildcard and unbound callers
+get no fallback. With no parameter, a single-stream token now resolves where it
+used to get `403` at `GET`/`POST /status`, `GET /stream` (including
+rotate-on-GET) and `DELETE /stream`, and `400` at admin `GET /state`. Poll
+(`/poll/{id}`) and push (`/events/{id}`) always name the stream on the path.
 
 ### The bootstrap secret
 
