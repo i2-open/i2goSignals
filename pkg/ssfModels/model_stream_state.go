@@ -82,6 +82,15 @@ type StreamStateRecord struct {
 	// ErrorMsg holds the reason a stream has been paused
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty" json:"errorMsg,omitempty"`
 
+	// TransmitterCaused is true when a poll receiver's paused or disabled Status
+	// was reported by the transmitter's status endpoint rather than set by an
+	// operator (issue #310). Only SetTransmitterCausedStatus sets it; every other
+	// status write (SetStatus, and the DAO's UpdateStatus) clears it, so an
+	// operator change always wins. The poll loop resumes a transmitter-caused
+	// pause by itself, and never an administrative one. It is shown on the admin
+	// stream-state surfaces, not on the SSF status response.
+	TransmitterCaused bool `json:"transmitter_caused,omitempty" bson:"transmitter_caused,omitempty"`
+
 	RemoteAddress *RemoteIP `json:"remote_address,omitempty" bson:"remote_address,omitempty"`
 
 	// DefaultSubjects is the SSF subject-filtering baseline policy for a
@@ -306,6 +315,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	// This is being done to preserve the handle on the PushStreams.
 	ss.Status = mod.Status
 	ss.ErrorMsg = mod.ErrorMsg
+	ss.TransmitterCaused = mod.TransmitterCaused
 	// ss.Receiver = mod.Receiver - now handled by StreamConfiguration
 
 	ss.ValidateJwks = mod.ValidateJwks
@@ -417,23 +427,39 @@ func (ss *StreamStateRecord) isPair() bool {
 // exchange, so every status — enabled, paused, or disabled — moves both, the
 // same single status a push or poll stream carries (#303), whichever SID named
 // the pair. A one-way logical pause would be a later enhancement.
+//
+// It clears TransmitterCaused: an ordinary status write is not the
+// transmitter's report (#310).
 func (ss *StreamStateRecord) SetStatus(status, reason string) {
 	ss.Status = status
 	ss.ErrorMsg = reason
+	ss.TransmitterCaused = false
 	if ss.isPair() {
 		ss.InboundStatus = status
 		ss.InboundErrorMsg = reason
 	}
 }
 
+// SetTransmitterCausedStatus is SetStatus for a paused or disabled status the
+// transmitter's status endpoint reported: it writes the status and reason and
+// sets TransmitterCaused (#310). It does not persist.
+func (ss *StreamStateRecord) SetTransmitterCausedStatus(status, reason string) {
+	ss.SetStatus(status, reason)
+	ss.TransmitterCaused = true
+}
+
 // IsStatusChange reports whether SetStatus(status, reason) would change the
 // record, which is POST /status's "no change" test (#303). On a pair both halves
 // take the write, so it is a change when EITHER half differs — which also lets a
 // legacy split record heal; otherwise only the primary half is compared. Reasons
-// compare case-insensitively.
+// compare case-insensitively. A transmitter-caused record always changes, since
+// the write clears TransmitterCaused (#310).
 func (ss *StreamStateRecord) IsStatusChange(status, reason string) bool {
 	differs := func(halfStatus, halfReason string) bool {
 		return halfStatus != status || !strings.EqualFold(reason, halfReason)
+	}
+	if ss.TransmitterCaused {
+		return true
 	}
 	if ss.isPair() && differs(ss.InboundStatus, ss.InboundErrorMsg) {
 		return true

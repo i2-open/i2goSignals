@@ -88,9 +88,18 @@ func (d *StreamDAOMemory) FindByPairId(ctx context.Context, pairId string) (*mod
 }
 
 func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(id, status, errorMsg, false)
+}
+
+func (d *StreamDAOMemory) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(id, status, errorMsg, true)
+}
+
+func (d *StreamDAOMemory) updateStatus(id, status, errorMsg string, transmitterCaused bool) error {
 	if state, ok := d.store.Get(id); ok {
 		state.Status = status
 		state.ErrorMsg = errorMsg
+		state.TransmitterCaused = transmitterCaused
 		d.store.Set(id, state)
 		return nil
 	}

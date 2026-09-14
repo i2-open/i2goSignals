@@ -196,6 +196,19 @@ func (d *StreamDAOMongo) FindByPairId(ctx context.Context, pairId string) (*mode
 }
 
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(ctx, id, bson.M{
+		"$set":   bson.M{"status": status, "error_msg": errorMsg},
+		"$unset": bson.M{"transmitter_caused": ""},
+	})
+}
+
+func (d *StreamDAOMongo) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(ctx, id, bson.M{
+		"$set": bson.M{"status": status, "error_msg": errorMsg, "transmitter_caused": true},
+	})
+}
+
+func (d *StreamDAOMongo) updateStatus(ctx context.Context, id string, update bson.M) error {
 	c, err := d.col()
 	if err != nil {
 		return err
@@ -206,12 +219,6 @@ func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status str
 	}
 
 	filter := bson.M{"_id": docId}
-	update := bson.M{
-		"$set": bson.M{
-			"status":    status,
-			"error_msg": errorMsg,
-		},
-	}
 
 	res, err := c.UpdateOne(ctx, filter, update)
 	if err != nil {

@@ -81,6 +81,14 @@ func (d *notifyingStreamDAO) UpdateStatus(ctx context.Context, id string, status
 	return nil
 }
 
+func (d *notifyingStreamDAO) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	if err := d.inner.UpdateTransmitterCausedStatus(ctx, id, status, errorMsg); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
 func (d *notifyingStreamDAO) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
 	if err := d.inner.UpdateRemoteAddress(ctx, id, addr); err != nil {
 		return err

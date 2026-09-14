@@ -563,12 +563,12 @@ func sstpPairBySID(
 // so this forecloses the hazard rather than fixing a demonstrated race. The DAO
 // round trip then runs off the lock, on a copy taken under it, because this
 // mutex is on the inbound verification path.
-func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string) {
+func (s *StreamService) updateSstpPairStatus(ctx context.Context, rec *model.StreamStateRecord, sid, status, errorMsg string, transmitterCaused bool) {
 	s.mu.Lock()
-	rec.SetStatus(status, errorMsg)
+	setRecordStatus(rec, status, errorMsg, transmitterCaused)
 	// rec is DAO-bound; the receiver cache holds its own copy of the pair
 	// record under the inbound SID, and the retry machinery reads THAT copy.
-	s.applyStatusToReceiverCache(sid, status, errorMsg)
+	s.applyStatusToReceiverCache(sid, status, errorMsg, transmitterCaused)
 	persistCopy := *rec
 	s.mu.Unlock()
 

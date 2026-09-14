@@ -43,7 +43,15 @@ type StreamDAO interface {
 	FindByPairId(ctx context.Context, pairId string) (*model.StreamStateRecord, error)
 
 	// Status updates
+
+	// UpdateStatus writes status and errorMsg and clears transmitter_caused
+	// (#310): an ordinary status write is never the transmitter's report.
 	UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error
+
+	// UpdateTransmitterCausedStatus writes a paused or disabled status the
+	// transmitter's status endpoint reported, setting transmitter_caused with
+	// the status and errorMsg (#310).
+	UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error
 
 	// UpdateRemoteAddress persists only the remote_address sub-document for the given stream.
 	UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error

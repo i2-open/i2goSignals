@@ -207,6 +207,38 @@ func TestStreamDAOMemory_UpdateStatus(t *testing.T) {
 	}
 }
 
+// TestStreamDAOMemory_TransmitterCausedStatus (#310): the transmitter-caused
+// write stores the flag with the status, and an ordinary UpdateStatus clears it.
+func TestStreamDAOMemory_TransmitterCausedStatus(t *testing.T) {
+	dao := NewStreamDAO()
+	ctx := context.Background()
+	_ = dao.Create(ctx, &model.StreamStateRecord{
+		Id:                  model.NewRecordId(),
+		StreamConfiguration: model.StreamConfiguration{Id: "rcv-1"},
+		Status:              model.StreamStateEnabled,
+	})
+
+	if err := dao.UpdateTransmitterCausedStatus(ctx, "rcv-1", model.StreamStatePause, "Transmitter stream is paused: x"); err != nil {
+		t.Fatalf("UpdateTransmitterCausedStatus failed: %v", err)
+	}
+	got, _ := dao.FindByID(ctx, "rcv-1")
+	if got.Status != model.StreamStatePause || got.ErrorMsg != "Transmitter stream is paused: x" || !got.TransmitterCaused {
+		t.Fatalf("got %q / %q / flag=%v, want paused with reason and flag", got.Status, got.ErrorMsg, got.TransmitterCaused)
+	}
+
+	if err := dao.UpdateStatus(ctx, "rcv-1", model.StreamStatePause, "operator"); err != nil {
+		t.Fatalf("UpdateStatus failed: %v", err)
+	}
+	got, _ = dao.FindByID(ctx, "rcv-1")
+	if got.TransmitterCaused {
+		t.Error("UpdateStatus must clear the flag")
+	}
+
+	if err := dao.UpdateTransmitterCausedStatus(ctx, "missing", model.StreamStateDisable, "x"); err == nil {
+		t.Error("expected an error for an unknown stream")
+	}
+}
+
 func TestStreamDAOMemory_UpdateRemoteAddress(t *testing.T) {
 	dao := NewStreamDAO()
 	ctx := context.Background()

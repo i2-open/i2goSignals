@@ -522,10 +522,13 @@ func (sa *SignalsApplication) handleClientPollReceiver(streamState *model.Stream
 	ps.stream = streamState
 	// Revive whenever the goroutine isn't alive and the caller wants the stream to run.
 	// Two paths reach here with a dead goroutine: (a) a prior terminal error set active=false
-	// and the goroutine returned, (b) the goroutine exited via pollEventsReceiver's outer-loop
-	// status check because the stream was Disabled at the time, leaving active=true but
-	// running=false. The status flip back to non-Disable is what re-arms the receiver.
-	needsRevive := !ps.running && streamState.Status != model.StreamStateDisable
+	// and the goroutine returned, (b) the goroutine exited via a status check because the
+	// stream was paused or disabled at the time, leaving active=true but running=false.
+	// A status that no longer halts polling — enabled, or a transmitter-caused pause, which
+	// the revived loop waits out on the transmitter's status endpoint — re-arms the
+	// receiver (#310). An administrative pause or any disable does not, so the background
+	// InitializeReceivers sync never restarts them; only an operator re-enable does.
+	needsRevive := !ps.running && !pollHalted(streamState)
 	if needsRevive {
 		// Cancel any lingering context from the previous goroutine before replacing.
 		if ps.cancel != nil {
@@ -1163,17 +1166,18 @@ func (ps *ClientPollStream) getVerifyEndpoint() string {
 	// Resolve WITHOUT holding ps.mu: the helpers below (getServerForStream,
 	// well-known discovery, getStatusEndpoint) manage their own state/locks, and
 	// getStatusEndpoint takes ps.mu itself — holding it here would deadlock.
+	stream := ps.currentStream()
 	resolved := ""
-	if server, _ := ps.sa.getServerForStream(ps.ctx, ps.stream); server != nil {
-		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
+	if server, _ := ps.sa.getServerForStream(ps.ctx, stream); server != nil {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, stream)
 		if endpoint, err := goSsfUtils.GetVerificationEndpoint(ps.ctx, client, server); err == nil && endpoint != "" {
 			resolved = endpoint
 		}
 	}
 
-	if resolved == "" && ps.stream.StreamConfiguration.TxWellKnownUrl != nil && *ps.stream.StreamConfiguration.TxWellKnownUrl != "" {
-		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, ps.stream)
-		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ps.ctx, client, *ps.stream.StreamConfiguration.TxWellKnownUrl)
+	if resolved == "" && stream.StreamConfiguration.TxWellKnownUrl != nil && *stream.StreamConfiguration.TxWellKnownUrl != "" {
+		client := ps.sa.getHTTPClientForWellKnownEndpoint(ps.ctx, stream)
+		txConfig, err := wellKnownSupport.FetchSSFConfiguration(ps.ctx, client, *stream.StreamConfiguration.TxWellKnownUrl)
 		if err == nil && txConfig.VerificationEndpoint != "" {
 			resolved = txConfig.VerificationEndpoint
 		}
@@ -1208,11 +1212,12 @@ func (ps *ClientPollStream) initiateVerification() {
 	if !services.RcvVerifyOnEstablishEnabled() {
 		return
 	}
-	sid := ps.stream.StreamConfiguration.Id
+	stream := ps.currentStream()
+	sid := stream.StreamConfiguration.Id
 
 	// The transmitter identifies the stream by its own (remote) stream_id.
 	remoteId := sid
-	if rid := ps.stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
+	if rid := stream.StreamConfiguration.RemoteStreamId; rid != nil && *rid != "" {
 		remoteId = *rid
 	}
 
@@ -1222,7 +1227,7 @@ func (ps *ClientPollStream) initiateVerification() {
 		return
 	}
 
-	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, stream)
 	if err != nil {
 		serverLog.Warn("POLL-RCV: Failed to get client for verification request", "sid", sid, "error", err)
 		return
@@ -1241,15 +1246,16 @@ func (ps *ClientPollStream) initiateVerification() {
 }
 
 func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.StreamStatus, error) {
-	server, _ := ps.sa.getServerForStream(ctx, ps.stream)
-	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ctx, ps.stream)
+	stream := ps.currentStream()
+	server, _ := ps.sa.getServerForStream(ctx, stream)
+	client, _, closeClient, err := ps.sa.getHTTPClientForStream(ctx, stream)
 	if err != nil {
 		return nil, err
 	}
 	defer closeClient()
 
 	if server != nil {
-		return goSsfUtils.GetStreamStatus(ctx, client, server, ps.stream.StreamConfiguration.Id)
+		return goSsfUtils.GetStreamStatus(ctx, client, server, stream.StreamConfiguration.Id)
 	}
 
 	statusUrl := ps.getStatusEndpoint()
@@ -1257,69 +1263,147 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 		return nil, errors.New("could not determine status endpoint")
 	}
 
-	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, ps.stream.StreamConfiguration.Id, "status check")
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, stream.StreamConfiguration.Id, "status check")
 }
 
-func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusCheckInterval time.Duration) (bool, error) {
-	status, err := ps.checkTransmitterStatus(ctx)
-	if err != nil {
-		serverLog.Debug("POLL-RCV: Transmitter status check failed, proceeding with polling", "sid", ps.stream.StreamConfiguration.Id, "error", err)
-		return true, nil // continue
+// pollHalted reports whether a poll receiver's status stops it polling and
+// retrying: any disable, or a pause an operator set (#310). A transmitter-caused
+// pause does not halt the loop; the loop waits it out on the transmitter's
+// status endpoint and resumes by itself.
+func pollHalted(stream *model.StreamStateRecord) bool {
+	switch stream.Status {
+	case model.StreamStateDisable:
+		return true
+	case model.StreamStatePause:
+		return !stream.TransmitterCaused
 	}
+	return false
+}
 
-	sid := ps.stream.StreamConfiguration.Id
+// waitingOnTransmitter reports whether the receiver is paused because the
+// transmitter reported its stream paused.
+func waitingOnTransmitter(stream *model.StreamStateRecord) bool {
+	return stream.Status == model.StreamStatePause && stream.TransmitterCaused
+}
+
+// currentStream returns the record the loop runs on. HandleReceiver replaces it
+// from other goroutines when an operator changes the stream, so it is read under
+// ps.mu.
+func (ps *ClientPollStream) currentStream() *model.StreamStateRecord {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.stream
+}
+
+// refreshStream re-reads the record from the store and adopts it, so the loop
+// sees a status change made on any node. It keeps the current record when the
+// read fails.
+func (ps *ClientPollStream) refreshStream() *model.StreamStateRecord {
+	current := ps.currentStream()
+	updated, err := ps.sa.StreamService.GetStreamState(context.Background(), current.StreamConfiguration.Id)
+	if err != nil || updated == nil {
+		return current
+	}
+	ps.mu.Lock()
+	ps.stream = updated
+	ps.mu.Unlock()
+	return updated
+}
+
+// setRetryReason records why the loop is retrying — or, with an empty reason,
+// that it no longer is — leaving the status enabled: a retrying receiver has not
+// paused (#310). It writes only while the stored status is still enabled, so it
+// never overwrites a pause or disable an operator made while a request was in
+// flight.
+func (ps *ClientPollStream) setRetryReason(reason string) {
+	stored := ps.refreshStream()
+	if stored.Status != model.StreamStateEnabled || stored.ErrorMsg == reason {
+		return
+	}
+	ps.sa.StreamService.UpdateStreamStatus(context.Background(), stored.StreamConfiguration.Id, model.StreamStateEnabled, reason)
+	ps.mu.Lock()
+	stored.SetStatus(model.StreamStateEnabled, reason)
+	ps.mu.Unlock()
+}
+
+// handleTransmitterStatus checks the transmitter's status endpoint and reports
+// whether the loop may poll (#310):
+//   - the receiver's own stored status is re-read after every check, and a
+//     status that halts polling (an operator pause, or any disable) stops the
+//     loop, so an operator change on any node wins over the transmitter;
+//   - a transmitter pause is stored as a transmitter-caused pause, and the loop
+//     rechecks every statusCheckInterval without polling or retrying;
+//   - a transmitter disable is stored as a transmitter-caused disable and stops
+//     the loop; only an operator re-enable restarts it;
+//   - enabled (or a status this receiver does not recognise) resumes a
+//     transmitter-caused pause, clearing its reason and flag, and polls.
+//
+// A failed check polls anyway, unless the receiver is waiting on a paused
+// transmitter, in which case it keeps rechecking.
+func (ps *ClientPollStream) handleTransmitterStatus(ctx context.Context, statusCheckInterval time.Duration) (bool, error) {
+	sid := ps.currentStream().StreamConfiguration.Id
 
 	for {
-		if status.Status == model.StreamStateEnabled {
-			return true, nil
+		status, err := ps.checkTransmitterStatus(ctx)
+		stored := ps.refreshStream()
+		if pollHalted(stored) {
+			serverLog.Info("POLL-RCV: Receiver is paused or disabled, not polling", "sid", sid, "status", stored.Status, "reason", stored.ErrorMsg)
+			return false, nil
 		}
+		waiting := waitingOnTransmitter(stored)
 
-		if status.Status == model.StreamStateDisable {
+		switch {
+		case err != nil:
+			if !waiting {
+				serverLog.Debug("POLL-RCV: Transmitter status check failed, proceeding with polling", "sid", sid, "error", err)
+				return true, nil
+			}
+			serverLog.Debug("POLL-RCV: Transmitter status check failed while the transmitter is paused, will recheck", "sid", sid, "error", err)
+		case status.Status == model.StreamStateDisable:
 			serverLog.Info("POLL-RCV: Transmitter stream is disabled", "sid", sid, "reason", status.Reason)
-			ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, "Transmitter stream is disabled: "+status.Reason)
+			ps.setTransmitterCausedStatus(stored, model.StreamStateDisable, "Transmitter stream is disabled: "+status.Reason)
 			ps.mu.Lock()
 			ps.active = false
 			ps.mu.Unlock()
 			return false, nil // stop
-		}
-
-		// if the stream is paused, periodically check status until it is re-enabled.
-		if status.Status == model.StreamStatePause {
-			serverLog.Info("POLL-RCV: Transmitter stream is paused", "sid", sid, "reason", status.Reason)
-			ps.sa.pauseStreamOnError(sid, "Transmitter stream is paused: "+status.Reason)
-
-			// Cancellable pause-probe delay. This is the top of a for loop that can
-			// spin for the entire time a transmitter stays paused, so the wait must
-			// not leave a timer behind on each iteration.
-			if !eventRouter.SleepCtx(ctx, statusCheckInterval) {
-				return false, ctx.Err()
+		case status.Status == model.StreamStatePause:
+			if !waiting {
+				serverLog.Info("POLL-RCV: Transmitter stream is paused", "sid", sid, "reason", status.Reason)
+				ps.setTransmitterCausedStatus(stored, model.StreamStatePause, "Transmitter stream is paused: "+status.Reason)
 			}
-			status, err = ps.checkTransmitterStatus(ctx)
-			if err != nil {
-				serverLog.Debug("POLL-RCV: Transmitter status check failed during pause, attempting poll as fallback", "sid", sid, "error", err)
-				return true, nil
-			}
-			if status.Status == model.StreamStateEnabled {
+		default:
+			if waiting {
 				serverLog.Info("POLL-RCV: Transmitter stream is now re-enabled after pause", "sid", sid)
 				ps.sa.updateStreamAfterError(sid, model.StreamStateEnabled, "")
 				ps.mu.Lock()
-				ps.active = true
-				ps.stream.Status = model.StreamStateEnabled
-				ps.stream.ErrorMsg = ""
+				stored.SetStatus(model.StreamStateEnabled, "")
 				ps.mu.Unlock()
-				return true, nil
 			}
-			continue
+			return true, nil
 		}
 
-		// Unknown status, fallback to enabled
-		return true, nil
+		// Cancellable pause-probe delay. This loop can spin for the entire time a
+		// transmitter stays paused, so the wait must not leave a timer behind on
+		// each iteration.
+		if !eventRouter.SleepCtx(ctx, statusCheckInterval) {
+			return false, ctx.Err()
+		}
 	}
+}
+
+// setTransmitterCausedStatus stores a paused or disabled status the transmitter
+// reported, with its reason and the transmitter-caused flag, on the store and on
+// stored, the record the loop just adopted.
+func (ps *ClientPollStream) setTransmitterCausedStatus(stored *model.StreamStateRecord, status, reason string) {
+	ps.sa.StreamService.UpdateTransmitterCausedStatus(context.Background(), stored.StreamConfiguration.Id, status, reason)
+	ps.mu.Lock()
+	stored.SetTransmitterCausedStatus(status, reason)
+	ps.mu.Unlock()
 }
 
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
-	sid := ps.stream.StreamConfiguration.Id
+	sid := ps.currentStream().StreamConfiguration.Id
 	resource := fmt.Sprintf("poll-receiver:%s", sid)
 
 	defer func() {
@@ -1337,8 +1421,8 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		// do not start if disabled or marked inactive
-		if !active || stream.Status == model.StreamStateDisable {
+		// do not start if paused or disabled by status, or marked inactive
+		if !active || pollHalted(stream) {
 			serverLog.Debug("POLL-RCV: Stream not enabled. Will not start.", "sid", sid)
 			return
 		}
@@ -1378,7 +1462,8 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 
 // runPollLoop processes polling events from a stream and manages lease renewal, error handling, and state transitions.
 func (ps *ClientPollStream) runPollLoop(resource string) {
-	sid := ps.stream.StreamConfiguration.Id
+	initial := ps.currentStream()
+	sid := initial.StreamConfiguration.Id
 	if ps.sa.Stats != nil {
 		ps.sa.Stats.IncLeasesHeld()
 		defer ps.sa.Stats.DecLeasesHeld()
@@ -1386,17 +1471,17 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	var acks []string
 	var setErrs map[string]goSetPoll.SetErrType
 
-	client, auth, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+	client, auth, closeClient, err := ps.sa.getHTTPClientForStream(ps.ctx, initial)
 	if err != nil {
 		serverLog.Error("POLL-RCV: Failed to get authenticated client", "sid", sid, "error", err)
 	}
 	defer closeClient()
 
-	if ps.stream.Delivery == nil || ps.stream.Delivery.PollReceiveMethod == nil {
+	if initial.Delivery == nil || initial.Delivery.PollReceiveMethod == nil {
 		serverLog.Error("POLL-RCV: Missing delivery configuration", "sid", sid)
 		return
 	}
-	receiveMethod := ps.stream.Delivery.PollReceiveMethod
+	receiveMethod := initial.Delivery.PollReceiveMethod
 	eventUrl := receiveMethod.EndpointUrl
 
 	// Heartbeat for lease renewal
@@ -1463,7 +1548,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	ps.managementExercised = true
 	ps.mu.Unlock()
 	if shouldExercise {
-		ps.sa.ExerciseReceiverManagement(ps.ctx, ps.stream)
+		ps.sa.ExerciseReceiverManagement(ps.ctx, ps.currentStream())
 	}
 
 	retryCount := 0
@@ -1477,7 +1562,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		active := ps.active
 		ps.mu.RUnlock()
 
-		if !active || stream.Status == model.StreamStateDisable {
+		// An operator pause or any disable stops the loop before the next poll
+		// (#310). A poll already in flight has completed and its SETs were
+		// processed; their acks ride the next poll, which is never sent, so the
+		// transmitter redelivers them (RFC8936 at-least-once).
+		if !active || pollHalted(stream) {
 			break
 		}
 
@@ -1486,6 +1575,16 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			serverLog.Info("POLL-RCV: Heartbeat cancelled, stopping poll loop", "sid", sid)
 			return
 		default:
+		}
+
+		// A transmitter-caused pause (a record adopted from the store after a
+		// restart, a lease takeover or a background sync) does not poll: it waits
+		// on the transmitter's status endpoint and resumes by itself.
+		if waitingOnTransmitter(stream) {
+			if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+				return
+			}
+			continue
 		}
 
 		pollReq := goSetPoll.PollRequest{
@@ -1498,7 +1597,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			pollReq.TimeoutSecs = receiveMethod.PollConfig.TimeoutSecs
 		}
 
-		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
+		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", sid, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
 		var capturedPollAddr string
 		pollTrace := &httptrace.ClientTrace{
 			GotConn: func(info httptrace.GotConnInfo) {
@@ -1557,23 +1656,19 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					authMethod = "static token: " + maskAuthorization(auth)
 				}
 				serverLog.Debug("POLL-RCV: Authentication method", "sid", sid, "method", authMethod)
-				ps.sa.pauseStreamOnError(sid, fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
+				ps.setRetryReason(fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
 				// Cancellable backoff: the enclosing poll loop retries 401s until the
 				// stream is disabled, so each iteration must not strand a timer.
 				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
 					return
 				}
-				// Refresh the stream state to check if it's still enabled/active
-				updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), sid)
-				if updatedStream != nil {
-					ps.mu.Lock()
-					ps.stream = updatedStream
-					ps.mu.Unlock()
-				}
+				// Refresh the stream state; the loop stops at the top if an operator
+				// paused or disabled it meanwhile.
+				refreshed := ps.refreshStream()
 				// Refresh the client and auth header before retrying.
 				// Close the old X509Source before creating a new one.
 				closeClient()
-				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
 				if err != nil {
 					serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", err)
 				}
@@ -1583,7 +1678,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			if httpStatus == http.StatusForbidden {
 				forbiddenCount++
 				if forbiddenCount >= forbiddenRetryLimit {
-					scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.stream)
+					scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
 					errMsg := fmt.Sprintf(
 						"POLL-RCV[%s] Stream disabled after %d forbidden (403) attempts. "+
 							"Transmitter rejected the token. Likely cause: OAuth client_credentials scope mismatch. "+
@@ -1602,11 +1697,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				}
 				delay := time.Duration(delaySeconds * float64(time.Second))
 
-				scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.stream)
+				scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
 				serverLog.Warn("POLL-RCV: Forbidden response, retrying after delay",
 					"sid", sid, "delay", delay, "attempt", forbiddenCount, "limit", forbiddenRetryLimit,
 					"requested_scopes", scopesDesc, "required_scope", authSupport.ScopeEventDelivery)
-				ps.sa.pauseStreamOnError(sid,
+				ps.setRetryReason(
 					fmt.Sprintf("forbidden response (403), retrying after %v (attempt %d/%d). "+
 						"Requested scopes: %s. Required scope: '%s'.",
 						delay, forbiddenCount, forbiddenRetryLimit, scopesDesc, authSupport.ScopeEventDelivery))
@@ -1615,14 +1710,9 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
 					return
 				}
-				updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), sid)
-				if updatedStream != nil {
-					ps.mu.Lock()
-					ps.stream = updatedStream
-					ps.mu.Unlock()
-				}
+				refreshed := ps.refreshStream()
 				closeClient()
-				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, ps.stream)
+				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
 				if err != nil {
 					serverLog.Error("POLL-RCV: Failed to refresh client/auth after 403", "sid", sid, "error", err)
 				}
@@ -1635,8 +1725,8 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				}
 				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
 				if time.Since(firstErrorTime) > retryLimit {
-					serverLog.Error("POLL-RCV: Exceeded retry limit, disabling stream", "sid", ps.stream.StreamConfiguration.Id, "elapsed", time.Since(firstErrorTime), "limit", retryLimit)
-					ps.sa.updateStreamAfterError(ps.stream.StreamConfiguration.Id, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
+					serverLog.Error("POLL-RCV: Exceeded retry limit, disabling stream", "sid", sid, "elapsed", time.Since(firstErrorTime), "limit", retryLimit)
+					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
 					ps.mu.Lock()
 					ps.active = false
 					ps.mu.Unlock()
@@ -1648,8 +1738,8 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					delaySeconds = maxDelay
 				}
 				delay := time.Duration(delaySeconds * float64(time.Second))
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, fmt.Sprintf("retry being attempted (delay %d attempt %d", delay, retryCount+1))
-				serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", ps.stream.StreamConfiguration.Id, "delay", delay, "attempt", retryCount+1)
+				ps.setRetryReason(fmt.Sprintf("retry being attempted (delay %d attempt %d", delay, retryCount+1))
+				serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", sid, "delay", delay, "attempt", retryCount+1)
 
 				// Cancellable backoff — see the 401 path above.
 				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
@@ -1657,30 +1747,24 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				}
 				retryCount++
 
-				// Complement retry with transmitter status check - if status is not active, abort retry
+				// Complement retry with transmitter status check. It re-reads the
+				// stream, so an operator pause or disable made during the backoff, or
+				// a transmitter that paused or disabled the stream, aborts the retry.
 				if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
 					return
-				}
-
-				// Refresh the stream state to check if it's still enabled/active
-				updatedStream, _ := ps.sa.StreamService.GetStreamState(context.Background(), stream.StreamConfiguration.Id)
-				if updatedStream != nil {
-					ps.mu.Lock()
-					ps.stream = updatedStream
-					ps.mu.Unlock()
 				}
 				continue
 			}
 			if httpStatus == http.StatusNotFound {
-				ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, "Disabled due to HTTP Not Found error")
-				serverLog.Error("POLL-RCV: Stream Not found", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "status", httpStatus)
+				ps.setRetryReason("HTTP Not Found (404) response, retrying")
+				serverLog.Error("POLL-RCV: Stream Not found", "sid", sid, "url", eventUrl, "status", httpStatus)
 				continue
 			}
 
 			// General error (other HTTP errors or request failures)
 			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
-			ps.sa.pauseStreamOnError(ps.stream.StreamConfiguration.Id, errMsg)
-			serverLog.Error("POLL-RCV: Request error", "sid", ps.stream.StreamConfiguration.Id, "url", eventUrl, "error", err.Error())
+			ps.setRetryReason(errMsg)
+			serverLog.Error("POLL-RCV: Request error", "sid", sid, "url", eventUrl, "error", err.Error())
 			continue
 		}
 
@@ -1689,7 +1773,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		acks = []string{}
 
 		setCnt := len(parsed.Sets)
-		serverLog.Debug("POLL-RCV: Response received", "sid", ps.stream.StreamConfiguration.Id, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
+		serverLog.Debug("POLL-RCV: Response received", "sid", sid, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
 
 		// Carry over the parse / iss / aud errors goSetPoll reported, to be sent
 		// back in the next poll's setErrs. Merged rather than assigned so the
@@ -1726,7 +1810,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			// two transports already take — push clears a corroborated rejection,
 			// SSTP maps invalid_request to Clear.
 			if decision := applyEventValidation(validationMode, validationTransportPoll,
-				ps.stream.StreamConfiguration.Id, jti, parsed.Validations[jti], ps.sa.Stats); decision.Reject {
+				sid, jti, parsed.Validations[jti], ps.sa.Stats); decision.Reject {
 				setErrs[jti] = goSetPoll.SetErrType{
 					Error:       decision.ErrCode,
 					Description: decision.Description,
@@ -1735,18 +1819,18 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 				continue
 			}
 
-			serverLog.Debug("POLL-RCV: Handling Event", "sid", ps.stream.StreamConfiguration.Id, "jti", jti)
+			serverLog.Debug("POLL-RCV: Handling Event", "sid", sid, "jti", jti)
 			batchJtis = append(batchJtis, jti)
 			batchTokens = append(batchTokens, token)
 			batchRaws = append(batchRaws, parsed.Sets[jti])
 		}
 		var ingestErrs []error
 		if len(batchTokens) > 0 {
-			ingestErrs = ps.sa.EventRouter.HandleEvents(batchTokens, batchRaws, ps.stream.StreamConfiguration.Id)
+			ingestErrs = ps.sa.EventRouter.HandleEvents(batchTokens, batchRaws, sid)
 		}
 		for i, ingestErr := range ingestErrs {
 			if ingestErr != nil {
-				serverLog.Error("POLL-RCV: Error handling event", "sid", ps.stream.StreamConfiguration.Id, "jti", batchJtis[i], "error", ingestErr)
+				serverLog.Error("POLL-RCV: Error handling event", "sid", sid, "jti", batchJtis[i], "error", ingestErr)
 				// We don't acknowledge if we couldn't handle it
 				continue
 			}
@@ -1777,15 +1861,11 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		retryCount = 0
 		unauthorizedCount = 0
 		firstErrorTime = time.Time{}
-		ps.mu.RLock()
-		needsUpdate := ps.stream.Status != model.StreamStateEnabled || ps.stream.ErrorMsg != ""
-		ps.mu.RUnlock()
-		if needsUpdate {
-			ps.sa.StreamService.UpdateStreamStatus(context.Background(), sid, model.StreamStateEnabled, "")
-			ps.mu.Lock()
-			ps.stream.Status = model.StreamStateEnabled
-			ps.stream.ErrorMsg = ""
-			ps.mu.Unlock()
+		// A successful poll never changes the status: it clears the reason a retry
+		// left while the status is enabled, and never writes enabled over a pause
+		// or disable (#310).
+		if current := ps.currentStream(); current.Status == model.StreamStateEnabled && current.ErrorMsg != "" {
+			ps.setRetryReason("")
 		}
 
 		// If the last poll returned no events, add a small delay to avoid tight loops.
@@ -1799,10 +1879,13 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			}
 		}
 	}
-	if !ps.active {
-		serverLog.Warn("POLL-RCV: Polling marked inactive", "sid", ps.stream.StreamConfiguration.Id)
+	ps.mu.RLock()
+	active, final := ps.active, ps.stream
+	ps.mu.RUnlock()
+	if !active {
+		serverLog.Warn("POLL-RCV: Polling marked inactive", "sid", sid)
 	} else {
-		serverLog.Warn("POLL-RCV: Stream state changed", "sid", ps.stream.StreamConfiguration.Id, "status", ps.stream.Status, "reason", ps.stream.ErrorMsg)
+		serverLog.Warn("POLL-RCV: Stream state changed", "sid", sid, "status", final.Status, "reason", final.ErrorMsg)
 	}
 
 	return
@@ -1969,11 +2052,6 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 
 func (sa *SignalsApplication) updateStreamAfterError(streamId string, mode string, reason string) {
 	sa.StreamService.UpdateStreamStatus(context.Background(), streamId, mode, reason)
-}
-
-func (sa *SignalsApplication) pauseStreamOnError(streamId string, errMsg string) {
-	sa.StreamService.UpdateStreamStatus(context.Background(), streamId, model.StreamStatePause, errMsg)
-	// TODO:  Update event router with stream state change??
 }
 
 // describeRequestedScopes returns a human-readable list of the OAuth scopes the
