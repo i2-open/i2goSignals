@@ -61,8 +61,9 @@ func validateSstpEndpointUrl(raw string) error {
 
 // validateSstpDirection enforces the minimal structural validation on a single
 // half of an SSTP pair (PRD #154 Q27, Q29): non-empty Iss and Aud, and a
-// recognized mode. Events are accepted loosely (no registry check, empty
-// allowed). No reciprocity is enforced against the other half.
+// recognized mode and, when present, receive_mode. Events are accepted loosely
+// (no registry check, empty allowed). No reciprocity is enforced against the
+// other half.
 //
 // Iss and Aud are checked for PRESENCE, not shape. They are JWT StringOrURI
 // values (RFC 7519 s2, s4.1.1, s4.1.3): a value containing a colon MUST be a
@@ -89,6 +90,14 @@ func validateSstpDirection(name string, d model.SstpDirection) error {
 	}
 	if _, ok := model.SstpModeToRouteMode(d.Mode); !ok {
 		return fmt.Errorf("invalid %s.mode: must be one of FORWARD, PUBLISH, IMPORT", name)
+	}
+	// receive_mode is optional; when present it must be a receive-side choice
+	// (issue #306). PUBLISH is a valid mode but not a valid receive_mode: a
+	// receiver cannot act on it differently from FORWARD (ADR 0031 D2).
+	if d.ReceiveMode != "" {
+		if _, ok := model.SstpReceiveModeToRouteMode(d.ReceiveMode); !ok {
+			return fmt.Errorf("invalid %s.receive_mode: must be one of IMPORT, FORWARD", name)
+		}
 	}
 	// A pattern that cannot compile matches nothing, so the leg would come up
 	// with a narrower events_delivered than the bootstrap asked for and no error
@@ -363,6 +372,14 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 		return nil, err
 	}
 	verifyChanged := applyStreamIdentityPatch(target, patch.StreamConfiguration)
+	// The inbound receive_mode echo states this node's receiving choice, so a
+	// patch that changes that choice moves the echo with it rather than leaving
+	// the pair read contradicting itself (issue #306). A pair bootstrapped
+	// without receive_mode has no echo and gains none. The primary echo is the
+	// peer's choice, which a local patch cannot change.
+	if inboundTargeted && patch.RouteMode != "" && streamRec.InboundReceiveMode != "" {
+		streamRec.InboundReceiveMode = sstpReceiveModeForRouteMode(target.RouteMode)
+	}
 	// The ADR-0066 §D2 invariant holds per direction: a signing-only inbound
 	// half must keep both a trust-root iss and a JWKS URL after the patch.
 	normalizeStreamTrustFields(target)
@@ -390,6 +407,17 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	}
 	config := streamRec.StreamConfiguration
 	return &config, nil
+}
+
+// sstpReceiveModeForRouteMode is the receive_mode word for a receive direction's
+// RouteMode, the inverse of model.SstpReceiveModeToRouteMode. A receive direction
+// only ever holds IM or FW after an update (validateRouteModeForRole), so those
+// are the only two cases.
+func sstpReceiveModeForRouteMode(routeMode string) string {
+	if routeMode == model.RouteModeImport {
+		return model.SstpModeImport
+	}
+	return model.SstpModeForward
 }
 
 // SstpDeleteOutcome reports the per-side result of an SSTP pair delete (Q37,
@@ -590,8 +618,14 @@ func resolveSstpDirectionEvents(pairId, direction string, requested, supported [
 func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, projectID string, b model.SstpPairBootstrap, endpointUrl, authHeader string) *model.StreamStateRecord {
 	now := time.Now()
 
+	// This node is the transmitting end of the primary direction and the
+	// receiving end of the inbound one. The transmitting end takes mode; the
+	// receiving end takes receive_mode when the bootstrap carries it and mirrors
+	// mode when it does not, which is exactly what it stored before the field
+	// existed (issue #306). The primary's receive_mode belongs to the peer's
+	// receiving end and reaches it through mirrorSstpBootstrap.
 	primaryMode, _ := model.SstpModeToRouteMode(b.Primary.Mode)
-	inboundMode, _ := model.SstpModeToRouteMode(b.Inbound.Mode)
+	inboundMode := b.Inbound.ReceiveRouteMode()
 
 	supported := model.GetSupportedEvents()
 	primaryRequested, primaryDelivered := resolveSstpDirectionEvents(pairId, "primary", b.Primary.Events, supported)
@@ -660,6 +694,12 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		// alias the caller's request body.
 		EventSource:        b.Primary.EventSource.DeepCopy(),
 		InboundEventSource: b.Inbound.EventSource.DeepCopy(),
+
+		// Each direction's receive_mode is echoed as bootstrapped so the pair read
+		// can show both ends of a direction (issue #306). Empty stays empty, and is
+		// omitted from the wire.
+		ReceiveMode:        b.Primary.ReceiveMode,
+		InboundReceiveMode: b.Inbound.ReceiveMode,
 	}
 }
 
@@ -730,6 +770,12 @@ func (s *StreamService) cascadeSstpPeer(ctx context.Context, rec *model.StreamSt
 // event_source is exactly what the peer's primary should route on, and the swap
 // puts it there. Keep the swap struct-level if this function is ever rewritten —
 // copying fields individually would silently drop it.
+//
+// receive_mode (issue #306) rides the same swap. This node's primary.receive_mode
+// is the choice for the peer's receiving end, and the swap delivers it as the
+// peer's inbound.receive_mode, which the peer's buildSstpRecord writes to its
+// SstpInbound.RouteMode. A direction without the field marshals without the key,
+// so the mirror of such a bootstrap is byte-for-byte what it was before.
 func mirrorSstpBootstrap(rec *model.StreamStateRecord, b model.SstpPairBootstrap) model.SstpPairBootstrap {
 	mirror := model.SstpPairBootstrap{
 		Description: b.Description,

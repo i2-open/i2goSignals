@@ -236,6 +236,55 @@ func (s *SstpPairE2ESuite) TestPairCreateCascade_ResponderInitiates() {
 	s.Equal(rec.SstpMethod.AuthorizationHeader, peerRec.SstpMethod.AuthorizationHeader, "initiator learns the minted bearer")
 }
 
+// TestPairCreateCascade_ReceiveModePerDirection drives the combination a single
+// per-direction mode could not express (issue #306): node B relays its outbound
+// verbatim while node A only imports it, and node A re-signs its outbound while
+// node B routes it on. One bootstrap posted to B must land all four ends on both
+// live servers, and each node's pair read must echo the receive_mode it holds.
+func (s *SstpPairE2ESuite) TestPairCreateCascade_ReceiveModePerDirection() {
+	s.b.registerPeer(s.T(), "peerA", s.a)
+	boot := symmetricBootstrap("peerA", "https://e2e.example.com", []string{"https://aud.example.com"})
+	boot.Primary.Mode = model.SstpModeForward
+	boot.Primary.ReceiveMode = model.SstpModeImport
+	boot.Inbound.Mode = model.SstpModePublish
+	boot.Inbound.ReceiveMode = model.SstpModeForward
+	body, err := json.Marshal(boot)
+	s.Require().NoError(err)
+
+	status, respBody := s.b.httpDo(s.T(), http.MethodPost, "/stream", s.b.adminBearer(s.T()), body)
+	s.Require().Equalf(http.StatusCreated, status, "pair create should return 201, got %d: %s", status, string(respBody))
+	var rec model.StreamStateRecord
+	s.Require().NoError(json.Unmarshal(respBody, &rec))
+	s.Require().NotNil(rec.SstpInbound)
+	s.Require().NotEmpty(rec.SstpMethod.PeerPairId)
+
+	// Node B: transmits with mode, receives with receive_mode.
+	s.Equal(model.RouteModeForward, rec.StreamConfiguration.RouteMode, "B relays its outbound verbatim")
+	s.Equal(model.RouteModeForward, rec.SstpInbound.RouteMode, "B routes on what A sends, not PUBLISH")
+
+	// Node A, provisioned only by the cascaded mirror.
+	peerRec, err := s.a.app.GetStreamService().GetStreamStateByPairId(context.Background(), rec.SstpMethod.PeerPairId)
+	s.Require().NoError(err)
+	s.Require().NotNil(peerRec.SstpInbound)
+	s.Equal(model.RouteModePublish, peerRec.StreamConfiguration.RouteMode, "A re-signs its outbound")
+	s.Equal(model.RouteModeImport, peerRec.SstpInbound.RouteMode, "A only imports what B relays")
+
+	// The pair read echoes each direction's receive_mode on both nodes.
+	readState := func(n *sstpNode, sid string) map[string]json.RawMessage {
+		status, body := n.httpDo(s.T(), http.MethodGet, "/state?stream_id="+sid, n.adminBearer(s.T()), nil)
+		s.Require().Equalf(http.StatusOK, status, "GET /state: %s", string(body))
+		var doc map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(body, &doc))
+		return doc
+	}
+	bDoc := readState(s.b, rec.PairId)
+	s.JSONEq(`"IMPORT"`, string(bDoc["receive_mode"]))
+	s.JSONEq(`"FORWARD"`, string(bDoc["inbound_receive_mode"]))
+	aDoc := readState(s.a, peerRec.PairId)
+	s.JSONEq(`"FORWARD"`, string(aDoc["receive_mode"]))
+	s.JSONEq(`"IMPORT"`, string(aDoc["inbound_receive_mode"]))
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 2: Pair-delete + cascade_peer=true 207 partial-failure path.
 // ---------------------------------------------------------------------------

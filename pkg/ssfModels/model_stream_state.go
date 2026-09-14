@@ -173,6 +173,21 @@ type StreamStateRecord struct {
 	// with no descriptor, and behaves as DIRECT.
 	InboundEventSource *EventSource `json:"inbound_event_source,omitempty" bson:"inbound_event_source,omitempty"`
 
+	// ReceiveMode echoes the SSTP bootstrap's primary.receive_mode (issue #306):
+	// SstpModeImport or SstpModeForward, the choice made for the RECEIVING end of
+	// this pair's outbound direction. That end is the peer, so this node never
+	// routes on it — the peer does, having received it through the mirror. It is
+	// stored so the pair read can show both ends of the direction. Empty when the
+	// bootstrap did not carry it, and then omitted from the wire.
+	ReceiveMode string `json:"receive_mode,omitempty" bson:"receive_mode,omitempty"`
+
+	// InboundReceiveMode is the inbound twin of ReceiveMode, following the
+	// InboundEventSource convention: it echoes inbound.receive_mode, which is
+	// THIS node's receiving choice and is what SstpInbound.RouteMode was built
+	// from. An inbound route_mode patch keeps it in step (updateSstpPair), so the
+	// echo never contradicts the mode it describes. Empty when not bootstrapped.
+	InboundReceiveMode string `json:"inbound_receive_mode,omitempty" bson:"inbound_receive_mode,omitempty"`
+
 	// --- Node-local JWKS readiness (ADR 0033) ---
 	// Derived, never persisted (bson:"-"), and NOT part of the SSF wire-format
 	// StreamConfiguration. Stream Status is not the carrier for this: an
@@ -311,6 +326,8 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.InboundStatus = mod.InboundStatus
 	ss.InboundErrorMsg = mod.InboundErrorMsg
 	ss.InboundEventSource = mod.InboundEventSource
+	ss.ReceiveMode = mod.ReceiveMode
+	ss.InboundReceiveMode = mod.InboundReceiveMode
 	ss.JwksReadiness = mod.JwksReadiness
 	ss.InboundJwksReadiness = mod.InboundJwksReadiness
 }
