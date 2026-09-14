@@ -354,11 +354,20 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	if streamRec.SstpInbound != nil && streamID == streamRec.SstpInbound.Id {
 		target = streamRec.SstpInbound
 	}
-	if patch.Iss != "" {
-		target.Iss = patch.Iss
+	// route_mode, iss, aud and the issuer JWKS URL land on the targeted side
+	// only (#306). The primary is the pair's transmit direction (PB|FW); the
+	// inbound half is its receive direction (IM|FW). The patch is local to this
+	// record — the peer is not told (same as every other pair patch, Q35a).
+	inboundTargeted := target == streamRec.SstpInbound
+	if err := validateRouteModeForRole(patch.RouteMode, !inboundTargeted); err != nil {
+		return nil, err
 	}
-	if len(patch.Aud) > 0 {
-		target.Aud = patch.Aud
+	verifyChanged := applyStreamIdentityPatch(target, patch.StreamConfiguration)
+	// The ADR-0066 §D2 invariant holds per direction: a signing-only inbound
+	// half must keep both a trust-root iss and a JWKS URL after the patch.
+	normalizeStreamTrustFields(target)
+	if err := validateBusinessStreamSecurity(*target); err != nil {
+		return nil, err
 	}
 
 	// Per-receiver event-validation mode (spec #247 #250). A pair record always
@@ -370,6 +379,14 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	streamRec.ModifiedAt = time.Now()
 	if err := s.streamDAO.Update(ctx, streamRec); err != nil {
 		return nil, err
+	}
+
+	// The pair's receiver-cache entry is keyed by the inbound SID (ADR 0018)
+	// and holds the resolved inbound JWKS; an inbound iss / JWKS URL change is
+	// re-resolved into it so ingest verifies against the new material without
+	// a restart (#306). A tx-side patch does not touch it.
+	if verifyChanged && inboundTargeted {
+		s.refreshReceiverEntry(ctx, streamRec)
 	}
 	config := streamRec.StreamConfiguration
 	return &config, nil

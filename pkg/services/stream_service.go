@@ -1348,6 +1348,20 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		config.Description = configReq.Description
 	}
 
+	// goSignals-specific settings (#306): route_mode, iss, aud and the issuer
+	// JWKS URL are patchable on every delivery method. route_mode is validated
+	// against the stream's role BEFORE anything is mutated, so a rejected value
+	// leaves the record untouched. verifyChanged records whether the receive
+	// direction's verification inputs moved, which decides the cache refresh
+	// after the write. Iss/Aud on a receiver are the foreign transmitter's
+	// assertions (SSF 1.0 §7.1.1), which the CLI back-patches once the publisher
+	// response is in hand; on a transmitter they are the signing issuer and the
+	// advertised audience.
+	if err := validateRouteModeForRole(configReq.RouteMode, isTransmitterMethod(config.Delivery.GetMethod())); err != nil {
+		return nil, err
+	}
+	verifyChanged := applyStreamIdentityPatch(config, configReq.StreamConfiguration)
+
 	switch config.Delivery.GetMethod() {
 	case model.DeliveryPoll:
 		if configReq.Delivery != nil {
@@ -1375,16 +1389,6 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		if configReq.RemoteStreamId != nil {
 			config.RemoteStreamId = configReq.RemoteStreamId
 		}
-		// Iss/Aud are transmitter-asserted (SSF 1.0 §7.1.1). For a receiver
-		// stream the asserting transmitter is the foreign one; the CLI bridges
-		// the two and may back-patch these once the publisher response is in
-		// hand. Without this, inbound SETs fail audience/issuer validation.
-		if len(configReq.Aud) > 0 {
-			config.Aud = configReq.Aud
-		}
-		if configReq.Iss != "" {
-			config.Iss = configReq.Iss
-		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval
 		}
@@ -1406,12 +1410,6 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		}
 		if configReq.RemoteStreamId != nil {
 			config.RemoteStreamId = configReq.RemoteStreamId
-		}
-		if len(configReq.Aud) > 0 {
-			config.Aud = configReq.Aud
-		}
-		if configReq.Iss != "" {
-			config.Iss = configReq.Iss
 		}
 		if configReq.MinVerificationInterval != 0 {
 			config.MinVerificationInterval = configReq.MinVerificationInterval
@@ -1492,6 +1490,14 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		if clearErr := s.subjectFilterService.ClearFilter(ctx, streamID); clearErr != nil {
 			ssLog.Warn("Error clearing subject filter after defaultSubjects change", "sid", streamID, "error", clearErr)
 		}
+	}
+
+	// A receiver verifies inbound SETs from the cached copy of its direction
+	// (ADR 0033), so a changed iss / JWKS URL is re-resolved into the cache now
+	// rather than waiting for a restart (#306). Aud and route_mode are read
+	// from the DAO record per request and need no cache work.
+	if verifyChanged && streamRec.IsReceiver() {
+		s.refreshReceiverEntry(ctx, streamRec)
 	}
 
 	return config, nil

@@ -381,8 +381,11 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 
 	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.NoError(err, "Update should have no error")
-	s.Equal(orig.Aud, res.Aud, "Audience should not change")
-	s.Equal(orig.Iss, res.Iss, "Issuer should not change")
+	// iss/aud are patchable on a transmitter since #306 (signing issuer /
+	// advertised audience); before that they were create-only here.
+	s.Equal([]string{"test"}, res.Aud, "Audience follows the patch")
+	s.Equal("meh", res.Iss, "Issuer follows the patch")
+	s.NotEqual(orig.Iss, res.Iss)
 	s.Equal([]string{"abc"}, res.EventsRequested, "Event should be abc")
 	s.Equal(0, len(res.EventsDelivered), "Should be no delivered events")
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -830,24 +831,56 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
 	if ok {
+		// The map copy is what fan-out matching reads, so it is always synced.
+		// The push runner goroutine, though, holds the record pointer it was
+		// started with and captured its signing key and route mode from it
+		// (runPushLoop); a map sync alone never reaches it. When the settings
+		// that runner captured have changed (#306), close its buffer so it
+		// exits, then fall through and start a fresh runner on the updated
+		// record exactly as a first registration does. Pending JTIs are
+		// persisted, so the re-preload below hands them to the new runner.
+		restart := pushRunnerSettingsChanged(currentState.StreamConfiguration, stream.StreamConfiguration)
 		currentState.Update(stream)
 		r.pushStreams[stream.StreamConfiguration.Id] = currentState
-	} else {
-		// preload the buffer with any existing events
-		// We release the lock for provider call
-		r.mu.Unlock()
-		jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
-			MaxEvents:         0,
-			ReturnImmediately: true,
-			Acks:              nil,
-			SetErrs:           nil,
-			TimeoutSecs:       10,
-		})
-		r.mu.Lock()
-		r.pushStreams[stream.StreamConfiguration.Id] = *stream
-		r.initPushStreamLocked(stream.StreamConfiguration.Id, stream, jtis)
+		if !restart {
+			return
+		}
+		if pb, has := r.pushBuffers[stream.StreamConfiguration.Id]; has {
+			pb.Close()
+			delete(r.pushBuffers, stream.StreamConfiguration.Id)
+		}
+		eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", stream.StreamConfiguration.Id)
 	}
+	// preload the buffer with any existing events
+	// We release the lock for provider call
+	r.mu.Unlock()
+	jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+		MaxEvents:         0,
+		ReturnImmediately: true,
+		Acks:              nil,
+		SetErrs:           nil,
+		TimeoutSecs:       10,
+	})
+	r.mu.Lock()
+	r.pushStreams[stream.StreamConfiguration.Id] = *stream
+	r.initPushStreamLocked(stream.StreamConfiguration.Id, stream, jtis)
+}
 
+// pushRunnerSettingsChanged reports whether the settings a push runner captures
+// when it starts — the signing issuer and algorithm, the advertised audience,
+// the forward-vs-sign route mode, and the receiver endpoint it pushes to —
+// differ between the record the runner was started on and the update. Status
+// and error text are deliberately not compared: the status handler syncs those
+// through the same path and must not bounce the runner.
+func pushRunnerSettingsChanged(current, updated model.StreamConfiguration) bool {
+	if current.Iss != updated.Iss || current.RouteMode != updated.RouteMode || current.SigningAlg != updated.SigningAlg {
+		return true
+	}
+	if !slices.Equal(current.Aud, updated.Aud) {
+		return true
+	}
+	return current.Delivery.GetEndpointUrl() != updated.Delivery.GetEndpointUrl() ||
+		current.Delivery.GetAuthorizationHeader() != updated.Delivery.GetAuthorizationHeader()
 }
 
 func (r *router) initPushStreamLocked(sid string, state *model.StreamStateRecord, jtis []string) {
