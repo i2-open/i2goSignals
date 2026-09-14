@@ -136,3 +136,19 @@ has no hop count or path record to detect it with.
 - [0030](0030-wire-shaped-set-bson-persistence.md) — the other GH-issue fix in
   this release line; unrelated mechanism.
 - `docs/SSTP.md` — pair model, bootstrap, per-direction mode semantics.
+
+## Amendment — 2026-09-13 (GH #306)
+
+`route_mode` — together with `iss`, `aud` and the issuer JWKS URL — is now
+**updatable after creation** rather than create-only, on every delivery method
+and on each SSTP side addressed by its own SID (`PairId` / tx SID → the
+primary transmit direction; `SstpInbound.Id` → the inbound direction).
+`route_mode` is validated by the targeted direction's role: a transmit
+direction accepts `PB` | `FW`, a receive direction accepts `IM` | `FW`; any
+other value is rejected with a 400 naming `route_mode`, and an empty value
+means unchanged. The vocabulary split follows the two read sites this ADR
+describes — a transmitter tests only `== FW`, a receiver only `== IM` — so a
+value from the wrong vocabulary would be mis-read rather than refused. An SSTP
+update is local to the patched side; the peer is not notified. D1–D5 above are
+unchanged: the inbound mode still decides only *whether* an SSTP-ingested SET
+is routed, and the sign-vs-forward choice stays on the outbound stream.

@@ -813,12 +813,17 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
 			return
 		}
-		if err != nil && err.Error() == "not found" || configResp == nil {
-			http.Error(w, "No stream found", http.StatusNotFound)
-			return
-		}
+		// A request-shaped rejection (route_mode outside the stream's role,
+		// #306; a bad event_validation mode or events_requested pattern) is a
+		// 400. Checked before the not-found fallback: every service error
+		// leaves configResp nil, so the fallback would otherwise claim every
+		// rejection as a missing stream.
 		if errors.Is(err, services.ErrInvalidRequest) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err != nil && err.Error() == "not found" || configResp == nil {
+			http.Error(w, "No stream found", http.StatusNotFound)
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
