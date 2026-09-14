@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptrace"
 	"net/url"
 	"time"
@@ -43,9 +44,13 @@ func (a *HTTPAdapter) SetKeyReloader(r KeyReloader) {
 	a.keyReloader = r
 }
 
-// Deliver signs-or-forwards the SET and pushes it. See package docs for scope.
+// Deliver signs-or-forwards the SET and pushes it. See package docs for scope. A SET
+// that cannot be signed is not sent: the outcome carries SignErr.
 func (a *HTTPAdapter) Deliver(ctx context.Context, req PushRequest) PushOutcome {
 	out := a.attempt(ctx, req)
+	if out.SignErr != nil {
+		return out
+	}
 
 	if a.shouldRotateAndRetry(req, out.Classification) {
 		newKey, newKid := a.keyReloader.InvalidateAndReload(
@@ -87,7 +92,10 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	cfg := req.Stream.StreamConfiguration
 	pushCfg := cfg.Delivery.PushTransmitMethod
 
-	tokenString := a.tokenString(req)
+	tokenString, err := a.tokenString(req)
+	if err != nil {
+		return PushOutcome{SignErr: err, Key: req.Key, Kid: req.Kid}
+	}
 
 	var capturedAddr string
 	trace := &httptrace.ClientTrace{
@@ -112,10 +120,13 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	}
 }
 
-func (a *HTTPAdapter) tokenString(req PushRequest) string {
+// tokenString is the SET to push: the original token as is in Forward mode, the
+// event re-signed under the stream's iss and signing_alg otherwise (an empty route
+// mode re-signs). A re-sign that fails returns the error, never an empty token.
+func (a *HTTPAdapter) tokenString(req PushRequest) (string, error) {
 	cfg := req.Stream.StreamConfiguration
 	if cfg.RouteMode == model.RouteModeForward {
-		return req.Event.Original
+		return req.Event.Original, nil
 	}
 	// PB/IM re-sign: copy the stored event token before mutating iss/aud/iat/kid so
 	// concurrent multi-stream fan-out cannot race on or corrupt the shared in-memory
@@ -132,11 +143,9 @@ func (a *HTTPAdapter) tokenString(req PushRequest) string {
 	token.Kid = req.Kid
 	signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), req.Key)
 	if err != nil {
-		// Match the prior router behavior: log and return an empty token string so
-		// the receiver responds with an error that ClassifyResult will surface.
-		return ""
+		return "", fmt.Errorf("signing SET for issuer %s: %w", cfg.Iss, err)
 	}
-	return signed
+	return signed, nil
 }
 
 // persistRemoteAddress updates the stream's RemoteAddress field both in memory

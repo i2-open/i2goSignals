@@ -84,6 +84,9 @@ func TestExportedBusinessRouter_DrivesAndObserves(t *testing.T) {
 
 	const issuer = "https://issuer.example.com"
 	const audience = "https://receiver.example.com"
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	_, err = persistence.KeyService.EnsureSigningKey(context.Background(), issuer, projectId)
+	require.NoError(t, err)
 	cfg := model.StreamConfiguration{
 		Iss:             issuer,
 		Aud:             []string{audience},

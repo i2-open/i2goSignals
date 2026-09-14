@@ -70,6 +70,9 @@ func TestPassthruRelaysAddSubjectToUpstream(t *testing.T) {
 	// Create a PASSTHRU transmitter stream feeding from the upstream issuer.
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
 		&authSupport.AuthContext{ProjectId: instance.projectId})
+	// The Publish poll transmitter signs as upstreamIss, which needs an active key (#308).
+	_, keyErr := instance.keySvc().EnsureSigningKey(context.Background(), upstreamIss, instance.projectId)
+	require.NoError(t, keyErr)
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss: upstreamIss,
@@ -158,6 +161,9 @@ func TestHybridRelaysAndFiltersLocally(t *testing.T) {
 	// Create a HYBRID NONE-baseline transmitter stream feeding from the upstream.
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
 		&authSupport.AuthContext{ProjectId: instance.projectId})
+	// The Publish poll transmitter signs as upstreamIss, which needs an active key (#308).
+	_, keyErr := instance.keySvc().EnsureSigningKey(context.Background(), upstreamIss, instance.projectId)
+	require.NoError(t, keyErr)
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss: upstreamIss,
@@ -241,6 +247,9 @@ func TestPassthruToleratesUpstreamErrorOnAddSubject(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
 		&authSupport.AuthContext{ProjectId: instance.projectId})
+	// The Publish poll transmitter signs as upstreamIss, which needs an active key (#308).
+	_, keyErr := instance.keySvc().EnsureSigningKey(context.Background(), upstreamIss, instance.projectId)
+	require.NoError(t, keyErr)
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss: upstreamIss,
@@ -311,6 +320,9 @@ func TestPassthruToleratesUpstreamErrorOnRemoveSubject(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
 		&authSupport.AuthContext{ProjectId: instance.projectId})
+	// The Publish poll transmitter signs as upstreamIss, which needs an active key (#308).
+	_, keyErr := instance.keySvc().EnsureSigningKey(context.Background(), upstreamIss, instance.projectId)
+	require.NoError(t, keyErr)
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss: upstreamIss,

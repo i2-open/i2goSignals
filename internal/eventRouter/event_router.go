@@ -853,13 +853,21 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		currentState.Update(stream)
 		r.pushStreams[sid] = currentState
 		if !restart {
-			return
-		}
-		if _, pending := r.pushHandoffs[sid]; pending {
+			// A push transmitter set to enabled with no live runner gets one
+			// (#308), whatever stopped the last: its key, the receiver-401 limit,
+			// the transport limit, or a stream that was not enabled when the
+			// runner started. A live runner, or a pending hand-off, is left alone.
+			if currentState.Status != model.StreamStateEnabled || r.pushRunnerLiveLocked(sid) {
+				return
+			}
+			eventLogger.Info("PUSH-SRV: stream enabled with no live runner, starting one", "sid", sid)
+		} else if _, pending := r.pushHandoffs[sid]; pending {
 			// The pending hand-off starts exactly one runner, on the record in
 			// pushStreams when it does, which now carries this update.
 			eventLogger.Info("PUSH-SRV: transmit settings changed during a pending runner restart", "sid", sid)
 			return
+		} else {
+			eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", sid)
 		}
 		// Stop the old runner and hand off in the background (#309). The old
 		// runner sends at most the batch it is already sending; the successor
@@ -870,7 +878,6 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		old := r.retirePushRunnerLocked(sid)
 		handoff := &pushHandoff{done: make(chan struct{})}
 		r.pushHandoffs[sid] = handoff
-		eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", sid)
 		go r.completePushHandoff(sid, old, handoff)
 		return
 	}
@@ -1782,15 +1789,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	// goes with it (issue #287).
 	defer r.leaseOwners.forget(resource)
 
-	var signingKey crypto.Signer
-	var kid string
-	if stream.GetRouteMode() == model.RouteModePublish {
-		signingKey, kid = r.checkAndLoadKey(stream.StreamConfiguration.Id, stream.Iss, stream.StreamConfiguration.SigningAlg)
-		if signingKey == nil {
-			eventLogger.Warn("PUSH-SRV: no issuer key available", "sid", sid, "issuer", stream.StreamConfiguration.Iss)
-		}
-	}
-
 	// Heartbeat for lease renewal. Its context is a child of the runner's, so a
 	// stop cancels it along with every wait below. On the way out the heartbeat
 	// is cancelled and waited for, so it cannot note or forget the lease owner
@@ -1832,6 +1830,22 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	recoveryCfg := LoadRecoveryConfig()
 	statusFetcher := r.pushStatusFetcher()
 	idleVerifyInterval := LoadIdleVerifyInterval()
+
+	// A signing transmitter (every route mode but Forward, an empty one included)
+	// never sends a SET it cannot sign (#308). With no active key for its iss and
+	// signing_alg it takes the key-unavailable pause before touching the receiver.
+	signing := isSigningPush(stream)
+	var keyWait pushKeyWait
+	if signing {
+		if key, _ := r.pushSigningKey(stream); key == nil {
+			switch r.awaitSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil) {
+			case RecoveryOutcomeDisabled:
+				return false
+			case RecoveryOutcomeContextDone:
+				return !runner.stopped()
+			}
+		}
+	}
 
 	// T2 pre-flight: check the receiver's reported state before draining the buffer. If the
 	// receiver self-paused or self-disabled while we were not the lease holder, we should not
@@ -1890,6 +1904,26 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				// The JTI is still pending in the store for the successor.
 				return false
 			}
+			// The signing key is resolved for every batch from the router's cache,
+			// so a key suspended, revoked or rotated since the last batch (the
+			// key-status handler evicts it) is never used (#308). A jws_signature_failed
+			// rotation in the previous batch reloaded the cache the same way.
+			var signingKey crypto.Signer
+			var kid string
+			if signing {
+				if signingKey, kid = r.pushSigningKey(stream); signingKey == nil {
+					// Nothing sent. The JTI just taken stays pending in the store
+					// and returns through backfill.
+					switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
+					case RecoveryOutcomeResumed:
+						continue
+					case RecoveryOutcomeDisabled:
+						return false
+					default:
+						return !runner.stopped()
+					}
+				}
+			}
 			// Drain whatever else is already buffered, up to the batch cap, so the
 			// batch's Mongo reads and acks are amortized and the worker pool has
 			// something to run in parallel. A quiet stream yields a batch of one
@@ -1897,7 +1931,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			jtis := drainPushBatch(v.(string), out, eventBuf, r.pushBatchMax())
 			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
 			res := r.pushBatch(jtis, stream, signingKey, kid, fencingToken)
-			signingKey, kid = res.key, res.kid
 			if runner.stopped() {
 				// The in-flight batch has completed. A stopped runner sends nothing
 				// more, and a failure in that batch was a verdict on the settings
@@ -1910,6 +1943,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				// R1: a successful push is proof the stream is alive, so the T3
 				// idle clock starts over — verify pushes included.
 				idle.Reset()
+				keyWait.tries = 0
+			}
+			if res.signErr != nil {
+				// A SET the key could not sign was not sent: the transmitter's own
+				// key problem, not a receiver verdict. The cached key goes, so the
+				// retries re-read the key store (#308).
+				r.dropCachedKey(stream.StreamConfiguration.Iss, stream.StreamConfiguration.SigningAlg)
+				switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, res.signErr, backfillTicker, idle, eventBuf) {
+				case RecoveryOutcomeResumed:
+					continue
+				case RecoveryOutcomeDisabled:
+					return false
+				default:
+					return !runner.stopped()
+				}
 			}
 			if res.failedJti == "" {
 				continue
@@ -1923,10 +1971,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, res.failedJti, res.failedCls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
-			}
-			// Resumed — refresh signing key in case the issuer rotated while we were paused.
-			if stream.GetRouteMode() == model.RouteModePublish {
-				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss, stream.StreamConfiguration.SigningAlg)
 			}
 		case <-backfillTicker.C:
 			if runner.stopped() {
@@ -2301,6 +2345,9 @@ type pushBatchResult struct {
 	// seam's rotated key when a jws_signature_failed rotate-and-retry fired.
 	key crypto.Signer
 	kid string
+	// signErr is the first error signing a SET in the batch (#308). That SET was
+	// not sent and stays pending; it is not a receiver failure.
+	signErr error
 }
 
 // pushBatch delivers a batch of JTIs for one push stream: one read for the
@@ -2378,7 +2425,7 @@ func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signi
 						Kid:    kid,
 					})
 					outcomes[idx] = &out
-					if out.Classification.Class != goSetPush.ClassAccepted {
+					if out.SignErr != nil || out.Classification.Class != goSetPush.ClassAccepted {
 						stopped.Store(true)
 					}
 				}
@@ -2391,6 +2438,13 @@ func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signi
 		out := outcomes[i]
 		if out == nil {
 			continue // never dispatched: still pending, backfill re-pulls it
+		}
+		if out.SignErr != nil {
+			// Not sent, so there is no receiver verdict to count: still pending.
+			if res.signErr == nil {
+				res.signErr = out.SignErr
+			}
+			continue
 		}
 		if out.Key != nil && out.Key != signingKey {
 			res.key, res.kid = out.Key, out.Kid
@@ -2487,6 +2541,16 @@ func (r *router) dropCachedKeysLocked(issuer string) {
 			delete(r.issuerKids, cacheKey)
 		}
 	}
+}
+
+// dropCachedKey evicts the cached signing key for one issuer and algorithm, after
+// signing with it failed (#308). Other algorithms' keys for the issuer are left.
+func (r *router) dropCachedKey(issuer, alg string) {
+	cacheKey := signingCacheKey(issuer, alg)
+	r.mu.Lock()
+	delete(r.issuerKeys, cacheKey)
+	delete(r.issuerKids, cacheKey)
+	r.mu.Unlock()
 }
 
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this

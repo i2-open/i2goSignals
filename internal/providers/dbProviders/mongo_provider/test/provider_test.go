@@ -92,6 +92,10 @@ func (s *MongoProviderSuite) InitStream(events []string) {
 	}
 	authCtx := authSupport.ConvertProject(s.project)
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authCtx)
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	if _, err = s.provider.GetKeyService().EnsureSigningKey(ctx, req.Iss, s.project); err != nil {
+		s.FailNow(err.Error())
+	}
 	s.stream, _ = s.provider.GetStreamService().CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: req}, authCtx.ProjectId, nil)
 }
 
@@ -311,8 +315,10 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	}
 
 	keys, _ := s.provider.GetKeyService().ListKeyNames(context.Background())
-	s.Len(keys, 2, "Should be 2 keys")
+	// DEFAULT, the suite stream's signing key (test.com, #308) and this issuer.
+	s.Len(keys, 3, "Should be 3 keys")
 	s.Contains(keys, issuer, "Confirm issuer i2test.example.org present")
+	s.Contains(keys, "test.com", "Confirm the suite stream's issuer test.com present")
 	s.Contains(keys, "DEFAULT", "Confirm issuer DEFAULT present")
 
 }
@@ -378,6 +384,10 @@ func (s *MongoProviderSuite) TestH_StreamManagement() {
 
 	_, err := s.provider.GetStreamService().UpdateStream(context.Background(), "1234", s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.Error(err, "not found")
+
+	// The transmitter's new iss needs an active signing key (#308).
+	_, err = s.provider.GetKeyService().EnsureSigningKey(context.Background(), config.Iss, s.project)
+	s.Require().NoError(err)
 
 	res, err := s.provider.GetStreamService().UpdateStream(context.Background(), sid, s.project, model.StreamStateRecord{StreamConfiguration: config})
 	s.NoError(err, "Update should have no error")
@@ -491,6 +501,9 @@ func (s *MongoProviderSuite) TestZ_SubjectRemovalGraceRoundTrip() {
 		},
 		SubjectRemovalGraceSeconds: 45,
 	}
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	_, err := s.provider.GetKeyService().EnsureSigningKey(ctx, req.Iss, s.project)
+	s.Require().NoError(err)
 
 	created, err := s.provider.GetStreamService().CreateStream(ctx, req, authCtx.ProjectId, nil)
 	s.Require().NoError(err, "CreateStream should succeed")

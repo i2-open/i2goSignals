@@ -83,6 +83,10 @@ func (s *SstpPairE2ESuite) bootNode(dbName string) *sstpNode {
 	persistence, err := dbProviders.OpenPersistence("memorydb:", dbName)
 	s.Require().NoError(err)
 	s.Require().NoError(persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))
+	// Both halves of the e2e pairs re-sign as this issuer on each node, which
+	// needs an active key there (#308).
+	_, err = persistence.KeyService.CreateKeyPair(context.Background(), "https://e2e.example.com", "sig", "")
+	s.Require().NoError(err)
 	if persistence.Storage != nil {
 		persistence.Refresh()
 	}

@@ -42,6 +42,9 @@ func mustCreateSstpPairForRouting(t *testing.T, h *testHarness, projectId, event
 	baseUrl, err := url.Parse("https://local.example")
 	require.NoError(t, err)
 	h.streamService.SetBaseUrl(baseUrl)
+	// The Publish primary signs as tx.issuer.example, which needs an active key (#308).
+	_, err = h.keyService.EnsureSigningKey(context.Background(), "https://tx.issuer.example", projectId)
+	require.NoError(t, err)
 
 	rec, err := h.streamService.CreateSstpPair(context.Background(), model.SstpPairBootstrap{
 		Role:        model.SstpRoleResponder,

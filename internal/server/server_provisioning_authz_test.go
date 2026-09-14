@@ -35,6 +35,10 @@ func (s *ServerProvisioningAuthzSuite) SetupTest() {
 	s.Require().NoError(err)
 	err = persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT")
 	s.Require().NoError(err)
+	// The plain-create tests' poll transmitter signs as this issuer, which needs
+	// an active key (#308).
+	_, err = persistence.KeyService.CreateKeyPair(context.Background(), "http://transmitter.example.com", "sig", "")
+	s.Require().NoError(err)
 
 	s.app = newTestApplication(persistence)
 	s.app.DefIssuer = "DEFAULT"

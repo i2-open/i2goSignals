@@ -22,6 +22,10 @@ func streamServiceFixture(t *testing.T) (*StreamService, *ServerService) {
 	keyService := NewKeyService(keyDAO, "http://receiver.com", nil, nil)
 	err := keyService.InitializeTokenKey(context.Background(), "http://receiver.com")
 	assert.NoError(t, err)
+	// newReceiverFixture's transmitters sign as test-issuer, which needs an
+	// active key (#308).
+	_, err = keyService.CreateKeyPair(context.Background(), "test-issuer", "sig", "")
+	assert.NoError(t, err)
 
 	serverDAO := memory.NewServerDAO()
 	serverService := NewServerService(serverDAO)

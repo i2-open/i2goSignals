@@ -269,6 +269,12 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 
 	rec := s.buildSstpRecord(mid, pairId, inboundSid, projectID, bootstrap, endpointUrl, authHeader)
 
+	// A Publish primary re-signs under its iss, so it needs an active signing
+	// key before anything is written or cascaded (#308).
+	if err := s.RequireActiveSigningKey(ctx, rec); err != nil {
+		return model.StreamStateRecord{}, err
+	}
+
 	if bootstrap.Role == model.SstpRoleResponder {
 		// ReceivePush-style: write local first, then cascade; roll back on failure.
 		if err := s.streamDAO.Create(ctx, rec); err != nil {
@@ -392,6 +398,12 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	// inbound leg regardless of which direction streamID names (ADR COM-0018,
 	// story 12). The request value was shape-checked by UpdateStream.
 	applyEventValidation(streamRec, patch.EventValidation)
+
+	// Whichever direction the patch names, the pair's transmit direction must
+	// still have an active signing key afterwards when it re-signs (#308).
+	if err := s.RequireActiveSigningKey(ctx, streamRec); err != nil {
+		return nil, err
+	}
 
 	streamRec.ModifiedAt = time.Now()
 	if err := s.streamDAO.Update(ctx, streamRec); err != nil {

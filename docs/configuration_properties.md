@@ -223,8 +223,8 @@ Defaults shown as Go `time.Duration` strings (e.g. `1s`, `5m`, `6h`).
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR`     | Multiplier applied to the delay after each TransportBackoff probe.                                                           | `2.0`   |
 | `I2SIG_PUSH_RETRY_MAX_DELAY`          | Cap on a single TransportBackoff sleep — exponential growth never exceeds this between probes.                               | `5m`    |
 | `I2SIG_PUSH_RETRY_LIMIT`              | Total elapsed wall time inside TransportBackoff before the stream is disabled.                                               | `6h`    |
-| `I2SIG_PUSH_AUTH_RETRY_DELAY`         | Sleep between `/status` probes while in AuthBounded recovery (HTTP 401 path).                                                | `15s`   |
-| `I2SIG_PUSH_AUTH_RETRY_LIMIT`         | Maximum AuthBounded probe attempts before the stream is disabled.                                                            | `10`    |
+| `I2SIG_PUSH_AUTH_RETRY_DELAY`         | Sleep between `/status` probes while in AuthBounded recovery (HTTP 401 path). Also the delay between signing-key retries while a signing push transmitter has no active key. | `15s`   |
+| `I2SIG_PUSH_AUTH_RETRY_LIMIT`         | Maximum AuthBounded probe attempts before the stream is disabled. Also the number of failed signing-key retries before a signing push transmitter with no active key is disabled. | `10`    |
 | `I2SIG_PUSH_PROBE_INTERVAL`           | Cadence at which recoveryLoop re-checks `/status` once it has confirmed the receiver is paused (PausedByRemote mode).        | `30s`   |
 | `I2SIG_PUSH_KEEPALIVE_INTERVAL`       | Idle period after which the push loop generates a real SSF verification SET as a keepalive. Set to `0` to disable.            | `5m`    |
 

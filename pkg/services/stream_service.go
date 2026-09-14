@@ -943,6 +943,18 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
+	// Mint the issuer's post-quantum key now that the delivery method (and with
+	// it whether this stream transmits) is settled, so the key is published in
+	// the issuer JWKS before the stream's first SET is signed. A signing
+	// transmitter then needs an active key for its iss and signing_alg (#308);
+	// both run before the record is written, so a refused create saves nothing.
+	if err = s.applySigningAlg(ctx, &streamRec.StreamConfiguration, projectID); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+	if err = s.RequireActiveSigningKey(ctx, streamRec); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
 	err = s.streamDAO.Create(ctx, streamRec)
 	if err != nil {
 		return model.StreamConfiguration{}, err
@@ -1117,13 +1129,6 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		}
 
 		ssLog.Debug("Push transmitter stream configured to send to this receiver")
-	}
-
-	// Mint the issuer's post-quantum key now that the delivery method (and with
-	// it whether this stream transmits) is settled, so the key is published in
-	// the issuer JWKS before the stream's first SET is signed.
-	if err = s.applySigningAlg(ctx, &config, projectID); err != nil {
-		return model.StreamConfiguration{}, err
 	}
 
 	return config, nil
@@ -1439,6 +1444,13 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		config.SigningAlg = configReq.SigningAlg
 	}
 	if err := s.applySigningAlg(ctx, config, streamRec.ProjectId); err != nil {
+		return nil, err
+	}
+	// Any update to a signing transmitter needs an active key for the stream as
+	// it is after the change (#308), so an unrelated edit to a stream whose key
+	// is missing is refused too. Switching to Forward, or to an issuer with a key,
+	// is the fix and passes.
+	if err := s.RequireActiveSigningKey(ctx, streamRec); err != nil {
 		return nil, err
 	}
 

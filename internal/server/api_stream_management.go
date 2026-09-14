@@ -894,7 +894,8 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 //   - 200 OK: JSON object containing the updated status.
 //
 // Errors:
-//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 400 Bad Request: Missing stream ID, error decoding request body, or a
+//     re-enable of a signing transmitter with no active signing key (#308).
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Database or internal update failure.
@@ -941,6 +942,20 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		serverLog.Error("Error: Get Stream state returned nil after update", "id", authCtx.StreamId)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+	if jsonRequest.Status == model.StreamStateEnabled {
+		// A re-enable runs the save-time signing-key check (#308): a signing
+		// transmitter with no active key for its iss and signing_alg stays as it
+		// is and the caller is told which key is missing.
+		if err := sa.GetStreamService().RequireActiveSigningKey(r.Context(), streamState); err != nil {
+			if errors.Is(err, services.ErrInvalidRequest) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			serverLog.Error("Error checking the signing key before a re-enable", "id", authCtx.StreamId, "error", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 	if jsonRequest.Status != "" {
 		// Judge "no change" against what the write would do (#303): on an SSTP
