@@ -829,6 +829,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	// The stream is delivery PUSH
 	r.preInitializeCounterLocked(stream)
 
+	restarting := false
 	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
 	if ok {
 		// The map copy is what fan-out matching reads, so it is always synced.
@@ -849,6 +850,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			pb.Close()
 			delete(r.pushBuffers, stream.StreamConfiguration.Id)
 		}
+		restarting = true
 		eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", stream.StreamConfiguration.Id)
 	}
 	// preload the buffer with any existing events
@@ -862,6 +864,20 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		TimeoutSecs:       10,
 	})
 	r.mu.Lock()
+	// The lock was dropped for the DAO call, so re-check before starting a
+	// runner: a concurrent update that also took the restart path may have
+	// started one already (its buffer is registered), and a concurrent
+	// RemoveStream may have torn the stream down. Starting here in either case
+	// would leak a runner whose buffer is never closed, or resurrect a removed
+	// stream.
+	if _, started := r.pushBuffers[stream.StreamConfiguration.Id]; started {
+		return
+	}
+	if restarting {
+		if _, present := r.pushStreams[stream.StreamConfiguration.Id]; !present {
+			return
+		}
+	}
 	r.pushStreams[stream.StreamConfiguration.Id] = *stream
 	r.initPushStreamLocked(stream.StreamConfiguration.Id, stream, jtis)
 }

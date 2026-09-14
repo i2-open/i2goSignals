@@ -166,14 +166,12 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 	// L2 = None; a trust anchor (Iss + IssuerJWKSUrl) is mandatory (ADR-0066 §D2).
 	if strings.EqualFold(cfg.IssuerJWKSUrl, "NONE") {
 		// Defensive: callers should have normalized this to "" before validating.
-		return errors.New(
-			"signingOnly (L2=None) requires a configured trust root — " +
-				"IssuerJWKSUrl 'NONE' is not a trust root (ADR-0066 §D2)")
+		return fmt.Errorf("%w: signingOnly (L2=None) requires a configured trust root — "+
+			"IssuerJWKSUrl 'NONE' is not a trust root (ADR-0066 §D2)", ErrInvalidRequest)
 	}
 	if cfg.Iss == "" || cfg.IssuerJWKSUrl == "" {
-		return errors.New(
-			"signingOnly (L2=None) requires both iss and issuerJWKSUrl to be " +
-				"configured — 'None + unverified' is not a configurable state (ADR-0066 §D2)")
+		return fmt.Errorf("%w: signingOnly (L2=None) requires both iss and issuerJWKSUrl to be "+
+			"configured — 'None + unverified' is not a configurable state (ADR-0066 §D2)", ErrInvalidRequest)
 	}
 	return nil
 }

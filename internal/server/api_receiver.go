@@ -1398,7 +1398,6 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	}
 	receiveMethod := ps.stream.Delivery.PollReceiveMethod
 	eventUrl := receiveMethod.EndpointUrl
-	jwks := ps.sa.StreamService.GetIssuerJwksForReceiver(context.Background(), ps.stream.StreamConfiguration.Id)
 
 	// Heartbeat for lease renewal
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ps.ctx)
@@ -1514,17 +1513,23 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		// NONE the validator set is nil and Poll takes exactly the pre-#247 path.
 		validationMode := resolveReceiveValidationMode(ps.sa.StreamService, stream)
 		validators := buildReceiveValidatorSet(stream, validationMode)
+		// The verification material is resolved per iteration for the same
+		// reason: an iss / issuerJWKSUrl patch (#306) replaces the receiver
+		// cache entry, and a JWKS captured once before the loop would keep
+		// verifying against the old key set for the life of this goroutine.
+		// The lookup is a cache read unless the entry is due for retry.
+		jwks := ps.sa.StreamService.GetIssuerJwksForReceiver(context.Background(), stream.StreamConfiguration.Id)
 
 		parsed, httpStatus, err := goSetPoll.Poll(tracedCtx, pollReq, goSetPoll.ReceiverConfig{
 			EndpointURL:       eventUrl,
 			Authorization:     auth,
 			HTTPClient:        client,
 			JWKS:              jwks,
-			ExpectedIssuer:    ps.stream.Iss,
-			ExpectedAudiences: ps.stream.Aud,
+			ExpectedIssuer:    stream.Iss,
+			ExpectedAudiences: stream.Aud,
 			// Signing-only (#184): make verification of pulled SETs mandatory so a
 			// nil JWKS rejects rather than silently accepting unsigned events.
-			RequireSignature: ps.stream.SigningOnly,
+			RequireSignature: stream.SigningOnly,
 			Validators:       validators,
 		})
 
