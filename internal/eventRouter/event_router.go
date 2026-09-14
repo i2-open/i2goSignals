@@ -124,6 +124,16 @@ type router struct {
 	issuerKids  map[string]string
 	pollBuffers map[string]*buffer.EventPollBuffer
 	pushBuffers map[string]*buffer.EventPushBuffer
+	// pushRunners holds the handle of the push runner registered for each push
+	// stream, alongside its buffer in pushBuffers (#309). A retired runner is
+	// removed at once, though it may still be finishing its in-flight batch.
+	pushRunners map[string]*pushRunner
+	// pushHandoffs holds the pending restart hand-off for each push stream
+	// whose runner has been stopped and whose successor has not started yet.
+	pushHandoffs map[string]*pushHandoff
+	// runningPushRunners counts push runner goroutines on this node that have
+	// started and not yet finished, retired ones included.
+	runningPushRunners atomic.Int64
 	// sstpClientStreams holds SSTP pair records whose client (initiator) side
 	// this router runs. sstpBuffers is the outbound-to-flush queue per pair,
 	// reusing EventPollBuffer (PRD #154 Q5.1).
@@ -293,6 +303,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pushStreams:            map[string]model.StreamStateRecord{},
 		pollStreams:            map[string]model.StreamStateRecord{},
 		pushBuffers:            map[string]*buffer.EventPushBuffer{},
+		pushRunners:            map[string]*pushRunner{},
+		pushHandoffs:           map[string]*pushHandoff{},
 		pollBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpClientStreams:      map[string]model.StreamStateRecord{},
 		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
@@ -829,29 +841,38 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	// The stream is delivery PUSH
 	r.preInitializeCounterLocked(stream)
 
-	restarting := false
-	currentState, ok := r.pushStreams[stream.StreamConfiguration.Id]
+	sid := stream.StreamConfiguration.Id
+	currentState, ok := r.pushStreams[sid]
 	if ok {
 		// The map copy is what fan-out matching reads, so it is always synced.
 		// The push runner goroutine, though, holds the record pointer it was
 		// started with and captured its signing key and route mode from it
 		// (runPushLoop); a map sync alone never reaches it. When the settings
-		// that runner captured have changed (#306), close its buffer so it
-		// exits, then fall through and start a fresh runner on the updated
-		// record exactly as a first registration does. Pending JTIs are
-		// persisted, so the re-preload below hands them to the new runner.
+		// that runner captured have changed (#306), the runner is replaced.
 		restart := pushRunnerSettingsChanged(currentState.StreamConfiguration, stream.StreamConfiguration)
 		currentState.Update(stream)
-		r.pushStreams[stream.StreamConfiguration.Id] = currentState
+		r.pushStreams[sid] = currentState
 		if !restart {
 			return
 		}
-		if pb, has := r.pushBuffers[stream.StreamConfiguration.Id]; has {
-			pb.Close()
-			delete(r.pushBuffers, stream.StreamConfiguration.Id)
+		if _, pending := r.pushHandoffs[sid]; pending {
+			// The pending hand-off starts exactly one runner, on the record in
+			// pushStreams when it does, which now carries this update.
+			eventLogger.Info("PUSH-SRV: transmit settings changed during a pending runner restart", "sid", sid)
+			return
 		}
-		restarting = true
-		eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", stream.StreamConfiguration.Id)
+		// Stop the old runner and hand off in the background (#309). The old
+		// runner sends at most the batch it is already sending; the successor
+		// starts once it has exited, so nothing goes out with the old settings
+		// afterwards and nothing is sent twice. This request does not wait.
+		// SETs routed meanwhile are already durable (no buffer is registered to
+		// wake), so the successor's preload picks them up.
+		old := r.retirePushRunnerLocked(sid)
+		handoff := &pushHandoff{done: make(chan struct{})}
+		r.pushHandoffs[sid] = handoff
+		eventLogger.Info("PUSH-SRV: transmit settings changed, restarting runner", "sid", sid)
+		go r.completePushHandoff(sid, old, handoff)
+		return
 	}
 	// preload the buffer with any existing events
 	// We release the lock for provider call
@@ -865,21 +886,17 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	})
 	r.mu.Lock()
 	// The lock was dropped for the DAO call, so re-check before starting a
-	// runner: a concurrent update that also took the restart path may have
-	// started one already (its buffer is registered), and a concurrent
-	// RemoveStream may have torn the stream down. Starting here in either case
-	// would leak a runner whose buffer is never closed, or resurrect a removed
-	// stream.
-	if _, started := r.pushBuffers[stream.StreamConfiguration.Id]; started {
+	// runner: a concurrent first registration may have started one already, or
+	// registered the stream and begun a restart hand-off. Starting here would
+	// leave two runners on one stream.
+	if _, started := r.pushRunners[sid]; started {
 		return
 	}
-	if restarting {
-		if _, present := r.pushStreams[stream.StreamConfiguration.Id]; !present {
-			return
-		}
+	if _, pending := r.pushHandoffs[sid]; pending {
+		return
 	}
-	r.pushStreams[stream.StreamConfiguration.Id] = *stream
-	r.initPushStreamLocked(stream.StreamConfiguration.Id, stream, jtis)
+	r.pushStreams[sid] = *stream
+	r.initPushStreamLocked(sid, stream, jtis)
 }
 
 // pushRunnerSettingsChanged reports whether the settings a push runner captures
@@ -897,12 +914,6 @@ func pushRunnerSettingsChanged(current, updated model.StreamConfiguration) bool 
 	}
 	return current.Delivery.GetEndpointUrl() != updated.Delivery.GetEndpointUrl() ||
 		current.Delivery.GetAuthorizationHeader() != updated.Delivery.GetAuthorizationHeader()
-}
-
-func (r *router) initPushStreamLocked(sid string, state *model.StreamStateRecord, jtis []string) {
-	pushBuffer := buffer.CreateEventPushBuffer(jtis)
-	r.pushBuffers[sid] = pushBuffer
-	go r.PushStreamHandler(state, pushBuffer)
 }
 
 /*
@@ -1693,12 +1704,18 @@ func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buff
 	}
 }
 
-// PushStreamHandler manages the lifecycle of a push stream, including lease handling and event transmission.
-func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer) {
+// PushStreamHandler manages the lifecycle of a push stream, including lease handling and event
+// transmission. It returns once runner's stop signal fires or the router shuts down, whatever it
+// was waiting on at the time.
+func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *pushRunner) {
 	sid := stream.StreamConfiguration.Id
 	resource := fmt.Sprintf("push-transmitter:%s", sid)
 
 	for {
+		if runner.stopped() {
+			eventLogger.Info("PUSH-SRV runner stopped. PushHandler exiting.", "sid", sid)
+			return
+		}
 		if stream.Status != model.StreamStateEnabled {
 			eventLogger.Info("PUSH-SRV is no longer enabled. PushHandler exiting.", "sid", sid)
 			return
@@ -1726,8 +1743,9 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 			eventLogger.Debug("PUSH-SRV: Node lease not held, waiting...", "sid", sid)
 			// Cancellable retry delay. SleepCtx owns and stops its timer; a time.After
 			// here would arm a fresh runtime timer on every spin of this loop and hold
-			// each one to expiry even after shutdown.
-			if !SleepCtx(r.ctx, leaseRetryDelay) {
+			// each one to expiry even after shutdown. The wait is on the runner's
+			// context, so a stop ends it too.
+			if !SleepCtx(runner.ctx, leaseRetryDelay) {
 				return
 			}
 			continue
@@ -1735,26 +1753,24 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, eventBuf *bu
 
 		// Lease acquired, start the actual push loop
 		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid)
-		shouldRetry := r.runPushLoop(resource, stream, eventBuf, fencingToken)
+		shouldRetry := r.runPushLoop(resource, stream, runner, fencingToken)
 		if !shouldRetry {
 			return
 		}
-
-		// Check if we should exit entirely
-		select {
-		case <-r.ctx.Done():
-			return
-		default:
-			// Loop back to try and re-acquire if runPushLoop exited for some reason
-		}
+		// Loop back to re-acquire; the top of the loop exits on a stop or shutdown.
 	}
 }
 
 // runPushLoop handles the event push loop for a given stream, including lease renewal, T2
 // pre-flight, T1 reactive recovery on push failures, and event processing. Returns true if the
 // caller should attempt to re-acquire the lease (e.g. lease lost), false if the lifecycle
-// goroutine should exit (buffer closed, stream disabled, shutdown).
-func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer, fencingToken int64) bool {
+// goroutine should exit (buffer closed, stream disabled, runner stopped, shutdown).
+//
+// Every wait here is on heartbeatCtx, a child of the runner's context, so the runner's stop
+// signal ends it. The stop is also checked before each new batch and once each batch returns: a
+// batch already in pushBatch completes, acked or failed, and then a stopped runner sends nothing
+// more and acts on no failure from it (#309).
+func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, runner *pushRunner, fencingToken int64) bool {
 	sid := stream.StreamConfiguration.Id
 	eventLogger.Info("PUSH-SRV: Starting transmission loop", "sid", sid)
 	if r.stats != nil {
@@ -1775,33 +1791,43 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 		}
 	}
 
-	// Heartbeat for lease renewal
-	heartbeatCtx, heartbeatCancel := context.WithCancel(r.ctx)
-	defer heartbeatCancel()
+	// Heartbeat for lease renewal. Its context is a child of the runner's, so a
+	// stop cancels it along with every wait below. On the way out the heartbeat
+	// is cancelled and waited for, so it cannot note or forget the lease owner
+	// after this runner has finished and a successor has taken over.
+	heartbeatCtx, heartbeatCancel := context.WithCancel(runner.ctx)
+	heartbeatDone := make(chan struct{})
+	defer func() {
+		heartbeatCancel()
+		<-heartbeatDone
+	}()
 
-	go leaseHeartbeat{
-		Coordinator:   r.coordinator,
-		Resource:      resource,
-		NodeId:        r.nodeId,
-		Interval:      leaseRenewInterval,
-		LeaseDuration: leaseTTL,
-		OnRenew: func(renewed bool) {
-			if r.stats != nil {
-				r.stats.TrackLeaseAcquisition(resource, renewed)
-			}
-			// Every renewal re-confirms ownership first-hand, so it refreshes
-			// the cached owner rather than letting the TTL lapse into a
-			// coordinator read that would only say the same thing.
-			if renewed {
-				r.leaseOwners.note(resource, r.nodeId)
-			}
-		},
-		OnLost: func() {
-			eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
-			r.leaseOwners.forget(resource)
-			heartbeatCancel()
-		},
-	}.run(heartbeatCtx)
+	go func() {
+		defer close(heartbeatDone)
+		leaseHeartbeat{
+			Coordinator:   r.coordinator,
+			Resource:      resource,
+			NodeId:        r.nodeId,
+			Interval:      leaseRenewInterval,
+			LeaseDuration: leaseTTL,
+			OnRenew: func(renewed bool) {
+				if r.stats != nil {
+					r.stats.TrackLeaseAcquisition(resource, renewed)
+				}
+				// Every renewal re-confirms ownership first-hand, so it refreshes
+				// the cached owner rather than letting the TTL lapse into a
+				// coordinator read that would only say the same thing.
+				if renewed {
+					r.leaseOwners.note(resource, r.nodeId)
+				}
+			},
+			OnLost: func() {
+				eventLogger.Warn("PUSH-SRV: Node lease lost or renewal failed", "sid", sid)
+				r.leaseOwners.forget(resource)
+				heartbeatCancel()
+			},
+		}.run(heartbeatCtx)
+	}()
 
 	recoveryCfg := LoadRecoveryConfig()
 	statusFetcher := r.pushStatusFetcher()
@@ -1839,16 +1865,30 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 	idle := newIdleKeepalive(idleVerifyInterval)
 	defer idle.Stop()
 
+	eventBuf := runner.buf
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
+
+	// A stop that landed during the pre-flight (which reads a cancelled fetch as
+	// "proceed") must not reach the select below, where a ready buffer could win.
+	if heartbeatCtx.Err() != nil {
+		return !runner.stopped()
+	}
 
 	for {
 		select {
 		case <-heartbeatCtx.Done():
-			return true // Heartbeat lost, but should try to re-acquire
+			// Heartbeat lost: re-acquire. Runner stopped or router shutting down: exit.
+			return !runner.stopped()
 		case v, ok := <-out:
 			if !ok {
 				return false // Buffer closed, stop entirely
+			}
+			if runner.stopped() {
+				// Checked before taking a new batch: select picks at random among
+				// ready arms, so a stop does not win over a queued JTI on its own.
+				// The JTI is still pending in the store for the successor.
+				return false
 			}
 			// Drain whatever else is already buffered, up to the batch cap, so the
 			// batch's Mongo reads and acks are amortized and the worker pool has
@@ -1858,6 +1898,13 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
 			res := r.pushBatch(jtis, stream, signingKey, kid, fencingToken)
 			signingKey, kid = res.key, res.kid
+			if runner.stopped() {
+				// The in-flight batch has completed. A stopped runner sends nothing
+				// more, and a failure in that batch was a verdict on the settings
+				// being replaced, so it moves no stream state: whatever was not
+				// acked stays pending for the successor.
+				return false
+			}
 
 			if res.acked > 0 {
 				// R1: a successful push is proof the stream is alive, so the T3
@@ -1882,12 +1929,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 				signingKey, kid = r.checkAndLoadKey(sid, stream.Iss, stream.StreamConfiguration.SigningAlg)
 			}
 		case <-backfillTicker.C:
+			if runner.stopped() {
+				return false
+			}
 			r.backfillPushBuffer(sid, eventBuf)
 			r.sweepDeferredHybridRelays(heartbeatCtx, stream)
 		case <-wakeup:
+			if runner.stopped() {
+				return false
+			}
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
 			r.backfillPushBuffer(sid, eventBuf)
 		case <-idle.C():
+			if runner.stopped() {
+				return false
+			}
 			// T3 fired: no successful push in the last idleVerifyInterval. Generate a real
 			// verify event via the operational-event direct-submission path. The new JTI lands
 			// in eventBuf and the next iteration of this loop will pull it from `out` and push
@@ -1917,6 +1973,11 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, e
 func (r *router) preflightCheckStatus(ctx context.Context, stream *model.StreamStateRecord, fetcher StatusFetcher, cfg RecoveryConfig) RecoveryOutcome {
 	sid := stream.StreamConfiguration.Id
 	status, err := fetcher(ctx, stream)
+	if ctx.Err() != nil {
+		// Lease lost, runner stopped or shutdown while the fetch was out: its
+		// answer must not move the stream's state.
+		return RecoveryOutcomeContextDone
+	}
 	if err != nil {
 		eventLogger.Debug("PUSH-SRV: T2 pre-flight status check failed; proceeding with delivery",
 			"sid", sid, "error", err)
@@ -2447,14 +2508,14 @@ func (r *router) RemoveStream(sid string) {
 	unregisterPair := false
 	r.mu.Lock()
 
-	pb, ok := r.pushBuffers[sid]
+	_, ok := r.pushStreams[sid]
 	if ok {
-		pb.Close()
-	}
-
-	_, ok = r.pushStreams[sid]
-	if ok {
-		delete(r.pushBuffers, sid)
+		// Stop the runner through the same signal a restart uses, so one that is
+		// waiting for the lease or sitting in recovery exits too, and cancel a
+		// pending restart hand-off so it starts no runner for a removed stream
+		// (#309). Nothing waits here for the runner to finish.
+		r.retirePushRunnerLocked(sid)
+		delete(r.pushHandoffs, sid)
 		delete(r.pushStreams, sid)
 	} else {
 		_, ok := r.pollStreams[sid]
@@ -2529,6 +2590,12 @@ func (r *router) Shutdown() {
 	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
+	}
+	// Cancelling r.ctx stops every push runner. Empty each closed buffer once
+	// its runner has exited, so its pump goroutine does not wait forever on a
+	// queue nobody reads (#309).
+	for _, runner := range r.pushRunners {
+		drainPushBufferWhenFinished(runner)
 	}
 	for _, sstpBuffer := range r.sstpBuffers {
 		sstpBuffer.Close()

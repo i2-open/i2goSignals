@@ -282,6 +282,12 @@ func (r *router) recoveryLoop(ctx context.Context, stream *model.StreamStateReco
 
 		attempts++
 		status, err := fetcher(ctx, stream)
+		if ctx.Err() != nil {
+			// Cancelled while the fetch was out (lease lost, runner stopped,
+			// shutdown). A fetch cut short says nothing about the receiver, so it
+			// must not count against a cap or move the stream's state.
+			return RecoveryOutcomeContextDone
+		}
 
 		if err == nil && status != nil {
 			switch status.Status {
