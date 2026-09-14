@@ -193,6 +193,37 @@ is that issuer's existing JWKS endpoint (ADR 0023). `aud` is a
 freshly-generated, immutable (§8.1.1: "cannot be updated") per-Receiver
 identifier in URI form.
 
+### Route mode
+
+What a stream does with an event on its way through the router. One
+value per stream:
+
+- **Import (IM)** — keep the event locally; do not propagate it.
+- **Forward (FW)** — relay the event *as is*. A signed SET keeps its
+  original signature; an unsigned SET stays unsigned. A forwarding
+  transmitter neither verifies nor signs, so it needs no signing key.
+  Verification, where it happens, belongs to the receive stream that
+  brought the event in. A forwarding transmitter may still advertise an
+  `issuerJWKSUrl` — the original publisher's keys — so the next hop in a
+  multi-hop chain can verify what it receives; goSignals does not check
+  that URL.
+- **Publish (PB)** — re-sign the event under the stream's own `iss` and
+  `signing_alg`. The default for a push transmitter.
+
+A **signing transmitter** is any transmitter not in Forward mode,
+whatever its delivery method; a transmitter with no route mode set
+counts as Publish. An active signing key for its `iss` and
+`signing_alg` must already exist: goSignals never creates a key as a
+side effect of creating or updating a stream, because doing so would
+mask a misconfiguration. A key is created deliberately, before the
+stream that uses it. The check applies to the stream as it would be
+after a create or an update (any update, not only one that changes
+`iss`, `signing_alg` or route mode), and again when the stream is
+re-enabled.
+
+_Avoid_: calling a Forward stream "unsigned" — it may carry a signed SET
+untouched.
+
 ### Re-sign (PB) routing and identity rules
 
 How `RouteMode` and the `EventSource` selector interact at the matcher
@@ -206,8 +237,8 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
   filter; `AUDIENCE` drops the `aud` filter, the stream's own `aud` being a
   routing handle. See **Event source** below.
 - **`iss` is a selection constraint only in Forward mode.** A forwarded SET
-  keeps its original signature, so its `iss` must match what the downstream
-  validates against. In **Publish mode goSignals re-signs under its own
+  is relayed as is (its original signature, if any, untouched), so its `iss`
+  must match what the downstream validates against. In **Publish mode goSignals re-signs under its own
   `iss`**, so the inbound `iss` is irrelevant to selection — the matcher must
   *not* require it. A strict transmitter is therefore **PB + EXPLICIT**,
   selecting purely on source SID + event-type.
@@ -260,12 +291,81 @@ The vocabulary that hangs off it:
   header before key lookup, and a receiver must be able to verify a
   PQ-signed SET from a peer regardless of what it signs itself. It is
   now exactly the set `goSet.SigningMethodFor` will select, because the
-  key store provisions a key for each.
+  key store can hold a key for each.
 
 Independent of all of the above: `CERT_KEY_ALG` selects the key
 algorithm for the **internal mTLS** certificates `cmd/genTlsKeys`
 generates. Different trust root, different blast radius, its own
 off-by-default switch.
+
+### Key rotation / Absolute revoke
+
+How a signing key is retired, as the signing transmitters that use it
+see it.
+
+- **Rotation** — a replacement key for the same issuer and `signing_alg`
+  is active *before* the old key is suspended or revoked. Signing
+  transmitters move to the replacement and keep delivering. This is the
+  expected way to suspend or revoke a key.
+- **Absolute revoke** — a key is revoked with no replacement in place.
+  Every signing transmitter that signs with it stops (pauses, then
+  disables) until a new key is configured. A revoke is never blocked or
+  held for confirmation: it is the response to a leaked key.
+
+A suspend or replace that would leave a signing transmitter with no
+active key needs the operator's explicit confirmation; a revoke never
+does.
+
+A signing key is created only by an operator, one algorithm at a time —
+never as a side effect of creating or updating a stream. Rotate and
+replace act on one algorithm and leave the issuer's keys of other
+algorithms alone.
+
+Every node stops signing with a suspended, revoked or replaced key, and
+picks up a rotated one, within a few seconds of the change, whichever
+node handled it.
+
+_Avoid_: "key expiry" — goSignals keys carry no expiry; a key leaves
+service only by suspend, revoke or replace.
+
+### Stream status: paused / disabled
+
+Pause and disable are defined at the **transmitter**:
+
+- **Paused** — the transmitter keeps queuing the stream's events for
+  later delivery.
+- **Disabled** — the transmitter does not queue events for the stream.
+
+A signing transmitter that has no active signing key takes a
+**key-unavailable pause**: it keeps queuing, resumes by itself once the
+key is active again, and disables if the key is still unavailable after
+the retry limit. It resumes only its own key-unavailable pause, never an
+operator's.
+
+A receiver's own status reports **paused** whenever it has stopped
+polling, for one of two reasons:
+
+- **Transmitter pause** — the receiver discovered from the transmitter's
+  status endpoint (typically when polling stops succeeding) that the
+  transmitter paused the stream. The receiver stops polling and
+  retrying, and resumes by itself once the status endpoint reports
+  enabled again.
+- **Administrative pause** — an operator paused the receiver. It stops
+  polling and every retry, and only an operator re-enable resumes it.
+  The receiver may tell the transmitter, but is not obliged to.
+
+A transmitter disable, or an operator disable, stops the receiver until
+an operator re-enables it.
+
+A receiver's paused or disabled status is **transmitter-caused** when
+the transmitter's status endpoint reported it, as opposed to an operator
+setting it. The receiver records which, so an operator can tell the two
+apart; any operator status change clears it.
+
+A receiver that is only retrying (for example after connection errors)
+has not paused: its status stays enabled and the reason says why.
+
+_Avoid_: "paused" for a receiver that is only retrying.
 
 ### Persistence record
 
