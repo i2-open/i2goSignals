@@ -117,3 +117,37 @@ half is out of scope here.
 - Admin: ADR 0013 (revoke/suspend, not hard delete), admin #265 / PR #281.
 - Enterprise: independentid/i2gosignals-enterprise#107 (control-stream
   set-status command + enterprise key model; fate of `key/delete`).
+
+## Update (2026-09-14): stranding guard, missing-key rule, cross-node expiry (GH #308, #311, #312, #313)
+
+**A suspend that strands signing transmitters is refused, not warned.** The
+Decision above lets a transition that leaves a keyName with zero active keys
+succeed with a warning. Since #311, a suspend (`POST /key/{keyName}/status` with
+`suspended`) or a replace (`force=replace`, on create or key load) that would
+leave any signing transmitter with no active key for its `iss` and `signing_alg`
+returns **409**, listing the affected streams; resending with `?confirm=true`
+applies it. Revoke, reactivate and rotate are never blocked: an absolute revoke
+of a leaked key must always go through. The 409 applies only when a transmitter
+would be stranded; a keyName no stream signs with still takes the warning path.
+
+**"Fails loudly on the next signing attempt" is now the missing-key rule.** A
+signing transmitter with no active key never sends an unsigned or empty SET.
+Push (#308), poll and SSTP (#312) transmitters pause with a reason naming the
+issuer and algorithm, resume on their own when a key becomes active, and disable
+at the retry limit. The loud ERROR is logged **once per key-unavailable pause**
+(and again on disable), not on every key read: `KeyService`'s "all signing keys
+are suspended or revoked" line is a WARN, because a paused transmitter re-reads
+the key on every retry. Saving or re-enabling a signing transmitter with no
+active key is refused up front.
+
+**Every node follows a key change within a bound.** Each node's in-memory signing
+key per issuer and algorithm expires after 2s (#313), so a suspend, revoke,
+reactivate, rotate or replace made through one node reaches every node's
+transmitters within that bound, not only the handling node's.
+
+**"Latest active record" means newest by record id.** Issuance selection takes
+the active record with the highest id. `ids.NewObjectID` mints ids in the
+MongoDB ObjectID layout (timestamp, per-process value, counter), so a rotated key
+is selected at once. Records minted between 2026-05-06 and this update carry
+random ids and may sort above a newer key; on such a store, suspend the old key
+to complete a rotation.
