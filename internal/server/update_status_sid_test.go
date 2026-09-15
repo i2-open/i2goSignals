@@ -385,7 +385,7 @@ func TestUpdateStatus_NonSstpStreamUnaffected(t *testing.T) {
 	assert.Equal(t, 0, app.refreshes(), "repeating the same status is a no-op")
 
 	rr = app.postStatus(t, bearer, "no-such-stream", model.StreamStatePause, reason)
-	assert.NotEqual(t, http.StatusOK, rr.Code, "an unknown SID is not found")
+	assert.Equal(t, http.StatusNotFound, rr.Code, "an unknown SID is not found (#305)")
 }
 
 // TestUpdateStatus_TokenBindingFallback pins #303 item 3 at the handler: with no

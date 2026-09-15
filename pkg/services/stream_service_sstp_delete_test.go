@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,4 +130,14 @@ func TestDeleteSstpPair_CascadePeerFailureIsPartial(t *testing.T) {
 
 	_, err = svc.GetStreamStateByPairId(context.Background(), rec.PairId)
 	require.Error(t, err, "local row must be gone even when peer cleanup failed")
+}
+
+// TestDeleteSstpPair_UnknownSidIsErrNotFound (#305): a SID that names no pair is
+// reported as interfaces.ErrNotFound, the sentinel the HTTP layer maps to 404.
+func TestDeleteSstpPair_UnknownSidIsErrNotFound(t *testing.T) {
+	svc, _ := createdPair(t)
+
+	outcome, err := svc.DeleteSstpPair(context.Background(), "no-such-pair", false, nil)
+	assert.ErrorIs(t, err, interfaces.ErrNotFound)
+	assert.False(t, outcome.LocalDeleted)
 }

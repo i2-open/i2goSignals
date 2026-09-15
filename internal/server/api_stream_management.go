@@ -21,6 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -223,8 +224,15 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 
 	streamStatus, err := sa.GetStreamService().GetStatus(r.Context(), sid)
 	if err != nil {
-		serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
-		w.WriteHeader(http.StatusNotFound)
+		// 404 means only that no such stream exists; a store that could not
+		// answer is a server fault (#305).
+		if errors.Is(err, interfaces.ErrNotFound) {
+			serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		serverLog.Warn("GetStatus: error reading stream status", "sid", sid, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -298,7 +306,12 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	state, err := sa.GetStreamService().GetStreamState(r.Context(), authContext.StreamId)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		if errors.Is(err, interfaces.ErrNotFound) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		serverLog.Warn("StreamDelete: error reading stream state", "sid", authContext.StreamId, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -337,7 +350,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
 	if err != nil {
-		if err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -575,7 +588,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
 	if err != nil {
-		if err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -639,7 +652,7 @@ func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	outcome, err := sa.GetStreamService().DeleteSstpPair(r.Context(), sid, cascadePeer, peerServer)
 	if err != nil {
-		if err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -734,7 +747,8 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 //   - 200 OK: JSON object of the updated StreamConfiguration.
 //
 // Errors:
-//   - 400 Bad Request: Missing stream ID or error decoding request body.
+//   - 400 Bad Request: Missing stream ID, error decoding request body, or an
+//     update the stream cannot accept (the body carries the rejection).
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Database update failure.
@@ -808,26 +822,32 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	jsonRequest.ResetJti = ""
 
 	configResp, err := sa.GetStreamService().UpdateStream(r.Context(), streamId, authCtx.ProjectId, jsonRequest)
-	if err != nil || configResp == nil {
-		if err != nil && err.Error() == mongo_provider.ErrorInvalidProject {
+	if err != nil {
+		if err.Error() == mongo_provider.ErrorInvalidProject {
 			http.Error(w, "Streamid invalid for authorization", http.StatusUnauthorized)
 			return
 		}
-		// A request-shaped rejection (route_mode outside the stream's role,
-		// #306; a bad event_validation mode or events_requested pattern) is a
-		// 400. Checked before the not-found fallback: every service error
-		// leaves configResp nil, so the fallback would otherwise claim every
-		// rejection as a missing stream.
+		// An update the stream cannot accept (a delivery-method change, an
+		// immutable SSTP field, a bad signing_alg, route_mode or grace value)
+		// is a 400 carrying the rejection (#305, #306).
 		if errors.Is(err, services.ErrInvalidRequest) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err != nil && err.Error() == "not found" || configResp == nil {
+		// 404 means only that no such stream exists; anything else, such as a
+		// store failure while writing the update, is a server fault (#305).
+		if errors.Is(err, interfaces.ErrNotFound) {
 			http.Error(w, "No stream found", http.StatusNotFound)
 			return
 		}
+		serverLog.Warn("StreamUpdate: error updating stream", "sid", streamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	if configResp == nil {
+		serverLog.Error("StreamUpdate: update returned no configuration", "sid", streamId)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -929,7 +949,7 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// through to the same _id lookup for every other stream.
 	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
-		if err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

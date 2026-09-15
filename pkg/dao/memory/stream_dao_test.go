@@ -2,9 +2,11 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -48,6 +50,32 @@ func TestStreamDAOMemory_FindByID_NotFound(t *testing.T) {
 	_, err := dao.FindByID(ctx, "non-existent")
 	if err == nil {
 		t.Error("Expected error for non-existent stream, got nil")
+	}
+}
+
+// TestStreamDAOMemory_UnknownStreamIsErrNotFound (#305): every stream lookup or
+// write that names no stream reports interfaces.ErrNotFound, so callers match
+// the sentinel instead of the error's text.
+func TestStreamDAOMemory_UnknownStreamIsErrNotFound(t *testing.T) {
+	dao := NewStreamDAO()
+	ctx := context.Background()
+	const sid = "non-existent"
+	missing := &model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Id: sid}}
+
+	_, err := dao.FindByID(ctx, sid)
+	assertErrNotFound(t, "FindByID", err)
+	assertErrNotFound(t, "Update", dao.Update(ctx, missing))
+	assertErrNotFound(t, "Delete", dao.Delete(ctx, sid))
+	assertErrNotFound(t, "UpdateStatus", dao.UpdateStatus(ctx, sid, model.StreamStatePause, ""))
+	assertErrNotFound(t, "UpdateTransmitterCausedStatus", dao.UpdateTransmitterCausedStatus(ctx, sid, model.StreamStatePause, ""))
+	assertErrNotFound(t, "UpdateKeyUnavailablePause", dao.UpdateKeyUnavailablePause(ctx, sid, "", time.Now()))
+	assertErrNotFound(t, "UpdateRemoteAddress", dao.UpdateRemoteAddress(ctx, sid, &model.RemoteIP{}))
+}
+
+func assertErrNotFound(t *testing.T, op string, err error) {
+	t.Helper()
+	if !errors.Is(err, interfaces.ErrNotFound) {
+		t.Errorf("%s on an unknown stream: expected ErrNotFound, got %v", op, err)
 	}
 }
 

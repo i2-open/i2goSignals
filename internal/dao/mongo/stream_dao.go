@@ -3,6 +3,7 @@ package mongo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -37,6 +38,18 @@ func (d *StreamDAOMongo) SetCollection(c *mongo.Collection) {
 	d.ref.set(c)
 }
 
+// parseStreamID converts a stream id to its document ObjectID. No stream is
+// stored under an id that is not an ObjectID, so a parse failure is reported as
+// interfaces.ErrNotFound (#305) rather than as a store error the HTTP layer
+// would answer with 500.
+func parseStreamID(id string) (bson.ObjectID, error) {
+	docId, err := ParseObjectID(id)
+	if err != nil {
+		return bson.ObjectID{}, fmt.Errorf("%w: %v", interfaces.ErrNotFound, err)
+	}
+	return docId, nil
+}
+
 func (d *StreamDAOMongo) col() (*mongo.Collection, error) {
 	c := d.ref.load()
 	if c == nil {
@@ -62,7 +75,7 @@ func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.Stream
 	if err != nil {
 		return nil, err
 	}
-	docId, err := ParseObjectID(id)
+	docId, err := parseStreamID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +83,7 @@ func (d *StreamDAOMongo) FindByID(ctx context.Context, id string) (*model.Stream
 	filter := bson.M{"_id": docId}
 	res := c.FindOne(ctx, filter)
 
-	if err := HandleFindError(res.Err(), errors.New("not found")); err != nil {
+	if err := HandleFindError(res.Err(), interfaces.ErrNotFound); err != nil {
 		return nil, err
 	}
 
@@ -93,7 +106,7 @@ func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRec
 	if err != nil {
 		return errors.New("stream update error: " + err.Error())
 	}
-	return HandleUpdateResult(res, errors.New("not found"))
+	return HandleUpdateResult(res, interfaces.ErrNotFound)
 }
 
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
@@ -101,7 +114,7 @@ func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	docId, err := ParseObjectID(id)
+	docId, err := parseStreamID(id)
 	if err != nil {
 		return err
 	}
@@ -111,7 +124,7 @@ func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return HandleDeleteResult(resp, errors.New("not found"))
+	return HandleDeleteResult(resp, interfaces.ErrNotFound)
 }
 
 func (d *StreamDAOMongo) List(ctx context.Context) ([]model.StreamStateRecord, error) {
@@ -226,7 +239,7 @@ func (d *StreamDAOMongo) updateStatus(ctx context.Context, id string, update bso
 	if err != nil {
 		return err
 	}
-	docId, err := ParseObjectID(id)
+	docId, err := parseStreamID(id)
 	if err != nil {
 		return err
 	}
@@ -238,7 +251,7 @@ func (d *StreamDAOMongo) updateStatus(ctx context.Context, id string, update bso
 		sLog.Error("Error updating stream status", "error", err)
 		return err
 	}
-	return HandleUpdateResult(res, errors.New("not found"))
+	return HandleUpdateResult(res, interfaces.ErrNotFound)
 }
 
 func (d *StreamDAOMongo) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
@@ -246,7 +259,7 @@ func (d *StreamDAOMongo) UpdateRemoteAddress(ctx context.Context, id string, add
 	if err != nil {
 		return err
 	}
-	docId, err := ParseObjectID(id)
+	docId, err := parseStreamID(id)
 	if err != nil {
 		return err
 	}
@@ -263,5 +276,5 @@ func (d *StreamDAOMongo) UpdateRemoteAddress(ctx context.Context, id string, add
 		sLog.Error("Error updating stream remote address", "error", err)
 		return err
 	}
-	return HandleUpdateResult(res, errors.New("not found"))
+	return HandleUpdateResult(res, interfaces.ErrNotFound)
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -320,9 +321,9 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 // targeted direction's Iss and Aud, and peer connectivity fields (EndpointUrl,
 // PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
 //
-// Immutable (rejected with a 4xx-shaped error): SstpMethod.Role, an already-set
-// EndpointUrl/PeerPairId, either direction's event_source descriptor, and all
-// IDs. UPDATE never re-triggers the peer cascade
+// Immutable (rejected with ErrInvalidRequest, a 400): SstpMethod.Role, an
+// already-set EndpointUrl/PeerPairId, either direction's event_source
+// descriptor, and all IDs. UPDATE never re-triggers the peer cascade
 // — delete-and-recreate is the path for that (Q35a).
 func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	// Both event_source descriptors are immutable on a pair (issue #296).
@@ -332,12 +333,12 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	// patch did nothing instead of believing it landed; recreate the pair to
 	// change it.
 	if patch.EventSource != nil || patch.InboundEventSource != nil {
-		return nil, errors.New("invalid patch: sstp event_source is immutable")
+		return nil, fmt.Errorf("%w: invalid patch: sstp event_source is immutable", ErrInvalidRequest)
 	}
 
 	if patch.SstpMethod != nil {
 		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
-			return nil, errors.New("invalid patch: sstp role is immutable")
+			return nil, fmt.Errorf("%w: invalid patch: sstp role is immutable", ErrInvalidRequest)
 		}
 		if patch.SstpMethod.AuthorizationHeader != "" {
 			streamRec.SstpMethod.AuthorizationHeader = patch.SstpMethod.AuthorizationHeader
@@ -347,16 +348,16 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 		// value (immutable, Q35).
 		if patch.SstpMethod.EndpointUrl != "" && patch.SstpMethod.EndpointUrl != streamRec.SstpMethod.EndpointUrl {
 			if streamRec.SstpMethod.EndpointUrl != "" {
-				return nil, errors.New("invalid patch: sstp endpoint_url is immutable once set")
+				return nil, fmt.Errorf("%w: invalid patch: sstp endpoint_url is immutable once set", ErrInvalidRequest)
 			}
 			if err := validateSstpEndpointUrl(patch.SstpMethod.EndpointUrl); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 			}
 			streamRec.SstpMethod.EndpointUrl = patch.SstpMethod.EndpointUrl
 		}
 		if patch.SstpMethod.PeerPairId != "" && patch.SstpMethod.PeerPairId != streamRec.SstpMethod.PeerPairId {
 			if streamRec.SstpMethod.PeerPairId != "" {
-				return nil, errors.New("invalid patch: sstp peer_pair_id is immutable once set")
+				return nil, fmt.Errorf("%w: invalid patch: sstp peer_pair_id is immutable once set", ErrInvalidRequest)
 			}
 			streamRec.SstpMethod.PeerPairId = patch.SstpMethod.PeerPairId
 		}
@@ -465,7 +466,7 @@ func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadeP
 	invalidateRequestStreams(ctx)
 	rec := s.findSstpPairBySIDFresh(ctx, sid)
 	if rec == nil {
-		return SstpDeleteOutcome{}, errors.New("not found")
+		return SstpDeleteOutcome{}, interfaces.ErrNotFound
 	}
 
 	var outcome SstpDeleteOutcome

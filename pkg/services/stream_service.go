@@ -186,7 +186,7 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 // silent fall back to RSA discovered later, per event, in a log line.
 func validateSigningAlg(alg string) error {
 	if _, err := goSet.SigningMethodFor(alg); err != nil {
-		return fmt.Errorf("invalid signing_alg: %w", err)
+		return fmt.Errorf("%w: invalid signing_alg: %w", ErrInvalidRequest, err)
 	}
 	return nil
 }
@@ -198,7 +198,7 @@ func validateSigningAlg(alg string) error {
 // caller's responsibility, since the rejection must be field-shape only.
 func validateSubjectRemovalGrace(grace int) error {
 	if grace < 0 {
-		return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
+		return fmt.Errorf("%w: invalid subject_removal_grace_seconds: must be >= 0, got %d", ErrInvalidRequest, grace)
 	}
 	return nil
 }
@@ -239,7 +239,7 @@ func validateEventSource(es *model.EventSource, mode string) error {
 	if es.Type == model.EventSourceExplicit {
 		// R2: EXPLICIT must name at least one upstream stream.
 		if len(es.SourceStreamIds) == 0 {
-			return fmt.Errorf("invalid event_source: type EXPLICIT requires a non-empty source_stream_ids")
+			return fmt.Errorf("%w: invalid event_source: type EXPLICIT requires a non-empty source_stream_ids", ErrInvalidRequest)
 		}
 		return nil
 	}
@@ -247,12 +247,12 @@ func validateEventSource(es *model.EventSource, mode string) error {
 	// type — DIRECT, AUDIENCE, and the unset/empty default, which the matcher
 	// resolves to DIRECT — must leave it empty.
 	if len(es.SourceStreamIds) > 0 {
-		return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
+		return fmt.Errorf("%w: invalid event_source: source_stream_ids is only valid when type is EXPLICIT", ErrInvalidRequest)
 	}
 	// R1: a DIRECT stream has no SSF upstream to relay Add/Remove to.
 	if es.Type == model.EventSourceDirect &&
 		(mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid) {
-		return fmt.Errorf("invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", mode)
+		return fmt.Errorf("%w: invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", ErrInvalidRequest, mode)
 	}
 	return nil
 }
@@ -1306,7 +1306,7 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 
 	if configReq.Delivery != nil && configReq.Delivery.GetMethod() != config.Delivery.GetMethod() {
-		return nil, errors.New(ErrorInvalidDeliveryMethod)
+		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, ErrorInvalidDeliveryMethod)
 	}
 
 	if configReq.Description != "" {

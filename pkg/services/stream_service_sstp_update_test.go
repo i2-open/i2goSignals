@@ -167,6 +167,28 @@ func TestUpdateSstpPair_FillsInitiallyOmittedPeerConnectivity(t *testing.T) {
 	assert.Equal(t, "peer-learned-123", got.SstpMethod.PeerPairId)
 }
 
+// TestUpdateSstpPair_InvalidFillInEndpointUrlIsInvalidRequest (#305): a
+// fill-in EndpointUrl that fails validation is the caller's to fix, so it is an
+// ErrInvalidRequest (a 400), and nothing is saved.
+func TestUpdateSstpPair_InvalidFillInEndpointUrlIsInvalidRequest(t *testing.T) {
+	svc, _ := sstpFixture(t)
+	b := initiatorBootstrap()
+	b.EndpointUrl = ""
+	rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.NoError(t, err)
+
+	patch := model.StreamStateRecord{
+		SstpMethod: &model.SstpMethod{EndpointUrl: "ftp://peer.example/sstp/learned"},
+	}
+	_, err = svc.UpdateStream(context.Background(), rec.PairId, "proj-1", patch)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+	assert.ErrorContains(t, err, "invalid endpoint_url")
+
+	got, err := svc.GetStreamStateByPairId(context.Background(), rec.PairId)
+	require.NoError(t, err)
+	assert.Empty(t, got.SstpMethod.EndpointUrl, "a rejected fill-in saves nothing")
+}
+
 // TestUpdateSstpPair_IDsAreImmutable: a patch carrying SIDs/PairId in its
 // StreamConfiguration/SstpInbound is ignored — the persisted IDs are unchanged.
 // (Q35)
