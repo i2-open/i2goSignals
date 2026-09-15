@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -72,9 +73,10 @@ var (
 	// the operator must name a Subject handler SID explicitly.
 	ErrRelayTargetAmbiguous = errors.New("multiple receiver streams match the issuer; name a subject handler explicitly")
 	// ErrUpstreamNotDiscoverable means a receiver stream feeds the downstream
-	// stream but carries no tx_alias, no tx_well_known_url and no usable iss, so
-	// there is nothing to discover its source transmitter from.
-	ErrUpstreamNotDiscoverable = errors.New("the receiver stream feeding this stream has no tx_alias, tx_well_known_url or iss to discover its transmitter from")
+	// stream but names no source transmitter to discover: it carries no usable
+	// tx_well_known_url or iss, and no tx_alias or one naming no registered
+	// server. The wrapping error says which.
+	ErrUpstreamNotDiscoverable = errors.New("the receiver stream feeding this stream names no discoverable source transmitter")
 	// ErrUpstreamNoSubjectFiltering means the upstream advertises no subject
 	// endpoints, so a PASSTHRU/HYBRID stream has nowhere to relay.
 	ErrUpstreamNoSubjectFiltering = errors.New("upstream does not support subject filtering")
@@ -145,18 +147,26 @@ func (c *UpstreamConn) release() {
 //
 // The credential is the resolved tx_alias server's, else the receiver stream's
 // tx_token with its per-stream transmitter TLS settings, obtained through
-// oauthClient.GetClientForServer. A receiver stream with no tx_alias, no
-// tx_well_known_url and no usable iss yields ErrUpstreamNotDiscoverable. Any
-// other failure — no source could be reached or fetched — is returned as is:
-// not the caller's configuration to fix (#305).
+// oauthClient.GetClientForServer. A receiver stream with no usable
+// tx_well_known_url or iss, and no tx_alias or one naming no registered server,
+// yields ErrUpstreamNotDiscoverable. Any other failure — a server store that
+// could not answer, or no source could be reached or fetched — is returned
+// unwrapped: not the caller's configuration to fix (#305). The returned error
+// never wraps interfaces.ErrNotFound, which the stream handlers answer as a
+// missing stream.
 func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 	return func(ctx context.Context, receiver *model.StreamStateRecord) (*UpstreamConn, error) {
 		var failures []error
 		var server *model.Server
 		var locations []string
+		aliasUnregistered := false
 		if receiver.TxAlias != nil && *receiver.TxAlias != "" && servers != nil {
 			resolved, err := servers.GetServerByAlias(ctx, *receiver.TxAlias)
-			if err != nil {
+			if errors.Is(err, interfaces.ErrNotFound) {
+				// Recorded without wrapping the DAO's ErrNotFound: no stream is missing.
+				aliasUnregistered = true
+				failures = append(failures, fmt.Errorf("upstream tx_alias %q names no registered server", *receiver.TxAlias))
+			} else if err != nil {
 				failures = append(failures, fmt.Errorf("cannot resolve upstream tx_alias %q: %w", *receiver.TxAlias, err))
 			} else if resolved != nil {
 				server = resolved
@@ -172,10 +182,14 @@ func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 			}
 		}
 		if len(locations) == 0 {
-			if len(failures) > 0 {
+			switch {
+			case aliasUnregistered:
+				return nil, fmt.Errorf("%w: tx_alias %q names no registered server, and there is no tx_well_known_url or iss",
+					ErrUpstreamNotDiscoverable, *receiver.TxAlias)
+			case len(failures) > 0:
 				return nil, errors.Join(failures...)
 			}
-			return nil, ErrUpstreamNotDiscoverable
+			return nil, fmt.Errorf("%w: no tx_alias, tx_well_known_url or iss", ErrUpstreamNotDiscoverable)
 		}
 		if server == nil {
 			server = &model.Server{

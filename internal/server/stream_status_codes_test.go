@@ -28,6 +28,19 @@ const unknownSid = "no-such-stream"
 // answer, which is not the same as a stream that does not exist.
 var errStoreDown = errors.New("stream store unavailable")
 
+// errServerStoreDown is the failure failingServerDAO reports: a server store
+// that could not answer, which is not the same as an alias naming no server.
+var errServerStoreDown = errors.New("server store unavailable")
+
+// failingServerDAO is a server store whose alias lookups fail.
+type failingServerDAO struct {
+	interfaces.ServerDAO
+}
+
+func (d *failingServerDAO) FindByAlias(context.Context, string) (*model.Server, error) {
+	return nil, errServerStoreDown
+}
+
 // failingStreamDAO is a memory stream store that fails on purpose. Lookups fail
 // while failFind is set, and whole-record writes while failUpdate is set, so a
 // test can break the read a handler starts with or only the write it ends with.
@@ -79,6 +92,17 @@ func (a *statusRefreshApp) deleteStream(t *testing.T, bearer, sid string) *httpt
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	rr := httptest.NewRecorder()
 	StreamDeleteHandler(a, rr, req)
+	return rr
+}
+
+func (a *statusRefreshApp) createStream(t *testing.T, bearer string, rec model.StreamStateRecord) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(rec)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/stream", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rr := httptest.NewRecorder()
+	StreamCreateHandler(a, rr, req)
 	return rr
 }
 
@@ -230,14 +254,16 @@ func TestStreamUpdate_RejectionIs400WithItsText(t *testing.T) {
 	}
 }
 
-// TestStreamUpdate_SubjectFilterModeOutcomes: a subject_filter_mode the stream's
-// upstream cannot serve is the caller's configuration to fix, so it is a 400
-// carrying the rejection. A receiver store or upstream that could not answer is
-// a server fault, so it stays a 500 — except on a LOCAL stream, which does not
-// relay and so is saved even when its upstream could not be checked. The cases
-// with a production resolver locate the source transmitter from a receiver
-// stream that names it only by iss.
-func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
+// TestStreamSave_SubjectFilterModeOutcomes: on stream create and update, a
+// subject_filter_mode the stream's upstream cannot serve is the caller's
+// configuration to fix, so it is a 400 carrying the rejection. A receiver store,
+// server store or upstream that could not answer is a server fault, so it stays
+// a 500 — except on a LOCAL stream, which does not relay and so is saved even
+// when its upstream could not be checked. Neither is ever a 404: no stream is
+// missing. The cases with a production resolver locate the source transmitter
+// from a receiver stream that names it by tx_alias or only by iss. A save that
+// succeeds is a 200 on update and a 201 on create.
+func TestStreamSave_SubjectFilterModeOutcomes(t *testing.T) {
 	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
 	receiverIss := func(id, iss string) model.StreamStateRecord {
 		var rx model.StreamStateRecord
@@ -246,6 +272,13 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 		return rx
 	}
 	receiver := func(id string) model.StreamStateRecord { return receiverIss(id, "DEFAULT") }
+	receiverAlias := func(id, alias, iss string) model.StreamStateRecord {
+		rx := receiverIss(id, iss)
+		rx.StreamConfiguration.TxAlias = &alias
+		return rx
+	}
+	noServers := services.NewDefaultUpstreamResolver(services.NewServerService(memory.NewServerDAO()))
+	serverStoreDown := services.NewDefaultUpstreamResolver(services.NewServerService(&failingServerDAO{ServerDAO: memory.NewServerDAO()}))
 	noSubjectEndpoints := &services.UpstreamConn{Config: &model.TransmitterConfiguration{Issuer: "DEFAULT"}}
 	// An EXPLICIT source names the receiver stream, whose iss need not match the
 	// updated stream's.
@@ -319,7 +352,29 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 			resolve:   services.NewDefaultUpstreamResolver(nil),
 			source:    fromRx1,
 			want:      http.StatusBadRequest,
-			text:      services.ErrUpstreamNotDiscoverable.Error(),
+			text:      "no tx_alias, tx_well_known_url or iss",
+		},
+		{
+			name:      "tx_alias naming no registered server, with nothing else to discover from",
+			receivers: []model.StreamStateRecord{receiverAlias("rx-1", "unregistered", "")},
+			resolve:   noServers,
+			source:    fromRx1,
+			want:      http.StatusBadRequest,
+			text:      `tx_alias "unregistered" names no registered server, and there is no tx_well_known_url or iss`,
+		},
+		{
+			name:      "tx_alias naming no registered server, source transmitter unreachable at its iss",
+			receivers: []model.StreamStateRecord{receiverAlias("rx-1", "unregistered", gone.URL)},
+			resolve:   noServers,
+			source:    fromRx1,
+			want:      http.StatusInternalServerError,
+		},
+		{
+			name:      "server store failure resolving tx_alias, with nothing else to discover from",
+			receivers: []model.StreamStateRecord{receiverAlias("rx-1", "source-server", "")},
+			resolve:   serverStoreDown,
+			source:    fromRx1,
+			want:      http.StatusInternalServerError,
 		},
 		{
 			name:      "source transmitter unreachable at its iss",
@@ -376,10 +431,25 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 					assert.Contains(t, rr.Body.String(), tc.text, "%s /stream", method)
 				}
 			}
+
+			create := *statusPlainRecord("DEFAULT", "", "")
+			create.StreamConfiguration.Id = ""
+			create.SubjectFilterMode = mode
+			create.EventSource = source
+			wantCreate := tc.want
+			if wantCreate == http.StatusOK {
+				wantCreate = http.StatusCreated
+			}
+			rr := app.createStream(t, app.adminBearer(t), create)
+			require.Equal(t, wantCreate, rr.Code, "POST /stream: %s", rr.Body.String())
+			if tc.text != "" {
+				assert.Contains(t, rr.Body.String(), tc.text, "POST /stream")
+			}
+
 			if tc.want == http.StatusOK {
-				assert.NotEmpty(t, app.router.updated, "an accepted update must refresh the router")
+				assert.NotEmpty(t, app.router.updated, "an accepted save must refresh the router")
 			} else {
-				assert.Empty(t, app.router.updated, "a refused update must not refresh the router")
+				assert.Empty(t, app.router.updated, "a refused save must not refresh the router")
 			}
 		})
 	}

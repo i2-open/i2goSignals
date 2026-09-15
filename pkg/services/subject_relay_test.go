@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -602,8 +603,80 @@ func TestDefaultUpstreamResolver_NothingToDiscover(t *testing.T) {
 	if !errors.Is(err, ErrUpstreamNotDiscoverable) {
 		t.Fatalf("expected ErrUpstreamNotDiscoverable, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "no tx_alias, tx_well_known_url or iss") {
+		t.Fatalf("expected the error to say the receiver stream has no tx_alias, tx_well_known_url or iss, got %v", err)
+	}
 	if errors.Is(err, ErrRelayTargetNotFound) {
 		t.Fatalf("a receiver stream feeds the stream, so the error must not be ErrRelayTargetNotFound: %v", err)
+	}
+}
+
+// failingAliasServerDAO is a server store whose alias lookups fail: a store
+// that could not answer, not an alias naming no server.
+type failingAliasServerDAO struct {
+	interfaces.ServerDAO
+	err error
+}
+
+func (d *failingAliasServerDAO) FindByAlias(context.Context, string) (*model.Server, error) {
+	return nil, d.err
+}
+
+// TestDefaultUpstreamResolver_UnusableTxAlias verifies that a tx_alias that
+// cannot be used never surfaces as interfaces.ErrNotFound, which the stream
+// handlers answer as a missing stream. An alias naming no registered server with
+// nothing else to discover from is ErrUpstreamNotDiscoverable, saying so; with a
+// later source that cannot be reached, or when the server store cannot answer,
+// it is a failure that is neither.
+func TestDefaultUpstreamResolver_UnusableTxAlias(t *testing.T) {
+	errStore := errors.New("server store unavailable")
+	for _, tc := range []struct {
+		name          string
+		dao           interfaces.ServerDAO
+		iss           string
+		discoverable  bool
+		wantErrIs     error
+		wantErrSubstr string
+	}{
+		{
+			name:          "no registered server and nothing else to discover from",
+			dao:           memory.NewServerDAO(),
+			discoverable:  true,
+			wantErrSubstr: `tx_alias "unregistered" names no registered server, and there is no tx_well_known_url or iss`,
+		},
+		{
+			name: "no registered server and the source transmitter unreachable at its iss",
+			dao:  memory.NewServerDAO(),
+			iss:  closedServerURL(),
+		},
+		{
+			name:      "server store failure and nothing else to discover from",
+			dao:       &failingAliasServerDAO{ServerDAO: memory.NewServerDAO(), err: errStore},
+			wantErrIs: errStore,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alias := "unregistered"
+			receiver := relayReceiver("rx-1", tc.iss)
+			receiver.StreamConfiguration.TxAlias = &alias
+
+			_, err := NewDefaultUpstreamResolver(NewServerService(tc.dao))(context.Background(), &receiver)
+			if err == nil {
+				t.Fatal("an unusable tx_alias with no usable source must fail resolution")
+			}
+			if errors.Is(err, interfaces.ErrNotFound) {
+				t.Fatalf("the resolver must never answer interfaces.ErrNotFound: %v", err)
+			}
+			if got := errors.Is(err, ErrUpstreamNotDiscoverable); got != tc.discoverable {
+				t.Fatalf("errors.Is(err, ErrUpstreamNotDiscoverable) = %v, want %v: %v", got, tc.discoverable, err)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("expected the error to wrap %v, got %v", tc.wantErrIs, err)
+			}
+			if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Fatalf("expected the error to say %q, got %v", tc.wantErrSubstr, err)
+			}
+		})
 	}
 }
 
