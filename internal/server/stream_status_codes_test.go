@@ -77,6 +77,37 @@ func (a *statusRefreshApp) withStreamDAO(dao interfaces.StreamDAO) {
 	a.StreamService = services.NewStreamService(dao, a.KeyService, "DEFAULT", services.StreamServiceConfig{})
 }
 
+// errKeyStoreDown is the failure failingKeyDAO reports: a key store that could
+// not answer, which is neither a missing key nor a missing stream.
+var errKeyStoreDown = errors.New("key store unavailable")
+
+// keyStoreDownIssuer is the issuer whose signing keys failingKeyDAO cannot read.
+const keyStoreDownIssuer = "https://key-store-down.example"
+
+// failingKeyDAO is a memory key store whose lookups of keyStoreDownIssuer's keys
+// fail, so the token key still loads while that issuer's signing key cannot be
+// read.
+type failingKeyDAO struct {
+	interfaces.KeyDAO
+}
+
+func (d *failingKeyDAO) FindByKeyName(ctx context.Context, keyName string) ([]*interfaces.JwkKeyRec, error) {
+	if keyName == keyStoreDownIssuer {
+		return nil, errKeyStoreDown
+	}
+	return d.KeyDAO.FindByKeyName(ctx, keyName)
+}
+
+// withFailingKeyStore swaps app's stream service for one whose key service reads
+// through failingKeyDAO, over a fresh stream store, so the stream records the
+// test persists afterwards live in that store.
+func (a *statusRefreshApp) withFailingKeyStore(t *testing.T) {
+	t.Helper()
+	keys := services.NewKeyService(&failingKeyDAO{KeyDAO: memory.NewKeyDAO()}, "DEFAULT", nil, nil)
+	require.NoError(t, keys.InitializeTokenKey(context.Background(), "DEFAULT"))
+	a.StreamService = services.NewStreamService(memory.NewStreamDAO(), keys, "DEFAULT", services.StreamServiceConfig{})
+}
+
 func (a *statusRefreshApp) getStatusRecorder(t *testing.T, bearer, sid string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/status?stream_id="+sid, nil)
@@ -172,6 +203,51 @@ func TestStreamUpdate_StoreFailureDuringWriteIs500(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, rr.Code, "%s /stream: %s", method, rr.Body.String())
 	}
 	assert.Empty(t, app.router.updated, "a failed write must not refresh the router")
+}
+
+// TestStreamHandlers_KeyStoreFailureIs500: the #308 signing-key check on a save
+// or re-enable could not read the key store. That is a server fault, not a
+// missing key (400) or a missing stream (404), and nothing changes. The missing
+// key's 400 is covered by stream_signing_key_api_test.go.
+func TestStreamHandlers_KeyStoreFailureIs500(t *testing.T) {
+	t.Run("POST /stream", func(t *testing.T) {
+		app := newStatusRefreshApp(t)
+		app.withFailingKeyStore(t)
+		create := *statusPlainRecord(keyStoreDownIssuer, "", "")
+		create.StreamConfiguration.Id = ""
+
+		rr := app.createStream(t, app.adminBearer(t), create)
+		assert.Equal(t, http.StatusInternalServerError, rr.Code, "POST /stream: %s", rr.Body.String())
+		assert.Empty(t, app.StreamService.ListStreams(context.Background()), "nothing is saved")
+		assert.Equal(t, 0, app.refreshes(), "a failed create must not refresh the router")
+	})
+
+	t.Run("PUT and PATCH /stream", func(t *testing.T) {
+		app := newStatusRefreshApp(t)
+		app.withFailingKeyStore(t)
+		persistStatusPlainIss(t, app, keyStoreDownIssuer, model.StreamStateEnabled, "")
+
+		for _, method := range []string{http.MethodPut, http.MethodPatch} {
+			rr := app.updateStream(t, method, app.adminBearer(t), statusPlainSid, model.StreamStateRecord{
+				StreamConfiguration: model.StreamConfiguration{Description: "edit"},
+			})
+			assert.Equal(t, http.StatusInternalServerError, rr.Code, "%s /stream: %s", method, rr.Body.String())
+		}
+		assert.Empty(t, app.router.updated, "a failed update must not refresh the router")
+	})
+
+	t.Run("POST /status enabled", func(t *testing.T) {
+		app := newStatusRefreshApp(t)
+		app.withFailingKeyStore(t)
+		persistStatusPlainIss(t, app, keyStoreDownIssuer, model.StreamStateDisable, "stopped")
+		bearer := app.adminBearer(t)
+
+		rr := app.postStatus(t, bearer, statusPlainSid, model.StreamStateEnabled, "")
+		assert.Equal(t, http.StatusInternalServerError, rr.Code, "POST /status: %s", rr.Body.String())
+		assert.Equal(t, 0, app.refreshes(), "a failed re-enable changes nothing")
+		assert.Equal(t, model.StreamStatus{Status: model.StreamStateDisable, Reason: "stopped"},
+			app.getStatus(t, bearer, statusPlainSid), "the status is unchanged")
+	})
 }
 
 // TestStreamUpdate_RejectionIs400WithItsText: an update the stream cannot accept
