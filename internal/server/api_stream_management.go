@@ -188,6 +188,24 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 }
 
+// writeStreamNotFoundOrFault answers a stream handler whose lookup or update of
+// sid failed with err (#305). 404 means only that no such stream exists; its
+// body is notFoundBody when one is given. Any other error is a server fault,
+// logged at WARN as op failing and answered 500.
+func writeStreamNotFoundOrFault(w http.ResponseWriter, err error, op, sid, notFoundBody string) {
+	if errors.Is(err, interfaces.ErrNotFound) {
+		serverLog.Debug(op+": stream not found", "sid", sid)
+		if notFoundBody != "" {
+			http.Error(w, notFoundBody, http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	serverLog.Warn(op+" failed", "sid", sid, "error", err)
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
 // GetStatus retrieves the status of a stream.
 //
 // Inputs:
@@ -224,15 +242,7 @@ func GetStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 
 	streamStatus, err := sa.GetStreamService().GetStatus(r.Context(), sid)
 	if err != nil {
-		// 404 means only that no such stream exists; a store that could not
-		// answer is a server fault (#305).
-		if errors.Is(err, interfaces.ErrNotFound) {
-			serverLog.Debug("GetStatus request received: not found", "sid", authCtx.StreamId)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		serverLog.Warn("GetStatus: error reading stream status", "sid", sid, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		writeStreamNotFoundOrFault(w, err, "GetStatus: reading stream status", sid, "")
 		return
 	}
 
@@ -306,12 +316,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	state, err := sa.GetStreamService().GetStreamState(r.Context(), authContext.StreamId)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		serverLog.Warn("StreamDelete: error reading stream state", "sid", authContext.StreamId, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		writeStreamNotFoundOrFault(w, err, "StreamDelete: reading stream state", authContext.StreamId, "")
 		return
 	}
 
@@ -828,21 +833,15 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 			return
 		}
 		// An update the stream cannot accept (a delivery-method change, an
-		// immutable SSTP field, a bad signing_alg, route_mode or grace value)
-		// is a 400 carrying the rejection (#305, #306).
+		// immutable SSTP field, a bad signing_alg, route_mode, grace value or
+		// subject_filter_mode) is a 400 carrying the rejection (#305, #306).
 		if errors.Is(err, services.ErrInvalidRequest) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// 404 means only that no such stream exists; anything else, such as a
-		// store failure while writing the update, is a server fault (#305).
-		if errors.Is(err, interfaces.ErrNotFound) {
-			http.Error(w, "No stream found", http.StatusNotFound)
-			return
-		}
-		serverLog.Warn("StreamUpdate: error updating stream", "sid", streamId, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		// 404 only for a missing stream; anything else, such as a store failure
+		// while writing the update, is a server fault (#305).
+		writeStreamNotFoundOrFault(w, err, "StreamUpdate: updating stream", streamId, "No stream found")
 		return
 	}
 	if configResp == nil {
@@ -949,12 +948,7 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// through to the same _id lookup for every other stream.
 	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		serverLog.Error("Error getting stream state after update", "id", authCtx.StreamId, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		writeStreamNotFoundOrFault(w, err, "UpdateStatus: reading stream state", authCtx.StreamId, "")
 		return
 	}
 	if streamState == nil {
