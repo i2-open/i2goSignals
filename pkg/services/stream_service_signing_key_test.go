@@ -129,8 +129,8 @@ func TestCreateStream_SuspendedOrRevokedKeyIsNotActive(t *testing.T) {
 func TestCreateStream_MessageNamesTheStreamsAlgorithm(t *testing.T) {
 	svc := signingKeyFixture(t)
 	ctx := context.Background()
-	// The signing_alg step still provisions an ES256 key; a suspended one it
-	// declines to replace, so the check after it finds no active key.
+	// The issuer's ES256 key exists but is suspended, so there is no active key
+	// for the stream's algorithm.
 	_, err := svc.keyService.EnsureSigningKeyForAlg(ctx, keyedIssuer, "ES256", "test-project")
 	require.NoError(t, err)
 	_, _, err = svc.keyService.SetKeyStatus(ctx, keyedIssuer, "", interfaces.KeyStatusSuspended)
@@ -193,8 +193,8 @@ func TestUpdateStream_LeavingASigningTransmitterWithoutActiveKeyIsRefused(t *tes
 	require.NoError(t, err)
 	assert.Equal(t, keyedIssuer, stored.Iss, "a refused update must save nothing")
 
-	// signing_alg: an ES256 key that exists but is suspended is not provisioned
-	// over, so the check after the provisioning step refuses.
+	// signing_alg: an ES256 key that exists but is suspended is not active, so
+	// the check refuses.
 	_, err = svc.keyService.EnsureSigningKeyForAlg(ctx, keyedIssuer, "ES256", "test-project")
 	require.NoError(t, err)
 	recs, err := svc.keyService.keyDAO.FindByKeyName(ctx, keyedIssuer)

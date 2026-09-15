@@ -46,7 +46,19 @@ unattended deployment that must bootstrap itself without a human:
 - A `key`-scoped caller may `POST /key/<issuer>` to mint a **new** issuer signing
   key, but a key **takeover** (`force=replace`, `force=rotate`, or `?rotate`) is
   rejected for a key-scope-only caller — preventing key substitution / event
-  forgery.
+  forgery. Both rules hold for every `?alg=`: a `key`-scoped caller may create an
+  `RS256`, `ES256` or `ML-DSA-65` key, and may not rotate or replace one.
+- `POST /key/<issuer>` acts on **one signature algorithm**, named by `?alg=`
+  (`RS256` when absent, `ES256`, `ML-DSA-65`; anything else is a 400). A create
+  adds a key of that algorithm alongside the issuer's keys of other algorithms,
+  and is a 409 only when a key of that algorithm that is not revoked exists.
+  `force=rotate` adds a new key of that algorithm and leaves the previous one
+  active; `force=replace` deletes only that algorithm's keys before creating the
+  new one, so a plain `force=replace` replaces the RS256 keys and leaves ES256
+  and ML-DSA-65 keys in place. A key load (`POST /key/<issuer>` with a body)
+  uploads an RSA key, so its conflict check and `force=replace` apply to RS256
+  keys only. A stream never creates a signing key: create the key for the
+  stream's `iss` and `signing_alg` first.
 - A `key`-scoped caller may `GET /iat` to obtain an IAT, but the minted IAT is
   always **`reg`-only**: the `key`/admin capability does not propagate into it.
 

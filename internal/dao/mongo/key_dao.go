@@ -258,6 +258,31 @@ func (d *KeyDAOMongo) DeleteByKeyName(ctx context.Context, keyName string) error
 	return nil
 }
 
+// DeleteByKeyNameAndAlg removes keyName's records of one algorithm. An RSA
+// record is written with no alg field (omitempty), so alg "" matches a missing,
+// null or empty field.
+func (d *KeyDAOMongo) DeleteByKeyNameAndAlg(ctx context.Context, keyName string, alg string) error {
+	c, err := d.col()
+	if err != nil {
+		return err
+	}
+	filter := bson.M{"key_name": keyName, "alg": alg}
+	if alg == "" {
+		filter["alg"] = bson.M{"$in": bson.A{nil, ""}}
+	}
+	delResult, err := c.DeleteMany(ctx, filter)
+	if err != nil {
+		kLog.Error("Error deleting keys for keyName and alg", "keyName", keyName, "alg", alg, "error", err)
+		return err
+	}
+	if delResult.DeletedCount == 0 {
+		return interfaces.ErrKeyNotFound
+	}
+
+	kLog.Info("Deleted keys for keyName and alg", "keyName", keyName, "alg", alg, "count", delResult.DeletedCount)
+	return nil
+}
+
 func (d *KeyDAOMongo) SetKeyStatus(ctx context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
 	c, err := d.col()
 	if err != nil {

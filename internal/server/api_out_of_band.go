@@ -47,15 +47,24 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
-	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, authCtx.ProjectId)
+	// alg selects the one signature algorithm rotated; the issuer's keys of
+	// other algorithms are untouched (i2goSignals#314). Absent means RS256.
+	alg := r.URL.Query().Get("alg")
+	if err := services.ValidateKeyAlg(alg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, alg, authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// If the rotated issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer {
+	// If the rotated issuer is the token issuer, update the application's
+	// AuthIssuer. Auth tokens are signed RS256, so only an RSA rotation applies.
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer && isRSAKeyAlg(alg) {
 		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
@@ -97,6 +106,12 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 //
 // Inputs:
 //   - keyName (path): The name of the key to create or load.
+//   - alg (query): Optional. The signature algorithm of the key to create, rotate
+//     or replace: RS256 (default), ES256 or ML-DSA-65; any other value is a 400.
+//     Keys of other algorithms under keyName are left alone.
+//   - force (query): Optional. 'rotate' adds a new key of alg; 'replace' deletes
+//     keyName's keys of alg, then creates one. Without force, an existing
+//     non-revoked key of alg is a 409.
 //
 // Return values:
 //   - 201 Created: (If generating) PEM-encoded private key.
@@ -205,10 +220,27 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 	force := queryParams.Get("force")
 	_, rotate := queryParams["rotate"]
 
-	// Check if key already exists
-	if checkKeyNameExists(sa, keyName) {
+	// alg selects the signature algorithm this request acts on: RS256 (the
+	// default when absent), ES256 or ML-DSA-65. Create, rotate and replace each
+	// touch only that algorithm's keys, so an issuer can hold one of each (the
+	// dual-key JWKS of ADR 0034; i2goSignals#314).
+	alg := queryParams.Get("alg")
+	if err := services.ValidateKeyAlg(alg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// A key of the requested algorithm that is not revoked is a conflict unless
+	// force (or ?rotate) says what to do with it.
+	exists, err := sa.GetKeyService().KeyExistsForAlg(r.Context(), keyName, alg)
+	if err != nil {
+		serverLog.Error(fmt.Sprintf("Error checking existing keys for %s: %v", keyName, err))
+		http.Error(w, "Error checking existing keys", http.StatusInternalServerError)
+		return
+	}
+	if exists {
 		if force == "" && !rotate {
-			http.Error(w, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
+			http.Error(w, fmt.Sprintf("Key already exists for algorithm %s. Use query parameter force=replace or force=rotate", keyAlgLabel(alg)), http.StatusConflict)
 			return
 		}
 
@@ -216,33 +248,34 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 			RotateIssuerHandler(sa, w, r, authCtx)
 			return
 		}
+	}
 
-		if force == "replace" {
-			// The guard (#311) describes exactly this replace: every key under
-			// the name is deleted and one RSA signing key is created.
-			change := services.KeyChange{Retires: services.RetireAllKeys, Adds: []string{"RS256"}}
-			if refuseStrandingKeyChange(sa, w, r, keyName, "replacing", change) {
-				return
-			}
-			err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
-			if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
-				serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
-				http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
-				return
-			}
+	if force == "replace" {
+		// Replace deletes only the keys of the requested algorithm and creates
+		// one signing key of it (#314); the guard (#311) is told exactly that.
+		change := services.KeyChange{Retires: services.RetireAlg(alg), Adds: []string{keyAlgLabel(alg)}}
+		if refuseStrandingKeyChange(sa, w, r, keyName, "replacing", change) {
+			return
+		}
+		err := sa.GetKeyService().DeleteKeysByNameAndAlg(r.Context(), keyName, alg)
+		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+			serverLog.Error(fmt.Sprintf("Error deleting existing %s keys for %s: %v", keyAlgLabel(alg), keyName, err))
+			http.Error(w, "Error replacing existing keys", http.StatusInternalServerError)
+			return
 		}
 	}
 
-	issuerKey, err := sa.GetKeyService().CreateKeyPair(r.Context(), keyName, "sig", authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetKeyService().CreateKeyPairForAlg(r.Context(), keyName, alg, "sig", authCtx.ProjectId)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
 		return
 	}
 
-	// If the created issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName {
-		sa.GetAuth().UpdateTokenKey(keyName, keyName, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
+	// If the created issuer is the token issuer, update the application's
+	// AuthIssuer. Auth tokens are signed RS256, so only an RSA key applies.
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && isRSAKeyAlg(alg) {
+		sa.GetAuth().UpdateTokenKey(keyName, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
@@ -269,7 +302,8 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 //
 // Inputs:
 //   - issuer (path): The name of the issuer for which to load the key. This will become the kid in the certificates and matches certificate 'iss' values.
-//   - force (query): Optional. If 'replace', all existing keys for the issuer are deleted before adding the new key.
+//   - force (query): Optional. If 'replace', the issuer's existing RSA keys are deleted before adding the new key
+//     (keys of other algorithms are kept).
 //     If 'rotate', a new unique kid is generated and added to the set of keys for the issuer.
 //   - confirm (query): Optional. 'true' lets a force=replace go ahead when it would strand signing transmitters (#311).
 //   - use (query): Optional. Specifies the intended use of the key. Acceptable values are 'sig' (signing) or 'enc' (encryption). Defaults to 'sig'.
@@ -325,7 +359,18 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	queryParams := request.URL.Query()
 	force := queryParams.Get("force")
 
-	if checkKeyNameExists(sa, keyName) && force == "" {
+	// Only RSA keys can be uploaded (the parsing below accepts nothing else), so
+	// the uploaded key's algorithm is RS256. The conflict check and a replace act
+	// on that algorithm only, leaving the keyName's ES256 and ML-DSA-65 keys in
+	// place (i2goSignals#314).
+	const uploadAlg = "RS256"
+	exists, existsErr := sa.GetKeyService().KeyExistsForAlg(ctx, keyName, uploadAlg)
+	if existsErr != nil {
+		serverLog.Error(fmt.Sprintf("Error checking existing keys for %s: %v", keyName, existsErr))
+		http.Error(writer, "Error checking existing keys", http.StatusInternalServerError)
+		return
+	}
+	if exists && force == "" {
 		http.Error(writer, "Key already exists. Use query parameter force=replace or force=rotate", http.StatusConflict)
 		return
 	}
@@ -444,17 +489,17 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	kid := ""
 	if force == "replace" {
-		// The guard (#311) describes exactly this replace: every key under the
-		// name is deleted, and the upload is a signing key only when it carries
-		// a private half (always RSA).
-		change := services.KeyChange{Retires: services.RetireAllKeys}
+		// The guard (#311) describes exactly this replace: the name's keys of the
+		// upload's algorithm are deleted (#314), and the upload is a signing key
+		// only when it carries a private half (always RSA).
+		change := services.KeyChange{Retires: services.RetireAlg(uploadAlg)}
 		if priv != nil {
-			change.Adds = []string{"RS256"}
+			change.Adds = []string{uploadAlg}
 		}
 		if refuseStrandingKeyChange(sa, writer, request, keyName, "replacing", change) {
 			return
 		}
-		err := sa.GetKeyService().DeleteKeysByName(ctx, keyName)
+		err := sa.GetKeyService().DeleteKeysByNameAndAlg(ctx, keyName, uploadAlg)
 		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 			serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
 			http.Error(writer, "Error replacing existing keys", http.StatusInternalServerError)
@@ -1889,6 +1934,19 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(keyBytes)
 	return
+}
+
+// isRSAKeyAlg reports whether a key request's alg ("" defaults to RS256) is RSA.
+func isRSAKeyAlg(alg string) bool {
+	return alg == "" || alg == "RS256"
+}
+
+// keyAlgLabel names a key request's alg for a message, "" reading as RS256.
+func keyAlgLabel(alg string) string {
+	if alg == "" {
+		return "RS256"
+	}
+	return alg
 }
 
 func checkKeyNameExists(sa SsfApplicationInterface, keyName string) bool {

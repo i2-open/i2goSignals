@@ -191,40 +191,6 @@ func validateSigningAlg(alg string) error {
 	return nil
 }
 
-// applySigningAlg validates a stream's requested signing_alg and, for a
-// transmitter stream opting into a post-quantum algorithm, makes sure the
-// issuer actually holds a key of that algorithm.
-//
-// Provisioning happens here — at configuration time — rather than lazily at the
-// first signature, because the receiver has to be able to fetch the new key
-// from the issuer's JWKS *before* the first SET signed with it arrives.
-// Minting at first signing would publish the key and the token that needs it in
-// the same instant, and a receiver caching a JWKS would reject that first SET.
-//
-// A receiver stream is skipped: its `iss` names the remote transmitter, so
-// minting a local key for it would create signing material for an issuer this
-// node does not speak for.
-func (s *StreamService) applySigningAlg(ctx context.Context, cfg *model.StreamConfiguration, projectID string) error {
-	if err := validateSigningAlg(cfg.SigningAlg); err != nil {
-		return err
-	}
-	if cfg.SigningAlg == "" || cfg.Iss == "" || s.keyService == nil {
-		return nil
-	}
-	if !isTransmitterMethod(cfg.Delivery.GetMethod()) && cfg.Delivery.GetMethod() != model.DeliverySstpPair {
-		return nil
-	}
-	created, err := s.keyService.EnsureSigningKeyForAlg(ctx, cfg.Iss, cfg.SigningAlg, projectID)
-	if err != nil {
-		return fmt.Errorf("signing_alg %s: %w", cfg.SigningAlg, err)
-	}
-	if created {
-		ssLog.Info("Provisioned signing key for stream signing_alg opt-in",
-			"iss", cfg.Iss, "signing_alg", cfg.SigningAlg, "stream_id", cfg.Id)
-	}
-	return nil
-}
-
 // validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
 // the request before any state is mutated (PRD #97 issue #98). Sits alongside
 // validateSubjectFilterMode in the create/update pipeline. Only the request
@@ -943,14 +909,10 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
-	// Mint the issuer's post-quantum key now that the delivery method (and with
-	// it whether this stream transmits) is settled, so the key is published in
-	// the issuer JWKS before the stream's first SET is signed. A signing
-	// transmitter then needs an active key for its iss and signing_alg (#308);
-	// both run before the record is written, so a refused create saves nothing.
-	if err = s.applySigningAlg(ctx, &streamRec.StreamConfiguration, projectID); err != nil {
-		return model.StreamConfiguration{}, err
-	}
+	// A signing transmitter needs an active key for its iss and signing_alg
+	// (#308). A stream never creates that key (#314): the operator creates it
+	// first. This runs before the record is written, so a refused create saves
+	// nothing.
 	if err = s.RequireActiveSigningKey(ctx, streamRec); err != nil {
 		return model.StreamConfiguration{}, err
 	}
@@ -1443,7 +1405,7 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	if configReq.SigningAlg != "" {
 		config.SigningAlg = configReq.SigningAlg
 	}
-	if err := s.applySigningAlg(ctx, config, streamRec.ProjectId); err != nil {
+	if err := validateSigningAlg(config.SigningAlg); err != nil {
 		return nil, err
 	}
 	// Any update to a signing transmitter needs an active key for the stream as

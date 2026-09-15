@@ -302,6 +302,14 @@ func (d *notifyingKeyDAO) DeleteByKeyName(ctx context.Context, keyName string) e
 	return nil
 }
 
+func (d *notifyingKeyDAO) DeleteByKeyNameAndAlg(ctx context.Context, keyName string, alg string) error {
+	if err := d.inner.DeleteByKeyNameAndAlg(ctx, keyName, alg); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
 func (d *notifyingKeyDAO) SetKeyStatus(ctx context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
 	n, err := d.inner.SetKeyStatus(ctx, keyName, kid, suspendedAt, revokedAt)
 	if err != nil {

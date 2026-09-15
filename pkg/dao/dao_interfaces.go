@@ -203,6 +203,10 @@ type KeyDAO interface {
 	FindByStreamID(ctx context.Context, streamID string) (*JwkKeyRec, error)
 	DeleteByKid(ctx context.Context, kid string) error
 	DeleteByKeyName(ctx context.Context, keyName string) error
+	// DeleteByKeyNameAndAlg removes every record under keyName whose Alg equals
+	// alg, the stored discriminator ("" is RSA), and leaves the keyName's records
+	// of other algorithms in place. Returns ErrKeyNotFound when none matched.
+	DeleteByKeyNameAndAlg(ctx context.Context, keyName string, alg string) error
 	// SetKeyStatus sets the lifecycle timestamps on matching key record(s). A nil
 	// pointer leaves that field unchanged; a non-nil pointer sets it (pass the
 	// zero time to clear — in practice only SuspendedAt is ever cleared). When

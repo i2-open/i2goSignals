@@ -134,6 +134,24 @@ func (d *KeyDAOMemory) DeleteByKeyName(_ context.Context, keyName string) error 
 	return nil
 }
 
+func (d *KeyDAOMemory) DeleteByKeyNameAndAlg(_ context.Context, keyName string, alg string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	deleted := false
+	for kid, rec := range d.keys {
+		if rec.KeyName == keyName && rec.Alg == alg {
+			delete(d.keys, kid)
+			deleted = true
+		}
+	}
+
+	if !deleted {
+		return interfaces.ErrKeyNotFound
+	}
+	return nil
+}
+
 func (d *KeyDAOMemory) SetKeyStatus(_ context.Context, keyName string, kid string, suspendedAt *time.Time, revokedAt *time.Time) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

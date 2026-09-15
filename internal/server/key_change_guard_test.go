@@ -129,7 +129,7 @@ func (s *KeyChangeGuardSuite) TestSuspendWithConfirmSuspendsTheKey() {
 
 func (s *KeyChangeGuardSuite) TestSuspendOneKidWhileAnotherActiveKeyOfTheAlgRemainsIs200() {
 	s.pollTransmitter("rs-1", "RS256", "", model.StreamStateEnabled)
-	_, rotatedKid, err := s.app.KeyService.RotateKey(context.Background(), guardIssuer, "proj-A")
+	_, rotatedKid, err := s.app.KeyService.RotateKey(context.Background(), guardIssuer, "RS256", "proj-A")
 	s.Require().NoError(err)
 
 	rr := s.setStatus("", model.SetKeyStatusRequest{Status: interfaces.KeyStatusSuspended, Kid: guardIssuer})
@@ -268,23 +268,40 @@ func (s *KeyChangeGuardSuite) signs(alg string) bool {
 	return err == nil
 }
 
-func (s *KeyChangeGuardSuite) TestReplaceDroppingAnAlgInUseIs409UntilConfirmed() {
+// Since #314 a replace on create deletes and recreates one algorithm, so it
+// never drops one: neither a plain replace nor alg=ES256 is refused, and the
+// issuer keeps signing with both algorithms.
+func (s *KeyChangeGuardSuite) TestPerAlgorithmReplaceOnADualAlgIssuerIsNotRefused() {
 	s.dualAlgIssuer()
 
-	// Before #314 a plain force=replace deletes the ES256 key and creates only an
-	// RSA key: the RS256 transmitter stays covered, the ES256 ones do not.
-	body := s.conflict(s.createKey("?force=replace", "", nil))
+	for _, query := range []string{"?force=replace", "?force=replace&alg=ES256"} {
+		rr := s.createKey(query, "", nil)
+		s.Require().Equal(http.StatusCreated, rr.Code, "%s: %s", query, rr.Body.String())
+		s.True(s.signs("RS256"), query)
+		s.True(s.signs("ES256"), query)
+	}
+}
+
+// Dropping one algorithm of a dual-algorithm issuer (here by suspending its
+// ES256 key) is refused listing only that algorithm's streams, until confirmed.
+func (s *KeyChangeGuardSuite) TestDroppingOneAlgInUseIs409ListingOnlyItsStreamsUntilConfirmed() {
+	s.dualAlgIssuer()
+	_, esKid, err := s.app.KeyService.GetSigner(context.Background(), guardIssuer, "ES256")
+	s.Require().NoError(err)
+
+	body := s.conflict(s.setStatus("", model.SetKeyStatusRequest{Status: interfaces.KeyStatusSuspended, Kid: esKid}))
 	s.Equal([]services.StrandedStream{
 		{StreamId: "es-1", Description: "stream es-1", SigningAlg: "ES256"},
 		{StreamId: "es-2", Description: "stream es-2", SigningAlg: "ES256"},
 	}, body.Streams)
 	s.Contains(body.Error, guardIssuer)
 	s.Contains(body.Error, "ES256")
-	s.True(s.signs("ES256"), "a refused replace deletes nothing")
+	s.NotContains(body.Error, "RS256")
+	s.True(s.signs("ES256"), "a refused suspend changes nothing")
 
-	rr := s.createKey("?force=replace&confirm=true", "", nil)
-	s.Require().Equal(http.StatusCreated, rr.Code, rr.Body.String())
-	s.False(s.signs("ES256"), "the confirmed replace went through")
+	rr := s.setStatus("?confirm=true", model.SetKeyStatusRequest{Status: interfaces.KeyStatusSuspended, Kid: esKid})
+	s.Require().Equal(http.StatusOK, rr.Code, rr.Body.String())
+	s.False(s.signs("ES256"), "the confirmed suspend went through")
 	s.True(s.signs("RS256"))
 }
 
@@ -298,21 +315,28 @@ func (s *KeyChangeGuardSuite) rsaPEM(private bool) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: x509.MarshalPKCS1PublicKey(&key.PublicKey)})
 }
 
+// Since #314 a key-load replace deletes only RSA keys. A private RSA upload
+// keeps RS256 covered and is not refused; a public-only upload drops RS256, so
+// it is refused listing only the RS256 stream, until confirmed. ES256 is kept.
 func (s *KeyChangeGuardSuite) TestKeyLoadReplaceDroppingAnAlgInUseIs409UntilConfirmed() {
 	s.dualAlgIssuer()
-	upload := s.rsaPEM(true)
 
-	body := s.conflict(s.createKey("?force=replace", "application/x-pem-file", upload))
-	s.Equal([]services.StrandedStream{
-		{StreamId: "es-1", Description: "stream es-1", SigningAlg: "ES256"},
-		{StreamId: "es-2", Description: "stream es-2", SigningAlg: "ES256"},
-	}, body.Streams)
-	s.True(s.signs("ES256"), "a refused replace deletes nothing")
-
-	rr := s.createKey("?force=replace&confirm=true", "application/x-pem-file", upload)
+	rr := s.createKey("?force=replace", "application/x-pem-file", s.rsaPEM(true))
 	s.Require().Equal(http.StatusOK, rr.Code, rr.Body.String())
-	s.False(s.signs("ES256"), "the confirmed replace went through")
 	s.True(s.signs("RS256"))
+	s.True(s.signs("ES256"), "a key-load replace keeps the ES256 key")
+
+	upload := s.rsaPEM(false)
+	body := s.conflict(s.createKey("?force=replace", "application/x-pem-file", upload))
+	s.Equal([]services.StrandedStream{{StreamId: "rs-1", Description: "stream rs-1", SigningAlg: "RS256"}}, body.Streams)
+	s.Contains(body.Error, "RS256")
+	s.NotContains(body.Error, "ES256")
+	s.True(s.signs("RS256"), "a refused replace deletes nothing")
+
+	rr = s.createKey("?force=replace&confirm=true", "application/x-pem-file", upload)
+	s.Require().Equal(http.StatusOK, rr.Code, rr.Body.String())
+	s.False(s.signs("RS256"), "the confirmed replace went through")
+	s.True(s.signs("ES256"))
 }
 
 // A public key signs nothing, so a replace that uploads one leaves the RS256

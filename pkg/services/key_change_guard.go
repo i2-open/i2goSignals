@@ -31,6 +31,17 @@ func RetireKid(kid string) func(*interfaces.JwkKeyRec) bool {
 	return func(rec *interfaces.JwkKeyRec) bool { return rec.Kid == kid }
 }
 
+// RetireAlg is the Retires of a change that deletes only the records of
+// signature algorithm alg ("" and "RS256" are RSA), as DeleteKeysByNameAndAlg
+// does for a replace (#314). An unsupported alg retires nothing.
+func RetireAlg(alg string) func(*interfaces.JwkKeyRec) bool {
+	storedAlg, err := storedAlgFor(alg)
+	if err != nil {
+		return func(*interfaces.JwkKeyRec) bool { return false }
+	}
+	return func(rec *interfaces.JwkKeyRec) bool { return rec.Alg == storedAlg }
+}
+
 // StrandedStream is a signing transmitter a key change would leave with no
 // active signing key (#311). SigningAlg is the effective algorithm, RS256 when
 // the stream's signing_alg is empty.

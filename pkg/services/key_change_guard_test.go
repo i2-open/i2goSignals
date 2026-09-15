@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,7 +24,7 @@ func TestStrandedByKeyChange_JudgesEachAlgorithmFromWhatTheChangeRetiresAndAdds(
 	} {
 		require.NoError(t, svc.PersistStreamStateRecord(ctx, &rec))
 	}
-	retireES256 := func(rec *interfaces.JwkKeyRec) bool { return rec.Alg == "ES256" }
+	retireES256 := RetireAlg("ES256")
 
 	cases := []struct {
 		name     string
@@ -38,6 +37,7 @@ func TestStrandedByKeyChange_JudgesEachAlgorithmFromWhatTheChangeRetiresAndAdds(
 		{"delete every key and create RSA", KeyChange{Retires: RetireAllKeys, Adds: []string{"RS256"}}, []string{"ES256"}, []string{"es-1"}},
 		{"suspend every key", KeyChange{Retires: RetireAllKeys}, []string{"ES256", "RS256"}, []string{"es-1", "rs-1"}},
 		{"suspend the RSA kid", KeyChange{Retires: RetireKid(keyedIssuer)}, []string{"RS256"}, []string{"rs-1"}},
+		{"delete RSA keys and create none", KeyChange{Retires: RetireAlg("RS256")}, []string{"RS256"}, []string{"rs-1"}},
 		{"add only", KeyChange{Adds: []string{"RS256"}}, nil, nil},
 	}
 	for _, tc := range cases {

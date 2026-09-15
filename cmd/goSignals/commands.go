@@ -1428,6 +1428,7 @@ type CreateKeyCmd struct {
 	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
 	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
 	Force    string `optional:"" help:"Force creation of the key even if it already exists (replace or rotate)."`
+	Alg      string `optional:"" help:"The signature algorithm of the key to create, rotate or replace: RS256 (the server default), ES256 or ML-DSA-65. Keys of other algorithms are left alone."`
 }
 
 func (c *CreateKeyCmd) Run(g *Globals) error {
@@ -1449,11 +1450,14 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	certUrl := *hostUrl
 	certUrl.Path = "/key/" + c.IssuerId
 	certUrl.RawPath = "/key/" + url.QueryEscape(c.IssuerId)
+	q := certUrl.Query()
 	if c.Force != "" {
-		q := certUrl.Query()
 		q.Set("force", c.Force)
-		certUrl.RawQuery = q.Encode()
 	}
+	if c.Alg != "" {
+		q.Set("alg", c.Alg)
+	}
+	certUrl.RawQuery = q.Encode()
 	req, _ := http.NewRequest(http.MethodPost, certUrl.String(), nil)
 	if bearer := bootstrapBearer(server.ClientToken); bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -1472,10 +1476,14 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
 	}
 
-	if g.Data.Pems == nil {
-		g.Data.Pems = map[string][]byte{}
+	// The stored PEM is the issuer key `generate event` signs RS256 with, so an
+	// ES256 or ML-DSA-65 key is written to the file but does not replace it.
+	if c.Alg == "" || c.Alg == "RS256" {
+		if g.Data.Pems == nil {
+			g.Data.Pems = map[string][]byte{}
+		}
+		g.Data.Pems[c.IssuerId] = body
 	}
-	g.Data.Pems[c.IssuerId] = body
 
 	outputPath := "issuer.pem"
 	if c.File != "" {
