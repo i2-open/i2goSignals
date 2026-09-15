@@ -852,7 +852,15 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			// (#308), whatever stopped the last: its key, the receiver-401 limit,
 			// the transport limit, or a stream that was not enabled when the
 			// runner started. A live runner, or a pending hand-off, is left alone.
-			if currentState.Status != model.StreamStateEnabled || r.pushRunnerLiveLocked(sid) {
+			if currentState.Status != model.StreamStateEnabled {
+				return
+			}
+			if r.pushRunnerLiveLocked(sid) {
+				// A live runner may be on its way out already; it starts a new
+				// one once it has finished (startPushRunnerIfReEnabled).
+				if runner, registered := r.pushRunners[sid]; registered {
+					runner.reEnabled = true
+				}
 				return
 			}
 			eventLogger.Info("PUSH-SRV: stream enabled with no live runner, starting one", "sid", sid)
@@ -1847,7 +1855,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	// A signing transmitter (every route mode but Forward, an empty one included)
 	// never sends a SET it cannot sign (#308). With no active key for its iss and
 	// signing_alg it takes the key-unavailable pause before touching the receiver.
-	signing := isSigningPush(stream)
+	signing := isSigningTransmitter(stream)
 	var keyWait pushKeyWait
 	if signing {
 		if key, _ := r.pushSigningKey(stream); key == nil {

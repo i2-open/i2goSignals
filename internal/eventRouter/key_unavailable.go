@@ -129,7 +129,7 @@ func (r *router) takeKeyUnavailablePause(stream *model.StreamStateRecord, compon
 // CheckSstpSigningKey is the SSTP accepting end's key check (#312). See the
 // EventRouter interface.
 func (r *router) CheckSstpSigningKey(rec *model.StreamStateRecord) error {
-	if rec == nil || rec.Status != model.StreamStateEnabled || rec.GetRouteMode() == model.RouteModeForward {
+	if rec == nil || rec.Status != model.StreamStateEnabled || !isSigningTransmitter(rec) {
 		return nil
 	}
 	cfg := rec.StreamConfiguration

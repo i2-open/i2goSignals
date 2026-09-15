@@ -316,6 +316,65 @@ func (c *countingCoordinator) TryAcquireOrRenewLease(resource, nodeId string, d 
 	return c.ClusterCoordinator.TryAcquireOrRenewLease(resource, nodeId, d)
 }
 
+// pushRunnerLive reports whether sid has a live push runner on this node; see
+// pushRunnerLiveLocked.
+func (r *router) pushRunnerLive(sid string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pushRunnerLiveLocked(sid)
+}
+
+// saveAndSync is what the stream update handler does: save req, re-read the
+// STORED record, which carries whatever status is stored (a runner's own pause
+// included), and hand that record to the router.
+func (h *filterPushHarness) saveAndSync(t *testing.T, sid string, req model.StreamStateRecord) *model.StreamStateRecord {
+	t.Helper()
+	ctx := context.Background()
+	_, err := h.streamService.UpdateStream(ctx, sid, "", req)
+	require.NoError(t, err)
+	state, err := h.streamService.GetStreamStateBySID(ctx, sid)
+	require.NoError(t, err)
+	h.router.UpdateStreamState(state)
+	return state
+}
+
+// endpointPatch is an update request moving a push transmitter to endpoint.
+func endpointPatch(endpoint string) model.StreamStateRecord {
+	return model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{
+		Delivery: &model.OneOfStreamConfigurationDelivery{
+			PushTransmitMethod: &model.PushTransmitMethod{Method: model.DeliveryPush, EndpointUrl: endpoint},
+		},
+	}}
+}
+
+// startRunnerInRecovery starts a runner whose receiver answers 5xx on the
+// stream's endpoint (and on every other endpoint too when failNew), with a
+// one-hour backoff, and waits for it to pause the stream in transport-backoff
+// recovery.
+func startRunnerInRecovery(t *testing.T, failNew bool) (*filterPushHarness, *holdingReceiver, string, *pushRunner) {
+	t.Helper()
+	t.Setenv("I2SIG_PUSH_RETRY_BASE_DELAY", "1h")
+	rx := newHoldingReceiver()
+	rx.release()
+	h := newRestartHarness(t, rx)
+	stream := h.createPushStream(t, "NONE")
+	sid := stream.StreamConfiguration.Id
+	oldEndpoint := stream.StreamConfiguration.Delivery.GetEndpointUrl()
+	rx.mu.Lock()
+	rx.classify = func(p recordedPush) goSetPush.FailureClass {
+		if p.endpoint == oldEndpoint || failNew {
+			return goSetPush.ClassServerError
+		}
+		return goSetPush.ClassAccepted
+	}
+	rx.mu.Unlock()
+	h.addPendingEvents(t, sid, 1)
+
+	h.router.UpdateStreamState(stream.DeepCopy())
+	h.waitStoredStatus(t, sid, model.StreamStatePause, "5xx")
+	return h, rx, sid, h.runnerFor(sid)
+}
+
 func deliveriesByJti(pushes []recordedPush) map[string][]recordedPush {
 	out := map[string][]recordedPush{}
 	for _, p := range pushes {
@@ -403,44 +462,81 @@ func TestPushRunnerRestart_RouteModeChangeNeverDeliversBothForms(t *testing.T) {
 
 // A runner in recoveryLoop (the receiver returned 5xx and the backoff sleep is
 // an hour) exits after a restart-triggering update, and only the successor is
-// live afterwards.
+// live afterwards. The router is handed the stored record, as the update
+// handler does, and that record carries the runner's own recovery pause: the
+// restart ends that pause, and the successor delivers.
 func TestPushRunnerRestart_RunnerInRecoveryExits(t *testing.T) {
-	t.Setenv("I2SIG_PUSH_RETRY_BASE_DELAY", "1h")
-	rx := newHoldingReceiver()
-	rx.release()
-	h := newRestartHarness(t, rx)
-	stream := h.createPushStream(t, "NONE")
-	sid := stream.StreamConfiguration.Id
-	oldEndpoint := stream.StreamConfiguration.Delivery.GetEndpointUrl()
-	rx.mu.Lock()
-	rx.classify = func(p recordedPush) goSetPush.FailureClass {
-		if p.endpoint == oldEndpoint {
-			return goSetPush.ClassServerError
-		}
-		return goSetPush.ClassAccepted
-	}
-	rx.mu.Unlock()
-	h.addPendingEvents(t, sid, 1)
+	h, _, sid, old := startRunnerInRecovery(t, false)
 
-	h.router.UpdateStreamState(stream.DeepCopy())
-	// The 5xx sends the runner into transport-backoff recovery, which pauses
-	// the stream and then sleeps.
-	require.Eventually(t, func() bool {
-		st, err := h.streamService.GetStreamState(context.Background(), sid)
-		return err == nil && st.Status == model.StreamStatePause
-	}, 5*time.Second, 5*time.Millisecond, "the runner entered recovery")
-	old := h.runnerFor(sid)
-
-	moved := stream.DeepCopy()
-	moved.StreamConfiguration.Delivery.PushTransmitMethod.EndpointUrl = "https://receiver2.example.com/events"
-	h.router.UpdateStreamState(moved)
+	synced := h.saveAndSync(t, sid, endpointPatch("https://receiver2.example.com/events"))
+	require.Equal(t, model.StreamStatePause, synced.Status, "the router is handed the runner's own pause")
 
 	waitFinished(t, old, "the runner in recoveryLoop exits after the restart")
-	h.waitReplacementRunner(t, sid, old)
+	next := h.waitReplacementRunner(t, sid, old)
 	require.Eventually(t, func() bool { return h.pendingCount(sid) == 0 }, 10*time.Second, 10*time.Millisecond,
 		"the successor delivers to the new endpoint")
+	status, reason := h.storedStatus(t, sid)
+	assert.Equal(t, model.StreamStateEnabled, status, "the restart ended the runner's own pause")
+	assert.Empty(t, reason)
 	assert.Equal(t, int64(1), h.router.runningPushRunners.Load(), "only one runner is live for the stream")
+	assert.True(t, next.live())
 	assert.True(t, h.router.pushRunnerLive(sid))
+}
+
+// When the receiver still fails after the restart, the successor goes back into
+// its own recovery: the stream is paused again, its event stays queued, and one
+// runner is live.
+func TestPushRunnerRestart_RunnerInRecoveryRecoversAgainWhileTheReceiverStillFails(t *testing.T) {
+	h, rx, sid, old := startRunnerInRecovery(t, true)
+	const newEndpoint = "https://receiver2.example.com/events"
+
+	h.saveAndSync(t, sid, endpointPatch(newEndpoint))
+
+	waitFinished(t, old, "the runner in recoveryLoop exits after the restart")
+	next := h.waitReplacementRunner(t, sid, old)
+	require.Eventually(t, func() bool {
+		for _, p := range rx.snapshot() {
+			if p.endpoint == newEndpoint {
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 5*time.Millisecond, "the successor pushes to the new endpoint")
+	h.waitStoredStatus(t, sid, model.StreamStatePause, "5xx")
+	assert.Equal(t, 1, h.pendingCount(sid), "the event stays queued")
+	assert.Equal(t, int64(1), h.router.runningPushRunners.Load(), "only one runner is live for the stream")
+	assert.True(t, next.live(), "the successor is in its own recovery")
+}
+
+// An operator's pause stays authoritative across a restart. A stream the
+// operator paused while its runner was in recovery gets no delivery after a
+// restart-triggering update, though the new endpoint would accept, and the
+// runner the hand-off starts exits.
+func TestPushRunnerRestart_OperatorPauseSurvivesTheRestart(t *testing.T) {
+	h, rx, sid, old := startRunnerInRecovery(t, false)
+	const newEndpoint = "https://receiver2.example.com/events"
+
+	// POST /status: store the operator's pause, then sync the stored record.
+	ctx := context.Background()
+	h.streamService.UpdateStreamStatus(ctx, sid, model.StreamStatePause, "operator hold")
+	rec, err := h.streamService.GetStreamState(ctx, sid)
+	require.NoError(t, err)
+	h.router.UpdateStreamState(rec)
+
+	h.saveAndSync(t, sid, endpointPatch(newEndpoint))
+
+	waitFinished(t, old, "the runner in recoveryLoop exits after the restart")
+	next := h.waitReplacementRunner(t, sid, old)
+	waitFinished(t, next, "the runner started on the operator's pause exits")
+	assert.False(t, h.router.pushRunnerLive(sid))
+	assert.Equal(t, int64(0), h.router.runningPushRunners.Load())
+	status, reason := h.storedStatus(t, sid)
+	assert.Equal(t, model.StreamStatePause, status)
+	assert.Equal(t, "operator hold", reason)
+	assert.Equal(t, 1, h.pendingCount(sid), "the event stays queued")
+	for _, p := range rx.settle(t) {
+		assert.NotEqual(t, newEndpoint, p.endpoint, "nothing is delivered on the operator-paused stream")
+	}
 }
 
 // A runner waiting for the lease (another node holds it) exits after a

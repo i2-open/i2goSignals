@@ -14,16 +14,18 @@ import (
 const signingKeyRemedy = "create, rotate or reactivate a signing key for the issuer and algorithm"
 
 // pushKeyWait counts a push runner's consecutive failed signing-key retries (#308).
-// It lives for one runPushLoop and is reset only when a batch is delivered, so a key
-// that resolves but still cannot sign reaches the retry limit instead of pausing
-// and resuming forever.
+// It lives for one runPushLoop. It is reset when a batch is delivered, and when a
+// missing key comes back, so each key-unavailable pause gets the full retry limit.
+// A pause caused by a signing failure keeps its count when the key resolves
+// again, so a key that resolves but still cannot sign reaches the retry limit
+// instead of pausing and resuming forever.
 type pushKeyWait struct {
 	tries int
 }
 
-// isSigningPush reports whether a push stream re-signs its SETs: every route mode
-// but Forward, an empty one included (#308).
-func isSigningPush(stream *model.StreamStateRecord) bool {
+// isSigningTransmitter reports whether a transmitter re-signs its SETs: every
+// route mode but Forward, an empty one included (#308).
+func isSigningTransmitter(stream *model.StreamStateRecord) bool {
 	return stream.GetRouteMode() != model.RouteModeForward
 }
 
@@ -56,10 +58,7 @@ func (r *router) awaitSigningKey(ctx context.Context, stream *model.StreamStateR
 	cfg.fillDefaults()
 	sc := stream.StreamConfiguration
 	sid := sc.Id
-	alg := sc.SigningAlg
-	if alg == "" {
-		alg = "RS256"
-	}
+	alg := signingKeyAlg(sc)
 	reason := "PUSH-SRV: " + services.NoActiveSigningKeyReason(sc.Iss, sc.SigningAlg)
 
 	logArgs := []any{"sid", sid, "issuer", sc.Iss, "alg", alg, "remedy", signingKeyRemedy,
@@ -88,6 +87,9 @@ func (r *router) awaitSigningKey(ctx context.Context, stream *model.StreamStateR
 			return RecoveryOutcomeDisabled
 		}
 		if key, _ := r.pushSigningKey(stream); key != nil {
+			if cause == nil {
+				wait.tries = 0
+			}
 			r.updateStream(stream, model.StreamStateEnabled, "")
 			r.logKeyWaitResolved(sid, RecoveryOutcomeResumed, cfg.Clock().Sub(started))
 			return RecoveryOutcomeResumed

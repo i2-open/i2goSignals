@@ -281,6 +281,151 @@ func TestPushSigningKey_OperatorPauseIsNotResumed(t *testing.T) {
 	assert.Equal(t, 1, h.pendingCount(sid))
 }
 
+// A key-paused push transmitter fixed by pointing it at an issuer that has a key
+// resumes delivery. The update handler hands the router the stored record, which
+// carries the runner's own key pause: the restart ends that pause.
+func TestPushSigningKey_UpdateToAnIssuerWithAKeyResumesDelivery(t *testing.T) {
+	h, rx, sid := startKeyedRunner(t, 1000)
+	old := h.runnerFor(sid)
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusSuspended)
+	queued := h.addPendingEvents(t, sid, 1)
+	h.waitStoredStatus(t, sid, model.StreamStatePause, services.NoActiveSigningKeyReason(signingKeyIssuer, ""))
+
+	const fixedIssuer = "https://fixed-issuer.example"
+	projectId := projectIdFromHarness(t, &testHarness{router: h.router, streamService: h.streamService, keyService: h.keyService})
+	_, err := h.keyService.CreateKeyPair(context.Background(), fixedIssuer, "sig", projectId)
+	require.NoError(t, err)
+	synced := h.saveAndSync(t, sid, model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Iss: fixedIssuer}})
+	require.Equal(t, model.StreamStatePause, synced.Status, "the router is handed the runner's own key pause")
+
+	waitFinished(t, old, "the key-paused runner exits after the restart")
+	next := h.waitReplacementRunner(t, sid, old)
+	require.Eventually(t, func() bool { return h.pendingCount(sid) == 0 }, 10*time.Second, 5*time.Millisecond,
+		"the successor delivers with the new issuer's key")
+	assert.Len(t, deliveriesByJti(rx.settle(t))[queued[0]], 1, "the queued event is delivered once")
+	status, reason := h.storedStatus(t, sid)
+	assert.Equal(t, model.StreamStateEnabled, status)
+	assert.Empty(t, reason)
+	assert.Equal(t, int64(1), h.router.runningPushRunners.Load(), "only one runner is live for the stream")
+	assert.True(t, next.live())
+}
+
+// Each key-unavailable pause gets the full retry limit (#308): the tries count
+// starts over when the key comes back, not only when a batch is acked. A key that
+// resolves but still cannot sign (the pause's cause is a signing error) keeps its
+// count, so it still reaches the limit instead of pausing and resuming forever.
+func TestPushSigningKey_EachKeyPauseGetsTheFullRetryLimit(t *testing.T) {
+	h := newSigningKeyHarness(t, nil, 1000)
+	stream := h.createSigningPushStream(t, signingKeyIssuer, model.RouteModePublish, "https://receiver.example.com/events", "")
+	ctx := context.Background()
+	var sleeps int
+	var onSleep func()
+	cfg := RecoveryConfig{
+		AuthRetryDelay: time.Millisecond,
+		AuthRetryLimit: 3,
+		Sleep: func(context.Context, time.Duration) bool {
+			sleeps++
+			if onSleep != nil {
+				onSleep()
+			}
+			return true
+		},
+	}
+	reactivateOnSleep := func(n int) func() {
+		return func() {
+			if sleeps == n {
+				h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusActive)
+			}
+		}
+	}
+
+	// A first pause resumes after two tries, and no batch is acked after it.
+	var wait pushKeyWait
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusSuspended)
+	onSleep = reactivateOnSleep(2)
+	require.Equal(t, RecoveryOutcomeResumed, h.router.awaitSigningKey(ctx, stream, cfg, &wait, nil))
+
+	// A later pause in the same loop still gets all three tries.
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusSuspended)
+	sleeps, onSleep = 0, nil
+	require.Equal(t, RecoveryOutcomeDisabled, h.router.awaitSigningKey(ctx, stream, cfg, &wait, nil))
+	assert.Equal(t, 3, sleeps, "the second key pause retries the full limit")
+
+	// A signing failure whose key resolves again does not start the count over.
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusActive)
+	wait = pushKeyWait{}
+	cause := errors.New("crypto/rsa: key unusable")
+	sleeps, onSleep = 0, nil
+	require.Equal(t, RecoveryOutcomeResumed, h.router.awaitSigningKey(ctx, stream, cfg, &wait, cause))
+	require.Equal(t, RecoveryOutcomeResumed, h.router.awaitSigningKey(ctx, stream, cfg, &wait, cause))
+	require.Equal(t, RecoveryOutcomeResumed, h.router.awaitSigningKey(ctx, stream, cfg, &wait, cause))
+	assert.Equal(t, RecoveryOutcomeDisabled, h.router.awaitSigningKey(ctx, stream, cfg, &wait, cause),
+		"a key that cannot sign reaches the limit")
+}
+
+// exitHoldingStats is a statsTracker that, once armed, holds the next push
+// runner to reach DecLeasesHeld until released. DecLeasesHeld runs in
+// runPushLoop's deferred cleanup, after the runner has written its final status
+// and before its finished signal fires.
+type exitHoldingStats struct {
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newExitHoldingStats() *exitHoldingStats {
+	return &exitHoldingStats{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *exitHoldingStats) DecLeasesHeld() {
+	if s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
+	}
+}
+
+func (s *exitHoldingStats) TrackLeaseAcquisition(string, bool)           {}
+func (s *exitHoldingStats) IncLeasesHeld()                               {}
+func (s *exitHoldingStats) RecordPushFailure(string, string)             {}
+func (s *exitHoldingStats) RecordStateTransition(string, string, string) {}
+func (s *exitHoldingStats) ObservePushRecoveryDuration(string, float64)  {}
+func (s *exitHoldingStats) RecordIdleVerifyOutcome(string, string)       {}
+
+// A re-enable that lands while the disabled runner is still on its way out (its
+// status written, its cleanup not yet done, so it still counts as live) leaves a
+// runner once the old one has gone.
+func TestPushReEnable_WhileTheDisabledRunnerIsExitingStartsARunner(t *testing.T) {
+	rx := newHoldingReceiver()
+	rx.release()
+	h := newSigningKeyHarness(t, rx, 2)
+	stats := newExitHoldingStats()
+	h.router.SetStatsHandler(stats)
+	stream := h.createSigningPushStream(t, signingKeyIssuer, model.RouteModePublish, "https://receiver.example.com/events", "")
+	id := stream.StreamConfiguration.Id
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusSuspended)
+	h.addPendingEvents(t, id, 1)
+
+	stats.armed.Store(true)
+	h.router.UpdateStreamState(stream.DeepCopy())
+	h.waitStoredStatus(t, id, model.StreamStateDisable, services.NoActiveSigningKeyReason(signingKeyIssuer, ""))
+	waitClosed(t, stats.entered, "the runner reaches its exit path")
+	first := h.runnerFor(id)
+	require.True(t, first.live(), "held in its exit path, the runner still counts as live")
+
+	h.setKeyStatus(t, signingKeyIssuer, interfaces.KeyStatusActive)
+	h.reEnable(t, id)
+	close(stats.release)
+	waitFinished(t, first, "the disabled runner exits")
+
+	require.Eventually(t, func() bool { return h.pendingCount(id) == 0 }, 10*time.Second, 5*time.Millisecond,
+		"the re-enabled stream delivers once the old runner has gone")
+	assert.NotSame(t, first, h.runnerFor(id), "a new runner was started")
+	assert.True(t, h.router.pushRunnerLive(id))
+	assert.Equal(t, int64(1), h.router.runningPushRunners.Load())
+	status, _ := h.storedStatus(t, id)
+	assert.Equal(t, model.StreamStateEnabled, status)
+}
+
 // After a key-limit disable, creating the key and re-enabling starts a new
 // runner and delivers without a node restart.
 func TestPushSigningKey_ReEnableAfterKeyFixDelivers(t *testing.T) {
