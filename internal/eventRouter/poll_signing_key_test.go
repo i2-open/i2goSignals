@@ -275,11 +275,7 @@ func TestPollSigningKey_SigningFailureWithholdsTheWholeResponse(t *testing.T) {
 	// A cached key that cannot sign this stream's RS256 SETs.
 	wrong, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	cacheKey := signingCacheKey(pollKeyIssuer, "")
-	h.router.mu.Lock()
-	h.router.issuerKeys[cacheKey] = wrong
-	h.router.issuerKids[cacheKey] = "wrong"
-	h.router.mu.Unlock()
+	h.router.signingKeys.put(pollKeyIssuer, "", wrong, "wrong")
 
 	sets, status := h.poll(sid)
 
@@ -289,10 +285,7 @@ func TestPollSigningKey_SigningFailureWithholdsTheWholeResponse(t *testing.T) {
 	assert.Equal(t, model.StreamStatePause, rec.Status)
 	assert.NotNil(t, rec.KeyUnavailableSince)
 	assert.ElementsMatch(t, queued, pendingJtis(t, h, sid), "both events stay queued")
-	h.router.mu.RLock()
-	_, cached := h.router.issuerKeys[cacheKey]
-	h.router.mu.RUnlock()
-	assert.False(t, cached, "the key that failed is evicted, so the retries read the key store")
+	assert.False(t, h.router.signingKeys.holds(pollKeyIssuer, ""), "the key that failed is evicted, so the retries read the key store")
 }
 
 func TestPollSigningKey_ForwardTransmitterNeedsNoKey(t *testing.T) {

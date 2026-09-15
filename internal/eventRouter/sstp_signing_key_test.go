@@ -90,11 +90,7 @@ func TestSstpServer_SigningFailureSendsNoSetsAndPauses(t *testing.T) {
 
 	wrong, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	cacheKey := signingCacheKey("DEFAULT", "")
-	h.router.mu.Lock()
-	h.router.issuerKeys[cacheKey] = wrong
-	h.router.issuerKids[cacheKey] = "wrong"
-	h.router.mu.Unlock()
+	h.router.signingKeys.put("DEFAULT", "", wrong, "wrong")
 
 	resp := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
 

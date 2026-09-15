@@ -133,8 +133,10 @@ type router struct {
 	cancel      context.CancelFunc
 	enabled     bool
 	nodeId      string
-	issuerKeys  map[string]crypto.Signer
-	issuerKids  map[string]string
+	// signingKeys is the key cache: each issuer's active signing key per
+	// signature algorithm, re-read from the key store 2s after it was loaded
+	// (#313).
+	signingKeys *signingKeyCache
 	pollBuffers map[string]*buffer.EventPollBuffer
 	pushBuffers map[string]*buffer.EventPushBuffer
 	// pushRunners holds the handle of the push runner registered for each push
@@ -325,8 +327,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
 		sstpSecondPushInFlight: map[string]bool{},
 		sstpInFlight:           map[string]map[string]bool{},
-		issuerKeys:             map[string]crypto.Signer{},
-		issuerKids:             map[string]string{},
+		signingKeys:            newSigningKeyCache(),
 		enabled:                false,
 		ctx:                    ctx,
 		cancel:                 cancel,
@@ -712,38 +713,15 @@ func signingCacheKey(issuer, alg string) string {
 	return issuer + "\x00" + alg
 }
 
-// checkAndLoadKey returns the cached signing key + kid for issuer, loading it
-// through the KeyService on a cache miss. It returns an untyped nil signer when
-// no key is available — callers compare the result against nil, and a boxed
-// typed-nil pointer would defeat that and panic at the signing site instead.
+// checkAndLoadKey returns issuer's active signing key + kid for alg from the key
+// cache, which reads it through the KeyService on a miss and again once the
+// cached entry is 2s old (#313). It returns an untyped nil signer when no key is
+// available — callers compare the result against nil, and a boxed typed-nil
+// pointer would defeat that and panic at the signing site instead.
 func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (crypto.Signer, string) {
-	cacheKey := signingCacheKey(issuer, alg)
-	r.mu.RLock()
-	key, ok := r.issuerKeys[cacheKey]
-	kid := r.issuerKids[cacheKey]
-	r.mu.RUnlock()
-	if !ok {
-		r.mu.Lock()
-		// Double check
-		key, ok = r.issuerKeys[cacheKey]
-		if !ok {
-			var err error
-			key, kid, err = r.keyService.GetSigner(r.ctx, issuer, alg)
-			if err != nil {
-				eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer, "alg", alg)
-				r.mu.Unlock()
-				return nil, ""
-			}
-			// Cached by reference. The previous shallow struct copy of the RSA
-			// key shared the same big.Int values anyway, so it isolated
-			// nothing; a crypto.Signer is treated as immutable, and rotation
-			// goes through InvalidateAndReload rather than mutation in place.
-			r.issuerKeys[cacheKey] = key
-			r.issuerKids[cacheKey] = kid
-		}
-		r.mu.Unlock()
-	}
-	return key, kid
+	return r.signingKeys.signer(streamID, issuer, alg, func() (crypto.Signer, string, error) {
+		return r.keyService.GetSigner(r.ctx, issuer, alg)
+	})
 }
 
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
@@ -2549,52 +2527,30 @@ func isOperationalVerify(rec *model.EventRecord) bool {
 	return false
 }
 
-// InvalidateIssuerKey flushes the cached private signing key for issuer so the
-// next delivery reloads it from the KeyService. The key-status handler calls this
-// after a revoke/suspend/reactivate (POST /key/{keyName}/status) so the router
-// stops signing outbound SETs under a retired kid without waiting for an RFC8935
-// §2.4 jws_signature_failed callback (ADR 0028). A no-op for the empty issuer.
+// InvalidateIssuerKey flushes the cached signing keys for issuer, for every
+// signature algorithm, so the next signing use reloads them from the KeyService.
+// The key handlers call this on the node that handled a key change — a
+// revoke/suspend/reactivate (POST /key/{keyName}/status), a rotate or a replace —
+// so this node signs with the result at once; every other node picks the change
+// up when its cached entry expires (ADR 0028, #313). A no-op for the empty issuer.
 func (r *router) InvalidateIssuerKey(issuer string) {
 	if issuer == "" {
 		return
 	}
-	r.mu.Lock()
-	r.dropCachedKeysLocked(issuer)
-	r.mu.Unlock()
-}
-
-// dropCachedKeysLocked evicts every cached signing key for issuer, across all
-// signature algorithms. A revoke or rotation is an issuer-level event, so an
-// issuer that signs one stream with RS256 and another with ML-DSA-65 must lose
-// both entries — leaving one behind would keep a retired kid in service on
-// whichever stream was not named. Caller holds r.mu.
-func (r *router) dropCachedKeysLocked(issuer string) {
-	prefix := issuer + "\x00"
-	for cacheKey := range r.issuerKeys {
-		if strings.HasPrefix(cacheKey, prefix) {
-			delete(r.issuerKeys, cacheKey)
-			delete(r.issuerKids, cacheKey)
-		}
-	}
+	r.signingKeys.forgetIssuer(issuer)
 }
 
 // dropCachedKey evicts the cached signing key for one issuer and algorithm, after
 // signing with it failed (#308). Other algorithms' keys for the issuer are left.
 func (r *router) dropCachedKey(issuer, alg string) {
-	cacheKey := signingCacheKey(issuer, alg)
-	r.mu.Lock()
-	delete(r.issuerKeys, cacheKey)
-	delete(r.issuerKids, cacheKey)
-	r.mu.Unlock()
+	r.signingKeys.forget(issuer, alg)
 }
 
 // InvalidateAndReload satisfies delivery.KeyReloader. The HTTP push adapter calls this
 // on RFC8935 §2.4 jws_signature_failed to flush the cached private key for issuer and
 // reload a fresh one from the KeyService. Returns (nil, "") when the reload fails.
 func (r *router) InvalidateAndReload(streamID, issuer, alg string) (crypto.Signer, string) {
-	r.mu.Lock()
-	r.dropCachedKeysLocked(issuer)
-	r.mu.Unlock()
+	r.signingKeys.forgetIssuer(issuer)
 	return r.checkAndLoadKey(streamID, issuer, alg)
 }
 

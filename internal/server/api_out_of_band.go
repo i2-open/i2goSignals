@@ -68,7 +68,9 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
-	// Update the router with the new key/kid
+	// Drop the issuer's cached signing keys, so this node signs with the rotated
+	// key the next time it signs (#313), then preload it.
+	invalidateIssuerSigningKeys(sa, issuer)
 	if sa.GetEventRouter() != nil {
 		sa.GetEventRouter().UpdateStreamState(&model.StreamStateRecord{
 			StreamConfiguration: model.StreamConfiguration{
@@ -266,6 +268,9 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 	}
 
 	issuerKey, kid, err := sa.GetKeyService().CreateKeyPairForAlg(r.Context(), keyName, alg, "sig", authCtx.ProjectId)
+	// A create, or a replace whose delete has already run, changes the issuer's
+	// signing keys even when the create fails (#313).
+	invalidateIssuerSigningKeys(sa, keyName)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error generating private key for issuer %s: %v", keyName, err))
 		http.Error(w, "Error generating private key", http.StatusInternalServerError)
@@ -518,6 +523,9 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	}
 
 	err := sa.GetKeyService().AddKey(ctx, keyName, use, kid, priv, pub, authCtx.ProjectId)
+	// A load, rotate or replace changes the issuer's signing keys; a replace's
+	// delete has run even when the add fails (#313).
+	invalidateIssuerSigningKeys(sa, keyName)
 	if err != nil {
 		http.Error(writer, "Error saving key", http.StatusInternalServerError)
 		return
@@ -630,15 +638,8 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	// Flush the event router's cached signing key for this issuer so outbound SET
 	// signing stops using a just-revoked/suspended kid. SetKeyStatus already
-	// refreshed the auth-plane key; the event plane caches issuer keys separately
-	// and is only otherwise flushed on an RFC8935 jws_signature_failed callback.
-	// The real router implements InvalidateIssuerKey; the admin-route surface,
-	// which holds no key cache, does not — hence the capability check (ADR 0028).
-	if er := sa.GetEventRouter(); er != nil {
-		if inv, ok := er.(interface{ InvalidateIssuerKey(string) }); ok {
-			inv.InvalidateIssuerKey(keyName)
-		}
-	}
+	// refreshed the auth-plane key; the event plane caches issuer keys separately.
+	invalidateIssuerSigningKeys(sa, keyName)
 
 	resp := KeyStatusResponse{Warning: warning}
 	if summary != nil {
@@ -652,6 +653,21 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// invalidateIssuerSigningKeys drops the event router's cached signing keys for
+// keyName, for every algorithm, after a key change handled on this node: a
+// rotate, a replace or load, or a status change. This node then signs with the
+// result the next time it signs; every other node picks the change up within its
+// key cache's 2s expiry (#313). The real router implements InvalidateIssuerKey;
+// the admin-route surface, which holds no key cache, does not — hence the
+// capability check (ADR 0028).
+func invalidateIssuerSigningKeys(sa SsfApplicationInterface, keyName string) {
+	if er := sa.GetEventRouter(); er != nil {
+		if inv, ok := er.(interface{ InvalidateIssuerKey(string) }); ok {
+			inv.InvalidateIssuerKey(keyName)
+		}
+	}
 }
 
 // KeyChangeConflict is the 409 body of a key suspend or replace refused because
