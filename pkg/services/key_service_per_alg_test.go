@@ -190,6 +190,31 @@ func TestRotateKey_EmptyAlgRotatesRSA(t *testing.T) {
 	assert.Equal(t, []string{ecKid}, byAlg["ES256"])
 }
 
+// TestRotateKey_TheNewKeyIsSelectedAtOnce: GetSigner signs with the newest
+// active key of an algorithm, and newest is the highest record id, so every
+// rotation must move the selection to the key it just added. That holds only
+// while record ids sort in mint order; with random ids one rotation in n+1
+// keys moves it only 1 time in n+1.
+func TestRotateKey_TheNewKeyIsSelectedAtOnce(t *testing.T) {
+	for _, alg := range []string{"RS256", "ES256", mldsa.Alg} {
+		t.Run(alg, func(t *testing.T) {
+			ctx := context.Background()
+			svc, _ := newMLDSATestService(t) // rtIssuer already holds an RSA key
+			if alg != "RS256" {
+				_, _, err := svc.CreateKeyPairForAlg(ctx, rtIssuer, alg, "sig", "")
+				require.NoError(t, err)
+			}
+			for i := 1; i <= 8; i++ {
+				_, newKid, err := svc.RotateKey(ctx, rtIssuer, alg, "")
+				require.NoError(t, err)
+				_, kid, err := svc.GetSigner(ctx, rtIssuer, alg)
+				require.NoError(t, err)
+				require.Equal(t, newKid, kid, "rotation %d: the key just added is the one signed with", i)
+			}
+		})
+	}
+}
+
 func TestRotateKey_RejectsAnUnsupportedAlg(t *testing.T) {
 	svc, _ := newMLDSATestService(t)
 	_, _, err := svc.RotateKey(context.Background(), rtIssuer, "HS256", "")

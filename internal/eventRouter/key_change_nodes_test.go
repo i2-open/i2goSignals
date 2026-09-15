@@ -265,27 +265,21 @@ func TestKeyChangeAcrossNodes_RevokeThroughAStopsNodeBsTransmitters(t *testing.T
 	assert.NotNil(t, paused.KeyUnavailableSince)
 }
 
-// rotateUntilSelected rotates nodesIssuer's RS256 key through node A, as the
-// rotate handler does, until the key store selects a key other than the one
-// with kid from. The store signs with the active key whose record id is
-// highest, and record ids are not minted in order, so one rotation moves the
-// selection only about half the time. What #313 pins is that every node
-// follows the selection within the bound, whichever key it is.
-func (n *keyChangeNodes) rotateUntilSelected(t *testing.T, from string) (crypto.Signer, string) {
+// rotateSelects rotates nodesIssuer's RS256 key through node A, as the rotate
+// handler does, and returns the key the key store selects after it, which is no
+// longer the one with kid from: the store signs with the active key whose
+// record id is highest, and record ids sort in mint order. What #313 pins is
+// that every node follows the selection within the bound.
+func (n *keyChangeNodes) rotateSelects(t *testing.T, from string) (crypto.Signer, string) {
 	t.Helper()
 	ctx := context.Background()
-	for i := 0; i < 64; i++ {
-		_, _, err := n.a.keyService.RotateKey(ctx, nodesIssuer, "", n.projectId)
-		require.NoError(t, err)
-		n.a.router.InvalidateIssuerKey(nodesIssuer)
-		key, kid, err := n.a.keyService.GetSigner(ctx, nodesIssuer, "")
-		require.NoError(t, err)
-		if kid != from {
-			return key, kid
-		}
-	}
-	require.FailNow(t, "the key store never selected a rotated key")
-	return nil, ""
+	_, _, err := n.a.keyService.RotateKey(ctx, nodesIssuer, "", n.projectId)
+	require.NoError(t, err)
+	n.a.router.InvalidateIssuerKey(nodesIssuer)
+	key, kid, err := n.a.keyService.GetSigner(ctx, nodesIssuer, "")
+	require.NoError(t, err)
+	require.NotEqual(t, from, kid, "the key store selects the rotated key")
+	return key, kid
 }
 
 // warmRotationNodes starts a running push transmitter on node B and a poll
@@ -330,7 +324,7 @@ func TestKeyChangeAcrossNodes_RotateThroughAMovesBothNodesToTheNewKid(t *testing
 	require.NoError(t, err)
 	pushSid, pollA, pollB := warmRotationNodes(t, n, rec, oldKey)
 
-	newKey, newKid := n.rotateUntilSelected(t, nodesIssuer)
+	newKey, newKid := n.rotateSelects(t, nodesIssuer)
 
 	assertBothNodesSignWith(t, n, rec, pushSid, pollA, pollB, newKey, newKid)
 }

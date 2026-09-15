@@ -31,6 +31,7 @@ type ServerProvisioningAuthzSuite struct {
 }
 
 func (s *ServerProvisioningAuthzSuite) SetupTest() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "serverauthz-test")
 	s.Require().NoError(err)
 	err = persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT")

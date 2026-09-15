@@ -27,6 +27,7 @@ func TestKeyStatusHandlerSuite(t *testing.T) {
 }
 
 func (s *KeyStatusHandlerSuite) SetupTest() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "keystatus-test")
 	s.Require().NoError(err)
 	s.Require().NoError(persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))

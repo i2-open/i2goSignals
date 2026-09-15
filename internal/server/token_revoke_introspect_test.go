@@ -25,6 +25,7 @@ type TokenAdminSuite struct {
 }
 
 func (s *TokenAdminSuite) SetupTest() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "tokenadmin-test")
 	s.Require().NoError(err)
 	// Wire the token signing key so the AuthIssuer can mint + validate tokens.

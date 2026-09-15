@@ -37,6 +37,7 @@ func TestKeyChangeGuardSuite(t *testing.T) {
 }
 
 func (s *KeyChangeGuardSuite) SetupTest() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "key-change-guard-"+s.T().Name())
 	s.Require().NoError(err)
 	s.Require().NoError(persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))

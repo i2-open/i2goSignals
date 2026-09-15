@@ -154,27 +154,23 @@ func privateKeyPEM(rr *httptest.ResponseRecorder) crypto.Signer {
 	return signer
 }
 
-// rotateUntilSelected sends rotate requests until the key store selects a key
-// other than the one with kid from. The store signs with the active key whose
-// record id is highest, and record ids are not minted in order, so a single
-// rotation moves the selection only about half the time.
-func (s *KeyChangeSigningSuite) rotateUntilSelected(from string, send func() *httptest.ResponseRecorder) (crypto.Signer, string) {
-	for i := 0; i < 64; i++ {
-		rr := send()
-		s.Require().Equal(http.StatusOK, rr.Code, rr.Body.String())
-		if key, kid := s.selected(); kid != from {
-			return key, kid
-		}
-	}
-	s.FailNow("the key store never selected a rotated key")
-	return nil, ""
+// rotateSelects sends one rotate request and returns the key the key store
+// selects after it, which is no longer the one with kid from: the store signs
+// with the active key whose record id is highest, and record ids sort in mint
+// order, so the rotated key is selected at once.
+func (s *KeyChangeSigningSuite) rotateSelects(from string, send func() *httptest.ResponseRecorder) (crypto.Signer, string) {
+	rr := send()
+	s.Require().Equal(http.StatusOK, rr.Code, rr.Body.String())
+	key, kid := s.selected()
+	s.Require().NotEqual(from, kid, "the key store selects the rotated key")
+	return key, kid
 }
 
 func (s *KeyChangeSigningSuite) TestRotateSignsWithTheNewKeyAtOnce() {
 	for _, query := range []string{"force=rotate", "rotate"} {
 		_, oldKid := s.warm()
 
-		key, kid := s.rotateUntilSelected(oldKid, func() *httptest.ResponseRecorder { return s.post(query, nil, "") })
+		key, kid := s.rotateSelects(oldKid, func() *httptest.ResponseRecorder { return s.post(query, nil, "") })
 
 		got, verifies := s.polled(key.Public())
 		s.Equal(kid, got, "%s: the handling node signs with the new kid the next time it signs", query)
@@ -213,7 +209,7 @@ func (s *KeyChangeSigningSuite) TestReplaceOnKeyLoadSignsWithTheUploadedKeyAtOnc
 func (s *KeyChangeSigningSuite) TestRotateOnKeyLoadSignsWithTheNewKeyAtOnce() {
 	_, oldKid := s.warm()
 
-	key, kid := s.rotateUntilSelected(oldKid, func() *httptest.ResponseRecorder {
+	key, kid := s.rotateSelects(oldKid, func() *httptest.ResponseRecorder {
 		_, pemBody := rsaPrivateKeyPEM(s.T())
 		return s.post("force=rotate", pemBody, "application/x-pem-file")
 	})

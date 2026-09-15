@@ -71,6 +71,7 @@ func (a *statusRefreshApp) resetRefreshes() {
 
 func newStatusRefreshApp(t *testing.T) *statusRefreshApp {
 	t.Helper()
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "update-status-sid-"+t.Name())
 	require.NoError(t, err)
 	require.NoError(t, persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))

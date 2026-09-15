@@ -38,6 +38,9 @@ func TestKeyAlgHandlerSuite(t *testing.T) {
 const keyAlgIssuer = "https://keyalg.example"
 
 func (s *KeyAlgHandlerSuite) SetupTest() {
+	// A directory of the test's own: the default config/keyalg-test is shared by
+	// every test and every run, and a provider's save loop leaves the keys there.
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "keyalg-test")
 	s.Require().NoError(err)
 	s.Require().NoError(persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))
