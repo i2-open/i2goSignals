@@ -101,6 +101,12 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 // Return values:
 //   - 201 Created: (If generating) PEM-encoded private key.
 //   - 200 OK: (If loading or rotating) PEM-encoded private key or success message.
+//
+// Errors:
+//   - 409 Conflict: the key exists and no force is given, or a force=replace
+//     would leave a signing transmitter with no active signing key for its
+//     algorithm (#311), with a KeyChangeConflict JSON body. Resending with
+//     confirm=true replaces anyway.
 func (sa *SignalsApplication) CreateKey(w http.ResponseWriter, r *http.Request) {
 	CreateKeyHandler(sa, w, r)
 }
@@ -212,6 +218,12 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 		}
 
 		if force == "replace" {
+			// The guard (#311) describes exactly this replace: every key under
+			// the name is deleted and one RSA signing key is created.
+			change := services.KeyChange{Retires: services.RetireAllKeys, Adds: []string{"RS256"}}
+			if refuseStrandingKeyChange(sa, w, r, keyName, "replacing", change) {
+				return
+			}
 			err := sa.GetKeyService().DeleteKeysByName(r.Context(), keyName)
 			if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 				serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
@@ -259,6 +271,7 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 //   - issuer (path): The name of the issuer for which to load the key. This will become the kid in the certificates and matches certificate 'iss' values.
 //   - force (query): Optional. If 'replace', all existing keys for the issuer are deleted before adding the new key.
 //     If 'rotate', a new unique kid is generated and added to the set of keys for the issuer.
+//   - confirm (query): Optional. 'true' lets a force=replace go ahead when it would strand signing transmitters (#311).
 //   - use (query): Optional. Specifies the intended use of the key. Acceptable values are 'sig' (signing) or 'enc' (encryption). Defaults to 'sig'.
 //   - Content-Type (header): Must be one of 'application/x-pem-file', 'application/pkix-cert', or 'application/pkcs7-mime'.
 //   - Request body: The key data in PEM or DER format.
@@ -269,7 +282,10 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 // Errors:
 //   - 400 Bad Request: Error reading body, invalid PEM data, invalid certificate, or unsupported key type.
 //   - 403 Forbidden: Invalid permissions.
-//   - 409 Conflict: Key already exists without force parameter.
+//   - 409 Conflict: Key already exists without force parameter, or a
+//     force=replace would leave a signing transmitter with no active signing
+//     key for its algorithm (#311): a KeyChangeConflict JSON body listing the
+//     streams. Resending with confirm=true (query) replaces anyway.
 //   - 500 Internal Server Error: Error saving the key.
 func (sa *SignalsApplication) LoadKey(writer http.ResponseWriter, request *http.Request) {
 	LoadKeyHandler(sa, writer, request)
@@ -428,6 +444,16 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	kid := ""
 	if force == "replace" {
+		// The guard (#311) describes exactly this replace: every key under the
+		// name is deleted, and the upload is a signing key only when it carries
+		// a private half (always RSA).
+		change := services.KeyChange{Retires: services.RetireAllKeys}
+		if priv != nil {
+			change.Adds = []string{"RS256"}
+		}
+		if refuseStrandingKeyChange(sa, writer, request, keyName, "replacing", change) {
+			return
+		}
 		err := sa.GetKeyService().DeleteKeysByName(ctx, keyName)
 		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 			serverLog.Error(fmt.Sprintf("Error deleting existing keys for %s: %v", keyName, err))
@@ -492,6 +518,10 @@ type KeyStatusResponse struct {
 //     denied — status mutation is takeover-class, ADR 0006).
 //   - 404 Not Found: keyName has no records, or the supplied kid does not
 //     belong to keyName.
+//   - 409 Conflict: a suspend would leave a signing transmitter with no active
+//     signing key for its algorithm (#311). The body is a KeyChangeConflict
+//     listing the streams; resending with confirm=true (query) suspends anyway.
+//     A revoke or a reactivate is never refused.
 func (sa *SignalsApplication) SetKeyStatus(w http.ResponseWriter, r *http.Request) {
 	SetKeyStatusHandler(sa, w, r)
 }
@@ -525,6 +555,18 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
+	}
+
+	// A suspend that would strand signing transmitters needs ?confirm=true
+	// (#311). A revoke never does: it is the response to a leaked key.
+	if req.Status == interfaces.KeyStatusSuspended {
+		change := services.KeyChange{Retires: services.RetireAllKeys}
+		if req.Kid != "" {
+			change.Retires = services.RetireKid(req.Kid)
+		}
+		if refuseStrandingKeyChange(sa, w, r, keyName, "suspending", change) {
+			return
+		}
 	}
 
 	summary, warning, err := sa.GetKeyService().SetKeyStatus(r.Context(), keyName, req.Kid, req.Status)
@@ -565,6 +607,54 @@ func SetKeyStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// KeyChangeConflict is the 409 body of a key suspend or replace refused because
+// it would leave signing transmitters with no active signing key (#311). Streams
+// lists them; i2goSignalsAdmin reads it to offer the confirmation.
+type KeyChangeConflict struct {
+	Error   string                    `json:"error"`
+	Streams []services.StrandedStream `json:"streams"`
+}
+
+// keyChangeConfirmed reports whether the caller resent a guarded key change with
+// ?confirm=true. Any other value counts as absent.
+func keyChangeConfirmed(r *http.Request) bool {
+	return r.URL.Query().Get("confirm") == "true"
+}
+
+// refuseStrandingKeyChange is the #311 guard, run before a key suspend or
+// replace is made. When change would leave a signing transmitter with no active
+// signing key for its algorithm, and the caller has not confirmed, it writes a
+// 409 KeyChangeConflict and reports true; nothing has changed and the handler
+// must return. It also reports true after writing a 500 when the streams or keys
+// could not be read. action names the change in the error ("suspending").
+func refuseStrandingKeyChange(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, keyName, action string, change services.KeyChange) bool {
+	if keyChangeConfirmed(r) || sa.GetStreamService() == nil {
+		return false
+	}
+	algs, stranded, err := sa.GetStreamService().StrandedByKeyChange(r.Context(), keyName, change)
+	if err != nil {
+		serverLog.Error("Error checking the signing transmitters of a key change", "keyName", keyName, "error", err)
+		http.Error(w, "Error checking the streams that sign with this key", http.StatusInternalServerError)
+		return true
+	}
+	if len(stranded) == 0 {
+		return false
+	}
+	body, err := json.Marshal(KeyChangeConflict{
+		Error: fmt.Sprintf("%s key %s would leave no active signing key for %s, which the listed signing transmitters use; resend with confirm=true to proceed",
+			action, keyName, strings.Join(algs, ", ")),
+		Streams: stranded,
+	})
+	if err != nil {
+		http.Error(w, "Error marshalling response", http.StatusInternalServerError)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusConflict)
+	_, _ = w.Write(body)
+	return true
 }
 
 func convertKey(jwksJson *json.RawMessage, format string) ([]byte, error) {
