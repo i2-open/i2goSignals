@@ -33,15 +33,20 @@ type keyDoc struct {
 	// omitempty keeps it absent from RSA documents, which is exactly how
 	// pre-existing documents decode: "" => RSA.
 	Alg string `bson:"alg,omitempty"`
-	// Lifecycle timestamps (ADR 0028). omitzero keeps them absent from
-	// pre-existing documents, which decode as the zero time => active.
+	// Lifecycle timestamps (ADR 0028). The bson struct-tag parser (mongo-driver
+	// v2) ignores omitzero, so every document written through keyDoc stores
+	// both, as a zero date while unset. A pre-existing document without them and
+	// a stored zero date both decode as the zero time => active, and the revoke
+	// filter matches either ($in [nil, time.Time{}]).
 	SuspendedAt time.Time `bson:"suspended_at,omitzero"`
 	RevokedAt   time.Time `bson:"revoked_at,omitzero"`
-	// CreatedAt is JwkKeyRec.CreatedAt (i2goSignals#316). omitempty, which the
-	// bson codec applies to a zero time.Time, keeps it absent from an unstamped
-	// record, the same as a document written before the field existed: both
-	// sort below every stamped document in FindLatestByKeyName's created_at
-	// sort, and among themselves by _id, as JwkKeyRec.NewerThan orders them.
+	// CreatedAt is JwkKeyRec.CreatedAt (i2goSignals#316). It is omitempty, not
+	// omitzero, because the bson codec ignores omitzero but applies omitempty to
+	// a zero time.Time. An unstamped record must store no created_at, the same
+	// as a document written before the field existed; a stored zero date would
+	// sort above every such document. With the field absent, both sort below
+	// every stamped document in FindLatestByKeyName's created_at sort, and among
+	// themselves by _id, as JwkKeyRec.NewerThan orders them.
 	CreatedAt time.Time `bson:"created_at,omitempty"`
 }
 

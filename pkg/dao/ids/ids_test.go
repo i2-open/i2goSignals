@@ -48,10 +48,10 @@ func TestNewObjectIDFormat(t *testing.T) {
 	}
 }
 
-// TestNewObjectIDMonotonic pins the property callers rely on when they take the
-// highest record id as the newest record (the key store's signing key selection
-// above all): consecutive mints sort into mint order, as a MongoDB ObjectID's
-// Hex() form does.
+// TestNewObjectIDMonotonic pins the property callers rely on when they fall back
+// to id order (the key store's JwkKeyRec.NewerThan tie-break, for key records
+// with equal or no creation times): consecutive mints sort into mint order, as a
+// MongoDB ObjectID's Hex() form does.
 func TestNewObjectIDMonotonic(t *testing.T) {
 	const n = 10_000
 	prev := NewObjectID()
