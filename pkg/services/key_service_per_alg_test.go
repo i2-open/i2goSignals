@@ -191,10 +191,11 @@ func TestRotateKey_EmptyAlgRotatesRSA(t *testing.T) {
 }
 
 // TestRotateKey_TheNewKeyIsSelectedAtOnce: GetSigner signs with the newest
-// active key of an algorithm, and newest is the highest record id, so every
-// rotation must move the selection to the key it just added. That holds only
-// while record ids sort in mint order; with random ids one rotation in n+1
-// keys moves it only 1 time in n+1.
+// active key of an algorithm, so every rotation must move the selection to the
+// key it just added. Keys minted in the same millisecond tie on creation time
+// and fall back to record id order, so this also holds only while record ids
+// sort in mint order; with random ids one rotation in n+1 keys moves it only 1
+// time in n+1.
 func TestRotateKey_TheNewKeyIsSelectedAtOnce(t *testing.T) {
 	for _, alg := range []string{"RS256", "ES256", mldsa.Alg} {
 		t.Run(alg, func(t *testing.T) {

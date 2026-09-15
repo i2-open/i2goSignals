@@ -145,9 +145,22 @@ key per issuer and algorithm expires after 2s (#313), so a suspend, revoke,
 reactivate, rotate or replace made through one node reaches every node's
 transmitters within that bound, not only the handling node's.
 
-**"Latest active record" means newest by record id.** Issuance selection takes
-the active record with the highest id. `ids.NewObjectID` mints ids in the
-MongoDB ObjectID layout (timestamp, per-process value, counter), so a rotated key
-is selected at once. Records minted between 2026-05-06 and this update carry
-random ids and may sort above a newer key; on such a store, suspend the old key
-to complete a rotation.
+**"Latest active record" means newest by creation time** (amended 2026-09-15,
+GH #316). Each key record carries a `CreatedAt`, which `KeyService` stamps when
+it mints the record and no status transition changes. Issuance selection takes
+the active record with the latest `CreatedAt`. Record id order decides only
+between records whose creation times are equal to the millisecond (the precision
+Mongo stores) and between records that have no `CreatedAt`, and a record that
+has one is newer than any record that does not. One rule, `JwkKeyRec.NewerThan`,
+decides every choice of a keyName's newest record: signing and issuance
+selection, the stranding guard's active-key check, the `use` a rotation carries
+over, which record wins a kid collision in the auth JWKS, and each community
+`KeyDAO.FindLatestByKeyName` (Mongo sorts on `created_at` then `_id`, both
+descending). Records minted by v0.11.0 through v0.12.0-alpha.19 carry random ids
+and no `CreatedAt`. They keep their order among themselves, so an upgraded store
+selects the key it selected before, and any key minted after the upgrade is
+newer than all of them, so a rotation takes effect at once. The earlier
+workaround, suspending the old key to complete a rotation, is retired. There is
+no migration and no backfill. `ids.NewObjectID` still mints ids in the MongoDB
+ObjectID layout (timestamp, per-process value, counter), which keeps the id
+tie-break in mint order.
