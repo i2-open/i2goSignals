@@ -31,6 +31,10 @@ func newSstpSigningOnlyPair(t *testing.T, instance *ssfInstance) *sstpTestPair {
 	txSid := ids.NewObjectID()
 	rxSid := ids.NewObjectID()
 	pairId := ids.NewObjectID()
+	// The transmit half re-signs as peer.example.com, which needs an active key
+	// or every exchange is refused (#312).
+	_, err := instance.keySvc().EnsureSigningKey(context.Background(), "peer.example.com", instance.projectId)
+	require.NoError(t, err)
 
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{

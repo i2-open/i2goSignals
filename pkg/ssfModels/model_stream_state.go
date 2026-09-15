@@ -91,6 +91,18 @@ type StreamStateRecord struct {
 	// stream-state surfaces, not on the SSF status response.
 	TransmitterCaused bool `json:"transmitter_caused,omitempty" bson:"transmitter_caused,omitempty"`
 
+	// KeyUnavailableSince marks a key-unavailable pause (issue #312): a paused
+	// Status the server set itself because a signing poll transmitter or SSTP
+	// pair had no active signing key for its iss and signing_alg. It holds the
+	// time of the first failure; a repeat failure does not move it. Only
+	// SetKeyUnavailablePause sets it; every other status write (SetStatus,
+	// SetTransmitterCausedStatus, and the DAO's other status writes) clears it.
+	// The server's background key check resumes a stream only while it is
+	// still set, so an operator's pause is never resumed, and disables a
+	// stream whose key is still missing once the retry limit has passed since
+	// this time.
+	KeyUnavailableSince *time.Time `json:"key_unavailable_since,omitempty" bson:"key_unavailable_since,omitempty"`
+
 	RemoteAddress *RemoteIP `json:"remote_address,omitempty" bson:"remote_address,omitempty"`
 
 	// DefaultSubjects is the SSF subject-filtering baseline policy for a
@@ -297,6 +309,10 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
 	res.InboundEventSource = ss.InboundEventSource.DeepCopy()
+	if ss.KeyUnavailableSince != nil {
+		since := *ss.KeyUnavailableSince
+		res.KeyUnavailableSince = &since
+	}
 	if ss.RetentionWindowDays != nil {
 		v := *ss.RetentionWindowDays
 		res.RetentionWindowDays = &v
@@ -316,6 +332,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.Status = mod.Status
 	ss.ErrorMsg = mod.ErrorMsg
 	ss.TransmitterCaused = mod.TransmitterCaused
+	ss.KeyUnavailableSince = mod.KeyUnavailableSince
 	// ss.Receiver = mod.Receiver - now handled by StreamConfiguration
 
 	ss.ValidateJwks = mod.ValidateJwks
@@ -429,11 +446,13 @@ func (ss *StreamStateRecord) isPair() bool {
 // the pair. A one-way logical pause would be a later enhancement.
 //
 // It clears TransmitterCaused: an ordinary status write is not the
-// transmitter's report (#310).
+// transmitter's report (#310). It also clears KeyUnavailableSince: it is not a
+// key-unavailable pause (#312).
 func (ss *StreamStateRecord) SetStatus(status, reason string) {
 	ss.Status = status
 	ss.ErrorMsg = reason
 	ss.TransmitterCaused = false
+	ss.KeyUnavailableSince = nil
 	if ss.isPair() {
 		ss.InboundStatus = status
 		ss.InboundErrorMsg = reason
@@ -448,17 +467,31 @@ func (ss *StreamStateRecord) SetTransmitterCausedStatus(status, reason string) {
 	ss.TransmitterCaused = true
 }
 
+// SetKeyUnavailablePause is SetStatus for a key-unavailable pause (#312): it
+// writes paused and reason and sets KeyUnavailableSince to since, unless the
+// record already carries an earlier marker, so a repeat failure keeps the time
+// of the first. It does not persist.
+func (ss *StreamStateRecord) SetKeyUnavailablePause(reason string, since time.Time) {
+	marker := ss.KeyUnavailableSince
+	ss.SetStatus(StreamStatePause, reason)
+	if marker == nil || since.Before(*marker) {
+		marker = &since
+	}
+	ss.KeyUnavailableSince = marker
+}
+
 // IsStatusChange reports whether SetStatus(status, reason) would change the
 // record, which is POST /status's "no change" test (#303). On a pair both halves
 // take the write, so it is a change when EITHER half differs — which also lets a
 // legacy split record heal; otherwise only the primary half is compared. Reasons
 // compare case-insensitively. A transmitter-caused record always changes, since
-// the write clears TransmitterCaused (#310).
+// the write clears TransmitterCaused (#310), and so does a key-unavailable pause,
+// since the write clears KeyUnavailableSince (#312).
 func (ss *StreamStateRecord) IsStatusChange(status, reason string) bool {
 	differs := func(halfStatus, halfReason string) bool {
 		return halfStatus != status || !strings.EqualFold(reason, halfReason)
 	}
-	if ss.TransmitterCaused {
+	if ss.TransmitterCaused || ss.KeyUnavailableSince != nil {
 		return true
 	}
 	if ss.isPair() && differs(ss.InboundStatus, ss.InboundErrorMsg) {

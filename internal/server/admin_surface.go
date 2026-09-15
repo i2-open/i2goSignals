@@ -164,6 +164,11 @@ func (a *adminRouterAdapter) PollStreamHandler(string, model.PollParameters) (ma
 	return nil, false, 0
 }
 
+func (a *adminRouterAdapter) CheckSstpSigningKey(*model.StreamStateRecord) error {
+	a.unsupported("CheckSstpSigningKey")
+	return nil
+}
+
 func (a *adminRouterAdapter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) goSetSstp.Message {
 	a.unsupported("SstpServerHandler")
 	return goSetSstp.Message{}

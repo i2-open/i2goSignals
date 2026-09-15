@@ -84,6 +84,7 @@ func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.EventReco
 func (rr *recordingRouter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
 	return nil, false, http.StatusOK
 }
+func (rr *recordingRouter) CheckSstpSigningKey(*model.StreamStateRecord) error { return nil }
 func (rr *recordingRouter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) goSetSstp.Message {
 	return goSetSstp.Message{}
 }

@@ -70,7 +70,8 @@ func TestOrphanPendingMarker_PollSkipsAndLeavesPending(t *testing.T) {
 
 	jtis := []string{orphan, healthy}
 	pollBuffer := buffer.CreateEventPollBuffer(jtis, h.router.pollDefaultTimeoutSecs, h.router.pollMaxTimeoutSecs)
-	sets := h.router.assemblePollResponse(sid, stream, pollBuffer, jtis, true, nil, "")
+	sets, err := h.router.assemblePollResponse(sid, stream, pollBuffer, jtis, true, nil, "")
+	require.NoError(t, err)
 
 	require.NotContains(t, sets, orphan, "an orphan must not appear in a poll response")
 	require.Contains(t, sets, healthy)
@@ -95,7 +96,8 @@ func TestOrphanPendingMarker_SstpServerSkips(t *testing.T) {
 	pair := *stream
 	pair.StreamConfiguration.RouteMode = model.RouteModeForward
 
-	sets := h.router.buildSstpOutboundSets(&pair, []string{orphan, healthy})
+	sets, err := h.router.buildSstpOutboundSets(&pair, []string{orphan, healthy})
+	require.NoError(t, err)
 
 	require.NotContains(t, sets, orphan, "an orphan must not be rendered onto an SSTP message")
 	require.Contains(t, sets, healthy)

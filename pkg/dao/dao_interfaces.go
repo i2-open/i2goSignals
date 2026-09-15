@@ -45,13 +45,20 @@ type StreamDAO interface {
 	// Status updates
 
 	// UpdateStatus writes status and errorMsg and clears transmitter_caused
-	// (#310): an ordinary status write is never the transmitter's report.
+	// (#310): an ordinary status write is never the transmitter's report. It
+	// also clears key_unavailable_since (#312).
 	UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error
 
 	// UpdateTransmitterCausedStatus writes a paused or disabled status the
 	// transmitter's status endpoint reported, setting transmitter_caused with
-	// the status and errorMsg (#310).
+	// the status and errorMsg (#310). It clears key_unavailable_since (#312).
 	UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error
+
+	// UpdateKeyUnavailablePause writes a key-unavailable pause (#312): status
+	// paused with errorMsg, and key_unavailable_since set to since unless the
+	// stored record already carries an earlier time, so a repeat failure keeps
+	// the first. It clears transmitter_caused.
+	UpdateKeyUnavailablePause(ctx context.Context, id string, errorMsg string, since time.Time) error
 
 	// UpdateRemoteAddress persists only the remote_address sub-document for the given stream.
 	UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error

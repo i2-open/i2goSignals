@@ -3,6 +3,7 @@ package mongo
 import (
 	"context"
 	"testing"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -84,5 +85,53 @@ func (suite *StreamDAOMongoStatusSuite) TestTransmitterCausedRoundTrip() {
 	suite.NotContains(raw, "transmitter_caused", "a cleared flag is omitted from the stored document")
 
 	suite.Error(suite.dao.UpdateTransmitterCausedStatus(ctx, model.NewRecordId().Hex(), model.StreamStateDisable, "x"),
+		"an unknown stream is an error")
+}
+
+// TestKeyUnavailablePauseRoundTrip (#312): the key-unavailable pause stores
+// paused, the reason and the marker; a repeat pause keeps the first failure's
+// time; a whole-record Update carries the marker; every other status write
+// removes it from the stored document.
+func (suite *StreamDAOMongoStatusSuite) TestKeyUnavailablePauseRoundTrip() {
+	ctx := context.Background()
+	mid := model.NewRecordId()
+	sid := mid.Hex()
+	suite.Require().NoError(suite.dao.Create(ctx, &model.StreamStateRecord{
+		Id:                  mid,
+		StreamConfiguration: model.StreamConfiguration{Id: sid},
+		Status:              model.StreamStateEnabled,
+	}))
+	first := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	suite.Require().NoError(suite.dao.UpdateKeyUnavailablePause(ctx, sid, "POLL-SRV: no key", first))
+	got, err := suite.dao.FindByID(ctx, sid)
+	suite.Require().NoError(err)
+	suite.Equal(model.StreamStatePause, got.Status)
+	suite.Equal("POLL-SRV: no key", got.ErrorMsg)
+	suite.Require().NotNil(got.KeyUnavailableSince, "the marker must be stored")
+	suite.True(got.KeyUnavailableSince.Equal(first))
+
+	suite.Require().NoError(suite.dao.UpdateKeyUnavailablePause(ctx, sid, "POLL-SRV: no key", first.Add(time.Minute)))
+	got, err = suite.dao.FindByID(ctx, sid)
+	suite.Require().NoError(err)
+	suite.True(got.KeyUnavailableSince.Equal(first), "a repeat failure must not move the marker")
+
+	suite.Require().NoError(suite.dao.Update(ctx, got))
+	got, err = suite.dao.FindByID(ctx, sid)
+	suite.Require().NoError(err)
+	suite.NotNil(got.KeyUnavailableSince, "a whole-record update must carry the marker")
+
+	suite.Require().NoError(suite.dao.UpdateStatus(ctx, sid, model.StreamStateEnabled, ""))
+	var raw bson.M
+	suite.Require().NoError(suite.collection.FindOne(ctx, bson.M{"_id": mid}).Decode(&raw))
+	suite.NotContains(raw, "key_unavailable_since", "UpdateStatus must remove the marker")
+
+	suite.Require().NoError(suite.dao.UpdateKeyUnavailablePause(ctx, sid, "POLL-SRV: no key", first))
+	suite.Require().NoError(suite.dao.UpdateTransmitterCausedStatus(ctx, sid, model.StreamStatePause, "x"))
+	raw = bson.M{}
+	suite.Require().NoError(suite.collection.FindOne(ctx, bson.M{"_id": mid}).Decode(&raw))
+	suite.NotContains(raw, "key_unavailable_since", "UpdateTransmitterCausedStatus must remove the marker")
+
+	suite.Error(suite.dao.UpdateKeyUnavailablePause(ctx, model.NewRecordId().Hex(), "x", first),
 		"an unknown stream is an error")
 }

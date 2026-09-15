@@ -1694,51 +1694,76 @@ func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model
 }
 
 // UpdateStreamStatus writes a stream's status and reason. It clears
-// TransmitterCaused (#310): this is the write for an operator's POST /status and
-// for every status the server decides itself.
+// TransmitterCaused (#310) and KeyUnavailableSince (#312): this is the write for
+// an operator's POST /status and for every status the server decides itself.
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
-	s.updateStreamStatus(ctx, streamID, status, errorMsg, false)
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: status, reason: errorMsg})
 }
 
 // UpdateTransmitterCausedStatus writes a paused or disabled status that a poll
 // receiver learned from the transmitter's status endpoint, setting
 // TransmitterCaused with it (#310).
 func (s *StreamService) UpdateTransmitterCausedStatus(ctx context.Context, streamID string, status string, errorMsg string) {
-	s.updateStreamStatus(ctx, streamID, status, errorMsg, true)
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: status, reason: errorMsg, transmitterCaused: true})
 }
 
-func (s *StreamService) updateStreamStatus(ctx context.Context, streamID, status, errorMsg string, transmitterCaused bool) {
+// UpdateKeyUnavailablePause writes a key-unavailable pause (#312): a signing
+// poll transmitter or SSTP pair with no active signing key is paused with reason,
+// and KeyUnavailableSince is set to since unless the stored record already
+// carries an earlier time. On a pair both halves pause, whichever SID names it.
+func (s *StreamService) UpdateKeyUnavailablePause(ctx context.Context, streamID string, reason string, since time.Time) {
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: model.StreamStatePause, reason: reason, keyUnavailableSince: since})
+}
+
+// statusWrite is one status write together with the marker it carries, if any:
+// TransmitterCaused (#310) or KeyUnavailableSince (#312). Whichever marker a
+// write does not set, it clears.
+type statusWrite struct {
+	status            string
+	reason            string
+	transmitterCaused bool
+	// keyUnavailableSince is non-zero only for a key-unavailable pause.
+	keyUnavailableSince time.Time
+}
+
+// applyTo writes w onto rec in memory the way the DAO writes it.
+func (w statusWrite) applyTo(rec *model.StreamStateRecord) {
+	switch {
+	case w.transmitterCaused:
+		rec.SetTransmitterCausedStatus(w.status, w.reason)
+	case !w.keyUnavailableSince.IsZero():
+		rec.SetKeyUnavailablePause(w.reason, w.keyUnavailableSince)
+	default:
+		rec.SetStatus(w.status, w.reason)
+	}
+}
+
+func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string, w statusWrite) {
 	invalidateRequestStreams(ctx)
 	// A status write moves both halves of an SSTP pair whichever SID names it
 	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
 	// belongs to a pair, the SSTP path owns the update.
 	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
-		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg, transmitterCaused)
+		s.updateSstpPairStatus(ctx, rec, streamID, w)
 		return
 	}
 
-	write := s.streamDAO.UpdateStatus
-	if transmitterCaused {
-		write = s.streamDAO.UpdateTransmitterCausedStatus
+	var err error
+	switch {
+	case w.transmitterCaused:
+		err = s.streamDAO.UpdateTransmitterCausedStatus(ctx, streamID, w.status, w.reason)
+	case !w.keyUnavailableSince.IsZero():
+		err = s.streamDAO.UpdateKeyUnavailablePause(ctx, streamID, w.reason, w.keyUnavailableSince)
+	default:
+		err = s.streamDAO.UpdateStatus(ctx, streamID, w.status, w.reason)
 	}
-	if err := write(ctx, streamID, status, errorMsg); err != nil {
+	if err != nil {
 		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
 	}
 
 	s.mu.Lock()
-	s.applyStatusToReceiverCache(streamID, status, errorMsg, transmitterCaused)
+	s.applyStatusToReceiverCache(streamID, w)
 	s.mu.Unlock()
-}
-
-// setRecordStatus writes a status onto rec in memory the way the DAO writes it:
-// SetTransmitterCausedStatus when transmitterCaused, SetStatus (which clears the
-// flag) otherwise.
-func setRecordStatus(rec *model.StreamStateRecord, status, errorMsg string, transmitterCaused bool) {
-	if transmitterCaused {
-		rec.SetTransmitterCausedStatus(status, errorMsg)
-		return
-	}
-	rec.SetStatus(status, errorMsg)
 }
 
 // applyStatusToReceiverCache mirrors a status change onto this node's receiver
@@ -1749,21 +1774,21 @@ func setRecordStatus(rec *model.StreamStateRecord, status, errorMsg string, tran
 // symptom through the re-enable path. Matching is by record identity, not map
 // key, because a pair's entry is keyed by its inbound SID (ADR 0018) while a
 // caller may name any of the record's identities. The status lands through
-// StreamStateRecord.SetStatus so the cached copy takes the same rule as the DAO
+// statusWrite.applyTo so the cached copy takes the same rule as the DAO
 // record — both halves of a pair move whichever SID is named (#303), and the
-// TransmitterCaused flag is set or cleared with the status (#310) — and when
-// the change transitions the entry's receive direction to enabled the retry
-// ladder is reset — including out of the permanent latch, which nothing else
-// clears.
+// TransmitterCaused flag (#310) and KeyUnavailableSince marker (#312) are set or
+// cleared with the status — and when the change transitions the entry's receive
+// direction to enabled the retry ladder is reset — including out of the
+// permanent latch, which nothing else clears.
 //
 // The caller must hold s.mu.
-func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg string, transmitterCaused bool) {
+func (s *StreamService) applyStatusToReceiverCache(streamID string, w statusWrite) {
 	for _, entry := range s.receiverStreams {
 		if entry == nil || !recordIdentifiedBy(entry.record, streamID) {
 			continue
 		}
 		wasEnabled := snapshotReceiveDirection(entry.record).enabled
-		setRecordStatus(entry.record, status, errorMsg, transmitterCaused)
+		w.applyTo(entry.record)
 		snap := snapshotReceiveDirection(entry.record)
 		if snap.present && snap.enabled && !wasEnabled {
 			entry.resetRetryLadder()

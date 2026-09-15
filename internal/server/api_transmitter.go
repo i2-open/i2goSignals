@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -27,6 +29,9 @@ import (
 //   - 401/403: Unauthorized access.
 //   - 404 Not Found: Stream not found.
 //   - 500 Internal Server Error: Error during polling or database access.
+//   - 503 Service Unavailable: the stream is paused, or it signs its SETs and
+//     has no active signing key for its iss and signing_alg; the plain-text
+//     body then names the issuer and algorithm, and the stream is paused (#312).
 func (sa *SignalsApplication) PollEvents(w http.ResponseWriter, r *http.Request) {
 	PollEventsHandler(sa, w, r)
 }
@@ -139,6 +144,13 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 
 	sets, more, status := sa.GetEventRouter().PollStreamHandler(authCtx.StreamId, request)
 
+	if status == eventRouter.PollKeyUnavailableStatus {
+		// The stream has no active signing key: nothing was sent, its events
+		// stay queued and it is now paused (#312). Say which key is missing.
+		cfg := streamState.StreamConfiguration
+		http.Error(w, services.NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg), status)
+		return
+	}
 	if status != http.StatusOK {
 		http.Error(w, "Stream not found or not ready", status)
 		return

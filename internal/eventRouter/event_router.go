@@ -72,7 +72,20 @@ type EventRouter interface {
 	// Used by both the operator-triggered API handler and the push-side T3 idle keepalive.
 	GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error)
 	//	PushStreamHandler(stream *model.StreamStateRecord, eventBuf *buffer.EventPushBuffer)
+	// PollStreamHandler serves one RFC 8936 poll for a poll transmitter and
+	// returns the SETs, whether more are available and an HTTP status. A
+	// signing transmitter with no active signing key, or whose key failed to
+	// sign, gets PollKeyUnavailableStatus (503) with no SETs: its events stay
+	// queued and the stream has taken the key-unavailable pause (#312).
 	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
+	// CheckSstpSigningKey is the SSTP accepting end's signing-key check (#312).
+	// The HTTP handler runs it on the resolved pair before an exchange applies
+	// anything. For an enabled pair whose transmit direction signs (any route
+	// mode but Forward) and has no active signing key for its iss and
+	// signing_alg, it pauses the pair (the key-unavailable pause, with the
+	// reason and marker) and returns an error naming the issuer and algorithm;
+	// the handler then refuses the exchange with 503. Otherwise it returns nil.
+	CheckSstpSigningKey(rec *model.StreamStateRecord) error
 	// SstpServerHandler runs one SSTP-server cycle for the pair already resolved
 	// by the HTTP handler: it ingests the already-parsed inbound SETs
 	// (persist-then-route via HandleEvent, counting eventsIn with tfr=SSTP,
@@ -429,6 +442,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		router.UpdateStreamState(&state)
 	}
 	router.enabled = true
+
+	// Every node retries the key for the stored poll transmitters and SSTP pairs
+	// in a key-unavailable pause, resuming or disabling them (#312).
+	go router.runKeyUnavailableCheck(LoadRecoveryConfig())
 
 	// Start the background watcher if explicitly enabled
 	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
@@ -1542,6 +1559,16 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	}
 
 	if state.Status != model.StreamStateEnabled {
+		// This node's copy can be stale: another node's key check, or a status
+		// change handled elsewhere, may have enabled the stream since (#312). The
+		// stored record decides, so an enabled stream never gets a 409 here.
+		if stored, err := r.streamService.GetStreamState(r.ctx, sid); err == nil && stored != nil && stored.Status == model.StreamStateEnabled {
+			r.UpdateStreamState(stored)
+			state = *stored
+		}
+	}
+
+	if state.Status != model.StreamStateEnabled {
 		if (state.Status == model.StreamStatePause || state.Status == model.StreamStateDisable) && (len(params.Acks) > 0 || len(params.SetErrs) > 0) {
 			return map[string]string{}, false, http.StatusOK
 		}
@@ -1563,6 +1590,9 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 	}
 
+	// A signing transmitter (every route mode but Forward) needs an active key
+	// for its iss and signing_alg. Without one the poll sends nothing, the
+	// events stay queued and the stream takes the key-unavailable pause (#312).
 	var key crypto.Signer
 	var kid string
 	forwardMode := false
@@ -1570,14 +1600,11 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		forwardMode = true
 	} else {
 		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss, state.StreamConfiguration.SigningAlg)
-	}
-
-	/*
-		if (key == nil) && !forwardMode {
-			eventLogger.Printf("POLL-SRV[%s] WARNING: no issuer key available for %s", sid, state.StreamConfiguration.Iss)
-			return nil, false, http.StatusConflict
+		if key == nil {
+			r.takeKeyUnavailablePause(&state, "POLL-SRV", nil)
+			return nil, false, PollKeyUnavailableStatus
 		}
-	*/
+	}
 
 	jtiSlice, more := pollBuffer.GetEvents(params)
 
@@ -1587,7 +1614,14 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 	}
 
 	if jtiSize > 0 {
-		return r.assemblePollResponse(sid, &state, pollBuffer, *jtiSlice, forwardMode, key, kid), more, http.StatusOK
+		sets, signErr := r.assemblePollResponse(sid, &state, pollBuffer, *jtiSlice, forwardMode, key, kid)
+		if signErr != nil {
+			// The key could not sign a SET: nothing is sent rather than a
+			// response that silently leaves it out, and the pause applies.
+			r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
+			return nil, false, PollKeyUnavailableStatus
+		}
+		return sets, more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
 }
@@ -1596,9 +1630,11 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 // one read for the batch's records, one subject-filter pass whose discards are
 // acked together, then the surviving records are re-signed across a worker
 // pool of signConcurrency (forward mode returns the stored JWS unchanged).
-// A JTI whose record is gone is skipped and left in the buffer; a SET that
-// fails to sign is left out of this response and stays pending (ADR 0036).
-func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, jtis []string, forwardMode bool, key crypto.Signer, kid string) map[string]string {
+// A JTI whose record is gone is skipped and left in the buffer. When any SET
+// fails to sign it returns no sets and the first signing error, so the caller
+// sends none of them rather than a response that leaves one out (#312); every
+// SET stays pending.
+func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, jtis []string, forwardMode bool, key crypto.Signer, kid string) (map[string]string, error) {
 	byJti := make(map[string]*model.EventRecord, len(jtis))
 	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
 		byJti[rec.Jti] = rec
@@ -1635,7 +1671,7 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 		r.discardPolledEvents(sid, discards, pollBuffer)
 	}
 	if len(work) == 0 {
-		return sets
+		return sets, nil
 	}
 
 	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
@@ -1650,12 +1686,11 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 	})
 	for i, rec := range work {
 		if signed[i].Err != nil {
-			eventLogger.Error("POLL-SRV: Error signing", "sid", sid, "jti", rec.Jti, "error", signed[i].Err)
-			continue
+			return nil, fmt.Errorf("signing JTI %s: %w", rec.Jti, signed[i].Err)
 		}
 		sets[rec.Jti] = signed[i].JWS
 	}
-	return sets
+	return sets, nil
 }
 
 // SignedSet is one SignSets result, positionally matching its input.

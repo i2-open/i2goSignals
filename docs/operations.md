@@ -102,6 +102,18 @@ Terminal state for this side. Reached via one of:
   retries the key every `I2SIG_PUSH_AUTH_RETRY_DELAY`, and disables after
   `I2SIG_PUSH_AUTH_RETRY_LIMIT` failed tries. It resumes by itself if the key
   is created or reactivated first. Events stay queued throughout.
+- **No active signing key (poll transmitter or SSTP pair)** — the same rule,
+  with the pause stored on the stream. A poll gets `503` with a plain-text
+  body naming the issuer and algorithm; an SSTP exchange to this side gets
+  `503` and nothing in it is applied; a dialing SSTP pair sends nothing. The
+  stream (both directions of a pair) pauses with the reason
+  `<POLL-SRV|SSTP-SRV|SSTP-CLIENT>: no active signing key for issuer <iss> (<alg>)`
+  and `key_unavailable_since` set to the first failure. Every
+  `I2SIG_PUSH_AUTH_RETRY_DELAY` each node checks those streams: once the key
+  is active it re-enables them (a dialing pair's loop restarts); once
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` has passed
+  since `key_unavailable_since` it disables them. An operator's status change
+  clears `key_unavailable_since`, so an operator pause is never resumed.
 
 `disabled` is the system's signal that **operator attention is required**.
 The stream's `ErrorMsg` field contains the diagnostic. Re-enabling the stream

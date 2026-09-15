@@ -3,6 +3,7 @@ package mongo
 import (
 	"context"
 	"errors"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -198,13 +199,25 @@ func (d *StreamDAOMongo) FindByPairId(ctx context.Context, pairId string) (*mode
 func (d *StreamDAOMongo) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
 	return d.updateStatus(ctx, id, bson.M{
 		"$set":   bson.M{"status": status, "error_msg": errorMsg},
-		"$unset": bson.M{"transmitter_caused": ""},
+		"$unset": bson.M{"transmitter_caused": "", "key_unavailable_since": ""},
 	})
 }
 
 func (d *StreamDAOMongo) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
 	return d.updateStatus(ctx, id, bson.M{
-		"$set": bson.M{"status": status, "error_msg": errorMsg, "transmitter_caused": true},
+		"$set":   bson.M{"status": status, "error_msg": errorMsg, "transmitter_caused": true},
+		"$unset": bson.M{"key_unavailable_since": ""},
+	})
+}
+
+// UpdateKeyUnavailablePause sets the marker with $min, which writes it when the
+// field is absent and otherwise keeps the earlier time, so concurrent or repeat
+// failures on any node leave the first failure's time in one atomic update.
+func (d *StreamDAOMongo) UpdateKeyUnavailablePause(ctx context.Context, id string, errorMsg string, since time.Time) error {
+	return d.updateStatus(ctx, id, bson.M{
+		"$set":   bson.M{"status": model.StreamStatePause, "error_msg": errorMsg},
+		"$unset": bson.M{"transmitter_caused": ""},
+		"$min":   bson.M{"key_unavailable_since": since},
 	})
 }
 
