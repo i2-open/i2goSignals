@@ -15,10 +15,7 @@ import (
 // same words wherever the problem surfaces. It deliberately does not say whether
 // the key was never created, or is suspended or revoked.
 func NoActiveSigningKeyReason(issuer, signingAlg string) string {
-	if signingAlg == "" {
-		signingAlg = "RS256"
-	}
-	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, signingAlg)
+	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, algLabel(signingAlg))
 }
 
 // signingTransmitterConfig returns the configuration of rec's signing transmit

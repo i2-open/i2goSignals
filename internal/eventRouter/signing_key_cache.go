@@ -28,7 +28,9 @@ const signingKeyCacheTTL = 2 * time.Second
 //
 //   - an active key: it replaces the entry, which may be a new key;
 //   - no active key (ErrKeyNotFound): the entry goes, and the caller gets no key,
-//     so its transmitter follows the missing-key rule;
+//     so its transmitter follows the missing-key rule. The absence is not cached:
+//     the rule's own retries pace the reads, and a key made active through
+//     another node is seen at the next one (#312);
 //   - the read fails: the current key stays for another TTL and a WARN is logged,
 //     so a key store outage does not pause every transmitter.
 //
@@ -123,7 +125,15 @@ func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (cryp
 			entry.expires = c.now().Add(c.ttl)
 		}
 	default:
-		eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer, "alg", alg, "error", err)
+		// WARN only when this read takes a cached key away or the store failed.
+		// A read that again finds no active key is DEBUG: the entry was already
+		// gone, and the transmitter's missing-key rule logs the one ERROR per
+		// key-unavailable pause (#312), so a WARN per retry would only add noise.
+		if entry.key != nil || !errors.Is(err, interfaces.ErrKeyNotFound) {
+			eventLogger.Warn("Unable to locate key for issuer, retrying...", "streamID", streamID, "issuer", issuer, "alg", alg, "error", err)
+		} else {
+			eventLogger.Debug("Still no active signing key for issuer", "streamID", streamID, "issuer", issuer, "alg", alg)
+		}
 		key, kid = nil, ""
 		if current {
 			delete(c.entries, cacheKey)

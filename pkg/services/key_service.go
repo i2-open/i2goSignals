@@ -499,12 +499,11 @@ const (
 )
 
 // EnsureSigningKeyForAlg idempotently guarantees keyName has a "sig" key pair
-// for signature algorithm alg, minting one only when genuinely absent. It is
-// the provisioning half of every per-stream signing_alg opt-in: a stream
-// created or updated with signing_alg = ES256 or ML-DSA-65 calls this so the
-// issuer's EC or AKP key exists — and is published in the issuer's JWKS —
-// before the first SET signed with it is emitted, rather than at first signing
-// when a receiver is already waiting on the key.
+// for signature algorithm alg, minting one only when genuinely absent. Streams
+// no longer call it: since i2goSignals#314 a stream's signing_alg creates no
+// key, and an operator creates the key through POST /key/{keyName}?alg=, which
+// builds on generateSigningKey and storeKeyPair directly. It has no production
+// caller today; tests use it to provision an issuer's ES256 or ML-DSA-65 key.
 //
 // It mirrors EnsureSigningKey's ADR 0028 discipline: a suspended or revoked key
 // of the same algorithm is never silently replaced, because recreating it would
@@ -682,8 +681,8 @@ func recKid(rec *interfaces.JwkKeyRec) string {
 
 // findLatestActiveSigningRec returns the newest active record for keyName that
 // carries private-key material. It returns ErrKeyNotFound when none qualifies,
-// logging a loud ERROR (issuer + remedy) whenever the only candidates were
-// filtered out because they are suspended or revoked.
+// logging a WARN (issuer + remedy) whenever the only candidates were filtered
+// out because they are suspended or revoked.
 func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName string, alg string) (*interfaces.JwkKeyRec, error) {
 	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil {
@@ -693,7 +692,11 @@ func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName str
 	latest, sawInactiveSigningKey := latestActiveSigningRec(recs, alg)
 	if latest == nil {
 		if sawInactiveSigningKey {
-			ksLog.Error("No active signing key for issuer; all signing keys are suspended or revoked",
+			// WARN, not ERROR (deliberately demoted): this runs on every key read,
+			// and a paused stream's push retries and background key check read
+			// the key once per retry. The router logs the one ERROR per
+			// key-unavailable pause (#312) and again when the stream is disabled.
+			ksLog.Warn("No active signing key for issuer; all signing keys are suspended or revoked",
 				"issuer", keyName, "alg", algLabel(alg),
 				"remedy", "rotate a new key or reactivate a suspended key")
 		}

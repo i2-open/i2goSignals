@@ -163,6 +163,33 @@ func TestKeyCache_NoActiveKeyOnReReadDropsTheKey(t *testing.T) {
 	assert.Same(t, replacement, got, "a missing key is not remembered: the next use reads the store again")
 }
 
+// A missing key is re-read on every use (the entry is dropped, so a key made
+// active through another node is seen at once), but only dropping a cached key
+// is worth a WARN. The transmitter's missing-key rule logs the one ERROR per
+// pause (#312), so a read that still finds no key must not add a line per retry.
+func TestKeyCache_MissingKeyWarnsOnlyWhenACachedKeyIsDropped(t *testing.T) {
+	logs := captureLogs(t)
+	src := &stubSignerSource{key: testSigner(t), kid: "kid-1"}
+	r, clk := keyCacheRouter(src)
+	r.checkAndLoadKey("sid-1", cacheIssuer, "")
+
+	src.err = interfaces.ErrKeyNotFound
+	clk.Advance(signingKeyCacheTTL)
+	for i := 0; i < 5; i++ {
+		got, _ := r.checkAndLoadKey("sid-1", cacheIssuer, "")
+		require.True(t, got == nil)
+	}
+	assert.Equal(t, 6, src.callCount(), "a missing key is not remembered")
+
+	warns := 0
+	for _, line := range logs.lines() {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, cacheIssuer) {
+			warns++
+		}
+	}
+	assert.Equal(t, 1, warns, "one WARN when the cached key is dropped, none per later read")
+}
+
 func TestKeyCache_StoreFailureKeepsTheCurrentKey(t *testing.T) {
 	logs := captureLogs(t)
 	current := testSigner(t)

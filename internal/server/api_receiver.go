@@ -1738,7 +1738,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 					delaySeconds = maxDelay
 				}
 				delay := time.Duration(delaySeconds * float64(time.Second))
-				ps.setRetryReason(fmt.Sprintf("retry being attempted (delay %d attempt %d", delay, retryCount+1))
+				ps.setRetryReason(fmt.Sprintf("retry being attempted (delay %v, attempt %d)", delay, retryCount+1))
 				serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", sid, "delay", delay, "attempt", retryCount+1)
 
 				// Cancellable backoff — see the 401 path above.
@@ -1757,14 +1757,18 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			}
 			if httpStatus == http.StatusNotFound {
 				ps.setRetryReason("HTTP Not Found (404) response, retrying")
-				serverLog.Error("POLL-RCV: Stream Not found", "sid", sid, "url", eventUrl, "status", httpStatus)
+				// WARN, not ERROR (deliberately demoted): the poll is retried, so no
+				// human action is needed yet (CONTEXT.md log-level policy).
+				serverLog.Warn("POLL-RCV: Stream Not found", "sid", sid, "url", eventUrl, "status", httpStatus)
 				continue
 			}
 
 			// General error (other HTTP errors or request failures)
 			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
 			ps.setRetryReason(errMsg)
-			serverLog.Error("POLL-RCV: Request error", "sid", sid, "url", eventUrl, "error", err.Error())
+			// WARN, not ERROR (deliberately demoted): the poll is retried, so no
+			// human action is needed yet (CONTEXT.md log-level policy).
+			serverLog.Warn("POLL-RCV: Request error", "sid", sid, "url", eventUrl, "error", err.Error())
 			continue
 		}
 

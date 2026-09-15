@@ -25,7 +25,7 @@ func TestClientPollStream_Recovery(t *testing.T) {
 		failStatus int
 		reason     string
 	}{
-		{"connection error", http.StatusServiceUnavailable, "retry being attempted"},
+		{"connection error", http.StatusServiceUnavailable, "retry being attempted (delay 1s, attempt 1)"},
 		{"unauthorized", http.StatusUnauthorized, "unauthorized response (401), retrying"},
 	}
 	for _, tc := range cases {
