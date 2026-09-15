@@ -187,7 +187,7 @@ func TestRotateKey_CarriesTheUseOfTheNewestRecordByCreationTime(t *testing.T) {
 // the one every newest-record site must pick. The legacy record has the highest
 // id and no creation time. The other two were minted in the same millisecond,
 // so once Mongo truncates their times they tie and the higher id wins, even
-// though the lower id's time is later by the nanosecond.
+// though the lower id's time is 800µs later within that millisecond.
 func newestRecordScenario(t *testing.T) (recs []*interfaces.JwkKeyRec, newest *interfaces.JwkKeyRec) {
 	t.Helper()
 	minted := time.Date(2026, 9, 15, 18, 0, 0, 0, time.UTC)
@@ -200,9 +200,9 @@ func newestRecordScenario(t *testing.T) (recs []*interfaces.JwkKeyRec, newest *i
 			KeyBytes: priv, PubKeyBytes: pub, CreatedAt: createdAt}
 	}
 	legacy := rec(legacyRandomId, time.Time{})
-	laterByTheNanosecond := rec("6aa991b90123456789000001", minted.Add(900*time.Microsecond))
+	laterInSameMillisecond := rec("6aa991b90123456789000001", minted.Add(900*time.Microsecond))
 	newest = rec("6aa991b90123456789000002", minted.Add(100*time.Microsecond))
-	return []*interfaces.JwkKeyRec{legacy, newest, laterByTheNanosecond}, newest
+	return []*interfaces.JwkKeyRec{legacy, newest, laterInSameMillisecond}, newest
 }
 
 // TestNewestRecordSites_AllPickTheSameRecord: signing selection, the use a

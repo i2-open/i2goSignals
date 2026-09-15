@@ -222,18 +222,19 @@ func (suite *KeyDAOMongoSuite) TestFindLatestByKeyName_OnlyLegacyDocumentsSelect
 // services package holds signing selection, rotation use carry-over and JWKS
 // kid-collision order to. The legacy document has the highest _id and no
 // created_at; the other two were minted in the same millisecond, so the higher
-// _id wins even though the lower one's in-memory time is later by the
-// nanosecond. Mongo keeps only the millisecond, and the answer must not change.
+// _id wins even though the lower one's in-memory time is 800µs later within
+// that millisecond. Mongo keeps only the millisecond, and the answer must not
+// change.
 func (suite *KeyDAOMongoSuite) TestFindLatestByKeyName_AgreesWithTheNewestRecordRule() {
 	ctx := context.Background()
 	minted := time.Date(2026, 9, 15, 18, 0, 0, 0, time.UTC)
 	suite.insertLegacyKeyDoc(legacyRandomHex, "")
-	laterByTheNanosecond := &interfaces.JwkKeyRec{Id: "6aa991b90123456789000001", KeyName: legacyKeyIssuer,
+	laterInSameMillisecond := &interfaces.JwkKeyRec{Id: "6aa991b90123456789000001", KeyName: legacyKeyIssuer,
 		Kid: legacyKeyIssuer + "-a", Use: "sig", KeyBytes: []byte{1}, CreatedAt: minted.Add(900 * time.Microsecond)}
 	newest := &interfaces.JwkKeyRec{Id: "6aa991b90123456789000002", KeyName: legacyKeyIssuer,
 		Kid: legacyKeyIssuer + "-b", Use: "sig", KeyBytes: []byte{1}, CreatedAt: minted.Add(100 * time.Microsecond)}
-	suite.Require().True(newest.NewerThan(laterByTheNanosecond), "the shared rule picks newest before the round trip")
-	suite.Require().NoError(suite.dao.Insert(ctx, laterByTheNanosecond))
+	suite.Require().True(newest.NewerThan(laterInSameMillisecond), "the shared rule picks newest before the round trip")
+	suite.Require().NoError(suite.dao.Insert(ctx, laterInSameMillisecond))
 	suite.Require().NoError(suite.dao.Insert(ctx, newest))
 
 	got, err := suite.dao.FindLatestByKeyName(ctx, legacyKeyIssuer)

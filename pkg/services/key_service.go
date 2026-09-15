@@ -303,12 +303,12 @@ func newKeyKid(keyName string, storedAlg string) string {
 	return fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
 }
 
-// keyRecCreatedAt is the CreatedAt stamped on a key record this service mints
-// (i2goSignals#316). It is stamped here rather than in each KeyDAO so every
-// store, including one that persists the whole JwkKeyRec, carries it. It is
-// truncated to the millisecond Mongo stores, so a record's CreatedAt reads back
-// unchanged from any store.
-func keyRecCreatedAt() time.Time {
+// createdAtNow returns the current time as the CreatedAt stamped on a key
+// record this service mints (i2goSignals#316). It is stamped here rather than in
+// each KeyDAO so every store, including one that persists the whole JwkKeyRec,
+// carries it. It is truncated to the millisecond Mongo stores, so a record's
+// CreatedAt reads back unchanged from any store.
+func createdAtNow() time.Time {
 	return time.Now().UTC().Truncate(time.Millisecond)
 }
 
@@ -327,7 +327,7 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 		Alg:         alg,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
-		CreatedAt:   keyRecCreatedAt(),
+		CreatedAt:   createdAtNow(),
 	}
 
 	err = s.keyDAO.Insert(ctx, keyPairRec)
@@ -389,7 +389,7 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 		ProjectId:   projectId,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
-		CreatedAt:   keyRecCreatedAt(),
+		CreatedAt:   createdAtNow(),
 	}
 
 	err := s.keyDAO.Insert(ctx, keyPairRec)
@@ -1244,7 +1244,7 @@ func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, kids 
 		Use:             use,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,
-		CreatedAt:       keyRecCreatedAt(),
+		CreatedAt:       createdAtNow(),
 	}
 	return s.keyDAO.Insert(ctx, keyPairRec)
 }
