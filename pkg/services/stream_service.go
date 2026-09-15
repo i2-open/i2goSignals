@@ -112,6 +112,14 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 	}
 	verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
 	if verdict.Err != nil {
+		// A missing or ambiguous relay target, or an upstream that cannot filter
+		// subjects, is the caller's to fix: ErrInvalidRequest, a 400 (#305). A
+		// receiver store or upstream that could not answer stays unwrapped.
+		if errors.Is(verdict.Err, ErrRelayTargetNotFound) ||
+			errors.Is(verdict.Err, ErrRelayTargetAmbiguous) ||
+			errors.Is(verdict.Err, ErrUpstreamNoSubjectFiltering) {
+			return fmt.Errorf("%w: invalid subject-filter configuration: %w", ErrInvalidRequest, verdict.Err)
+		}
 		return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
 	}
 	if verdict.Warn != "" {
@@ -1245,6 +1253,11 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		// inbound-SID index so an rxSid resolves to its pair record. (Q35, Q39)
 		inboundRec, inboundErr := s.streamDAO.FindByInboundSID(ctx, streamID)
 		if inboundErr != nil {
+			// Not found only when neither lookup found the SID: a store error
+			// from the fallback is reported as itself (#305).
+			if errors.Is(err, interfaces.ErrNotFound) && !errors.Is(inboundErr, interfaces.ErrNotFound) {
+				return nil, inboundErr
+			}
 			return nil, err
 		}
 		streamRec = inboundRec
@@ -1541,7 +1554,7 @@ func (s *StreamService) GetStream(ctx context.Context, id string) (*model.Stream
 // whichever direction the SID names, so it scopes the generated verify SET to
 // the resolved direction's iss/aud. Non-SSTP streams resolve via FindByID.
 func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*model.StreamConfiguration, error) {
-	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+	if rec, _ := s.findSstpPairBySID(ctx, sid); rec != nil {
 		if rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
 			inbound := *rec.SstpInbound
 			return &inbound, nil
@@ -1627,7 +1640,11 @@ func (s *StreamService) findByInboundSID(ctx context.Context, sid string) (*mode
 // verify) find the pair when the named SID is the inbound side, whose value is
 // not the document _id.
 func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
-	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+	rec, err := s.findSstpPairBySID(ctx, sid)
+	if err != nil {
+		return nil, err
+	}
+	if rec != nil {
 		return rec, nil
 	}
 	return s.findByID(ctx, sid)
@@ -1705,7 +1722,7 @@ func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string,
 	// A status write moves both halves of an SSTP pair whichever SID names it
 	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
 	// belongs to a pair, the SSTP path owns the update.
-	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
+	if rec, _ := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
 		s.updateSstpPairStatus(ctx, rec, streamID, w)
 		return
 	}
@@ -1780,7 +1797,11 @@ func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.
 	// status except on a legacy split record. findSstpPairBySID resolves either
 	// SID; non-SSTP streams fall through to the plain FindByID path below, where
 	// DirectionStatus always reports the one primary half.
-	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+	rec, err := s.findSstpPairBySID(ctx, streamID)
+	if err != nil {
+		return nil, err
+	}
+	if rec != nil {
 		status := rec.DirectionStatus(streamID)
 		return &status, nil
 	}

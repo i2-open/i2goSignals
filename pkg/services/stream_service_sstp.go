@@ -464,7 +464,10 @@ func (o SstpDeleteOutcome) PartialFailure() bool {
 // answer 207 Multi-Status.
 func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadePeer bool, peerServer *model.Server) (SstpDeleteOutcome, error) {
 	invalidateRequestStreams(ctx)
-	rec := s.findSstpPairBySIDFresh(ctx, sid)
+	rec, err := s.findSstpPairBySIDFresh(ctx, sid)
+	if err != nil {
+		return SstpDeleteOutcome{}, err
+	}
 	if rec == nil {
 		return SstpDeleteOutcome{}, interfaces.ErrNotFound
 	}
@@ -533,8 +536,10 @@ func (s *StreamService) cascadeSstpPeerDelete(ctx context.Context, rec *model.St
 
 // findSstpPairBySID resolves sid to its SSTP pair record, whether sid names the
 // tx side (== PairId == document _id) or the rx side (== SstpInbound.Id), or
-// returns nil when sid is not an SSTP pair SID. (Q39, Q41)
-func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *model.StreamStateRecord {
+// returns nil when sid is not an SSTP pair SID. (Q39, Q41) The error is set only
+// when neither lookup found a record and one of them failed for a reason other
+// than not-found, so whether sid names a stream is unknown (#305).
+func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
 	return sstpPairBySID(ctx, sid, s.findByID, s.findByInboundSID)
 }
 
@@ -542,7 +547,7 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 // (issue #287). Write paths use it because they MUTATE the record they are
 // handed before persisting it, so they must own a private decode rather than
 // the pointer other readers in the same request are still holding.
-func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) *model.StreamStateRecord {
+func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
 	return sstpPairBySID(ctx, sid, s.streamDAO.FindByID, s.streamDAO.FindByInboundSID)
 }
 
@@ -553,14 +558,25 @@ func sstpPairBySID(
 	sid string,
 	byID func(context.Context, string) (*model.StreamStateRecord, error),
 	byInboundSID func(context.Context, string) (*model.StreamStateRecord, error),
-) *model.StreamStateRecord {
-	if rec, err := byID(ctx, sid); err == nil && rec.GetType() == model.DeliverySstpPair {
-		return rec
+) (*model.StreamStateRecord, error) {
+	rec, idErr := byID(ctx, sid)
+	if idErr == nil && rec.GetType() == model.DeliverySstpPair {
+		return rec, nil
 	}
-	if rec, err := byInboundSID(ctx, sid); err == nil {
-		return rec
+	inbound, inboundErr := byInboundSID(ctx, sid)
+	if inboundErr == nil {
+		return inbound, nil
 	}
-	return nil
+	if idErr == nil {
+		return nil, nil // sid names a stream that is not a pair
+	}
+	if !errors.Is(idErr, interfaces.ErrNotFound) {
+		return nil, idErr
+	}
+	if !errors.Is(inboundErr, interfaces.ErrNotFound) {
+		return nil, inboundErr
+	}
+	return nil, nil
 }
 
 // updateSstpPairStatus applies a status change to an SSTP pair and persists the

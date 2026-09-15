@@ -59,14 +59,19 @@ func RelaySubjectChange(ctx context.Context, client *http.Client, upstream *mode
 	return nil
 }
 
-// Relay-target resolution errors (issue #95). Both reject stream configuration
-// at config time when a PASSTHRU/HYBRID stream cannot designate an upstream.
+// Relay configuration errors (issue #95). Each rejects stream configuration at
+// config time when a PASSTHRU/HYBRID stream cannot designate an upstream, or its
+// upstream cannot filter subjects. All three are the caller's configuration to
+// fix, unlike a receiver store or upstream that could not answer (#305).
 var (
 	// ErrRelayTargetNotFound means no receiver stream feeds the downstream stream.
 	ErrRelayTargetNotFound = errors.New("no upstream receiver stream feeds this stream")
 	// ErrRelayTargetAmbiguous means several receiver streams share the issuer and
 	// the operator must name a Subject handler SID explicitly.
 	ErrRelayTargetAmbiguous = errors.New("multiple receiver streams match the issuer; name a subject handler explicitly")
+	// ErrUpstreamNoSubjectFiltering means the upstream advertises no subject
+	// endpoints, so a PASSTHRU/HYBRID stream has nowhere to relay.
+	ErrUpstreamNoSubjectFiltering = errors.New("upstream does not support subject filtering")
 )
 
 // RelayConfigVerdict is the outcome of validating a transmitter stream's
@@ -91,7 +96,8 @@ func ClassifyUpstreamSupport(mode string, upstream *model.TransmitterConfigurati
 	case model.SubjectFilterModePassthru, model.SubjectFilterModeHybrid:
 		if !supportsFiltering {
 			return RelayConfigVerdict{Err: fmt.Errorf(
-				"subject_filter_mode %s requires an upstream that advertises add_subject_endpoint and remove_subject_endpoint", mode)}
+				"%w: subject_filter_mode %s requires an upstream that advertises add_subject_endpoint and remove_subject_endpoint",
+				ErrUpstreamNoSubjectFiltering, mode)}
 		}
 	case model.SubjectFilterModeLocal:
 		if !supportsFiltering {

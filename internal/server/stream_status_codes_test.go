@@ -229,3 +229,83 @@ func TestStreamUpdate_RejectionIs400WithItsText(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamUpdate_SubjectFilterModeOutcomes: a subject_filter_mode the stream's
+// upstream cannot serve is the caller's configuration to fix, so it is a 400
+// carrying the rejection. A receiver store or upstream that could not answer is
+// a server fault, so it stays a 500.
+func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
+	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+	receiver := func(id string) model.StreamStateRecord {
+		var rx model.StreamStateRecord
+		rx.StreamConfiguration.Id = id
+		rx.StreamConfiguration.Iss = "DEFAULT"
+		return rx
+	}
+	noSubjectEndpoints := &services.UpstreamConn{Config: &model.TransmitterConfiguration{Issuer: "DEFAULT"}}
+
+	for _, tc := range []struct {
+		name       string
+		receivers  []model.StreamStateRecord
+		listErr    error
+		conn       *services.UpstreamConn
+		resolveErr error
+		want       int
+		text       string
+	}{
+		{
+			name: "no relay target",
+			want: http.StatusBadRequest,
+			text: services.ErrRelayTargetNotFound.Error(),
+		},
+		{
+			name:      "ambiguous relay target",
+			receivers: []model.StreamStateRecord{receiver("rx-1"), receiver("rx-2")},
+			want:      http.StatusBadRequest,
+			text:      services.ErrRelayTargetAmbiguous.Error(),
+		},
+		{
+			name:      "upstream without subject endpoints",
+			receivers: []model.StreamStateRecord{receiver("rx-1")},
+			conn:      noSubjectEndpoints,
+			want:      http.StatusBadRequest,
+			text:      "requires an upstream that advertises add_subject_endpoint and remove_subject_endpoint",
+		},
+		{
+			name:    "receiver store failure",
+			listErr: errStoreDown,
+			want:    http.StatusInternalServerError,
+		},
+		{
+			name:       "upstream unreachable",
+			receivers:  []model.StreamStateRecord{receiver("rx-1")},
+			resolveErr: errors.New("cannot fetch upstream configuration"),
+			want:       http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newStatusRefreshApp(t)
+			persistStatusPlain(t, app, model.StreamStateEnabled, "")
+			app.StreamService.SetSubjectRelayService(services.NewSubjectRelayService(
+				func(context.Context) ([]model.StreamStateRecord, error) { return tc.receivers, tc.listErr },
+				nil, nil,
+				func(context.Context, *model.StreamStateRecord) (*services.UpstreamConn, error) {
+					return tc.conn, tc.resolveErr
+				},
+			))
+			patch := model.StreamStateRecord{
+				SubjectFilterMode: model.SubjectFilterModePassthru,
+				EventSource:       &model.EventSource{Type: model.EventSourceAudience},
+			}
+
+			for _, method := range []string{http.MethodPut, http.MethodPatch} {
+				rr := app.updateStream(t, method, app.adminBearer(t), statusPlainSid, patch)
+				require.Equal(t, tc.want, rr.Code, "%s /stream: %s", method, rr.Body.String())
+				if tc.text != "" {
+					assert.Contains(t, rr.Body.String(), tc.text, "%s /stream", method)
+				}
+			}
+			assert.Empty(t, app.router.updated, "a refused update must not refresh the router")
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -262,4 +263,38 @@ func TestUpdateSstpPair_EventSourceIsImmutable(t *testing.T) {
 	assert.Equal(t, []string{"upstream-sid"}, got.EventSource.SourceStreamIds)
 	require.NotNil(t, got.InboundEventSource)
 	assert.Equal(t, model.EventSourceAudience, got.InboundEventSource.Type, "inbound descriptor must be unchanged")
+}
+
+// TestUpdateStream_StoreFailureIsNotErrNotFound (#305): UpdateStream falls back
+// to the inbound-SID lookup when FindByID finds nothing. When that fallback
+// fails for a reason other than not-found, the store error is returned, not
+// FindByID's ErrNotFound (a 404). ErrNotFound remains the answer only when
+// neither lookup finds the SID.
+func TestUpdateStream_StoreFailureIsNotErrNotFound(t *testing.T) {
+	patch := model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Description: "edit"}}
+
+	t.Run("inbound lookup fails for the rx SID", func(t *testing.T) {
+		svc, dao := lookupFailingPair(t)
+		dao.failByInbound = true
+
+		_, err := svc.UpdateStream(context.Background(), lookupPairRxSid, "proj-1", patch)
+		assert.ErrorIs(t, err, errLookupStoreDown)
+		assert.NotErrorIs(t, err, interfaces.ErrNotFound)
+	})
+
+	t.Run("id lookup fails", func(t *testing.T) {
+		svc, dao := lookupFailingPair(t)
+		dao.failByID = true
+
+		_, err := svc.UpdateStream(context.Background(), lookupPairTxSid, "proj-1", patch)
+		assert.ErrorIs(t, err, errLookupStoreDown)
+		assert.NotErrorIs(t, err, interfaces.ErrNotFound)
+	})
+
+	t.Run("neither lookup finds the SID", func(t *testing.T) {
+		svc, _ := lookupFailingPair(t)
+
+		_, err := svc.UpdateStream(context.Background(), "no-such-stream", "proj-1", patch)
+		assert.ErrorIs(t, err, interfaces.ErrNotFound)
+	})
 }

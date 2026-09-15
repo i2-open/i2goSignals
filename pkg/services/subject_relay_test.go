@@ -354,8 +354,13 @@ func TestStreamService_CreatePassthruRejectedWhenUpstreamLacksEndpoints(t *testi
 	req.SubjectFilterMode = model.SubjectFilterModePassthru
 	req.EventSource = &model.EventSource{Type: model.EventSourceAudience}
 
-	if _, err := svc.CreateStream(context.Background(), req, "test-project", nil); err == nil {
+	_, err := svc.CreateStream(context.Background(), req, "test-project", nil)
+	if err == nil {
 		t.Fatal("CreateStream must reject PASSTHRU against a non-filtering upstream")
+	}
+	// The caller's configuration to fix, so a 400 (#305).
+	if !errors.Is(err, ErrInvalidRequest) || !errors.Is(err, ErrUpstreamNoSubjectFiltering) {
+		t.Fatalf("expected ErrInvalidRequest wrapping ErrUpstreamNoSubjectFiltering, got %v", err)
 	}
 }
 
