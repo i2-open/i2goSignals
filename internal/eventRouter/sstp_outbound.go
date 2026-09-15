@@ -83,6 +83,17 @@ type SstpOutbound interface {
 	// the runner's next-cycle RefreshPair observes it (Finding #9).
 	PausePair(stream *model.StreamStateRecord, reason string)
 
+	// PauseForSigningKey is the dialing end's key-unavailable pause (#312),
+	// taken when the pair could not sign what it would send: no active signing
+	// key for its iss and signing_alg, or cause, the error signing with the key
+	// it had. Nothing has been sent. It pauses the pair (both halves) with a
+	// reason naming the issuer and algorithm and the KeyUnavailableSince marker,
+	// writes the pause into the source-of-truth map so the loop's next
+	// RefreshPair exits, and logs one ERROR. The background key check resumes
+	// the pair, and with it the dial loop, when the key is back, and disables it
+	// after the retry limit.
+	PauseForSigningKey(stream *model.StreamStateRecord, cause error)
+
 	// LoadSigningKey returns the issuer's private signing key + kid,
 	// consulting the router's issuer-key cache (or loading it once and
 	// caching). RouteModeForward pairs skip this call — the dialer forwards

@@ -175,7 +175,16 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 
 	// Outbound long-poll drain: wait on the pair's EventPollBuffer for the duration
 	// of the request and return whatever SETs are available (Q7.1, Q15, Q19, Q20).
-	sets := r.drainSstpOutbound(ctx, rec, inbound)
+	sets, signErr := r.drainSstpOutbound(ctx, rec, inbound)
+	if signErr != nil {
+		// The key was checked when the exchange began (CheckSstpSigningKey) but
+		// could not sign this batch: send none of it, rather than a message that
+		// leaves SETs out, and take the key-unavailable pause (#312). The inbound
+		// half is already applied, so the exchange still answers 200 with its acks.
+		r.takeKeyUnavailablePause(rec, "SSTP-SRV", signErr)
+		resp.ReturnEvents = goSetSstp.BoolPtr(false)
+		return resp
+	}
 	if len(sets) > 0 {
 		resp.Sets = sets
 	}
@@ -189,9 +198,9 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 // I2SIG_POLL_MAX_TIMEOUT knobs (no SSTP-specific knob) and — per Q15 — does NOT
 // honor request-context cancellation: it waits the full buffer timeout even if the
 // client aborts, symmetric with the RFC8936 poll-transmitter handler.
-func (r *router) drainSstpOutbound(_ context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message) map[string]string {
+func (r *router) drainSstpOutbound(_ context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message) (map[string]string, error) {
 	if !inbound.ReturnEventsResolved() {
-		return nil
+		return nil, nil
 	}
 
 	txSid := rec.StreamConfiguration.Id
@@ -219,7 +228,7 @@ func (r *router) drainSstpOutbound(_ context.Context, rec *model.StreamStateReco
 		ReturnImmediately: inbound.ReturnImmediatelyResolved(),
 	})
 	if jtiSlice == nil || len(*jtiSlice) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	return r.buildSstpOutboundSets(rec, *jtiSlice)
@@ -243,14 +252,18 @@ func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
 // otherwise. Same shape as the poll transmitter's assemblePollResponse: one
 // read for the batch's records, then the re-signing fans out across the
 // signConcurrency pool (ADR 0036). A JTI whose record is gone is skipped and
-// stays in the buffer; a SET that fails to sign is left out of this response
-// and stays pending.
-func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) map[string]string {
+// stays in the buffer. With no active key, or when any SET fails to sign, it
+// returns no sets and the error, so the caller sends none of them rather than
+// a message that leaves one out (#312); every SET stays pending.
+func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) (map[string]string, error) {
 	forward := rec.GetRouteMode() == model.RouteModeForward
 	var key crypto.Signer
 	var kid string
 	if !forward {
 		key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, rec.StreamConfiguration.SigningAlg)
+		if key == nil {
+			return nil, errNoActiveSigningKey(rec.StreamConfiguration)
+		}
 	}
 
 	byJti := make(map[string]*model.EventRecord, len(jtis))
@@ -272,7 +285,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		work = append(work, eventRecord)
 	}
 	if len(work) == 0 {
-		return sets
+		return sets, nil
 	}
 
 	cfg := rec.StreamConfiguration
@@ -287,12 +300,11 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 	})
 	for i, eventRecord := range work {
 		if signed[i].Err != nil {
-			eventLogger.Error("SSTP-SRV: error signing outbound SET", "sid", cfg.Id, "jti", eventRecord.Jti, "error", signed[i].Err)
-			continue
+			return nil, fmt.Errorf("signing outbound JTI %s: %w", eventRecord.Jti, signed[i].Err)
 		}
 		sets[eventRecord.Jti] = signed[i].JWS
 	}
-	return sets
+	return sets, nil
 }
 
 // sstpInboundCounterRecord returns a view of the SSTP pair record whose

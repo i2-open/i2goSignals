@@ -978,17 +978,15 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	}
 
 	// AC 5: signing failure is an error, not a skip. Halt the dial cycle
-	// (release the claim, pause the pair so an operator investigates the
-	// broken key material, exit the loop) rather than send an unsigned SET.
-	// Signing runs BEFORE Exchange, so nothing has been sent — the pending
-	// feedback is preserved verbatim (no request reached the peer, nothing owed
-	// has been discharged).
+	// (release the claim, take the key-unavailable pause, exit the loop) rather
+	// than send an unsigned SET. The pause names the issuer and algorithm and
+	// carries the marker, so the key check resumes the pair once the key is
+	// back and disables it after the retry limit (#312). Signing runs BEFORE
+	// Exchange, so nothing has been sent — the pending feedback is preserved
+	// verbatim (no request reached the peer, nothing owed has been discharged).
 	if signErr != nil {
 		d.outbound.ReleaseOutbound(pairId, events)
-		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on pair=%s: %s", pairId, signErr.Error())
-		sstpDialerLog.Error("egress signing failure — halting dial cycle",
-			"pairId", pairId, "error", signErr)
-		d.outbound.PausePair(stream, reason)
+		d.outbound.PauseForSigningKey(stream, signErr)
 		return cls, 0, true, pending
 	}
 
@@ -1309,13 +1307,10 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 
 	if signErr != nil {
 		// AC 5: signing failure halts even on the second-push path — never
-		// send an unsigned SET. Pause the pair and log; the primary loop
-		// will observe the pause on its next RefreshPair and exit.
+		// send an unsigned SET. Take the key-unavailable pause (#312); the
+		// primary loop will observe the pause on its next RefreshPair and exit.
 		d.outbound.ReleaseOutbound(pairId, events)
-		reason := fmt.Sprintf("SSTP-CLIENT: signing failure on push-while-poll-held for pair=%s: %s", pairId, signErr.Error())
-		sstpDialerLog.Error("egress signing failure on second push — halting",
-			"pairId", pairId, "error", signErr)
-		d.outbound.PausePair(stream, reason)
+		d.outbound.PauseForSigningKey(stream, signErr)
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, true
 	}
 

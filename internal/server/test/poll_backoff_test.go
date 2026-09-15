@@ -56,13 +56,14 @@ func TestPollBackoffRetry(t *testing.T) {
 	ps := instance.app.HandleReceiver(streamState)
 	assert.NotNil(t, ps)
 
-	// Poll for the transient Pause state (retry in progress, base delay 0.1s)
-	// rather than sleeping a fixed interval.
+	// Poll for the retry-in-progress reason (base delay 0.1s) rather than
+	// sleeping a fixed interval. A retrying receiver has not paused, so its
+	// status stays enabled (#310).
 	assert.Eventually(t, func() bool {
 		st, err := instance.GetStreamState(streamID)
-		return err == nil && st.Status == model.StreamStatePause &&
+		return err == nil && st.Status == model.StreamStateEnabled &&
 			strings.Contains(st.ErrorMsg, "retry being attempted")
-	}, 2*time.Second, 20*time.Millisecond, "stream should pause with a retry-in-progress message")
+	}, 2*time.Second, 20*time.Millisecond, "stream should stay enabled with a retry-in-progress message")
 
 	// After the retry limit (1.0s) is exceeded the stream must be disabled.
 	assert.Eventually(t, func() bool {

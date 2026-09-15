@@ -261,6 +261,9 @@ func (suite *SubjectFilterReviewSuite) TestPassthruReportsNoLocalFilter() {
 
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey,
 		&authSupport.AuthContext{ProjectId: instance.projectId})
+	// The Publish poll transmitter signs as upstreamIss, which needs an active key (#308).
+	_, keyErr := instance.keySvc().EnsureSigningKey(context.Background(), upstreamIss, instance.projectId)
+	require.NoError(t, keyErr)
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
 			Iss: upstreamIss,

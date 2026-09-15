@@ -95,6 +95,9 @@ func TestUpdateStream_IssAudJwksOnEveryDeliveryMethod(t *testing.T) {
 				initial = model.RouteModeImport
 			}
 			sid := persistedPlainStream(t, svc, method, initial)
+			// A transmitter's new iss needs an active signing key (#308).
+			_, err := svc.keyService.CreateKeyPair(ctx, "https://new-issuer.example", "sig", "")
+			require.NoError(t, err)
 
 			patch := model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{
 				Iss:           "https://new-issuer.example",

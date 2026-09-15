@@ -179,3 +179,25 @@ issuer its upstream asserts rather than one this server chose. Presence is still
 required. A non-URI value is now accepted with a WARN naming the field and the
 value, so an interop failure against a strict SSF peer is diagnosable from this
 server's own output rather than only from the peer's refusal.
+
+## Update (2026-09-14): per-direction `receive_mode` (GH #306)
+
+**An optional per-direction `receive_mode` joins the DTO.** `mode` keeps its
+meaning and values and is the transmitting end's choice. A direction is read
+differently at its two ends — the transmitter tests `== FW` (relay or re-sign),
+the receiver `== IM` (import or route on), and `PUBLISH` is indistinguishable
+from `FORWARD` on receipt (ADR 0031 D2) — so one word per direction could not
+express "relay verbatim, import only". `receive_mode` accepts `IMPORT | FORWARD`
+and, when present, is what the receiving end's `RouteMode` is built from
+(`SstpDirection.ReceiveRouteMode`); when absent the receiving end mirrors `mode`
+exactly as before and the direction marshals without the key, so existing
+bootstraps and their mirrors are byte-for-byte unchanged. Any other value is
+refused beside the `mode` check, naming `<half>.receive_mode`.
+
+It crosses to the peer on the existing whole-direction swap: this node's
+`primary.receive_mode` is the peer's receiving choice and arrives as the peer's
+`inbound.receive_mode`. Each half's value is echoed on the record for the pair
+read, on `receive_mode` / `inbound_receive_mode` twins that follow the
+`EventSource` / `InboundEventSource` convention above. The inbound echo is this
+node's own choice, so an inbound `route_mode` patch (ADR 0031 amendment) keeps
+it in step; the primary echo is the peer's and no local patch changes it.

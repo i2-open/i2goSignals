@@ -79,10 +79,13 @@ Fields:
 - **Pair-level**: `role`, `endpoint_url`, `authorization_header`,
   `peer_server_alias`, `peer_pair_id`, `description`.
 - **Per direction** (`primary` = transmit, `inbound` = receive): `iss`,
-  `iss_jwks_url`, `aud`, `events`, `mode`, `event_source`. `mode` and
-  `event_source.type` are the two independent ADR 0004 axes — whether the
-  direction re-signs, and where its events come from — and each half answers both
-  for itself (#296). An absent `event_source` routes that leg as `DIRECT`.
+  `iss_jwks_url`, `aud`, `events`, `mode`, `receive_mode`, `event_source`.
+  `mode` and `event_source.type` are the two independent ADR 0004 axes — whether
+  the direction re-signs, and where its events come from — and each half answers
+  both for itself (#296). An absent `event_source` routes that leg as `DIRECT`.
+  The optional `receive_mode` (`IMPORT` | `FORWARD`) gives the direction's
+  receiving end its own choice (#306); see
+  [Receive mode](#receive-mode-the-receiving-ends-own-choice).
 
 `StreamService.CreateSstpPair` validates and expands the bootstrap:
 
@@ -97,7 +100,9 @@ Fields:
 - `EndpointUrl` is validated **syntactically only** — scheme `https` (or `http`
   when `I2SIG_INSECURE_SSTP_HTTP=true`), non-empty host, no query/fragment. No
   network probe; reachability is the runner's concern (matching push/poll).
-- Each half needs a non-empty `iss` and `aud` and a recognized `mode`. Both are
+- Each half needs a non-empty `iss` and `aud` and a recognized `mode`; a
+  present `receive_mode` must be `IMPORT` or `FORWARD` (anything else, `PUBLISH`
+  included, is a 400 naming `<half>.receive_mode`). `iss` and `aud` are
   JWT `StringOrURI` values (RFC 7519 §2), so a bare hostname is legal: a non-URI
   value is accepted with a WARN rather than refused, because the SSF profile's
   use of URIs is a convention and a strict peer refusing it is an interop fact
@@ -114,6 +119,11 @@ Fields:
   inbound one — the transmitting end of that logical stream is the peer, and
   `mirrorSstpBootstrap` delivers the same descriptor there as the peer's primary,
   where it is live.
+- Each half's `receive_mode` is echoed as bootstrapped on the record-level
+  `receive_mode` (primary) and `inbound_receive_mode` (inbound) fields, following
+  the same twin convention, so a pair read (`GET /state`, `GET /states`) shows
+  both ends of each direction. Both are omitted when the bootstrap did not carry
+  the field.
 - `Status`/`InboundStatus` are always `Enabled` at create — the runner
   self-pauses on first failure. There is **no "pending" state**.
 
@@ -149,6 +159,38 @@ patched later via UPDATE.
 
 Because mode is per direction, a pair can FORWARD outbound while PUBLISH-ing
 inbound, etc.
+
+### Receive mode: the receiving end's own choice
+
+A direction has two ends, and they read its route mode differently: the
+transmitting end asks only "`FORWARD`?" (relay verbatim, or re-sign), the
+receiving end only "`IMPORT`?" (keep it, or route it on). With `mode` alone both
+ends are written from one word — one node's transmitter and the peer's receiver
+for the same direction — so the four real combinations collapse to three, and
+"relay verbatim, import only" cannot be expressed.
+
+The optional per-direction `receive_mode` separates them:
+
+| `mode` (transmitting end) | `receive_mode` (receiving end) | Receiving end's `RouteMode` |
+| :------------------------ | :----------------------------- | :-------------------------- |
+| any | absent | from `mode`, exactly as before the field existed |
+| any | `IMPORT` | `IM` |
+| any | `FORWARD` | `FW` |
+
+`PUBLISH` is not a valid `receive_mode`: on receipt it is indistinguishable from
+`FORWARD` (ADR 0031 D2).
+
+On a node, the primary is the transmitting end and the inbound half the receiving
+end. So `inbound.receive_mode` sets this node's `sstp_inbound.route_mode`, while
+`primary.receive_mode` is the choice for the **peer's** receiving end: the
+mirror's whole-direction swap delivers it to the peer as its
+`inbound.receive_mode`. A direction without the field marshals without the key,
+so a bootstrap that omits it — and its mirror — is byte-for-byte unchanged.
+
+The echo is kept truthful on the one side this node owns: a `route_mode` patch
+on the inbound SID moves `inbound_receive_mode` with it. `receive_mode` (the
+peer's choice) is not changed by any local patch, just as a peer is not told of
+any other local pair update.
 
 ### Inbound mode governs routing, not just signing
 

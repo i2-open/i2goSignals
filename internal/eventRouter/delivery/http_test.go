@@ -562,3 +562,35 @@ func TestHTTPAdapter_SuccessReturnsAccepted(t *testing.T) {
 	assert.Equal(t, goSetPush.ClassAccepted, out.Classification.Class)
 	assert.NotEmpty(t, out.RemoteAddress, "successful push should capture peer address via httptrace")
 }
+
+// Issue #308: a SET that cannot be signed is never sent. The adapter used to
+// push "" and let the receiver's rejection stand in for the error, so a
+// receiver that answers 202 lost the event and one that answers 400 was blamed
+// for the transmitter's missing key.
+func TestHTTPAdapter_SigningFailureSendsNothing(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer receiver.Close()
+
+	for _, routeMode := range []string{model.RouteModePublish, ""} {
+		stream := newPublishStream(receiver.URL + "/events")
+		stream.StreamConfiguration.RouteMode = routeMode
+		out := NewHTTPAdapter(nil, nil).Deliver(context.Background(), PushRequest{
+			Stream: stream,
+			Event:  newEventRecord(),
+			Key:    nil,
+		})
+
+		require.Error(t, out.SignErr, "route mode %q: a nil key cannot sign", routeMode)
+		assert.Empty(t, out.RemoteAddress, "route mode %q: no connection is made", routeMode)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, requests, "an unsigned SET must never reach the receiver")
+}

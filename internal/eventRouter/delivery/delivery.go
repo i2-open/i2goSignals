@@ -48,11 +48,17 @@ type PushRequest struct {
 // Key and Kid may differ from the request's when the HTTP adapter rotated the signing
 // material in response to jws_signature_failed — the caller reuses them on subsequent
 // attempts.
+//
+// SignErr is non-nil when the SET could not be signed (for example with no key). Nothing
+// was sent, so Classification says nothing about the receiver: the caller must check
+// SignErr first and treat it as the transmitter's own key problem, never as a receiver
+// fault (#308).
 type PushOutcome struct {
 	Classification goSetPush.Classification
 	RemoteAddress  string
 	Key            crypto.Signer
 	Kid            string
+	SignErr        error
 }
 
 // KeyReloader is the seam the HTTP adapter uses on the jws_signature_failed retry path.

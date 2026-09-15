@@ -191,40 +191,6 @@ func validateSigningAlg(alg string) error {
 	return nil
 }
 
-// applySigningAlg validates a stream's requested signing_alg and, for a
-// transmitter stream opting into a post-quantum algorithm, makes sure the
-// issuer actually holds a key of that algorithm.
-//
-// Provisioning happens here — at configuration time — rather than lazily at the
-// first signature, because the receiver has to be able to fetch the new key
-// from the issuer's JWKS *before* the first SET signed with it arrives.
-// Minting at first signing would publish the key and the token that needs it in
-// the same instant, and a receiver caching a JWKS would reject that first SET.
-//
-// A receiver stream is skipped: its `iss` names the remote transmitter, so
-// minting a local key for it would create signing material for an issuer this
-// node does not speak for.
-func (s *StreamService) applySigningAlg(ctx context.Context, cfg *model.StreamConfiguration, projectID string) error {
-	if err := validateSigningAlg(cfg.SigningAlg); err != nil {
-		return err
-	}
-	if cfg.SigningAlg == "" || cfg.Iss == "" || s.keyService == nil {
-		return nil
-	}
-	if !isTransmitterMethod(cfg.Delivery.GetMethod()) && cfg.Delivery.GetMethod() != model.DeliverySstpPair {
-		return nil
-	}
-	created, err := s.keyService.EnsureSigningKeyForAlg(ctx, cfg.Iss, cfg.SigningAlg, projectID)
-	if err != nil {
-		return fmt.Errorf("signing_alg %s: %w", cfg.SigningAlg, err)
-	}
-	if created {
-		ssLog.Info("Provisioned signing key for stream signing_alg opt-in",
-			"iss", cfg.Iss, "signing_alg", cfg.SigningAlg, "stream_id", cfg.Id)
-	}
-	return nil
-}
-
 // validateSubjectRemovalGrace rejects a malformed SSF §9.3 grace override on
 // the request before any state is mutated (PRD #97 issue #98). Sits alongside
 // validateSubjectFilterMode in the create/update pipeline. Only the request
@@ -943,6 +909,14 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		return model.StreamConfiguration{}, err
 	}
 
+	// A signing transmitter needs an active key for its iss and signing_alg
+	// (#308). A stream never creates that key (#314): the operator creates it
+	// first. This runs before the record is written, so a refused create saves
+	// nothing.
+	if err = s.RequireActiveSigningKey(ctx, streamRec); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
 	err = s.streamDAO.Create(ctx, streamRec)
 	if err != nil {
 		return model.StreamConfiguration{}, err
@@ -1117,13 +1091,6 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		}
 
 		ssLog.Debug("Push transmitter stream configured to send to this receiver")
-	}
-
-	// Mint the issuer's post-quantum key now that the delivery method (and with
-	// it whether this stream transmits) is settled, so the key is published in
-	// the issuer JWKS before the stream's first SET is signed.
-	if err = s.applySigningAlg(ctx, &config, projectID); err != nil {
-		return model.StreamConfiguration{}, err
 	}
 
 	return config, nil
@@ -1438,7 +1405,14 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	if configReq.SigningAlg != "" {
 		config.SigningAlg = configReq.SigningAlg
 	}
-	if err := s.applySigningAlg(ctx, config, streamRec.ProjectId); err != nil {
+	if err := validateSigningAlg(config.SigningAlg); err != nil {
+		return nil, err
+	}
+	// Any update to a signing transmitter needs an active key for the stream as
+	// it is after the change (#308), so an unrelated edit to a stream whose key
+	// is missing is refused too. Switching to Forward, or to an issuer with a key,
+	// is the fix and passes.
+	if err := s.RequireActiveSigningKey(ctx, streamRec); err != nil {
 		return nil, err
 	}
 
@@ -1681,23 +1655,76 @@ func (s *StreamService) PersistStreamStateRecord(ctx context.Context, rec *model
 	return s.streamDAO.Create(ctx, rec)
 }
 
+// UpdateStreamStatus writes a stream's status and reason. It clears
+// TransmitterCaused (#310) and KeyUnavailableSince (#312): this is the write for
+// an operator's POST /status and for every status the server decides itself.
 func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: status, reason: errorMsg})
+}
+
+// UpdateTransmitterCausedStatus writes a paused or disabled status that a poll
+// receiver learned from the transmitter's status endpoint, setting
+// TransmitterCaused with it (#310).
+func (s *StreamService) UpdateTransmitterCausedStatus(ctx context.Context, streamID string, status string, errorMsg string) {
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: status, reason: errorMsg, transmitterCaused: true})
+}
+
+// UpdateKeyUnavailablePause writes a key-unavailable pause (#312): a signing
+// poll transmitter or SSTP pair with no active signing key is paused with reason,
+// and KeyUnavailableSince is set to since unless the stored record already
+// carries an earlier time. On a pair both halves pause, whichever SID names it.
+func (s *StreamService) UpdateKeyUnavailablePause(ctx context.Context, streamID string, reason string, since time.Time) {
+	s.updateStreamStatus(ctx, streamID, statusWrite{status: model.StreamStatePause, reason: reason, keyUnavailableSince: since})
+}
+
+// statusWrite is one status write together with the marker it carries, if any:
+// TransmitterCaused (#310) or KeyUnavailableSince (#312). Whichever marker a
+// write does not set, it clears.
+type statusWrite struct {
+	status            string
+	reason            string
+	transmitterCaused bool
+	// keyUnavailableSince is non-zero only for a key-unavailable pause.
+	keyUnavailableSince time.Time
+}
+
+// applyTo writes w onto rec in memory the way the DAO writes it.
+func (w statusWrite) applyTo(rec *model.StreamStateRecord) {
+	switch {
+	case w.transmitterCaused:
+		rec.SetTransmitterCausedStatus(w.status, w.reason)
+	case !w.keyUnavailableSince.IsZero():
+		rec.SetKeyUnavailablePause(w.reason, w.keyUnavailableSince)
+	default:
+		rec.SetStatus(w.status, w.reason)
+	}
+}
+
+func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string, w statusWrite) {
 	invalidateRequestStreams(ctx)
 	// A status write moves both halves of an SSTP pair whichever SID names it
 	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
 	// belongs to a pair, the SSTP path owns the update.
 	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
-		s.updateSstpPairStatus(ctx, rec, streamID, status, errorMsg)
+		s.updateSstpPairStatus(ctx, rec, streamID, w)
 		return
 	}
 
-	err := s.streamDAO.UpdateStatus(ctx, streamID, status, errorMsg)
+	var err error
+	switch {
+	case w.transmitterCaused:
+		err = s.streamDAO.UpdateTransmitterCausedStatus(ctx, streamID, w.status, w.reason)
+	case !w.keyUnavailableSince.IsZero():
+		err = s.streamDAO.UpdateKeyUnavailablePause(ctx, streamID, w.reason, w.keyUnavailableSince)
+	default:
+		err = s.streamDAO.UpdateStatus(ctx, streamID, w.status, w.reason)
+	}
 	if err != nil {
 		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
 	}
 
 	s.mu.Lock()
-	s.applyStatusToReceiverCache(streamID, status, errorMsg)
+	s.applyStatusToReceiverCache(streamID, w)
 	s.mu.Unlock()
 }
 
@@ -1709,20 +1736,21 @@ func (s *StreamService) UpdateStreamStatus(ctx context.Context, streamID string,
 // symptom through the re-enable path. Matching is by record identity, not map
 // key, because a pair's entry is keyed by its inbound SID (ADR 0018) while a
 // caller may name any of the record's identities. The status lands through
-// StreamStateRecord.SetStatus so the cached copy takes the same rule as the DAO
-// record — both halves of a pair move whichever SID is named (#303) — and when
-// the change transitions the entry's receive direction to enabled the retry
-// ladder is reset — including out of the permanent latch, which nothing else
-// clears.
+// statusWrite.applyTo so the cached copy takes the same rule as the DAO
+// record — both halves of a pair move whichever SID is named (#303), and the
+// TransmitterCaused flag (#310) and KeyUnavailableSince marker (#312) are set or
+// cleared with the status — and when the change transitions the entry's receive
+// direction to enabled the retry ladder is reset — including out of the
+// permanent latch, which nothing else clears.
 //
 // The caller must hold s.mu.
-func (s *StreamService) applyStatusToReceiverCache(streamID, status, errorMsg string) {
+func (s *StreamService) applyStatusToReceiverCache(streamID string, w statusWrite) {
 	for _, entry := range s.receiverStreams {
 		if entry == nil || !recordIdentifiedBy(entry.record, streamID) {
 			continue
 		}
 		wasEnabled := snapshotReceiveDirection(entry.record).enabled
-		entry.record.SetStatus(status, errorMsg)
+		w.applyTo(entry.record)
 		snap := snapshotReceiveDirection(entry.record)
 		if snap.present && snap.enabled && !wasEnabled {
 			entry.resetRetryLadder()

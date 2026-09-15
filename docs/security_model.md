@@ -46,13 +46,54 @@ unattended deployment that must bootstrap itself without a human:
 - A `key`-scoped caller may `POST /key/<issuer>` to mint a **new** issuer signing
   key, but a key **takeover** (`force=replace`, `force=rotate`, or `?rotate`) is
   rejected for a key-scope-only caller — preventing key substitution / event
-  forgery.
+  forgery. Both rules hold for every `?alg=`: a `key`-scoped caller may create an
+  `RS256`, `ES256` or `ML-DSA-65` key, and may not rotate or replace one.
+- `POST /key/<issuer>` acts on **one signature algorithm**, named by `?alg=`
+  (`RS256` when absent, `ES256`, `ML-DSA-65`; anything else is a 400). A create
+  adds a key of that algorithm alongside the issuer's keys of other algorithms,
+  and is a 409 only when a key of that algorithm that is not revoked exists.
+  `force=rotate` adds a new key of that algorithm and leaves the previous one
+  active; `force=replace` deletes only that algorithm's keys before creating the
+  new one, so a plain `force=replace` replaces the RS256 keys and leaves ES256
+  and ML-DSA-65 keys in place. A key load (`POST /key/<issuer>` with a body)
+  uploads an RSA key, so its conflict check and `force=replace` apply to RS256
+  keys only. A stream never creates a signing key: create the key for the
+  stream's `iss` and `signing_alg` first.
 - A `key`-scoped caller may `GET /iat` to obtain an IAT, but the minted IAT is
   always **`reg`-only**: the `key`/admin capability does not propagate into it.
 
 This is the machine tier ladder: a bootstrap identity (`key`) seeds an issuer key
 and a `reg` IAT; the `reg` IAT registers a client that caps at `stream`+`event`;
 `admin` clients are provisioned out of band, not through the registration door.
+
+### Stranding signing transmitters: `confirm`
+
+A key change that an admin/root caller is allowed to make can still leave
+signing transmitters with nothing to sign with. A **suspend**
+(`POST /key/<issuer>/status` with `"status": "suspended"`, with or without a
+`kid`) or a **replace** (`POST /key/<issuer>?force=replace`, as a create or as a
+key load) is checked against the issuer's keys as they would be after the
+change. When a signing transmitter (any push, poll or SSTP pair transmitter not
+in Forward mode) whose `iss` is the issuer and whose status is not `disabled`
+would lose the only active key for its `signing_alg` (RS256 when empty), the
+request is refused with **409 Conflict** and nothing changes. The body is JSON:
+
+```json
+{"error": "suspending key https://issuer.example would leave no active signing key for RS256, ...",
+ "streams": [{"stream_id": "...", "description": "...", "signing_alg": "RS256"}]}
+```
+
+Resending the same request with `?confirm=true` (e.g.
+`?force=replace&confirm=true`) makes the change; any other `confirm` value counts
+as absent. The streams then pause and disable at runtime until a key is
+configured. An algorithm that has no active key before the change is not
+counted: the stream checks already report those streams.
+
+A **revoke**, a reactivate (`"status": "active"`), a rotate (`force=rotate` or
+`?rotate`) and a create that deletes nothing are never refused. A revoke is the
+response to a leaked key and never waits on a confirmation; the normal way to
+retire a key is to rotate first, so the old key's streams are covered before it
+is suspended or revoked.
 
 ### Foreign-server provisioning (endpoint → scope)
 

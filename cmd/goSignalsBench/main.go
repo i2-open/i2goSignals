@@ -171,6 +171,9 @@ func run(o *options) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureSigningAlgKey(gs1, o); err != nil {
+		return err
+	}
 
 	removeOrphans(o, gs1, gs2)
 	topo, err := buildTopology(gs1, gs2, o)
@@ -331,6 +334,27 @@ func ensureIssuerKey(gs1 *node, o *options) (*rsa.PrivateKey, error) {
 	}
 	logf("minted issuer key %s on goSignals1, saved to %s", o.issuer, o.issuerKeyFile)
 	return k, nil
+}
+
+// ensureSigningAlgKey makes sure goSignals1 holds the issuer key for
+// --signing-alg before the transmitter streams that sign with it are created:
+// a stream never creates its own signing key (i2goSignals#314), and one with no
+// active key for its algorithm is refused. RS256 is ensureIssuerKey's key; the
+// harness never signs with the ES256 or ML-DSA-65 key, so it is not saved.
+func ensureSigningAlgKey(gs1 *node, o *options) error {
+	if o.signingAlg == "" || o.signingAlg == "RS256" {
+		return nil
+	}
+	created, err := gs1.createSigningAlgKey(o.bootstrapToken, o.issuer, o.signingAlg)
+	if err != nil {
+		return fmt.Errorf("create %s issuer key %s: %w", o.signingAlg, o.issuer, err)
+	}
+	if created {
+		logf("minted %s issuer key %s on goSignals1", o.signingAlg, o.issuer)
+	} else {
+		logf("using existing %s issuer key %s on goSignals1", o.signingAlg, o.issuer)
+	}
+	return nil
 }
 
 func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {

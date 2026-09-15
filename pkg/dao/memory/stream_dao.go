@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -88,9 +89,35 @@ func (d *StreamDAOMemory) FindByPairId(ctx context.Context, pairId string) (*mod
 }
 
 func (d *StreamDAOMemory) UpdateStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(id, status, errorMsg, false)
+}
+
+func (d *StreamDAOMemory) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	return d.updateStatus(id, status, errorMsg, true)
+}
+
+func (d *StreamDAOMemory) UpdateKeyUnavailablePause(ctx context.Context, id string, errorMsg string, since time.Time) error {
+	if state, ok := d.store.Get(id); ok {
+		marker := state.KeyUnavailableSince
+		if marker == nil || since.Before(*marker) {
+			marker = &since
+		}
+		state.Status = model.StreamStatePause
+		state.ErrorMsg = errorMsg
+		state.TransmitterCaused = false
+		state.KeyUnavailableSince = marker
+		d.store.Set(id, state)
+		return nil
+	}
+	return errors.New("not found")
+}
+
+func (d *StreamDAOMemory) updateStatus(id, status, errorMsg string, transmitterCaused bool) error {
 	if state, ok := d.store.Get(id); ok {
 		state.Status = status
 		state.ErrorMsg = errorMsg
+		state.TransmitterCaused = transmitterCaused
+		state.KeyUnavailableSince = nil
 		d.store.Set(id, state)
 		return nil
 	}

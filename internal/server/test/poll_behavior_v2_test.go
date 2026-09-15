@@ -415,7 +415,7 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	t := suite.T()
 
 	// Allow up to 3 forbidden attempts before disabling. With a short delay
-	// and backoff factor, the test should observe at least one paused state
+	// and backoff factor, the test should observe at least one retrying state
 	// before the stream is ultimately disabled.
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_DELAY", "0.05") // 50ms base
 	t.Setenv("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "3")
@@ -452,19 +452,20 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	ps := suite.instance.app.HandleReceiver(state)
 	assert.NotNil(t, ps)
 
-	// Within the first ~100ms we should see at least one retry (status paused
-	// with a retry-attempt message), well before the limit of 3 is reached.
-	sawPause := false
+	// Within the first ~100ms we should see at least one retry (status enabled
+	// with a retry-attempt message — a retrying receiver has not paused, #310),
+	// well before the limit of 3 is reached.
+	sawRetry := false
 	for i := 0; i < 20; i++ {
 		time.Sleep(25 * time.Millisecond)
 		updatedState, _ := suite.instance.GetStreamState(createdConfig.Id)
-		if updatedState != nil && updatedState.Status == model.StreamStatePause &&
+		if updatedState != nil && updatedState.Status == model.StreamStateEnabled &&
 			strings.Contains(updatedState.ErrorMsg, "forbidden response (403), retrying") {
-			sawPause = true
+			sawRetry = true
 			break
 		}
 	}
-	assert.True(t, sawPause, "expected to observe a paused state with a 403 retry message during retries")
+	assert.True(t, sawRetry, "expected to observe an enabled state with a 403 retry message during retries")
 
 	// Eventually the stream must end up DISABLED with the diagnostic message.
 	var finalState *model.StreamStateRecord
@@ -479,4 +480,5 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	assert.Equal(t, model.StreamStateDisable, finalState.Status)
 	assert.Contains(t, finalState.ErrorMsg, "Stream disabled after 3 forbidden (403)")
 	assert.Contains(t, finalState.ErrorMsg, "scope")
+	assert.False(t, finalState.TransmitterCaused, "a retry-limit disable is not transmitter-caused (#310)")
 }

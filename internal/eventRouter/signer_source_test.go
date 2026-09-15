@@ -56,13 +56,12 @@ func (s *stubSignerSource) callCount() int {
 }
 
 // newKeyCacheRouter builds the minimum router the issuer-key cache needs: the
-// two cache maps, a context, and the signer source under test.
+// key cache, a context, and the signer source under test.
 func newKeyCacheRouter(src signerSource) *router {
 	return &router{
-		ctx:        context.Background(),
-		issuerKeys: map[string]crypto.Signer{},
-		issuerKids: map[string]string{},
-		keyService: src,
+		ctx:         context.Background(),
+		signingKeys: newSigningKeyCache(),
+		keyService:  src,
 	}
 }
 

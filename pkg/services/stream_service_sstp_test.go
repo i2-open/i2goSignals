@@ -294,6 +294,9 @@ func TestCreateSstpPair_AsymmetricIssAudAccepted(t *testing.T) {
 	b.Primary.Aud = []string{"https://hopB.example"}
 	b.Inbound.Iss = "https://hopC.example"
 	b.Inbound.Aud = []string{"https://hopD.example"}
+	// The Publish primary signs as hopA, which needs an active key (#308).
+	_, err := svc.keyService.CreateKeyPair(context.Background(), "https://hopA.example", "sig", "")
+	require.NoError(t, err)
 	rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://hopA.example", rec.StreamConfiguration.Iss)

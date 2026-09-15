@@ -208,6 +208,20 @@ goSignals> create key gs1 cluster.scim.example.com --file=issuer.pem
 goSignals> create iat gs1
 ```
 
+`create key --alg` picks the signature algorithm of the key: `RS256` (the
+server's default when omitted), `ES256` or `ML-DSA-65`. It is sent as `?alg=` and
+applies to `--force=rotate` and `--force=replace` too, which act on that
+algorithm's keys only — a plain `--force=replace` replaces the RS256 keys and
+leaves the issuer's ES256 and ML-DSA-65 keys in place. A stream with
+`signing_alg` set never creates its key, so create it first:
+
+```shell
+goSignals> create key gs1 cluster.scim.example.com --alg=ES256 --file=issuer-es256.pem
+```
+
+The bootstrap `key` scope may create a key of any algorithm, but not rotate or
+replace one.
+
 This is exactly what the demo stacks do. The `scimSsfSetup` container exports
 `I2SIG_BOOTSTRAP_TOKEN` and runs `config/scim/scripts/auto-reg.gosignals`:
 

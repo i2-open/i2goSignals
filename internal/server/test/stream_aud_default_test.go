@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -133,6 +134,9 @@ func TestCreateStreamHonorsRequestedIss(t *testing.T) {
 
 	cfg := pollStreamConfig()
 	cfg.Iss = "https://issuer.example.com"
+	// A Publish poll transmitter needs an active signing key for its iss (#308).
+	_, err = instance.keySvc().EnsureSigningKey(context.Background(), cfg.Iss, instance.projectId)
+	require.NoError(t, err)
 
 	authCtx := &authSupport.AuthContext{
 		ProjectId: instance.projectId,

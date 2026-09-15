@@ -31,9 +31,14 @@ type ServerProvisioningAuthzSuite struct {
 }
 
 func (s *ServerProvisioningAuthzSuite) SetupTest() {
+	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "serverauthz-test")
 	s.Require().NoError(err)
 	err = persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT")
+	s.Require().NoError(err)
+	// The plain-create tests' poll transmitter signs as this issuer, which needs
+	// an active key (#308).
+	_, err = persistence.KeyService.CreateKeyPair(context.Background(), "http://transmitter.example.com", "sig", "")
 	s.Require().NoError(err)
 
 	s.app = newTestApplication(persistence)
@@ -159,6 +164,22 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_UnknownEventValidationMo
 	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
 	s.Equal(http.StatusBadRequest, rr.Code, "an unrecognized event_validation mode is a client error")
 	s.Contains(rr.Body.String(), "ENFORE", "the response must name the offending value")
+}
+
+// An SSTP bootstrap whose receive_mode is not a receive-side choice is refused
+// with a 400 naming the field, beside the existing mode check (issue #306).
+// PUBLISH is the telling case: it is a valid mode, but a receiver cannot act on
+// it differently from FORWARD.
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SstpInvalidReceiveModeIs400() {
+	tok := s.streamToken("proj-A")
+	dir := model.SstpDirection{Iss: "https://a.example", Aud: []string{"https://b.example"}, Mode: model.SstpModeForward}
+	boot := model.SstpPairBootstrap{Role: model.SstpRoleResponder, Primary: dir, Inbound: dir}
+	boot.Inbound.ReceiveMode = model.SstpModePublish
+	body, _ := json.Marshal(boot)
+
+	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
+	s.Equal(http.StatusBadRequest, rr.Code, "an invalid receive_mode is a client error")
+	s.Contains(rr.Body.String(), "inbound.receive_mode", "the response must name the offending field")
 }
 
 // TestCanProvisionTxAlias locks the tx_alias authorization policy directly,

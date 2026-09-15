@@ -82,6 +82,27 @@ type StreamStateRecord struct {
 	// ErrorMsg holds the reason a stream has been paused
 	ErrorMsg string `json:"reason,omitempty" bson:"error_msg,omitempty" json:"errorMsg,omitempty"`
 
+	// TransmitterCaused is true when a poll receiver's paused or disabled Status
+	// was reported by the transmitter's status endpoint rather than set by an
+	// operator (issue #310). Only SetTransmitterCausedStatus sets it; every other
+	// status write (SetStatus, and the DAO's UpdateStatus) clears it, so an
+	// operator change always wins. The poll loop resumes a transmitter-caused
+	// pause by itself, and never an administrative one. It is shown on the admin
+	// stream-state surfaces, not on the SSF status response.
+	TransmitterCaused bool `json:"transmitter_caused,omitempty" bson:"transmitter_caused,omitempty"`
+
+	// KeyUnavailableSince marks a key-unavailable pause (issue #312): a paused
+	// Status the server set itself because a signing poll transmitter or SSTP
+	// pair had no active signing key for its iss and signing_alg. It holds the
+	// time of the first failure; a repeat failure does not move it. Only
+	// SetKeyUnavailablePause sets it; every other status write (SetStatus,
+	// SetTransmitterCausedStatus, and the DAO's other status writes) clears it.
+	// The server's background key check resumes a stream only while it is
+	// still set, so an operator's pause is never resumed, and disables a
+	// stream whose key is still missing once the retry limit has passed since
+	// this time.
+	KeyUnavailableSince *time.Time `json:"key_unavailable_since,omitempty" bson:"key_unavailable_since,omitempty"`
+
 	RemoteAddress *RemoteIP `json:"remote_address,omitempty" bson:"remote_address,omitempty"`
 
 	// DefaultSubjects is the SSF subject-filtering baseline policy for a
@@ -172,6 +193,21 @@ type StreamStateRecord struct {
 	// value the cascade carries. Nil means the leg was configured before #296, or
 	// with no descriptor, and behaves as DIRECT.
 	InboundEventSource *EventSource `json:"inbound_event_source,omitempty" bson:"inbound_event_source,omitempty"`
+
+	// ReceiveMode echoes the SSTP bootstrap's primary.receive_mode (issue #306):
+	// SstpModeImport or SstpModeForward, the choice made for the RECEIVING end of
+	// this pair's outbound direction. That end is the peer, so this node never
+	// routes on it — the peer does, having received it through the mirror. It is
+	// stored so the pair read can show both ends of the direction. Empty when the
+	// bootstrap did not carry it, and then omitted from the wire.
+	ReceiveMode string `json:"receive_mode,omitempty" bson:"receive_mode,omitempty"`
+
+	// InboundReceiveMode is the inbound twin of ReceiveMode, following the
+	// InboundEventSource convention: it echoes inbound.receive_mode, which is
+	// THIS node's receiving choice and is what SstpInbound.RouteMode was built
+	// from. An inbound route_mode patch keeps it in step (updateSstpPair), so the
+	// echo never contradicts the mode it describes. Empty when not bootstrapped.
+	InboundReceiveMode string `json:"inbound_receive_mode,omitempty" bson:"inbound_receive_mode,omitempty"`
 
 	// --- Node-local JWKS readiness (ADR 0033) ---
 	// Derived, never persisted (bson:"-"), and NOT part of the SSF wire-format
@@ -273,6 +309,10 @@ func (ss *StreamStateRecord) DeepCopy() *StreamStateRecord {
 	res.StreamConfiguration = ss.StreamConfiguration.DeepCopy()
 	res.EventSource = ss.EventSource.DeepCopy()
 	res.InboundEventSource = ss.InboundEventSource.DeepCopy()
+	if ss.KeyUnavailableSince != nil {
+		since := *ss.KeyUnavailableSince
+		res.KeyUnavailableSince = &since
+	}
 	if ss.RetentionWindowDays != nil {
 		v := *ss.RetentionWindowDays
 		res.RetentionWindowDays = &v
@@ -291,6 +331,8 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	// This is being done to preserve the handle on the PushStreams.
 	ss.Status = mod.Status
 	ss.ErrorMsg = mod.ErrorMsg
+	ss.TransmitterCaused = mod.TransmitterCaused
+	ss.KeyUnavailableSince = mod.KeyUnavailableSince
 	// ss.Receiver = mod.Receiver - now handled by StreamConfiguration
 
 	ss.ValidateJwks = mod.ValidateJwks
@@ -311,6 +353,8 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.InboundStatus = mod.InboundStatus
 	ss.InboundErrorMsg = mod.InboundErrorMsg
 	ss.InboundEventSource = mod.InboundEventSource
+	ss.ReceiveMode = mod.ReceiveMode
+	ss.InboundReceiveMode = mod.InboundReceiveMode
 	ss.JwksReadiness = mod.JwksReadiness
 	ss.InboundJwksReadiness = mod.InboundJwksReadiness
 }
@@ -400,23 +444,55 @@ func (ss *StreamStateRecord) isPair() bool {
 // exchange, so every status — enabled, paused, or disabled — moves both, the
 // same single status a push or poll stream carries (#303), whichever SID named
 // the pair. A one-way logical pause would be a later enhancement.
+//
+// It clears TransmitterCaused: an ordinary status write is not the
+// transmitter's report (#310). It also clears KeyUnavailableSince: it is not a
+// key-unavailable pause (#312).
 func (ss *StreamStateRecord) SetStatus(status, reason string) {
 	ss.Status = status
 	ss.ErrorMsg = reason
+	ss.TransmitterCaused = false
+	ss.KeyUnavailableSince = nil
 	if ss.isPair() {
 		ss.InboundStatus = status
 		ss.InboundErrorMsg = reason
 	}
 }
 
+// SetTransmitterCausedStatus is SetStatus for a paused or disabled status the
+// transmitter's status endpoint reported: it writes the status and reason and
+// sets TransmitterCaused (#310). It does not persist.
+func (ss *StreamStateRecord) SetTransmitterCausedStatus(status, reason string) {
+	ss.SetStatus(status, reason)
+	ss.TransmitterCaused = true
+}
+
+// SetKeyUnavailablePause is SetStatus for a key-unavailable pause (#312): it
+// writes paused and reason and sets KeyUnavailableSince to since, unless the
+// record already carries an earlier marker, so a repeat failure keeps the time
+// of the first. It does not persist.
+func (ss *StreamStateRecord) SetKeyUnavailablePause(reason string, since time.Time) {
+	marker := ss.KeyUnavailableSince
+	ss.SetStatus(StreamStatePause, reason)
+	if marker == nil || since.Before(*marker) {
+		marker = &since
+	}
+	ss.KeyUnavailableSince = marker
+}
+
 // IsStatusChange reports whether SetStatus(status, reason) would change the
 // record, which is POST /status's "no change" test (#303). On a pair both halves
 // take the write, so it is a change when EITHER half differs — which also lets a
 // legacy split record heal; otherwise only the primary half is compared. Reasons
-// compare case-insensitively.
+// compare case-insensitively. A transmitter-caused record always changes, since
+// the write clears TransmitterCaused (#310), and so does a key-unavailable pause,
+// since the write clears KeyUnavailableSince (#312).
 func (ss *StreamStateRecord) IsStatusChange(status, reason string) bool {
 	differs := func(halfStatus, halfReason string) bool {
 		return halfStatus != status || !strings.EqualFold(reason, halfReason)
+	}
+	if ss.TransmitterCaused || ss.KeyUnavailableSince != nil {
+		return true
 	}
 	if ss.isPair() && differs(ss.InboundStatus, ss.InboundErrorMsg) {
 		return true

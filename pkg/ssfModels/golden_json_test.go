@@ -191,6 +191,8 @@ func goldenCases() []goldenCase {
 		InboundStatus:        "enabled",
 		InboundErrorMsg:      "",
 		InboundEventSource:   &EventSource{Type: EventSourceAudience},
+		ReceiveMode:          SstpModeImport,
+		InboundReceiveMode:   SstpModeForward,
 		JwksReadiness:        &JwksReadiness{State: JwksReadinessReady},
 		InboundJwksReadiness: &JwksReadiness{State: JwksReadinessUnresolved, LastError: "dial tcp", NextRetryAt: goldenPtr(goldenTime2)},
 	}

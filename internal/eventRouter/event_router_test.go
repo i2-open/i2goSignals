@@ -222,6 +222,9 @@ func setupDedupRouterPollStream(t *testing.T) *dedupTestSetup {
 
 	audience := "https://receiver.example.com"
 	projectId := projectIdFromHarness(t, h)
+	// The poll transmitter signs as dupTestIssuer, which needs an active key (#308).
+	_, err := h.keyService.CreateKeyPair(context.Background(), dupTestIssuer, "sig", projectId)
+	require.NoError(t, err)
 	// EventsRequested drives EventsDelivered through the stream service's
 	// request/supported intersection — passing EventsDelivered alone is ignored.
 	cfg := model.StreamConfiguration{

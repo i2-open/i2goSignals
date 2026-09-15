@@ -70,7 +70,8 @@ type SstpPairBootstrap struct {
 // SstpDirection holds the per-direction business-plane inputs of an SSTP pair
 // bootstrap. iss/aud ride the business plane (Q27, Q29); events are accepted
 // loosely per half (no URI-registry check, empty allowed); mode maps to the
-// existing RouteMode semantics via SstpModeToRouteMode; event_source answers the
+// existing RouteMode semantics via SstpModeToRouteMode; receive_mode optionally
+// gives the receiving end its own choice (issue #306); event_source answers the
 // other ADR 0004 axis for this half alone (issue #296).
 type SstpDirection struct {
 	// Iss is the issuer asserted for this direction. Non-empty. A JWT
@@ -90,8 +91,29 @@ type SstpDirection struct {
 	Events []string `json:"events,omitempty"`
 
 	// Mode is one of SstpModeForward, SstpModePublish, SstpModeImport, mapped to
-	// the existing RouteMode by SstpModeToRouteMode.
+	// the existing RouteMode by SstpModeToRouteMode. It is the TRANSMITTING end's
+	// choice for this direction, and also the receiving end's unless ReceiveMode
+	// says otherwise.
 	Mode string `json:"mode,omitempty"`
+
+	// ReceiveMode is the RECEIVING end's choice for this direction: SstpModeImport
+	// (keep what arrives) or SstpModeForward (route it on). Optional (issue #306).
+	//
+	// A direction has two ends that read its route mode differently: the
+	// transmitter tests == FW (relay verbatim, or re-sign), the receiver tests
+	// == IM (import only, or route on), and PUBLISH is indistinguishable from
+	// FORWARD on receipt (ADR 0031 D2). With Mode alone both ends are written from
+	// one word, so "relay verbatim, import only" cannot be said. When ReceiveMode
+	// is set the receiving end's RouteMode comes from it (see ReceiveRouteMode);
+	// when it is empty the receiving end mirrors Mode exactly as it did before the
+	// field existed, and the direction marshals without the key.
+	//
+	// Which end is which follows the bootstrap: on this node the primary is the
+	// transmitting end, so the primary's ReceiveMode is the PEER's choice and
+	// reaches it through mirrorSstpBootstrap's swap; the inbound's ReceiveMode is
+	// this node's own. Each is echoed on the record — StreamStateRecord.ReceiveMode
+	// and InboundReceiveMode.
+	ReceiveMode string `json:"receive_mode,omitempty"`
 
 	// EventSource says where THIS direction's events come from — the second of
 	// the two orthogonal axes ADR 0004 defines, Mode above being the first. Mode
@@ -134,4 +156,36 @@ func SstpModeToRouteMode(mode string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// SstpReceiveModeToRouteMode maps a direction's receive_mode to the RouteMode the
+// receiving end stores. Only the two receive-side choices are valid:
+// SstpModeImport and SstpModeForward. SstpModePublish is refused because a
+// receiver cannot act on it differently from FORWARD (ADR 0031 D2), and the empty
+// string is refused because an absent receive_mode is not a value — the direction
+// falls back to its mode instead (SstpDirection.ReceiveRouteMode). Any other
+// value returns ("", false) so callers can reject it.
+func SstpReceiveModeToRouteMode(receiveMode string) (string, bool) {
+	switch receiveMode {
+	case SstpModeImport:
+		return RouteModeImport, true
+	case SstpModeForward:
+		return RouteModeForward, true
+	default:
+		return "", false
+	}
+}
+
+// ReceiveRouteMode is the RouteMode the RECEIVING end of this direction stores:
+// the mapped ReceiveMode when it is present and valid, otherwise the mapped Mode,
+// which is what the receiving end stored before ReceiveMode existed. Validation
+// (validateSstpDirection) refuses an invalid value of either field before a
+// record is built, so the fallback is never reached with a bad ReceiveMode on
+// the create path.
+func (d SstpDirection) ReceiveRouteMode() string {
+	if mode, ok := SstpReceiveModeToRouteMode(d.ReceiveMode); ok {
+		return mode
+	}
+	mode, _ := SstpModeToRouteMode(d.Mode)
+	return mode
 }

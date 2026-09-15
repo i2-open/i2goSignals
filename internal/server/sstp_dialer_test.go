@@ -101,6 +101,10 @@ type fakeSstpOutbound struct {
 	acked    []string
 	released []string
 	paused   string
+	// keyPaused records PauseForSigningKey (#312): the cause it was given, and
+	// how many times it was called.
+	keyPauseCause error
+	keyPauses     int
 
 	// PRD #49 slice 2c: inbound-half hooks. verifyCfg is what
 	// InboundVerifyConfig returns to the dialer; ingested records what the
@@ -231,6 +235,14 @@ func (f *fakeSstpOutbound) PausePair(stream *model.StreamStateRecord, reason str
 	defer f.mu.Unlock()
 	f.paused = reason
 	f.pair.SetStatus(model.StreamStatePause, reason)
+}
+
+func (f *fakeSstpOutbound) PauseForSigningKey(stream *model.StreamStateRecord, cause error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keyPauseCause = cause
+	f.keyPauses++
+	f.pair.SetKeyUnavailablePause("SSTP-CLIENT: no active signing key", time.Now())
 }
 
 func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer, alg string) (crypto.Signer, string) {
@@ -678,8 +690,9 @@ func TestSstpDialer_BackoffJitter_Uniform25(t *testing.T) {
 
 // TestSstpDialer_SignFailureIsError proves AC 5: a broken signing key
 // causes buildSstpSets to return an error, deliver propagates it as
-// signErr, and runCycle halts the dial cycle (Pauses outbound, releases
-// the claim) rather than sending an unsigned SET on the wire.
+// signErr, and runCycle halts the dial cycle (takes the key-unavailable
+// pause, releases the claim) rather than sending an unsigned SET on the wire.
+// The pause is the key-unavailable one (#312), so the key check can resume it.
 func TestSstpDialer_SignFailureIsError(t *testing.T) {
 	const (
 		pairId = "pair-sign-fail"
@@ -744,16 +757,18 @@ func TestSstpDialer_SignFailureIsError(t *testing.T) {
 	dialer.RegisterPair(pairId)
 	t.Cleanup(func() { dialer.UnregisterPair(pairId) })
 
-	// The dialer should observe the sign error, pause the pair, and exit.
-	// We assert on the pause reason (visible via fake.paused) — the sign
-	// error's presence in the reason string proves the sign-failure code
-	// path was hit.
+	// The dialer should observe the sign error, take the key-unavailable
+	// pause with the signing error as its cause, and exit.
 	require.Eventually(t, func() bool {
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
-		return strings.Contains(fake.paused, "signing failure")
+		return fake.keyPauseCause != nil && strings.Contains(fake.keyPauseCause.Error(), "no signing key")
 	}, 3*time.Second, 20*time.Millisecond,
-		"sign failure must halt the dial cycle by pausing the pair with a signing-failure reason")
+		"sign failure must halt the dial cycle with the key-unavailable pause (#312)")
+	fake.mu.Lock()
+	assert.Empty(t, fake.paused, "no other pause reason replaces the key-unavailable one")
+	assert.Contains(t, fake.released, jti, "the claim is released so the SET stays queued")
+	fake.mu.Unlock()
 
 	// AC 5: the sign error MUST short-circuit before any HTTP request.
 	// If the peer's counter is non-zero we sent an unsigned SET — which is

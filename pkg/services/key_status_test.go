@@ -72,7 +72,7 @@ func (s *KeyStatusSuite) TestIssuancePicksLatestActive() {
 	svc := s.svc()
 	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "") // kid "iss"
 	s.Require().NoError(err)
-	_, newKid, err := svc.RotateKey(ctx, "iss", "") // newest kid
+	_, newKid, err := svc.RotateKey(ctx, "iss", "", "") // newest kid
 	s.Require().NoError(err)
 
 	// Suspending the newest kid should leave the original active.
@@ -128,6 +128,28 @@ func (s *KeyStatusSuite) TestReactivateSuspendedRestoresSigning() {
 	s.Equal("iss", kid)
 }
 
+// TestSuspendedKeyReadLogsWarnNotError: a signing-key read that finds only
+// suspended or revoked keys logs a WARN naming the remedy, never an ERROR. Push
+// retries and the background key check read the key on every retry; the router
+// logs the one ERROR per key-unavailable pause (#312).
+func (s *KeyStatusSuite) TestSuspendedKeyReadLogsWarnNotError() {
+	ctx := context.Background()
+	svc := s.svc()
+	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "")
+	s.Require().NoError(err)
+	_, _, err = svc.SetKeyStatus(ctx, "iss", "", interfaces.KeyStatusSuspended)
+	s.Require().NoError(err)
+
+	logs := captureLogs(s.T())
+	for i := 0; i < 3; i++ {
+		_, _, err = svc.GetSigner(ctx, "iss", "")
+		s.Require().ErrorIs(err, interfaces.ErrKeyNotFound)
+	}
+	s.NotContains(logs.String(), "level=ERROR")
+	s.Contains(logs.String(), "level=WARN")
+	s.Contains(logs.String(), "remedy=")
+}
+
 // TestReactivateRevokedIsTerminal: moving away from revoked is refused.
 func (s *KeyStatusSuite) TestReactivateRevokedIsTerminal() {
 	ctx := context.Background()
@@ -177,7 +199,7 @@ func (s *KeyStatusSuite) TestPartialSuspendKeepsActiveInPublicJWKS() {
 	svc := s.svc()
 	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "")
 	s.Require().NoError(err)
-	_, newKid, err := svc.RotateKey(ctx, "iss", "")
+	_, newKid, err := svc.RotateKey(ctx, "iss", "", "")
 	s.Require().NoError(err)
 
 	_, _, err = svc.SetKeyStatus(ctx, "iss", newKid, interfaces.KeyStatusSuspended)
@@ -196,7 +218,7 @@ func (s *KeyStatusSuite) TestKeyNameWideSuspendSkipsRevokedSibling() {
 	svc := s.svc()
 	_, err := svc.CreateKeyPair(ctx, "iss", "sig", "") // kid "iss"
 	s.Require().NoError(err)
-	_, newKid, err := svc.RotateKey(ctx, "iss", "") // second active kid
+	_, newKid, err := svc.RotateKey(ctx, "iss", "", "") // second active kid
 	s.Require().NoError(err)
 
 	// Revoke only the older kid.
@@ -266,8 +288,8 @@ func (s *KeyStatusSuite) TestRevokeTokenIssuerDropsFromAuthJWKSAndClearsSigning(
 // to the revoked kid.
 func (s *KeyStatusSuite) TestRevokeTokenIssuerActiveKidKeepsSuspendedSibling() {
 	ctx := context.Background()
-	svc := s.svc()                                      // kid "DEFAULT" active
-	_, newKid, err := svc.RotateKey(ctx, "DEFAULT", "") // newKid becomes active signer
+	svc := s.svc()                                          // kid "DEFAULT" active
+	_, newKid, err := svc.RotateKey(ctx, "DEFAULT", "", "") // newKid becomes active signer
 	s.Require().NoError(err)
 	_, _, err = svc.SetKeyStatus(ctx, "DEFAULT", "DEFAULT", interfaces.KeyStatusSuspended)
 	s.Require().NoError(err)

@@ -325,6 +325,16 @@ Every node stops signing with a suspended, revoked or replaced key, and
 picks up a rotated one, within a few seconds of the change, whichever
 node handled it.
 
+The bound is the router's **key cache**
+(`internal/eventRouter/signing_key_cache.go`): each node's in-memory
+signing keys, per issuer and algorithm, which every signing transmitter
+on the node shares. An entry is re-read from the key store 2 s after it
+was loaded, once per issuer and algorithm however many streams use it;
+the node that handles a key change clears the issuer's entries at once.
+A re-read that finds no active key drops the entry, so the transmitter
+follows the missing-key rule; a re-read that fails keeps the current key,
+so a key store outage does not pause every signing transmitter.
+
 _Avoid_: "key expiry" — goSignals keys carry no expiry; a key leaves
 service only by suspend, revoke or replace.
 

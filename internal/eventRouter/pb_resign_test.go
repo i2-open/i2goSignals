@@ -76,6 +76,9 @@ func (h *pbResignHarness) createPBStream(t *testing.T, projectId, iss string, au
 			},
 		},
 	}
+	// A Publish stream needs an active signing key for its iss (#308).
+	_, err := h.keyService.EnsureSigningKey(context.Background(), iss, projectId)
+	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
 	created, err := h.streamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
 	require.NoError(t, err)

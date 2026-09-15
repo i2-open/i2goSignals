@@ -25,6 +25,10 @@ func newEventValidationTestService(def model.EventValidationMode) *StreamService
 	streamDAO := memory.NewStreamDAO()
 	keyDAO := memory.NewKeyDAO()
 	keyService := NewKeyService(keyDAO, "http://test", nil, nil)
+	// pushTransmitterRequest signs as test-issuer, which needs an active key (#308).
+	if _, err := keyService.CreateKeyPair(context.Background(), "test-issuer", "sig", ""); err != nil {
+		panic(err)
+	}
 	return NewStreamService(streamDAO, keyService, "http://test",
 		StreamServiceConfig{EventValidationDefault: def})
 }

@@ -29,7 +29,9 @@ func (sa *SignalsApplication) ReceiveSstpEvent(w http.ResponseWriter, r *http.Re
 // duplication lives in one place. Observable gate order is pinned verbatim to
 // the pre-migration behavior — Check(405/415) → pair-404 → bearer-401 → Parse
 // (400) — with no pre-auth body read (pkg CheckExchangeRequest owns method +
-// content-type only, ParseExchangeRequest owns the body).
+// content-type only, ParseExchangeRequest owns the body). The signing-key gate
+// (503, #312) follows Parse, so an unauthenticated or malformed request can
+// never pause a pair.
 //
 // The pair record is resolved EXACTLY ONCE here (AC 2) and threaded into
 // eventRouter.SstpServerHandler; the runner no longer re-looks-up. Ingest of
@@ -95,6 +97,18 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 	inbound, rerr := goSetSstp.ParseExchangeRequest(r, goSetSstp.ParseOptions{MaxBodyBytes: 0})
 	if rerr != nil {
 		writeSstpError(w, rerr.Status, goSetPush.ErrInvalidRequest, rerr.Description)
+		return
+	}
+
+	// Gate 5 (signing key, #312): a pair that re-signs its outbound SETs needs
+	// an active signing key for its iss and signing_alg. Without one the
+	// exchange is refused before anything in it is applied — no inbound SET is
+	// verified or ingested and no ack is honored — and the pair takes the
+	// key-unavailable pause. The 503 makes the dialing end back off and resend
+	// rather than pause itself; the key check resumes this pair once the key is
+	// back, and the resent exchange is then applied.
+	if keyErr := sa.GetEventRouter().CheckSstpSigningKey(rec); keyErr != nil {
+		writeSstpError(w, http.StatusServiceUnavailable, goSetPush.ErrInvalidKey, keyErr.Error())
 		return
 	}
 

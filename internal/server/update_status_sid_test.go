@@ -71,6 +71,7 @@ func (a *statusRefreshApp) resetRefreshes() {
 
 func newStatusRefreshApp(t *testing.T) *statusRefreshApp {
 	t.Helper()
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "update-status-sid-"+t.Name())
 	require.NoError(t, err)
 	require.NoError(t, persistence.KeyService.InitializeTokenKey(context.Background(), "DEFAULT"))
@@ -80,14 +81,22 @@ func newStatusRefreshApp(t *testing.T) *statusRefreshApp {
 }
 
 // persistStatusPair stores an SSTP pair whose two halves carry the given
-// statuses and reasons.
+// statuses and reasons. Its transmit half signs as DEFAULT, the issuer with a
+// key, so re-enabling it passes the signing-key check (#308).
 func persistStatusPair(t *testing.T, app *statusRefreshApp, outStatus, outReason, inStatus, inReason string) {
+	t.Helper()
+	persistStatusPairIss(t, app, "DEFAULT", outStatus, outReason, inStatus, inReason)
+}
+
+// persistStatusPairIss is persistStatusPair with the transmit half signing as iss.
+func persistStatusPairIss(t *testing.T, app *statusRefreshApp, iss, outStatus, outReason, inStatus, inReason string) {
 	t.Helper()
 	rec := &model.StreamStateRecord{
 		ProjectId: statusTestProject,
 		PairId:    statusPairId,
 		StreamConfiguration: model.StreamConfiguration{
 			Id:       statusPairTxSid,
+			Iss:      iss,
 			Delivery: &model.OneOfStreamConfigurationDelivery{SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp}},
 		},
 		SstpInbound: &model.StreamConfiguration{
@@ -107,18 +116,29 @@ func persistStatusPair(t *testing.T, app *statusRefreshApp, outStatus, outReason
 	require.NoError(t, app.StreamService.PersistStreamStateRecord(context.Background(), rec))
 }
 
+// persistStatusPlain stores a poll transmitter signing as DEFAULT, the issuer
+// with a key, so re-enabling it passes the signing-key check (#308).
 func persistStatusPlain(t *testing.T, app *statusRefreshApp, status, reason string) {
 	t.Helper()
-	rec := &model.StreamStateRecord{
+	persistStatusPlainIss(t, app, "DEFAULT", status, reason)
+}
+
+func persistStatusPlainIss(t *testing.T, app *statusRefreshApp, iss, status, reason string) {
+	t.Helper()
+	require.NoError(t, app.StreamService.PersistStreamStateRecord(context.Background(), statusPlainRecord(iss, status, reason)))
+}
+
+func statusPlainRecord(iss, status, reason string) *model.StreamStateRecord {
+	return &model.StreamStateRecord{
 		ProjectId: statusTestProject,
 		StreamConfiguration: model.StreamConfiguration{
 			Id:       statusPlainSid,
+			Iss:      iss,
 			Delivery: &model.OneOfStreamConfigurationDelivery{PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll}},
 		},
 		Status:   status,
 		ErrorMsg: reason,
 	}
-	require.NoError(t, app.StreamService.PersistStreamStateRecord(context.Background(), rec))
 }
 
 func (a *statusRefreshApp) pairBearer(t *testing.T) string {

@@ -112,3 +112,22 @@ key simply skips it and keeps verifying its own streams.
   say so explicitly. `pkg/services/key_service_es256_test.go` and
   `pkg/services/es256_roundtrip_test.go` pin provisioning and a full push / poll
   / SSTP round trip respectively.
+
+## Update (2026-09-14): streams no longer provision keys (GH #314)
+
+**Decisions 2 and 3 no longer provision through streams.** A stream created or
+updated with `signing_alg` creates no key: `applySigningAlg` is gone and
+`validateSigningAlg` only validates the value. Keys are created by the operator
+through `POST /key/{keyName}?alg=` (`RS256` default, `ES256`, `ML-DSA-65`; any
+other value is 400), and create, rotate and replace each act on that one
+algorithm, so a plain `force=replace` no longer deletes the name's ES256 or
+ML-DSA-65 keys. The curve (Decision 2) and the discriminated encoding contract
+(Decision 3) are unchanged; the key endpoint generates them where
+`EnsureSigningKeyForAlg` did. `EnsureSigningKeyForAlg` remains for tests only.
+`goSignals create key --alg` and `goSignalsBench --signing-alg` create the key
+before the stream.
+
+A signing stream whose issuer has no active key for its algorithm is refused on
+save and follows the missing-key rule at runtime (ADR 0028 update, #308/#312).
+An ES256 or ML-DSA-65 key created under the token issuer's name does not become
+the auth token signing key, which stays RSA.

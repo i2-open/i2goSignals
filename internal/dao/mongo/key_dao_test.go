@@ -201,3 +201,38 @@ func (suite *KeyDAOMongoSuite) TestListSummaries() {
 	suite.True(foundA)
 	suite.True(foundB)
 }
+
+// TestDeleteByKeyNameAndAlg deletes only one algorithm's records under a keyName
+// (i2goSignals#314). An RSA record is stored with no alg field at all, so ""
+// must match the absent field.
+func (suite *KeyDAOMongoSuite) TestDeleteByKeyNameAndAlg() {
+	ctx := context.Background()
+	for _, rec := range []*interfaces.JwkKeyRec{
+		{KeyName: "iss", Kid: "iss"},
+		{KeyName: "iss", Kid: "iss-ec-1", Alg: "ES256"},
+		{KeyName: "iss", Kid: "iss-ec-2", Alg: "ES256"},
+		{KeyName: "iss", Kid: "iss-pq", Alg: "ML-DSA-65"},
+		{KeyName: "other", Kid: "other-ec", Alg: "ES256"},
+	} {
+		rec.Id = bson.NewObjectID().Hex()
+		suite.Require().NoError(suite.dao.Insert(ctx, rec))
+	}
+
+	suite.Require().NoError(suite.dao.DeleteByKeyNameAndAlg(ctx, "iss", "ES256"))
+	kids := func(keyName string) []string {
+		recs, err := suite.dao.FindByKeyName(ctx, keyName)
+		suite.Require().NoError(err)
+		var out []string
+		for _, r := range recs {
+			out = append(out, r.Kid)
+		}
+		return out
+	}
+	suite.ElementsMatch([]string{"iss", "iss-pq"}, kids("iss"))
+	suite.ElementsMatch([]string{"other-ec"}, kids("other"))
+
+	suite.Require().NoError(suite.dao.DeleteByKeyNameAndAlg(ctx, "iss", ""))
+	suite.ElementsMatch([]string{"iss-pq"}, kids("iss"))
+
+	suite.ErrorIs(suite.dao.DeleteByKeyNameAndAlg(ctx, "iss", "ES256"), interfaces.ErrKeyNotFound)
+}

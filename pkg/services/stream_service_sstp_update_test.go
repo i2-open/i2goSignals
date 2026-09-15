@@ -63,6 +63,9 @@ func TestUpdateSstpPair_RotatesAuthorizationHeader(t *testing.T) {
 func TestUpdateSstpPair_PatchesIssAudPerDirection(t *testing.T) {
 	t.Run("tx side patches primary", func(t *testing.T) {
 		svc, rec := createdPair(t)
+		// The Publish primary's new iss needs an active signing key (#308).
+		_, keyErr := svc.keyService.CreateKeyPair(context.Background(), "https://corrected-tx.example", "sig", "")
+		require.NoError(t, keyErr)
 		patch := model.StreamStateRecord{
 			StreamConfiguration: model.StreamConfiguration{
 				Iss: "https://corrected-tx.example",
@@ -169,6 +172,9 @@ func TestUpdateSstpPair_FillsInitiallyOmittedPeerConnectivity(t *testing.T) {
 // (Q35)
 func TestUpdateSstpPair_IDsAreImmutable(t *testing.T) {
 	svc, rec := createdPair(t)
+	// The Publish primary's new iss needs an active signing key (#308).
+	_, keyErr := svc.keyService.CreateKeyPair(context.Background(), "https://still-patches.example", "sig", "")
+	require.NoError(t, keyErr)
 
 	patch := model.StreamStateRecord{
 		PairId: "forged-pair-id",

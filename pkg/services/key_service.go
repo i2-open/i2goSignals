@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -34,6 +35,11 @@ var ErrKeyStatusInvalid = errors.New("invalid key status; must be active, suspen
 // ErrKeyStatusTerminal is returned when a transition would move a record away
 // from the terminal revoked state. The HTTP surface maps it to 400.
 var ErrKeyStatusTerminal = errors.New("key is revoked (terminal); cannot transition to another status")
+
+// ErrUnsupportedKeyAlg is returned when a key operation names a signature
+// algorithm the key store cannot hold a key for. The accepted values are ""
+// and "RS256" (RSA), "ES256" and "ML-DSA-65". The HTTP surface maps it to 400.
+var ErrUnsupportedKeyAlg = errors.New("unsupported SET signing algorithm")
 
 type KeyService struct {
 	keyDAO      interfaces.KeyDAO
@@ -179,19 +185,35 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 	return true, nil
 }
 
-// RotateKey generates a new key pair for keyName with a unique kid.
-func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId string) (crypto.Signer, string, error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+// RotateKey adds a new key of signature algorithm alg for keyName under a
+// unique kid ("" and "RS256" are RSA). The keyName's previous keys of that
+// algorithm stay active until an operator suspends or revokes them, and its keys
+// of other algorithms are untouched (i2goSignals#314). The new key is the newest
+// of its algorithm, so it is the one GetSigner selects from now on.
+func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, projectId string) (crypto.Signer, string, error) {
+	storedAlg, err := storedAlgFor(alg)
+	if err != nil {
+		return nil, "", err
+	}
+	privateKey, err := generateSigningKey(storedAlg)
 	if err != nil {
 		return nil, "", err
 	}
 
-	kid := fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
+	kid := newKeyKid(keyName, storedAlg)
 
-	// Preserve the use from the existing key if available
+	// Preserve the use from the newest existing key of the same algorithm.
 	use := "sig"
-	if existing, err2 := s.keyDAO.FindLatestByKeyName(ctx, keyName); err2 == nil {
-		use = existing.Use
+	if recs, err2 := s.keyDAO.FindByKeyName(ctx, keyName); err2 == nil {
+		var latest *interfaces.JwkKeyRec
+		for _, rec := range recs {
+			if rec.Alg == storedAlg && (latest == nil || rec.Id > latest.Id) {
+				latest = rec
+			}
+		}
+		if latest != nil && latest.Use != "" {
+			use = latest.Use
+		}
 	}
 
 	err = s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId)
@@ -199,7 +221,8 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 		return nil, "", err
 	}
 
-	if keyName == s.tokenIssuer {
+	// Auth tokens are signed RS256, so only an RSA rotation moves the token key.
+	if keyName == s.tokenIssuer && storedAlg == "" {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
 		jwks := s.buildAuthJWKS(ctx, keyName, privateKey, kid)
@@ -212,6 +235,71 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, projectId st
 	}
 
 	return privateKey, kid, nil
+}
+
+// CreateKeyPairForAlg creates a key of signature algorithm alg for keyName
+// alongside the keyName's keys of other algorithms, and returns it with its kid.
+// It is the operator's create: a stream never creates a key (i2goSignals#314),
+// and it does not check for an existing key of alg (the caller decides whether
+// one is a conflict).
+//
+// An RSA key takes keyName as its kid, as keys always have, unless a record
+// already holds that kid (a revoked key, say), in which case it gets a unique
+// kid rather than overwriting the record. Every other algorithm always gets a
+// kid of its own, because all of an issuer's keys share one JWKS.
+func (s *KeyService) CreateKeyPairForAlg(ctx context.Context, keyName string, alg string, use string, projectId string) (crypto.Signer, string, error) {
+	storedAlg, err := storedAlgFor(alg)
+	if err != nil {
+		return nil, "", err
+	}
+	kid := newKeyKid(keyName, storedAlg)
+	if storedAlg == "" {
+		recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
+		if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
+			return nil, "", fmt.Errorf("failed to check keys for %q: %w", keyName, err)
+		}
+		if !slices.ContainsFunc(recs, func(rec *interfaces.JwkKeyRec) bool { return recKid(rec) == keyName }) {
+			kid = keyName
+		}
+	}
+	privateKey, err := generateSigningKey(storedAlg)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to generate %s key %q: %w", algLabel(storedAlg), keyName, err)
+	}
+	if err := s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId); err != nil {
+		return nil, "", fmt.Errorf("failed to store %s key %q: %w", algLabel(storedAlg), keyName, err)
+	}
+	return privateKey, kid, nil
+}
+
+// KeyExistsForAlg reports whether keyName has a key record of signature
+// algorithm alg that is not revoked. A suspended key counts; a revoked one does
+// not, so a create after a revoke with no replacement is not a conflict.
+func (s *KeyService) KeyExistsForAlg(ctx context.Context, keyName string, alg string) (bool, error) {
+	storedAlg, err := storedAlgFor(alg)
+	if err != nil {
+		return false, err
+	}
+	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return slices.ContainsFunc(recs, func(rec *interfaces.JwkKeyRec) bool {
+		return rec.Alg == storedAlg && !rec.IsRevoked()
+	}), nil
+}
+
+// newKeyKid mints a unique kid for a new key of storedAlg under keyName. The
+// algorithm is part of a non-RSA kid so the kids of an issuer's JWKS say which
+// key is which.
+func newKeyKid(keyName string, storedAlg string) string {
+	if storedAlg == "" {
+		return fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
+	}
+	return fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
 }
 
 func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string) error {
@@ -232,7 +320,9 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 	}
 
 	err = s.keyDAO.Insert(ctx, keyPairRec)
-	if err == nil && keyName == s.tokenIssuer {
+	// Auth tokens are signed RS256, so only an RSA key becomes the token key; an
+	// ES256 or ML-DSA key stored under the token issuer's name must not.
+	if err == nil && keyName == s.tokenIssuer && alg == "" {
 		s.tokenKey = privateKey
 		s.tokenKid = kid
 		// Use buildAuthJWKS with the signing key override to guarantee that the JWKS
@@ -310,6 +400,18 @@ func (s *KeyService) DeleteKeysByName(ctx context.Context, keyName string) error
 	return s.keyDAO.DeleteByKeyName(ctx, keyName)
 }
 
+// DeleteKeysByNameAndAlg removes keyName's key records of signature algorithm
+// alg ("" and "RS256" are RSA) and leaves its keys of other algorithms. It is
+// the delete half of a replace (i2goSignals#314). Returns ErrKeyNotFound when
+// keyName has no key of alg.
+func (s *KeyService) DeleteKeysByNameAndAlg(ctx context.Context, keyName string, alg string) error {
+	storedAlg, err := storedAlgFor(alg)
+	if err != nil {
+		return err
+	}
+	return s.keyDAO.DeleteByKeyNameAndAlg(ctx, keyName, storedAlg)
+}
+
 // GetPrivateKey retrieves the latest private key for keyName.
 func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (crypto.Signer, error) {
 	key, _, err := s.GetPrivateKeyWithKeyname(ctx, keyName)
@@ -373,8 +475,16 @@ func storedAlgFor(alg string) (string, error) {
 	case mldsa.Alg:
 		return mldsa.Alg, nil
 	default:
-		return "", fmt.Errorf("unsupported SET signing algorithm %q", alg)
+		return "", fmt.Errorf("%w %q", ErrUnsupportedKeyAlg, alg)
 	}
+}
+
+// ValidateKeyAlg reports whether alg names a signature algorithm the key store
+// can hold a key for, returning an error wrapping ErrUnsupportedKeyAlg if not.
+// "" means RS256.
+func ValidateKeyAlg(alg string) error {
+	_, err := storedAlgFor(alg)
+	return err
 }
 
 // jwtRS256 and jwtES256 are spelled out rather than pulled from golang-jwt so
@@ -389,12 +499,11 @@ const (
 )
 
 // EnsureSigningKeyForAlg idempotently guarantees keyName has a "sig" key pair
-// for signature algorithm alg, minting one only when genuinely absent. It is
-// the provisioning half of every per-stream signing_alg opt-in: a stream
-// created or updated with signing_alg = ES256 or ML-DSA-65 calls this so the
-// issuer's EC or AKP key exists — and is published in the issuer's JWKS —
-// before the first SET signed with it is emitted, rather than at first signing
-// when a receiver is already waiting on the key.
+// for signature algorithm alg, minting one only when genuinely absent. Streams
+// no longer call it: since i2goSignals#314 a stream's signing_alg creates no
+// key, and an operator creates the key through POST /key/{keyName}?alg=, which
+// builds on generateSigningKey and storeKeyPair directly. It has no production
+// caller today; tests use it to provision an issuer's ES256 or ML-DSA-65 key.
 //
 // It mirrors EnsureSigningKey's ADR 0028 discipline: a suspended or revoked key
 // of the same algorithm is never silently replaced, because recreating it would
@@ -430,7 +539,7 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	// A distinct kid is mandatory, not cosmetic: the issuer's RSA key already
 	// occupies the kid that equals keyName, and every key is published in the
 	// same JWKS, so a receiver resolves the right one only if they differ.
-	kid := fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
+	kid := newKeyKid(keyName, storedAlg)
 	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId); err != nil {
 		return false, fmt.Errorf("failed to store %s signing key %q: %w", alg, keyName, err)
 	}
@@ -440,11 +549,11 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 
 // generateSigningKey mints a fresh private key for a stored algorithm, and is
 // the single place a newly selectable signature algorithm gains key material.
-// It takes the stored alg rather than the stream's signing_alg because the RSA
-// case ("" stored) is routed to EnsureSigningKey by the caller and never
-// reaches here.
+// It takes the stored alg rather than the stream's signing_alg, so RSA is "".
 func generateSigningKey(storedAlg string) (crypto.Signer, error) {
 	switch storedAlg {
+	case "":
+		return rsa.GenerateKey(rand.Reader, 2048)
 	case jwtES256:
 		// The curve is not a separate knob: "ES256" names ECDSA on P-256 with
 		// SHA-256, so a different curve would be a different algorithm.
@@ -452,7 +561,7 @@ func generateSigningKey(storedAlg string) (crypto.Signer, error) {
 	case mldsa.Alg:
 		return mldsa.GenerateKey()
 	default:
-		return nil, fmt.Errorf("unsupported SET signing algorithm %q", storedAlg)
+		return nil, fmt.Errorf("%w %q", ErrUnsupportedKeyAlg, storedAlg)
 	}
 }
 
@@ -572,8 +681,8 @@ func recKid(rec *interfaces.JwkKeyRec) string {
 
 // findLatestActiveSigningRec returns the newest active record for keyName that
 // carries private-key material. It returns ErrKeyNotFound when none qualifies,
-// logging a loud ERROR (issuer + remedy) whenever the only candidates were
-// filtered out because they are suspended or revoked.
+// logging a WARN (issuer + remedy) whenever the only candidates were filtered
+// out because they are suspended or revoked.
 func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName string, alg string) (*interfaces.JwkKeyRec, error) {
 	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil {
@@ -583,7 +692,11 @@ func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName str
 	latest, sawInactiveSigningKey := latestActiveSigningRec(recs, alg)
 	if latest == nil {
 		if sawInactiveSigningKey {
-			ksLog.Error("No active signing key for issuer; all signing keys are suspended or revoked",
+			// WARN, not ERROR (deliberately demoted): this runs on every key read,
+			// and a paused stream's push retries and background key check read
+			// the key once per retry. The router logs the one ERROR per
+			// key-unavailable pause (#312) and again when the stream is disabled.
+			ksLog.Warn("No active signing key for issuer; all signing keys are suspended or revoked",
 				"issuer", keyName, "alg", algLabel(alg),
 				"remedy", "rotate a new key or reactivate a suspended key")
 		}

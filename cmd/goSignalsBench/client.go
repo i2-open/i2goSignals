@@ -172,6 +172,24 @@ func (n *node) createIssuerKey(bootstrapToken, issuer string) (*rsa.PrivateKey, 
 	return key, body, nil
 }
 
+// createSigningAlgKey asks the server to create the issuer's signing key for
+// alg (ES256 or ML-DSA-65), alongside its RSA key. It reports false when the
+// server already holds a key of that algorithm (409).
+func (n *node) createSigningAlgKey(bootstrapToken, issuer, alg string) (bool, error) {
+	status, body, err := n.do(http.MethodPost, keyPath("/key/", issuer)+"?alg="+url.QueryEscape(alg), bootstrapToken, "", nil)
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case http.StatusCreated, http.StatusOK:
+		return true, nil
+	case http.StatusConflict:
+		return false, nil
+	default:
+		return false, &httpError{status, string(body)}
+	}
+}
+
 func parseRSAPrivateKeyPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {

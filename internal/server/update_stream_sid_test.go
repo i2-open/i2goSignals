@@ -57,6 +57,9 @@ func TestUpdateStream_PairSidRefreshesPairRecord(t *testing.T) {
 		t.Run(sid, func(t *testing.T) {
 			app := newStatusRefreshApp(t)
 			persistStatusPair(t, app, model.StreamStateEnabled, "", model.StreamStateEnabled, "")
+			// A new iss on the transmit half needs an active signing key (#308).
+			_, err := app.KeyService.CreateKeyPair(context.Background(), "https://issuer.example/"+sid, "sig", statusTestProject)
+			require.NoError(t, err)
 
 			var rr *httptest.ResponseRecorder
 			require.NotPanics(t, func() {

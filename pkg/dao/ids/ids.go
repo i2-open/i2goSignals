@@ -8,10 +8,12 @@
 //
 // Three shapes are offered, and the choice between them is a semantic one:
 //
-//   - NewObjectID — a 24-character lowercase hex string, the same shape as a
-//     MongoDB ObjectID's Hex() form. Use it for record ids that a DAO converts
-//     back into a bson.ObjectID at the storage boundary, so existing Mongo data
-//     keeps round-tripping through the Mongo DAO's ParseObjectID.
+//   - NewObjectID — a 24-character lowercase hex string with a MongoDB
+//     ObjectID's layout and Hex() form, so it sorts into mint order. Use it for
+//     record ids that a DAO converts back into a bson.ObjectID at the storage
+//     boundary, so existing Mongo data keeps round-tripping through the Mongo
+//     DAO's ParseObjectID, and where the highest id is taken as the newest
+//     record (the key store's signing key selection).
 //   - NewV7 — an RFC 9562 version-7 UUID. Time-ordered, so a set of them sorts
 //     into mint order. Use it for stream ids, inbound SSTP SIDs and SET jti
 //     values, where ordering is useful and no Mongo _id shape is required.
@@ -26,20 +28,49 @@ package ids
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
+	"sync/atomic"
+	"time"
 	"uuid"
 )
 
-// NewObjectID returns a 24-character hex string suitable as a primary key.
-// The format matches MongoDB ObjectID hex but is generated from crypto/rand.
+// objectIDProcess is NewObjectID's per-process random value and
+// objectIDCounter its counter. The counter starts at a random value below 2^23,
+// so at least 2^23 ids mint before its 24 bits wrap.
+var (
+	objectIDProcess [5]byte
+	objectIDCounter atomic.Uint32
+)
+
+func init() {
+	var seed [3]byte
+	mustRead(objectIDProcess[:])
+	mustRead(seed[:])
+	objectIDCounter.Store(uint32(seed[0]&0x7f)<<16 | uint32(seed[1])<<8 | uint32(seed[2]))
+}
+
+// NewObjectID returns a 24-character hex string suitable as a primary key. It
+// has the MongoDB ObjectID layout: a 4-byte big-endian Unix seconds timestamp,
+// a 5-byte random per-process value and a 3-byte big-endian counter. Ids a
+// process mints therefore sort into mint order, which is what lets a caller
+// take the highest record id as the newest record; the random parts come from
+// crypto/rand.
 func NewObjectID() string {
 	var b [12]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	binary.BigEndian.PutUint32(b[0:4], uint32(time.Now().Unix()))
+	copy(b[4:9], objectIDProcess[:])
+	c := objectIDCounter.Add(1)
+	b[9], b[10], b[11] = byte(c>>16), byte(c>>8), byte(c)
+	return hex.EncodeToString(b[:])
+}
+
+func mustRead(b []byte) {
+	if _, err := rand.Read(b); err != nil {
 		// crypto/rand.Read on standard platforms cannot fail; if it does
 		// the host is in an unrecoverable state. Panic is the only sane response.
 		panic("ids: crypto/rand failed: " + err.Error())
 	}
-	return hex.EncodeToString(b[:])
 }
 
 // NewV7 returns an RFC 9562 version-7 UUID in canonical string form.

@@ -179,7 +179,7 @@ func (s *KeyServiceTestSuite) TestRotateKey_UpdatesPublicKey() {
 	ctx := context.Background()
 	s.Require().NoError(svc.InitializeTokenKey(ctx, "DEFAULT"))
 
-	_, newKid, err := svc.RotateKey(ctx, "DEFAULT", "")
+	_, newKid, err := svc.RotateKey(ctx, "DEFAULT", "", "")
 	s.NoError(err)
 	s.NotNil(svc.authIssuer.PublicKey, "PublicKey must remain non-nil after rotation")
 	s.Equal(newKid, svc.authIssuer.TokenKid, "TokenKid must be updated to the new kid after rotation")
@@ -243,7 +243,7 @@ func (s *KeyServiceTestSuite) TestIssuedTokenValidatesAfterRotation() {
 	s.Require().NoError(err)
 
 	// Rotate the key.
-	_, _, err = svc.RotateKey(ctx, "DEFAULT", "")
+	_, _, err = svc.RotateKey(ctx, "DEFAULT", "", "")
 	s.Require().NoError(err)
 
 	// The pre-rotation token must still validate because the JWKS contains

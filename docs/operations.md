@@ -96,10 +96,31 @@ Terminal state for this side. Reached via one of:
   [RFC8935 protocol errors](#rfc8935-protocol-errors).)
 - **Remote `/status` reports `disabled`** — local side mirrors the remote's
   terminal state.
+- **No active signing key** — a signing push transmitter (any route mode but
+  `FW`) whose `iss` has no active key for its `signing_alg` sends nothing,
+  pauses with the reason `no active signing key for issuer <iss> (<alg>)`,
+  retries the key every `I2SIG_PUSH_AUTH_RETRY_DELAY`, and disables after
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` failed tries. It resumes by itself if the key
+  is created or reactivated first. Events stay queued throughout.
+- **No active signing key (poll transmitter or SSTP pair)** — the same rule,
+  with the pause stored on the stream. A poll gets `503` with a plain-text
+  body naming the issuer and algorithm; an SSTP exchange to this side gets
+  `503` and nothing in it is applied; a dialing SSTP pair sends nothing. The
+  stream (both directions of a pair) pauses with the reason
+  `<POLL-SRV|SSTP-SRV|SSTP-CLIENT>: no active signing key for issuer <iss> (<alg>)`
+  and `key_unavailable_since` set to the first failure. Every
+  `I2SIG_PUSH_AUTH_RETRY_DELAY` each node checks those streams: once the key
+  is active it re-enables them (a dialing pair's loop restarts); once
+  `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` has passed
+  since `key_unavailable_since` it disables them. An operator's status change
+  clears `key_unavailable_since`, so an operator pause is never resumed.
 
 `disabled` is the system's signal that **operator attention is required**.
 The stream's `ErrorMsg` field contains the diagnostic. Re-enabling the stream
-replays all unacked JTIs that accumulated while it was failing.
+starts delivery again on the node that handled the request, without a
+restart, and replays all unacked JTIs that accumulated while it was failing.
+Re-enabling a signing transmitter that still has no active signing key is
+refused with `400` and leaves the status unchanged.
 
 ## Push delivery: failure classes and responses
 
@@ -112,6 +133,7 @@ buckets below. The classification drives the response.
 | **Transport error** (DNS, refused, TLS, timeout) | network or cert problem | exp backoff; retry until cap; then `disabled` | `I2SIG_PUSH_RETRY_LIMIT` (6h default) |
 | **HTTP 5xx** (500/502/503/504) | server-side problem | same as transport error | 6h |
 | **HTTP 401 Unauthorized** | auth rejected | bounded retries with fixed delay; then `disabled` | `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` (10 × 15s default) |
+| **No active signing key** (nothing sent) | the transmitter's own key is missing, suspended or revoked | ERROR log; `paused`; retry the key with fixed delay; resume when it is back, else `disabled` | `I2SIG_PUSH_AUTH_RETRY_LIMIT` × `I2SIG_PUSH_AUTH_RETRY_DELAY` (10 × 15s default) |
 | **HTTP 403 Forbidden** | auth forbidden | `disabled` immediately | — |
 | **HTTP 429 Too Many Requests** | rate-limited | honor `Retry-After`; if absent, exp backoff; **no cap** (peer back-pressure) | none |
 | **HTTP 4xx other** (404/410/422/...) | unexpected protocol | `disabled` + verbose log | — |
@@ -486,8 +508,8 @@ poll-side analogues.
 | `I2SIG_PUSH_RETRY_BACKOFF_FACTOR` | `2.0` | Multiplier per retry attempt |
 | `I2SIG_PUSH_RETRY_MAX_DELAY` | `5m` | Cap on individual sleep |
 | `I2SIG_PUSH_RETRY_LIMIT` | `6h` | Total elapsed time before transport recovery exits to `disabled` |
-| `I2SIG_PUSH_AUTH_RETRY_LIMIT` | `10` | Max 401 retry attempts before `disabled` |
-| `I2SIG_PUSH_AUTH_RETRY_DELAY` | `15s` | Sleep between 401 retries |
+| `I2SIG_PUSH_AUTH_RETRY_LIMIT` | `10` | Max 401 retry attempts, and max signing-key retries, before `disabled` |
+| `I2SIG_PUSH_AUTH_RETRY_DELAY` | `15s` | Sleep between 401 retries, and between signing-key retries |
 | `I2SIG_PUSH_PROBE_INTERVAL` | `30s` | Cadence of `/status` re-checks while in `paused` |
 | `I2SIG_PUSH_KEEPALIVE_INTERVAL` | `5m` | Idle threshold before generating a verify-event keepalive |
 

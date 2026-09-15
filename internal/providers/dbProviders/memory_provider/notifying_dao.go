@@ -81,6 +81,22 @@ func (d *notifyingStreamDAO) UpdateStatus(ctx context.Context, id string, status
 	return nil
 }
 
+func (d *notifyingStreamDAO) UpdateTransmitterCausedStatus(ctx context.Context, id string, status string, errorMsg string) error {
+	if err := d.inner.UpdateTransmitterCausedStatus(ctx, id, status, errorMsg); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
+func (d *notifyingStreamDAO) UpdateKeyUnavailablePause(ctx context.Context, id string, errorMsg string, since time.Time) error {
+	if err := d.inner.UpdateKeyUnavailablePause(ctx, id, errorMsg, since); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
 func (d *notifyingStreamDAO) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
 	if err := d.inner.UpdateRemoteAddress(ctx, id, addr); err != nil {
 		return err
@@ -280,6 +296,14 @@ func (d *notifyingKeyDAO) DeleteByKid(ctx context.Context, kid string) error {
 
 func (d *notifyingKeyDAO) DeleteByKeyName(ctx context.Context, keyName string) error {
 	if err := d.inner.DeleteByKeyName(ctx, keyName); err != nil {
+		return err
+	}
+	d.notify()
+	return nil
+}
+
+func (d *notifyingKeyDAO) DeleteByKeyNameAndAlg(ctx context.Context, keyName string, alg string) error {
+	if err := d.inner.DeleteByKeyNameAndAlg(ctx, keyName, alg); err != nil {
 		return err
 	}
 	d.notify()
