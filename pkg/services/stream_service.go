@@ -112,11 +112,14 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 	}
 	verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
 	if verdict.Err != nil {
-		// A missing or ambiguous relay target, or an upstream that cannot filter
+		// A missing or ambiguous relay target, a receiver stream with nothing to
+		// discover its source transmitter from, or an upstream that cannot filter
 		// subjects, is the caller's to fix: ErrInvalidRequest, a 400 (#305). A
-		// receiver store or upstream that could not answer stays unwrapped.
+		// receiver store or source transmitter that could not answer stays
+		// unwrapped.
 		if errors.Is(verdict.Err, ErrRelayTargetNotFound) ||
 			errors.Is(verdict.Err, ErrRelayTargetAmbiguous) ||
+			errors.Is(verdict.Err, ErrUpstreamNotDiscoverable) ||
 			errors.Is(verdict.Err, ErrUpstreamNoSubjectFiltering) {
 			return fmt.Errorf("%w: invalid subject-filter configuration: %w", ErrInvalidRequest, verdict.Err)
 		}

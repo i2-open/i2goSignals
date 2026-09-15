@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -386,5 +387,191 @@ func TestStreamService_CreateLocalSurvivesNonFilteringUpstream(t *testing.T) {
 	}
 	if state.SubjectFilterMode != model.SubjectFilterModeLocal {
 		t.Fatalf("expected the LOCAL stream to persist, got mode %q", state.SubjectFilterMode)
+	}
+}
+
+// ssfConfigurationServer starts a fake source transmitter that serves SSF
+// discovery metadata advertising add and remove subject endpoints at
+// discoveryPath only (404 elsewhere), and records the Authorization header the
+// discovery fetch carried.
+func ssfConfigurationServer(t *testing.T, discoveryPath string) (*httptest.Server, *string) {
+	t.Helper()
+	auth := new(string)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != discoveryPath {
+			http.NotFound(w, r)
+			return
+		}
+		*auth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(model.TransmitterConfiguration{
+			Issuer:                srv.URL,
+			AddSubjectEndpoint:    srv.URL + "/add-subject",
+			RemoveSubjectEndpoint: srv.URL + "/remove-subject",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, auth
+}
+
+// closedServerURL returns the URL of a server that is no longer listening: a
+// source transmitter that cannot be reached.
+func closedServerURL() string {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL
+}
+
+// TestDefaultUpstreamResolver_DiscoversSourceTransmitterFromIss verifies that a
+// receiver stream with neither tx_alias nor tx_well_known_url still reaches its
+// source transmitter: the resolver inserts the SSF well-known component into the
+// receiver stream's iss (RFC 8615, SSF §7.2), as the receiver's own status and
+// verify discovery does, and fetches with the receiver's tx_token.
+func TestDefaultUpstreamResolver_DiscoversSourceTransmitterFromIss(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		issuerPath    string
+		discoveryPath string
+	}{
+		{name: "issuer at the host root", issuerPath: "", discoveryPath: "/.well-known/ssf-configuration"},
+		{name: "issuer with a path", issuerPath: "/issuer1", discoveryPath: "/.well-known/ssf-configuration/issuer1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, auth := ssfConfigurationServer(t, tc.discoveryPath)
+			token := "rx-token"
+			receiver := relayReceiver("rx-1", srv.URL+tc.issuerPath)
+			receiver.StreamConfiguration.TxToken = &token
+
+			conn, err := NewDefaultUpstreamResolver(nil)(context.Background(), &receiver)
+			if err != nil {
+				t.Fatalf("resolver must discover the source transmitter from iss: %v", err)
+			}
+			defer conn.release()
+			if conn.Config.AddSubjectEndpoint != srv.URL+"/add-subject" ||
+				conn.Config.RemoveSubjectEndpoint != srv.URL+"/remove-subject" {
+				t.Fatalf("expected the discovered subject endpoints, got add=%q remove=%q",
+					conn.Config.AddSubjectEndpoint, conn.Config.RemoveSubjectEndpoint)
+			}
+			if *auth != "Bearer rx-token" {
+				t.Fatalf("expected discovery to carry the receiver's tx_token, got %q", *auth)
+			}
+		})
+	}
+}
+
+// TestDefaultUpstreamResolver_UnusableSourcesFallThroughToIss verifies the
+// receiver path's precedence and fall-through: a tx_alias that names no
+// registered server, then a tx_well_known_url that cannot be fetched, each give
+// way to the next source, ending at the iss-derived well-known URL.
+func TestDefaultUpstreamResolver_UnusableSourcesFallThroughToIss(t *testing.T) {
+	srv, _ := ssfConfigurationServer(t, "/.well-known/ssf-configuration")
+	alias := "unregistered"
+	wellKnown := closedServerURL() + "/.well-known/ssf-configuration"
+	receiver := relayReceiver("rx-1", srv.URL)
+	receiver.StreamConfiguration.TxAlias = &alias
+	receiver.StreamConfiguration.TxWellKnownUrl = &wellKnown
+
+	conn, err := NewDefaultUpstreamResolver(NewServerService(memory.NewServerDAO()))(context.Background(), &receiver)
+	if err != nil {
+		t.Fatalf("unusable tx_alias and tx_well_known_url must fall through to iss: %v", err)
+	}
+	defer conn.release()
+	if conn.Config.AddSubjectEndpoint != srv.URL+"/add-subject" {
+		t.Fatalf("expected the iss-derived source transmitter, got add=%q", conn.Config.AddSubjectEndpoint)
+	}
+}
+
+// TestDefaultUpstreamResolver_MetadataWithoutSubjectEndpoints verifies that
+// metadata advertising no subject endpoints gives way to a later source that
+// advertises them, and is returned for classification when no source does.
+func TestDefaultUpstreamResolver_MetadataWithoutSubjectEndpoints(t *testing.T) {
+	bare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(model.TransmitterConfiguration{Issuer: "https://bare.example"})
+	}))
+	t.Cleanup(bare.Close)
+	bareWellKnown := bare.URL + "/.well-known/ssf-configuration"
+	capable, _ := ssfConfigurationServer(t, "/.well-known/ssf-configuration")
+
+	t.Run("a later source advertising subject endpoints wins", func(t *testing.T) {
+		receiver := relayReceiver("rx-1", capable.URL)
+		receiver.StreamConfiguration.TxWellKnownUrl = &bareWellKnown
+
+		conn, err := NewDefaultUpstreamResolver(nil)(context.Background(), &receiver)
+		if err != nil {
+			t.Fatalf("resolver: %v", err)
+		}
+		defer conn.release()
+		if conn.Config.AddSubjectEndpoint != capable.URL+"/add-subject" {
+			t.Fatalf("expected the iss-derived source advertising subject endpoints, got add=%q", conn.Config.AddSubjectEndpoint)
+		}
+	})
+
+	t.Run("no source advertises them", func(t *testing.T) {
+		receiver := relayReceiver("rx-1", closedServerURL())
+		receiver.StreamConfiguration.TxWellKnownUrl = &bareWellKnown
+
+		conn, err := NewDefaultUpstreamResolver(nil)(context.Background(), &receiver)
+		if err != nil {
+			t.Fatalf("fetched metadata must be returned for classification: %v", err)
+		}
+		defer conn.release()
+		verdict := ClassifyUpstreamSupport(model.SubjectFilterModePassthru, conn.Config)
+		if !errors.Is(verdict.Err, ErrUpstreamNoSubjectFiltering) {
+			t.Fatalf("expected ErrUpstreamNoSubjectFiltering, got %v", verdict.Err)
+		}
+	})
+}
+
+// TestDefaultUpstreamResolver_NothingToDiscover verifies that a receiver stream
+// with no tx_alias, no tx_well_known_url and no iss yields
+// ErrUpstreamNotDiscoverable — a configuration the caller can fix — and not
+// ErrRelayTargetNotFound, because a receiver stream does feed the stream.
+func TestDefaultUpstreamResolver_NothingToDiscover(t *testing.T) {
+	receiver := relayReceiver("rx-1", "")
+
+	_, err := NewDefaultUpstreamResolver(nil)(context.Background(), &receiver)
+	if !errors.Is(err, ErrUpstreamNotDiscoverable) {
+		t.Fatalf("expected ErrUpstreamNotDiscoverable, got %v", err)
+	}
+	if errors.Is(err, ErrRelayTargetNotFound) {
+		t.Fatalf("a receiver stream feeds the stream, so the error must not be ErrRelayTargetNotFound: %v", err)
+	}
+}
+
+// TestDefaultUpstreamResolver_UnreachableSourceTransmitter verifies that a
+// source transmitter that cannot be reached at its iss-derived well-known URL
+// is a failure, not a configuration error: validation leaves it unwrapped, so
+// it is not ErrInvalidRequest (a 500, not a 400).
+func TestDefaultUpstreamResolver_UnreachableSourceTransmitter(t *testing.T) {
+	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
+	receiver := relayReceiver("rx-1", closedServerURL())
+
+	_, err := NewDefaultUpstreamResolver(nil)(context.Background(), &receiver)
+	if err == nil {
+		t.Fatal("an unreachable source transmitter must fail resolution")
+	}
+	if errors.Is(err, ErrUpstreamNotDiscoverable) || errors.Is(err, ErrRelayTargetNotFound) {
+		t.Fatalf("an unreachable source transmitter is not a configuration error: %v", err)
+	}
+
+	svc := newSubjectFilterTestService()
+	svc.SetSubjectRelayService(NewSubjectRelayService(
+		func(context.Context) ([]model.StreamStateRecord, error) {
+			return []model.StreamStateRecord{receiver}, nil
+		},
+		nil, nil, NewDefaultUpstreamResolver(nil),
+	))
+	downstream := relayDownstream("test-issuer", &model.EventSource{
+		Type:            model.EventSourceExplicit,
+		SourceStreamIds: []string{"rx-1"},
+	})
+	downstream.SubjectFilterMode = model.SubjectFilterModePassthru
+	err = svc.validateSubjectFilterMode(context.Background(), downstream)
+	if err == nil {
+		t.Fatal("validation must refuse a PASSTHRU stream whose source transmitter cannot be reached")
+	}
+	if errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("an unreachable source transmitter must not be ErrInvalidRequest: %v", err)
 	}
 }

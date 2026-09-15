@@ -233,16 +233,35 @@ func TestStreamUpdate_RejectionIs400WithItsText(t *testing.T) {
 // TestStreamUpdate_SubjectFilterModeOutcomes: a subject_filter_mode the stream's
 // upstream cannot serve is the caller's configuration to fix, so it is a 400
 // carrying the rejection. A receiver store or upstream that could not answer is
-// a server fault, so it stays a 500.
+// a server fault, so it stays a 500. The cases with a production resolver
+// locate the source transmitter from a receiver stream that names it only by iss.
 func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
-	receiver := func(id string) model.StreamStateRecord {
+	receiverIss := func(id, iss string) model.StreamStateRecord {
 		var rx model.StreamStateRecord
 		rx.StreamConfiguration.Id = id
-		rx.StreamConfiguration.Iss = "DEFAULT"
+		rx.StreamConfiguration.Iss = iss
 		return rx
 	}
+	receiver := func(id string) model.StreamStateRecord { return receiverIss(id, "DEFAULT") }
 	noSubjectEndpoints := &services.UpstreamConn{Config: &model.TransmitterConfiguration{Issuer: "DEFAULT"}}
+	// An EXPLICIT source names the receiver stream, whose iss need not match the
+	// updated stream's.
+	fromRx1 := &model.EventSource{Type: model.EventSourceExplicit, SourceStreamIds: []string{"rx-1"}}
+
+	sourceTransmitter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/ssf-configuration/issuer1" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(model.TransmitterConfiguration{
+			AddSubjectEndpoint:    "https://source.example/add-subject",
+			RemoveSubjectEndpoint: "https://source.example/remove-subject",
+		})
+	}))
+	t.Cleanup(sourceTransmitter.Close)
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
 
 	for _, tc := range []struct {
 		name       string
@@ -250,6 +269,8 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 		listErr    error
 		conn       *services.UpstreamConn
 		resolveErr error
+		resolve    services.UpstreamResolver
+		source     *model.EventSource
 		want       int
 		text       string
 	}{
@@ -282,20 +303,49 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 			resolveErr: errors.New("cannot fetch upstream configuration"),
 			want:       http.StatusInternalServerError,
 		},
+		{
+			name:      "source transmitter discovered from the receiver's iss",
+			receivers: []model.StreamStateRecord{receiverIss("rx-1", sourceTransmitter.URL+"/issuer1")},
+			resolve:   services.NewDefaultUpstreamResolver(nil),
+			source:    fromRx1,
+			want:      http.StatusOK,
+		},
+		{
+			name:      "receiver with nothing to discover its transmitter from",
+			receivers: []model.StreamStateRecord{receiverIss("rx-1", "")},
+			resolve:   services.NewDefaultUpstreamResolver(nil),
+			source:    fromRx1,
+			want:      http.StatusBadRequest,
+			text:      services.ErrUpstreamNotDiscoverable.Error(),
+		},
+		{
+			name:      "source transmitter unreachable at its iss",
+			receivers: []model.StreamStateRecord{receiverIss("rx-1", gone.URL)},
+			resolve:   services.NewDefaultUpstreamResolver(nil),
+			source:    fromRx1,
+			want:      http.StatusInternalServerError,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newStatusRefreshApp(t)
 			persistStatusPlain(t, app, model.StreamStateEnabled, "")
+			resolve := tc.resolve
+			if resolve == nil {
+				resolve = func(context.Context, *model.StreamStateRecord) (*services.UpstreamConn, error) {
+					return tc.conn, tc.resolveErr
+				}
+			}
 			app.StreamService.SetSubjectRelayService(services.NewSubjectRelayService(
 				func(context.Context) ([]model.StreamStateRecord, error) { return tc.receivers, tc.listErr },
-				nil, nil,
-				func(context.Context, *model.StreamStateRecord) (*services.UpstreamConn, error) {
-					return tc.conn, tc.resolveErr
-				},
+				nil, nil, resolve,
 			))
+			source := tc.source
+			if source == nil {
+				source = &model.EventSource{Type: model.EventSourceAudience}
+			}
 			patch := model.StreamStateRecord{
 				SubjectFilterMode: model.SubjectFilterModePassthru,
-				EventSource:       &model.EventSource{Type: model.EventSourceAudience},
+				EventSource:       source,
 			}
 
 			for _, method := range []string{http.MethodPut, http.MethodPatch} {
@@ -305,7 +355,11 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 					assert.Contains(t, rr.Body.String(), tc.text, "%s /stream", method)
 				}
 			}
-			assert.Empty(t, app.router.updated, "a refused update must not refresh the router")
+			if tc.want == http.StatusOK {
+				assert.NotEmpty(t, app.router.updated, "an accepted update must refresh the router")
+			} else {
+				assert.Empty(t, app.router.updated, "a refused update must not refresh the router")
+			}
 		})
 	}
 }
