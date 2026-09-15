@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
@@ -325,6 +326,73 @@ func TestSubjectRelayService_ValidateConfig_LocalNoEndpointsWarns(t *testing.T) 
 	}
 	if verdict.Warn == "" {
 		t.Fatal("LOCAL against a non-filtering upstream must produce a WARN")
+	}
+}
+
+// TestSubjectRelayService_ValidateConfig_LocalUncheckableUpstreamWarns verifies
+// that a LOCAL stream is never rejected because its upstream's subject-filtering
+// support could not be checked: LOCAL does not relay, so a receiver store that
+// could not answer, or a source transmitter that cannot be discovered or
+// reached, earns a WARN carrying the failure instead of an error. An unresolved
+// relay target stays silent.
+func TestSubjectRelayService_ValidateConfig_LocalUncheckableUpstreamWarns(t *testing.T) {
+	errStore := errors.New("receiver store unavailable")
+	for _, tc := range []struct {
+		name      string
+		receivers []model.StreamStateRecord
+		listErr   error
+		source    string
+		wantWarn  string
+	}{
+		{
+			name:     "receiver store failure",
+			listErr:  errStore,
+			source:   "rx-1",
+			wantWarn: errStore.Error(),
+		},
+		{
+			name:      "source transmitter unreachable",
+			receivers: []model.StreamStateRecord{relayReceiver("rx-1", closedServerURL())},
+			source:    "rx-1",
+			wantWarn:  "cannot fetch upstream configuration",
+		},
+		{
+			name:      "nothing to discover the source transmitter from",
+			receivers: []model.StreamStateRecord{relayReceiver("rx-1", "")},
+			source:    "rx-1",
+			wantWarn:  ErrUpstreamNotDiscoverable.Error(),
+		},
+		{
+			name:      "no relay target",
+			receivers: []model.StreamStateRecord{relayReceiver("rx-1", "")},
+			source:    "rx-other",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relaySvc := NewSubjectRelayService(
+				func(context.Context) ([]model.StreamStateRecord, error) { return tc.receivers, tc.listErr },
+				nil, nil, NewDefaultUpstreamResolver(nil),
+			)
+			downstream := relayDownstream("test-issuer", &model.EventSource{
+				Type:            model.EventSourceExplicit,
+				SourceStreamIds: []string{tc.source},
+			})
+			downstream.SubjectFilterMode = model.SubjectFilterModeLocal
+
+			verdict := relaySvc.ValidateConfig(context.Background(), downstream)
+			if verdict.Err != nil {
+				t.Fatalf("LOCAL must never be rejected at config time: %v", verdict.Err)
+			}
+			if tc.wantWarn == "" {
+				if verdict.Warn != "" {
+					t.Fatalf("expected no WARN, got %q", verdict.Warn)
+				}
+				return
+			}
+			if !strings.Contains(verdict.Warn, "could not be checked") || !strings.Contains(verdict.Warn, tc.wantWarn) {
+				t.Fatalf("expected a WARN that the upstream could not be checked, carrying %q, got %q", tc.wantWarn, verdict.Warn)
+			}
+		})
 	}
 }
 

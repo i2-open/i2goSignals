@@ -344,29 +344,42 @@ func (s *SubjectRelayService) RelayHybrid(ctx context.Context, downstream *model
 
 // ValidateConfig checks a downstream transmitter stream's subject-filter mode
 // against its upstream at config time. A PASSTHRU/HYBRID stream with no
-// resolvable relay target, or whose upstream advertises no subject endpoints,
-// is rejected; a LOCAL stream is never rejected but may earn a WARN.
+// resolvable relay target, whose upstream cannot be resolved, or whose upstream
+// advertises no subject endpoints, is rejected. A LOCAL stream does not relay,
+// so it is never rejected: a relay target that does not resolve is silent, and
+// a receiver store or upstream that cannot be checked, or an upstream that
+// advertises no subject endpoints, earns a WARN.
 func (s *SubjectRelayService) ValidateConfig(ctx context.Context, downstream *model.StreamStateRecord) RelayConfigVerdict {
 	mode := downstream.SubjectFilterMode
 	if mode == "" {
 		return RelayConfigVerdict{}
 	}
+	relays := mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid
+	// uncheckable is the verdict when the upstream's subject-filtering support
+	// could not be checked: fatal for a relaying mode, a WARN for LOCAL.
+	uncheckable := func(err error) RelayConfigVerdict {
+		if relays {
+			return RelayConfigVerdict{Err: err}
+		}
+		return RelayConfigVerdict{Warn: fmt.Sprintf(
+			"%s subject filtering: the upstream's subject-filtering support could not be checked: %v", mode, err)}
+	}
 	receivers, err := s.listReceivers(ctx)
 	if err != nil {
-		return RelayConfigVerdict{Err: err}
+		return uncheckable(err)
 	}
 	target, err := ResolveRelayTarget(downstream, receivers)
 	if err != nil {
 		// PASSTHRU/HYBRID must relay, so an unresolved target is fatal; LOCAL
 		// does not relay and tolerates having no upstream subject handler.
-		if mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid {
+		if relays {
 			return RelayConfigVerdict{Err: err}
 		}
 		return RelayConfigVerdict{}
 	}
 	conn, err := s.resolve(ctx, target)
 	if err != nil {
-		return RelayConfigVerdict{Err: err}
+		return uncheckable(err)
 	}
 	defer conn.release()
 	return ClassifyUpstreamSupport(mode, conn.Config)

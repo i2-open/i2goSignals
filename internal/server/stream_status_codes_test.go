@@ -233,8 +233,10 @@ func TestStreamUpdate_RejectionIs400WithItsText(t *testing.T) {
 // TestStreamUpdate_SubjectFilterModeOutcomes: a subject_filter_mode the stream's
 // upstream cannot serve is the caller's configuration to fix, so it is a 400
 // carrying the rejection. A receiver store or upstream that could not answer is
-// a server fault, so it stays a 500. The cases with a production resolver
-// locate the source transmitter from a receiver stream that names it only by iss.
+// a server fault, so it stays a 500 — except on a LOCAL stream, which does not
+// relay and so is saved even when its upstream could not be checked. The cases
+// with a production resolver locate the source transmitter from a receiver
+// stream that names it only by iss.
 func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
 	receiverIss := func(id, iss string) model.StreamStateRecord {
@@ -271,6 +273,7 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 		resolveErr error
 		resolve    services.UpstreamResolver
 		source     *model.EventSource
+		mode       string
 		want       int
 		text       string
 	}{
@@ -325,6 +328,20 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 			source:    fromRx1,
 			want:      http.StatusInternalServerError,
 		},
+		{
+			name:    "LOCAL with a receiver store failure",
+			listErr: errStoreDown,
+			mode:    model.SubjectFilterModeLocal,
+			want:    http.StatusOK,
+		},
+		{
+			name:      "LOCAL whose source transmitter is unreachable at its iss",
+			receivers: []model.StreamStateRecord{receiverIss("rx-1", gone.URL)},
+			resolve:   services.NewDefaultUpstreamResolver(nil),
+			source:    fromRx1,
+			mode:      model.SubjectFilterModeLocal,
+			want:      http.StatusOK,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newStatusRefreshApp(t)
@@ -343,8 +360,12 @@ func TestStreamUpdate_SubjectFilterModeOutcomes(t *testing.T) {
 			if source == nil {
 				source = &model.EventSource{Type: model.EventSourceAudience}
 			}
+			mode := tc.mode
+			if mode == "" {
+				mode = model.SubjectFilterModePassthru
+			}
 			patch := model.StreamStateRecord{
-				SubjectFilterMode: model.SubjectFilterModePassthru,
+				SubjectFilterMode: mode,
 				EventSource:       source,
 			}
 
