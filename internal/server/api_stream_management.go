@@ -719,8 +719,20 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx),
 		bootstrap, authCtx.ProjectId, nil)
 	if err != nil {
-		serverLog.Warn("SSTP pair create failed", "role", bootstrap.Role, "error", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// A bootstrap the caller can fix is the documented 400 (SSF s8.1.1.1);
+		// anything else — a token mint, a store write, a peer this server could
+		// not reach — is an unexpected server condition and a 500 (RFC 9110
+		// s15.6.1). Reporting a server fault as 400 tells the caller to fix a
+		// request that was never the problem, and it is the same mapping the
+		// StreamCreate path uses.
+		if errors.Is(err, services.ErrInvalidRequest) {
+			serverLog.Warn("SSTP pair create refused", "role", bootstrap.Role, "error", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		serverLog.Error("SSTP pair create failed", "role", bootstrap.Role, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 

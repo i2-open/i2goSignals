@@ -198,26 +198,40 @@ func warnIfNotUriShaped(field, value string) {
 // only the local half is provisioned (Q31).
 func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.SstpPairBootstrap, projectID string, peerServer *model.Server) (model.StreamStateRecord, error) {
 	invalidateRequestStreams(ctx)
+	// Everything this function refuses about the bootstrap itself is the caller's
+	// to fix, so each such return carries ErrInvalidRequest and the handler answers
+	// 400 (SSF s8.1.1.1). A return without it is an unexpected server condition —
+	// a mint failure, a store write, an unreachable peer — and answers 500 (RFC
+	// 9110 s15.6.1).
+
 	// Role is required at create with no default (Q30).
 	switch bootstrap.Role {
 	case model.SstpRoleInitiator, model.SstpRoleResponder:
 	default:
-		return model.StreamStateRecord{}, fmt.Errorf("invalid role: must be %q or %q", model.SstpRoleInitiator, model.SstpRoleResponder)
+		return model.StreamStateRecord{}, fmt.Errorf("%w: invalid role: must be %q or %q", ErrInvalidRequest, model.SstpRoleInitiator, model.SstpRoleResponder)
 	}
 
 	// Structural validation of both halves before any state is mutated (Q27, Q29).
 	if err := validateSstpDirection("primary", bootstrap.Primary); err != nil {
-		return model.StreamStateRecord{}, err
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	if err := validateSstpDirection("inbound", bootstrap.Inbound); err != nil {
-		return model.StreamStateRecord{}, err
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 
 	// Resolve the peer Server from the alias when the caller didn't pre-resolve.
+	// An alias no Server carries is the caller naming a peer that isn't
+	// registered — a 400. A store that cannot answer is a server fault, so it
+	// keeps its own error and answers 500. interfaces.ErrNotFound is deliberately
+	// NOT wrapped: it addresses the alias, not a stream, and letting it out would
+	// read as stream-not-found at the HTTP boundary.
 	if peerServer == nil && bootstrap.PeerServerAlias != "" && s.serverService != nil {
 		resolved, err := s.serverService.GetServerByAlias(ctx, bootstrap.PeerServerAlias)
 		if err != nil {
-			return model.StreamStateRecord{}, errors.New("unknown peer_server_alias provided")
+			if errors.Is(err, interfaces.ErrNotFound) {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: unknown peer_server_alias %q", ErrInvalidRequest, bootstrap.PeerServerAlias)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("looking up peer_server_alias %q: %v", bootstrap.PeerServerAlias, err)
 		}
 		peerServer = resolved
 	}
@@ -237,10 +251,10 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		// Responder rejects an operator-supplied EndpointUrl and bearer; both are
 		// server-derived/minted.
 		if bootstrap.EndpointUrl != "" {
-			return model.StreamStateRecord{}, errors.New("endpoint_url must not be supplied on a responder; it is server-derived")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: endpoint_url must not be supplied on a responder; it is server-derived", ErrInvalidRequest)
 		}
 		if bootstrap.AuthorizationHeader != "" {
-			return model.StreamStateRecord{}, errors.New("authorization_header must not be supplied on a responder; it is server-minted")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header must not be supplied on a responder; it is server-minted", ErrInvalidRequest)
 		}
 		endpointUrl = s.getFullUrl(fmt.Sprintf("/sstp/%s", pairId))
 
@@ -256,15 +270,21 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		// Initiator: the operator must supply the bearer (Q30); the peer responder
 		// minted it.
 		if bootstrap.AuthorizationHeader == "" {
-			return model.StreamStateRecord{}, errors.New("authorization_header is required on an initiator")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header is required on an initiator", ErrInvalidRequest)
 		}
 	}
 
 	// EndpointUrl syntactic validation, when present (Q28). The responder always
-	// has one (just derived); the initiator may not have learned it yet.
+	// has one (just derived); the initiator may not have learned it yet. Only the
+	// initiator's came from the caller, so only that one is a 400; a responder's
+	// is derived from this server's own base URL, and a bad one there is this
+	// server misconfigured — an unexpected condition, and a 500.
 	if endpointUrl != "" {
 		if err := validateSstpEndpointUrl(endpointUrl); err != nil {
-			return model.StreamStateRecord{}, err
+			if bootstrap.EndpointUrl != "" {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("the derived responder endpoint_url is not usable; check this server's base URL: %v", err)
 		}
 	}
 

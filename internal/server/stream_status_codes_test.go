@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -529,4 +530,83 @@ func TestStreamSave_SubjectFilterModeOutcomes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// createSstpPair posts an SstpPairBootstrap to POST /stream, the same body shape
+// the create-side discriminator routes to createSstpPairHandler (ADR 0019).
+func (a *statusRefreshApp) createSstpPair(t *testing.T, bearer string, bootstrap model.SstpPairBootstrap) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(bootstrap)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/stream", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rr := httptest.NewRecorder()
+	StreamCreateHandler(a, rr, req)
+	return rr
+}
+
+// sstpPairBootstrap is a local-only responder bootstrap that signs as DEFAULT,
+// the issuer newStatusRefreshApp gives a key, so it clears the signing-key check
+// (#308) and the test reaches the outcome it is about.
+func sstpPairBootstrap() model.SstpPairBootstrap {
+	return model.SstpPairBootstrap{
+		Role:    model.SstpRoleResponder,
+		Primary: model.SstpDirection{Iss: "DEFAULT", Aud: []string{"https://peer.example"}, Mode: model.SstpModePublish},
+		Inbound: model.SstpDirection{Iss: "https://peer.example", Aud: []string{"DEFAULT"}, Mode: model.SstpModeImport},
+	}
+}
+
+// TestSstpPairCreate_CallerErrorsAre400AndFaultsAre500 (#305): POST /stream with
+// an SSTP bootstrap answered 400 for every failure, including the ones the
+// caller could do nothing about. A bootstrap the caller can fix is the 400 SSF
+// s8.1.1.1 documents; a store that cannot answer is the 500 RFC 9110 s15.6.1
+// reserves for an unexpected condition, and calling it 400 sends the operator to
+// fix a request that was already correct.
+func TestSstpPairCreate_CallerErrorsAre400AndFaultsAre500(t *testing.T) {
+	app := newStatusRefreshApp(t)
+	baseUrl, err := url.Parse("https://local.example")
+	require.NoError(t, err)
+	app.StreamService.SetBaseUrl(baseUrl) // a responder derives its endpoint from it
+	bearer := app.adminBearer(t)
+
+	t.Run("a bootstrap the caller can fix is 400", func(t *testing.T) {
+		b := sstpPairBootstrap()
+		b.Primary.Mode = "RELAY"
+		rr := app.createSstpPair(t, bearer, b)
+		require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "primary.mode")
+	})
+
+	t.Run("an alias naming no registered peer is 400", func(t *testing.T) {
+		b := sstpPairBootstrap()
+		b.PeerServerAlias = "no-such-peer"
+		rr := app.createSstpPair(t, bearer, b)
+		require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "peer_server_alias")
+		assert.NotEqual(t, http.StatusNotFound, rr.Code,
+			"the alias is not a stream, so its absence must never read as stream-not-found")
+	})
+
+	t.Run("a server store that cannot answer is 500", func(t *testing.T) {
+		down := newStatusRefreshApp(t)
+		down.StreamService.SetBaseUrl(baseUrl)
+		down.StreamService.SetServerService(services.NewServerService(&failingServerDAO{ServerDAO: memory.NewServerDAO()}))
+		b := sstpPairBootstrap()
+		b.PeerServerAlias = "peer-a"
+
+		rr := down.createSstpPair(t, down.adminBearer(t), b)
+		assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	})
+
+	t.Run("a key store that cannot answer is 500", func(t *testing.T) {
+		down := newStatusRefreshApp(t)
+		down.withFailingKeyStore(t)
+		down.StreamService.SetBaseUrl(baseUrl)
+		b := sstpPairBootstrap()
+		b.Primary.Iss = keyStoreDownIssuer
+		b.Inbound.Aud = []string{keyStoreDownIssuer}
+
+		rr := down.createSstpPair(t, down.adminBearer(t), b)
+		assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	})
 }
