@@ -112,6 +112,17 @@ func (s *StreamService) validateSubjectFilterMode(ctx context.Context, rec *mode
 	}
 	verdict := s.subjectRelayService.ValidateConfig(ctx, rec)
 	if verdict.Err != nil {
+		// A missing or ambiguous relay target, a receiver stream with nothing to
+		// discover its source transmitter from, or an upstream that cannot filter
+		// subjects, is the caller's to fix: ErrInvalidRequest, a 400 (#305). A
+		// receiver store or source transmitter that could not answer stays
+		// unwrapped.
+		if errors.Is(verdict.Err, ErrRelayTargetNotFound) ||
+			errors.Is(verdict.Err, ErrRelayTargetAmbiguous) ||
+			errors.Is(verdict.Err, ErrUpstreamNotDiscoverable) ||
+			errors.Is(verdict.Err, ErrUpstreamNoSubjectFiltering) {
+			return fmt.Errorf("%w: invalid subject-filter configuration: %w", ErrInvalidRequest, verdict.Err)
+		}
 		return fmt.Errorf("invalid subject-filter configuration: %w", verdict.Err)
 	}
 	if verdict.Warn != "" {
@@ -186,7 +197,7 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 // silent fall back to RSA discovered later, per event, in a log line.
 func validateSigningAlg(alg string) error {
 	if _, err := goSet.SigningMethodFor(alg); err != nil {
-		return fmt.Errorf("invalid signing_alg: %w", err)
+		return fmt.Errorf("%w: invalid signing_alg: %w", ErrInvalidRequest, err)
 	}
 	return nil
 }
@@ -198,7 +209,7 @@ func validateSigningAlg(alg string) error {
 // caller's responsibility, since the rejection must be field-shape only.
 func validateSubjectRemovalGrace(grace int) error {
 	if grace < 0 {
-		return fmt.Errorf("invalid subject_removal_grace_seconds: must be >= 0, got %d", grace)
+		return fmt.Errorf("%w: invalid subject_removal_grace_seconds: must be >= 0, got %d", ErrInvalidRequest, grace)
 	}
 	return nil
 }
@@ -239,7 +250,7 @@ func validateEventSource(es *model.EventSource, mode string) error {
 	if es.Type == model.EventSourceExplicit {
 		// R2: EXPLICIT must name at least one upstream stream.
 		if len(es.SourceStreamIds) == 0 {
-			return fmt.Errorf("invalid event_source: type EXPLICIT requires a non-empty source_stream_ids")
+			return fmt.Errorf("%w: invalid event_source: type EXPLICIT requires a non-empty source_stream_ids", ErrInvalidRequest)
 		}
 		return nil
 	}
@@ -247,12 +258,12 @@ func validateEventSource(es *model.EventSource, mode string) error {
 	// type — DIRECT, AUDIENCE, and the unset/empty default, which the matcher
 	// resolves to DIRECT — must leave it empty.
 	if len(es.SourceStreamIds) > 0 {
-		return fmt.Errorf("invalid event_source: source_stream_ids is only valid when type is EXPLICIT")
+		return fmt.Errorf("%w: invalid event_source: source_stream_ids is only valid when type is EXPLICIT", ErrInvalidRequest)
 	}
 	// R1: a DIRECT stream has no SSF upstream to relay Add/Remove to.
 	if es.Type == model.EventSourceDirect &&
 		(mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid) {
-		return fmt.Errorf("invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", mode)
+		return fmt.Errorf("%w: invalid event_source: type DIRECT is incompatible with subject_filter_mode %s (no upstream to relay to)", ErrInvalidRequest, mode)
 	}
 	return nil
 }
@@ -1245,6 +1256,11 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		// inbound-SID index so an rxSid resolves to its pair record. (Q35, Q39)
 		inboundRec, inboundErr := s.streamDAO.FindByInboundSID(ctx, streamID)
 		if inboundErr != nil {
+			// Not found only when neither lookup found the SID: a store error
+			// from the fallback is reported as itself (#305).
+			if errors.Is(err, interfaces.ErrNotFound) && !errors.Is(inboundErr, interfaces.ErrNotFound) {
+				return nil, inboundErr
+			}
 			return nil, err
 		}
 		streamRec = inboundRec
@@ -1306,7 +1322,7 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 
 	if configReq.Delivery != nil && configReq.Delivery.GetMethod() != config.Delivery.GetMethod() {
-		return nil, errors.New(ErrorInvalidDeliveryMethod)
+		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, ErrorInvalidDeliveryMethod)
 	}
 
 	if configReq.Description != "" {
@@ -1541,7 +1557,7 @@ func (s *StreamService) GetStream(ctx context.Context, id string) (*model.Stream
 // whichever direction the SID names, so it scopes the generated verify SET to
 // the resolved direction's iss/aud. Non-SSTP streams resolve via FindByID.
 func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*model.StreamConfiguration, error) {
-	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+	if rec, _ := s.findSstpPairBySID(ctx, sid); rec != nil {
 		if rec.SstpInbound != nil && sid == rec.SstpInbound.Id {
 			inbound := *rec.SstpInbound
 			return &inbound, nil
@@ -1627,7 +1643,11 @@ func (s *StreamService) findByInboundSID(ctx context.Context, sid string) (*mode
 // verify) find the pair when the named SID is the inbound side, whose value is
 // not the document _id.
 func (s *StreamService) GetStreamStateBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
-	if rec := s.findSstpPairBySID(ctx, sid); rec != nil {
+	rec, err := s.findSstpPairBySID(ctx, sid)
+	if err != nil {
+		return nil, err
+	}
+	if rec != nil {
 		return rec, nil
 	}
 	return s.findByID(ctx, sid)
@@ -1705,7 +1725,7 @@ func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string,
 	// A status write moves both halves of an SSTP pair whichever SID names it
 	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
 	// belongs to a pair, the SSTP path owns the update.
-	if rec := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
+	if rec, _ := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
 		s.updateSstpPairStatus(ctx, rec, streamID, w)
 		return
 	}
@@ -1780,7 +1800,11 @@ func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.
 	// status except on a legacy split record. findSstpPairBySID resolves either
 	// SID; non-SSTP streams fall through to the plain FindByID path below, where
 	// DirectionStatus always reports the one primary half.
-	if rec := s.findSstpPairBySID(ctx, streamID); rec != nil {
+	rec, err := s.findSstpPairBySID(ctx, streamID)
+	if err != nil {
+		return nil, err
+	}
+	if rec != nil {
 		status := rec.DirectionStatus(streamID)
 		return &status, nil
 	}

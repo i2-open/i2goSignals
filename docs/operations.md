@@ -22,7 +22,8 @@ behavior** once the system is running.
 6. [Operational events](#operational-events)
 7. [Recovery playbook](#recovery-playbook)
 8. [Event retention](#event-retention)
-9. [Configuration knobs](#configuration-knobs)
+9. [Signing key selection](#signing-key-selection)
+10. [Configuration knobs](#configuration-knobs)
 
 ## Delivery semantics invariant
 
@@ -495,6 +496,31 @@ knob, is the subject of planning issue
 - **Do not mistake `I2SIG_TOKEN_RETENTION` for event retention.** That variable
   governs the management-plane *token* collection only. See
   `docs/configuration_properties.md`.
+
+## Signing key selection
+
+An issuer signs SETs, and the token issuer signs auth tokens, with its newest
+active key of the algorithm in use. Newest means the latest creation time: the
+server stamps one on every key record it creates, rotates or loads, and a
+suspend, reactivate or revoke never changes it. A record with a creation time is
+newer than any record without one, and records without one, or created in the
+same millisecond, are ordered by record id. See ADR 0028.
+
+### Upgrading a store from v0.11.0 through v0.12.0-alpha.19
+
+Key records minted by those versions carry random record ids and no creation
+time. Upgrading needs no migration, and nothing re-stamps existing records.
+
+- **The first rotation after upgrading selects the new key at once.** The same
+  holds for creating or loading a key alongside an older key of the same
+  algorithm. Transmitters sign with the new `kid` straight away, and every node
+  follows within its 2s signing-key cache expiry. Suspending the old key is no
+  longer needed to complete a rotation.
+- **Records minted before the upgrade keep their relative order among
+  themselves.** Each issuer signs with the same key after the upgrade as
+  before it. A rotation made *before* the upgrade is still decided by record
+  id, so an issuer can still be signing with its old `kid`; to move it to the
+  newer key, rotate again or suspend the old key.
 
 ## Configuration knobs
 

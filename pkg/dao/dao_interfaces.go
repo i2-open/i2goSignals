@@ -313,6 +313,42 @@ type JwkKeyRec struct {
 	// ADR 0028.
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`
+
+	// CreatedAt is when the key record was minted. KeyService stamps it before
+	// the insert and nothing changes it afterwards; a status transition never
+	// touches it. Records written before the field existed decode as the zero
+	// time, and NewerThan falls back to id order for them. See ADR 0028.
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+}
+
+// NewerThan reports whether key is a newer record than other. It is the single
+// rule every "newest record for a keyName" choice uses — signing selection, the
+// use a rotation carries over, JWKS kid-collision order and each
+// FindLatestByKeyName — so they all pick the same record (i2goSignals#316):
+//
+//   - both carry a CreatedAt: the later one is newer, and equal times fall
+//     back to the higher id;
+//   - only one carries a CreatedAt: that one is newer;
+//   - neither does: the higher id is newer.
+//
+// Times are compared at millisecond precision, the precision Mongo stores, so
+// a record orders the same before and after it round-trips through storage.
+// A creation time outranks id order because records minted by v0.11.0 through
+// v0.12.0-alpha.19 carry random ids that can sort above any id minted since.
+// Any record is newer than a nil other.
+func (key *JwkKeyRec) NewerThan(other *JwkKeyRec) bool {
+	if other == nil {
+		return true
+	}
+	mine, theirs := key.CreatedAt.Truncate(time.Millisecond), other.CreatedAt.Truncate(time.Millisecond)
+	switch {
+	case mine.IsZero() != theirs.IsZero():
+		return theirs.IsZero()
+	case !mine.Equal(theirs):
+		return mine.After(theirs)
+	default:
+		return key.Id > other.Id
+	}
 }
 
 // IsRevoked reports whether the key has been terminally revoked.

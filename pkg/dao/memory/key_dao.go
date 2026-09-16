@@ -74,12 +74,12 @@ func (d *KeyDAOMemory) FindLatestByKeyName(_ context.Context, keyName string) (*
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
+	// Newest by JwkKeyRec.NewerThan, the rule KeyService's signing selection
+	// uses, so the two never disagree (i2goSignals#316).
 	var latest *interfaces.JwkKeyRec
 	for _, rec := range d.keys {
-		if rec.KeyName == keyName {
-			if latest == nil || rec.Id > latest.Id {
-				latest = rec
-			}
+		if rec.KeyName == keyName && rec.NewerThan(latest) {
+			latest = rec
 		}
 	}
 

@@ -12,8 +12,10 @@
 //     ObjectID's layout and Hex() form, so it sorts into mint order. Use it for
 //     record ids that a DAO converts back into a bson.ObjectID at the storage
 //     boundary, so existing Mongo data keeps round-tripping through the Mongo
-//     DAO's ParseObjectID, and where the highest id is taken as the newest
-//     record (the key store's signing key selection).
+//     DAO's ParseObjectID, and where id order is the fallback for the newest
+//     record (the key store picks the newest key record by JwkKeyRec.CreatedAt,
+//     through JwkKeyRec.NewerThan, and takes the higher id only when creation
+//     times are equal or missing).
 //   - NewV7 — an RFC 9562 version-7 UUID. Time-ordered, so a set of them sorts
 //     into mint order. Use it for stream ids, inbound SSTP SIDs and SET jti
 //     values, where ordering is useful and no Mongo _id shape is required.
@@ -53,8 +55,9 @@ func init() {
 // NewObjectID returns a 24-character hex string suitable as a primary key. It
 // has the MongoDB ObjectID layout: a 4-byte big-endian Unix seconds timestamp,
 // a 5-byte random per-process value and a 3-byte big-endian counter. Ids a
-// process mints therefore sort into mint order, which is what lets a caller
-// take the highest record id as the newest record; the random parts come from
+// process mints therefore sort into mint order, so where a caller falls back to
+// id order, as JwkKeyRec.NewerThan does for key records with equal or no
+// creation times, the higher id is the later mint; the random parts come from
 // crypto/rand.
 func NewObjectID() string {
 	var b [12]byte

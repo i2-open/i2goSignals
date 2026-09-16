@@ -33,10 +33,21 @@ type keyDoc struct {
 	// omitempty keeps it absent from RSA documents, which is exactly how
 	// pre-existing documents decode: "" => RSA.
 	Alg string `bson:"alg,omitempty"`
-	// Lifecycle timestamps (ADR 0028). omitzero keeps them absent from
-	// pre-existing documents, which decode as the zero time => active.
+	// Lifecycle timestamps (ADR 0028). The bson struct-tag parser (mongo-driver
+	// v2) ignores omitzero, so every document written through keyDoc stores
+	// both, as a zero date while unset. A pre-existing document without them and
+	// a stored zero date both decode as the zero time => active, and the revoke
+	// filter matches either ($in [nil, time.Time{}]).
 	SuspendedAt time.Time `bson:"suspended_at,omitzero"`
 	RevokedAt   time.Time `bson:"revoked_at,omitzero"`
+	// CreatedAt is JwkKeyRec.CreatedAt (i2goSignals#316). It is omitempty, not
+	// omitzero, because the bson codec ignores omitzero but applies omitempty to
+	// a zero time.Time. An unstamped record must store no created_at, the same
+	// as a document written before the field existed; a stored zero date would
+	// sort above every such document. With the field absent, both sort below
+	// every stamped document in FindLatestByKeyName's created_at sort, and among
+	// themselves by _id, as JwkKeyRec.NewerThan orders them.
+	CreatedAt time.Time `bson:"created_at,omitempty"`
 }
 
 func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
@@ -53,6 +64,7 @@ func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
 		Alg:             d.Alg,
 		SuspendedAt:     d.SuspendedAt,
 		RevokedAt:       d.RevokedAt,
+		CreatedAt:       d.CreatedAt,
 	}
 }
 
@@ -74,6 +86,7 @@ func recToDoc(rec *interfaces.JwkKeyRec) (*keyDoc, error) {
 		Alg:             rec.Alg,
 		SuspendedAt:     rec.SuspendedAt,
 		RevokedAt:       rec.RevokedAt,
+		CreatedAt:       rec.CreatedAt,
 	}, nil
 }
 
@@ -171,7 +184,11 @@ func (d *KeyDAOMongo) FindLatestByKeyName(ctx context.Context, keyName string) (
 		return nil, err
 	}
 	filter := bson.M{"key_name": keyName}
-	opts := options.FindOne().SetSort(bson.M{"_id": -1}) // Newest first based on ObjectID
+	// Newest first by JwkKeyRec.NewerThan (i2goSignals#316): created_at, then
+	// _id, both descending. A document without created_at sorts below every
+	// stamped one, and Mongo stores created_at to the millisecond NewerThan
+	// compares at, so equal times fall back to _id exactly as the rule does.
+	opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}})
 
 	res := c.FindOne(ctx, filter, opts)
 

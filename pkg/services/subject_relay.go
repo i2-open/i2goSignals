@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -59,14 +60,26 @@ func RelaySubjectChange(ctx context.Context, client *http.Client, upstream *mode
 	return nil
 }
 
-// Relay-target resolution errors (issue #95). Both reject stream configuration
-// at config time when a PASSTHRU/HYBRID stream cannot designate an upstream.
+// Relay configuration errors (issue #95). Each rejects stream configuration at
+// config time when a PASSTHRU/HYBRID stream cannot designate an upstream, its
+// feeding receiver stream names no source transmitter to discover, or its
+// upstream cannot filter subjects. All four are the caller's configuration to
+// fix, unlike a receiver store or source transmitter that could not answer
+// (#305).
 var (
 	// ErrRelayTargetNotFound means no receiver stream feeds the downstream stream.
 	ErrRelayTargetNotFound = errors.New("no upstream receiver stream feeds this stream")
 	// ErrRelayTargetAmbiguous means several receiver streams share the issuer and
 	// the operator must name a Subject handler SID explicitly.
 	ErrRelayTargetAmbiguous = errors.New("multiple receiver streams match the issuer; name a subject handler explicitly")
+	// ErrUpstreamNotDiscoverable means a receiver stream feeds the downstream
+	// stream but names no source transmitter to discover: it carries no usable
+	// tx_well_known_url or iss, and no tx_alias or one naming no registered
+	// server. The wrapping error says which.
+	ErrUpstreamNotDiscoverable = errors.New("the receiver stream feeding this stream names no discoverable source transmitter")
+	// ErrUpstreamNoSubjectFiltering means the upstream advertises no subject
+	// endpoints, so a PASSTHRU/HYBRID stream has nowhere to relay.
+	ErrUpstreamNoSubjectFiltering = errors.New("upstream does not support subject filtering")
 )
 
 // RelayConfigVerdict is the outcome of validating a transmitter stream's
@@ -91,7 +104,8 @@ func ClassifyUpstreamSupport(mode string, upstream *model.TransmitterConfigurati
 	case model.SubjectFilterModePassthru, model.SubjectFilterModeHybrid:
 		if !supportsFiltering {
 			return RelayConfigVerdict{Err: fmt.Errorf(
-				"subject_filter_mode %s requires an upstream that advertises add_subject_endpoint and remove_subject_endpoint", mode)}
+				"%w: subject_filter_mode %s requires an upstream that advertises add_subject_endpoint and remove_subject_endpoint",
+				ErrUpstreamNoSubjectFiltering, mode)}
 		}
 	case model.SubjectFilterModeLocal:
 		if !supportsFiltering {
@@ -120,36 +134,94 @@ func (c *UpstreamConn) release() {
 	}
 }
 
-// NewDefaultUpstreamResolver builds the production UpstreamResolver: it derives
-// a model.Server from the receiver stream's upstream credentials (resolving a
-// tx_alias through servers when set), obtains a credentialed HTTP client, and
-// fetches the upstream's SSF discovery metadata.
+// NewDefaultUpstreamResolver builds the production UpstreamResolver. It locates
+// the source transmitter the way the receiver stream's own status and verify
+// discovery does (internal/server ReceiverPushStream): the registered tx_alias
+// server's host, then tx_well_known_url, then the well-known URL derived from
+// the receiver stream's iss by RFC 8615 insertion (SSF §7.2). A source that
+// cannot be used — a tx_alias that does not resolve, a discovery fetch that
+// fails, or metadata without add and remove subject endpoints — falls through
+// to the next. The first metadata advertising both subject endpoints wins; when
+// metadata was fetched but none advertises them, the first fetched is returned
+// so the caller classifies the upstream (ClassifyUpstreamSupport).
+//
+// The credential is the resolved tx_alias server's, else the receiver stream's
+// tx_token with its per-stream transmitter TLS settings, obtained through
+// oauthClient.GetClientForServer. A receiver stream with no usable
+// tx_well_known_url or iss, and no tx_alias or one naming no registered server,
+// yields ErrUpstreamNotDiscoverable. Any other failure — a server store that
+// could not answer, or no source could be reached or fetched — is returned
+// unwrapped: not the caller's configuration to fix (#305). The returned error
+// never wraps interfaces.ErrNotFound, which the stream handlers answer as a
+// missing stream.
 func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 	return func(ctx context.Context, receiver *model.StreamStateRecord) (*UpstreamConn, error) {
+		var failures []error
 		var server *model.Server
+		var locations []string
+		aliasUnregistered := false
 		if receiver.TxAlias != nil && *receiver.TxAlias != "" && servers != nil {
 			resolved, err := servers.GetServerByAlias(ctx, *receiver.TxAlias)
-			if err != nil {
-				return nil, fmt.Errorf("cannot resolve upstream tx_alias %q: %w", *receiver.TxAlias, err)
+			if errors.Is(err, interfaces.ErrNotFound) {
+				// Recorded without wrapping the DAO's ErrNotFound: no stream is missing.
+				aliasUnregistered = true
+				failures = append(failures, fmt.Errorf("upstream tx_alias %q names no registered server", *receiver.TxAlias))
+			} else if err != nil {
+				failures = append(failures, fmt.Errorf("cannot resolve upstream tx_alias %q: %w", *receiver.TxAlias, err))
+			} else if resolved != nil {
+				server = resolved
+				locations = append(locations, resolved.Host)
 			}
-			server = resolved
+		}
+		if receiver.TxWellKnownUrl != nil && *receiver.TxWellKnownUrl != "" {
+			locations = append(locations, *receiver.TxWellKnownUrl)
+		}
+		if receiver.Iss != "" {
+			if wkURL, err := wellKnownSupport.InsertWellKnownURL(receiver.Iss, wellKnownSupport.SSFConfigurationPath); err == nil && wkURL != "" {
+				locations = append(locations, wkURL)
+			}
+		}
+		if len(locations) == 0 {
+			switch {
+			case aliasUnregistered:
+				return nil, fmt.Errorf("%w: tx_alias %q names no registered server, and there is no tx_well_known_url or iss",
+					ErrUpstreamNotDiscoverable, *receiver.TxAlias)
+			case len(failures) > 0:
+				return nil, errors.Join(failures...)
+			}
+			return nil, fmt.Errorf("%w: no tx_alias, tx_well_known_url or iss", ErrUpstreamNotDiscoverable)
 		}
 		if server == nil {
-			if receiver.TxWellKnownUrl == nil || *receiver.TxWellKnownUrl == "" {
-				return nil, ErrRelayTargetNotFound
+			server = &model.Server{
+				Host:           locations[0],
+				ClientToken:    receiver.TxToken,
+				TLSCertificate: receiver.TxTLSCertificate,
+				TLSSkipVerify:  receiver.TxTLSSkipVerify,
 			}
-			server = &model.Server{Host: *receiver.TxWellKnownUrl, ClientToken: receiver.TxToken}
 		}
 		client, closeClient, err := oauthClient.GetClientForServer(ctx, server)
 		if err != nil {
 			return nil, fmt.Errorf("cannot obtain upstream client: %w", err)
 		}
-		config, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, server.Host)
-		if err != nil {
-			closeClient()
-			return nil, fmt.Errorf("cannot fetch upstream configuration: %w", err)
+		var fetched *model.TransmitterConfiguration
+		for _, location := range locations {
+			config, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, location)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("cannot fetch upstream configuration from %s: %w", location, err))
+				continue
+			}
+			if config.AddSubjectEndpoint != "" && config.RemoveSubjectEndpoint != "" {
+				return &UpstreamConn{Config: config, HttpClient: client, Close: closeClient}, nil
+			}
+			if fetched == nil {
+				fetched = config
+			}
 		}
-		return &UpstreamConn{Config: config, HttpClient: client, Close: closeClient}, nil
+		if fetched != nil {
+			return &UpstreamConn{Config: fetched, HttpClient: client, Close: closeClient}, nil
+		}
+		closeClient()
+		return nil, errors.Join(failures...)
 	}
 }
 
@@ -286,29 +358,42 @@ func (s *SubjectRelayService) RelayHybrid(ctx context.Context, downstream *model
 
 // ValidateConfig checks a downstream transmitter stream's subject-filter mode
 // against its upstream at config time. A PASSTHRU/HYBRID stream with no
-// resolvable relay target, or whose upstream advertises no subject endpoints,
-// is rejected; a LOCAL stream is never rejected but may earn a WARN.
+// resolvable relay target, whose upstream cannot be resolved, or whose upstream
+// advertises no subject endpoints, is rejected. A LOCAL stream does not relay,
+// so it is never rejected: a relay target that does not resolve is silent, and
+// a receiver store or upstream that cannot be checked, or an upstream that
+// advertises no subject endpoints, earns a WARN.
 func (s *SubjectRelayService) ValidateConfig(ctx context.Context, downstream *model.StreamStateRecord) RelayConfigVerdict {
 	mode := downstream.SubjectFilterMode
 	if mode == "" {
 		return RelayConfigVerdict{}
 	}
+	relays := mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid
+	// uncheckable is the verdict when the upstream's subject-filtering support
+	// could not be checked: fatal for a relaying mode, a WARN for LOCAL.
+	uncheckable := func(err error) RelayConfigVerdict {
+		if relays {
+			return RelayConfigVerdict{Err: err}
+		}
+		return RelayConfigVerdict{Warn: fmt.Sprintf(
+			"%s subject filtering: the upstream's subject-filtering support could not be checked: %v", mode, err)}
+	}
 	receivers, err := s.listReceivers(ctx)
 	if err != nil {
-		return RelayConfigVerdict{Err: err}
+		return uncheckable(err)
 	}
 	target, err := ResolveRelayTarget(downstream, receivers)
 	if err != nil {
 		// PASSTHRU/HYBRID must relay, so an unresolved target is fatal; LOCAL
 		// does not relay and tolerates having no upstream subject handler.
-		if mode == model.SubjectFilterModePassthru || mode == model.SubjectFilterModeHybrid {
+		if relays {
 			return RelayConfigVerdict{Err: err}
 		}
 		return RelayConfigVerdict{}
 	}
 	conn, err := s.resolve(ctx, target)
 	if err != nil {
-		return RelayConfigVerdict{Err: err}
+		return uncheckable(err)
 	}
 	defer conn.release()
 	return ClassifyUpstreamSupport(mode, conn.Config)
