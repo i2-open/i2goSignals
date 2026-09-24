@@ -583,8 +583,6 @@ func TestSstpPairCreate_CallerErrorsAre400AndFaultsAre500(t *testing.T) {
 		rr := app.createSstpPair(t, bearer, b)
 		require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 		assert.Contains(t, rr.Body.String(), "peer_server_alias")
-		assert.NotEqual(t, http.StatusNotFound, rr.Code,
-			"the alias is not a stream, so its absence must never read as stream-not-found")
 	})
 
 	t.Run("a server store that cannot answer is 500", func(t *testing.T) {

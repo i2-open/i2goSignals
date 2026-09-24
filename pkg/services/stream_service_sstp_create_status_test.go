@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"net/url"
 	"testing"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -131,6 +132,7 @@ func TestCreateSstpPair_AliasStoreFailureIsServerFault(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrInvalidRequest,
 		"a store that cannot answer is an unexpected server condition, not a bad request")
+	assert.ErrorIs(t, err, boom, "the store's own error stays in the chain")
 	assert.Contains(t, err.Error(), "peer_server_alias")
 }
 
@@ -169,4 +171,41 @@ func TestCreateSstpPair_PeerCascadeFailureIsServerFault(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrInvalidRequest,
 		"an unreachable peer is not something the caller can fix in the bootstrap")
 	assert.Contains(t, err.Error(), "cascade")
+}
+
+// TestCreateSstpPair_InitiatorPeerCascadeFailureIsServerFault covers the other
+// cascade ordering: an initiator cascades before any local write, so its
+// failure returns from a different branch than the responder's. It is still
+// nothing the caller can fix in the bootstrap, so it stays a 500.
+func TestCreateSstpPair_InitiatorPeerCascadeFailureIsServerFault(t *testing.T) {
+	svc, ss := sstpFixture(t)
+	peer := newMockPeer(t, true) // peer returns 500
+	alias := storePeerServer(t, ss, peer.ts.URL)
+
+	b := initiatorBootstrap()
+	b.PeerServerAlias = alias
+
+	_, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidRequest,
+		"an unreachable peer is not something the caller can fix in the bootstrap")
+	assert.Contains(t, err.Error(), "cascade")
+}
+
+// TestCreateSstpPair_DerivedResponderEndpointIsServerFault: a responder's
+// endpoint_url is built from this server's own base URL, never from the
+// bootstrap, so a base URL that yields an unusable endpoint is this server
+// misconfigured — a 500, not a 400 telling the caller to change a field they
+// never sent.
+func TestCreateSstpPair_DerivedResponderEndpointIsServerFault(t *testing.T) {
+	svc, _ := sstpFixture(t)
+	badBase, err := url.Parse("ftp://local.example")
+	require.NoError(t, err)
+	svc.SetBaseUrl(badBase)
+
+	_, err = svc.CreateSstpPair(context.Background(), responderBootstrap(), "proj-1", nil)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidRequest,
+		"the caller supplied no endpoint_url, so there is nothing for them to fix")
+	assert.Contains(t, err.Error(), "base URL")
 }

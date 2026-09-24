@@ -723,14 +723,18 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		// anything else — a token mint, a store write, a peer this server could
 		// not reach — is an unexpected server condition and a 500 (RFC 9110
 		// s15.6.1). Reporting a server fault as 400 tells the caller to fix a
-		// request that was never the problem, and it is the same mapping the
-		// StreamCreate path uses.
+		// request that was never the problem. Unlike StreamCreate there is no
+		// 404 branch: an unregistered peer_server_alias is a 400, never
+		// stream-not-found.
 		if errors.Is(err, services.ErrInvalidRequest) {
 			serverLog.Warn("SSTP pair create refused", "role", bootstrap.Role, "error", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		serverLog.Error("SSTP pair create failed", "role", bootstrap.Role, "error", err)
+		// WARN, not ERROR (CONTEXT.md log-level policy): the usual cause is a
+		// peer cascade that failed on this one attempt, which the caller can
+		// retry; the error= field lets the store-fault subset be filtered.
+		serverLog.Warn("SSTP pair create failed", "role", bootstrap.Role, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
 		return

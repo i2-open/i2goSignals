@@ -231,7 +231,7 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 			if errors.Is(err, interfaces.ErrNotFound) {
 				return model.StreamStateRecord{}, fmt.Errorf("%w: unknown peer_server_alias %q", ErrInvalidRequest, bootstrap.PeerServerAlias)
 			}
-			return model.StreamStateRecord{}, fmt.Errorf("looking up peer_server_alias %q: %v", bootstrap.PeerServerAlias, err)
+			return model.StreamStateRecord{}, fmt.Errorf("looking up peer_server_alias %q: %w", bootstrap.PeerServerAlias, err)
 		}
 		peerServer = resolved
 	}
