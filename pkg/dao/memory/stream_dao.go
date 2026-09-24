@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -30,12 +29,12 @@ func (d *StreamDAOMemory) FindByID(ctx context.Context, id string) (*model.Strea
 	if state, ok := d.store.Get(id); ok {
 		return state, nil
 	}
-	return nil, errors.New("stream not found")
+	return nil, interfaces.ErrNotFound
 }
 
 func (d *StreamDAOMemory) Update(ctx context.Context, state *model.StreamStateRecord) error {
 	if !d.store.Exists(state.StreamConfiguration.Id) {
-		return errors.New("not found")
+		return interfaces.ErrNotFound
 	}
 	d.store.Set(state.StreamConfiguration.Id, state)
 	return nil
@@ -43,7 +42,7 @@ func (d *StreamDAOMemory) Update(ctx context.Context, state *model.StreamStateRe
 
 func (d *StreamDAOMemory) Delete(ctx context.Context, id string) error {
 	if !d.store.Delete(id) {
-		return errors.New("not found")
+		return interfaces.ErrNotFound
 	}
 	return nil
 }
@@ -109,7 +108,7 @@ func (d *StreamDAOMemory) UpdateKeyUnavailablePause(ctx context.Context, id stri
 		d.store.Set(id, state)
 		return nil
 	}
-	return errors.New("not found")
+	return interfaces.ErrNotFound
 }
 
 func (d *StreamDAOMemory) updateStatus(id, status, errorMsg string, transmitterCaused bool) error {
@@ -121,7 +120,7 @@ func (d *StreamDAOMemory) updateStatus(id, status, errorMsg string, transmitterC
 		d.store.Set(id, state)
 		return nil
 	}
-	return errors.New("not found")
+	return interfaces.ErrNotFound
 }
 
 func (d *StreamDAOMemory) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
@@ -130,7 +129,7 @@ func (d *StreamDAOMemory) UpdateRemoteAddress(ctx context.Context, id string, ad
 		d.store.Set(id, state)
 		return nil
 	}
-	return errors.New("not found")
+	return interfaces.ErrNotFound
 }
 
 func (d *StreamDAOMemory) GetState() map[string]*model.StreamStateRecord {

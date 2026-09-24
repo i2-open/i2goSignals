@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/logger"
@@ -197,26 +198,46 @@ func warnIfNotUriShaped(field, value string) {
 // only the local half is provisioned (Q31).
 func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.SstpPairBootstrap, projectID string, peerServer *model.Server) (model.StreamStateRecord, error) {
 	invalidateRequestStreams(ctx)
+	// Everything this function refuses about the bootstrap itself is the caller's
+	// to fix, so each such return carries ErrInvalidRequest and the handler answers
+	// 400 (SSF s8.1.1.1). A return without it is an unexpected server condition —
+	// a mint failure, a store write, an unreachable peer — and answers 500 (RFC
+	// 9110 s15.6.1).
+
 	// Role is required at create with no default (Q30).
 	switch bootstrap.Role {
 	case model.SstpRoleInitiator, model.SstpRoleResponder:
 	default:
-		return model.StreamStateRecord{}, fmt.Errorf("invalid role: must be %q or %q", model.SstpRoleInitiator, model.SstpRoleResponder)
+		return model.StreamStateRecord{}, fmt.Errorf("%w: invalid role: must be %q or %q", ErrInvalidRequest, model.SstpRoleInitiator, model.SstpRoleResponder)
 	}
 
 	// Structural validation of both halves before any state is mutated (Q27, Q29).
 	if err := validateSstpDirection("primary", bootstrap.Primary); err != nil {
-		return model.StreamStateRecord{}, err
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	if err := validateSstpDirection("inbound", bootstrap.Inbound); err != nil {
-		return model.StreamStateRecord{}, err
+		return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 
 	// Resolve the peer Server from the alias when the caller didn't pre-resolve.
-	if peerServer == nil && bootstrap.PeerServerAlias != "" && s.serverService != nil {
+	// An alias no Server carries is the caller naming a peer that isn't
+	// registered — a 400. A store that cannot answer is a server fault, so it
+	// keeps its own error and answers 500. interfaces.ErrNotFound is deliberately
+	// NOT wrapped: it addresses the alias, not a stream, and letting it out would
+	// read as stream-not-found at the HTTP boundary. A server wired without a
+	// ServerService cannot resolve any alias; that is this server misconfigured,
+	// not the caller, and ignoring the alias would answer 201 for a pair whose
+	// peer half was never provisioned.
+	if peerServer == nil && bootstrap.PeerServerAlias != "" {
+		if s.serverService == nil {
+			return model.StreamStateRecord{}, fmt.Errorf("cannot resolve peer_server_alias %q: no server registry is configured", bootstrap.PeerServerAlias)
+		}
 		resolved, err := s.serverService.GetServerByAlias(ctx, bootstrap.PeerServerAlias)
 		if err != nil {
-			return model.StreamStateRecord{}, errors.New("unknown peer_server_alias provided")
+			if errors.Is(err, interfaces.ErrNotFound) {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: unknown peer_server_alias %q", ErrInvalidRequest, bootstrap.PeerServerAlias)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("looking up peer_server_alias %q: %w", bootstrap.PeerServerAlias, err)
 		}
 		peerServer = resolved
 	}
@@ -236,10 +257,10 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		// Responder rejects an operator-supplied EndpointUrl and bearer; both are
 		// server-derived/minted.
 		if bootstrap.EndpointUrl != "" {
-			return model.StreamStateRecord{}, errors.New("endpoint_url must not be supplied on a responder; it is server-derived")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: endpoint_url must not be supplied on a responder; it is server-derived", ErrInvalidRequest)
 		}
 		if bootstrap.AuthorizationHeader != "" {
-			return model.StreamStateRecord{}, errors.New("authorization_header must not be supplied on a responder; it is server-minted")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header must not be supplied on a responder; it is server-minted", ErrInvalidRequest)
 		}
 		endpointUrl = s.getFullUrl(fmt.Sprintf("/sstp/%s", pairId))
 
@@ -255,15 +276,21 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		// Initiator: the operator must supply the bearer (Q30); the peer responder
 		// minted it.
 		if bootstrap.AuthorizationHeader == "" {
-			return model.StreamStateRecord{}, errors.New("authorization_header is required on an initiator")
+			return model.StreamStateRecord{}, fmt.Errorf("%w: authorization_header is required on an initiator", ErrInvalidRequest)
 		}
 	}
 
 	// EndpointUrl syntactic validation, when present (Q28). The responder always
-	// has one (just derived); the initiator may not have learned it yet.
+	// has one (just derived); the initiator may not have learned it yet. Only the
+	// initiator's came from the caller, so only that one is a 400; a responder's
+	// is derived from this server's own base URL, and a bad one there is this
+	// server misconfigured — an unexpected condition, and a 500.
 	if endpointUrl != "" {
 		if err := validateSstpEndpointUrl(endpointUrl); err != nil {
-			return model.StreamStateRecord{}, err
+			if bootstrap.EndpointUrl != "" {
+				return model.StreamStateRecord{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+			}
+			return model.StreamStateRecord{}, fmt.Errorf("the derived responder endpoint_url is not usable; check this server's base URL: %v", err)
 		}
 	}
 
@@ -320,9 +347,9 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 // targeted direction's Iss and Aud, and peer connectivity fields (EndpointUrl,
 // PeerPairId) ONLY while they are still unset — a staged-rollout fill-in.
 //
-// Immutable (rejected with a 4xx-shaped error): SstpMethod.Role, an already-set
-// EndpointUrl/PeerPairId, either direction's event_source descriptor, and all
-// IDs. UPDATE never re-triggers the peer cascade
+// Immutable (rejected with ErrInvalidRequest, a 400): SstpMethod.Role, an
+// already-set EndpointUrl/PeerPairId, either direction's event_source
+// descriptor, and all IDs. UPDATE never re-triggers the peer cascade
 // — delete-and-recreate is the path for that (Q35a).
 func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.StreamStateRecord, streamID string, patch model.StreamStateRecord) (*model.StreamConfiguration, error) {
 	// Both event_source descriptors are immutable on a pair (issue #296).
@@ -332,12 +359,12 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	// patch did nothing instead of believing it landed; recreate the pair to
 	// change it.
 	if patch.EventSource != nil || patch.InboundEventSource != nil {
-		return nil, errors.New("invalid patch: sstp event_source is immutable")
+		return nil, fmt.Errorf("%w: invalid patch: sstp event_source is immutable", ErrInvalidRequest)
 	}
 
 	if patch.SstpMethod != nil {
 		if patch.SstpMethod.Role != "" && patch.SstpMethod.Role != streamRec.SstpMethod.Role {
-			return nil, errors.New("invalid patch: sstp role is immutable")
+			return nil, fmt.Errorf("%w: invalid patch: sstp role is immutable", ErrInvalidRequest)
 		}
 		if patch.SstpMethod.AuthorizationHeader != "" {
 			streamRec.SstpMethod.AuthorizationHeader = patch.SstpMethod.AuthorizationHeader
@@ -347,16 +374,16 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 		// value (immutable, Q35).
 		if patch.SstpMethod.EndpointUrl != "" && patch.SstpMethod.EndpointUrl != streamRec.SstpMethod.EndpointUrl {
 			if streamRec.SstpMethod.EndpointUrl != "" {
-				return nil, errors.New("invalid patch: sstp endpoint_url is immutable once set")
+				return nil, fmt.Errorf("%w: invalid patch: sstp endpoint_url is immutable once set", ErrInvalidRequest)
 			}
 			if err := validateSstpEndpointUrl(patch.SstpMethod.EndpointUrl); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 			}
 			streamRec.SstpMethod.EndpointUrl = patch.SstpMethod.EndpointUrl
 		}
 		if patch.SstpMethod.PeerPairId != "" && patch.SstpMethod.PeerPairId != streamRec.SstpMethod.PeerPairId {
 			if streamRec.SstpMethod.PeerPairId != "" {
-				return nil, errors.New("invalid patch: sstp peer_pair_id is immutable once set")
+				return nil, fmt.Errorf("%w: invalid patch: sstp peer_pair_id is immutable once set", ErrInvalidRequest)
 			}
 			streamRec.SstpMethod.PeerPairId = patch.SstpMethod.PeerPairId
 		}
@@ -463,9 +490,12 @@ func (o SstpDeleteOutcome) PartialFailure() bool {
 // answer 207 Multi-Status.
 func (s *StreamService) DeleteSstpPair(ctx context.Context, sid string, cascadePeer bool, peerServer *model.Server) (SstpDeleteOutcome, error) {
 	invalidateRequestStreams(ctx)
-	rec := s.findSstpPairBySIDFresh(ctx, sid)
+	rec, err := s.findSstpPairBySIDFresh(ctx, sid)
+	if err != nil {
+		return SstpDeleteOutcome{}, err
+	}
 	if rec == nil {
-		return SstpDeleteOutcome{}, errors.New("not found")
+		return SstpDeleteOutcome{}, interfaces.ErrNotFound
 	}
 
 	var outcome SstpDeleteOutcome
@@ -532,8 +562,10 @@ func (s *StreamService) cascadeSstpPeerDelete(ctx context.Context, rec *model.St
 
 // findSstpPairBySID resolves sid to its SSTP pair record, whether sid names the
 // tx side (== PairId == document _id) or the rx side (== SstpInbound.Id), or
-// returns nil when sid is not an SSTP pair SID. (Q39, Q41)
-func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *model.StreamStateRecord {
+// returns nil when sid is not an SSTP pair SID. (Q39, Q41) The error is set only
+// when neither lookup found a record and one of them failed for a reason other
+// than not-found, so whether sid names a stream is unknown (#305).
+func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
 	return sstpPairBySID(ctx, sid, s.findByID, s.findByInboundSID)
 }
 
@@ -541,7 +573,7 @@ func (s *StreamService) findSstpPairBySID(ctx context.Context, sid string) *mode
 // (issue #287). Write paths use it because they MUTATE the record they are
 // handed before persisting it, so they must own a private decode rather than
 // the pointer other readers in the same request are still holding.
-func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) *model.StreamStateRecord {
+func (s *StreamService) findSstpPairBySIDFresh(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
 	return sstpPairBySID(ctx, sid, s.streamDAO.FindByID, s.streamDAO.FindByInboundSID)
 }
 
@@ -552,14 +584,25 @@ func sstpPairBySID(
 	sid string,
 	byID func(context.Context, string) (*model.StreamStateRecord, error),
 	byInboundSID func(context.Context, string) (*model.StreamStateRecord, error),
-) *model.StreamStateRecord {
-	if rec, err := byID(ctx, sid); err == nil && rec.GetType() == model.DeliverySstpPair {
-		return rec
+) (*model.StreamStateRecord, error) {
+	rec, idErr := byID(ctx, sid)
+	if idErr == nil && rec.GetType() == model.DeliverySstpPair {
+		return rec, nil
 	}
-	if rec, err := byInboundSID(ctx, sid); err == nil {
-		return rec
+	inbound, inboundErr := byInboundSID(ctx, sid)
+	if inboundErr == nil {
+		return inbound, nil
 	}
-	return nil
+	if idErr == nil {
+		return nil, nil // sid names a stream that is not a pair
+	}
+	if !errors.Is(idErr, interfaces.ErrNotFound) {
+		return nil, idErr
+	}
+	if !errors.Is(inboundErr, interfaces.ErrNotFound) {
+		return nil, inboundErr
+	}
+	return nil, nil
 }
 
 // updateSstpPairStatus applies a status change to an SSTP pair and persists the

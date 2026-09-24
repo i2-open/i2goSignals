@@ -3,11 +3,14 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,4 +132,100 @@ func TestDeleteSstpPair_CascadePeerFailureIsPartial(t *testing.T) {
 
 	_, err = svc.GetStreamStateByPairId(context.Background(), rec.PairId)
 	require.Error(t, err, "local row must be gone even when peer cleanup failed")
+}
+
+// TestDeleteSstpPair_UnknownSidIsErrNotFound (#305): a SID that names no pair is
+// reported as interfaces.ErrNotFound, the sentinel the HTTP layer maps to 404.
+func TestDeleteSstpPair_UnknownSidIsErrNotFound(t *testing.T) {
+	svc, _ := createdPair(t)
+
+	outcome, err := svc.DeleteSstpPair(context.Background(), "no-such-pair", false, nil)
+	assert.ErrorIs(t, err, interfaces.ErrNotFound)
+	assert.False(t, outcome.LocalDeleted)
+}
+
+// errLookupStoreDown is the failure lookupFailingStreamDAO reports: a store that
+// could not answer, which is not the same as a stream that does not exist.
+var errLookupStoreDown = errors.New("stream store unavailable")
+
+// lookupFailingStreamDAO is a memory stream store whose SID lookups fail on
+// purpose: FindByID while failByID is set, FindByInboundSID while failByInbound
+// is set. Everything else passes straight through (#305).
+type lookupFailingStreamDAO struct {
+	interfaces.StreamDAO
+	failByID      bool
+	failByInbound bool
+}
+
+func (d *lookupFailingStreamDAO) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
+	if d.failByID {
+		return nil, errLookupStoreDown
+	}
+	return d.StreamDAO.FindByID(ctx, id)
+}
+
+func (d *lookupFailingStreamDAO) FindByInboundSID(ctx context.Context, sid string) (*model.StreamStateRecord, error) {
+	if d.failByInbound {
+		return nil, errLookupStoreDown
+	}
+	return d.StreamDAO.FindByInboundSID(ctx, sid)
+}
+
+const (
+	lookupPairTxSid = "lookup-pair-tx"
+	lookupPairRxSid = "lookup-pair-rx"
+)
+
+// lookupFailingPair stores an SSTP pair in a lookupFailingStreamDAO, with every
+// lookup working until the test breaks one.
+func lookupFailingPair(t *testing.T) (*StreamService, *lookupFailingStreamDAO) {
+	t.Helper()
+	dao := &lookupFailingStreamDAO{StreamDAO: memory.NewStreamDAO()}
+	svc := NewStreamService(dao, nil, "https://local.example", StreamServiceConfig{})
+	rec := &model.StreamStateRecord{
+		ProjectId: "proj-1",
+		PairId:    lookupPairTxSid,
+		StreamConfiguration: model.StreamConfiguration{
+			Id:       lookupPairTxSid,
+			Delivery: &model.OneOfStreamConfigurationDelivery{SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp}},
+		},
+		SstpInbound: &model.StreamConfiguration{
+			Id:       lookupPairRxSid,
+			Delivery: &model.OneOfStreamConfigurationDelivery{SstpReceiveMarker: &model.SstpReceiveMarker{Method: model.ReceiveSstp}},
+		},
+		SstpMethod: &model.SstpMethod{Role: model.SstpRoleInitiator},
+		Status:     model.StreamStateEnabled,
+	}
+	require.NoError(t, svc.PersistStreamStateRecord(context.Background(), rec))
+	return svc, dao
+}
+
+// TestDeleteSstpPair_StoreFailureIsNotErrNotFound (#305): a lookup that fails
+// for a reason other than not-found leaves the pair's existence unknown, so the
+// store error is returned as itself, never as ErrNotFound (a 404), and nothing
+// is deleted.
+func TestDeleteSstpPair_StoreFailureIsNotErrNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		sid                     string
+		failByID, failByInbound bool
+	}{
+		{name: "both lookups fail", sid: lookupPairTxSid, failByID: true, failByInbound: true},
+		{name: "id lookup fails", sid: lookupPairTxSid, failByID: true},
+		{name: "inbound lookup fails for the rx SID", sid: lookupPairRxSid, failByInbound: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, dao := lookupFailingPair(t)
+			dao.failByID, dao.failByInbound = tc.failByID, tc.failByInbound
+
+			outcome, err := svc.DeleteSstpPair(context.Background(), tc.sid, false, nil)
+			assert.ErrorIs(t, err, errLookupStoreDown)
+			assert.NotErrorIs(t, err, interfaces.ErrNotFound)
+			assert.False(t, outcome.LocalDeleted)
+
+			dao.failByID, dao.failByInbound = false, false
+			_, err = svc.GetStreamStateByPairId(context.Background(), lookupPairTxSid)
+			assert.NoError(t, err, "a failed lookup must delete nothing")
+		})
+	}
 }

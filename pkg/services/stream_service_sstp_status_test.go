@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -124,4 +125,23 @@ func TestUpdateStreamStatus_PairPredicateAcceptsEitherSignal(t *testing.T) {
 			assert.Empty(t, got.InboundErrorMsg)
 		})
 	}
+}
+
+// TestStatusReads_InboundStoreFailureIsNotErrNotFound (#305): GET and POST
+// /status resolve a SID through the inbound-SID lookup as well as FindByID. An
+// rx SID is not a document id, so FindByID finds nothing; when the inbound
+// lookup then fails with a store error, that error is returned rather than
+// ErrNotFound (a 404).
+func TestStatusReads_InboundStoreFailureIsNotErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	svc, dao := lookupFailingPair(t)
+	dao.failByInbound = true
+
+	_, err := svc.GetStatus(ctx, lookupPairRxSid)
+	assert.ErrorIs(t, err, errLookupStoreDown, "GetStatus")
+	assert.NotErrorIs(t, err, interfaces.ErrNotFound, "GetStatus")
+
+	_, err = svc.GetStreamStateBySID(ctx, lookupPairRxSid)
+	assert.ErrorIs(t, err, errLookupStoreDown, "GetStreamStateBySID")
+	assert.NotErrorIs(t, err, interfaces.ErrNotFound, "GetStreamStateBySID")
 }

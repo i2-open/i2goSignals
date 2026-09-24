@@ -202,12 +202,13 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, 
 
 	kid := newKeyKid(keyName, storedAlg)
 
-	// Preserve the use from the newest existing key of the same algorithm.
+	// Preserve the use from the newest existing key of the same algorithm, by
+	// the same rule signing selection uses (JwkKeyRec.NewerThan).
 	use := "sig"
 	if recs, err2 := s.keyDAO.FindByKeyName(ctx, keyName); err2 == nil {
 		var latest *interfaces.JwkKeyRec
 		for _, rec := range recs {
-			if rec.Alg == storedAlg && (latest == nil || rec.Id > latest.Id) {
+			if rec.Alg == storedAlg && rec.NewerThan(latest) {
 				latest = rec
 			}
 		}
@@ -302,6 +303,15 @@ func newKeyKid(keyName string, storedAlg string) string {
 	return fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
 }
 
+// createdAtNow returns the current time as the CreatedAt stamped on a key
+// record this service mints (i2goSignals#316). It is stamped here rather than in
+// each KeyDAO so every store, including one that persists the whole JwkKeyRec,
+// carries it. It is truncated to the millisecond Mongo stores, so a record's
+// CreatedAt reads back unchanged from any store.
+func createdAtNow() time.Time {
+	return time.Now().UTC().Truncate(time.Millisecond)
+}
+
 func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string) error {
 	alg, privateKeyBytes, pubKeyBytes, err := encodeSigningKey(privateKey)
 	if err != nil {
@@ -317,6 +327,7 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 		Alg:         alg,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
+		CreatedAt:   createdAtNow(),
 	}
 
 	err = s.keyDAO.Insert(ctx, keyPairRec)
@@ -378,6 +389,7 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 		ProjectId:   projectId,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
+		CreatedAt:   createdAtNow(),
 	}
 
 	err := s.keyDAO.Insert(ctx, keyPairRec)
@@ -715,17 +727,19 @@ func algLabel(alg string) string {
 }
 
 // latestActiveSigningRec picks the newest active record carrying private-key
-// material for algorithm alg. sawInactive reports whether at least one
-// signing-capable record of that algorithm was skipped solely because it is
-// suspended or revoked — this distinguishes "this keyName has a signing key
-// that is currently disabled" from "this keyName has no signing material at
-// all" (e.g. a verification-only external record). Pure: no I/O and no logging,
-// so callers that use it as a predicate incur no side effects (ADR 0028).
+// material for algorithm alg, newest by JwkKeyRec.NewerThan: creation time,
+// with id order only for records that have none (i2goSignals#316). sawInactive
+// reports whether at least one signing-capable record of that algorithm was
+// skipped solely because it is suspended or revoked — this distinguishes "this
+// keyName has a signing key that is currently disabled" from "this keyName has
+// no signing material at all" (e.g. a verification-only external record). Pure:
+// no I/O and no logging, so callers that use it as a predicate incur no side
+// effects (ADR 0028).
 //
 // alg is "" for RSA and "ML-DSA-65" for RFC 9964, matching JwkKeyRec.Alg
 // exactly. The filter is what makes one issuer able to hold both: without it an
 // RSA signing request on an issuer that has opted a stream into ML-DSA would
-// pick up the newer ML-DSA record (higher Id) and sign RS256 with an ML-DSA key.
+// pick up the newer ML-DSA record and sign RS256 with an ML-DSA key.
 func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string) (latest *interfaces.JwkKeyRec, sawInactive bool) {
 	for _, rec := range recs {
 		if len(rec.KeyBytes) == 0 {
@@ -738,7 +752,7 @@ func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string) (latest *i
 			sawInactive = true
 			continue
 		}
-		if latest == nil || rec.Id > latest.Id {
+		if rec.NewerThan(latest) {
 			latest = rec
 		}
 	}
@@ -1102,11 +1116,12 @@ func (s *KeyService) buildAuthJWKS(ctx context.Context, keyName string, signingK
 func jwksFromRecs(recs []*interfaces.JwkKeyRec, signingKey crypto.Signer, signingKid string) *keyfunc.JWKS {
 	// Copy before sorting so the caller's slice (which it may still be iterating)
 	// is not mutated. Oldest-first so that when records share a kid the newest
-	// public key overwrites older ones in the map — matching signing selection.
+	// public key overwrites older ones in the map — newest by
+	// JwkKeyRec.NewerThan, matching signing selection.
 	sorted := make([]*interfaces.JwkKeyRec, len(recs))
 	copy(sorted, recs)
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Id < sorted[j].Id
+		return sorted[j].NewerThan(sorted[i])
 	})
 
 	givenKeys := make(map[string]keyfunc.GivenKey)
@@ -1229,6 +1244,7 @@ func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, kids 
 		Use:             use,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,
+		CreatedAt:       createdAtNow(),
 	}
 	return s.keyDAO.Insert(ctx, keyPairRec)
 }

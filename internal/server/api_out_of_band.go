@@ -1366,7 +1366,7 @@ func GetServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http
 
 	server, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1418,7 +1418,7 @@ func UpdateServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// Find the existing server
 	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1488,7 +1488,7 @@ func DeleteServerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	existing, err := sa.GetServerService().GetServerByAlias(r.Context(), alias)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) || err.Error() == "not found" {
+		if errors.Is(err, interfaces.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
