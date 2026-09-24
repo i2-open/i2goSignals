@@ -551,6 +551,47 @@ func TestDefaultUpstreamResolver_UnusableSourcesFallThroughToIss(t *testing.T) {
 	}
 }
 
+// TestDefaultUpstreamResolver_AliasCredentialStaysWithItsHost verifies that a
+// registered tx_alias server's credential is sent only to that server's host:
+// when the alias host cannot be fetched, the iss-derived fall-through is
+// fetched with the receiver stream's own tx_token, never the alias bearer.
+func TestDefaultUpstreamResolver_AliasCredentialStaysWithItsHost(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		txToken  string
+		wantAuth string
+	}{
+		{name: "with a tx_token", txToken: "rx-token", wantAuth: "Bearer rx-token"},
+		{name: "without a tx_token", txToken: "", wantAuth: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, auth := ssfConfigurationServer(t, "/.well-known/ssf-configuration")
+			aliasToken := "alias-secret"
+			serverDAO := memory.NewServerDAO()
+			if err := serverDAO.Create(context.Background(), &model.Server{
+				Alias: "upstream", Host: closedServerURL(), ClientToken: &aliasToken,
+			}); err != nil {
+				t.Fatalf("register alias server: %v", err)
+			}
+			alias := "upstream"
+			receiver := relayReceiver("rx-1", srv.URL)
+			receiver.StreamConfiguration.TxAlias = &alias
+			if tc.txToken != "" {
+				receiver.StreamConfiguration.TxToken = &tc.txToken
+			}
+
+			conn, err := NewDefaultUpstreamResolver(NewServerService(serverDAO))(context.Background(), &receiver)
+			if err != nil {
+				t.Fatalf("an unreachable alias host must fall through to iss: %v", err)
+			}
+			defer conn.release()
+			if *auth != tc.wantAuth {
+				t.Fatalf("iss discovery must carry the receiver's credential %q, got %q", tc.wantAuth, *auth)
+			}
+		})
+	}
+}
+
 // TestDefaultUpstreamResolver_MetadataWithoutSubjectEndpoints verifies that
 // metadata advertising no subject endpoints gives way to a later source that
 // advertises them, and is returned for classification when no source does.

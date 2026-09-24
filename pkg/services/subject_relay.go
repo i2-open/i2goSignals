@@ -145,9 +145,12 @@ func (c *UpstreamConn) release() {
 // metadata was fetched but none advertises them, the first fetched is returned
 // so the caller classifies the upstream (ClassifyUpstreamSupport).
 //
-// The credential is the resolved tx_alias server's, else the receiver stream's
-// tx_token with its per-stream transmitter TLS settings, obtained through
-// oauthClient.GetClientForServer. A receiver stream with no usable
+// Each source is fetched with its own credential, obtained through
+// oauthClient.GetClientForServer: the tx_alias server's for that server's host
+// only, and the receiver stream's tx_token with its per-stream transmitter TLS
+// settings for tx_well_known_url and the iss-derived URL. The alias server's
+// credential never goes to a fall-through location, and the returned client is
+// the one that fetched the returned metadata. A receiver stream with no usable
 // tx_well_known_url or iss, and no tx_alias or one naming no registered server,
 // yields ErrUpstreamNotDiscoverable. Any other failure — a server store that
 // could not answer, or no source could be reached or fetched — is returned
@@ -156,9 +159,14 @@ func (c *UpstreamConn) release() {
 // missing stream.
 func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 	return func(ctx context.Context, receiver *model.StreamStateRecord) (*UpstreamConn, error) {
+		// Each source carries its own credential: the tx_alias server's only ever
+		// goes to that server's host, never to a fall-through location.
+		type source struct {
+			location string
+			server   *model.Server
+		}
 		var failures []error
-		var server *model.Server
-		var locations []string
+		var sources []source
 		aliasUnregistered := false
 		if receiver.TxAlias != nil && *receiver.TxAlias != "" && servers != nil {
 			resolved, err := servers.GetServerByAlias(ctx, *receiver.TxAlias)
@@ -169,19 +177,26 @@ func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 			} else if err != nil {
 				failures = append(failures, fmt.Errorf("cannot resolve upstream tx_alias %q: %w", *receiver.TxAlias, err))
 			} else if resolved != nil {
-				server = resolved
-				locations = append(locations, resolved.Host)
+				sources = append(sources, source{location: resolved.Host, server: resolved})
 			}
 		}
+		receiverSource := func(location string) source {
+			return source{location: location, server: &model.Server{
+				Host:           location,
+				ClientToken:    receiver.TxToken,
+				TLSCertificate: receiver.TxTLSCertificate,
+				TLSSkipVerify:  receiver.TxTLSSkipVerify,
+			}}
+		}
 		if receiver.TxWellKnownUrl != nil && *receiver.TxWellKnownUrl != "" {
-			locations = append(locations, *receiver.TxWellKnownUrl)
+			sources = append(sources, receiverSource(*receiver.TxWellKnownUrl))
 		}
 		if receiver.Iss != "" {
 			if wkURL, err := wellKnownSupport.InsertWellKnownURL(receiver.Iss, wellKnownSupport.SSFConfigurationPath); err == nil && wkURL != "" {
-				locations = append(locations, wkURL)
+				sources = append(sources, receiverSource(wkURL))
 			}
 		}
-		if len(locations) == 0 {
+		if len(sources) == 0 {
 			switch {
 			case aliasUnregistered:
 				return nil, fmt.Errorf("%w: tx_alias %q names no registered server, and there is no tx_well_known_url or iss",
@@ -191,36 +206,35 @@ func NewDefaultUpstreamResolver(servers *ServerService) UpstreamResolver {
 			}
 			return nil, fmt.Errorf("%w: no tx_alias, tx_well_known_url or iss", ErrUpstreamNotDiscoverable)
 		}
-		if server == nil {
-			server = &model.Server{
-				Host:           locations[0],
-				ClientToken:    receiver.TxToken,
-				TLSCertificate: receiver.TxTLSCertificate,
-				TLSSkipVerify:  receiver.TxTLSSkipVerify,
-			}
-		}
-		client, closeClient, err := oauthClient.GetClientForServer(ctx, server)
-		if err != nil {
-			return nil, fmt.Errorf("cannot obtain upstream client: %w", err)
-		}
-		var fetched *model.TransmitterConfiguration
-		for _, location := range locations {
-			config, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, location)
+		var fetched *UpstreamConn
+		for _, src := range sources {
+			client, closeClient, err := oauthClient.GetClientForServer(ctx, src.server)
 			if err != nil {
-				failures = append(failures, fmt.Errorf("cannot fetch upstream configuration from %s: %w", location, err))
+				failures = append(failures, fmt.Errorf("cannot obtain upstream client for %s: %w", src.location, err))
 				continue
 			}
+			config, err := wellKnownSupport.FetchSSFConfiguration(ctx, client, src.location)
+			if err != nil {
+				closeClient()
+				failures = append(failures, fmt.Errorf("cannot fetch upstream configuration from %s: %w", src.location, err))
+				continue
+			}
+			conn := &UpstreamConn{Config: config, HttpClient: client, Close: closeClient}
 			if config.AddSubjectEndpoint != "" && config.RemoveSubjectEndpoint != "" {
-				return &UpstreamConn{Config: config, HttpClient: client, Close: closeClient}, nil
+				if fetched != nil {
+					fetched.release()
+				}
+				return conn, nil
 			}
 			if fetched == nil {
-				fetched = config
+				fetched = conn
+			} else {
+				conn.release()
 			}
 		}
 		if fetched != nil {
-			return &UpstreamConn{Config: fetched, HttpClient: client, Close: closeClient}, nil
+			return fetched, nil
 		}
-		closeClient()
 		return nil, errors.Join(failures...)
 	}
 }

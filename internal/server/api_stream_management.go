@@ -371,13 +371,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		writeStreamNotFoundOrFault(w, err, "StreamDelete: deleting stream", authContext.StreamId, "")
 		return
 	}
 	// sa.EventRouter.RemoveStream(authContext)
@@ -661,12 +655,7 @@ func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 
 	outcome, err := sa.GetStreamService().DeleteSstpPair(r.Context(), sid, cascadePeer, peerServer)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		writeStreamNotFoundOrFault(w, err, "SSTP delete: deleting pair", sid, "")
 		return
 	}
 
@@ -956,6 +945,8 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// through to the same _id lookup for every other stream.
 	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), authCtx.StreamId)
 	if err != nil {
+		// WARN, not ERROR, deliberately (CONTEXT.md log-level policy): a store
+		// read failure here is answered 500 and the caller can retry.
 		writeStreamNotFoundOrFault(w, err, "UpdateStatus: reading stream state", authCtx.StreamId, "")
 		return
 	}
@@ -970,6 +961,8 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		// transmitter with no active key for its iss and signing_alg stays as it
 		// is and the caller is told which key is missing.
 		if err := sa.GetStreamService().RequireActiveSigningKey(r.Context(), streamState); err != nil {
+			// A key-store failure logs at WARN, not ERROR, deliberately (CONTEXT.md
+			// log-level policy): it is answered 500 and the caller can retry.
 			writeInvalidRequestOrFault(w, err, "UpdateStatus: checking the signing key before a re-enable", "sid", authCtx.StreamId)
 			return
 		}
@@ -1002,7 +995,6 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if err != nil {
 		serverLog.Error("Error getting status after update", "id", authCtx.StreamId, "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
