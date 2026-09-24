@@ -136,6 +136,24 @@ func TestCreateSstpPair_AliasStoreFailureIsServerFault(t *testing.T) {
 	assert.Contains(t, err.Error(), "peer_server_alias")
 }
 
+// TestCreateSstpPair_AliasWithNoServerRegistryIsServerFault: a server wired
+// without a ServerService cannot resolve any peer_server_alias. The caller's
+// bootstrap is fine, so this is a 500; ignoring the alias instead would answer
+// 201 for a pair whose peer half was never provisioned.
+func TestCreateSstpPair_AliasWithNoServerRegistryIsServerFault(t *testing.T) {
+	svc, _ := sstpFixture(t)
+	svc.SetServerService(nil)
+
+	b := responderBootstrap()
+	b.PeerServerAlias = "peer-a"
+
+	_, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidRequest,
+		"the missing registry is this server's configuration, not the caller's request")
+	assert.Contains(t, err.Error(), "peer_server_alias")
+}
+
 // TestCreateSstpPair_UnregisteredAliasIsNotAStreamNotFound guards a leak on the
 // path that DOES answer 400: the memory and Mongo server DAOs both report an
 // unregistered alias as interfaces.ErrNotFound, and passing that through would

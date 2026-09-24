@@ -224,8 +224,14 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 	// registered — a 400. A store that cannot answer is a server fault, so it
 	// keeps its own error and answers 500. interfaces.ErrNotFound is deliberately
 	// NOT wrapped: it addresses the alias, not a stream, and letting it out would
-	// read as stream-not-found at the HTTP boundary.
-	if peerServer == nil && bootstrap.PeerServerAlias != "" && s.serverService != nil {
+	// read as stream-not-found at the HTTP boundary. A server wired without a
+	// ServerService cannot resolve any alias; that is this server misconfigured,
+	// not the caller, and ignoring the alias would answer 201 for a pair whose
+	// peer half was never provisioned.
+	if peerServer == nil && bootstrap.PeerServerAlias != "" {
+		if s.serverService == nil {
+			return model.StreamStateRecord{}, fmt.Errorf("cannot resolve peer_server_alias %q: no server registry is configured", bootstrap.PeerServerAlias)
+		}
 		resolved, err := s.serverService.GetServerByAlias(ctx, bootstrap.PeerServerAlias)
 		if err != nil {
 			if errors.Is(err, interfaces.ErrNotFound) {

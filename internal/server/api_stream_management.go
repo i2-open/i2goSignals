@@ -190,10 +190,11 @@ func handleSubjectChange(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 // writeStreamNotFoundOrFault answers a stream handler whose lookup or update of
 // sid failed with err (#305). 404 means only that no such stream exists; its
-// body is notFoundBody when one is given. Any other error is a server fault,
-// logged at WARN as op failing and answered 500.
+// body is notFoundBody when one is given. Anything else, including a rejection
+// that carries services.ErrInvalidRequest, is answered by
+// writeInvalidRequestOrFault.
 func writeStreamNotFoundOrFault(w http.ResponseWriter, err error, op, sid, notFoundBody string) {
-	if errors.Is(err, interfaces.ErrNotFound) {
+	if errors.Is(err, interfaces.ErrNotFound) && !errors.Is(err, services.ErrInvalidRequest) {
 		serverLog.Debug(op+": stream not found", "sid", sid)
 		if notFoundBody != "" {
 			http.Error(w, notFoundBody, http.StatusNotFound)
@@ -202,7 +203,22 @@ func writeStreamNotFoundOrFault(w http.ResponseWriter, err error, op, sid, notFo
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	serverLog.Warn(op+" failed", "sid", sid, "error", err)
+	writeInvalidRequestOrFault(w, err, op, "sid", sid)
+}
+
+// writeInvalidRequestOrFault answers a handler whose service call failed with
+// err (#305). A request the caller can fix carries services.ErrInvalidRequest
+// and is the documented 400 with the rejection as its body (SSF s8.1.1.1).
+// Anything else is an unexpected server condition (RFC 9110 s15.6.1): it is
+// logged at WARN as op failing, with attrs and the error= field, and answered
+// 500 with no body, so store and peer error text never reaches the caller.
+func writeInvalidRequestOrFault(w http.ResponseWriter, err error, op string, attrs ...any) {
+	if errors.Is(err, services.ErrInvalidRequest) {
+		serverLog.Debug(op+" refused", append(attrs, "error", err)...)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	serverLog.Warn(op+" failed", append(attrs, "error", err)...)
 	w.WriteHeader(http.StatusInternalServerError)
 }
 
@@ -593,19 +609,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	configResp, err := sa.GetStreamService().CreateStream(context.WithValue(r.Context(), authSupport.AuthContextKey, authCtx), jsonRequest, authCtx.ProjectId, nil)
 	if err != nil {
-		if errors.Is(err, interfaces.ErrNotFound) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		// A request the caller can fix is the documented 400, not the catch-all
-		// 500 that says the server broke.
-		if errors.Is(err, services.ErrInvalidRequest) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		writeStreamNotFoundOrFault(w, err, "StreamCreate: creating stream", "", "")
 		return
 	}
 
@@ -725,18 +729,10 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		// s15.6.1). Reporting a server fault as 400 tells the caller to fix a
 		// request that was never the problem. Unlike StreamCreate there is no
 		// 404 branch: an unregistered peer_server_alias is a 400, never
-		// stream-not-found.
-		if errors.Is(err, services.ErrInvalidRequest) {
-			serverLog.Warn("SSTP pair create refused", "role", bootstrap.Role, "error", err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		// WARN, not ERROR (CONTEXT.md log-level policy): the usual cause is a
-		// peer cascade that failed on this one attempt, which the caller can
-		// retry; the error= field lets the store-fault subset be filtered.
-		serverLog.Warn("SSTP pair create failed", "role", bootstrap.Role, "error", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+		// stream-not-found. A fault logs at WARN, not ERROR (CONTEXT.md
+		// log-level policy): the usual cause is a peer cascade that failed on
+		// this one attempt, which the caller can retry.
+		writeInvalidRequestOrFault(w, err, "SSTP pair create", "role", bootstrap.Role)
 		return
 	}
 
@@ -850,11 +846,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		}
 		// An update the stream cannot accept (a delivery-method change, an
 		// immutable SSTP field, a bad signing_alg, route_mode, grace value or
-		// subject_filter_mode) is a 400 carrying the rejection (#305, #306).
-		if errors.Is(err, services.ErrInvalidRequest) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// subject_filter_mode) is a 400 carrying the rejection (#305, #306);
 		// 404 only for a missing stream; anything else, such as a store failure
 		// while writing the update, is a server fault (#305).
 		writeStreamNotFoundOrFault(w, err, "StreamUpdate: updating stream", streamId, "No stream found")
@@ -978,12 +970,7 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		// transmitter with no active key for its iss and signing_alg stays as it
 		// is and the caller is told which key is missing.
 		if err := sa.GetStreamService().RequireActiveSigningKey(r.Context(), streamState); err != nil {
-			if errors.Is(err, services.ErrInvalidRequest) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			serverLog.Error("Error checking the signing key before a re-enable", "id", authCtx.StreamId, "error", err)
-			w.WriteHeader(http.StatusInternalServerError)
+			writeInvalidRequestOrFault(w, err, "UpdateStatus: checking the signing key before a re-enable", "sid", authCtx.StreamId)
 			return
 		}
 	}

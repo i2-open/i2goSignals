@@ -219,6 +219,7 @@ func TestStreamHandlers_KeyStoreFailureIs500(t *testing.T) {
 
 		rr := app.createStream(t, app.adminBearer(t), create)
 		assert.Equal(t, http.StatusInternalServerError, rr.Code, "POST /stream: %s", rr.Body.String())
+		assert.Empty(t, rr.Body.String(), "a server fault must not echo store or peer error text")
 		assert.Empty(t, app.StreamService.ListStreams(context.Background()), "nothing is saved")
 		assert.Equal(t, 0, app.refreshes(), "a failed create must not refresh the router")
 	})
@@ -245,6 +246,7 @@ func TestStreamHandlers_KeyStoreFailureIs500(t *testing.T) {
 
 		rr := app.postStatus(t, bearer, statusPlainSid, model.StreamStateEnabled, "")
 		assert.Equal(t, http.StatusInternalServerError, rr.Code, "POST /status: %s", rr.Body.String())
+		assert.Empty(t, rr.Body.String(), "a server fault must not echo store or peer error text")
 		assert.Equal(t, 0, app.refreshes(), "a failed re-enable changes nothing")
 		assert.Equal(t, model.StreamStatus{Status: model.StreamStateDisable, Reason: "stopped"},
 			app.getStatus(t, bearer, statusPlainSid), "the status is unchanged")
@@ -594,6 +596,7 @@ func TestSstpPairCreate_CallerErrorsAre400AndFaultsAre500(t *testing.T) {
 
 		rr := down.createSstpPair(t, down.adminBearer(t), b)
 		assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+		assert.Empty(t, rr.Body.String(), "a server fault must not echo store or peer error text")
 	})
 
 	t.Run("a key store that cannot answer is 500", func(t *testing.T) {
@@ -606,5 +609,6 @@ func TestSstpPairCreate_CallerErrorsAre400AndFaultsAre500(t *testing.T) {
 
 		rr := down.createSstpPair(t, down.adminBearer(t), b)
 		assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+		assert.Empty(t, rr.Body.String(), "a server fault must not echo store or peer error text")
 	})
 }
