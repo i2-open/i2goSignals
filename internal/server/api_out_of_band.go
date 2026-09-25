@@ -55,7 +55,13 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, alg, authCtx.ProjectId)
+	lifetime, err := keyLifetimeOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	issuerKey, kid, err := sa.GetKeyService().RotateKey(r.Context(), issuer, alg, authCtx.ProjectId, lifetime...)
 	if err != nil {
 		serverLog.Error(fmt.Sprintf("Error rotating issuer keys for issuer %s: %v", issuer, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -203,6 +209,22 @@ func requestIsKeyTakeover(r *http.Request) bool {
 	return false
 }
 
+// keyLifetimeOptions reads the optional lifetime query parameter of a key
+// create, rotate or cert-less upload (#318): a number of days ("90d"), a Go
+// duration, or 0/never for a key that does not expire. Absent means the global
+// default (I2SIG_ISSUER_KEY_LIFETIME).
+func keyLifetimeOptions(r *http.Request) ([]services.KeyOption, error) {
+	q := r.URL.Query()
+	if !q.Has("lifetime") {
+		return nil, nil
+	}
+	d, err := services.ParseKeyLifetime(q.Get("lifetime"))
+	if err != nil {
+		return nil, err
+	}
+	return []services.KeyOption{services.WithLifetime(d)}, nil
+}
+
 func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
 	vars := mux.Vars(r)
 	rawKeyName := vars["keyName"]
@@ -228,6 +250,11 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 	// dual-key JWKS of ADR 0034; i2goSignals#314).
 	alg := queryParams.Get("alg")
 	if err := services.ValidateKeyAlg(alg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	lifetime, err := keyLifetimeOptions(r)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -267,7 +294,7 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 		}
 	}
 
-	issuerKey, kid, err := sa.GetKeyService().CreateKeyPairForAlg(r.Context(), keyName, alg, "sig", authCtx.ProjectId)
+	issuerKey, kid, err := sa.GetKeyService().CreateKeyPairForAlg(r.Context(), keyName, alg, "sig", authCtx.ProjectId, lifetime...)
 	// A create, or a replace whose delete has already run, changes the issuer's
 	// signing keys even when the create fails (#313).
 	invalidateIssuerSigningKeys(sa, keyName)
@@ -364,11 +391,36 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	queryParams := request.URL.Query()
 	force := queryParams.Get("force")
 
-	// Only RSA keys can be uploaded (the parsing below accepts nothing else), so
-	// the uploaded key's algorithm is RS256. The conflict check and a replace act
-	// on that algorithm only, leaving the keyName's ES256 and ML-DSA-65 keys in
-	// place (i2goSignals#314).
-	const uploadAlg = "RS256"
+	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
+	contentType = strings.TrimSpace(contentType)
+
+	// The uploaded key's algorithm scopes the conflict check and a replace, which
+	// leave the keyName's keys of other algorithms in place (i2goSignals#314).
+	// JWKS URIs and PKCS#1 public keys are RSA (RS256); a PEM key or a
+	// certificate may also be ES256 or ML-DSA-65, and a PEM private key may come
+	// with its certificate (#318), so those are read first.
+	uploadAlg := "RS256"
+	var bundle *pemBundle
+	switch contentType {
+	case "application/x-pem-file", "application/pkix-cert":
+		parse := parsePemBundle
+		if contentType == "application/pkix-cert" {
+			parse = parsePkixUpload
+		}
+		var err error
+		if bundle, err = parse(body); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		uploadAlg = bundle.alg
+	}
+	// A cert-less private key takes the lifetime query parameter (#318).
+	lifetime, err := keyLifetimeOptions(request)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	exists, existsErr := sa.GetKeyService().KeyExistsForAlg(ctx, keyName, uploadAlg)
 	if existsErr != nil {
 		serverLog.Error(fmt.Sprintf("Error checking existing keys for %s: %v", keyName, existsErr))
@@ -380,15 +432,12 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	contentType := strings.Split(request.Header.Get("Content-Type"), ";")[0]
-	contentType = strings.TrimSpace(contentType)
-
 	// priv is declared as the interface, not *rsa.PrivateKey, so the
 	// public-key-only paths below leave it as an untyped nil. A nil
 	// *rsa.PrivateKey boxed into a crypto.Signer would read as present at
 	// AddKey's "privateKey != nil" check and panic on Public().
 	var priv crypto.Signer
-	var pub *rsa.PublicKey
+	var pub crypto.PublicKey
 
 	switch contentType {
 	case "application/json":
@@ -413,6 +462,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		if err != nil {
 			msg := fmt.Sprintf("Error getting jwks for keyName %s: %v", keyName, err)
 			http.Error(writer, msg, http.StatusBadRequest)
+			return
 		}
 
 		use := "sig"
@@ -429,55 +479,11 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		writer.WriteHeader(http.StatusOK)
 		return
 
-	case "application/x-pem-file":
-		block, _ := pem.Decode(body)
-		if block == nil {
-			http.Error(writer, "Invalid PEM data", http.StatusBadRequest)
-			return
-		}
-		if block.Type == "PRIVATE KEY" || block.Type == "RSA PRIVATE KEY" {
-			if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-				priv = key
-				pub = &key.PublicKey
-			} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-				if rsaKey, ok := key.(*rsa.PrivateKey); ok {
-					priv = rsaKey
-					pub = &rsaKey.PublicKey
-				}
-			}
-		} else if block.Type == "PUBLIC KEY" || block.Type == "RSA PUBLIC KEY" {
-			if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
-				pub = key
-			} else if key, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
-				if rsaKey, ok := key.(*rsa.PublicKey); ok {
-					pub = rsaKey
-				}
-			}
-		} else if block.Type == "CERTIFICATE" {
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				http.Error(writer, "Invalid certificate", http.StatusBadRequest)
-				return
-			}
-			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-				pub = rsaKey
-			}
-		}
-
-	case "application/pkix-cert":
-		// Try parsing as certificate first
-		cert, err := x509.ParseCertificate(body)
-		if err == nil {
-			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-				pub = rsaKey
-			}
+	case "application/x-pem-file", "application/pkix-cert":
+		if bundle.priv != nil {
+			priv = bundle.priv
 		} else {
-			// Try parsing as PKIX public key
-			if key, err := x509.ParsePKIXPublicKey(body); err == nil {
-				if rsaKey, ok := key.(*rsa.PublicKey); ok {
-					pub = rsaKey
-				}
-			}
+			pub = bundle.pub
 		}
 
 	case "application/pkcs7-mime":
@@ -496,9 +502,10 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	if force == "replace" {
 		// The guard (#311) describes exactly this replace: the name's keys of the
 		// upload's algorithm are deleted (#314), and the upload is a signing key
-		// only when it carries a private half (always RSA).
+		// only when it carries a private half whose certificate, if any, is valid
+		// now (#318).
 		change := services.KeyChange{Retires: services.RetireAlg(uploadAlg)}
-		if priv != nil {
+		if priv != nil && sa.GetKeyService().UploadedKeySignsNow(keyName, bundle.cert) {
 			change.Adds = []string{uploadAlg}
 		}
 		if refuseStrandingKeyChange(sa, writer, request, keyName, "replacing", change) {
@@ -510,7 +517,8 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 			http.Error(writer, "Error replacing existing keys", http.StatusInternalServerError)
 			return
 		}
-	} else if force == "rotate" {
+	} else if force == "rotate" && isRSAKeyAlg(uploadAlg) {
+		// An ES256 or ML-DSA-65 key always gets a unique kid from the service.
 		kid = fmt.Sprintf("%s-%s", keyName, ids.NewObjectID())
 	}
 
@@ -522,7 +530,13 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	err := sa.GetKeyService().AddKey(ctx, keyName, use, kid, priv, pub, authCtx.ProjectId)
+	if priv != nil {
+		// A private key is a signing key with a validity period: its
+		// certificate's, else from now for the lifetime (#318).
+		kid, err = sa.GetKeyService().StoreUploadedSigningKey(ctx, keyName, use, kid, priv, bundle.cert, authCtx.ProjectId, lifetime...)
+	} else {
+		kid, err = sa.GetKeyService().AddVerificationKey(ctx, keyName, use, kid, pub, authCtx.ProjectId)
+	}
 	// A load, rotate or replace changes the issuer's signing keys; a replace's
 	// delete has run even when the add fails (#313).
 	invalidateIssuerSigningKeys(sa, keyName)
@@ -531,12 +545,9 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		return
 	}
 
-	// If the loaded issuer is the token issuer, update the application's AuthIssuer
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && priv != nil {
-		// Update the kid for the token issuer if not set
-		if kid == "" {
-			kid = keyName
-		}
+	// If the loaded issuer is the token issuer, update the application's
+	// AuthIssuer. Auth tokens are signed RS256, so only an RSA key applies.
+	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && priv != nil && isRSAKeyAlg(uploadAlg) {
 		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 

@@ -60,6 +60,13 @@ type StreamDAO interface {
 	// the first. It clears transmitter_caused.
 	UpdateKeyUnavailablePause(ctx context.Context, id string, errorMsg string, since time.Time) error
 
+	// UpdateIfStatus replaces the stored record with state, as Update does, but
+	// only while the stored status is still status, atomically: it reports
+	// whether the write applied. An unknown stream is ErrNotFound. The
+	// background key check's pause uses it so an operator change made after
+	// the check read the stream wins (#318).
+	UpdateIfStatus(ctx context.Context, state *model.StreamStateRecord, status string) (bool, error)
+
 	// UpdateRemoteAddress persists only the remote_address sub-document for the given stream.
 	UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error
 }
@@ -276,6 +283,12 @@ const (
 	KeyStatusActive    = "active"    // signing candidate; published in all JWKS
 	KeyStatusSuspended = "suspended" // reversible; not a signing candidate; still published for verification
 	KeyStatusRevoked   = "revoked"   // terminal; not a signing candidate; excluded from JWKS
+
+	// The validity statuses are derived against a clock (see StatusAt), never
+	// from a stored stamp (i2goSignals#318). Neither is a signing candidate;
+	// both stay published for verification.
+	KeyStatusExpired     = "expired"       // past NotAfter
+	KeyStatusNotYetValid = "not-yet-valid" // before NotBefore
 )
 
 type JwkKeyRec struct {
@@ -319,6 +332,16 @@ type JwkKeyRec struct {
 	// touches it. Records written before the field existed decode as the zero
 	// time, and NewerThan falls back to id order for them. See ADR 0028.
 	CreatedAt time.Time `json:"createdAt,omitzero"`
+
+	// NotBefore and NotAfter bound the period in which a signing key may sign
+	// (i2goSignals#318, ADR 0042). A zero bound is open: a record with neither
+	// never expires, which is how every record written before the fields
+	// existed reads. An uploaded certificate supplies both; a generated key or
+	// a certificate-less private key gets NotAfter = creation + lifetime.
+	// Validity is derived against a clock on every read (ValidAt, StatusAt),
+	// never stored as a status.
+	NotBefore time.Time `json:"notBefore,omitzero"`
+	NotAfter  time.Time `json:"notAfter,omitzero"`
 }
 
 // NewerThan reports whether key is a newer record than other. It is the single
@@ -370,13 +393,57 @@ func (key *JwkKeyRec) Status() string {
 	return KeyStatusActive
 }
 
-// ToKeyState projects the per-kid lifecycle state carried on a KeySummary.
+// ValidAt reports whether now falls inside the record's validity period:
+// at or after NotBefore and before NotAfter, a zero bound being open. A record
+// with neither bound is valid at every instant (i2goSignals#318).
+func (key *JwkKeyRec) ValidAt(now time.Time) bool {
+	return validAt(key.NotBefore, key.NotAfter, now)
+}
+
+func validAt(notBefore, notAfter, now time.Time) bool {
+	if !notBefore.IsZero() && now.Before(notBefore) {
+		return false
+	}
+	return notAfter.IsZero() || now.Before(notAfter)
+}
+
+// statusAt is the status of a key with lifecycle status status and validity
+// period [notBefore, notAfter) at now.
+func statusAt(status string, notBefore, notAfter, now time.Time) string {
+	switch {
+	case status != KeyStatusActive, validAt(notBefore, notAfter, now):
+		return status
+	case !notBefore.IsZero() && now.Before(notBefore):
+		return KeyStatusNotYetValid
+	default:
+		return KeyStatusExpired
+	}
+}
+
+// StatusAt derives the status at now. The lifecycle status (Status) outranks
+// the validity period, so a revoked or suspended key reads as such whatever its
+// dates; an otherwise active key outside its period is expired or
+// not-yet-valid. A record with no validity period reads exactly as Status().
+func (key *JwkKeyRec) StatusAt(now time.Time) string {
+	return statusAt(key.Status(), key.NotBefore, key.NotAfter, now)
+}
+
+// ToKeyState projects the per-kid lifecycle state carried on a KeySummary,
+// with the status derived at the current time. KeyService re-derives it
+// against its own clock (ToKeyStateAt) when it reports a summary.
 func (key *JwkKeyRec) ToKeyState() KeyState {
+	return key.ToKeyStateAt(time.Now())
+}
+
+// ToKeyStateAt projects the per-kid state with the status derived at now.
+func (key *JwkKeyRec) ToKeyStateAt(now time.Time) KeyState {
 	return KeyState{
 		Kid:         key.Kid,
-		Status:      key.Status(),
+		Status:      key.StatusAt(now),
 		SuspendedAt: key.SuspendedAt,
 		RevokedAt:   key.RevokedAt,
+		NotBefore:   key.NotBefore,
+		NotAfter:    key.NotAfter,
 	}
 }
 
@@ -409,9 +476,25 @@ func (key *JwkKeyRec) ToSummary() KeySummary {
 // so a KeySummary reports per-kid state without a second round trip (ADR 0028).
 type KeyState struct {
 	Kid         string    `json:"kid"`
-	Status      string    `json:"status"` // "active" | "suspended" | "revoked"
+	Status      string    `json:"status"` // "active" | "suspended" | "revoked" | "expired" | "not-yet-valid"
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`
+	NotBefore   time.Time `json:"not_before,omitzero"`
+	NotAfter    time.Time `json:"not_after,omitzero"`
+}
+
+// StatusAt re-derives the state's status at now: revoked and suspended stand,
+// otherwise the validity period decides between active, expired and
+// not-yet-valid, as JwkKeyRec.StatusAt does.
+func (st KeyState) StatusAt(now time.Time) string {
+	status := KeyStatusActive
+	switch {
+	case !st.RevokedAt.IsZero():
+		status = KeyStatusRevoked
+	case !st.SuspendedAt.IsZero():
+		status = KeyStatusSuspended
+	}
+	return statusAt(status, st.NotBefore, st.NotAfter, now)
 }
 
 // KeySummary is used to report a key registry entry and its capabilities without exposing key material

@@ -335,8 +335,13 @@ A re-read that finds no active key drops the entry, so the transmitter
 follows the missing-key rule; a re-read that fails keeps the current key,
 so a key store outage does not pause every signing transmitter.
 
-_Avoid_: "key expiry" — goSignals keys carry no expiry; a key leaves
-service only by suspend, revoke or replace.
+**Key validity period** (ADR 0042): a signing key may carry `NotBefore` /
+`NotAfter` — its certificate's dates, or creation plus a lifetime
+(`I2SIG_ISSUER_KEY_LIFETIME`, default 180 days). Outside that period the key
+is `expired` or `not-yet-valid`: it stays in the JWKS but never signs, and a
+stream left without a valid key follows the missing-key rule. A key without
+a period never expires. Validity is derived on read, never stored as status;
+a key otherwise leaves service by suspend, revoke or replace.
 
 ### Stream status: paused / disabled
 

@@ -34,6 +34,11 @@ const signingKeyCacheTTL = 2 * time.Second
 //   - the read fails: the current key stays for another TTL and a WARN is logged,
 //     so a key store outage does not pause every transmitter.
 //
+// A key read also says until when its answer holds (#318): the key's NotAfter,
+// or the NotBefore of a newer key that takes over. The entry expires then if
+// that is sooner than the TTL, and a key past it is never served, not while it
+// is being re-read and not through a key store outage.
+//
 // One read per entry is in flight at a time: while an expired entry is re-read,
 // other callers keep signing with its current key; on a cold miss they wait for
 // the read and share its answer. The store is read without the router's lock.
@@ -51,6 +56,9 @@ type signingKeyEntry struct {
 	key     crypto.Signer
 	kid     string
 	expires time.Time
+	// validUntil is when the key's selection changes (it expires, or a newer
+	// key becomes valid); zero when the key store named no such moment.
+	validUntil time.Time
 	// loading is the key store read in flight for this entry, nil when none is.
 	loading *signingKeyLoad
 }
@@ -71,12 +79,18 @@ func newSigningKeyCache() *signingKeyCache {
 	}
 }
 
+// servable reports whether the entry's key may still be signed with at now.
+func (e *signingKeyEntry) servable(now time.Time) bool {
+	return e.validUntil.IsZero() || now.Before(e.validUntil)
+}
+
 // signer returns the cached key and kid for issuer and alg, calling load to read
-// the key store on a miss or once the entry has expired. It returns an untyped
-// nil signer when there is no key to sign with.
-func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (crypto.Signer, string, error)) (crypto.Signer, string) {
+// the key store on a miss or once the entry has expired. load also returns until
+// when its answer holds (zero for no limit). It returns an untyped nil signer
+// when there is no key to sign with.
+func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (crypto.Signer, string, time.Time, error)) (crypto.Signer, string) {
 	if c == nil {
-		key, kid, err := load()
+		key, kid, _, err := load()
 		if err != nil {
 			return nil, ""
 		}
@@ -89,7 +103,7 @@ func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (cryp
 	case entry == nil:
 		entry = &signingKeyEntry{}
 		c.entries[cacheKey] = entry
-	case entry.loading != nil && entry.key == nil:
+	case entry.loading != nil && (entry.key == nil || !entry.servable(c.now())):
 		// The first read for this key is in flight: share its answer.
 		inFlight := entry.loading
 		c.mu.Unlock()
@@ -105,7 +119,7 @@ func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (cryp
 	entry.loading = inFlight
 	c.mu.Unlock()
 
-	key, kid, err := load()
+	key, kid, until, err := load()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -115,14 +129,15 @@ func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (cryp
 	switch {
 	case err == nil:
 		if current {
-			entry.key, entry.kid, entry.expires = key, kid, c.now().Add(c.ttl)
+			entry.key, entry.kid, entry.validUntil = key, kid, until
+			c.renew(entry)
 		}
-	case entry.key != nil && !errors.Is(err, interfaces.ErrKeyNotFound):
+	case entry.key != nil && entry.servable(c.now()) && !errors.Is(err, interfaces.ErrKeyNotFound):
 		eventLogger.Warn("Could not re-read the signing key; signing with the current key until the next try",
 			"streamID", streamID, "issuer", issuer, "alg", alg, "retryIn", c.ttl, "error", err)
 		key, kid = entry.key, entry.kid
 		if current {
-			entry.expires = c.now().Add(c.ttl)
+			c.renew(entry)
 		}
 	default:
 		// WARN only when this read takes a cached key away or the store failed.
@@ -170,4 +185,13 @@ func (c *signingKeyCache) forget(issuer, alg string) {
 	c.mu.Lock()
 	delete(c.entries, signingCacheKey(issuer, alg))
 	c.mu.Unlock()
+}
+
+// renew sets entry to expire one TTL from now, or at its key's validUntil when
+// that comes first (#318). The caller must hold c.mu.
+func (c *signingKeyCache) renew(entry *signingKeyEntry) {
+	entry.expires = c.now().Add(c.ttl)
+	if !entry.validUntil.IsZero() && entry.validUntil.Before(entry.expires) {
+		entry.expires = entry.validUntil
+	}
 }

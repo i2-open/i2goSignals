@@ -1697,6 +1697,40 @@ func (s *StreamService) UpdateKeyUnavailablePause(ctx context.Context, streamID 
 	s.updateStreamStatus(ctx, streamID, statusWrite{status: model.StreamStatePause, reason: reason, keyUnavailableSince: since})
 }
 
+// PauseEnabledForKeyUnavailable is the background key check's key-unavailable
+// pause (#318): UpdateKeyUnavailablePause, but written only while the stored
+// stream is still enabled, in one conditional write, so an operator's pause or
+// disable made after the check listed the stream wins. It reports whether the
+// pause was written.
+func (s *StreamService) PauseEnabledForKeyUnavailable(ctx context.Context, streamID string, reason string, since time.Time) bool {
+	invalidateRequestStreams(ctx)
+	rec, _ := s.findSstpPairBySIDFresh(ctx, streamID)
+	if rec == nil {
+		found, err := s.streamDAO.FindByID(ctx, streamID)
+		if err != nil {
+			return false
+		}
+		rec = found
+	}
+	if rec.Status != model.StreamStateEnabled {
+		return false
+	}
+	w := statusWrite{status: model.StreamStatePause, reason: reason, keyUnavailableSince: since}
+	persist := rec.DeepCopy()
+	w.applyTo(persist)
+	applied, err := s.streamDAO.UpdateIfStatus(ctx, persist, model.StreamStateEnabled)
+	if err != nil {
+		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
+		return false
+	}
+	if applied {
+		s.mu.Lock()
+		s.applyStatusToReceiverCache(streamID, w)
+		s.mu.Unlock()
+	}
+	return applied
+}
+
 // statusWrite is one status write together with the marker it carries, if any:
 // TransmitterCaused (#310) or KeyUnavailableSince (#312). Whichever marker a
 // write does not set, it clears.

@@ -48,6 +48,12 @@ type keyDoc struct {
 	// every stamped document in FindLatestByKeyName's created_at sort, and among
 	// themselves by _id, as JwkKeyRec.NewerThan orders them.
 	CreatedAt time.Time `bson:"created_at,omitempty"`
+	// NotBefore/NotAfter are the validity period (i2goSignals#318). omitempty
+	// for the same reason as created_at: a record with no period stores no
+	// member, exactly like a document written before the fields existed, and
+	// both decode as the zero time => no bound.
+	NotBefore time.Time `bson:"not_before,omitempty"`
+	NotAfter  time.Time `bson:"not_after,omitempty"`
 }
 
 func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
@@ -65,6 +71,8 @@ func (d *keyDoc) toRec() *interfaces.JwkKeyRec {
 		SuspendedAt:     d.SuspendedAt,
 		RevokedAt:       d.RevokedAt,
 		CreatedAt:       d.CreatedAt,
+		NotBefore:       d.NotBefore,
+		NotAfter:        d.NotAfter,
 	}
 }
 
@@ -87,6 +95,8 @@ func recToDoc(rec *interfaces.JwkKeyRec) (*keyDoc, error) {
 		SuspendedAt:     rec.SuspendedAt,
 		RevokedAt:       rec.RevokedAt,
 		CreatedAt:       rec.CreatedAt,
+		NotBefore:       rec.NotBefore,
+		NotAfter:        rec.NotAfter,
 	}, nil
 }
 

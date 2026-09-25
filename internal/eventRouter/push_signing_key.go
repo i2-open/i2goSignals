@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -59,7 +58,7 @@ func (r *router) awaitSigningKey(ctx context.Context, stream *model.StreamStateR
 	sc := stream.StreamConfiguration
 	sid := sc.Id
 	alg := signingKeyAlg(sc)
-	reason := "PUSH-SRV: " + services.NoActiveSigningKeyReason(sc.Iss, sc.SigningAlg)
+	reason := "PUSH-SRV: " + r.keyUnavailableReason(sc)
 
 	logArgs := []any{"sid", sid, "issuer", sc.Iss, "alg", alg, "remedy", signingKeyRemedy,
 		"retryDelay", cfg.AuthRetryDelay, "retryLimit", cfg.AuthRetryLimit}

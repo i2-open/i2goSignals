@@ -134,6 +134,7 @@ func (s *KeyService) signingAlgsLostBy(ctx context.Context, keyName string, chan
 			kept = append(kept, rec)
 		}
 	}
+	now := s.clock() // expired and not-yet-valid keys are unavailable (#318)
 	added := map[string]bool{}
 	for _, alg := range change.Adds {
 		if storedAlg, err := storedAlgFor(alg); err == nil {
@@ -141,13 +142,13 @@ func (s *KeyService) signingAlgsLostBy(ctx context.Context, keyName string, chan
 		}
 	}
 	return func(storedAlg string) bool {
-		if now, _ := latestActiveSigningRec(recs, storedAlg); now == nil {
+		if before, _ := latestActiveSigningRec(recs, storedAlg, now); before == nil {
 			return false
 		}
 		if added[storedAlg] {
 			return false
 		}
-		after, _ := latestActiveSigningRec(kept, storedAlg)
+		after, _ := latestActiveSigningRec(kept, storedAlg, now)
 		return after == nil
 	}, nil
 }

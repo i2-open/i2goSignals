@@ -1,10 +1,12 @@
 package eventRouter
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -56,6 +58,13 @@ func errNoActiveSigningKey(cfg model.StreamConfiguration) error {
 	return errors.New(services.NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg))
 }
 
+// keyUnavailableReason is a key-unavailable pause's reason for cfg: the issuer
+// and algorithm, and the expired or not-yet-valid key with its time when a
+// validity period is the cause (#318).
+func (r *router) keyUnavailableReason(cfg model.StreamConfiguration) string {
+	return r.streamService.SigningKeyUnavailableReason(r.ctx, cfg.Iss, cfg.SigningAlg)
+}
+
 // takeKeyUnavailablePause pauses a signing poll transmitter or SSTP pair that
 // has no active signing key, or whose key failed to sign (cause), with nothing
 // sent. component prefixes the reason (POLL-SRV, SSTP-SRV, SSTP-CLIENT).
@@ -67,13 +76,29 @@ func errNoActiveSigningKey(cfg model.StreamConfiguration) error {
 // issuer, algorithm and remedy, when this node's copy was not already in the
 // pause (ADR 0028), rather than one per SET or per refused request.
 func (r *router) takeKeyUnavailablePause(stream *model.StreamStateRecord, component string, cause error) {
+	r.takeKeyUnavailablePauseAt(stream, component, cause, time.Now().UTC())
+}
+
+// takeKeyUnavailablePauseAt is takeKeyUnavailablePause with the pause starting
+// at since.
+func (r *router) takeKeyUnavailablePauseAt(stream *model.StreamStateRecord, component string, cause error, since time.Time) {
 	sc := stream.StreamConfiguration
-	sid := sc.Id
-	reason := component + ": " + services.NoActiveSigningKeyReason(sc.Iss, sc.SigningAlg)
-	since := time.Now().UTC()
+	reason := component + ": " + r.keyUnavailableReason(sc)
 	if cause != nil {
 		r.dropCachedKey(sc.Iss, sc.SigningAlg)
 	}
+	// Always written, even when this node's copy already shows the pause: that
+	// copy can be stale if another node has resumed the stream meanwhile.
+	r.streamService.UpdateKeyUnavailablePause(r.ctx, sc.Id, reason, since)
+	r.mirrorKeyUnavailablePause(stream, component, cause, reason, since)
+}
+
+// mirrorKeyUnavailablePause mirrors a stored key-unavailable pause onto stream
+// and this node's copy of it, wakes a long poll waiting on it, and logs the one
+// ERROR when this node's copy was not already in the pause.
+func (r *router) mirrorKeyUnavailablePause(stream *model.StreamStateRecord, component string, cause error, reason string, since time.Time) {
+	sc := stream.StreamConfiguration
+	sid := sc.Id
 
 	first := !inKeyUnavailablePause(stream)
 	var pollBuffer interface{ Wakeup() }
@@ -102,9 +127,6 @@ func (r *router) takeKeyUnavailablePause(stream *model.StreamStateRecord, compon
 	}
 	r.mu.Unlock()
 
-	// Always written, even when this node's copy already shows the pause: that
-	// copy can be stale if another node has resumed the stream meanwhile.
-	r.streamService.UpdateKeyUnavailablePause(r.ctx, sid, reason, since)
 	from := stream.Status
 	stream.SetKeyUnavailablePause(reason, since)
 	if pollBuffer != nil {
@@ -146,6 +168,21 @@ func (r *router) PauseForSigningKey(stream *model.StreamStateRecord, cause error
 	r.takeKeyUnavailablePause(stream, "SSTP-CLIENT", cause)
 }
 
+// expiryWarner is the KeyService's signing-key expiry WARN (#318), optional so a
+// stub signerSource need not provide it.
+type expiryWarner interface {
+	WarnExpiringSigningKeys(ctx context.Context)
+}
+
+// keyCheckComponent names the end that takes rec's key-unavailable pause in the
+// background key check: the poll server or the SSTP pair's transmit end.
+func keyCheckComponent(rec *model.StreamStateRecord) string {
+	if rec.GetType() == model.DeliverySstpPair {
+		return "SSTP-SRV"
+	}
+	return "POLL-SRV"
+}
+
 // runKeyUnavailableCheck runs the background key check every retry delay until
 // the router shuts down. The retry settings are the push receiver-401 ones
 // (I2SIG_PUSH_AUTH_RETRY_DELAY / _LIMIT), as for a push key pause (#308).
@@ -158,6 +195,10 @@ func (r *router) runKeyUnavailableCheck(cfg RecoveryConfig) {
 // checkKeyUnavailablePauses is one pass of the background key check (#312) over
 // the stored poll transmitters and SSTP pairs:
 //
+//   - enabled, signing, and its issuer's only key is now expired or not yet
+//     valid (#318): take the stored key-unavailable
+//     pause, even with nothing to send, so the stream status tells a receiver
+//     why the stream is down;
 //   - paused with the marker and the key active again: set enabled, which clears
 //     the reason and the marker;
 //   - paused with the marker, the key still missing, and the limit (retry delay
@@ -170,8 +211,17 @@ func (r *router) runKeyUnavailableCheck(cfg RecoveryConfig) {
 // a dial loop paused here restarts. Several nodes running the check at once is
 // harmless: every write is conditional on the record still being in the same
 // pause (resolveKeyUnavailablePause).
+//
+// Each pass also WARNs of signing keys about to expire (#318); the KeyService
+// paces that to once a day per key. It also nudges this node's push runners,
+// each of which checks its own key and takes its own pause (#308), so an idle
+// push stream is paused at expiry rather than at its next delivery.
 func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 	cfg.fillDefaults()
+	if w, ok := r.keyService.(expiryWarner); ok {
+		w.WarnExpiringSigningKeys(r.ctx)
+	}
+	r.nudgePushRunnersKeyCheck()
 	recs, err := r.streamService.ListTransmitterStreams(r.ctx)
 	if err != nil {
 		if r.ctx.Err() == nil {
@@ -180,12 +230,17 @@ func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 		return
 	}
 	limit := cfg.AuthRetryDelay * time.Duration(cfg.AuthRetryLimit)
+	outside := map[string]bool{}
 	for i := range recs {
 		rec := &recs[i]
 		if !keyCheckedStream(rec) {
 			continue
 		}
 		if !inKeyUnavailablePause(rec) {
+			if rec.Status == model.StreamStateEnabled && isSigningTransmitter(rec) && r.signingKeyOutsideValidity(rec, outside) {
+				r.pauseAtKeyCheck(rec, cfg.Clock().UTC())
+				continue
+			}
 			r.syncResolvedKeyPause(rec)
 			continue
 		}
@@ -198,6 +253,56 @@ func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 		case cfg.Clock().Sub(*rec.KeyUnavailableSince) >= limit:
 			r.resolveKeyUnavailablePause(rec, model.StreamStateDisable, rec.ErrorMsg)
 		}
+	}
+}
+
+// signingKeyOutsideValidity reports whether rec's issuer has no active signing
+// key of its signing_alg at the key service's clock because its key is expired
+// or not yet valid (#318). A missing key without a validity cause is left to
+// the next signing attempt (#312), so the brief gap of a key replace pauses
+// nothing; a key store that cannot answer is not a missing key. memo holds the
+// answers of one pass per issuer and algorithm.
+func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo map[string]bool) bool {
+	cfg := rec.StreamConfiguration
+	cacheKey := signingCacheKey(cfg.Iss, cfg.SigningAlg)
+	if answer, ok := memo[cacheKey]; ok {
+		return answer
+	}
+	_, _, err := r.keyService.GetSigner(r.ctx, cfg.Iss, cfg.SigningAlg)
+	var validity *services.SigningKeyValidityError
+	answer := errors.As(err, &validity)
+	switch {
+	case answer, errors.Is(err, interfaces.ErrKeyNotFound):
+	case err != nil && r.ctx.Err() == nil:
+		eventLogger.Warn("Key check: could not check the signing key", "sid", cfg.Id, "error", err)
+	}
+	memo[cacheKey] = answer
+	return answer
+}
+
+// pauseAtKeyCheck takes listed's key-unavailable pause from the background key
+// check, starting at since. The pause is written only while the stored record
+// is still enabled, in one conditional write, so an operator change made
+// meanwhile wins; this node's copies change only when it was written.
+func (r *router) pauseAtKeyCheck(listed *model.StreamStateRecord, since time.Time) {
+	sc := listed.StreamConfiguration
+	component := keyCheckComponent(listed)
+	reason := component + ": " + r.keyUnavailableReason(sc)
+	if !r.streamService.PauseEnabledForKeyUnavailable(r.ctx, sc.Id, reason, since) {
+		return
+	}
+	r.dropCachedKey(sc.Iss, sc.SigningAlg)
+	r.mirrorKeyUnavailablePause(listed, component, nil, reason, since)
+}
+
+// nudgePushRunnersKeyCheck asks every push runner on this node to check its
+// signing key. It never blocks: a runner with a nudge already pending needs no
+// second one.
+func (r *router) nudgePushRunnersKeyCheck() {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, runner := range r.pushRunners {
+		runner.nudgeKeyCheck()
 	}
 }
 

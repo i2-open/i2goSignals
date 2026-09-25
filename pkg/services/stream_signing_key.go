@@ -18,6 +18,31 @@ func NoActiveSigningKeyReason(issuer, signingAlg string) string {
 	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, algLabel(signingAlg))
 }
 
+// SigningKeyUnavailableReason is NoActiveSigningKeyReason, followed by the
+// expired or not-yet-valid key and its time when a validity period is why the
+// issuer has no active key (#318): the operator, and a receiver reading the
+// stream status, need the time to tell an expiry from a future key. It is the
+// save-time rejection and every key-unavailable pause's reason.
+func (s *StreamService) SigningKeyUnavailableReason(ctx context.Context, issuer, signingAlg string) string {
+	if s == nil || s.keyService == nil {
+		return NoActiveSigningKeyReason(issuer, signingAlg)
+	}
+	_, _, err := s.keyService.GetSigner(ctx, issuer, signingAlg)
+	return SigningKeyUnavailableReasonFor(issuer, signingAlg, err)
+}
+
+// SigningKeyUnavailableReasonFor is SigningKeyUnavailableReason built from the
+// error a signing key lookup already returned, with no key store read: the
+// validity detail is there when err is a SigningKeyValidityError.
+func SigningKeyUnavailableReasonFor(issuer, signingAlg string, err error) string {
+	reason := NoActiveSigningKeyReason(issuer, signingAlg)
+	var validity *SigningKeyValidityError
+	if errors.As(err, &validity) {
+		reason += "; " + validity.Error()
+	}
+	return reason
+}
+
 // signingTransmitterConfig returns the configuration of rec's signing transmit
 // direction, or nil when rec has none. A signing transmitter is any transmitter
 // not in Forward mode, an empty route mode counting as Publish: a push or poll
@@ -42,21 +67,23 @@ func signingTransmitterConfig(rec *model.StreamStateRecord) *model.StreamConfigu
 }
 
 // requireActiveKeyFor refuses a signing transmitter configuration whose iss and
-// signing_alg have no active signing key. The test is KeyService.GetSigner,
-// which never selects a suspended or revoked key. A missing key is the caller's
-// to fix, so it wraps ErrInvalidRequest (400); a key store that could not answer
-// is not, and is returned as is.
+// signing_alg have no active signing key (KeyService.RequireSigningKey, which
+// never selects a suspended, revoked, expired or not-yet-valid key). A missing
+// key is the caller's to fix, so it wraps ErrInvalidRequest (400); a key store
+// that could not answer is not, and is returned as is.
 func (s *StreamService) requireActiveKeyFor(ctx context.Context, cfg *model.StreamConfiguration) error {
 	if cfg == nil || s.keyService == nil {
 		return nil
 	}
-	if _, _, err := s.keyService.GetSigner(ctx, cfg.Iss, cfg.SigningAlg); err != nil {
-		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			return fmt.Errorf("%w: %s", ErrInvalidRequest, NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg))
-		}
+	err := s.keyService.RequireSigningKey(ctx, cfg.Iss, cfg.SigningAlg)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, interfaces.ErrKeyNotFound):
+		return fmt.Errorf("%w: %s", ErrInvalidRequest, SigningKeyUnavailableReasonFor(cfg.Iss, cfg.SigningAlg, err))
+	default:
 		return fmt.Errorf("checking the signing key for issuer %s: %w", cfg.Iss, err)
 	}
-	return nil
 }
 
 // RequireActiveSigningKey is the save-time and re-enable check of #308: when rec

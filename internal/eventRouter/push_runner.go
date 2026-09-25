@@ -41,11 +41,24 @@ type pushRunner struct {
 	// reEnabled records that UpdateStreamState was handed an enabled record
 	// while this runner was live, and so started nothing. Guarded by r.mu.
 	reEnabled bool
+
+	// keyCheck carries the background key check's nudge (#318): the runner
+	// checks its signing key and, with none active, takes its key-unavailable
+	// pause even when idle. Buffered, so a nudge never blocks the check.
+	keyCheck chan struct{}
 }
 
 func newPushRunner(parent context.Context, buf *buffer.EventPushBuffer, state *model.StreamStateRecord) *pushRunner {
 	ctx, cancel := context.WithCancel(parent)
-	return &pushRunner{buf: buf, ctx: ctx, cancel: cancel, done: make(chan struct{}), state: state}
+	return &pushRunner{buf: buf, ctx: ctx, cancel: cancel, done: make(chan struct{}), state: state, keyCheck: make(chan struct{}, 1)}
+}
+
+// nudgeKeyCheck asks the runner to check its signing key. It never blocks.
+func (p *pushRunner) nudgeKeyCheck() {
+	select {
+	case p.keyCheck <- struct{}{}:
+	default:
+	}
 }
 
 // stop fires the stop signal and closes the runner's buffer. It never blocks,

@@ -135,3 +135,43 @@ func (suite *StreamDAOMongoStatusSuite) TestKeyUnavailablePauseRoundTrip() {
 	suite.Error(suite.dao.UpdateKeyUnavailablePause(ctx, model.NewRecordId().Hex(), "x", first),
 		"an unknown stream is an error")
 }
+
+// TestUpdateIfStatus (#318): the conditional whole-record write lands only
+// while the stored status is still the expected one, so a background pause
+// never overwrites an operator's change made after the stream was read.
+func (suite *StreamDAOMongoStatusSuite) TestUpdateIfStatus() {
+	ctx := context.Background()
+	mid := model.NewRecordId()
+	sid := mid.Hex()
+	rec := &model.StreamStateRecord{
+		Id:                  mid,
+		StreamConfiguration: model.StreamConfiguration{Id: sid},
+		Status:              model.StreamStateEnabled,
+	}
+	suite.Require().NoError(suite.dao.Create(ctx, rec))
+
+	paused := rec.DeepCopy()
+	paused.SetKeyUnavailablePause("POLL-SRV: expired", time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	applied, err := suite.dao.UpdateIfStatus(ctx, paused, model.StreamStateEnabled)
+	suite.Require().NoError(err)
+	suite.True(applied)
+	got, err := suite.dao.FindByID(ctx, sid)
+	suite.Require().NoError(err)
+	suite.Equal(model.StreamStatePause, got.Status)
+	suite.NotNil(got.KeyUnavailableSince)
+
+	suite.Require().NoError(suite.dao.UpdateStatus(ctx, sid, model.StreamStateDisable, "operator"))
+	applied, err = suite.dao.UpdateIfStatus(ctx, paused, model.StreamStateEnabled)
+	suite.Require().NoError(err)
+	suite.False(applied, "a stream no longer enabled is not written")
+	got, err = suite.dao.FindByID(ctx, sid)
+	suite.Require().NoError(err)
+	suite.Equal(model.StreamStateDisable, got.Status)
+	suite.Equal("operator", got.ErrorMsg)
+
+	missing := rec.DeepCopy()
+	missing.Id = model.NewRecordId()
+	missing.StreamConfiguration.Id = missing.Id.Hex()
+	_, err = suite.dao.UpdateIfStatus(ctx, missing, model.StreamStateEnabled)
+	suite.ErrorIs(err, interfaces.ErrNotFound)
+}

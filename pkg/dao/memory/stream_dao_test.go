@@ -363,3 +363,48 @@ func TestStreamDAOMemory_UpdateRemoteAddress(t *testing.T) {
 		t.Errorf("expected Forwarded 203.0.113.1, got %s", retrieved.RemoteAddress.Forwarded)
 	}
 }
+
+// UpdateIfStatus writes the record only while the stored status is still the
+// expected one (#318): a background key-check pause must not overwrite an
+// operator's pause or disable made after the check read the stream.
+func TestStreamDAOMemory_UpdateIfStatus(t *testing.T) {
+	dao := NewStreamDAO()
+	ctx := context.Background()
+	rec := &model.StreamStateRecord{
+		Id:                  model.NewRecordId(),
+		StreamConfiguration: model.StreamConfiguration{Id: "stream-cas"},
+		Status:              model.StreamStateEnabled,
+	}
+	if err := dao.Create(ctx, rec); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	paused := rec.DeepCopy()
+	paused.SetKeyUnavailablePause("POLL-SRV: expired", time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	applied, err := dao.UpdateIfStatus(ctx, paused, model.StreamStateEnabled)
+	if err != nil || !applied {
+		t.Fatalf("UpdateIfStatus on an enabled stream: applied=%v err=%v", applied, err)
+	}
+	got, _ := dao.FindByID(ctx, "stream-cas")
+	if got.Status != model.StreamStatePause || got.KeyUnavailableSince == nil {
+		t.Fatalf("the pause was not stored: %+v", got)
+	}
+
+	if err := dao.UpdateStatus(ctx, "stream-cas", model.StreamStateDisable, "operator"); err != nil {
+		t.Fatalf("UpdateStatus failed: %v", err)
+	}
+	applied, err = dao.UpdateIfStatus(ctx, paused, model.StreamStateEnabled)
+	if err != nil || applied {
+		t.Fatalf("UpdateIfStatus on a disabled stream: applied=%v err=%v", applied, err)
+	}
+	got, _ = dao.FindByID(ctx, "stream-cas")
+	if got.Status != model.StreamStateDisable || got.ErrorMsg != "operator" {
+		t.Fatalf("the operator's disable was overwritten: %+v", got)
+	}
+
+	missing := rec.DeepCopy()
+	missing.StreamConfiguration.Id = "no-such-stream"
+	if _, err := dao.UpdateIfStatus(ctx, missing, model.StreamStateEnabled); !errors.Is(err, interfaces.ErrNotFound) {
+		t.Fatalf("an unknown stream: want ErrNotFound, got %v", err)
+	}
+}

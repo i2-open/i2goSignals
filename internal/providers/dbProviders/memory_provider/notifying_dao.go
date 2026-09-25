@@ -97,6 +97,14 @@ func (d *notifyingStreamDAO) UpdateKeyUnavailablePause(ctx context.Context, id s
 	return nil
 }
 
+func (d *notifyingStreamDAO) UpdateIfStatus(ctx context.Context, state *model.StreamStateRecord, status string) (bool, error) {
+	applied, err := d.inner.UpdateIfStatus(ctx, state, status)
+	if applied {
+		d.notify()
+	}
+	return applied, err
+}
+
 func (d *notifyingStreamDAO) UpdateRemoteAddress(ctx context.Context, id string, addr *model.RemoteIP) error {
 	if err := d.inner.UpdateRemoteAddress(ctx, id, addr); err != nil {
 		return err
