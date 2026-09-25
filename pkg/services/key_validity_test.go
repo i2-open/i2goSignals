@@ -357,8 +357,8 @@ func TestKeyValidity_ListingReportsDerivedStatusAndPeriod(t *testing.T) {
 
 	raw, err := json.Marshal(k1)
 	require.NoError(t, err)
-	assert.Contains(t, string(raw), `"notBefore"`)
-	assert.Contains(t, string(raw), `"notAfter"`)
+	assert.Contains(t, string(raw), `"not_before"`)
+	assert.Contains(t, string(raw), `"not_after"`)
 	assert.Contains(t, string(raw), `"status":"expired"`)
 }
 

@@ -510,8 +510,8 @@ type KeyState struct {
 	Status      string    `json:"status"` // "active" | "suspended" | "revoked" | "expired" | "not-yet-valid"
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`
-	NotBefore   time.Time `json:"notBefore,omitzero"`
-	NotAfter    time.Time `json:"notAfter,omitzero"`
+	NotBefore   time.Time `json:"not_before,omitzero"`
+	NotAfter    time.Time `json:"not_after,omitzero"`
 }
 
 // Validity is the state's validity period.

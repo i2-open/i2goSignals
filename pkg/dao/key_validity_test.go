@@ -73,8 +73,8 @@ func TestJwkKeyRec_ToKeyStateIsRawLifecycleState(t *testing.T) {
 
 	raw, err := json.Marshal(st)
 	assert.NoError(t, err)
-	assert.Contains(t, string(raw), `"notBefore"`)
-	assert.Contains(t, string(raw), `"notAfter"`)
+	assert.Contains(t, string(raw), `"not_before"`)
+	assert.Contains(t, string(raw), `"not_after"`)
 }
 
 func TestValidityPeriod(t *testing.T) {

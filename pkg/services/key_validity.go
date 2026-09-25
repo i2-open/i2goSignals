@@ -64,7 +64,7 @@ func ParseKeyLifetime(raw string) (time.Duration, error) {
 		}
 		// Past MaxInt64 nanoseconds the Duration conversion is undefined
 		// (it wraps on some platforms), so a huge day count is refused here.
-		if n > float64(math.MaxInt64)/float64(24*time.Hour) {
+		if n >= float64(math.MaxInt64)/float64(24*time.Hour) {
 			return 0, fmt.Errorf("invalid key lifetime %q: too long", raw)
 		}
 		d = time.Duration(n * float64(24*time.Hour))
