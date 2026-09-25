@@ -54,7 +54,15 @@ could not be uploaded.
    algorithm and the time. Under a running stream, expiry follows the #308 /
    #312 missing-key rule: a push stream pauses and is disabled at the retry
    limit; a poll transmitter or SSTP pair takes the stored pause, which the
-   background key check re-evaluates. The router's key cache holds a key no
+   background key check re-evaluates. The pause is taken at expiry, not at the
+   next signing attempt: each pass of the background key check re-evaluates
+   validity against the key service clock, pauses an enabled poll transmitter
+   or SSTP pair whose only key is expired or not yet valid, even with nothing
+   pending, and nudges each push runner to check its own key. A key that is
+   simply missing (as in the brief gap of a replace) still pauses at the next
+   signing attempt. The reason names the expired key and
+   its `NotAfter` (or the future key and its `NotBefore`). Rotating in a valid
+   key resumes the stream as before. The router's key cache holds a key no
    later than the instant its selection changes, and a key store outage never
    extends a key past its `NotAfter`. The stranding guard (#311) counts an
    expired or not-yet-valid key as unavailable.
@@ -76,7 +84,7 @@ could not be uploaded.
 - An uploaded key whose certificate has already expired is stored and listed as
   `expired`; it never signs, and it does not count as a replacement for the
   stranding guard.
-- Idle poll and SSTP streams are not paused at the moment of expiry; the pause
-  is taken at the next signing attempt.
+- An idle stream is paused within one background key check interval of its
+  key's expiry, so its status tells a receiver why nothing is being sent.
 - Out of scope: expiry of verification-only keys, publishing `x5c` in the
   JWKS, and backfilling a validity period onto existing records.

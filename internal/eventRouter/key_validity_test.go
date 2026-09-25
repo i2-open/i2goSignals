@@ -162,6 +162,7 @@ func TestPushSigningKey_ExpiredKeyPausesThenDisables(t *testing.T) {
 	stream := h.createSigningPushStream(t, signingKeyIssuer, model.RouteModePublish, "https://receiver.example.com/events", "")
 	sid := stream.StreamConfiguration.Id
 	clk := expiringIssuerKey(t, h, signingKeyIssuer)
+	kid, notAfter := expiringKeyOf(t, h, signingKeyIssuer)
 	h.addPendingEvents(t, sid, 1)
 	h.router.UpdateStreamState(stream.DeepCopy())
 	require.Eventually(t, func() bool { return h.pendingCount(sid) == 0 }, 10*time.Second, 5*time.Millisecond)
@@ -169,7 +170,7 @@ func TestPushSigningKey_ExpiredKeyPausesThenDisables(t *testing.T) {
 	clk.jump(time.Hour)
 	h.addPendingEvents(t, sid, 1)
 
-	h.waitStoredStatus(t, sid, model.StreamStateDisable, services.NoActiveSigningKeyReason(signingKeyIssuer, ""))
+	h.waitStoredStatus(t, sid, model.StreamStateDisable, expiredKeyReason("PUSH-SRV", signingKeyIssuer, kid, notAfter))
 	assert.Len(t, rx.snapshot(), 1, "nothing is signed with the expired key")
 	assert.Equal(t, 1, h.pendingCount(sid), "the event stays queued")
 }
@@ -179,9 +180,10 @@ func TestPushSigningKey_ExpiredKeyPausesThenDisables(t *testing.T) {
 func TestPushSigningKey_RotationAfterExpiryResumes(t *testing.T) {
 	h, rx, sid := startKeyedRunner(t, 1000)
 	clk := expiringIssuerKey(t, h, signingKeyIssuer)
+	kid, notAfter := expiringKeyOf(t, h, signingKeyIssuer)
 	clk.jump(time.Hour)
 	queued := h.addPendingEvents(t, sid, 1)
-	h.waitStoredStatus(t, sid, model.StreamStatePause, services.NoActiveSigningKeyReason(signingKeyIssuer, ""))
+	h.waitStoredStatus(t, sid, model.StreamStatePause, expiredKeyReason("PUSH-SRV", signingKeyIssuer, kid, notAfter))
 
 	_, _, err := h.keyService.RotateKey(context.Background(), signingKeyIssuer, "RS256", "")
 	require.NoError(t, err)
@@ -199,6 +201,7 @@ func TestPollSigningKey_ExpiredKeyAnswers503AndPauses(t *testing.T) {
 	stream := h.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish)
 	sid := stream.StreamConfiguration.Id
 	clk := expiringIssuerKey(t, h, pollKeyIssuer)
+	kid, notAfter := expiringKeyOf(t, h, pollKeyIssuer)
 	delivered := h.queuePollEvents(t, sid, 1)
 	sets, status := h.poll(sid)
 	require.Equal(t, http.StatusOK, status)
@@ -211,7 +214,7 @@ func TestPollSigningKey_ExpiredKeyAnswers503AndPauses(t *testing.T) {
 	assert.Empty(t, sets)
 	rec := h.stored(t, sid)
 	assert.Equal(t, model.StreamStatePause, rec.Status)
-	assert.Equal(t, "POLL-SRV: "+services.NoActiveSigningKeyReason(pollKeyIssuer, ""), rec.ErrorMsg)
+	assert.Equal(t, expiredKeyReason("POLL-SRV", pollKeyIssuer, kid, notAfter), rec.ErrorMsg, "the reason names the expired key")
 	require.NotNil(t, rec.KeyUnavailableSince)
 
 	_, _, err := h.keyService.RotateKey(context.Background(), pollKeyIssuer, "RS256", "")
@@ -247,4 +250,98 @@ func TestKeyCheck_WarnsOfSigningKeysNearExpiry(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, warns, "one WARN per key per day")
+}
+
+// expiringKeyOf returns the kid and NotAfter of iss's signing key that has a
+// validity period (the one expiringIssuerKey rotated in).
+func expiringKeyOf(t *testing.T, h *filterPushHarness, iss string) (string, time.Time) {
+	t.Helper()
+	summaries, err := h.keyService.ListSummaries(context.Background())
+	require.NoError(t, err)
+	for _, summary := range summaries {
+		if summary.KeyName != iss {
+			continue
+		}
+		for _, state := range summary.KeyStates {
+			if !state.NotAfter.IsZero() {
+				return state.Kid, state.NotAfter
+			}
+		}
+	}
+	t.Fatalf("no key with a validity period for %s", iss)
+	return "", time.Time{}
+}
+
+// expiredKeyReason is the stored reason of a key-unavailable pause taken because
+// iss's key kid expired at notAfter.
+func expiredKeyReason(component, iss, kid string, notAfter time.Time) string {
+	return component + ": " + services.NoActiveSigningKeyReason(iss, "") +
+		"; the signing key " + kid + " expired at " + notAfter.UTC().Format(time.RFC3339)
+}
+
+// TestKeyCheck_PausesIdleStreamsAtKeyExpiry: a poll transmitter and an SSTP pair
+// with nothing to send are paused by the background key check as soon as their
+// key expires, with a reason naming the expired key and when it expired, so a
+// receiver reading the stream status learns why the stream is down. Rotating in
+// a valid key resumes both at the next pass.
+func TestKeyCheck_PausesIdleStreamsAtKeyExpiry(t *testing.T) {
+	h, _ := newPollKeyHarness(t, "1h")
+	ctx := context.Background()
+	poll := h.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish)
+	pollSid := poll.StreamConfiguration.Id
+	pair := sstpServerPairState("sstp-tx-expiry", "sstp-rx-expiry", "pair-expiry")
+	pair.StreamConfiguration.RouteMode = model.RouteModePublish
+	pair.StreamConfiguration.Iss = pollKeyIssuer
+	require.NoError(t, h.streamService.PersistStreamStateRecord(ctx, pair))
+	storedPair := func() *model.StreamStateRecord {
+		rec, err := h.streamService.GetStreamStateByPairId(ctx, "pair-expiry")
+		require.NoError(t, err)
+		return rec
+	}
+	clk := expiringIssuerKey(t, h, pollKeyIssuer)
+	kid, notAfter := expiringKeyOf(t, h, pollKeyIssuer)
+
+	h.router.checkKeyUnavailablePauses(keyCheckAt(clk.Now()))
+	require.Equal(t, model.StreamStateEnabled, h.stored(t, pollSid).Status, "a valid key leaves the streams alone")
+	require.Equal(t, model.StreamStateEnabled, storedPair().Status)
+
+	clk.jump(time.Hour)
+	h.router.checkKeyUnavailablePauses(keyCheckAt(clk.Now()))
+
+	rec := h.stored(t, pollSid)
+	assert.Equal(t, model.StreamStatePause, rec.Status, "an idle poll transmitter is paused at expiry")
+	assert.Equal(t, expiredKeyReason("POLL-SRV", pollKeyIssuer, kid, notAfter), rec.ErrorMsg)
+	assert.NotNil(t, rec.KeyUnavailableSince, "the pause is the key-unavailable one")
+	sstp := storedPair()
+	assert.Equal(t, model.StreamStatePause, sstp.Status, "an idle SSTP pair is paused at expiry")
+	assert.Equal(t, expiredKeyReason("SSTP-SRV", pollKeyIssuer, kid, notAfter), sstp.ErrorMsg)
+	assert.NotNil(t, sstp.KeyUnavailableSince)
+
+	_, _, err := h.keyService.RotateKey(ctx, pollKeyIssuer, "RS256", "")
+	require.NoError(t, err)
+	h.router.checkKeyUnavailablePauses(keyCheckAt(clk.Now()))
+
+	rec = h.stored(t, pollSid)
+	assert.Equal(t, model.StreamStateEnabled, rec.Status, "a rotated-in key resumes the poll transmitter")
+	assert.Nil(t, rec.KeyUnavailableSince)
+	assert.Equal(t, model.StreamStateEnabled, storedPair().Status, "a rotated-in key resumes the SSTP pair")
+}
+
+// TestKeyCheck_PausesIdlePushStreamAtKeyExpiry: a push stream with nothing to
+// deliver takes its key-unavailable pause at the key check pass after its key
+// expires, not at the next delivery, and resumes once a valid key is rotated in.
+func TestKeyCheck_PausesIdlePushStreamAtKeyExpiry(t *testing.T) {
+	h, _, sid := startKeyedRunner(t, 1000)
+	clk := expiringIssuerKey(t, h, signingKeyIssuer)
+	kid, notAfter := expiringKeyOf(t, h, signingKeyIssuer)
+
+	clk.jump(time.Hour)
+	h.router.checkKeyUnavailablePauses(keyCheckAt(clk.Now()))
+
+	h.waitStoredStatus(t, sid, model.StreamStatePause, expiredKeyReason("PUSH-SRV", signingKeyIssuer, kid, notAfter))
+	assert.Zero(t, h.pendingCount(sid), "nothing was queued")
+
+	_, _, err := h.keyService.RotateKey(context.Background(), signingKeyIssuer, "RS256", "")
+	require.NoError(t, err)
+	h.waitStoredStatus(t, sid, model.StreamStateEnabled, "")
 }

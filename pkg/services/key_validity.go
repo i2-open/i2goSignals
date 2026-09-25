@@ -237,8 +237,9 @@ func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec
 }
 
 // signingKeyUnavailableDetail says why issuer has no signing key of alg when a
-// validity period is the reason: "expired at <time>" or "not valid until
-// <time>" for the newest otherwise-active key, "" when there is none.
+// validity period is the reason, naming the newest otherwise-active key: "the
+// signing key <kid> expired at <time>" or "... is not valid until <time>", ""
+// when there is none.
 func (s *KeyService) signingKeyUnavailableDetail(ctx context.Context, issuer string, alg string) string {
 	storedAlg, err := storedAlgFor(alg)
 	if err != nil {
@@ -262,9 +263,9 @@ func (s *KeyService) signingKeyUnavailableDetail(ctx context.Context, issuer str
 	case newest == nil:
 		return ""
 	case !newest.NotBefore.IsZero() && now.Before(newest.NotBefore):
-		return "the signing key is not valid until " + newest.NotBefore.UTC().Format(time.RFC3339)
+		return "the signing key " + newest.Kid + " is not valid until " + newest.NotBefore.UTC().Format(time.RFC3339)
 	default:
-		return "the signing key expired at " + newest.NotAfter.UTC().Format(time.RFC3339)
+		return "the signing key " + newest.Kid + " expired at " + newest.NotAfter.UTC().Format(time.RFC3339)
 	}
 }
 

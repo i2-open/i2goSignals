@@ -2004,6 +2004,25 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
+		case <-runner.keyCheck:
+			// The background key check's nudge (#318): an idle stream whose only
+			// key is expired or not yet valid takes its key-unavailable pause
+			// now, not at its next delivery, so its status says why nothing is
+			// being sent. A key merely missing (a replace in progress) waits for
+			// the next delivery, as before.
+			if !signing || runner.stopped() {
+				continue
+			}
+			if key, _ := r.pushSigningKey(stream); key == nil && r.keyUnavailableForValidity(stream.StreamConfiguration) {
+				switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
+				case RecoveryOutcomeResumed:
+					continue
+				case RecoveryOutcomeDisabled:
+					return false
+				default:
+					return !runner.stopped()
+				}
+			}
 		case <-backfillTicker.C:
 			if runner.stopped() {
 				return false

@@ -18,6 +18,22 @@ func NoActiveSigningKeyReason(issuer, signingAlg string) string {
 	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, algLabel(signingAlg))
 }
 
+// SigningKeyUnavailableReason is NoActiveSigningKeyReason, followed by the
+// expired or not-yet-valid key and its time when a validity period is why the
+// issuer has no active key (#318): the operator, and a receiver reading the
+// stream status, need the time to tell an expiry from a future key. It is the
+// save-time rejection and every key-unavailable pause's reason.
+func (s *StreamService) SigningKeyUnavailableReason(ctx context.Context, issuer, signingAlg string) string {
+	reason := NoActiveSigningKeyReason(issuer, signingAlg)
+	if s == nil || s.keyService == nil {
+		return reason
+	}
+	if detail := s.keyService.signingKeyUnavailableDetail(ctx, issuer, signingAlg); detail != "" {
+		reason += "; " + detail
+	}
+	return reason
+}
+
 // signingTransmitterConfig returns the configuration of rec's signing transmit
 // direction, or nil when rec has none. A signing transmitter is any transmitter
 // not in Forward mode, an empty route mode counting as Publish: a push or poll
@@ -56,13 +72,7 @@ func (s *StreamService) requireActiveKeyFor(ctx context.Context, cfg *model.Stre
 	}
 	if err != nil {
 		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			reason := NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg)
-			// A validity period is the one cause worth naming (#318): the
-			// operator needs the time to tell an expiry from a future key.
-			if detail := s.keyService.signingKeyUnavailableDetail(ctx, cfg.Iss, cfg.SigningAlg); detail != "" {
-				reason += "; " + detail
-			}
-			return fmt.Errorf("%w: %s", ErrInvalidRequest, reason)
+			return fmt.Errorf("%w: %s", ErrInvalidRequest, s.SigningKeyUnavailableReason(ctx, cfg.Iss, cfg.SigningAlg))
 		}
 		return fmt.Errorf("checking the signing key for issuer %s: %w", cfg.Iss, err)
 	}
