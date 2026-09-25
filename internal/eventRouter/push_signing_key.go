@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -20,6 +21,11 @@ const signingKeyRemedy = "create, rotate or reactivate a signing key for the iss
 // instead of pausing and resuming forever.
 type pushKeyWait struct {
 	tries int
+	// lookupErr is the signing key lookup error a caller already holds when it
+	// enters the pause (the background key check's nudge, #318). The pause's
+	// reason is built from it, with no second key store read, and it is then
+	// cleared. Nil means the reason is read from the key store.
+	lookupErr error
 }
 
 // isSigningTransmitter reports whether a transmitter re-signs its SETs: every
@@ -58,7 +64,13 @@ func (r *router) awaitSigningKey(ctx context.Context, stream *model.StreamStateR
 	sc := stream.StreamConfiguration
 	sid := sc.Id
 	alg := signingKeyAlg(sc)
-	reason := "PUSH-SRV: " + r.keyUnavailableReason(sc)
+	var reason string
+	if wait.lookupErr != nil {
+		reason = "PUSH-SRV: " + services.SigningKeyUnavailableReasonFor(sc.Iss, sc.SigningAlg, wait.lookupErr)
+		wait.lookupErr = nil
+	} else {
+		reason = "PUSH-SRV: " + r.keyUnavailableReason(sc)
+	}
 
 	logArgs := []any{"sid", sid, "issuer", sc.Iss, "alg", alg, "remedy", signingKeyRemedy,
 		"retryDelay", cfg.AuthRetryDelay, "retryLimit", cfg.AuthRetryLimit}

@@ -83,8 +83,9 @@ func TestKeyValidity_ARecordWithNoValiditySignsAtAnyTime(t *testing.T) {
 	}
 }
 
-// A key valid at T0 signs at T0; once the clock passes NotAfter it is not
-// active, so GetSigner reports no active key.
+// A key valid at T0 signs at T0 and still at exactly NotAfter (inclusive, RFC
+// 5280); once the clock passes NotAfter it is not active, so GetSigner reports
+// no active key.
 func TestKeyValidity_AnExpiredKeyIsNotActive(t *testing.T) {
 	for _, alg := range []string{"RS256", "ES256", mldsa.Alg} {
 		t.Run(alg, func(t *testing.T) {
@@ -97,6 +98,11 @@ func TestKeyValidity_AnExpiredKeyIsNotActive(t *testing.T) {
 			assert.Equal(t, kid, got)
 
 			clk.Set(notAfter)
+			_, got, err = svc.GetSigner(context.Background(), validityIssuer, alg)
+			require.NoError(t, err, "still valid at exactly NotAfter")
+			assert.Equal(t, kid, got)
+
+			clk.Set(notAfter.Add(time.Nanosecond))
 			_, _, err = svc.GetSigner(context.Background(), validityIssuer, alg)
 			assert.ErrorIs(t, err, interfaces.ErrKeyNotFound)
 		})
@@ -123,15 +129,16 @@ func TestKeyValidity_ANewerNotYetValidKeyTakesOverAtNotBefore(t *testing.T) {
 	assert.Equal(t, newer, kid)
 }
 
-// GetSignerUntil reports the selected key's NotAfter as the instant the answer
-// stops holding, and the zero time for a key with no period.
+// GetSignerUntil reports the instant just past the selected key's (inclusive)
+// NotAfter as when the answer stops holding, and the zero time for a key with
+// no period.
 func TestKeyValidity_GetSignerUntilReportsTheSelectedKeysNotAfter(t *testing.T) {
 	svc, _ := validityKeyService(t)
 	notAfter := validityT0.Add(time.Hour)
 	seedSigningRec(t, svc, validityIssuer, "RS256", "k1", validityT0, time.Time{}, notAfter)
 	_, _, until, err := svc.GetSignerUntil(context.Background(), validityIssuer, "RS256")
 	require.NoError(t, err)
-	assert.Equal(t, notAfter, until)
+	assert.Equal(t, notAfter.Add(time.Nanosecond), until)
 
 	svc2, _ := validityKeyService(t)
 	seedSigningRec(t, svc2, validityIssuer, "RS256", "k1", validityT0, time.Time{}, time.Time{})
@@ -184,7 +191,46 @@ func TestKeyValidity_GeneratedKeyLifetime(t *testing.T) {
 	t.Run("the token issuer key never expires", func(t *testing.T) {
 		svc, _ := validityKeyService(t)
 		require.NoError(t, svc.InitializeTokenKey(ctx, "DEFAULT"))
-		assert.True(t, keyRec(t, svc, "DEFAULT").NotAfter.IsZero())
+		rec := keyRec(t, svc, "DEFAULT")
+		assert.True(t, rec.NotAfter.IsZero())
+		assert.Equal(t, validityT0, rec.NotBefore)
+	})
+	// Server-generated keys expire (#318): CreateKeyPair and
+	// EnsureSigningKeyForAlg stamp NotBefore = creation, NotAfter = creation
+	// plus the configured lifetime; a zero lifetime leaves NotAfter empty.
+	t.Run("CreateKeyPair and EnsureSigningKeyForAlg take the lifetime", func(t *testing.T) {
+		svc, _ := validityKeyService(t)
+		svc.SetKeyLifetime(30 * 24 * time.Hour)
+		_, err := svc.CreateKeyPair(ctx, validityIssuer, "sig", "")
+		require.NoError(t, err)
+		rec := keyRec(t, svc, validityIssuer)
+		assert.Equal(t, validityT0, rec.NotBefore)
+		assert.Equal(t, validityT0.AddDate(0, 0, 30), rec.NotAfter)
+
+		minted, err := svc.EnsureSigningKeyForAlg(ctx, validityIssuer, "ES256", "")
+		require.NoError(t, err)
+		require.True(t, minted)
+		recs, err := svc.keyDAO.FindByKeyName(ctx, validityIssuer)
+		require.NoError(t, err)
+		for _, r := range recs {
+			assert.Equal(t, validityT0, r.NotBefore, r.Kid)
+			assert.Equal(t, validityT0.AddDate(0, 0, 30), r.NotAfter, r.Kid)
+		}
+	})
+	t.Run("a zero lifetime leaves NotAfter empty on generated keys", func(t *testing.T) {
+		svc, _ := validityKeyService(t)
+		svc.SetKeyLifetime(0)
+		_, err := svc.CreateKeyPair(ctx, validityIssuer, "sig", "")
+		require.NoError(t, err)
+		_, err = svc.EnsureSigningKeyForAlg(ctx, validityIssuer, "ES256", "")
+		require.NoError(t, err)
+		recs, err := svc.keyDAO.FindByKeyName(ctx, validityIssuer)
+		require.NoError(t, err)
+		require.Len(t, recs, 2)
+		for _, r := range recs {
+			assert.Equal(t, validityT0, r.NotBefore, r.Kid)
+			assert.True(t, r.NotAfter.IsZero(), r.Kid)
+		}
 	})
 }
 
@@ -203,7 +249,7 @@ func TestParseKeyLifetime(t *testing.T) {
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
-	for _, bad := range []string{"", "soon", "-1d", "-5h", "d"} {
+	for _, bad := range []string{"", "soon", "-1d", "-5h", "d", "nand", "NaNd", "infd", "+Infd", "1e12d"} {
 		_, err := ParseKeyLifetime(bad)
 		assert.Error(t, err, bad)
 	}
@@ -285,7 +331,7 @@ func TestKeyValidity_ListingReportsDerivedStatusAndPeriod(t *testing.T) {
 	notAfter := validityT0.Add(time.Hour)
 	seedSigningRec(t, svc, validityIssuer, "RS256", "k1", validityT0, validityT0, notAfter)
 	seedSigningRec(t, svc, validityIssuer, "RS256", "k2", validityT0, notAfter.Add(time.Hour), time.Time{})
-	clk.Set(notAfter)
+	clk.Set(notAfter.Add(time.Second))
 
 	stateOf := func(states []interfaces.KeyState, kid string) interfaces.KeyState {
 		for _, st := range states {

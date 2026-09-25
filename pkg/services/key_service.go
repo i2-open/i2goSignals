@@ -144,7 +144,7 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 		return nil, err
 	}
 
-	err = s.storeKeyPair(ctx, keyName, keyName, use, privateKey, projectId, keyValidity{})
+	err = s.storeKeyPair(ctx, keyName, keyName, use, privateKey, projectId, s.generatedValidity(keyName, s.mintedAt(), nil))
 	if err != nil {
 		ksLog.Error("Error storing key pair", "error", err)
 		return nil, err
@@ -319,7 +319,7 @@ func newKeyKid(keyName string, storedAlg string) string {
 // storeKeyPair stores a key this service holds the private half of, with the
 // validity period v (the zero period never expires). CreatedAt is the service
 // clock (mintedAt), the same instant a generated period is measured from.
-func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string, v keyValidity) error {
+func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string, v interfaces.ValidityPeriod) error {
 	alg, privateKeyBytes, pubKeyBytes, err := encodeSigningKey(privateKey)
 	if err != nil {
 		return err
@@ -335,8 +335,8 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
 		CreatedAt:   s.mintedAt(),
-		NotBefore:   v.notBefore,
-		NotAfter:    v.notAfter,
+		NotBefore:   v.NotBefore,
+		NotAfter:    v.NotAfter,
 	}
 
 	err = s.keyDAO.Insert(ctx, keyPairRec)
@@ -552,7 +552,7 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	// occupies the kid that equals keyName, and every key is published in the
 	// same JWKS, so a receiver resolves the right one only if they differ.
 	kid := newKeyKid(keyName, storedAlg)
-	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId, keyValidity{}); err != nil {
+	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId, s.generatedValidity(keyName, s.mintedAt(), nil)); err != nil {
 		return false, fmt.Errorf("failed to store %s signing key %q: %w", alg, keyName, err)
 	}
 	ksLog.Info("Minted signing key for issuer", "keyName", keyName, "alg", storedAlg, "kid", kid)

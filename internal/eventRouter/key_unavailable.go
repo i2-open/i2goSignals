@@ -1,7 +1,6 @@
 package eventRouter
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -60,7 +59,8 @@ func errNoActiveSigningKey(cfg model.StreamConfiguration) error {
 
 // keyUnavailableReason is a key-unavailable pause's reason for cfg: the issuer
 // and algorithm, and the expired or not-yet-valid key with its time when a
-// validity period is the cause (#318).
+// validity period is the cause (#318). It reads the key store; a caller already
+// holding the lookup error builds it with services.SigningKeyUnavailableReasonFor.
 func (r *router) keyUnavailableReason(cfg model.StreamConfiguration) string {
 	return r.streamService.SigningKeyUnavailableReason(r.ctx, cfg.Iss, cfg.SigningAlg)
 }
@@ -168,12 +168,6 @@ func (r *router) PauseForSigningKey(stream *model.StreamStateRecord, cause error
 	r.takeKeyUnavailablePause(stream, "SSTP-CLIENT", cause)
 }
 
-// expiryWarner is the KeyService's signing-key expiry WARN (#318), optional so a
-// stub signerSource need not provide it.
-type expiryWarner interface {
-	WarnExpiringSigningKeys(ctx context.Context)
-}
-
 // keyCheckComponent names the end that takes rec's key-unavailable pause in the
 // background key check: the poll server or the SSTP pair's transmit end.
 func keyCheckComponent(rec *model.StreamStateRecord) string {
@@ -218,9 +212,7 @@ func (r *router) runKeyUnavailableCheck(cfg RecoveryConfig) {
 // push stream is paused at expiry rather than at its next delivery.
 func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 	cfg.fillDefaults()
-	if w, ok := r.keyService.(expiryWarner); ok {
-		w.WarnExpiringSigningKeys(r.ctx)
-	}
+	r.keyService.WarnExpiringSigningKeys(r.ctx)
 	r.nudgePushRunnersKeyCheck()
 	recs, err := r.streamService.ListTransmitterStreams(r.ctx)
 	if err != nil {
@@ -230,16 +222,18 @@ func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 		return
 	}
 	limit := cfg.AuthRetryDelay * time.Duration(cfg.AuthRetryLimit)
-	outside := map[string]bool{}
+	outside := map[string]error{}
 	for i := range recs {
 		rec := &recs[i]
 		if !keyCheckedStream(rec) {
 			continue
 		}
 		if !inKeyUnavailablePause(rec) {
-			if rec.Status == model.StreamStateEnabled && isSigningTransmitter(rec) && r.signingKeyOutsideValidity(rec, outside) {
-				r.pauseAtKeyCheck(rec, cfg.Clock().UTC())
-				continue
+			if rec.Status == model.StreamStateEnabled && isSigningTransmitter(rec) {
+				if lookupErr := r.signingKeyValidityErr(rec, outside); lookupErr != nil {
+					r.pauseAtKeyCheck(rec, cfg.Clock().UTC(), lookupErr)
+					continue
+				}
 			}
 			r.syncResolvedKeyPause(rec)
 			continue
@@ -256,13 +250,16 @@ func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 	}
 }
 
-// signingKeyOutsideValidity reports whether rec's issuer has no active signing
-// key of its signing_alg at the key service's clock because its key is expired
-// or not yet valid (#318). A missing key without a validity cause is left to
-// the next signing attempt (#312), so the brief gap of a key replace pauses
-// nothing; a key store that cannot answer is not a missing key. memo holds the
-// answers of one pass per issuer and algorithm.
-func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo map[string]bool) bool {
+// signingKeyValidityErr is the signing key lookup error of rec's issuer and
+// signing_alg at the key service's clock when its key is expired or not yet
+// valid (#318) — an error carrying a *services.SigningKeyValidityError — and
+// nil otherwise. A missing key without a validity cause is left to the next
+// signing attempt (#312), so the brief gap of a key replace pauses nothing; a
+// key store that cannot answer is not a missing key. The error is returned
+// rather than a yes/no so the pause's reason is built from it
+// (services.SigningKeyUnavailableReasonFor) without a second key store read.
+// memo holds the answers of one pass per issuer and algorithm.
+func (r *router) signingKeyValidityErr(rec *model.StreamStateRecord, memo map[string]error) error {
 	cfg := rec.StreamConfiguration
 	cacheKey := signingCacheKey(cfg.Iss, cfg.SigningAlg)
 	if answer, ok := memo[cacheKey]; ok {
@@ -270,10 +267,12 @@ func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo ma
 	}
 	_, _, err := r.keyService.GetSigner(r.ctx, cfg.Iss, cfg.SigningAlg)
 	var validity *services.SigningKeyValidityError
-	answer := errors.As(err, &validity)
+	var answer error
 	switch {
-	case answer, errors.Is(err, interfaces.ErrKeyNotFound):
-	case err != nil && r.ctx.Err() == nil:
+	case errors.As(err, &validity):
+		answer = err
+	case err == nil, errors.Is(err, interfaces.ErrKeyNotFound):
+	case r.ctx.Err() == nil:
 		eventLogger.Warn("Key check: could not check the signing key", "sid", cfg.Id, "error", err)
 	}
 	memo[cacheKey] = answer
@@ -281,13 +280,15 @@ func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo ma
 }
 
 // pauseAtKeyCheck takes listed's key-unavailable pause from the background key
-// check, starting at since. The pause is written only while the stored record
-// is still enabled, in one conditional write, so an operator change made
-// meanwhile wins; this node's copies change only when it was written.
-func (r *router) pauseAtKeyCheck(listed *model.StreamStateRecord, since time.Time) {
+// check, starting at since, with the reason built from lookupErr, the signing
+// key lookup error the check already holds. The pause is written only while
+// the stored record is still enabled, in one conditional write, so an operator
+// change made meanwhile wins; this node's copies change only when it was
+// written.
+func (r *router) pauseAtKeyCheck(listed *model.StreamStateRecord, since time.Time, lookupErr error) {
 	sc := listed.StreamConfiguration
 	component := keyCheckComponent(listed)
-	reason := component + ": " + r.keyUnavailableReason(sc)
+	reason := component + ": " + services.SigningKeyUnavailableReasonFor(sc.Iss, sc.SigningAlg, lookupErr)
 	if !r.streamService.PauseEnabledForKeyUnavailable(r.ctx, sc.Id, reason, since) {
 		return
 	}

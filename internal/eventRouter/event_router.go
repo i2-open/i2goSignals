@@ -696,19 +696,19 @@ func (r *router) preInitializeCounterLocked(stream *model.StreamStateRecord) {
 	}
 }
 
-// signerSource is the slice of KeyService the router depends on: resolve an
-// issuer's active signing key. Declared here, at the consumer, so the router's
-// key path is pinned to GetSigner (Slice Contract rev 1, Seam S2) and a test
-// can substitute a stub to prove it.
+// signerSource is the slice of KeyService the router depends on. Declared here,
+// at the consumer, so the router's key path is pinned to the GetSigner family
+// (Slice Contract rev 1, Seam S2) and a test can substitute a stub to prove it.
 type signerSource interface {
+	// GetSigner resolves an issuer's active signing key for alg.
 	GetSigner(ctx context.Context, issuer string, alg string) (crypto.Signer, string, error)
-}
-
-// signerUntilSource is a signerSource that also says until when its answer
-// holds (#318): the key's NotAfter, or a newer key's NotBefore. The KeyService
-// is one; the cache caps an entry's life at that moment.
-type signerUntilSource interface {
+	// GetSignerUntil is GetSigner plus until when its answer holds (#318): the
+	// key's NotAfter, or a newer key's NotBefore. The cache caps an entry's
+	// life at that moment.
 	GetSignerUntil(ctx context.Context, issuer string, alg string) (crypto.Signer, string, time.Time, error)
+	// WarnExpiringSigningKeys is the signing-key expiry WARN (#318) the
+	// background key check runs on every pass.
+	WarnExpiringSigningKeys(ctx context.Context)
 }
 
 // signingCacheKey names an entry in the router's signing-key cache. An issuer
@@ -727,11 +727,7 @@ func signingCacheKey(issuer, alg string) string {
 // pointer would defeat that and panic at the signing site instead.
 func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (crypto.Signer, string) {
 	return r.signingKeys.signer(streamID, issuer, alg, func() (crypto.Signer, string, time.Time, error) {
-		if src, ok := r.keyService.(signerUntilSource); ok {
-			return src.GetSignerUntil(r.ctx, issuer, alg)
-		}
-		key, kid, err := r.keyService.GetSigner(r.ctx, issuer, alg)
-		return key, kid, time.Time{}, err
+		return r.keyService.GetSignerUntil(r.ctx, issuer, alg)
 	})
 }
 
@@ -2013,7 +2009,11 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if !signing || runner.stopped() {
 				continue
 			}
-			if key, _ := r.pushSigningKey(stream); key == nil && r.signingKeyOutsideValidity(stream, map[string]bool{}) {
+			if key, _ := r.pushSigningKey(stream); key != nil {
+				continue
+			}
+			if lookupErr := r.signingKeyValidityErr(stream, map[string]error{}); lookupErr != nil {
+				keyWait.lookupErr = lookupErr
 				switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
 				case RecoveryOutcomeResumed:
 					continue

@@ -101,6 +101,12 @@ func (s *gatedSignerSource) GetSigner(ctx context.Context, issuer string, alg st
 	return key, kid, err
 }
 
+// GetSignerUntil answers through the gated GetSigner, with no bound.
+func (s *gatedSignerSource) GetSignerUntil(ctx context.Context, issuer string, alg string) (crypto.Signer, string, time.Time, error) {
+	key, kid, err := s.GetSigner(ctx, issuer, alg)
+	return key, kid, time.Time{}, err
+}
+
 // waitGroupWithin waits for wg, failing the test (and releasing src so nothing
 // is left blocked) when that takes more than a few seconds.
 func waitGroupWithin(t *testing.T, wg *sync.WaitGroup, src *gatedSignerSource, msg string) {

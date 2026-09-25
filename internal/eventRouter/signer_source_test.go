@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,14 @@ func (s *stubSignerSource) GetSigner(_ context.Context, issuer string, alg strin
 	}
 	return s.key, s.kid, nil
 }
+
+// GetSignerUntil answers as GetSigner, with no bound on the answer.
+func (s *stubSignerSource) GetSignerUntil(ctx context.Context, issuer string, alg string) (crypto.Signer, string, time.Time, error) {
+	key, kid, err := s.GetSigner(ctx, issuer, alg)
+	return key, kid, time.Time{}, err
+}
+
+func (s *stubSignerSource) WarnExpiringSigningKeys(context.Context) {}
 
 func (s *stubSignerSource) callCount() int {
 	s.mu.Lock()
