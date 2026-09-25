@@ -1,6 +1,7 @@
 package eventRouter
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -146,6 +147,12 @@ func (r *router) PauseForSigningKey(stream *model.StreamStateRecord, cause error
 	r.takeKeyUnavailablePause(stream, "SSTP-CLIENT", cause)
 }
 
+// expiryWarner is the KeyService's signing-key expiry WARN (#318), optional so a
+// stub signerSource need not provide it.
+type expiryWarner interface {
+	WarnExpiringSigningKeys(ctx context.Context)
+}
+
 // runKeyUnavailableCheck runs the background key check every retry delay until
 // the router shuts down. The retry settings are the push receiver-401 ones
 // (I2SIG_PUSH_AUTH_RETRY_DELAY / _LIMIT), as for a push key pause (#308).
@@ -170,8 +177,14 @@ func (r *router) runKeyUnavailableCheck(cfg RecoveryConfig) {
 // a dial loop paused here restarts. Several nodes running the check at once is
 // harmless: every write is conditional on the record still being in the same
 // pause (resolveKeyUnavailablePause).
+//
+// Each pass also WARNs of signing keys about to expire (#318); the KeyService
+// paces that to once a day per key.
 func (r *router) checkKeyUnavailablePauses(cfg RecoveryConfig) {
 	cfg.fillDefaults()
+	if w, ok := r.keyService.(expiryWarner); ok {
+		w.WarnExpiringSigningKeys(r.ctx)
+	}
 	recs, err := r.streamService.ListTransmitterStreams(r.ctx)
 	if err != nil {
 		if r.ctx.Err() == nil {

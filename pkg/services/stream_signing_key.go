@@ -50,12 +50,25 @@ func (s *StreamService) requireActiveKeyFor(ctx context.Context, cfg *model.Stre
 	if cfg == nil || s.keyService == nil {
 		return nil
 	}
-	if _, _, err := s.keyService.GetSigner(ctx, cfg.Iss, cfg.SigningAlg); err != nil {
+	rec, _, err := s.keyService.signingRecFor(ctx, cfg.Iss, cfg.SigningAlg)
+	if err == nil {
+		_, _, err = parseSigningRec(rec)
+	}
+	if err != nil {
 		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			return fmt.Errorf("%w: %s", ErrInvalidRequest, NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg))
+			reason := NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg)
+			// A validity period is the one cause worth naming (#318): the
+			// operator needs the time to tell an expiry from a future key.
+			if detail := s.keyService.signingKeyUnavailableDetail(ctx, cfg.Iss, cfg.SigningAlg); detail != "" {
+				reason += "; " + detail
+			}
+			return fmt.Errorf("%w: %s", ErrInvalidRequest, reason)
 		}
 		return fmt.Errorf("checking the signing key for issuer %s: %w", cfg.Iss, err)
 	}
+	// Saving or enabling a stream whose key expires soon succeeds, with the
+	// same WARN the background check logs (#318).
+	s.keyService.warnIfExpiringSoon(rec, s.keyService.clock())
 	return nil
 }
 

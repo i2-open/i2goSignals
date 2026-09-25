@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/jwkset"
@@ -48,6 +49,15 @@ type KeyService struct {
 	tokenKey    crypto.Signer
 	tokenPubKey *keyfunc.JWKS
 	authIssuer  *authSupport.AuthIssuer
+
+	// Validity-period state (i2goSignals#318, key_validity.go), guarded by
+	// validityMu.
+	validityMu       sync.Mutex
+	nowFn            func() time.Time
+	keyLifetime      time.Duration
+	expiryWarnWindow time.Duration
+	expiryWarnedAt   map[string]time.Time
+	lastExpiryScan   time.Time
 }
 
 // NewKeyService constructs a KeyService. oauthServersLookup supplies the OAuth
@@ -57,8 +67,11 @@ type KeyService struct {
 // OAuth servers configured.
 func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker authSupport.TokenTracker, oauthServersLookup func() string) *KeyService {
 	return &KeyService{
-		keyDAO:      keyDAO,
-		tokenIssuer: tokenIssuer,
+		keyDAO:           keyDAO,
+		tokenIssuer:      tokenIssuer,
+		keyLifetime:      durationFromEnv(keyLifetimeEnvVar, DefaultKeyLifetime),
+		expiryWarnWindow: durationFromEnv(keyExpiryWarningEnvVar, DefaultKeyExpiryWarning),
+		expiryWarnedAt:   map[string]time.Time{},
 		authIssuer: &authSupport.AuthIssuer{
 			TokenIssuer:        tokenIssuer,
 			TokenTracker:       tokenTracker,
@@ -131,7 +144,7 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 		return nil, err
 	}
 
-	err = s.storeKeyPair(ctx, keyName, keyName, use, privateKey, projectId)
+	err = s.storeKeyPair(ctx, keyName, keyName, use, privateKey, projectId, keyValidity{})
 	if err != nil {
 		ksLog.Error("Error storing key pair", "error", err)
 		return nil, err
@@ -173,7 +186,7 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 	if ferr != nil {
 		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, ferr)
 	}
-	if _, sawInactive := latestActiveSigningRec(recs, ""); sawInactive {
+	if _, sawInactive := latestActiveSigningRec(recs, "", s.clock()); sawInactive {
 		ksLog.Warn("Signing key exists but is suspended or revoked; not creating a replacement",
 			"keyName", keyName,
 			"remedy", "rotate a new key or reactivate the suspended key")
@@ -190,7 +203,7 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 // algorithm stay active until an operator suspends or revokes them, and its keys
 // of other algorithms are untouched (i2goSignals#314). The new key is the newest
 // of its algorithm, so it is the one GetSigner selects from now on.
-func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, projectId string) (crypto.Signer, string, error) {
+func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, projectId string, opts ...KeyOption) (crypto.Signer, string, error) {
 	storedAlg, err := storedAlgFor(alg)
 	if err != nil {
 		return nil, "", err
@@ -217,7 +230,7 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, 
 		}
 	}
 
-	err = s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId)
+	err = s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId, s.generatedValidity(keyName, s.mintedAt(), opts))
 	if err != nil {
 		return nil, "", err
 	}
@@ -248,7 +261,7 @@ func (s *KeyService) RotateKey(ctx context.Context, keyName string, alg string, 
 // already holds that kid (a revoked key, say), in which case it gets a unique
 // kid rather than overwriting the record. Every other algorithm always gets a
 // kid of its own, because all of an issuer's keys share one JWKS.
-func (s *KeyService) CreateKeyPairForAlg(ctx context.Context, keyName string, alg string, use string, projectId string) (crypto.Signer, string, error) {
+func (s *KeyService) CreateKeyPairForAlg(ctx context.Context, keyName string, alg string, use string, projectId string, opts ...KeyOption) (crypto.Signer, string, error) {
 	storedAlg, err := storedAlgFor(alg)
 	if err != nil {
 		return nil, "", err
@@ -267,7 +280,7 @@ func (s *KeyService) CreateKeyPairForAlg(ctx context.Context, keyName string, al
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate %s key %q: %w", algLabel(storedAlg), keyName, err)
 	}
-	if err := s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId); err != nil {
+	if err := s.storeKeyPair(ctx, keyName, kid, use, privateKey, projectId, s.generatedValidity(keyName, s.mintedAt(), opts)); err != nil {
 		return nil, "", fmt.Errorf("failed to store %s key %q: %w", algLabel(storedAlg), keyName, err)
 	}
 	return privateKey, kid, nil
@@ -303,16 +316,10 @@ func newKeyKid(keyName string, storedAlg string) string {
 	return fmt.Sprintf("%s-%s-%s", keyName, storedAlg, ids.NewObjectID())
 }
 
-// createdAtNow returns the current time as the CreatedAt stamped on a key
-// record this service mints (i2goSignals#316). It is stamped here rather than in
-// each KeyDAO so every store, including one that persists the whole JwkKeyRec,
-// carries it. It is truncated to the millisecond Mongo stores, so a record's
-// CreatedAt reads back unchanged from any store.
-func createdAtNow() time.Time {
-	return time.Now().UTC().Truncate(time.Millisecond)
-}
-
-func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string) error {
+// storeKeyPair stores a key this service holds the private half of, with the
+// validity period v (the zero period never expires). CreatedAt is the service
+// clock (mintedAt), the same instant a generated period is measured from.
+func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid string, use string, privateKey crypto.Signer, projectId string, v keyValidity) error {
 	alg, privateKeyBytes, pubKeyBytes, err := encodeSigningKey(privateKey)
 	if err != nil {
 		return err
@@ -327,7 +334,9 @@ func (s *KeyService) storeKeyPair(ctx context.Context, keyName string, kid strin
 		Alg:         alg,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
-		CreatedAt:   createdAtNow(),
+		CreatedAt:   s.mintedAt(),
+		NotBefore:   v.notBefore,
+		NotAfter:    v.notAfter,
 	}
 
 	err = s.keyDAO.Insert(ctx, keyPairRec)
@@ -389,7 +398,7 @@ func (s *KeyService) AddKey(ctx context.Context, keyName string, use string, kid
 		ProjectId:   projectId,
 		KeyBytes:    privateKeyBytes,
 		PubKeyBytes: pubKeyBytes,
-		CreatedAt:   createdAtNow(),
+		CreatedAt:   s.mintedAt(),
 	}
 
 	err := s.keyDAO.Insert(ctx, keyPairRec)
@@ -436,11 +445,8 @@ func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (crypto.
 // issuer and the remedy, and returns ErrKeyNotFound — there is deliberately no
 // fallback to an older inactive kid and no auto-rotation (ADR 0028).
 func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (crypto.Signer, string, error) {
-	rec, err := s.findLatestActiveSigningRec(ctx, keyName, "")
-	if err != nil {
-		return nil, "", err
-	}
-	return parseSigningRec(rec)
+	key, kid, _, err := s.GetSignerUntil(ctx, keyName, "")
+	return key, kid, err
 }
 
 // GetSigner resolves issuer's active signing key and its kid for signature
@@ -458,19 +464,13 @@ func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName strin
 // This is the seam an additional signature algorithm arrives behind: a signing
 // site asks for a key *for its stream's alg* and gets one, without knowing how
 // the store represents it.
+//
+// A key outside its validity period (i2goSignals#318) is not active, so an
+// expired key is never returned and a newer key that is not yet valid is
+// skipped until its NotBefore.
 func (s *KeyService) GetSigner(ctx context.Context, issuer string, alg string) (key crypto.Signer, kid string, err error) {
-	storedAlg, err := storedAlgFor(alg)
-	if err != nil {
-		return nil, "", err
-	}
-	if storedAlg == "" {
-		return s.GetPrivateKeyWithKeyname(ctx, issuer)
-	}
-	rec, err := s.findLatestActiveSigningRec(ctx, issuer, storedAlg)
-	if err != nil {
-		return nil, "", err
-	}
-	return parseSigningRec(rec)
+	key, kid, _, err = s.GetSignerUntil(ctx, issuer, alg)
+	return key, kid, err
 }
 
 // storedAlgFor maps a stream's configured signing_alg to the JwkKeyRec.Alg
@@ -533,7 +533,7 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		return false, fmt.Errorf("failed to check %s signing key %q: %w", alg, keyName, err)
 	}
-	latest, sawInactive := latestActiveSigningRec(recs, storedAlg)
+	latest, sawInactive := latestActiveSigningRec(recs, storedAlg, s.clock())
 	if latest != nil {
 		return false, nil
 	}
@@ -552,7 +552,7 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	// occupies the kid that equals keyName, and every key is published in the
 	// same JWKS, so a receiver resolves the right one only if they differ.
 	kid := newKeyKid(keyName, storedAlg)
-	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId); err != nil {
+	if err := s.storeKeyPair(ctx, keyName, kid, "sig", privateKey, projectId, keyValidity{}); err != nil {
 		return false, fmt.Errorf("failed to store %s signing key %q: %w", alg, keyName, err)
 	}
 	ksLog.Info("Minted signing key for issuer", "keyName", keyName, "alg", storedAlg, "kid", kid)
@@ -691,32 +691,6 @@ func recKid(rec *interfaces.JwkKeyRec) string {
 	return rec.Kid
 }
 
-// findLatestActiveSigningRec returns the newest active record for keyName that
-// carries private-key material. It returns ErrKeyNotFound when none qualifies,
-// logging a WARN (issuer + remedy) whenever the only candidates were filtered
-// out because they are suspended or revoked.
-func (s *KeyService) findLatestActiveSigningRec(ctx context.Context, keyName string, alg string) (*interfaces.JwkKeyRec, error) {
-	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
-	if err != nil {
-		return nil, err
-	}
-
-	latest, sawInactiveSigningKey := latestActiveSigningRec(recs, alg)
-	if latest == nil {
-		if sawInactiveSigningKey {
-			// WARN, not ERROR (deliberately demoted): this runs on every key read,
-			// and a paused stream's push retries and background key check read
-			// the key once per retry. The router logs the one ERROR per
-			// key-unavailable pause (#312) and again when the stream is disabled.
-			ksLog.Warn("No active signing key for issuer; all signing keys are suspended or revoked",
-				"issuer", keyName, "alg", algLabel(alg),
-				"remedy", "rotate a new key or reactivate a suspended key")
-		}
-		return nil, interfaces.ErrKeyNotFound
-	}
-	return latest, nil
-}
-
 // algLabel renders a stored Alg for a log line, where "" would read as a
 // missing value rather than "the RSA default".
 func algLabel(alg string) string {
@@ -736,11 +710,14 @@ func algLabel(alg string) string {
 // no I/O and no logging, so callers that use it as a predicate incur no side
 // effects (ADR 0028).
 //
+// A record outside its validity period at now (i2goSignals#318) is inactive
+// like a suspended one: skipped, and counted in sawInactive.
+//
 // alg is "" for RSA and "ML-DSA-65" for RFC 9964, matching JwkKeyRec.Alg
 // exactly. The filter is what makes one issuer able to hold both: without it an
 // RSA signing request on an issuer that has opted a stream into ML-DSA would
 // pick up the newer ML-DSA record and sign RS256 with an ML-DSA key.
-func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string) (latest *interfaces.JwkKeyRec, sawInactive bool) {
+func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string, now time.Time) (latest *interfaces.JwkKeyRec, sawInactive bool) {
 	for _, rec := range recs {
 		if len(rec.KeyBytes) == 0 {
 			continue // public/external-only record has no private material to sign with
@@ -748,7 +725,7 @@ func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string) (latest *i
 		if rec.Alg != alg {
 			continue // a different signature algorithm's key for the same issuer
 		}
-		if !rec.IsActive() {
+		if !rec.IsActive() || !rec.ValidAt(now) {
 			sawInactive = true
 			continue
 		}
@@ -843,7 +820,7 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 		s.refreshTokenIssuerKey(ctx)
 	}
 
-	summary, err := s.keyDAO.KeySummary(ctx, keyName)
+	summary, err := s.GetKeySummary(ctx, keyName)
 	if err != nil {
 		return nil, "", err
 	}
@@ -853,7 +830,7 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 	// signs, so a "signing will fail" warning there would be misleading (ADR 0028).
 	warning := ""
 	if recs, ferr := s.keyDAO.FindByKeyName(ctx, keyName); ferr == nil {
-		if latest, sawInactive := latestActiveSigningRec(recs, ""); latest == nil && sawInactive {
+		if latest, sawInactive := latestActiveSigningRec(recs, "", s.clock()); latest == nil && sawInactive {
 			warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
 			ksLog.Warn(warning, "issuer", keyName)
 		}
@@ -884,7 +861,7 @@ func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
 		return
 	}
 
-	signingRec, _ := latestActiveSigningRec(recs, "")
+	signingRec, _ := latestActiveSigningRec(recs, "", s.clock())
 	var signingKey crypto.Signer
 	signingKid := ""
 	if signingRec != nil {
@@ -1192,13 +1169,28 @@ func (s *KeyService) GetKeyIds(ctx context.Context) ([]string, error) {
 }
 
 // ListSummaries returns key summaries for all keys without exposing key material.
+// Each kid's status is derived at the service clock, so a key outside its
+// validity period reads expired or not-yet-valid (i2goSignals#318).
 func (s *KeyService) ListSummaries(ctx context.Context) ([]interfaces.KeySummary, error) {
-	return s.keyDAO.ListSummaries(ctx)
+	summaries, err := s.keyDAO.ListSummaries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock()
+	for i := range summaries {
+		statesAt(summaries[i].KeyStates, now)
+	}
+	return summaries, nil
 }
 
 // GetKeySummary returns the summary for a specific kid.
 func (s *KeyService) GetKeySummary(ctx context.Context, kid string) (*interfaces.KeySummary, error) {
-	return s.keyDAO.KeySummary(ctx, kid)
+	summary, err := s.keyDAO.KeySummary(ctx, kid)
+	if err != nil || summary == nil {
+		return summary, err
+	}
+	statesAt(summary.KeyStates, s.clock())
+	return summary, nil
 }
 
 // DeleteKey removes the key with the given kid.
@@ -1244,7 +1236,7 @@ func (s *KeyService) StoreExternalKey(ctx context.Context, keyName string, kids 
 		Use:             use,
 		StreamId:        streamID,
 		ReceiverJwksUrl: jwksUri,
-		CreatedAt:       createdAtNow(),
+		CreatedAt:       s.mintedAt(),
 	}
 	return s.keyDAO.Insert(ctx, keyPairRec)
 }

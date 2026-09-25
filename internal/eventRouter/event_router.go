@@ -704,6 +704,13 @@ type signerSource interface {
 	GetSigner(ctx context.Context, issuer string, alg string) (crypto.Signer, string, error)
 }
 
+// signerUntilSource is a signerSource that also says until when its answer
+// holds (#318): the key's NotAfter, or a newer key's NotBefore. The KeyService
+// is one; the cache caps an entry's life at that moment.
+type signerUntilSource interface {
+	GetSignerUntil(ctx context.Context, issuer string, alg string) (crypto.Signer, string, time.Time, error)
+}
+
 // signingCacheKey names an entry in the router's signing-key cache. An issuer
 // that has opted one stream into RFC 9964 ML-DSA while another stays on RS256
 // holds two live signing keys at once, so the cache is keyed by the pair rather
@@ -719,8 +726,12 @@ func signingCacheKey(issuer, alg string) string {
 // available — callers compare the result against nil, and a boxed typed-nil
 // pointer would defeat that and panic at the signing site instead.
 func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (crypto.Signer, string) {
-	return r.signingKeys.signer(streamID, issuer, alg, func() (crypto.Signer, string, error) {
-		return r.keyService.GetSigner(r.ctx, issuer, alg)
+	return r.signingKeys.signer(streamID, issuer, alg, func() (crypto.Signer, string, time.Time, error) {
+		if src, ok := r.keyService.(signerUntilSource); ok {
+			return src.GetSignerUntil(r.ctx, issuer, alg)
+		}
+		key, kid, err := r.keyService.GetSigner(r.ctx, issuer, alg)
+		return key, kid, time.Time{}, err
 	})
 }
 

@@ -276,6 +276,12 @@ const (
 	KeyStatusActive    = "active"    // signing candidate; published in all JWKS
 	KeyStatusSuspended = "suspended" // reversible; not a signing candidate; still published for verification
 	KeyStatusRevoked   = "revoked"   // terminal; not a signing candidate; excluded from JWKS
+
+	// The validity statuses are derived against a clock (see StatusAt), never
+	// from a stored stamp (i2goSignals#318). Neither is a signing candidate;
+	// both stay published for verification.
+	KeyStatusExpired     = "expired"       // past NotAfter
+	KeyStatusNotYetValid = "not-yet-valid" // before NotBefore
 )
 
 type JwkKeyRec struct {
@@ -319,6 +325,16 @@ type JwkKeyRec struct {
 	// touches it. Records written before the field existed decode as the zero
 	// time, and NewerThan falls back to id order for them. See ADR 0028.
 	CreatedAt time.Time `json:"createdAt,omitzero"`
+
+	// NotBefore and NotAfter bound the period in which a signing key may sign
+	// (i2goSignals#318, ADR 0042). A zero bound is open: a record with neither
+	// never expires, which is how every record written before the fields
+	// existed reads. An uploaded certificate supplies both; a generated key or
+	// a certificate-less private key gets NotAfter = creation + lifetime.
+	// Validity is derived against a clock on every read (ValidAt, StatusAt),
+	// never stored as a status.
+	NotBefore time.Time `json:"notBefore,omitzero"`
+	NotAfter  time.Time `json:"notAfter,omitzero"`
 }
 
 // NewerThan reports whether key is a newer record than other. It is the single
@@ -370,13 +386,49 @@ func (key *JwkKeyRec) Status() string {
 	return KeyStatusActive
 }
 
-// ToKeyState projects the per-kid lifecycle state carried on a KeySummary.
+// ValidAt reports whether now falls inside the record's validity period:
+// at or after NotBefore and before NotAfter, a zero bound being open. A record
+// with neither bound is valid at every instant (i2goSignals#318).
+func (key *JwkKeyRec) ValidAt(now time.Time) bool {
+	if !key.NotBefore.IsZero() && now.Before(key.NotBefore) {
+		return false
+	}
+	return key.NotAfter.IsZero() || now.Before(key.NotAfter)
+}
+
+// StatusAt derives the status at now. The lifecycle status (Status) outranks
+// the validity period, so a revoked or suspended key reads as such whatever its
+// dates; an otherwise active key outside its period is expired or
+// not-yet-valid. A record with no validity period reads exactly as Status().
+func (key *JwkKeyRec) StatusAt(now time.Time) string {
+	if status := key.Status(); status != KeyStatusActive {
+		return status
+	}
+	if !key.NotBefore.IsZero() && now.Before(key.NotBefore) {
+		return KeyStatusNotYetValid
+	}
+	if !key.NotAfter.IsZero() && !now.Before(key.NotAfter) {
+		return KeyStatusExpired
+	}
+	return KeyStatusActive
+}
+
+// ToKeyState projects the per-kid lifecycle state carried on a KeySummary,
+// with the status derived at the current time. KeyService re-derives it
+// against its own clock (ToKeyStateAt) when it reports a summary.
 func (key *JwkKeyRec) ToKeyState() KeyState {
+	return key.ToKeyStateAt(time.Now())
+}
+
+// ToKeyStateAt projects the per-kid state with the status derived at now.
+func (key *JwkKeyRec) ToKeyStateAt(now time.Time) KeyState {
 	return KeyState{
 		Kid:         key.Kid,
-		Status:      key.Status(),
+		Status:      key.StatusAt(now),
 		SuspendedAt: key.SuspendedAt,
 		RevokedAt:   key.RevokedAt,
+		NotBefore:   key.NotBefore,
+		NotAfter:    key.NotAfter,
 	}
 }
 
@@ -409,9 +461,11 @@ func (key *JwkKeyRec) ToSummary() KeySummary {
 // so a KeySummary reports per-kid state without a second round trip (ADR 0028).
 type KeyState struct {
 	Kid         string    `json:"kid"`
-	Status      string    `json:"status"` // "active" | "suspended" | "revoked"
+	Status      string    `json:"status"` // "active" | "suspended" | "revoked" | "expired" | "not-yet-valid"
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`
+	NotBefore   time.Time `json:"not_before,omitzero"`
+	NotAfter    time.Time `json:"not_after,omitzero"`
 }
 
 // KeySummary is used to report a key registry entry and its capabilities without exposing key material

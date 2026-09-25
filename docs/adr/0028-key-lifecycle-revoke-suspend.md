@@ -9,6 +9,10 @@ Date: 2026-07-04
 
 Accepted (GH #223)
 
+Superseded in part by [ADR 0042](0042-signing-key-validity-period.md): signing
+keys now carry a validity period, so the statement that goSignals keys carry no
+expiry no longer holds. Suspend and revoke are unchanged.
+
 ## Context
 
 A signing keypair had exactly one retirement primitive: hard delete
