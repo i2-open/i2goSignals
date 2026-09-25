@@ -48,7 +48,8 @@ func TestClientPollStream_Recovery(t *testing.T) {
 			defer ts.Close()
 
 			streamConfig := model.StreamConfiguration{
-				Id: sid,
+				Id:               sid,
+				TxAllowPlaintext: true, // loopback httptest transmitter (#322)
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,

@@ -65,10 +65,11 @@ func newPBResignRouter(t *testing.T) *pbResignHarness {
 func (h *pbResignHarness) createPBStream(t *testing.T, projectId, iss string, aud []string, endpointURL string) *model.StreamStateRecord {
 	t.Helper()
 	cfg := model.StreamConfiguration{
-		Iss:             iss,
-		Aud:             aud,
-		RouteMode:       model.RouteModePublish,
-		EventsDelivered: []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+		Iss:              iss,
+		Aud:              aud,
+		RouteMode:        model.RouteModePublish,
+		EventsDelivered:  []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+		TxAllowPlaintext: true, // loopback httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:      model.DeliveryPush,

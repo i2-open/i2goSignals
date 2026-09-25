@@ -99,12 +99,13 @@ func TestReceiverStreamDeleteCascadesToTransmitter(t *testing.T) {
 	wellKnown := mockTs.URL + "/.well-known/ssf-configuration"
 	remoteId := remoteStreamId
 	streamConfig := model.StreamConfiguration{
-		Iss:             "https://mock-transmitter.example.com",
-		Aud:             []string{"rcv.example.com"},
-		TxWellKnownUrl:  &wellKnown,
-		IssuerJWKSUrl:   mockTs.URL + "/jwks",
-		RemoteStreamId:  &remoteId,
-		EventsRequested: []string{"*"},
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "https://mock-transmitter.example.com",
+		Aud:              []string{"rcv.example.com"},
+		TxWellKnownUrl:   &wellKnown,
+		IssuerJWKSUrl:    mockTs.URL + "/jwks",
+		RemoteStreamId:   &remoteId,
+		EventsRequested:  []string{"*"},
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

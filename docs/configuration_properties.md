@@ -109,7 +109,18 @@ understands. They are documented in their natural section below.
 | `I2SIG_STREAM_EVENT_VALIDATION`           | Server-wide default event-validation policy applied to events **received** on a stream. Accepted values (case-insensitive): `NONE` (no validation), `WARN` (validate and report dispositions, deliver regardless), `ENFORCE` (reject events that fail validation), `STRICT` (`ENFORCE` plus reject events that cannot be validated). Unset, empty, or unrecognized falls back to `NONE` with a `WARN`. Per-receiver overrides are set via `event_validation` on the stream's `StreamStateRecord` (management API; off the SSF wire-format `StreamConfiguration`), where an empty value inherits this default. The knob is receive-side only — a mode set on a transmit-only stream is ignored with a `WARN`; on a bidirectional SSTP pair record the single field governs the **inbound** leg. | `NONE` |
 | `I2SIG_SUBJECT_FILTERING`                 | Enables SSF subject filtering (Add/Remove Subject, §8.1.3) server-wide. `ENABLED` advertises the `add_subject_endpoint` / `remove_subject_endpoint` in SSF discovery and makes the per-stream `defaultSubjects` knob settable; `DISABLED` omits both endpoints, returns `404` from the Add/Remove Subject handlers, and silently ignores `defaultSubjects`. | `DISABLED` |
 | `I2SIG_SUBJECT_REMOVAL_GRACE`             | Server-wide default for the SSF §9.3 ("Malicious Subject Removal") removal grace period, in **seconds**. `0` (or unset) means immediate enforcement — no behavior change. Per-transmitter-stream overrides can be set via `subject_removal_grace_seconds` on the stream's `StreamStateRecord` (set via the management API; an override on a receiver stream is ignored with a `WARN`). Negative or non-integer values fall back to `0`. On `LOCAL` and `HYBRID` streams a delivery-stopping change is deferred for the grace window before it takes effect; on `HYBRID` the upstream `remove` relay is also deferred to the same deadline and fired by the push-transmitter lease owner's backfill sweep, so the upstream keeps feeding events during the window. `PASSTHRU` adds no grace of its own — the upstream transmitter's §9.3 handling is authoritative. | `0` |
-| `I2SIG_INSECURE_SSTP_HTTP`                 | When `true`, allows an SSTP pair `endpoint_url` to use the `http` scheme (otherwise only `https` is accepted). Create-time validation is syntactic only — there is no network probe. Intended for local/dev only. | `false` |
+| *(retired)* `I2SIG_INSECURE_SSTP_HTTP`     | No longer read. Plaintext business endpoints are governed per stream by `tx_allow_plaintext` (see **Per-stream transport flags** below), never by an environment variable (ADR-0066 §2 as amended by ADR 0076). | — |
+
+### Per-stream transport flags (`tx_*`)
+
+Two goSignals-extension fields on the stream configuration govern how this server dials a business stream's
+peer. Both default to `false`, are omitted from JSON when false, and are set per stream through the
+management API — neither has an environment default except where noted.
+
+| Field | Description | Default |
+| :---- | :---------- | :------ |
+| `tx_tls_skip_verify` | When `true`, the push transmitter skips TLS certificate verification for the receiver (self-signed / SAN-less receivers in dev or conformance). Only relaxes certificate checks on an `https` dial; it does not permit plaintext. Deployment-wide default via `I2SIG_TX_TLS_SKIP_VERIFY`. | `false` |
+| `tx_allow_plaintext` | The **business-stream TLS floor** opt-out. When `false`, every endpoint this server **dials** for the stream — a push transmitter's receiver `endpoint_url`, a poll receiver's transmitter `endpoint_url`, and an SSTP **initiator**'s `endpoint_url` — must be `https`: a create or update naming an `http://` endpoint is refused with `400`, and the dialers (`goSetPush`, `goSetPoll`, `goSetSstp`) refuse again at dial time with `ErrPlaintextNotAllowed` (a transport failure), so no request is made. Endpoints this server *serves* (push receive, poll transmit, an SSTP responder) are never subject to it. Set to `true` for local/dev peers on plain HTTP. On update the flag follows the request only when the request carries `delivery` (a transport change); a partial update that omits `delivery` leaves it as stored. There is deliberately no environment default; on an SSTP pair it is supplied on the bootstrap and carried to the peer mirror. | `false` |
 
 ## Event
 
@@ -263,7 +274,7 @@ must be set uniformly across cluster nodes to avoid receiver-visible variance.
 > long-poll wait, and the SSTP **client (initiator)** side applies
 > `I2SIG_POLL_RETRY_BASE_DELAY` / `I2SIG_POLL_RETRY_MAX_DELAY` /
 > `I2SIG_POLL_RETRY_BACKOFF_FACTOR` to its transport/transient backoff. The
-> only SSTP-specific knob is `I2SIG_INSECURE_SSTP_HTTP` (see **Stream** above).
+> plaintext initiator endpoint needs the pair's `tx_allow_plaintext` opt-out (see **Stream** above).
 > See [docs/SSTP.md](SSTP.md).
 
 ## TLS

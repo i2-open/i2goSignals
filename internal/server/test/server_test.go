@@ -522,10 +522,11 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 		AuthorizationHeader: streamToken1,
 	}
 	regPush := model.StreamConfiguration{
-		Aud:             []string{"test.example.com"},
-		Iss:             "DEFAULT",
-		Delivery:        &model.OneOfStreamConfigurationDelivery{PushTransmitMethod: delivery2},
-		EventsRequested: stream.EventsDelivered,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Aud:              []string{"test.example.com"},
+		Iss:              "DEFAULT",
+		Delivery:         &model.OneOfStreamConfigurationDelivery{PushTransmitMethod: delivery2},
+		EventsRequested:  stream.EventsDelivered,
 	}
 
 	stream, err = suite.servers[0].CreateStream(regPush, authSupport.ConvertProject("DEFAULT"))
@@ -993,8 +994,9 @@ func (suite *ServerSuite) setUpPollStreamConnection() {
 	}
 
 	req := model.StreamConfiguration{
-		Aud: []string{"test.example.com"},
-		Iss: stream.Iss,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Aud:              []string{"test.example.com"},
+		Iss:              stream.Iss,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:              model.ReceivePoll,

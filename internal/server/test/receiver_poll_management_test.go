@@ -97,9 +97,10 @@ func TestPollReceiverRequestsVerificationOnce(t *testing.T) {
 
 	txWellKnown := ts.URL + "/.well-known/ssf-configuration"
 	streamConfig := model.StreamConfiguration{
-		Iss:            "transmitter.example.com",
-		IssuerJWKSUrl:  ts.URL + "/jwks",
-		TxWellKnownUrl: &txWellKnown,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		TxWellKnownUrl:   &txWellKnown,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -272,12 +273,13 @@ func TestPollReceiverFallsBackToRegistrationToken(t *testing.T) {
 	txWellKnown := ts.URL + "/.well-known/ssf-configuration"
 	txToken := registrationToken
 	streamConfig := model.StreamConfiguration{
-		Iss:             "transmitter.example.com",
-		Aud:             []string{"https://receiver.example.com"},
-		IssuerJWKSUrl:   ts.URL + "/jwks",
-		EventsRequested: []string{"*"},
-		TxWellKnownUrl:  &txWellKnown,
-		TxToken:         &txToken,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "transmitter.example.com",
+		Aud:              []string{"https://receiver.example.com"},
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		EventsRequested:  []string{"*"},
+		TxWellKnownUrl:   &txWellKnown,
+		TxToken:          &txToken,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:     model.ReceivePoll,

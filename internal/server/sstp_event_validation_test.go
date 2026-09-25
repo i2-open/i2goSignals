@@ -86,11 +86,12 @@ func signSstpEventSetWithKey(t *testing.T, priv *rsa.PrivateKey, jti, eventUri s
 func sstpValidationPair(mode model.EventValidationMode, inboundDelivered []string) *model.StreamStateRecord {
 	return &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:              sstpValidationTxSid,
-			Iss:             sstpValidationAud,
-			Aud:             []string{sstpValidationIssuer},
-			EventsDelivered: []string{sstpVendorEventUri},
-			EventsSupported: []string{sstpVendorEventUri},
+			Id:               sstpValidationTxSid,
+			Iss:              sstpValidationAud,
+			Aud:              []string{sstpValidationIssuer},
+			EventsDelivered:  []string{sstpVendorEventUri},
+			EventsSupported:  []string{sstpVendorEventUri},
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		SstpInbound: &model.StreamConfiguration{
 			Id:              sstpValidationRxSid,

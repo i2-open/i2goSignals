@@ -37,6 +37,8 @@ func newPublishStream(endpointURL string) *model.StreamStateRecord {
 			Aud:             []string{"https://receiver.example.com"},
 			EventsDelivered: []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
 			RouteMode:       model.RouteModePublish,
+			// The receivers in this file are plaintext httptest stubs (#322).
+			TxAllowPlaintext: true,
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PushTransmitMethod: &model.PushTransmitMethod{
 					Method:      model.DeliveryPush,
@@ -55,6 +57,8 @@ func newForwardStream(endpointURL string) *model.StreamStateRecord {
 			Aud:             []string{"https://receiver.example.com"},
 			EventsDelivered: []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
 			RouteMode:       model.RouteModeForward,
+			// The receivers in this file are plaintext httptest stubs (#322).
+			TxAllowPlaintext: true,
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PushTransmitMethod: &model.PushTransmitMethod{
 					Method:      model.DeliveryPush,
@@ -335,10 +339,11 @@ func TestHTTPAdapter_RFC8935DeliveryErrParsed(t *testing.T) {
 func newPublishStreamWithIdentity(id, iss string, aud []string, endpointURL string) *model.StreamStateRecord {
 	return &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        id,
-			Iss:       iss,
-			Aud:       aud,
-			RouteMode: model.RouteModePublish,
+			Id:               id,
+			Iss:              iss,
+			Aud:              aud,
+			RouteMode:        model.RouteModePublish,
+			TxAllowPlaintext: true, // loopback httptest receiver (#322)
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PushTransmitMethod: &model.PushTransmitMethod{
 					Method:      model.DeliveryPush,

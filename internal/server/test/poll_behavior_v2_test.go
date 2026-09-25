@@ -381,9 +381,10 @@ func (suite *PollBehaviorSuite) TestReceiverHandles403() {
 
 	// Create a polling receiver stream pointing to our mock transmitter
 	streamConfig := model.StreamConfiguration{
-		Id:            "transmitter-403",
-		Iss:           "transmitter-403.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		Id:               "transmitter-403",
+		Iss:              "transmitter-403.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -433,9 +434,10 @@ func (suite *PollBehaviorSuite) TestReceiverRetriesOn403BeforeDisable() {
 	defer ts.Close()
 
 	streamConfig := model.StreamConfiguration{
-		Id:            "transmitter-403-retry",
-		Iss:           "transmitter-403-retry.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		Id:               "transmitter-403-retry",
+		Iss:              "transmitter-403-retry.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

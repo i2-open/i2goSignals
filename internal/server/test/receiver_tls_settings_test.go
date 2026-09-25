@@ -77,14 +77,15 @@ func TestReceiverUsesStreamTLSSettingsForDiscovery(t *testing.T) {
 		token := "tx-token"
 		remote := "tx-stream-1"
 		streamConfig := model.StreamConfiguration{
-			Iss:             "https://tx.example.test",
-			Aud:             []string{"https://receiver.example.test"},
-			EventsRequested: []string{"*"},
-			IssuerJWKSUrl:   jwksURL,
-			TxWellKnownUrl:  &wellKnownURL,
-			TxToken:         &token,
-			RemoteStreamId:  &remote, // suppress auto-registration POST
-			TxTLSSkipVerify: true,    // the contract under test
+			TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+			Iss:              "https://tx.example.test",
+			Aud:              []string{"https://receiver.example.test"},
+			EventsRequested:  []string{"*"},
+			IssuerJWKSUrl:    jwksURL,
+			TxWellKnownUrl:   &wellKnownURL,
+			TxToken:          &token,
+			RemoteStreamId:   &remote, // suppress auto-registration POST
+			TxTLSSkipVerify:  true,    // the contract under test
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PollReceiveMethod: &model.PollReceiveMethod{
 					Method:      model.ReceivePoll,
@@ -125,14 +126,15 @@ func TestReceiverUsesStreamTLSSettingsForDiscovery(t *testing.T) {
 		token := "tx-token"
 		remote := "tx-stream-2"
 		streamConfig := model.StreamConfiguration{
-			Iss:             "https://tx.example.test",
-			Aud:             []string{"https://receiver.example.test"},
-			EventsRequested: []string{"*"},
-			IssuerJWKSUrl:   jwksURL,
-			TxWellKnownUrl:  &wellKnownURL,
-			TxToken:         &token,
-			RemoteStreamId:  &remote,
-			TxTLSSkipVerify: false, // explicit: verify against system roots
+			TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+			Iss:              "https://tx.example.test",
+			Aud:              []string{"https://receiver.example.test"},
+			EventsRequested:  []string{"*"},
+			IssuerJWKSUrl:    jwksURL,
+			TxWellKnownUrl:   &wellKnownURL,
+			TxToken:          &token,
+			RemoteStreamId:   &remote,
+			TxTLSSkipVerify:  false, // explicit: verify against system roots
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PollReceiveMethod: &model.PollReceiveMethod{
 					Method:      model.ReceivePoll,

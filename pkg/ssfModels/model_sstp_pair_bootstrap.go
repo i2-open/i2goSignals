@@ -60,6 +60,12 @@ type SstpPairBootstrap struct {
 	// Description is a human-facing label for the pair, copied onto both halves.
 	Description string `json:"description,omitempty"`
 
+	// TxAllowPlaintext is the pair's opt-out from the business-stream TLS floor
+	// (StreamConfiguration.TxAllowPlaintext). An initiator whose EndpointUrl is
+	// http:// is refused unless this is set; a responder never dials, so the
+	// flag is only recorded there.
+	TxAllowPlaintext bool `json:"tx_allow_plaintext,omitzero"`
+
 	// Primary is the transmit (outbound) direction's business-plane inputs.
 	Primary SstpDirection `json:"primary"`
 

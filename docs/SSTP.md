@@ -97,9 +97,12 @@ Fields:
 - **Initiator**: the operator **must** supply `authorization_header` (the bearer
   the peer responder minted); `endpoint_url` is operator-supplied or learned via
   the cascade response.
-- `EndpointUrl` is validated **syntactically only** — scheme `https` (or `http`
-  when `I2SIG_INSECURE_SSTP_HTTP=true`), non-empty host, no query/fragment. No
-  network probe; reachability is the runner's concern (matching push/poll).
+- `EndpointUrl` is validated **syntactically only** — scheme `https` or `http`,
+  non-empty host, no query/fragment. No network probe; reachability is the
+  runner's concern (matching push/poll). An **initiator's** `http` endpoint is
+  additionally refused by the business-stream TLS floor unless the bootstrap
+  sets `tx_allow_plaintext: true` (carried to the peer mirror and re-checked at
+  dial time); a responder serves its endpoint and is never subject to it.
 - Each half needs a non-empty `iss` and `aud` and a recognized `mode`; a
   present `receive_mode` must be `IMPORT` or `FORWARD` (anything else, `PUBLISH`
   included, is a 400 naming `<half>.receive_mode`). `iss` and `aud` are
@@ -435,7 +438,7 @@ timeout knobs**:
 | `I2SIG_POLL_DEFAULT_TIMEOUT` | server-side outbound long-poll timeout |
 | `I2SIG_POLL_MAX_TIMEOUT` | server-side outbound long-poll cap |
 | `I2SIG_POLL_RETRY_BASE_DELAY` / `_MAX_DELAY` / `_BACKOFF_FACTOR` | client-side transport/transient backoff |
-| `I2SIG_INSECURE_SSTP_HTTP` | allow an `http`-scheme `endpoint_url` at create (dev only; default `false`) |
+| *(retired)* `I2SIG_INSECURE_SSTP_HTTP` | no longer read — a plaintext initiator `endpoint_url` needs the pair's `tx_allow_plaintext` opt-out instead |
 | `I2SIG_EVENT_TYPES_EXTRA` | extend the supported-event catalog so a pair can negotiate and route a custom event vocabulary |
 
 See `docs/configuration_properties.md` for the full catalogue.

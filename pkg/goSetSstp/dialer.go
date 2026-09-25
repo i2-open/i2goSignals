@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +50,33 @@ type DialerConfig struct {
 	// HTTPClient is supplied — an injected client owns its own TLS posture.
 	// Mirrors goSetPush.TransmitterConfig.InsecureSkipVerify.
 	InsecureSkipVerify bool
+
+	// AllowPlaintext permits EndpointURL to use a scheme other than https.
+	// False (the default) is the business-stream TLS floor (ADR-0066 §2 as
+	// amended by ADR 0076): Exchange refuses a plaintext endpoint before any
+	// request is built, whether or not HTTPClient is injected. It carries the
+	// stream's tx_allow_plaintext opt-out and is orthogonal to
+	// InsecureSkipVerify, which only governs certificate verification on an
+	// https dial. Control streams never set it (ADR-0063 §1).
+	AllowPlaintext bool
+}
+
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// in Result.Err when DialerConfig.EndpointURL is not https and
+// DialerConfig.AllowPlaintext is false. StatusCode is 0, so ClassifyResult
+// reports ClassTransport. Not part of errcode.go: that file is the SSTP §2.3
+// per-JTI keyword registry, and this is a local transport-floor error.
+var ErrPlaintextNotAllowed = errors.New("sstp: plaintext endpoint not allowed (tx_allow_plaintext is false)")
+
+// isPlaintextEndpoint reports whether raw's scheme is anything other than
+// https. An unparseable URL is not reported here — http.NewRequest reports it
+// on the existing path; this check is only the TLS floor.
+func isPlaintextEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return !strings.EqualFold(u.Scheme, "https")
 }
 
 // defaultDialerTimeout is the value used when DialerConfig.Timeout is zero
@@ -71,6 +101,12 @@ const sstpMaxIdleConnsPerHost = 64
 // Exchange is single-cycle: no retries, no backoff, no goroutines, no
 // sleeps. Consumer-owned loops call Exchange once per attempt.
 func Exchange(ctx context.Context, msg Message, config DialerConfig) Result {
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && isPlaintextEndpoint(config.EndpointURL) {
+		return Result{Err: fmt.Errorf("%w: %s", ErrPlaintextNotAllowed, config.EndpointURL)}
+	}
+
 	client := config.HTTPClient
 	if client == nil {
 		client = dialerClientFor(config)

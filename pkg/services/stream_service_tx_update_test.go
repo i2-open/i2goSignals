@@ -104,9 +104,10 @@ func TestCreateStream_NoDiscovery_TxAliasPreserved(t *testing.T) {
 
 	txAlias := "manual-alias"
 	config := model.StreamConfiguration{
-		Iss:     "http://transmitter.com",
-		Aud:     []string{"http://receiver.com"},
-		TxAlias: &txAlias,
+		Iss:              "http://transmitter.com",
+		Aud:              []string{"http://receiver.com"},
+		TxAlias:          &txAlias,
+		TxAllowPlaintext: true,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

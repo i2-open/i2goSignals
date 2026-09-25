@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -76,6 +77,21 @@ func derivePushStatusURL(endpointURL, sid string) (string, error) {
 // fetcher reuses the push transmitter's configured Authorization header — receivers in this
 // codebase carry the stream identity inside that token (StreamMgmt scope), so the same
 // credential that authorizes event delivery also authorizes /status reads.
+// ErrPlaintextNotAllowed is the status-probe's counterpart of
+// goSetPush.ErrPlaintextNotAllowed: the receiver status GET dials the same
+// business endpoint as the push, so it is held to the same TLS floor.
+var ErrPlaintextNotAllowed = errors.New("plaintext endpoint not allowed (tx_allow_plaintext is false)")
+
+// isPlaintextEndpoint reports whether raw's scheme is anything other than
+// https. An unparseable URL is left to derivePushStatusURL to report.
+func isPlaintextEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return !strings.EqualFold(u.Scheme, "https")
+}
+
 func (r *router) pushStatusFetcher() StatusFetcher {
 	return func(ctx context.Context, stream *model.StreamStateRecord) (*model.StreamStatus, error) {
 		// The receiver status-poll is a goSignals/SSTP extension with no basis in
@@ -90,6 +106,13 @@ func (r *router) pushStatusFetcher() StatusFetcher {
 			return nil, fmt.Errorf("PUSH-SRV: stream missing push transmit method")
 		}
 		push := stream.StreamConfiguration.Delivery.PushTransmitMethod
+		// Business-stream TLS floor (#322): this probe is a raw GET, not a
+		// goSetPush transmitter, but it dials the same business endpoint, so it
+		// takes the same guard before any request. It fails closed on a
+		// plaintext receiver unless the stream carries the opt-out.
+		if !stream.StreamConfiguration.TxAllowPlaintext && isPlaintextEndpoint(push.EndpointUrl) {
+			return nil, fmt.Errorf("PUSH-SRV: %w: %s", ErrPlaintextNotAllowed, push.EndpointUrl)
+		}
 		statusURL, err := derivePushStatusURL(push.EndpointUrl, stream.StreamConfiguration.Id)
 		if err != nil {
 			return nil, fmt.Errorf("PUSH-SRV: derive status URL: %w", err)

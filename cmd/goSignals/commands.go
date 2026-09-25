@@ -326,11 +326,12 @@ func (p *CreatePollPublisherCmd) Run(cli *CLI) error {
 }
 
 type CreatePushPublisherCmd struct {
-	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl string `short:"e" group:"man" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if Connect not provided."`
-	Auth     string `group:"man" help:"Provide the authorization header to used to submit events at the endpoint url. Required if Connect not provided."`
-	Connect  string `short:"c" group:"auto" xor:"auto,man" help:"The Alias of a stream which is receiving events."`
-	Mode     string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
+	Alias          string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl       string `short:"e" group:"man" optional:"" help:"Provide the endpoint where events may be delivered using SET Push. Required if Connect not provided."`
+	Auth           string `group:"man" help:"Provide the authorization header to used to submit events at the endpoint url. Required if Connect not provided."`
+	Connect        string `short:"c" group:"auto" xor:"auto,man" help:"The Alias of a stream which is receiving events."`
+	Mode           string `optional:"" default:"PUBLISH" enum:"FORWARD,PUBLISH,F,P" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt this stream out of the business-stream TLS floor so the server may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
@@ -383,6 +384,7 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 	}
 
 	// Should override be allowed if destAlias is set?
+	reg.TxAllowPlaintext = p.AllowPlaintext
 
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
@@ -400,13 +402,14 @@ func (p *CreatePushPublisherCmd) Run(cli *CLI) error {
 }
 
 type CreatePollReceiverCmd struct {
-	Alias    string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
-	EventUrl string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
-	Auth     string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
-	Connect  string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
-	TxAlias  string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
-	Secret   string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
-	Mode     string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
+	Alias          string `arg:"" optional:"" help:"The alias of the server to create the stream on (default is selected server)"`
+	EventUrl       string `short:"e" group:"man" help:"The event publishers polling endpoint URL. Required unless Connect specified."`
+	Auth           string `group:"man" help:"An authorization header used to poll for events. Required unless Connect specified"`
+	Connect        string `short:"c" group:"auto" xor:"man,auto" help:"The Alias of a stream which is publishing events using polling"`
+	TxAlias        string `help:"Alias of a configured foreign SSF transmitter (e.g. 'add server --client-id'). Requires an ADMIN credential (not the IAT): the transmitter is registered on the node and the server-side TxAlias auto-registration path discovers and wires its poll endpoint."`
+	Secret         string `help:"OAuth client secret for the tx-alias transmitter (non-interactive); resolved as staged->flag->env"`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,PUBLISH,I,F,P" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt this stream out of the business-stream TLS floor so the server may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
@@ -471,6 +474,7 @@ func (p *CreatePollReceiverCmd) Run(cli *CLI) error {
 		}
 	}
 
+	reg.TxAllowPlaintext = p.AllowPlaintext
 	jsonString, _ := json.MarshalIndent(reg, "", "  ")
 	server, err := cli.Data.GetServer(p.Alias)
 	if err != nil {
@@ -536,9 +540,10 @@ func (p *CreatePushReceiverCmd) Run(cli *CLI) error {
 }
 
 type CreatePollConnectionCmd struct {
-	SourceAlias string `arg:"" help:"The alias of the publishing server or existing stream alias."`
-	DestAlias   string `arg:"" help:"The alias of receiving server."`
-	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias    string `arg:"" help:"The alias of the publishing server or existing stream alias."`
+	DestAlias      string `arg:"" help:"The alias of receiving server."`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt the dialing (transmitter / receiver-poll) half out of the business-stream TLS floor so it may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 // createRegRequestFromParams creates the complimentary connecting stream based on an input stream.
@@ -764,6 +769,7 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 		}
 	}
 	fmt.Println("Creating polling receiver stream...")
+	regReceiveStreamRequest.TxAllowPlaintext = p.AllowPlaintext
 	_, err = cli.executeCreateRequest(rcvName, *regReceiveStreamRequest, serverRcv, "Poll Receivers Connection from "+pubName, pubName)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error creating polling receiver stream on %s: %s", serverRcv.Alias, err.Error()))
@@ -773,9 +779,10 @@ func (p *CreatePollConnectionCmd) Run(cli *CLI) error {
 }
 
 type CreatePushConnectionCmd struct {
-	SourceAlias string `arg:"" help:"The alias of the publishing server."`
-	DestAlias   string `arg:"" help:"The alias of receiving server or existing stream alias."`
-	Mode        string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	SourceAlias    string `arg:"" help:"The alias of the publishing server."`
+	DestAlias      string `arg:"" help:"The alias of receiving server or existing stream alias."`
+	Mode           string `optional:"" default:"IMPORT" enum:"IMPORT,FORWARD,REPUBLISH,I,F,R" help:"What should the receiver to with received events"`
+	AllowPlaintext bool   `name:"allow-plaintext" optional:"" help:"Opt the dialing (transmitter / receiver-poll) half out of the business-stream TLS floor so it may dial a plaintext http:// endpoint (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
@@ -878,6 +885,7 @@ func (p *CreatePushConnectionCmd) Run(cli *CLI) error {
 		regPublisherStreamRequest = createRegRequestFromParams(model.DeliveryPush, p.Mode, cli, streamConfig)
 	}
 
+	regPublisherStreamRequest.TxAllowPlaintext = p.AllowPlaintext
 	fmt.Println("Creating push publisher stream...")
 	pubStreamConfig, err := cli.executeCreateRequest(pubName, *regPublisherStreamRequest, serverPub, "Push Publisher to "+rcvName, rcvName)
 	if err != nil {
@@ -1227,16 +1235,17 @@ type CreateStreamPushCmd struct {
 //
 // The two shapes are mutually exclusive.
 type CreateStreamSstpCmd struct {
-	ClientAlias   string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
-	ServerAlias   string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
-	Name          string   `optional:"" help:"An alias name for the pair to be stored locally."`
-	Description   string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
-	BootstrapFile string   `name:"bootstrap-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
-	Iss           string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
-	IssJwksUrl    string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
-	Aud           []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
-	Events        []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode). Each value is a case-insensitive regular expression with '*' as shorthand for '.*'."`
-	Mode          string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
+	ClientAlias    string   `arg:"" required:"" help:"Alias of the SSTP client (initiator) server to provision the pair against."`
+	ServerAlias    string   `arg:"" required:"" help:"Alias of the SSTP server (responder) peer; its stored credentials cascade the mirrored half."`
+	Name           string   `optional:"" help:"An alias name for the pair to be stored locally."`
+	Description    string   `optional:"" help:"Human-facing label copied onto both halves of the pair."`
+	BootstrapFile  string   `name:"bootstrap-file" optional:"" help:"Path to a JSON/YAML file carrying a full (asymmetric) SstpPairBootstrap. Mutually exclusive with the symmetric flags."`
+	Iss            string   `optional:"" help:"Issuer value for both directions (symmetric mode)."`
+	IssJwksUrl     string   `optional:"" help:"Issuer JWKS URL for both directions (symmetric mode)."`
+	Aud            []string `optional:"" sep:"," help:"Audience value(s) for both directions (symmetric mode)."`
+	Events         []string `optional:"" sep:"," help:"Event uris (types) requested for both directions (symmetric mode). Each value is a case-insensitive regular expression with '*' as shorthand for '.*'."`
+	Mode           string   `optional:"" default:"" enum:"FORWARD,PUBLISH,IMPORT," help:"Route mode for both directions (symmetric mode): FORWARD, PUBLISH, or IMPORT (default PUBLISH)."`
+	AllowPlaintext bool     `name:"allow-plaintext" optional:"" help:"Opt the pair out of the business-stream TLS floor so the initiator may dial a plaintext http:// peer (sets tx_allow_plaintext; loopback/dev only, ADR-0066 §2)."`
 }
 
 func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
@@ -1254,7 +1263,8 @@ func (p *CreateStreamSstpCmd) Run(cli *CLI) error {
 		boot = *loaded
 	} else {
 		boot = model.SstpPairBootstrap{
-			Description: p.Description,
+			Description:      p.Description,
+			TxAllowPlaintext: p.AllowPlaintext,
 			Primary: model.SstpDirection{
 				Iss:        p.Iss,
 				IssJwksUrl: p.IssJwksUrl,

@@ -142,7 +142,7 @@ func TestPushSET_RetryAfterHonored(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := PushSET(context.Background(), "test-set", TransmitterConfig{EndpointURL: server.URL})
+	result := PushSET(context.Background(), "test-set", TransmitterConfig{AllowPlaintext: true, EndpointURL: server.URL})
 	assert.False(t, result.Accepted)
 	assert.Equal(t, http.StatusTooManyRequests, result.StatusCode)
 	assert.Equal(t, 30*time.Second, result.RetryAfter)
@@ -159,7 +159,7 @@ func TestPushSET_RetryAfter503ParsedAsRateLimited(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := PushSET(context.Background(), "test-set", TransmitterConfig{EndpointURL: server.URL})
+	result := PushSET(context.Background(), "test-set", TransmitterConfig{AllowPlaintext: true, EndpointURL: server.URL})
 	c := ClassifyResult(result)
 	assert.Equal(t, ClassRateLimited, c.Class)
 	assert.Equal(t, 5*time.Second, c.NextDelay)

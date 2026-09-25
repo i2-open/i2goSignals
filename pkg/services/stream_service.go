@@ -187,6 +187,55 @@ func validateBusinessStreamSecurity(cfg model.StreamConfiguration) error {
 	return nil
 }
 
+// validateBusinessStreamTransport enforces the business-stream TLS floor
+// (ADR-0066 §2 as amended by ADR 0076, i2goSignals#322): every endpoint this
+// server DIALS for the stream must be https unless the stream carries the
+// tx_allow_plaintext opt-out. Outbound-dialed endpoints are the push
+// transmitter's receiver URL, the poll receiver's transmitter URL, and an SSTP
+// initiator's peer endpoint. Endpoints this server SERVES (push receive, poll
+// transmit, an SSTP responder's own URL) are never dialed and never rejected
+// here. An empty endpoint is not dialed and is skipped; an unparseable one is
+// left to the delivery-method validation that already owns that error.
+//
+// The same rule is applied a second time inside the dialers
+// (goSetPush.PushSET, goSetPoll.PollRaw, goSetSstp.Exchange), so a record that
+// bypasses this validator still cannot dial plaintext. The opt-out is a
+// per-stream field only; there is deliberately no environment default.
+func validateBusinessStreamTransport(rec model.StreamStateRecord) error {
+	if rec.TxAllowPlaintext {
+		return nil
+	}
+	check := func(field, raw string) error {
+		if raw == "" {
+			return nil
+		}
+		u, err := url.Parse(raw)
+		if err != nil || strings.EqualFold(u.Scheme, "https") {
+			return nil
+		}
+		return fmt.Errorf("%w: %s %q is not https — business-stream endpoints this server dials must "+
+			"use TLS unless tx_allow_plaintext is true (ADR-0066 §2)", ErrInvalidRequest, field, raw)
+	}
+	if d := rec.Delivery; d != nil {
+		if d.PushTransmitMethod != nil {
+			if err := check("delivery.endpoint_url (push transmitter)", d.PushTransmitMethod.EndpointUrl); err != nil {
+				return err
+			}
+		}
+		if d.PollReceiveMethod != nil {
+			if err := check("delivery.endpoint_url (poll receiver)", d.PollReceiveMethod.EndpointUrl); err != nil {
+				return err
+			}
+		}
+	}
+	if m := rec.SstpMethod; m != nil && m.Role == model.SstpRoleInitiator {
+		if err := check("sstp_method.endpoint_url (initiator)", m.EndpointUrl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateSigningAlg rejects a stream configuration asking for a SET signature
 // algorithm this transmitter cannot produce. The accepted set is goSet's:
 // "" (unset, meaning RS256), "RS256", "ES256" (ECDSA P-256, the throughput
@@ -410,6 +459,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// defaulted to the local issuer), so signingOnly can never be silently
 	// enabled without a real trust anchor.
 	if err := validateBusinessStreamSecurity(request.StreamConfiguration); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+	if err := validateBusinessStreamTransport(request); err != nil {
 		return model.StreamConfiguration{}, err
 	}
 
@@ -823,6 +875,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// cert (dev, conformance). The field is built field-by-field here, so without
 	// this copy the request value would be silently dropped.
 	config.TxTLSSkipVerify = request.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
+	// TxAllowPlaintext: the per-stream TLS-floor opt-out validated above. Copied
+	// for the same reason; unlike TxTLSSkipVerify it has no environment default.
+	config.TxAllowPlaintext = request.TxAllowPlaintext
 
 	// It is not SSF compliant, but goSignals will accept these settings on stream creation
 	if request.InactivityTimeout > 0 {
@@ -1411,6 +1466,23 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	}
 	normalizeStreamTrustFields(config)
 	if err := validateBusinessStreamSecurity(*config); err != nil {
+		return nil, err
+	}
+
+	// The tx_* transport flags follow the delivery method: an update that
+	// carries Delivery is replacing the stream's transport configuration, so
+	// both flags take the request's value (TxTLSSkipVerify keeps the deployment
+	// default it has at create). A partial update without Delivery follows the
+	// "absent means unchanged" rule the rest of this path uses and leaves both
+	// flags as stored — a bool cannot distinguish "false" from "omitted". The
+	// transport floor is then re-checked against the updated record, so an
+	// endpoint moved to http:// is refused unless the same update carries the
+	// opt-out (i2goSignals#322).
+	if configReq.Delivery != nil {
+		config.TxTLSSkipVerify = configReq.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
+		config.TxAllowPlaintext = configReq.TxAllowPlaintext
+	}
+	if err := validateBusinessStreamTransport(*streamRec); err != nil {
 		return nil, err
 	}
 

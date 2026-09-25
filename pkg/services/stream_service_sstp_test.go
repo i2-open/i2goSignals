@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -241,22 +242,41 @@ func TestCreateSstpPair_InitiatorKeepsOperatorEndpointAndBearer(t *testing.T) {
 
 func TestCreateSstpPair_EndpointUrlValidation(t *testing.T) {
 	t.Run("http rejected by default", func(t *testing.T) {
+		// Business-stream TLS floor (#322): an initiator dials endpoint_url, so
+		// plaintext needs the pair's tx_allow_plaintext opt-out. 400 (ErrInvalidRequest).
 		svc, _ := sstpFixture(t)
 		b := initiatorBootstrap()
 		b.EndpointUrl = "http://peer.example/sstp/abc"
 		_, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
 		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrInvalidRequest), "want ErrInvalidRequest, got %v", err)
 		assert.Contains(t, err.Error(), "endpoint_url")
+		assert.Contains(t, err.Error(), "tx_allow_plaintext")
 	})
 
-	t.Run("http accepted when insecure flag set", func(t *testing.T) {
-		t.Setenv("I2SIG_INSECURE_SSTP_HTTP", "true")
+	t.Run("http accepted with tx_allow_plaintext opt-out", func(t *testing.T) {
 		svc, _ := sstpFixture(t)
 		b := initiatorBootstrap()
 		b.EndpointUrl = "http://peer.example/sstp/abc"
+		b.TxAllowPlaintext = true
 		rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
 		require.NoError(t, err)
 		assert.Equal(t, "http://peer.example/sstp/abc", rec.SstpMethod.EndpointUrl)
+		assert.True(t, rec.TxAllowPlaintext, "the opt-out must persist on the pair's primary half")
+	})
+
+	t.Run("http responder endpoint never rejected", func(t *testing.T) {
+		// A responder serves its endpoint; it never dials it, so the floor does
+		// not apply even though sstpFixture derives an http base URL.
+		svc, _ := sstpFixture(t)
+		b := initiatorBootstrap()
+		b.Role = model.SstpRoleResponder
+		b.EndpointUrl = ""
+		b.AuthorizationHeader = ""
+		rec, err := svc.CreateSstpPair(context.Background(), b, "proj-1", nil)
+		require.NoError(t, err)
+		assert.False(t, rec.TxAllowPlaintext)
+		assert.NotEmpty(t, rec.SstpMethod.EndpointUrl)
 	})
 
 	t.Run("query rejected", func(t *testing.T) {

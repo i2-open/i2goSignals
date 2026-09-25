@@ -64,9 +64,10 @@ func TestPollTransmitterStatus(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-status"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -139,9 +140,10 @@ func TestPollTransmitterStatusDisabled(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-status-disabled"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

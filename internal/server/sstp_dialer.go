@@ -1450,6 +1450,10 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 		EndpointURL:   method.EndpointUrl,
 		Authorization: auth,
 		HTTPClient:    client,
+		// Business-stream TLS floor (#322): the guard runs inside Exchange even
+		// though the client is injected, so a plaintext peer without the
+		// stream's opt-out is refused before any request.
+		AllowPlaintext: stream.TxAllowPlaintext,
 	})
 
 	cls := goSetSstp.ClassifyResult(result)

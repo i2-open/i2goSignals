@@ -384,7 +384,7 @@ func (suite *toolSuite) Test3_PushStream() {
 	assert.Len(suite.T(), streamConfig.EventsDelivered, 4, "Should be 4 events delivered")
 
 	testLog.Println("  Testing simple Create Stream Push Publisher...")
-	cmd = fmt.Sprintf("create stream push publish %s --name=scim1PushPub --mode=F --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:full,*:prov:delete --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1name, server1Addr, streamConfig.Delivery.PushReceiveMethod.EndpointUrl, streamConfig.Delivery.GetAuthorizationHeader())
+	cmd = fmt.Sprintf("create stream push publish %s --name=scim1PushPub --mode=F --allow-plaintext --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:full,*:prov:delete --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1name, server1Addr, streamConfig.Delivery.PushReceiveMethod.EndpointUrl, streamConfig.Delivery.GetAuthorizationHeader())
 	testLog.Println("Executing:\n" + cmd)
 	res, err = suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
@@ -403,7 +403,7 @@ func (suite *toolSuite) Test3_PushStream() {
 	assert.Nil(suite.T(), streamCheck, "Stream should be deleted")
 
 	testLog.Println("  Testing simple Create Stream Push Publisher using Connect...")
-	cmd = fmt.Sprintf("create stream push publish %s --name=scim1PushPub -c scim1Push", server1name)
+	cmd = fmt.Sprintf("create stream push publish %s --name=scim1PushPub --allow-plaintext -c scim1Push", server1name)
 	testLog.Println("    Executing:\n" + cmd)
 	res, err = suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
@@ -424,7 +424,7 @@ func (suite *toolSuite) Test3_PushStream() {
 	testLog.Println("  Testing create stream publisher connection to existing scim1Push stream...")
 
 	server1Name := suite.servers[0].Name()
-	cmd = fmt.Sprintf("create stream push connection %s scim1Push --mode=F", server1Name)
+	cmd = fmt.Sprintf("create stream push connection %s scim1Push --mode=F --allow-plaintext", server1Name)
 	testLog.Println("    Executing:\n" + cmd)
 
 	res, err = suite.executeCommand(cmd, true)
@@ -442,7 +442,7 @@ func (suite *toolSuite) Test3_PushStream() {
 	testLog.Println(fmt.Sprintf("Result:\n%s", res2))
 
 	testLog.Println("  Testing create stream connection at both ends..")
-	cmd = fmt.Sprintf("create stream push connection %s %s --name=scimNotice --mode=FORWARD --aud=monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:notice --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server2Name, server1Addr)
+	cmd = fmt.Sprintf("create stream push connection %s %s --name=scimNotice --mode=FORWARD --allow-plaintext --aud=monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:prov:*:notice --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server2Name, server1Addr)
 	testLog.Println("    Executing:\n" + cmd)
 
 	res, err = suite.executeCommand(cmd, true)
@@ -483,7 +483,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	testLog.Println(fmt.Sprintf("Result:\n%s", res))
 
 	testLog.Println("  Testing simple Create Stream Poll Receive...")
-	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:(feed|sig):* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1Name, server1Addr, streamConfig.Delivery.PollTransmitMethod.EndpointUrl, streamConfig.Delivery.PollTransmitMethod.AuthorizationHeader)
+	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --allow-plaintext --aud=cluster.example.com,monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:event:(feed|sig):* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com --event-url=%s --auth=\"%s\"", server1Name, server1Addr, streamConfig.Delivery.PollTransmitMethod.EndpointUrl, streamConfig.Delivery.PollTransmitMethod.AuthorizationHeader)
 	testLog.Println("    Executing:\n" + cmd)
 	res, err = suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
@@ -496,7 +496,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	assert.Nil(suite.T(), err, "Check no error deleting scimPollRec")
 
 	testLog.Println("  Testing Create Stream Receiver Poll using connect...")
-	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --connect=scimPoll", server1Name)
+	cmd = fmt.Sprintf("create stream poll receive %s --name=scimPollRec --allow-plaintext --connect=scimPoll", server1Name)
 	testLog.Println("    Executing:\n" + cmd)
 	res, err = suite.executeCommand(cmd, true)
 	assert.NoError(suite.T(), err, "Add stream has no error")
@@ -510,7 +510,7 @@ func (suite *toolSuite) Test4_PollStream() {
 
 	testLog.Println("  Testing create stream receiver connection to existing scimPoll stream...")
 
-	cmd = fmt.Sprintf("create stream poll connection scimPoll %s --mode=F", server2Name)
+	cmd = fmt.Sprintf("create stream poll connection scimPoll %s --mode=F --allow-plaintext", server2Name)
 	testLog.Println("    Executing:\n" + cmd)
 
 	res, err = suite.executeCommand(cmd, true)
@@ -526,7 +526,7 @@ func (suite *toolSuite) Test4_PollStream() {
 	testLog.Println(fmt.Sprintf("Result:\n%s", res2))
 
 	testLog.Println("  Testing create polling stream connection at both ends..")
-	cmd = fmt.Sprintf("create stream poll connection %s %s --name=scimMisc --mode=FORWARD --aud=monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:misc:* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server2Name, server1Addr)
+	cmd = fmt.Sprintf("create stream poll connection %s %s --name=scimMisc --mode=FORWARD --allow-plaintext --aud=monitor.example.com,partner.scim.example.com --iss=cluster.scim.example.com --events=*:misc:* --iss-jwks-url=http://%s/jwks/cluster.scim.example.com", server1Name, server2Name, server1Addr)
 	testLog.Println("    Executing:\n" + cmd)
 
 	res, err = suite.executeCommand(cmd, true)
@@ -736,7 +736,7 @@ func (suite *toolSuite) Test9_GenAndPoll() {
 	assert.NoError(suite.T(), err, "Error creating issuer certificate")
 
 	testLog.Println("  Create PUSH connection between server 1 and 2...")
-	cmd = fmt.Sprintf("create stream push connection %s %s --name=scimHop --mode=FORWARD --aud=receiver.example.com --iss=%s --events=*:prov:create:* --iss-jwks-url=http://%s/jwks/%s", server1Name, server2Name, iss, server1Addr, iss)
+	cmd = fmt.Sprintf("create stream push connection %s %s --name=scimHop --mode=FORWARD --allow-plaintext --aud=receiver.example.com --iss=%s --events=*:prov:create:* --iss-jwks-url=http://%s/jwks/%s", server1Name, server2Name, iss, server1Addr, iss)
 	testLog.Println("    Executing:\n" + cmd)
 
 	_, err = suite.executeCommand(cmd, true)

@@ -56,7 +56,8 @@ func TestPushStatusFetcher_ReturnsStreamStatus(t *testing.T) {
 	r := newTestRouter(t).router
 	stream := &model.StreamStateRecord{}
 	stream.StreamConfiguration = model.StreamConfiguration{
-		Id: "abc123",
+		Id:               "abc123",
+		TxAllowPlaintext: true, // plaintext httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:              model.DeliveryPush,
@@ -90,7 +91,8 @@ func TestPushStatusFetcher_DisabledMakesNoRequest(t *testing.T) {
 	r := newTestRouter(t).router
 	stream := &model.StreamStateRecord{}
 	stream.StreamConfiguration = model.StreamConfiguration{
-		Id: "abc123",
+		Id:               "abc123",
+		TxAllowPlaintext: true, // plaintext httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:              model.DeliveryPush,
@@ -115,7 +117,8 @@ func TestPushStatusFetcher_NonOKReturnsError(t *testing.T) {
 	r := newTestRouter(t).router
 	stream := &model.StreamStateRecord{}
 	stream.StreamConfiguration = model.StreamConfiguration{
-		Id: "abc123",
+		Id:               "abc123",
+		TxAllowPlaintext: true, // plaintext httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:      model.DeliveryPush,

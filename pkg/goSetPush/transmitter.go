@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,11 +16,36 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// in PushResult.Err when TransmitterConfig.EndpointURL is not https and
+// TransmitterConfig.AllowPlaintext is false. StatusCode is 0 (no request was
+// made), so ClassifyResult reports it as a transport failure.
+var ErrPlaintextNotAllowed = errors.New("RFC8935: plaintext endpoint not allowed (tx_allow_plaintext is false)")
+
+// isPlaintextEndpoint reports whether raw's scheme is anything other than
+// https. An unparseable URL is not reported here — http.NewRequest reports it
+// on the existing path; this check is only the TLS floor.
+func isPlaintextEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return !strings.EqualFold(u.Scheme, "https")
+}
+
 // PushSET sends a SET token string to the receiver endpoint per RFC8935.
 // It sets Content-Type to application/secevent+jwt, includes the Authorization header
 // if configured, and interprets the response.
 func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) PushResult {
 	log := getLogger(config.Logger)
+
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && isPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("%w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		log.Error("RFC8935: Refusing plaintext push endpoint", "url", config.EndpointURL)
+		return PushResult{Err: err}
+	}
 
 	client := config.HTTPClient
 	if client == nil {

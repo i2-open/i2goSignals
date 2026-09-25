@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -18,12 +21,36 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// by PollRaw and Poll when ReceiverConfig.EndpointURL is not https and
+// ReceiverConfig.AllowPlaintext is false. The status code is 0: no request
+// was made.
+var ErrPlaintextNotAllowed = errors.New("RFC8936: plaintext endpoint not allowed (tx_allow_plaintext is false)")
+
+// isPlaintextEndpoint reports whether raw's scheme is anything other than
+// https. An unparseable URL is not reported here — http.NewRequest reports it
+// on the existing path; this check is only the TLS floor.
+func isPlaintextEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return !strings.EqualFold(u.Scheme, "https")
+}
+
 // PollRaw sends an RFC8936 poll request to the configured endpoint and returns
 // the raw PollResponse without parsing individual SET tokens.
 // Returns the response, the HTTP status code, and any error.
 // On HTTP-level errors (status >= 400), the PollResponse is nil and the error describes the failure.
 func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*PollResponse, int, error) {
 	log := getLogger(config.Logger)
+
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && isPlaintextEndpoint(config.EndpointURL) {
+		log.Error("RFC8936: Refusing plaintext poll endpoint", "url", config.EndpointURL)
+		return nil, 0, fmt.Errorf("%w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+	}
 
 	client := config.HTTPClient
 	if client == nil {

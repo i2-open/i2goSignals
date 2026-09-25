@@ -102,6 +102,15 @@ type TransmitterConfig struct {
 	// otherwise unverifiable TLS cert. Ignored when HTTPClient is supplied.
 	InsecureSkipVerify bool
 
+	// AllowPlaintext permits EndpointURL to use a scheme other than https.
+	// False (the default) is the business-stream TLS floor (ADR-0066 §2 as
+	// amended by ADR 0076): PushSET refuses a plaintext endpoint before any
+	// request is built, whether or not HTTPClient is injected. It carries the
+	// stream's tx_allow_plaintext opt-out and is orthogonal to
+	// InsecureSkipVerify, which only governs certificate verification on an
+	// https dial. Control streams never set it (ADR-0063 §1).
+	AllowPlaintext bool
+
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger
 }

@@ -108,6 +108,7 @@ func TestMLDSARoundTrip_TransmitterToJWKSToEveryReceiver(t *testing.T) {
 		resp, status, err := goSetPoll.Poll(context.Background(), goSetPoll.PollRequest{ReturnImmediately: true},
 			goSetPoll.ReceiverConfig{
 				EndpointURL:       server.URL,
+				AllowPlaintext:    true,
 				JWKS:              jwks,
 				ExpectedIssuer:    rtIssuer,
 				ExpectedAudiences: []string{rtAudience},

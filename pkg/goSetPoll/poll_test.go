@@ -147,7 +147,8 @@ func TestPollRaw_WithEvents(t *testing.T) {
 		ReturnImmediately: true,
 		Acks:              []string{"prev-jti-1"},
 	}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -166,7 +167,8 @@ func TestPollRaw_EmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -184,8 +186,9 @@ func TestPollRaw_AuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	_, _, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL:   server.URL,
-		Authorization: "Bearer my-auth-token",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "Bearer my-auth-token",
 	})
 	assert.NoError(t, err)
 }
@@ -197,7 +200,8 @@ func TestPollRaw_HTTPError401(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -212,7 +216,8 @@ func TestPollRaw_HTTPError403(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -227,7 +232,8 @@ func TestPollRaw_HTTPError503(t *testing.T) {
 	defer server.Close()
 
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, resp)
@@ -237,7 +243,8 @@ func TestPollRaw_HTTPError503(t *testing.T) {
 
 func TestPollRaw_ConnectionError(t *testing.T) {
 	resp, status, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: "http://localhost:1", // unreachable
+		AllowPlaintext: true,
+		EndpointURL:    "http://localhost:1", // unreachable
 	})
 
 	assert.Nil(t, resp)
@@ -265,6 +272,7 @@ func TestPoll_WithValidSETs(t *testing.T) {
 	defer server.Close()
 
 	parsed, status, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
 		JWKS:              jwksForKey(t, iss, key),
 		ExpectedIssuer:    iss,
@@ -307,6 +315,7 @@ func TestPoll_RequireSignature_NoJWKSRejected(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
 		ExpectedIssuer:    iss,
 		ExpectedAudiences: aud,
@@ -334,6 +343,7 @@ func TestPoll_RequireSignature_ValidAccepted(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
 		JWKS:              jwksForKey(t, iss, key),
 		ExpectedIssuer:    iss,
@@ -363,6 +373,7 @@ func TestPoll_RequireSignature_BadSignatureRejected(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
 		JWKS:              jwksForKey(t, iss, otherKey), // wrong public key
 		ExpectedIssuer:    iss,
@@ -395,6 +406,7 @@ func TestPoll_IssuerValidationError(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext: true,
 		EndpointURL:    server.URL,
 		JWKS:           jwksForKey(t, tokenIss, key),
 		ExpectedIssuer: "https://expected-issuer.example.com",
@@ -422,6 +434,7 @@ func TestPoll_AudienceValidationError(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       server.URL,
 		JWKS:              jwksForKey(t, iss, key),
 		ExpectedAudiences: []string{"https://expected-aud.example.com"},
@@ -453,8 +466,9 @@ func TestPoll_MalformedSET(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
-		JWKS:        jwksForKey(t, iss, key),
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		JWKS:           jwksForKey(t, iss, key),
 	})
 
 	require.NoError(t, err)
@@ -482,6 +496,7 @@ func TestPoll_MixedValidAndInvalid(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
+		AllowPlaintext: true,
 		EndpointURL:    server.URL,
 		JWKS:           jwksForKey(t, iss, key),
 		ExpectedIssuer: iss,
@@ -512,7 +527,8 @@ func TestPoll_NoJWKS_AlwaysRejected(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 		// no JWKS, no RequireSignature — the receiver must still refuse.
 	})
 
@@ -532,7 +548,8 @@ func TestPoll_EmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	parsed, _, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	require.NoError(t, err)
@@ -547,7 +564,8 @@ func TestPoll_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	parsed, status, err := Poll(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.Nil(t, parsed)
@@ -566,7 +584,8 @@ func TestPollRaw_SetsJSONHeaders(t *testing.T) {
 	defer server.Close()
 
 	_, _, err := PollRaw(context.Background(), PollRequest{ReturnImmediately: true}, ReceiverConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 	assert.NoError(t, err)
 }

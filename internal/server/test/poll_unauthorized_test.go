@@ -42,9 +42,10 @@ func TestPollUnauthorizedTightLoop(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -113,9 +114,10 @@ func TestPollUnauthorizedRetry(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-retry"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -194,9 +196,10 @@ func TestPollUnauthorizedLimit(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-limit"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -269,9 +272,10 @@ func TestPollUnauthorizedLimitDefault(t *testing.T) {
 	// Create a polling receiver stream
 	streamID := "test-poll-unauthorized-default"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: ts.URL + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    ts.URL + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

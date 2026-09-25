@@ -106,6 +106,15 @@ type StreamConfiguration struct {
 	TxTLSCertificate string `json:"tx_tls_certificate,omitempty" bson:"tx_tls_certificate,omitempty"`
 	// TxTLSSkipVerify if true, skip certificate verification for the transmitter
 	TxTLSSkipVerify bool `json:"tx_tls_skip_verify,omitzero" bson:"tx_tls_skip_verify,omitempty"`
+	// TxAllowPlaintext (goSignals extension) is the per-stream opt-out from the
+	// business-stream TLS floor (ADR-0066 §2 as amended by ADR 0076). When false
+	// (the default) every endpoint this server dials for the stream — push
+	// transmit, poll receive, and an SSTP initiator's endpoint_url — must be
+	// https, both at create/update validation and again at dial time. It is
+	// never derived from an environment variable, and it is orthogonal to
+	// TxTLSSkipVerify, which only relaxes certificate verification on an https
+	// dial. Control streams never set it (ADR-0063 §1).
+	TxAllowPlaintext bool `json:"tx_allow_plaintext,omitzero" bson:"tx_allow_plaintext,omitempty"`
 }
 
 func (sc *StreamConfiguration) DeepCopy() StreamConfiguration {
