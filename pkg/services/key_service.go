@@ -719,11 +719,8 @@ func algLabel(alg string) string {
 // pick up the newer ML-DSA record and sign RS256 with an ML-DSA key.
 func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string, now time.Time) (latest *interfaces.JwkKeyRec, sawInactive bool) {
 	for _, rec := range recs {
-		if len(rec.KeyBytes) == 0 {
-			continue // public/external-only record has no private material to sign with
-		}
-		if rec.Alg != alg {
-			continue // a different signature algorithm's key for the same issuer
+		if !holdsSigningKeyOf(rec, alg) {
+			continue // no private material, or another algorithm's key
 		}
 		if !rec.IsActive() || !rec.ValidAt(now) {
 			sawInactive = true

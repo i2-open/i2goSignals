@@ -2,34 +2,26 @@ package server
 
 import (
 	"crypto"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/services"
 )
 
 // pemBundle is what an application/x-pem-file key upload carries: a private
-// key (RSA, ECDSA P-256 or ML-DSA-65) optionally with its certificate, or an
-// RSA public key or certificate for verification only (#318).
+// key (RSA, ECDSA P-256 or ML-DSA-65) optionally with its certificate, or a
+// public key or certificate of those types for verification only (#318).
 type pemBundle struct {
 	priv crypto.Signer
-	pub  *rsa.PublicKey
+	pub  crypto.PublicKey
 	cert *x509.Certificate
 	alg  string
 }
 
-// validAt reports whether the bundle's certificate, if any, is valid at now
-// (NotAfter exclusive, as for a key's validity period).
-func (b *pemBundle) validAt(now time.Time) bool {
-	return b.cert == nil || (!now.Before(b.cert.NotBefore) && now.Before(b.cert.NotAfter))
-}
-
 // parsePemBundle reads every PEM block of an upload. A private key is a signing
 // key of the algorithm SigningAlgOf names; a certificate with it must certify
-// that key. Without a private key the upload is an RSA public key, from a
+// that key. Without a private key the upload is a verification key, from a
 // PUBLIC KEY block or a certificate.
 func parsePemBundle(body []byte) (*pemBundle, error) {
 	b := &pemBundle{alg: "RS256"}
@@ -85,26 +77,40 @@ func parsePemBundle(body []byte) (*pemBundle, error) {
 				return nil, errors.New("the certificate does not match the private key")
 			}
 		}
-		if rsaKey, ok := b.priv.(*rsa.PrivateKey); ok {
-			b.pub = &rsaKey.PublicKey
-		}
 		return b, nil
 	}
 
-	// Verification only: an RSA public key. Its certificate's dates are not
-	// enforced (#318 leaves verification-only keys without expiry).
-	if rsaKey, ok := pubBlock.(*rsa.PublicKey); ok {
-		b.pub = rsaKey
-	} else if b.cert != nil {
-		if rsaKey, ok := b.cert.PublicKey.(*rsa.PublicKey); ok {
-			b.pub = rsaKey
-		}
+	// Verification only: the PUBLIC KEY block's key, else the certificate's.
+	if pubBlock == nil && b.cert != nil {
+		pubBlock = b.cert.PublicKey
 	}
-	b.cert = nil
-	if b.pub == nil {
+	return verificationBundle(pubBlock)
+}
+
+// parsePkixUpload reads an application/pkix-cert upload: a DER certificate, or
+// a DER PKIX public key, registered for verification only.
+func parsePkixUpload(body []byte) (*pemBundle, error) {
+	if cert, err := x509.ParseCertificate(body); err == nil {
+		return verificationBundle(cert.PublicKey)
+	}
+	if key, err := x509.ParsePKIXPublicKey(body); err == nil {
+		return verificationBundle(key)
+	}
+	return nil, errors.New("Could not parse key or unsupported key type")
+}
+
+// verificationBundle is the upload of pub for verification only: RSA, ECDSA
+// P-256 or ML-DSA-65, any other type being an error naming it. A certificate's
+// dates are not kept (#318 leaves verification-only keys without expiry).
+func verificationBundle(pub crypto.PublicKey) (*pemBundle, error) {
+	if pub == nil {
 		return nil, errors.New("Could not parse key or unsupported key type")
 	}
-	return b, nil
+	alg, err := services.VerificationAlgOf(pub)
+	if err != nil {
+		return nil, err
+	}
+	return &pemBundle{pub: pub, alg: alg}, nil
 }
 
 // parsePemPrivateKey parses a PKCS#8, PKCS#1 (RSA) or SEC 1 (EC) private key.

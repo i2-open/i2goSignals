@@ -40,6 +40,16 @@ func (d *StreamDAOMemory) Update(ctx context.Context, state *model.StreamStateRe
 	return nil
 }
 
+func (d *StreamDAOMemory) UpdateIfStatus(ctx context.Context, state *model.StreamStateRecord, status string) (bool, error) {
+	exists, stored := d.store.SetIf(state.StreamConfiguration.Id, state, func(current *model.StreamStateRecord) bool {
+		return current.Status == status
+	})
+	if !exists {
+		return false, interfaces.ErrNotFound
+	}
+	return stored, nil
+}
+
 func (d *StreamDAOMemory) Delete(ctx context.Context, id string) error {
 	if !d.store.Delete(id) {
 		return interfaces.ErrNotFound

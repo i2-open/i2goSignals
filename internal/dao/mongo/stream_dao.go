@@ -109,6 +109,30 @@ func (d *StreamDAOMongo) Update(ctx context.Context, state *model.StreamStateRec
 	return HandleUpdateResult(res, interfaces.ErrNotFound)
 }
 
+// UpdateIfStatus is Update filtered on the stored status as well as the id, so
+// the replace and the status test are one atomic operation.
+func (d *StreamDAOMongo) UpdateIfStatus(ctx context.Context, state *model.StreamStateRecord, status string) (bool, error) {
+	c, err := d.col()
+	if err != nil {
+		return false, err
+	}
+	res, err := c.ReplaceOne(ctx, bson.M{"_id": state.Id, "status": status}, state)
+	if err != nil {
+		return false, errors.New("stream update error: " + err.Error())
+	}
+	if res.MatchedCount == 1 {
+		return true, nil
+	}
+	n, err := c.CountDocuments(ctx, bson.M{"_id": state.Id})
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, interfaces.ErrNotFound
+	}
+	return false, nil
+}
+
 func (d *StreamDAOMongo) Delete(ctx context.Context, id string) error {
 	c, err := d.col()
 	if err != nil {

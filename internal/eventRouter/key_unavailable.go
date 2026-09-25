@@ -65,13 +65,6 @@ func (r *router) keyUnavailableReason(cfg model.StreamConfiguration) string {
 	return r.streamService.SigningKeyUnavailableReason(r.ctx, cfg.Iss, cfg.SigningAlg)
 }
 
-// keyUnavailableForValidity reports whether cfg's issuer, already found to
-// have no active signing key, has one that is expired or not yet valid: the
-// key-unavailable reason then carries the key's validity detail.
-func (r *router) keyUnavailableForValidity(cfg model.StreamConfiguration) bool {
-	return r.keyUnavailableReason(cfg) != services.NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg)
-}
-
 // takeKeyUnavailablePause pauses a signing poll transmitter or SSTP pair that
 // has no active signing key, or whose key failed to sign (cause), with nothing
 // sent. component prefixes the reason (POLL-SRV, SSTP-SRV, SSTP-CLIENT).
@@ -90,11 +83,22 @@ func (r *router) takeKeyUnavailablePause(stream *model.StreamStateRecord, compon
 // at since.
 func (r *router) takeKeyUnavailablePauseAt(stream *model.StreamStateRecord, component string, cause error, since time.Time) {
 	sc := stream.StreamConfiguration
-	sid := sc.Id
 	reason := component + ": " + r.keyUnavailableReason(sc)
 	if cause != nil {
 		r.dropCachedKey(sc.Iss, sc.SigningAlg)
 	}
+	// Always written, even when this node's copy already shows the pause: that
+	// copy can be stale if another node has resumed the stream meanwhile.
+	r.streamService.UpdateKeyUnavailablePause(r.ctx, sc.Id, reason, since)
+	r.mirrorKeyUnavailablePause(stream, component, cause, reason, since)
+}
+
+// mirrorKeyUnavailablePause mirrors a stored key-unavailable pause onto stream
+// and this node's copy of it, wakes a long poll waiting on it, and logs the one
+// ERROR when this node's copy was not already in the pause.
+func (r *router) mirrorKeyUnavailablePause(stream *model.StreamStateRecord, component string, cause error, reason string, since time.Time) {
+	sc := stream.StreamConfiguration
+	sid := sc.Id
 
 	first := !inKeyUnavailablePause(stream)
 	var pollBuffer interface{ Wakeup() }
@@ -123,9 +127,6 @@ func (r *router) takeKeyUnavailablePauseAt(stream *model.StreamStateRecord, comp
 	}
 	r.mu.Unlock()
 
-	// Always written, even when this node's copy already shows the pause: that
-	// copy can be stale if another node has resumed the stream meanwhile.
-	r.streamService.UpdateKeyUnavailablePause(r.ctx, sid, reason, since)
 	from := stream.Status
 	stream.SetKeyUnavailablePause(reason, since)
 	if pollBuffer != nil {
@@ -268,10 +269,10 @@ func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo ma
 		return answer
 	}
 	_, _, err := r.keyService.GetSigner(r.ctx, cfg.Iss, cfg.SigningAlg)
-	answer := false
+	var validity *services.SigningKeyValidityError
+	answer := errors.As(err, &validity)
 	switch {
-	case errors.Is(err, interfaces.ErrKeyNotFound):
-		answer = r.keyUnavailableForValidity(cfg)
+	case answer, errors.Is(err, interfaces.ErrKeyNotFound):
 	case err != nil && r.ctx.Err() == nil:
 		eventLogger.Warn("Key check: could not check the signing key", "sid", cfg.Id, "error", err)
 	}
@@ -280,15 +281,18 @@ func (r *router) signingKeyOutsideValidity(rec *model.StreamStateRecord, memo ma
 }
 
 // pauseAtKeyCheck takes listed's key-unavailable pause from the background key
-// check, starting at since. The stored record is re-read first and paused only
-// while it is still enabled, so an operator change made meanwhile wins.
+// check, starting at since. The pause is written only while the stored record
+// is still enabled, in one conditional write, so an operator change made
+// meanwhile wins; this node's copies change only when it was written.
 func (r *router) pauseAtKeyCheck(listed *model.StreamStateRecord, since time.Time) {
-	current, err := r.streamService.GetStreamState(r.ctx, listed.StreamConfiguration.Id)
-	if err != nil || current == nil || current.Status != model.StreamStateEnabled {
+	sc := listed.StreamConfiguration
+	component := keyCheckComponent(listed)
+	reason := component + ": " + r.keyUnavailableReason(sc)
+	if !r.streamService.PauseEnabledForKeyUnavailable(r.ctx, sc.Id, reason, since) {
 		return
 	}
-	r.dropCachedKey(listed.StreamConfiguration.Iss, listed.StreamConfiguration.SigningAlg)
-	r.takeKeyUnavailablePauseAt(listed, keyCheckComponent(listed), nil, since)
+	r.dropCachedKey(sc.Iss, sc.SigningAlg)
+	r.mirrorKeyUnavailablePause(listed, component, nil, reason, since)
 }
 
 // nudgePushRunnersKeyCheck asks every push runner on this node to check its

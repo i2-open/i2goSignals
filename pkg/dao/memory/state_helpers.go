@@ -46,6 +46,28 @@ func (sm *StateManager[K, V]) Set(key K, value *V) {
 	}
 }
 
+// SetIf stores a deep copy of value under key only when key exists and cond
+// holds for its current value, all under the lock. It reports whether key
+// existed and whether the value was stored.
+func (sm *StateManager[K, V]) SetIf(key K, value *V, cond func(current *V) bool) (exists bool, stored bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	current, ok := sm.store[key]
+	if !ok {
+		return false, false
+	}
+	if !cond(current) {
+		return true, false
+	}
+	if sm.copyFunc != nil {
+		sm.store[key] = sm.copyFunc(value)
+	} else {
+		sm.store[key] = value
+	}
+	return true, true
+}
+
 // Delete removes a value by key
 func (sm *StateManager[K, V]) Delete(key K) bool {
 	sm.mu.Lock()

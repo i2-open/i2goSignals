@@ -9,6 +9,7 @@ package services
 import (
 	"context"
 	"crypto"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -37,6 +38,9 @@ const (
 	// expiryScanEvery is the most often the background pass reads the key store
 	// looking for keys inside the warning window.
 	expiryScanEvery = time.Hour
+
+	// keyLifetimeForms is the accepted forms an invalid key lifetime error lists.
+	keyLifetimeForms = "want a number of days (180d), a duration (12h), 0 or never"
 )
 
 // ParseKeyLifetime parses a key lifetime or warning window: a whole or decimal
@@ -55,13 +59,13 @@ func ParseKeyLifetime(raw string) (time.Duration, error) {
 	if days, ok := strings.CutSuffix(v, "d"); ok {
 		n, err := strconv.ParseFloat(days, 64)
 		if err != nil {
-			return 0, fmt.Errorf("invalid key lifetime %q: want a number of days (180d), a duration (12h), 0 or never", raw)
+			return 0, fmt.Errorf("invalid key lifetime %q: %s", raw, keyLifetimeForms)
 		}
 		d = time.Duration(n * float64(24*time.Hour))
 	} else {
 		var err error
 		if d, err = time.ParseDuration(v); err != nil {
-			return 0, fmt.Errorf("invalid key lifetime %q: want a number of days (180d), a duration (12h), 0 or never", raw)
+			return 0, fmt.Errorf("invalid key lifetime %q: %s", raw, keyLifetimeForms)
 		}
 	}
 	if d < 0 {
@@ -175,6 +179,97 @@ func (s *KeyService) generatedValidity(keyName string, createdAt time.Time, opts
 	return keyValidity{notAfter: createdAt.Add(lifetime)}
 }
 
+// uploadedValidity is the period of an uploaded signing key: its
+// certificate's, else a generated period from now. The token issuer's key is
+// exempt, as generatedValidity makes it, even when a certificate came with it.
+func (s *KeyService) uploadedValidity(keyName string, cert *x509.Certificate, opts []KeyOption) keyValidity {
+	if cert == nil || keyName == s.tokenIssuer {
+		return s.generatedValidity(keyName, s.mintedAt(), opts)
+	}
+	return keyValidity{notBefore: cert.NotBefore.UTC(), notAfter: cert.NotAfter.UTC()}
+}
+
+// UploadedKeySignsNow reports whether a private key uploaded for keyName with
+// cert (nil for none) would be valid for signing at the service clock: the
+// question a key replace's stranding guard asks before the key is stored.
+func (s *KeyService) UploadedKeySignsNow(keyName string, cert *x509.Certificate) bool {
+	v := s.uploadedValidity(keyName, cert, nil)
+	rec := interfaces.JwkKeyRec{NotBefore: v.notBefore, NotAfter: v.notAfter}
+	return rec.ValidAt(s.clock())
+}
+
+// holdsSigningKeyOf reports whether rec carries private key material of the
+// stored algorithm storedAlg ("" for RSA).
+func holdsSigningKeyOf(rec *interfaces.JwkKeyRec, storedAlg string) bool {
+	return len(rec.KeyBytes) > 0 && rec.Alg == storedAlg
+}
+
+// isSigningCandidate reports whether rec could sign storedAlg as far as its
+// lifecycle status goes: it holds the key and is neither suspended nor
+// revoked. Its validity period is left to the caller.
+func isSigningCandidate(rec *interfaces.JwkKeyRec, storedAlg string) bool {
+	return holdsSigningKeyOf(rec, storedAlg) && rec.IsActive()
+}
+
+// SigningKeyValidityError is the ErrKeyNotFound of an issuer whose newest
+// otherwise-active signing key of an algorithm is outside its validity period
+// (#318): it names that key and the time it expired or becomes valid. It
+// unwraps to ErrKeyNotFound, so a caller that only asks whether there is a key
+// needs no change.
+type SigningKeyValidityError struct {
+	Kid string
+	// NotYetValid is true for a key whose NotBefore is still ahead (At), false
+	// for an expired key (At is its NotAfter).
+	NotYetValid bool
+	At          time.Time
+}
+
+func (e *SigningKeyValidityError) Error() string {
+	if e.NotYetValid {
+		return "the signing key " + e.Kid + " is not valid until " + e.At.UTC().Format(time.RFC3339)
+	}
+	return "the signing key " + e.Kid + " expired at " + e.At.UTC().Format(time.RFC3339)
+}
+
+func (e *SigningKeyValidityError) Unwrap() error { return interfaces.ErrKeyNotFound }
+
+// validityCause is the error of an issuer with no active signing key of
+// storedAlg at now: a SigningKeyValidityError naming the newest candidate
+// outside its validity period, else ErrKeyNotFound.
+func validityCause(recs []*interfaces.JwkKeyRec, storedAlg string, now time.Time) error {
+	var newest *interfaces.JwkKeyRec
+	for _, rec := range recs {
+		if isSigningCandidate(rec, storedAlg) && !rec.ValidAt(now) && rec.NewerThan(newest) {
+			newest = rec
+		}
+	}
+	switch {
+	case newest == nil:
+		return interfaces.ErrKeyNotFound
+	case !newest.NotBefore.IsZero() && now.Before(newest.NotBefore):
+		return &SigningKeyValidityError{Kid: newest.Kid, NotYetValid: true, At: newest.NotBefore}
+	default:
+		return &SigningKeyValidityError{Kid: newest.Kid, At: newest.NotAfter}
+	}
+}
+
+// RequireSigningKey is the save-time signing key check (#308): issuer must have
+// an active, parseable signing key for alg at the service clock. A missing key
+// is an error wrapping ErrKeyNotFound, a SigningKeyValidityError when a
+// validity period is why; a key store that could not answer is returned as is.
+// A key inside the expiry warning window passes, with the expiry WARN (#318).
+func (s *KeyService) RequireSigningKey(ctx context.Context, issuer string, alg string) error {
+	rec, _, err := s.signingRecFor(ctx, issuer, alg)
+	if err != nil {
+		return err
+	}
+	if _, _, err := parseSigningRec(rec); err != nil {
+		return err
+	}
+	s.warnIfExpiringSoon(rec, s.clock())
+	return nil
+}
+
 // GetSignerUntil is GetSigner plus the instant its answer stops holding: the
 // selected key's NotAfter, or a newer key's NotBefore when that comes first. It
 // is the zero time when no validity bound can change the selection. The event
@@ -193,7 +288,8 @@ func (s *KeyService) GetSignerUntil(ctx context.Context, issuer string, alg stri
 }
 
 // signingRecFor resolves issuer's active signing record for signature algorithm
-// alg at the service clock, with the instant the selection stops holding.
+// alg at the service clock, with the instant the selection stops holding. With
+// no active record the error is validityCause's.
 func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg string) (*interfaces.JwkKeyRec, time.Time, error) {
 	storedAlg, err := storedAlgFor(alg)
 	if err != nil {
@@ -215,7 +311,7 @@ func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg strin
 				"issuer", issuer, "alg", algLabel(storedAlg),
 				"remedy", "rotate a new key or reactivate a suspended key")
 		}
-		return nil, time.Time{}, interfaces.ErrKeyNotFound
+		return nil, time.Time{}, validityCause(recs, storedAlg, now)
 	}
 	return latest, selectionUntil(recs, latest, storedAlg, now), nil
 }
@@ -226,7 +322,7 @@ func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg strin
 func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec, storedAlg string, now time.Time) time.Time {
 	until := selected.NotAfter
 	for _, rec := range recs {
-		if len(rec.KeyBytes) == 0 || rec.Alg != storedAlg || !rec.IsActive() {
+		if !isSigningCandidate(rec, storedAlg) {
 			continue
 		}
 		if rec.NotBefore.After(now) && rec.NewerThan(selected) && (until.IsZero() || rec.NotBefore.Before(until)) {
@@ -236,50 +332,24 @@ func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec
 	return until
 }
 
-// signingKeyUnavailableDetail says why issuer has no signing key of alg when a
-// validity period is the reason, naming the newest otherwise-active key: "the
-// signing key <kid> expired at <time>" or "... is not valid until <time>", ""
-// when there is none.
-func (s *KeyService) signingKeyUnavailableDetail(ctx context.Context, issuer string, alg string) string {
-	storedAlg, err := storedAlgFor(alg)
-	if err != nil {
-		return ""
-	}
-	recs, err := s.keyDAO.FindByKeyName(ctx, issuer)
-	if err != nil {
-		return ""
-	}
-	now := s.clock()
-	var newest *interfaces.JwkKeyRec
-	for _, rec := range recs {
-		if len(rec.KeyBytes) == 0 || rec.Alg != storedAlg || !rec.IsActive() || rec.ValidAt(now) {
-			continue
-		}
-		if rec.NewerThan(newest) {
-			newest = rec
-		}
-	}
-	switch {
-	case newest == nil:
-		return ""
-	case !newest.NotBefore.IsZero() && now.Before(newest.NotBefore):
-		return "the signing key " + newest.Kid + " is not valid until " + newest.NotBefore.UTC().Format(time.RFC3339)
-	default:
-		return "the signing key " + newest.Kid + " expired at " + newest.NotAfter.UTC().Format(time.RFC3339)
-	}
-}
-
-// warnIfExpiringSoon logs the expiry WARN for rec when its NotAfter falls inside
-// the warning window, and reports whether it did.
-func (s *KeyService) warnIfExpiringSoon(rec *interfaces.JwkKeyRec, now time.Time) bool {
+// expiresSoon reports whether rec, valid at now, has its NotAfter inside the
+// expiry warning window, and how long it has left.
+func (s *KeyService) expiresSoon(rec *interfaces.JwkKeyRec, now time.Time) (time.Duration, bool) {
 	if rec == nil || rec.NotAfter.IsZero() || !rec.ValidAt(now) {
-		return false
+		return 0, false
 	}
 	s.validityMu.Lock()
 	window := s.expiryWarnWindow
 	s.validityMu.Unlock()
 	left := rec.NotAfter.Sub(now)
-	if window <= 0 || left > window {
+	return left, window > 0 && left <= window
+}
+
+// warnIfExpiringSoon logs the expiry WARN for rec when its NotAfter falls inside
+// the warning window, and reports whether it did.
+func (s *KeyService) warnIfExpiringSoon(rec *interfaces.JwkKeyRec, now time.Time) bool {
+	left, soon := s.expiresSoon(rec, now)
+	if !soon {
 		return false
 	}
 	ksLog.Warn("Signing key expires soon",
@@ -290,10 +360,12 @@ func (s *KeyService) warnIfExpiringSoon(rec *interfaces.JwkKeyRec, now time.Time
 	return true
 }
 
-// WarnExpiringSigningKeys is the background expiry check: it WARNs for every
-// signing key inside the warning window, at most once a day per key, and reads
-// the key store at most once an hour. The event router's background key check
-// calls it on every pass.
+// WarnExpiringSigningKeys is the background expiry check: for every issuer and
+// algorithm it WARNs about the key signing selection picks when that key is
+// inside the warning window, at most once a day per key, and reads the key
+// store at most once an hour. A replaced key that no longer signs is not
+// warned about. The event router's background key check calls it on every
+// pass. The once-a-day memory keeps only keys still in the window.
 func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 	now := s.clock()
 	s.validityMu.Lock()
@@ -306,19 +378,25 @@ func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 
 	names, err := s.keyDAO.ListKeyNames(ctx)
 	if err != nil {
-		ksLog.Debug("Expiry check could not list key names", "error", err)
+		ksLog.Warn("Expiry check could not list key names", "error", err)
 		return
 	}
+	inWindow := map[string]bool{}
+	complete := true
 	for _, name := range names {
 		recs, err := s.keyDAO.FindByKeyName(ctx, name)
 		if err != nil {
+			ksLog.Warn("Expiry check could not read an issuer's keys", "issuer", name, "error", err)
+			complete = false
 			continue
 		}
-		for _, rec := range recs {
-			if len(rec.KeyBytes) == 0 || !rec.IsActive() {
+		for _, storedAlg := range signingAlgsOf(recs) {
+			rec, _ := latestActiveSigningRec(recs, storedAlg, now)
+			if _, soon := s.expiresSoon(rec, now); !soon {
 				continue
 			}
 			kid := recKid(rec)
+			inWindow[kid] = true
 			s.validityMu.Lock()
 			last, seen := s.expiryWarnedAt[kid]
 			s.validityMu.Unlock()
@@ -332,15 +410,34 @@ func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 			}
 		}
 	}
+	if !complete {
+		return // an unread issuer's keys may still be in the window
+	}
+	s.validityMu.Lock()
+	for kid := range s.expiryWarnedAt {
+		if !inWindow[kid] {
+			delete(s.expiryWarnedAt, kid)
+		}
+	}
+	s.validityMu.Unlock()
 }
 
-// statesAt re-derives each KeyState's status at now. Suspended and revoked
-// stand; otherwise the validity period decides between active, expired and
-// not-yet-valid.
+// signingAlgsOf lists the stored algorithms recs hold signing keys of.
+func signingAlgsOf(recs []*interfaces.JwkKeyRec) []string {
+	var algs []string
+	seen := map[string]bool{}
+	for _, rec := range recs {
+		if len(rec.KeyBytes) > 0 && !seen[rec.Alg] {
+			seen[rec.Alg] = true
+			algs = append(algs, rec.Alg)
+		}
+	}
+	return algs
+}
+
+// statesAt re-derives each KeyState's status at now.
 func statesAt(states []interfaces.KeyState, now time.Time) {
 	for i := range states {
-		st := &states[i]
-		rec := interfaces.JwkKeyRec{SuspendedAt: st.SuspendedAt, RevokedAt: st.RevokedAt, NotBefore: st.NotBefore, NotAfter: st.NotAfter}
-		st.Status = rec.StatusAt(now)
+		states[i].Status = states[i].StatusAt(now)
 	}
 }

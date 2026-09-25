@@ -31,7 +31,7 @@ could not be uploaded.
    behaviour and nothing is backfilled. `NotAfter` is exclusive, as in X.509.
 2. **Where the period comes from.**
     - A private key uploaded with its certificate takes the certificate's
-      dates. They win over any lifetime.
+      dates. They win over any lifetime, except for the token issuer (below).
     - A generated key (create, rotate) and a cert-less private-key upload are
       valid from creation for a lifetime: the `lifetime` query parameter
       (`90d`, a Go duration, or `0`/`never`), else
@@ -41,8 +41,11 @@ could not be uploaded.
       sees a brand-new key as not yet valid.
     - Verification-only keys (public keys, certificates without a private key,
       `jwks_uri` keys) have no enforced expiry.
-    - The token issuer's key and the keys the server provisions itself at
-      startup carry no lifetime: their expiry would lock out administration or
+    - The token issuer's key is exempt from validity: whether generated or
+      uploaded, and even when uploaded with a certificate, it is stored with no
+      `NotBefore` / `NotAfter` and keeps signing after the certificate's
+      `NotAfter`. Its expiry would lock out administration. The keys the server
+      provisions itself at startup likewise carry no lifetime, so they never
       strand streams with nobody having asked for it.
 3. **Validity is derived on every read against a clock**, never stored as a
    status. The listing reports `expired` or `not-yet-valid` with
@@ -68,14 +71,19 @@ could not be uploaded.
    expired or not-yet-valid key as unavailable.
 5. **Expiry is warned of in advance.** Inside `I2SIG_ISSUER_KEY_EXPIRY_WARNING`
    (default `30d`) the background key check WARNs once a day per key, naming
-   the issuer, algorithm, kid, expiry and days remaining; a stream save inside
+   the issuer, algorithm, kid, expiry and days remaining. It warns only of the
+   key signing selects for each issuer and algorithm, not of an older key a
+   newer one has replaced; a stream save inside
    the window succeeds and WARNs.
 6. **The JWKS keeps expired public keys**, so SETs signed before the expiry
    still verify. Only revocation removes a key from the JWKS (ADR 0028).
 7. **PEM uploads read every block.** A private key (PKCS#8, PKCS#1 or SEC 1)
    of RSA, ECDSA P-256 or ML-DSA-65, plus optionally its certificate, loads a
    signing key of RS256, ES256 or ML-DSA-65. A certificate for another key is a
-   400; any other key type is a 400 naming the type.
+   400; any other key type is a 400 naming the type. A public key or
+   certificate alone, as PEM or as `application/pkix-cert` DER, loads a
+   verification-only key of the same three types; any other type is a 400
+   naming it.
 
 ## Consequences
 

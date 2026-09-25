@@ -396,14 +396,19 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	// The uploaded key's algorithm scopes the conflict check and a replace, which
 	// leave the keyName's keys of other algorithms in place (i2goSignals#314).
-	// Public keys and JWKS URIs are RSA (RS256); a PEM private key may also be
-	// ES256 or ML-DSA-65, and may come with its certificate (#318), so the PEM is
-	// read first.
+	// JWKS URIs and PKCS#1 public keys are RSA (RS256); a PEM key or a
+	// certificate may also be ES256 or ML-DSA-65, and a PEM private key may come
+	// with its certificate (#318), so those are read first.
 	uploadAlg := "RS256"
 	var bundle *pemBundle
-	if contentType == "application/x-pem-file" {
+	switch contentType {
+	case "application/x-pem-file", "application/pkix-cert":
+		parse := parsePemBundle
+		if contentType == "application/pkix-cert" {
+			parse = parsePkixUpload
+		}
 		var err error
-		if bundle, err = parsePemBundle(body); err != nil {
+		if bundle, err = parse(body); err != nil {
 			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -432,7 +437,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 	// *rsa.PrivateKey boxed into a crypto.Signer would read as present at
 	// AddKey's "privateKey != nil" check and panic on Public().
 	var priv crypto.Signer
-	var pub *rsa.PublicKey
+	var pub crypto.PublicKey
 
 	switch contentType {
 	case "application/json":
@@ -474,26 +479,11 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		writer.WriteHeader(http.StatusOK)
 		return
 
-	case "application/x-pem-file":
+	case "application/x-pem-file", "application/pkix-cert":
 		if bundle.priv != nil {
 			priv = bundle.priv
-		}
-		pub = bundle.pub
-
-	case "application/pkix-cert":
-		// Try parsing as certificate first
-		cert, err := x509.ParseCertificate(body)
-		if err == nil {
-			if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-				pub = rsaKey
-			}
 		} else {
-			// Try parsing as PKIX public key
-			if key, err := x509.ParsePKIXPublicKey(body); err == nil {
-				if rsaKey, ok := key.(*rsa.PublicKey); ok {
-					pub = rsaKey
-				}
-			}
+			pub = bundle.pub
 		}
 
 	case "application/pkcs7-mime":
@@ -515,7 +505,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		// only when it carries a private half whose certificate, if any, is valid
 		// now (#318).
 		change := services.KeyChange{Retires: services.RetireAlg(uploadAlg)}
-		if priv != nil && bundle.validAt(time.Now()) {
+		if priv != nil && sa.GetKeyService().UploadedKeySignsNow(keyName, bundle.cert) {
 			change.Adds = []string{uploadAlg}
 		}
 		if refuseStrandingKeyChange(sa, writer, request, keyName, "replacing", change) {
@@ -545,7 +535,7 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 		// certificate's, else from now for the lifetime (#318).
 		kid, err = sa.GetKeyService().StoreUploadedSigningKey(ctx, keyName, use, kid, priv, bundle.cert, authCtx.ProjectId, lifetime...)
 	} else {
-		err = sa.GetKeyService().AddKey(ctx, keyName, use, kid, nil, pub, authCtx.ProjectId)
+		kid, err = sa.GetKeyService().AddVerificationKey(ctx, keyName, use, kid, pub, authCtx.ProjectId)
 	}
 	// A load, rotate or replace changes the issuer's signing keys; a replace's
 	// delete has run even when the add fails (#313).

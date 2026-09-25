@@ -130,20 +130,14 @@ func (c *signingKeyCache) signer(streamID, issuer, alg string, load func() (cryp
 	case err == nil:
 		if current {
 			entry.key, entry.kid, entry.validUntil = key, kid, until
-			entry.expires = c.now().Add(c.ttl)
-			if !until.IsZero() && until.Before(entry.expires) {
-				entry.expires = until
-			}
+			c.renew(entry)
 		}
 	case entry.key != nil && entry.servable(c.now()) && !errors.Is(err, interfaces.ErrKeyNotFound):
 		eventLogger.Warn("Could not re-read the signing key; signing with the current key until the next try",
 			"streamID", streamID, "issuer", issuer, "alg", alg, "retryIn", c.ttl, "error", err)
 		key, kid = entry.key, entry.kid
 		if current {
-			entry.expires = c.now().Add(c.ttl)
-			if !entry.validUntil.IsZero() && entry.validUntil.Before(entry.expires) {
-				entry.expires = entry.validUntil
-			}
+			c.renew(entry)
 		}
 	default:
 		// WARN only when this read takes a cached key away or the store failed.
@@ -191,4 +185,13 @@ func (c *signingKeyCache) forget(issuer, alg string) {
 	c.mu.Lock()
 	delete(c.entries, signingCacheKey(issuer, alg))
 	c.mu.Unlock()
+}
+
+// renew sets entry to expire one TTL from now, or at its key's validUntil when
+// that comes first (#318). The caller must hold c.mu.
+func (c *signingKeyCache) renew(entry *signingKeyEntry) {
+	entry.expires = c.now().Add(c.ttl)
+	if !entry.validUntil.IsZero() && entry.validUntil.Before(entry.expires) {
+		entry.expires = entry.validUntil
+	}
 }

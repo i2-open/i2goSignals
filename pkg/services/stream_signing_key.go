@@ -24,12 +24,21 @@ func NoActiveSigningKeyReason(issuer, signingAlg string) string {
 // stream status, need the time to tell an expiry from a future key. It is the
 // save-time rejection and every key-unavailable pause's reason.
 func (s *StreamService) SigningKeyUnavailableReason(ctx context.Context, issuer, signingAlg string) string {
-	reason := NoActiveSigningKeyReason(issuer, signingAlg)
 	if s == nil || s.keyService == nil {
-		return reason
+		return NoActiveSigningKeyReason(issuer, signingAlg)
 	}
-	if detail := s.keyService.signingKeyUnavailableDetail(ctx, issuer, signingAlg); detail != "" {
-		reason += "; " + detail
+	_, _, err := s.keyService.GetSigner(ctx, issuer, signingAlg)
+	return SigningKeyUnavailableReasonFor(issuer, signingAlg, err)
+}
+
+// SigningKeyUnavailableReasonFor is SigningKeyUnavailableReason built from the
+// error a signing key lookup already returned, with no key store read: the
+// validity detail is there when err is a SigningKeyValidityError.
+func SigningKeyUnavailableReasonFor(issuer, signingAlg string, err error) string {
+	reason := NoActiveSigningKeyReason(issuer, signingAlg)
+	var validity *SigningKeyValidityError
+	if errors.As(err, &validity) {
+		reason += "; " + validity.Error()
 	}
 	return reason
 }
@@ -58,28 +67,23 @@ func signingTransmitterConfig(rec *model.StreamStateRecord) *model.StreamConfigu
 }
 
 // requireActiveKeyFor refuses a signing transmitter configuration whose iss and
-// signing_alg have no active signing key. The test is KeyService.GetSigner,
-// which never selects a suspended or revoked key. A missing key is the caller's
-// to fix, so it wraps ErrInvalidRequest (400); a key store that could not answer
-// is not, and is returned as is.
+// signing_alg have no active signing key (KeyService.RequireSigningKey, which
+// never selects a suspended, revoked, expired or not-yet-valid key). A missing
+// key is the caller's to fix, so it wraps ErrInvalidRequest (400); a key store
+// that could not answer is not, and is returned as is.
 func (s *StreamService) requireActiveKeyFor(ctx context.Context, cfg *model.StreamConfiguration) error {
 	if cfg == nil || s.keyService == nil {
 		return nil
 	}
-	rec, _, err := s.keyService.signingRecFor(ctx, cfg.Iss, cfg.SigningAlg)
-	if err == nil {
-		_, _, err = parseSigningRec(rec)
-	}
-	if err != nil {
-		if errors.Is(err, interfaces.ErrKeyNotFound) {
-			return fmt.Errorf("%w: %s", ErrInvalidRequest, s.SigningKeyUnavailableReason(ctx, cfg.Iss, cfg.SigningAlg))
-		}
+	err := s.keyService.RequireSigningKey(ctx, cfg.Iss, cfg.SigningAlg)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, interfaces.ErrKeyNotFound):
+		return fmt.Errorf("%w: %s", ErrInvalidRequest, SigningKeyUnavailableReasonFor(cfg.Iss, cfg.SigningAlg, err))
+	default:
 		return fmt.Errorf("checking the signing key for issuer %s: %w", cfg.Iss, err)
 	}
-	// Saving or enabling a stream whose key expires soon succeeds, with the
-	// same WARN the background check logs (#318).
-	s.keyService.warnIfExpiringSoon(rec, s.keyService.clock())
-	return nil
 }
 
 // RequireActiveSigningKey is the save-time and re-enable check of #308: when rec

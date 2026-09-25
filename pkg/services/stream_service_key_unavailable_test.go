@@ -103,3 +103,32 @@ func TestUpdateKeyUnavailablePause_SstpPair(t *testing.T) {
 	h.svc.mu.Unlock()
 	assert.Nil(t, cached, "and on the receiver cache copy")
 }
+
+// TestPauseEnabledForKeyUnavailable (#318): the background key check's pause is
+// written only while the stored stream is still enabled, in one conditional
+// write, so an operator's disable landing after the check listed the stream
+// stands.
+func TestPauseEnabledForKeyUnavailable(t *testing.T) {
+	h := newRetryHarness(t)
+	ctx := context.Background()
+	since := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	enabled := newReceiverFixture(t, model.DeliveryPoll, model.RouteModePublish, "poll-enabled")
+	require.NoError(t, h.streamDAO.Create(ctx, enabled))
+	assert.True(t, h.svc.PauseEnabledForKeyUnavailable(ctx, enabled.StreamConfiguration.Id, "POLL-SRV: expired", since))
+	stored, err := h.svc.GetStreamState(ctx, enabled.StreamConfiguration.Id)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStatePause, stored.Status)
+	require.NotNil(t, stored.KeyUnavailableSince)
+	assert.True(t, stored.KeyUnavailableSince.Equal(since))
+
+	disabled := newReceiverFixture(t, model.DeliveryPoll, model.RouteModePublish, "poll-disabled")
+	require.NoError(t, h.streamDAO.Create(ctx, disabled))
+	h.svc.UpdateStreamStatus(ctx, disabled.StreamConfiguration.Id, model.StreamStateDisable, "operator")
+	assert.False(t, h.svc.PauseEnabledForKeyUnavailable(ctx, disabled.StreamConfiguration.Id, "POLL-SRV: expired", since))
+	stored, err = h.svc.GetStreamState(ctx, disabled.StreamConfiguration.Id)
+	require.NoError(t, err)
+	assert.Equal(t, model.StreamStateDisable, stored.Status, "the operator's disable stands")
+	assert.Equal(t, "operator", stored.ErrorMsg)
+	assert.Nil(t, stored.KeyUnavailableSince)
+}

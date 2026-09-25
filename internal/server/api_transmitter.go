@@ -9,7 +9,6 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -146,9 +145,10 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 
 	if status == eventRouter.PollKeyUnavailableStatus {
 		// The stream has no active signing key: nothing was sent, its events
-		// stay queued and it is now paused (#312). Say which key is missing.
+		// stay queued and it is now paused (#312). Say which key is missing,
+		// and when it expired or becomes valid if that is why (#318).
 		cfg := streamState.StreamConfiguration
-		http.Error(w, services.NoActiveSigningKeyReason(cfg.Iss, cfg.SigningAlg), status)
+		http.Error(w, sa.GetStreamService().SigningKeyUnavailableReason(r.Context(), cfg.Iss, cfg.SigningAlg), status)
 		return
 	}
 	if status != http.StatusOK {

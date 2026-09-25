@@ -2013,7 +2013,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if !signing || runner.stopped() {
 				continue
 			}
-			if key, _ := r.pushSigningKey(stream); key == nil && r.keyUnavailableForValidity(stream.StreamConfiguration) {
+			if key, _ := r.pushSigningKey(stream); key == nil && r.signingKeyOutsideValidity(stream, map[string]bool{}) {
 				switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
 				case RecoveryOutcomeResumed:
 					continue

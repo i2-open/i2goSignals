@@ -223,3 +223,64 @@ func (s *KeyAlgHandlerSuite) TestKeyLoadJwksUriFetchFailureIs400() {
 	s.Equal(http.StatusBadRequest, rr.Code, rr.Body.String())
 	s.Empty(s.keyStates(issuer))
 }
+
+// TestKeyLoadCertificateOnlyAcceptsEveryVerificationKeyType: a certificate
+// uploaded without its private key registers its public key for verification,
+// whether RSA, EC P-256 or ML-DSA-65, as PEM or as application/pkix-cert DER.
+// The key is published in the issuer's JWKS and never signs.
+func (s *KeyAlgHandlerSuite) TestKeyLoadCertificateOnlyAcceptsEveryVerificationKeyType() {
+	admin := s.adminToken()
+	nb := time.Now().Add(-time.Hour)
+	na := nb.Add(24 * time.Hour)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	s.Require().NoError(err)
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s.Require().NoError(err)
+	pqKey, err := mldsa.GenerateKey(mldsa.MLDSA65())
+	s.Require().NoError(err)
+
+	cases := map[string]struct {
+		key crypto.Signer
+		kty string
+	}{
+		"RS256":     {rsaKey, `"kty":"RSA"`},
+		"ES256":     {ecKey, `"kty":"EC"`},
+		"ML-DSA-65": {pqKey, `"kty":"AKP"`},
+	}
+	for name, c := range cases {
+		certPEM := certFor(s.T(), c.key.Public(), nb, na)
+		block, _ := pem.Decode(certPEM)
+		for contentType, body := range map[string][]byte{"application/x-pem-file": certPEM, "application/pkix-cert": block.Bytes} {
+			issuer := "https://cert-only-" + name + "-" + contentType[len("application/"):] + ".example"
+			rr := s.post(issuer, admin, "", body, contentType)
+			s.Require().Equal(http.StatusOK, rr.Code, "%s %s: %s", name, contentType, rr.Body.String())
+
+			s.Len(s.keyStates(issuer), 1, "%s %s", name, contentType)
+			jwks := s.app.KeyService.GetPublicJWKS(context.Background(), issuer)
+			s.Require().NotNil(jwks, "%s %s", name, contentType)
+			s.Contains(string(*jwks), c.kty, "%s %s: published for verification", name, contentType)
+			_, _, err := s.app.KeyService.GetSigner(context.Background(), issuer, name)
+			s.ErrorIs(err, interfaces.ErrKeyNotFound, "%s %s: verification only", name, contentType)
+		}
+	}
+}
+
+// TestKeyLoadCertificateOnlyUnsupportedKeyTypeIs400NamingIt: a certificate for
+// an Ed25519 key, uploaded without its private key, is refused with a 400 naming
+// the type, and nothing is stored.
+func (s *KeyAlgHandlerSuite) TestKeyLoadCertificateOnlyUnsupportedKeyTypeIs400NamingIt() {
+	admin := s.adminToken()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	s.Require().NoError(err)
+	certPEM := certFor(s.T(), pub, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	block, _ := pem.Decode(certPEM)
+
+	for contentType, body := range map[string][]byte{"application/x-pem-file": certPEM, "application/pkix-cert": block.Bytes} {
+		issuer := "https://cert-only-ed25519-" + contentType[len("application/"):] + ".example"
+		rr := s.post(issuer, admin, "", body, contentType)
+		s.Equal(http.StatusBadRequest, rr.Code, contentType)
+		s.Contains(rr.Body.String(), "Ed25519", contentType)
+		s.Empty(s.keyStates(issuer), "%s: nothing is stored", contentType)
+	}
+}
