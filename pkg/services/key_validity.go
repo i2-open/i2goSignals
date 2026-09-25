@@ -1,7 +1,7 @@
 package services
 
 // Signing-key validity periods (i2goSignals#318, ADR 0042). A key signs only
-// inside [NotBefore, NotAfter). Validity is derived against the KeyService clock
+// inside [NotBefore, NotAfter], both bounds inclusive as in RFC 5280. Validity is derived against the KeyService clock
 // on every read, never stored as a status, so an expired key leaves signing
 // selection the moment its NotAfter passes, and a newer key that is not yet
 // valid takes over at its NotBefore, with no operator action and no job.
@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -58,8 +59,13 @@ func ParseKeyLifetime(raw string) (time.Duration, error) {
 	var d time.Duration
 	if days, ok := strings.CutSuffix(v, "d"); ok {
 		n, err := strconv.ParseFloat(days, 64)
-		if err != nil {
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 			return 0, fmt.Errorf("invalid key lifetime %q: %s", raw, keyLifetimeForms)
+		}
+		// Past MaxInt64 nanoseconds the Duration conversion is undefined
+		// (it wraps on some platforms), so a huge day count is refused here.
+		if n > float64(math.MaxInt64)/float64(24*time.Hour) {
+			return 0, fmt.Errorf("invalid key lifetime %q: too long", raw)
 		}
 		d = time.Duration(n * float64(24*time.Hour))
 	} else {
@@ -106,13 +112,6 @@ func WithLifetime(d time.Duration) KeyOption {
 	}
 }
 
-// keyValidity is the validity period stamped on a minted record. The zero value
-// is the open period of a key that never expires.
-type keyValidity struct {
-	notBefore time.Time
-	notAfter  time.Time
-}
-
 // SetClock replaces the clock validity is derived against. Tests inject one; a
 // nil now restores time.Now.
 func (s *KeyService) SetClock(now func() time.Time) {
@@ -156,12 +155,13 @@ func (s *KeyService) mintedAt() time.Time {
 }
 
 // generatedValidity is the period of a key minted at createdAt without a
-// certificate: createdAt plus the request's lifetime, or the global one. The
-// token issuer's key never expires: it signs the server's own auth tokens, and
-// an expiry there would lock administrators out.
-func (s *KeyService) generatedValidity(keyName string, createdAt time.Time, opts []KeyOption) keyValidity {
+// certificate: from createdAt for the request's lifetime, or the global one; a
+// zero lifetime ("never") leaves NotAfter empty. The token issuer's key is
+// exempt from the lifetime: it signs the server's own auth tokens, and an
+// expiry there would lock administrators out.
+func (s *KeyService) generatedValidity(keyName string, createdAt time.Time, opts []KeyOption) interfaces.ValidityPeriod {
 	if keyName == s.tokenIssuer {
-		return keyValidity{}
+		return interfaces.ValidityPeriod{NotBefore: createdAt}
 	}
 	var o keyOptions
 	for _, opt := range opts {
@@ -174,28 +174,26 @@ func (s *KeyService) generatedValidity(keyName string, createdAt time.Time, opts
 		lifetime = o.lifetime
 	}
 	if lifetime <= 0 {
-		return keyValidity{}
+		return interfaces.ValidityPeriod{NotBefore: createdAt}
 	}
-	return keyValidity{notAfter: createdAt.Add(lifetime)}
+	return interfaces.ValidityPeriod{NotBefore: createdAt, NotAfter: createdAt.Add(lifetime)}
 }
 
 // uploadedValidity is the period of an uploaded signing key: its
-// certificate's, else a generated period from now. The token issuer's key is
-// exempt, as generatedValidity makes it, even when a certificate came with it.
-func (s *KeyService) uploadedValidity(keyName string, cert *x509.Certificate, opts []KeyOption) keyValidity {
-	if cert == nil || keyName == s.tokenIssuer {
+// certificate's, else a generated period from now. The certificate wins for the
+// token issuer too; that key is exempt only from the configured lifetime.
+func (s *KeyService) uploadedValidity(keyName string, cert *x509.Certificate, opts []KeyOption) interfaces.ValidityPeriod {
+	if cert == nil {
 		return s.generatedValidity(keyName, s.mintedAt(), opts)
 	}
-	return keyValidity{notBefore: cert.NotBefore.UTC(), notAfter: cert.NotAfter.UTC()}
+	return interfaces.ValidityPeriod{NotBefore: cert.NotBefore.UTC(), NotAfter: cert.NotAfter.UTC()}
 }
 
 // UploadedKeySignsNow reports whether a private key uploaded for keyName with
 // cert (nil for none) would be valid for signing at the service clock: the
 // question a key replace's stranding guard asks before the key is stored.
 func (s *KeyService) UploadedKeySignsNow(keyName string, cert *x509.Certificate) bool {
-	v := s.uploadedValidity(keyName, cert, nil)
-	rec := interfaces.JwkKeyRec{NotBefore: v.notBefore, NotAfter: v.notAfter}
-	return rec.ValidAt(s.clock())
+	return s.uploadedValidity(keyName, cert, nil).ValidAt(s.clock())
 }
 
 // holdsSigningKeyOf reports whether rec carries private key material of the
@@ -246,7 +244,7 @@ func validityCause(recs []*interfaces.JwkKeyRec, storedAlg string, now time.Time
 	switch {
 	case newest == nil:
 		return interfaces.ErrKeyNotFound
-	case !newest.NotBefore.IsZero() && now.Before(newest.NotBefore):
+	case newest.Validity().NotYetValidAt(now):
 		return &SigningKeyValidityError{Kid: newest.Kid, NotYetValid: true, At: newest.NotBefore}
 	default:
 		return &SigningKeyValidityError{Kid: newest.Kid, At: newest.NotAfter}
@@ -317,10 +315,14 @@ func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg strin
 }
 
 // selectionUntil is the first instant after now at which a validity bound
-// changes which record of storedAlg is selected: the selected record's NotAfter,
-// or the NotBefore of a record that would then be newer and active.
+// changes which record of storedAlg is selected: just past the selected
+// record's NotAfter (which is inclusive), or the NotBefore of a record that
+// would then be newer and active.
 func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec, storedAlg string, now time.Time) time.Time {
-	until := selected.NotAfter
+	var until time.Time
+	if !selected.NotAfter.IsZero() {
+		until = selected.NotAfter.Add(time.Nanosecond)
+	}
 	for _, rec := range recs {
 		if !isSigningCandidate(rec, storedAlg) {
 			continue
@@ -366,6 +368,11 @@ func (s *KeyService) warnIfExpiringSoon(rec *interfaces.JwkKeyRec, now time.Time
 // store at most once an hour. A replaced key that no longer signs is not
 // warned about. The event router's background key check calls it on every
 // pass. The once-a-day memory keeps only keys still in the window.
+//
+// The memory is keyed on issuer|kid — a kid is unique only within its
+// issuer's keyName — and lives in this process: with several router nodes
+// sharing one key store, each node WARNs once a day per key, so the limit is
+// per node, not per cluster (ADR 0042).
 func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 	now := s.clock()
 	s.validityMu.Lock()
@@ -395,17 +402,17 @@ func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 			if _, soon := s.expiresSoon(rec, now); !soon {
 				continue
 			}
-			kid := recKid(rec)
-			inWindow[kid] = true
+			warnKey := expiryWarnKey(name, recKid(rec))
+			inWindow[warnKey] = true
 			s.validityMu.Lock()
-			last, seen := s.expiryWarnedAt[kid]
+			last, seen := s.expiryWarnedAt[warnKey]
 			s.validityMu.Unlock()
 			if seen && now.Sub(last) < expiryWarnEvery {
 				continue
 			}
 			if s.warnIfExpiringSoon(rec, now) {
 				s.validityMu.Lock()
-				s.expiryWarnedAt[kid] = now
+				s.expiryWarnedAt[warnKey] = now
 				s.validityMu.Unlock()
 			}
 		}
@@ -414,12 +421,17 @@ func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 		return // an unread issuer's keys may still be in the window
 	}
 	s.validityMu.Lock()
-	for kid := range s.expiryWarnedAt {
-		if !inWindow[kid] {
-			delete(s.expiryWarnedAt, kid)
+	for warnKey := range s.expiryWarnedAt {
+		if !inWindow[warnKey] {
+			delete(s.expiryWarnedAt, warnKey)
 		}
 	}
 	s.validityMu.Unlock()
+}
+
+// expiryWarnKey is the expiryWarnedAt key of issuer's signing key kid.
+func expiryWarnKey(issuer, kid string) string {
+	return issuer + "|" + kid
 }
 
 // signingAlgsOf lists the stored algorithms recs hold signing keys of.

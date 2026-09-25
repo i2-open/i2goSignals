@@ -20,12 +20,17 @@ type pemBundle struct {
 }
 
 // parsePemBundle reads every PEM block of an upload. A private key is a signing
-// key of the algorithm SigningAlgOf names; a certificate with it must certify
-// that key. Without a private key the upload is a verification key, from a
-// PUBLIC KEY block or a certificate.
+// key of the algorithm SigningAlgOf names; its certificate is the one among the
+// upload's CERTIFICATE blocks that certifies that key, in whatever order the
+// chain was concatenated. Without a private key the upload is a verification
+// key, from a PUBLIC KEY block or the first certificate.
+//
+// The capitalized error strings here are HTTP response body text returned to
+// the uploader verbatim; they are kept as the wire has always carried them.
 func parsePemBundle(body []byte) (*pemBundle, error) {
 	b := &pemBundle{alg: "RS256"}
 	var pubBlock crypto.PublicKey
+	var certs []*x509.Certificate
 	blocks := 0
 	for rest := body; ; {
 		var block *pem.Block
@@ -51,14 +56,11 @@ func parsePemBundle(body []byte) (*pemBundle, error) {
 				pubBlock = key
 			}
 		case "CERTIFICATE":
-			if b.cert != nil {
-				continue // the leaf comes first; the rest is its chain
-			}
 			cert, err := x509.ParseCertificate(block.Bytes)
 			if err != nil {
 				return nil, errors.New("Invalid certificate")
 			}
-			b.cert = cert
+			certs = append(certs, cert)
 		}
 	}
 	if blocks == 0 {
@@ -71,18 +73,27 @@ func parsePemBundle(body []byte) (*pemBundle, error) {
 			return nil, err
 		}
 		b.alg = alg
-		if b.cert != nil {
+		if len(certs) > 0 {
+			// The leaf is the certificate whose public key is the private
+			// key's; the others are its chain.
 			pub, ok := b.priv.Public().(interface{ Equal(crypto.PublicKey) bool })
-			if !ok || !pub.Equal(b.cert.PublicKey) {
+			for _, cert := range certs {
+				if ok && pub.Equal(cert.PublicKey) {
+					b.cert = cert
+					break
+				}
+			}
+			if b.cert == nil {
 				return nil, errors.New("the certificate does not match the private key")
 			}
 		}
 		return b, nil
 	}
 
-	// Verification only: the PUBLIC KEY block's key, else the certificate's.
-	if pubBlock == nil && b.cert != nil {
-		pubBlock = b.cert.PublicKey
+	// Verification only: the PUBLIC KEY block's key, else the first
+	// certificate's (the leaf, by the PEM chain convention).
+	if pubBlock == nil && len(certs) > 0 {
+		pubBlock = certs[0].PublicKey
 	}
 	return verificationBundle(pubBlock)
 }

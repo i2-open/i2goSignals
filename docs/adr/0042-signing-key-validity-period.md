@@ -28,28 +28,29 @@ could not be uploaded.
 
 1. **The key record carries `NotBefore` / `NotAfter`.** A zero bound is open; a
    record with neither never expires, so every existing record keeps its
-   behaviour and nothing is backfilled. `NotAfter` is exclusive, as in X.509.
+   behaviour and nothing is backfilled. Both bounds are inclusive, as in
+   RFC 5280: a key is valid at `now` when `!now.Before(NotBefore) &&
+   !now.After(NotAfter)`, so it still signs at exactly its `NotAfter`.
 2. **Where the period comes from.**
     - A private key uploaded with its certificate takes the certificate's
-      dates. They win over any lifetime, except for the token issuer (below).
-    - A generated key (create, rotate) and a cert-less private-key upload are
-      valid from creation for a lifetime: the `lifetime` query parameter
-      (`90d`, a Go duration, or `0`/`never`), else
-      `I2SIG_ISSUER_KEY_LIFETIME` (default `180d`; `0`/`never` means no
-      expiry). `NotBefore` is left open rather than stamped with the creation
-      time, so a node whose clock runs slightly behind the minting node's never
-      sees a brand-new key as not yet valid.
+      dates. They win over any lifetime, for the token issuer too (below).
+    - A key the server generates — create, rotate, and the keys provisioned
+      at startup (`CreateKeyPair`, `EnsureSigningKeyForAlg`) — and a cert-less
+      private-key upload are valid from creation for a lifetime: `NotBefore`
+      is the creation time and `NotAfter` the creation time plus the
+      `lifetime` query parameter (`90d`, a Go duration, or `0`/`never`), else
+      `I2SIG_ISSUER_KEY_LIFETIME` (default `180d`). A zero lifetime
+      (`0`/`never`) leaves `NotAfter` empty: no expiry.
     - Verification-only keys (public keys, certificates without a private key,
       `jwks_uri` keys) have no enforced expiry.
-    - The token issuer's key is exempt from validity: whether generated or
-      uploaded, and even when uploaded with a certificate, it is stored with no
-      `NotBefore` / `NotAfter` and keeps signing after the certificate's
-      `NotAfter`. Its expiry would lock out administration. The keys the server
-      provisions itself at startup likewise carry no lifetime, so they never
-      strand streams with nobody having asked for it.
+    - The token issuer's key is exempt from the configured lifetime only: a
+      generated or cert-less token-issuer key has no `NotAfter`, since a
+      lifetime nobody asked for would lock out administration. Uploaded with
+      a certificate, the certificate wins: the key takes the certificate's
+      `NotBefore` / `NotAfter` and stops signing outside them.
 3. **Validity is derived on every read against a clock**, never stored as a
    status. The listing reports `expired` or `not-yet-valid` with
-   `not_before` / `not_after`. Signing selects the newest key that is active
+   `notBefore` / `notAfter`. Signing selects the newest key that is active
    and valid now, so a newer key pre-staged with a future `NotBefore` takes
    over at that instant.
 4. **An expired key is key-unavailable.** Saving or enabling a signing stream
@@ -70,16 +71,21 @@ could not be uploaded.
    extends a key past its `NotAfter`. The stranding guard (#311) counts an
    expired or not-yet-valid key as unavailable.
 5. **Expiry is warned of in advance.** Inside `I2SIG_ISSUER_KEY_EXPIRY_WARNING`
-   (default `30d`) the background key check WARNs once a day per key, naming
+   (default `30d`) the background key check WARNs once a day per key (keyed
+   on issuer and kid), naming
    the issuer, algorithm, kid, expiry and days remaining. It warns only of the
    key signing selects for each issuer and algorithm, not of an older key a
    newer one has replaced; a stream save inside
-   the window succeeds and WARNs.
+   the window succeeds and WARNs. The once-a-day limit is held in memory on
+   each node, so in a cluster every node running the key check WARNs once a
+   day.
 6. **The JWKS keeps expired public keys**, so SETs signed before the expiry
    still verify. Only revocation removes a key from the JWKS (ADR 0028).
 7. **PEM uploads read every block.** A private key (PKCS#8, PKCS#1 or SEC 1)
    of RSA, ECDSA P-256 or ML-DSA-65, plus optionally its certificate, loads a
-   signing key of RS256, ES256 or ML-DSA-65. A certificate for another key is a
+   signing key of RS256, ES256 or ML-DSA-65. The key's certificate is the one
+   whose public key matches the private key's, in whatever order the chain was
+   concatenated; with no such certificate the upload is a
    400; any other key type is a 400 naming the type. A public key or
    certificate alone, as PEM or as `application/pkix-cert` DER, loads a
    verification-only key of the same three types; any other type is a 400
@@ -87,7 +93,8 @@ could not be uploaded.
 
 ## Consequences
 
-- Operators must rotate generated keys at least every 180 days unless they set
+- Operators must rotate generated keys, including the ones provisioned at
+  startup, at least every 180 days unless they set
   `I2SIG_ISSUER_KEY_LIFETIME=never`; the WARN gives 30 days' notice.
 - An uploaded key whose certificate has already expired is stored and listed as
   `expired`; it never signs, and it does not count as a replacement for the

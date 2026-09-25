@@ -1703,32 +1703,10 @@ func (s *StreamService) UpdateKeyUnavailablePause(ctx context.Context, streamID 
 // disable made after the check listed the stream wins. It reports whether the
 // pause was written.
 func (s *StreamService) PauseEnabledForKeyUnavailable(ctx context.Context, streamID string, reason string, since time.Time) bool {
-	invalidateRequestStreams(ctx)
-	rec, _ := s.findSstpPairBySIDFresh(ctx, streamID)
-	if rec == nil {
-		found, err := s.streamDAO.FindByID(ctx, streamID)
-		if err != nil {
-			return false
-		}
-		rec = found
-	}
-	if rec.Status != model.StreamStateEnabled {
-		return false
-	}
-	w := statusWrite{status: model.StreamStatePause, reason: reason, keyUnavailableSince: since}
-	persist := rec.DeepCopy()
-	w.applyTo(persist)
-	applied, err := s.streamDAO.UpdateIfStatus(ctx, persist, model.StreamStateEnabled)
-	if err != nil {
-		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
-		return false
-	}
-	if applied {
-		s.mu.Lock()
-		s.applyStatusToReceiverCache(streamID, w)
-		s.mu.Unlock()
-	}
-	return applied
+	return s.updateStreamStatus(ctx, streamID, statusWrite{
+		status: model.StreamStatePause, reason: reason, keyUnavailableSince: since,
+		ifStatus: model.StreamStateEnabled,
+	})
 }
 
 // statusWrite is one status write together with the marker it carries, if any:
@@ -1740,6 +1718,10 @@ type statusWrite struct {
 	transmitterCaused bool
 	// keyUnavailableSince is non-zero only for a key-unavailable pause.
 	keyUnavailableSince time.Time
+	// ifStatus, when set, guards the write: it applies only while the stored
+	// status is still ifStatus, in one conditional write (UpdateIfStatus), so
+	// a change made after the caller read the stream wins (#318).
+	ifStatus string
 }
 
 // applyTo writes w onto rec in memory the way the DAO writes it.
@@ -1754,14 +1736,21 @@ func (w statusWrite) applyTo(rec *model.StreamStateRecord) {
 	}
 }
 
-func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string, w statusWrite) {
+// It reports whether the write was made: an unguarded write always is (a store
+// error is logged), a guarded one (w.ifStatus) only while the stored status
+// still matched.
+func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string, w statusWrite) bool {
 	invalidateRequestStreams(ctx)
 	// A status write moves both halves of an SSTP pair whichever SID names it
 	// (#303), which the DAO's single-field UpdateStatus cannot do. When the SID
 	// belongs to a pair, the SSTP path owns the update.
-	if rec, _ := s.findSstpPairBySIDFresh(ctx, streamID); rec != nil {
-		s.updateSstpPairStatus(ctx, rec, streamID, w)
-		return
+	pair, _ := s.findSstpPairBySIDFresh(ctx, streamID)
+	if w.ifStatus != "" {
+		return s.updateStreamStatusIf(ctx, streamID, pair, w)
+	}
+	if pair != nil {
+		s.updateSstpPairStatus(ctx, pair, streamID, w)
+		return true
 	}
 
 	var err error
@@ -1780,6 +1769,38 @@ func (s *StreamService) updateStreamStatus(ctx context.Context, streamID string,
 	s.mu.Lock()
 	s.applyStatusToReceiverCache(streamID, w)
 	s.mu.Unlock()
+	return true
+}
+
+// updateStreamStatusIf is updateStreamStatus's guarded write: the whole record
+// (pair, when the SID names an SSTP pair, else the stored stream) with w
+// applied, written by UpdateIfStatus only while the stored status is still
+// w.ifStatus. This node's receiver cache changes only when it was written.
+func (s *StreamService) updateStreamStatusIf(ctx context.Context, streamID string, pair *model.StreamStateRecord, w statusWrite) bool {
+	rec := pair
+	if rec == nil {
+		found, err := s.streamDAO.FindByID(ctx, streamID)
+		if err != nil {
+			return false
+		}
+		rec = found
+	}
+	if rec.Status != w.ifStatus {
+		return false
+	}
+	persist := rec.DeepCopy()
+	w.applyTo(persist)
+	applied, err := s.streamDAO.UpdateIfStatus(ctx, persist, w.ifStatus)
+	if err != nil {
+		ssLog.Error("Error updating stream status", "streamID", streamID, "error", err)
+		return false
+	}
+	if applied {
+		s.mu.Lock()
+		s.applyStatusToReceiverCache(streamID, w)
+		s.mu.Unlock()
+	}
+	return applied
 }
 
 // applyStatusToReceiverCache mirrors a status change onto this node's receiver

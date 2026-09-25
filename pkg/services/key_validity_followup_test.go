@@ -62,7 +62,7 @@ func TestKeyValidity_ExpiryWarningForgetsKeysNoLongerWarnedAbout(t *testing.T) {
 	seedSigningRec(t, svc, validityIssuer, "ES256", "k1", validityT0, time.Time{}, validityT0.AddDate(0, 0, 10))
 	svc.WarnExpiringSigningKeys(ctx)
 	svc.validityMu.Lock()
-	_, warned := svc.expiryWarnedAt["k1"]
+	_, warned := svc.expiryWarnedAt[expiryWarnKey(validityIssuer, "k1")]
 	svc.validityMu.Unlock()
 	require.True(t, warned)
 
@@ -118,28 +118,39 @@ func TestKeyValidity_ExpiryCheckWarnsWhenTheKeyStoreFails(t *testing.T) {
 	}
 }
 
-// The token issuer's key signs the server's own admin tokens, so it is exempt
-// from validity like the startup keys: uploaded with a certificate, it keeps
-// signing after the certificate's NotAfter.
-func TestKeyValidity_TokenIssuerUploadWithCertificateSignsAfterNotAfter(t *testing.T) {
+// The token issuer's certificate wins (#318): uploaded with a certificate, the
+// token issuer's key takes the certificate's period like any other signing key
+// — it is exempt only from the configured lifetime — so it stops signing once
+// the certificate's NotAfter has passed.
+func TestKeyValidity_TokenIssuerUploadWithCertificateTakesItsPeriod(t *testing.T) {
 	svc, clk := validityKeyService(t)
 	ctx := context.Background()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	cert := selfSignedCert(t, key, validityT0.Add(-time.Hour), validityT0.AddDate(0, 0, 10))
+	notAfter := validityT0.AddDate(0, 0, 10)
+	cert := selfSignedCert(t, key, validityT0.Add(-time.Hour), notAfter)
 
 	kid, err := svc.StoreUploadedSigningKey(ctx, "DEFAULT", "sig", "", key, cert, "")
 	require.NoError(t, err)
 	assert.True(t, svc.UploadedKeySignsNow("DEFAULT", cert))
+	rec := keyRec(t, svc, kid)
+	assert.True(t, notAfter.Equal(rec.NotAfter), "the certificate's NotAfter, not an open period: %v", rec.NotAfter)
 
-	clk.Set(validityT0.AddDate(0, 0, 11))
-	_, gotKid, err := svc.GetSigner(ctx, "DEFAULT", "RS256")
-	require.NoError(t, err, "the token issuer still signs after the certificate expired")
-	assert.Equal(t, kid, gotKid)
-	assert.True(t, svc.UploadedKeySignsNow("DEFAULT", cert), "a replace of the token issuer key is a signing key")
+	clk.Set(notAfter.Add(time.Second))
+	_, _, err = svc.GetSigner(ctx, "DEFAULT", "RS256")
+	assert.ErrorIs(t, err, interfaces.ErrKeyNotFound, "outside the certificate's period the token issuer key does not sign")
+	assert.False(t, svc.UploadedKeySignsNow("DEFAULT", cert))
+}
 
-	svc.refreshTokenIssuerKey(ctx)
-	assert.NotNil(t, svc.tokenKey, "admin token signing keeps its key")
+// A certificate-less upload for the token issuer stays exempt from the
+// configured lifetime: no NotAfter.
+func TestKeyValidity_TokenIssuerCertlessUploadIsExemptFromLifetime(t *testing.T) {
+	svc, _ := validityKeyService(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	assert.True(t, svc.uploadedValidity("DEFAULT", nil, nil).NotAfter.IsZero())
+	cert := selfSignedCert(t, key, validityT0.Add(-time.Hour), validityT0.AddDate(0, 0, 10))
+	assert.False(t, svc.uploadedValidity("DEFAULT", cert, nil).NotAfter.IsZero())
 }
 
 // Whether an uploaded key signs is judged at the KeyService clock, the same

@@ -67,6 +67,8 @@ func (s *untilSignerSource) GetSigner(ctx context.Context, issuer, alg string) (
 	return key, kid, err
 }
 
+func (s *untilSignerSource) WarnExpiringSigningKeys(context.Context) {}
+
 func (s *untilSignerSource) GetSignerUntil(_ context.Context, _ string, _ string) (crypto.Signer, string, time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,8 +254,9 @@ func TestKeyCheck_WarnsOfSigningKeysNearExpiry(t *testing.T) {
 	assert.Equal(t, 1, warns, "one WARN per key per day")
 }
 
-// expiringKeyOf returns the kid and NotAfter of iss's signing key that has a
-// validity period (the one expiringIssuerKey rotated in).
+// expiringKeyOf returns the kid and NotAfter of the key expiringIssuerKey
+// rotated in: the one not suspended (generated keys all carry a NotAfter now,
+// #318, so the period alone no longer tells it from iss's original key).
 func expiringKeyOf(t *testing.T, h *filterPushHarness, iss string) (string, time.Time) {
 	t.Helper()
 	summaries, err := h.keyService.ListSummaries(context.Background())
@@ -263,7 +266,7 @@ func expiringKeyOf(t *testing.T, h *filterPushHarness, iss string) (string, time
 			continue
 		}
 		for _, state := range summary.KeyStates {
-			if !state.NotAfter.IsZero() {
+			if !state.NotAfter.IsZero() && state.Status != interfaces.KeyStatusSuspended {
 				return state.Kid, state.NotAfter
 			}
 		}

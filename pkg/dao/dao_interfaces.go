@@ -384,40 +384,67 @@ func (key *JwkKeyRec) IsActive() bool { return key.RevokedAt.IsZero() && key.Sus
 // Status derives the lifecycle status from the timestamps. Revocation wins over
 // suspension; an untouched record is active.
 func (key *JwkKeyRec) Status() string {
-	if !key.RevokedAt.IsZero() {
-		return KeyStatusRevoked
-	}
-	if !key.SuspendedAt.IsZero() {
-		return KeyStatusSuspended
-	}
-	return KeyStatusActive
+	return lifecycleStatus(key.SuspendedAt, key.RevokedAt)
 }
 
-// ValidAt reports whether now falls inside the record's validity period:
-// at or after NotBefore and before NotAfter, a zero bound being open. A record
-// with neither bound is valid at every instant (i2goSignals#318).
-func (key *JwkKeyRec) ValidAt(now time.Time) bool {
-	return validAt(key.NotBefore, key.NotAfter, now)
-}
-
-func validAt(notBefore, notAfter, now time.Time) bool {
-	if !notBefore.IsZero() && now.Before(notBefore) {
-		return false
-	}
-	return notAfter.IsZero() || now.Before(notAfter)
-}
-
-// statusAt is the status of a key with lifecycle status status and validity
-// period [notBefore, notAfter) at now.
-func statusAt(status string, notBefore, notAfter, now time.Time) string {
+// lifecycleStatus is the lifecycle status the SuspendedAt/RevokedAt stamps
+// derive: revocation wins over suspension; neither stamp is active. It is the
+// one rule JwkKeyRec.Status and KeyState.StatusAt share.
+func lifecycleStatus(suspendedAt, revokedAt time.Time) string {
 	switch {
-	case status != KeyStatusActive, validAt(notBefore, notAfter, now):
+	case !revokedAt.IsZero():
+		return KeyStatusRevoked
+	case !suspendedAt.IsZero():
+		return KeyStatusSuspended
+	default:
+		return KeyStatusActive
+	}
+}
+
+// ValidityPeriod is a signing key's validity period [NotBefore, NotAfter],
+// both bounds inclusive as in RFC 5280 (i2goSignals#318, ADR 0042). A zero bound is open, so the zero value is the
+// period of a key that never expires. It is the single rule every validity
+// question — signing selection, derived status, the stranding guard — asks.
+type ValidityPeriod struct {
+	NotBefore time.Time
+	NotAfter  time.Time
+}
+
+// NotYetValidAt reports whether now is before a set NotBefore.
+func (p ValidityPeriod) NotYetValidAt(now time.Time) bool {
+	return !p.NotBefore.IsZero() && now.Before(p.NotBefore)
+}
+
+// ValidAt reports whether now falls inside the period: at or after NotBefore
+// and at or before NotAfter, a zero bound being open.
+func (p ValidityPeriod) ValidAt(now time.Time) bool {
+	return !p.NotYetValidAt(now) && (p.NotAfter.IsZero() || !now.After(p.NotAfter))
+}
+
+// statusAt is the status at now of a key with lifecycle status status: an
+// active key outside the period is expired or not-yet-valid; any other status
+// stands whatever the dates.
+func (p ValidityPeriod) statusAt(status string, now time.Time) string {
+	switch {
+	case status != KeyStatusActive, p.ValidAt(now):
 		return status
-	case !notBefore.IsZero() && now.Before(notBefore):
+	case p.NotYetValidAt(now):
 		return KeyStatusNotYetValid
 	default:
 		return KeyStatusExpired
 	}
+}
+
+// Validity is the record's validity period.
+func (key *JwkKeyRec) Validity() ValidityPeriod {
+	return ValidityPeriod{NotBefore: key.NotBefore, NotAfter: key.NotAfter}
+}
+
+// ValidAt reports whether now falls inside the record's validity period
+// (see ValidityPeriod.ValidAt). A record with neither bound is valid at every
+// instant (i2goSignals#318).
+func (key *JwkKeyRec) ValidAt(now time.Time) bool {
+	return key.Validity().ValidAt(now)
 }
 
 // StatusAt derives the status at now. The lifecycle status (Status) outranks
@@ -425,26 +452,30 @@ func statusAt(status string, notBefore, notAfter, now time.Time) string {
 // dates; an otherwise active key outside its period is expired or
 // not-yet-valid. A record with no validity period reads exactly as Status().
 func (key *JwkKeyRec) StatusAt(now time.Time) string {
-	return statusAt(key.Status(), key.NotBefore, key.NotAfter, now)
+	return key.Validity().statusAt(key.Status(), now)
 }
 
-// ToKeyState projects the per-kid lifecycle state carried on a KeySummary,
-// with the status derived at the current time. KeyService re-derives it
-// against its own clock (ToKeyStateAt) when it reports a summary.
+// ToKeyState projects the per-kid state carried on a KeySummary as the raw
+// stored state: Status is the lifecycle status alone (Status), with the
+// validity bounds carried alongside and no clock consulted. The status against
+// a clock is derived by the reader — KeyService re-derives it with its own
+// clock (KeyState.StatusAt) when it reports a summary — so one clock decides.
 func (key *JwkKeyRec) ToKeyState() KeyState {
-	return key.ToKeyStateAt(time.Now())
-}
-
-// ToKeyStateAt projects the per-kid state with the status derived at now.
-func (key *JwkKeyRec) ToKeyStateAt(now time.Time) KeyState {
 	return KeyState{
 		Kid:         key.Kid,
-		Status:      key.StatusAt(now),
+		Status:      key.Status(),
 		SuspendedAt: key.SuspendedAt,
 		RevokedAt:   key.RevokedAt,
 		NotBefore:   key.NotBefore,
 		NotAfter:    key.NotAfter,
 	}
+}
+
+// ToKeyStateAt projects the per-kid state with the status derived at now.
+func (key *JwkKeyRec) ToKeyStateAt(now time.Time) KeyState {
+	st := key.ToKeyState()
+	st.Status = st.StatusAt(now)
+	return st
 }
 
 func (key *JwkKeyRec) ToSummary() KeySummary {
@@ -479,22 +510,20 @@ type KeyState struct {
 	Status      string    `json:"status"` // "active" | "suspended" | "revoked" | "expired" | "not-yet-valid"
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`
-	NotBefore   time.Time `json:"not_before,omitzero"`
-	NotAfter    time.Time `json:"not_after,omitzero"`
+	NotBefore   time.Time `json:"notBefore,omitzero"`
+	NotAfter    time.Time `json:"notAfter,omitzero"`
+}
+
+// Validity is the state's validity period.
+func (st KeyState) Validity() ValidityPeriod {
+	return ValidityPeriod{NotBefore: st.NotBefore, NotAfter: st.NotAfter}
 }
 
 // StatusAt re-derives the state's status at now: revoked and suspended stand,
 // otherwise the validity period decides between active, expired and
 // not-yet-valid, as JwkKeyRec.StatusAt does.
 func (st KeyState) StatusAt(now time.Time) string {
-	status := KeyStatusActive
-	switch {
-	case !st.RevokedAt.IsZero():
-		status = KeyStatusRevoked
-	case !st.SuspendedAt.IsZero():
-		status = KeyStatusSuspended
-	}
-	return statusAt(status, st.NotBefore, st.NotAfter, now)
+	return st.Validity().statusAt(lifecycleStatus(st.SuspendedAt, st.RevokedAt), now)
 }
 
 // KeySummary is used to report a key registry entry and its capabilities without exposing key material
