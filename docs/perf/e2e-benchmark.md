@@ -260,10 +260,13 @@ initiator only sends the next request once that answer lands. The same
 per-event Mongo cost that bounds push and poll therefore counts twice per
 batch on the responder path, which is the next thing to batch.
 
-### Remaining hot spots (not yet addressed)
+### Hot spots after the handshake fix (since addressed by spec-102)
 
-With the handshake gone, the goSignals1 profile is dominated by work that is
-serialized per event inside the push loop and the poll handler:
+With the handshake gone, the goSignals1 profile was dominated by work that
+was serialized per event inside the push loop and the poll handler. Every item
+below was taken up by the spec-102 runtime-performance work (PR #293); the
+status line on each gives the slice and ADR, and the measured before/after
+numbers are in `e2e-history.md` and the PR.
 
 - **RSA re-signing in Publish mode: 41% of goSignals1 CPU.** Both transmitters
   in the harness use `PB` route mode, so every event is re-signed with the
@@ -272,23 +275,32 @@ serialized per event inside the push loop and the poll handler:
   roughly 1 ms per event on this machine. Forward mode (`FW`) skips this
   entirely; where re-signing is required, a smaller key type (ES256) or
   signing events in parallel while the push loop stays sequential would help.
+  *Status:* ES256 is a selectable per-stream `signing_alg` (#284, ADR 0041);
+  RS256 stays the default, so a stream must opt in.
 - **Per-event Mongo round trips.** The push loop and poll handler each fetch
   the event record by JTI, look the stream state up by id, and ack the event
   with separate Mongo calls, each a network round trip. At about 10 ms per
   event per leg these bound both transports to ~100 events/s per stream.
   Batching the poll-side fetch and ack, and caching stream state per lease,
   are the obvious next steps.
+  *Status:* acks are removed in one query per exchange with `{sid, jti}`
+  indexes (#288), ingest writes run concurrently (#286, ADR 0038) and the
+  per-event stream, revocation and lease reads are cached (#287, ADR 0039).
 - **Per-request bearer validation: about 5% on goSignals1 and 13% on
   goSignals2.** `ValidateAuthorizationAny` parses and RSA-verifies the bearer
   JWT and then checks revocation in Mongo on every request. A short-lived
   cache keyed by token string would remove both the verify and the lookup for
   hot streams.
+  *Status:* partly — the revocation lookup is cached for 2s (#287, ADR 0039);
+  the per-request JWT verify is still paid.
 - **Push loop is strictly sequential per stream.** Sign, deliver, ack, one
   event at a time. Pipelining a small window of in-flight pushes per stream
   (bounded so ordering guarantees hold where they matter) is the largest
   remaining structural gain for the push transport.
+  *Status:* push delivers concurrently (ADR 0035) with a pool sized from
+  available processors (#285, ADR 0037).
 
-### Poll and SSTP connection handling (reviewed, not changed)
+### Poll and SSTP connection handling (SSTP mostly fixed)
 
 - **Poll receiver: already reuses connections.** `runPollLoop` resolves its
   `http.Client` once per stream loop and keeps it across poll cycles,
@@ -312,3 +324,8 @@ serialized per event inside the push loop and the poll handler:
   handshake is amortised well enough that it does not show in the numbers
   above, so it stays a latency and idle-cost concern rather than a
   throughput one.
+  *Status:* the static-token, per-stream-TLS and default paths are fixed by
+  #289 — they share a pooled transport, and `clientHandshake` is absent from
+  the after-profiles. The SPIFFE path is not: the credential chain still
+  reaches `oauthClient.GetClientForServer`, which opens a new `X509Source`
+  and transport on each call (`pkg/oauthClient/spiffe_client.go:51`); tracked in #326.
