@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
 // insecureStatusClient is the lazily-built HTTP client used for push /status
@@ -79,18 +79,9 @@ func derivePushStatusURL(endpointURL, sid string) (string, error) {
 // credential that authorizes event delivery also authorizes /status reads.
 // ErrPlaintextNotAllowed is the status-probe's counterpart of
 // goSetPush.ErrPlaintextNotAllowed: the receiver status GET dials the same
-// business endpoint as the push, so it is held to the same TLS floor.
-var ErrPlaintextNotAllowed = errors.New("plaintext endpoint not allowed (tx_allow_plaintext is false)")
-
-// isPlaintextEndpoint reports whether raw's scheme is anything other than
-// https. An unparseable URL is left to derivePushStatusURL to report.
-func isPlaintextEndpoint(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	return !strings.EqualFold(u.Scheme, "https")
-}
+// business endpoint as the push, so it is held to the same TLS floor. It is
+// an alias of the family-wide tlsSupport.ErrPlaintextNotAllowed.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
 
 func (r *router) pushStatusFetcher() StatusFetcher {
 	return func(ctx context.Context, stream *model.StreamStateRecord) (*model.StreamStatus, error) {
@@ -110,7 +101,7 @@ func (r *router) pushStatusFetcher() StatusFetcher {
 		// goSetPush transmitter, but it dials the same business endpoint, so it
 		// takes the same guard before any request. It fails closed on a
 		// plaintext receiver unless the stream carries the opt-out.
-		if !stream.StreamConfiguration.TxAllowPlaintext && isPlaintextEndpoint(push.EndpointUrl) {
+		if !stream.StreamConfiguration.TxAllowPlaintext && tlsSupport.IsPlaintextEndpoint(push.EndpointUrl) {
 			return nil, fmt.Errorf("PUSH-SRV: %w: %s", ErrPlaintextNotAllowed, push.EndpointUrl)
 		}
 		statusURL, err := derivePushStatusURL(push.EndpointUrl, stream.StreamConfiguration.Id)

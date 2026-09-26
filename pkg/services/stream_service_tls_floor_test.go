@@ -152,3 +152,86 @@ func TestTLSFloor_PartialUpdateWithoutDeliveryPreservesOptOut(t *testing.T) {
 	assert.True(t, updated.TxAllowPlaintext, "opt-out must survive a patch that omits delivery")
 	assert.Equal(t, "http://rx.example/push", updated.Delivery.PushTransmitMethod.EndpointUrl)
 }
+
+func TestTLSFloor_UpdateGrantsOptOutThenEndpointInSequentialPuts(t *testing.T) {
+	// The opt-out is grant-on-request on update: a PUT carrying only
+	// tx_allow_plaintext (no delivery block) must not be dropped, so an
+	// operator can grant the opt-out in one PUT and move the endpoint to
+	// http:// in the next.
+	svc := newSubjectFilterTestService()
+	ctx := context.Background()
+	created, err := svc.CreateStream(ctx, pushTransmitterRequest(), "test-project", nil)
+	require.NoError(t, err)
+	require.False(t, created.TxAllowPlaintext)
+
+	first := model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{TxAllowPlaintext: true}}
+	updated, err := svc.UpdateStream(ctx, created.Id, "test-project", first)
+	require.NoError(t, err)
+	assert.True(t, updated.TxAllowPlaintext, "a PUT carrying only tx_allow_plaintext must set it")
+
+	second := model.StreamStateRecord{StreamConfiguration: created.DeepCopy()}
+	second.Delivery.PushTransmitMethod.EndpointUrl = "http://rx.example/push"
+	second.TxAllowPlaintext = false // omitted on the wire; must not revoke the grant
+	updated, err = svc.UpdateStream(ctx, created.Id, "test-project", second)
+	require.NoError(t, err, "endpoint move to http:// must succeed once the opt-out is stored")
+	assert.True(t, updated.TxAllowPlaintext)
+
+	state, err := svc.GetStreamState(ctx, created.Id)
+	require.NoError(t, err)
+	assert.True(t, state.TxAllowPlaintext, "GET must show the opt-out granted by the earlier PUT")
+	assert.Equal(t, "http://rx.example/push", state.Delivery.PushTransmitMethod.EndpointUrl)
+}
+
+func TestTLSFloor_LegacyPlaintextStreamRemediedByOptOutOnlyPut(t *testing.T) {
+	// A stream that pre-dates the floor (http:// endpoint, no opt-out) is
+	// seeded straight into the store. Any update re-runs the floor, so a
+	// description-only patch is refused; a PUT carrying tx_allow_plaintext
+	// grants the opt-out and is the remedy.
+	svc := newSubjectFilterTestService()
+	ctx := context.Background()
+	req := pushTransmitterRequest()
+	req.Delivery.PushTransmitMethod.EndpointUrl = "http://rx.example/push"
+	req.TxAllowPlaintext = true
+	created, err := svc.CreateStream(ctx, req, "test-project", nil)
+	require.NoError(t, err)
+	legacy, err := svc.streamDAO.FindByID(ctx, created.Id)
+	require.NoError(t, err)
+	legacy.TxAllowPlaintext = false
+	require.NoError(t, svc.streamDAO.Update(ctx, legacy))
+
+	patch := model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Description: "renamed"}}
+	_, err = svc.UpdateStream(ctx, created.Id, "test-project", patch)
+	require.Error(t, err, "a legacy plaintext stream fails the floor on any update")
+	assert.True(t, errors.Is(err, ErrInvalidRequest), "%v", err)
+
+	remedy := model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{TxAllowPlaintext: true}}
+	updated, err := svc.UpdateStream(ctx, created.Id, "test-project", remedy)
+	require.NoError(t, err, "a PUT carrying tx_allow_plaintext is the remedy")
+	assert.True(t, updated.TxAllowPlaintext)
+
+	updated, err = svc.UpdateStream(ctx, created.Id, "test-project", patch)
+	require.NoError(t, err, "the description patch succeeds once the opt-out is stored")
+	assert.Equal(t, "renamed", updated.Description)
+	assert.True(t, updated.TxAllowPlaintext)
+}
+
+func TestTLSFloor_DeliveryPatchOmittingTxTLSSkipVerifyKeepsStoredValue(t *testing.T) {
+	// A Delivery-carrying update that omits tx_tls_skip_verify must not
+	// silently clear a stored true: the flag is grant-on-request like the
+	// opt-out.
+	svc := newSubjectFilterTestService()
+	ctx := context.Background()
+	req := pushTransmitterRequest()
+	req.TxTLSSkipVerify = true
+	created, err := svc.CreateStream(ctx, req, "test-project", nil)
+	require.NoError(t, err)
+	require.True(t, created.TxTLSSkipVerify)
+
+	patch := model.StreamStateRecord{StreamConfiguration: created.DeepCopy()}
+	patch.TxTLSSkipVerify = false // omitted on the wire
+	patch.Delivery.PushTransmitMethod.EndpointUrl = "https://rx2.example/push"
+	updated, err := svc.UpdateStream(ctx, created.Id, "test-project", patch)
+	require.NoError(t, err)
+	assert.True(t, updated.TxTLSSkipVerify, "stored tx_tls_skip_verify must survive a delivery patch that omits it")
+	assert.Equal(t, "https://rx2.example/push", updated.Delivery.PushTransmitMethod.EndpointUrl)
+}

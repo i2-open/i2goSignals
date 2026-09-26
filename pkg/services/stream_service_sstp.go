@@ -42,7 +42,7 @@ func validateSstpEndpointUrl(raw string) error {
 	switch u.Scheme {
 	case "https", "http":
 	default:
-		return fmt.Errorf("invalid endpoint_url: scheme must be https, got %q", u.Scheme)
+		return fmt.Errorf("invalid endpoint_url: scheme must be http or https, got %q", u.Scheme)
 	}
 	if u.Host == "" {
 		return errors.New("invalid endpoint_url: host must be non-empty")

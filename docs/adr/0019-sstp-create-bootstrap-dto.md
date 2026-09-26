@@ -78,6 +78,10 @@ record described by ADR 0018:
   (or `http` when `I2SIG_INSECURE_SSTP_HTTP=true`, a new env var defaulting to
   false), non-empty host, no query or fragment. No network probe; reachability
   is the runner's concern, matching push/poll create semantics.
+  *Superseded (2026-09-25):* the `I2SIG_INSECURE_SSTP_HTTP` env override was
+  retired by the business-stream TLS floor (planning ADR 0076 / #322);
+  `http` is accepted syntactically and plaintext is now governed per pair by
+  `tx_allow_plaintext`.
 - Each half is validated for a non-empty, URI-shaped `iss` and `aud` and a
   recognized `mode`. **No reciprocity is enforced between halves** so asymmetric
   multi-hop pairs are legitimate. `events` is accepted loosely (no URI-registry
@@ -145,6 +149,8 @@ patched later via UPDATE (slice #162).
 - ADR 0009 — foreign-server provisioning requires admin; the `Server`-alias
   credential path the cascade reuses.
 - ADR 0011 — environment-variable taxonomy; `I2SIG_INSECURE_SSTP_HTTP` follows it.
+  *Superseded (2026-09-25):* that env var was retired by the TLS floor
+  (planning ADR 0076 / #322); plaintext is governed by `tx_allow_plaintext`.
 - `pkg/ssfModels/model_sstp_pair_bootstrap.go`,
   `internal/services/stream_service_sstp.go`, draft-hunt-secevent-sstp-00.
 

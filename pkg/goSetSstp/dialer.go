@@ -5,12 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -65,19 +63,10 @@ type DialerConfig struct {
 // in Result.Err when DialerConfig.EndpointURL is not https and
 // DialerConfig.AllowPlaintext is false. StatusCode is 0, so ClassifyResult
 // reports ClassTransport. Not part of errcode.go: that file is the SSTP §2.3
-// per-JTI keyword registry, and this is a local transport-floor error.
-var ErrPlaintextNotAllowed = errors.New("sstp: plaintext endpoint not allowed (tx_allow_plaintext is false)")
-
-// isPlaintextEndpoint reports whether raw's scheme is anything other than
-// https. An unparseable URL is not reported here — http.NewRequest reports it
-// on the existing path; this check is only the TLS floor.
-func isPlaintextEndpoint(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	return !strings.EqualFold(u.Scheme, "https")
-}
+// per-JTI keyword registry, and this is a transport-floor error. It is an
+// alias of the family-wide tlsSupport.ErrPlaintextNotAllowed so errors.Is
+// holds against either name.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
 
 // defaultDialerTimeout is the value used when DialerConfig.Timeout is zero
 // AND DialerConfig.HTTPClient is nil. It matches goSetPush.PushSET's default.
@@ -103,8 +92,12 @@ const sstpMaxIdleConnsPerHost = 64
 func Exchange(ctx context.Context, msg Message, config DialerConfig) Result {
 	// TLS floor: refused before a client is even selected, so an injected
 	// HTTPClient cannot bypass it.
-	if !config.AllowPlaintext && isPlaintextEndpoint(config.EndpointURL) {
-		return Result{Err: fmt.Errorf("%w: %s", ErrPlaintextNotAllowed, config.EndpointURL)}
+	if !config.AllowPlaintext && tlsSupport.IsPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("sstp: %w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		// WARN once per refused dial, matching goSetPush/goSetPoll: a refused
+		// dial is a per-attempt connect failure (CONTEXT.md log-level policy).
+		slog.Default().Warn("sstp: Refusing plaintext endpoint", "url", config.EndpointURL, "error", err)
+		return Result{Err: err}
 	}
 
 	client := config.HTTPClient

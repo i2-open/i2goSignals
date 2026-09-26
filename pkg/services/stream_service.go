@@ -21,6 +21,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
@@ -206,11 +207,7 @@ func validateBusinessStreamTransport(rec model.StreamStateRecord) error {
 		return nil
 	}
 	check := func(field, raw string) error {
-		if raw == "" {
-			return nil
-		}
-		u, err := url.Parse(raw)
-		if err != nil || strings.EqualFold(u.Scheme, "https") {
+		if raw == "" || !tlsSupport.IsPlaintextEndpoint(raw) {
 			return nil
 		}
 		return fmt.Errorf("%w: %s %q is not https — business-stream endpoints this server dials must "+
@@ -1469,18 +1466,24 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		return nil, err
 	}
 
-	// The tx_* transport flags follow the delivery method: an update that
-	// carries Delivery is replacing the stream's transport configuration, so
-	// both flags take the request's value (TxTLSSkipVerify keeps the deployment
-	// default it has at create). A partial update without Delivery follows the
-	// "absent means unchanged" rule the rest of this path uses and leaves both
-	// flags as stored — a bool cannot distinguish "false" from "omitted". The
-	// transport floor is then re-checked against the updated record, so an
-	// endpoint moved to http:// is refused unless the same update carries the
+	// The tx_* transport flags are grant-on-request on update, mirroring the
+	// fill-in-once rule updateSstpPair applies to tx_allow_plaintext: a request
+	// that carries a true value sets the flag, whether or not it also carries
+	// Delivery, so an operator can grant the opt-out in one PUT and move the
+	// endpoint to http:// in the next (or remedy a legacy plaintext stream that
+	// pre-dates the floor with a PUT carrying only tx_allow_plaintext). A false
+	// (or omitted — a bool cannot distinguish the two) value leaves the stored
+	// flag alone, so neither flag can be revoked through update; recreate the
+	// stream to do that. TxTLSSkipVerify keeps the deployment default it has at
+	// create, and only a Delivery-carrying update may re-apply it. The transport
+	// floor is then re-checked against the updated record on every update, so
+	// an endpoint moved to http:// is refused unless the record carries the
 	// opt-out (i2goSignals#322).
-	if configReq.Delivery != nil {
-		config.TxTLSSkipVerify = configReq.TxTLSSkipVerify || TxTLSSkipVerifyDefault()
-		config.TxAllowPlaintext = configReq.TxAllowPlaintext
+	if configReq.TxAllowPlaintext {
+		config.TxAllowPlaintext = true
+	}
+	if configReq.Delivery != nil && (configReq.TxTLSSkipVerify || TxTLSSkipVerifyDefault()) {
+		config.TxTLSSkipVerify = true
 	}
 	if err := validateBusinessStreamTransport(*streamRec); err != nil {
 		return nil, err

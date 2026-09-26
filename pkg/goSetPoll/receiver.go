@@ -4,16 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"runtime"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -24,19 +21,9 @@ import (
 // ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
 // by PollRaw and Poll when ReceiverConfig.EndpointURL is not https and
 // ReceiverConfig.AllowPlaintext is false. The status code is 0: no request
-// was made.
-var ErrPlaintextNotAllowed = errors.New("RFC8936: plaintext endpoint not allowed (tx_allow_plaintext is false)")
-
-// isPlaintextEndpoint reports whether raw's scheme is anything other than
-// https. An unparseable URL is not reported here — http.NewRequest reports it
-// on the existing path; this check is only the TLS floor.
-func isPlaintextEndpoint(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	return !strings.EqualFold(u.Scheme, "https")
-}
+// was made. It is an alias of the family-wide tlsSupport.ErrPlaintextNotAllowed
+// so errors.Is holds against either name.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
 
 // PollRaw sends an RFC8936 poll request to the configured endpoint and returns
 // the raw PollResponse without parsing individual SET tokens.
@@ -47,9 +34,12 @@ func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*
 
 	// TLS floor: refused before a client is even selected, so an injected
 	// HTTPClient cannot bypass it.
-	if !config.AllowPlaintext && isPlaintextEndpoint(config.EndpointURL) {
-		log.Error("RFC8936: Refusing plaintext poll endpoint", "url", config.EndpointURL)
-		return nil, 0, fmt.Errorf("%w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+	if !config.AllowPlaintext && tlsSupport.IsPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("RFC8936: %w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		// WARN, not ERROR: a refused dial is a per-attempt connect failure
+		// (CONTEXT.md log-level policy) and recurs on every poll tick.
+		log.Warn("RFC8936: Refusing plaintext poll endpoint", "url", config.EndpointURL, "error", err)
+		return nil, 0, err
 	}
 
 	client := config.HTTPClient
