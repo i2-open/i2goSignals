@@ -93,8 +93,9 @@ func TestExchangeInjectedClientWins(t *testing.T) {
 	injected := &http.Client{Transport: rt, Timeout: 3 * time.Second}
 
 	result := Exchange(context.Background(), Message{}, DialerConfig{
-		EndpointURL: "https://peer.example/sstp/abc",
-		HTTPClient:  injected,
+		AllowPlaintext: true,
+		EndpointURL:    "https://peer.example/sstp/abc",
+		HTTPClient:     injected,
 		// InsecureSkipVerify must be ignored entirely when a client is injected.
 		InsecureSkipVerify: true,
 	})
@@ -153,6 +154,7 @@ func TestExchangeReusesTLSConnectionsAcrossConcurrentBursts(t *testing.T) {
 	defer srv.Close()
 
 	cfg := DialerConfig{
+		AllowPlaintext:     true,
 		EndpointURL:        srv.URL + "/sstp/pool-test",
 		InsecureSkipVerify: true,
 	}

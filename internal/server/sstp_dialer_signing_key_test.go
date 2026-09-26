@@ -102,10 +102,11 @@ func newDialKeyNode(t *testing.T, retryLimit int) *dialKeyNode {
 	pairId := ids.NewObjectID()
 	rec := &model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        pairId,
-			Iss:       dialKeyIssuer,
-			Aud:       []string{"https://peer.example"},
-			RouteMode: model.RouteModePublish,
+			Id:               pairId,
+			Iss:              dialKeyIssuer,
+			Aud:              []string{"https://peer.example"},
+			RouteMode:        model.RouteModePublish,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		SstpInbound: &model.StreamConfiguration{
 			Id:        ids.NewObjectID(),

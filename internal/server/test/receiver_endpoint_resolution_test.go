@@ -128,12 +128,13 @@ func TestReceiverResolvesTransmitterEndpointsViaWellKnown(t *testing.T) {
 	remoteId := "TX-REMOTE-STREAM-ID-9999"
 	token := "tx-static-token"
 	streamConfig := model.StreamConfiguration{
-		Iss:             "https://tx.example.test",
-		Aud:             []string{"https://receiver.example.test"},
-		EventsRequested: []string{"*"},
-		IssuerJWKSUrl:   ts.URL + jwksPath,
-		TxWellKnownUrl:  &wellKnownURL,
-		TxToken:         &token,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "https://tx.example.test",
+		Aud:              []string{"https://receiver.example.test"},
+		EventsRequested:  []string{"*"},
+		IssuerJWKSUrl:    ts.URL + jwksPath,
+		TxWellKnownUrl:   &wellKnownURL,
+		TxToken:          &token,
 		// Distinct from the local id the SUT will assign — the test pins the
 		// contract that remote calls quote THIS id, not the local one.
 		// Setting RemoteStreamId on a ReceivePoll create also suppresses the

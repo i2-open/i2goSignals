@@ -143,7 +143,7 @@ func TestPollWireIsCompact(t *testing.T) {
 			},
 			TimeoutSecs: 30,
 		}
-		if _, _, err := PollRaw(context.Background(), request, ReceiverConfig{EndpointURL: server.URL}); err != nil {
+		if _, _, err := PollRaw(context.Background(), request, ReceiverConfig{AllowPlaintext: true, EndpointURL: server.URL}); err != nil {
 			t.Fatalf("PollRaw: %v", err)
 		}
 		assertPollGolden(t, "poll_request_populated", sent)

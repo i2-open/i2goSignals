@@ -54,6 +54,7 @@ func validationPollServer(t *testing.T, sets map[string]string) *httptest.Server
 func validationPollConfig(t *testing.T, url string, key *rsa.PrivateKey, vs *goSetValidate.ValidatorSet) ReceiverConfig {
 	t.Helper()
 	return ReceiverConfig{
+		AllowPlaintext:    true,
 		EndpointURL:       url,
 		JWKS:              jwksForKey(t, validationTestIssuer, key),
 		ExpectedIssuer:    validationTestIssuer,

@@ -91,11 +91,12 @@ func (h *filterPushHarness) createSigningPushStream(t *testing.T, iss, routeMode
 		require.NoError(t, err)
 	}
 	cfg := model.StreamConfiguration{
-		Iss:             iss,
-		Aud:             []string{"https://receiver.example.com"},
-		RouteMode:       routeMode,
-		IssuerJWKSUrl:   jwksUrl,
-		EventsDelivered: []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+		Iss:              iss,
+		Aud:              []string{"https://receiver.example.com"},
+		RouteMode:        routeMode,
+		IssuerJWKSUrl:    jwksUrl,
+		EventsDelivered:  []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+		TxAllowPlaintext: true, // loopback httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{Method: model.DeliveryPush, EndpointUrl: endpoint},
 		},

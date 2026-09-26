@@ -18,12 +18,29 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// by PollRaw and Poll when ReceiverConfig.EndpointURL is not https and
+// ReceiverConfig.AllowPlaintext is false. The status code is 0: no request
+// was made. It is an alias of the family-wide tlsSupport.ErrPlaintextNotAllowed
+// so errors.Is holds against either name.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
+
 // PollRaw sends an RFC8936 poll request to the configured endpoint and returns
 // the raw PollResponse without parsing individual SET tokens.
 // Returns the response, the HTTP status code, and any error.
 // On HTTP-level errors (status >= 400), the PollResponse is nil and the error describes the failure.
 func PollRaw(ctx context.Context, request PollRequest, config ReceiverConfig) (*PollResponse, int, error) {
 	log := getLogger(config.Logger)
+
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && tlsSupport.IsPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("RFC8936: %w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		// WARN, not ERROR: a refused dial is a per-attempt connect failure
+		// (CONTEXT.md log-level policy) and recurs on every poll tick.
+		log.Warn("RFC8936: Refusing plaintext poll endpoint", "url", config.EndpointURL, "error", err)
+		return nil, 0, err
+	}
 
 	client := config.HTTPClient
 	if client == nil {

@@ -195,8 +195,9 @@ func newStatusTestServer(t *testing.T) *ssfInstance {
 func createStatusReceiver(t *testing.T, instance *ssfInstance, tx *statusTx) string {
 	t.Helper()
 	created, err := instance.CreateStream(model.StreamConfiguration{
-		Iss:           "https://status-tx.example.com",
-		IssuerJWKSUrl: tx.url + "/jwks",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "https://status-tx.example.com",
+		IssuerJWKSUrl:    tx.url + "/jwks",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -456,11 +457,12 @@ func TestPollReceiver_LiveJwksPickup(t *testing.T) {
 	jwksA, jwksB := liveJwksServer(t, "kid-a", keyA), liveJwksServer(t, "kid-b", keyB)
 
 	created, err := instance.CreateStream(model.StreamConfiguration{
-		Iss:             issA,
-		Aud:             []string{evAudience},
-		IssuerJWKSUrl:   jwksA,
-		EventsRequested: []string{"*"},
-		RouteMode:       model.RouteModeImport,
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              issA,
+		Aud:              []string{evAudience},
+		IssuerJWKSUrl:    jwksA,
+		EventsRequested:  []string{"*"},
+		RouteMode:        model.RouteModeImport,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

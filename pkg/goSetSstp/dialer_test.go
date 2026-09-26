@@ -41,8 +41,9 @@ func TestExchange_200SuccessWithBody(t *testing.T) {
 
 	msg := goSetSstp.Message{Sets: map[string]string{"jti-1": "raw-set"}}
 	res := goSetSstp.Exchange(context.Background(), msg, goSetSstp.DialerConfig{
-		EndpointURL:   srv.URL,
-		Authorization: "Bearer test-tok",
+		AllowPlaintext: true,
+		EndpointURL:    srv.URL,
+		Authorization:  "Bearer test-tok",
 	})
 	if res.StatusCode != http.StatusOK || res.Err != nil {
 		t.Fatalf("Exchange = %+v; want StatusCode=200, Err=nil", res)
@@ -68,7 +69,7 @@ func TestExchange_200EmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{EndpointURL: srv.URL})
+	res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{AllowPlaintext: true, EndpointURL: srv.URL})
 	if res.StatusCode != http.StatusOK || res.Message != nil || res.Err != nil {
 		t.Fatalf("Exchange = %+v; want 200/nil/nil", res)
 	}
@@ -88,7 +89,7 @@ func TestExchange_200UnparseableBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{EndpointURL: srv.URL})
+	res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{AllowPlaintext: true, EndpointURL: srv.URL})
 	if res.StatusCode != http.StatusOK || res.Err == nil || res.Message != nil {
 		t.Fatalf("Exchange = %+v; want 200/Err!=nil/Message==nil", res)
 	}
@@ -120,7 +121,7 @@ func TestExchange_HTTPStatusPassthrough(t *testing.T) {
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()
-			res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{EndpointURL: srv.URL})
+			res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{AllowPlaintext: true, EndpointURL: srv.URL})
 			if res.StatusCode != tc.status {
 				t.Errorf("StatusCode = %d, want %d", res.StatusCode, tc.status)
 			}
@@ -139,7 +140,8 @@ func TestExchange_HTTPStatusPassthrough(t *testing.T) {
 func TestExchange_TransportError(t *testing.T) {
 	// A URL that will fail immediately: unreachable localhost port.
 	res := goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{
-		EndpointURL: "http://127.0.0.1:1", // port 1 is reserved and won't bind
+		AllowPlaintext: true,
+		EndpointURL:    "http://127.0.0.1:1", // port 1 is reserved and won't bind
 	})
 	if res.StatusCode != 0 || res.Err == nil {
 		t.Fatalf("Exchange = %+v; want StatusCode=0, Err!=nil", res)
@@ -161,7 +163,7 @@ func TestExchange_NoAuthorizationHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_ = goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{EndpointURL: srv.URL})
+	_ = goSetSstp.Exchange(context.Background(), goSetSstp.Message{}, goSetSstp.DialerConfig{AllowPlaintext: true, EndpointURL: srv.URL})
 	if seen != "" {
 		t.Errorf("Authorization header = %q, want empty", seen)
 	}
@@ -184,8 +186,9 @@ func TestExchange_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	res := goSetSstp.Exchange(ctx, goSetSstp.Message{}, goSetSstp.DialerConfig{
-		EndpointURL: srv.URL,
-		HTTPClient:  srv.Client(),
+		AllowPlaintext: true,
+		EndpointURL:    srv.URL,
+		HTTPClient:     srv.Client(),
 	})
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "context canceled") {
 		t.Errorf("Err = %v, want context-canceled error", res.Err)

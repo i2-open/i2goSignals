@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -26,30 +25,24 @@ import (
 
 var sstpLog = logger.Sub("SSTP")
 
-// insecureSstpHttpEnabled reports whether plain-http SSTP EndpointUrls are
-// permitted. Controlled by the I2SIG_INSECURE_SSTP_HTTP env var (default false,
-// PRD #154 Q28). Read per-call so tests can flip it with t.Setenv.
-func insecureSstpHttpEnabled() bool {
-	return strings.EqualFold(os.Getenv("I2SIG_INSECURE_SSTP_HTTP"), "true")
-}
-
 // validateSstpEndpointUrl performs the create-time syntactic validation of an
-// SSTP EndpointUrl (PRD #154 Q28): require scheme=https (http only when
-// I2SIG_INSECURE_SSTP_HTTP=true), reject query/fragment, require a non-empty
-// host. No network probe is performed.
+// SSTP EndpointUrl (PRD #154 Q28): scheme must be http or https, reject
+// query/fragment, require a non-empty host. No network probe is performed.
+//
+// Whether http is acceptable is not decided here: the business-stream TLS
+// floor (validateBusinessStreamTransport, ADR-0066 §2 as amended by ADR 0076)
+// refuses an initiator's plaintext endpoint unless the pair carries the
+// tx_allow_plaintext opt-out. The former I2SIG_INSECURE_SSTP_HTTP environment
+// gate is retired by that per-stream field (i2goSignals#322).
 func validateSstpEndpointUrl(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid endpoint_url: %v", err)
 	}
 	switch u.Scheme {
-	case "https":
-	case "http":
-		if !insecureSstpHttpEnabled() {
-			return errors.New("invalid endpoint_url: http scheme requires I2SIG_INSECURE_SSTP_HTTP=true")
-		}
+	case "https", "http":
 	default:
-		return fmt.Errorf("invalid endpoint_url: scheme must be https, got %q", u.Scheme)
+		return fmt.Errorf("invalid endpoint_url: scheme must be http or https, got %q", u.Scheme)
 	}
 	if u.Host == "" {
 		return errors.New("invalid endpoint_url: host must be non-empty")
@@ -296,6 +289,13 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 
 	rec := s.buildSstpRecord(mid, pairId, inboundSid, projectID, bootstrap, endpointUrl, authHeader)
 
+	// Business-stream TLS floor (i2goSignals#322): an initiator dials its
+	// endpoint_url, so a plaintext one needs the pair's tx_allow_plaintext
+	// opt-out. The responder's URL is served, not dialed, and passes.
+	if err := validateBusinessStreamTransport(*rec); err != nil {
+		return model.StreamStateRecord{}, err
+	}
+
 	// A Publish primary re-signs under its iss, so it needs an active signing
 	// key before anything is written or cascaded (#308).
 	if err := s.RequireActiveSigningKey(ctx, rec); err != nil {
@@ -380,6 +380,19 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 				return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 			}
 			streamRec.SstpMethod.EndpointUrl = patch.SstpMethod.EndpointUrl
+		}
+	}
+	// tx_allow_plaintext is fill-in-once like the endpoint it governs: a patch
+	// may grant the TLS-floor opt-out (typically in the same patch that fills
+	// in a plaintext endpoint_url) but a partial patch cannot revoke it —
+	// recreate the pair to do that. The floor is then re-checked on the
+	// resulting record (i2goSignals#322).
+	if patch.TxAllowPlaintext {
+		streamRec.TxAllowPlaintext = true
+	}
+	if patch.SstpMethod != nil {
+		if err := validateBusinessStreamTransport(*streamRec); err != nil {
+			return nil, err
 		}
 		if patch.SstpMethod.PeerPairId != "" && patch.SstpMethod.PeerPairId != streamRec.SstpMethod.PeerPairId {
 			if streamRec.SstpMethod.PeerPairId != "" {
@@ -700,6 +713,9 @@ func (s *StreamService) buildSstpRecord(mid bson.ObjectID, pairId, inboundSid, p
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			SstpTransmitMarker: &model.SstpTransmitMarker{Method: model.DeliverySstp},
 		},
+		// The TLS-floor opt-out lives on the primary (transmit) half: that is
+		// the StreamConfiguration the SSTP dialer reads for the outbound leg.
+		TxAllowPlaintext: b.TxAllowPlaintext,
 	}
 
 	inbound := model.StreamConfiguration{
@@ -835,6 +851,9 @@ func mirrorSstpBootstrap(rec *model.StreamStateRecord, b model.SstpPairBootstrap
 	mirror := model.SstpPairBootstrap{
 		Description: b.Description,
 		PeerPairId:  rec.PairId,
+		// The TLS-floor opt-out is a property of the pair: whichever side ends
+		// up the initiator dials the same endpoint, so the mirror carries it.
+		TxAllowPlaintext: b.TxAllowPlaintext,
 		// Swap directions: peer's primary (tx) == our inbound (rx).
 		Primary: b.Inbound,
 		Inbound: b.Primary,

@@ -14,11 +14,29 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
+// ErrPlaintextNotAllowed is returned (wrapped, with the offending endpoint)
+// in PushResult.Err when TransmitterConfig.EndpointURL is not https and
+// TransmitterConfig.AllowPlaintext is false. StatusCode is 0 (no request was
+// made), so ClassifyResult reports it as a transport failure. It is an alias
+// of the family-wide tlsSupport.ErrPlaintextNotAllowed so errors.Is holds
+// against either name.
+var ErrPlaintextNotAllowed = tlsSupport.ErrPlaintextNotAllowed
+
 // PushSET sends a SET token string to the receiver endpoint per RFC8935.
 // It sets Content-Type to application/secevent+jwt, includes the Authorization header
 // if configured, and interprets the response.
 func PushSET(ctx context.Context, tokenString string, config TransmitterConfig) PushResult {
 	log := getLogger(config.Logger)
+
+	// TLS floor: refused before a client is even selected, so an injected
+	// HTTPClient cannot bypass it.
+	if !config.AllowPlaintext && tlsSupport.IsPlaintextEndpoint(config.EndpointURL) {
+		err := fmt.Errorf("RFC8935: %w: %s", ErrPlaintextNotAllowed, config.EndpointURL)
+		// WARN, not ERROR: a refused dial is a per-attempt connect failure
+		// (CONTEXT.md log-level policy) and recurs on every delivery attempt.
+		log.Warn("RFC8935: Refusing plaintext push endpoint", "url", config.EndpointURL, "error", err)
+		return PushResult{Err: err}
+	}
 
 	client := config.HTTPClient
 	if client == nil {

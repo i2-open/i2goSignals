@@ -55,10 +55,10 @@ func TestSstpPairE2ESuite(t *testing.T) {
 }
 
 func (s *SstpPairE2ESuite) SetupTest() {
-	// The e2e servers run on http loopback; permit http SSTP EndpointUrls so the
-	// responder-derived endpoint passes create-time validation (I2SIG_INSECURE_SSTP_HTTP,
-	// PRD #154 Q28). Production requires https.
-	s.T().Setenv("I2SIG_INSECURE_SSTP_HTTP", "true")
+	// The e2e servers run on http loopback. The responder-derived endpoint is
+	// served, not dialed, so it passes the business-stream TLS floor on its own;
+	// the initiator mirror dials it, so symmetricBootstrap carries the pair's
+	// tx_allow_plaintext opt-out (#322). Production requires https.
 	// Shared HMAC secret so authenticated /_cluster/wake-sstp-* calls are accepted.
 	s.T().Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "e2e-cluster-secret")
 	s.a = s.bootNode("sstp-e2e-a")
@@ -180,11 +180,12 @@ func symmetricBootstrap(peerAlias, iss string, aud []string) model.SstpPairBoots
 		Mode:   model.SstpModePublish,
 	}
 	return model.SstpPairBootstrap{
-		Role:            model.SstpRoleResponder,
-		PeerServerAlias: peerAlias,
-		Description:     "e2e symmetric pair",
-		Primary:         dir,
-		Inbound:         dir,
+		Role:             model.SstpRoleResponder,
+		PeerServerAlias:  peerAlias,
+		Description:      "e2e symmetric pair",
+		Primary:          dir,
+		Inbound:          dir,
+		TxAllowPlaintext: true, // http loopback peers (#322)
 	}
 }
 

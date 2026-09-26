@@ -57,10 +57,11 @@ func TestPushWhilePollHeld_DefersInboundFeedbackForTheNextRequest(t *testing.T) 
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://us.example",
-			Aud:       []string{peerIssuer},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://us.example",
+			Aud:              []string{peerIssuer},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		SstpInbound: &model.StreamConfiguration{
 			Id:  "rx-sid-second-push",
@@ -144,10 +145,11 @@ func TestPushWhilePollHeld_DrainsUntilOutboundEmpty(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://us.example",
-			Aud:       []string{"https://peer.example"},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://us.example",
+			Aud:              []string{"https://peer.example"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,

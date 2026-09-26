@@ -25,9 +25,10 @@ func TestPollBackoffRetry(t *testing.T) {
 	// Create a polling receiver stream with a bogus URL
 	streamID := "test-poll-backoff"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "transmitter.example.com",
-		IssuerJWKSUrl: "http://localhost:12345/.well-known/jwks.json", // Valid URL format but will cause connection error (temporary)
+		Id:               streamID,
+		Iss:              "transmitter.example.com",
+		IssuerJWKSUrl:    "http://localhost:12345/.well-known/jwks.json", // Valid URL format but will cause connection error (temporary)
+		TxAllowPlaintext: true,                                           // plaintext loopback endpoint (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
@@ -85,9 +86,10 @@ func TestPollReceiverPermanentJwksError(t *testing.T) {
 	// Create a polling receiver stream with an invalid JWKS URL (permanent error)
 	streamID := "test-jwks-permanent-error"
 	streamConfig := model.StreamConfiguration{
-		Id:            streamID,
-		Iss:           "invalid-protocol-in-issuer",
-		IssuerJWKSUrl: "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		Id:               streamID,
+		Iss:              "invalid-protocol-in-issuer",
+		IssuerJWKSUrl:    "invalid-protocol://invalid-protocol-in-issuer", // This will create an invalid JWKS URL path
+		TxAllowPlaintext: true,                                            // plaintext loopback endpoint (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

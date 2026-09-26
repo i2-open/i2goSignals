@@ -1630,6 +1630,9 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 			// nil JWKS rejects rather than silently accepting unsigned events.
 			RequireSignature: stream.SigningOnly,
 			Validators:       validators,
+			// Business-stream TLS floor (#322): an http:// transmitter is refused
+			// inside Poll unless the stream carries the tx_allow_plaintext opt-out.
+			AllowPlaintext: stream.TxAllowPlaintext,
 		})
 
 		if err != nil {

@@ -103,11 +103,12 @@ func createEvPollReceiver(t *testing.T, instance *ssfInstance, jwksUrl, endpoint
 
 	created, err := instance.streamSvc().CreateStream(ctx, model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Iss:             evIssuer,
-			Aud:             []string{evAudience},
-			IssuerJWKSUrl:   jwksUrl,
-			EventsRequested: []string{"*"},
-			RouteMode:       model.RouteModeImport,
+			TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+			Iss:              evIssuer,
+			Aud:              []string{evAudience},
+			IssuerJWKSUrl:    jwksUrl,
+			EventsRequested:  []string{"*"},
+			RouteMode:        model.RouteModeImport,
 			Delivery: &model.OneOfStreamConfigurationDelivery{
 				PollReceiveMethod: &model.PollReceiveMethod{
 					Method:      model.ReceivePoll,

@@ -109,6 +109,9 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 		EndpointURL:        pushCfg.EndpointUrl,
 		Authorization:      pushCfg.AuthorizationHeader,
 		InsecureSkipVerify: cfg.TxTLSSkipVerify,
+		// Business-stream TLS floor (#322): http:// receivers are refused inside
+		// PushSET unless the stream carries the tx_allow_plaintext opt-out.
+		AllowPlaintext: cfg.TxAllowPlaintext,
 	})
 
 	cls := goSetPush.ClassifyResult(result)

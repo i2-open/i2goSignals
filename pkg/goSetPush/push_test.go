@@ -367,7 +367,8 @@ func TestPushSET_Accepted(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
@@ -387,13 +388,15 @@ func TestPushSET_InsecureSkipVerify(t *testing.T) {
 	// Default (verify): the self-signed cert is untrusted, so the push fails at
 	// the TLS layer with no HTTP response.
 	verifyResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 	require.Error(t, verifyResult.Err, "default client must reject the self-signed receiver cert")
 	assert.False(t, verifyResult.Accepted)
 
 	// InsecureSkipVerify: TLS verification is skipped and the push is accepted.
 	skipResult := PushSET(context.Background(), "test-token-string", TransmitterConfig{
+		AllowPlaintext:     true,
 		EndpointURL:        server.URL,
 		InsecureSkipVerify: true,
 	})
@@ -415,7 +418,8 @@ func TestPushSET_BadRequest(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.False(t, result.Accepted)
@@ -434,7 +438,8 @@ func TestPushSET_ServerError(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-token-string", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.False(t, result.Accepted)
@@ -450,8 +455,9 @@ func TestPushSET_AuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL:   server.URL,
-		Authorization: "Bearer test-token-123",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "Bearer test-token-123",
 	})
 
 	assert.True(t, result.Accepted)
@@ -465,8 +471,9 @@ func TestPushSET_BareTokenPrefixed(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL:   server.URL,
-		Authorization: "raw-token-value",
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		Authorization:  "raw-token-value",
 	})
 
 	assert.True(t, result.Accepted)
@@ -480,7 +487,8 @@ func TestPushSET_NoAuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
@@ -497,7 +505,8 @@ func TestPushSET_BodyContent(t *testing.T) {
 	defer server.Close()
 
 	result := PushSET(context.Background(), expectedToken, TransmitterConfig{
-		EndpointURL: server.URL,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
 	})
 
 	assert.True(t, result.Accepted)
@@ -505,7 +514,8 @@ func TestPushSET_BodyContent(t *testing.T) {
 
 func TestPushSET_ConnectionError(t *testing.T) {
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: "http://localhost:1", // port 1 should not be listening
+		AllowPlaintext: true,
+		EndpointURL:    "http://localhost:1", // port 1 should not be listening
 	})
 
 	assert.False(t, result.Accepted)
@@ -521,8 +531,9 @@ func TestPushSET_CustomHTTPClient(t *testing.T) {
 
 	customClient := &http.Client{}
 	result := PushSET(context.Background(), "test-set", TransmitterConfig{
-		EndpointURL: server.URL,
-		HTTPClient:  customClient,
+		AllowPlaintext: true,
+		EndpointURL:    server.URL,
+		HTTPClient:     customClient,
 	})
 
 	assert.True(t, result.Accepted)

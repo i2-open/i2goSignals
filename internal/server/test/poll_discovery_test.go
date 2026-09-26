@@ -91,10 +91,11 @@ func TestPollStatusDiscovery(t *testing.T) {
 
 			wellKnownUrl := ts_final.URL + "/.well-known/sse-configuration"
 			streamConfig := model.StreamConfiguration{
-				Id:             "test-stream-" + tt.name,
-				TxWellKnownUrl: &wellKnownUrl,
-				Iss:            "transmitter.example.com",
-				IssuerJWKSUrl:  ts_final.URL + "/jwks",
+				Id:               "test-stream-" + tt.name,
+				TxWellKnownUrl:   &wellKnownUrl,
+				Iss:              "transmitter.example.com",
+				IssuerJWKSUrl:    ts_final.URL + "/jwks",
+				TxAllowPlaintext: true, // httptest peers are plaintext (#322)
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,

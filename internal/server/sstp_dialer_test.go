@@ -385,10 +385,11 @@ func TestSstpDialer_BasicDialAndAck(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://issuer.example.com",
-			Aud:       []string{"https://peer.example.com"},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://issuer.example.com",
+			Aud:              []string{"https://peer.example.com"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,
@@ -494,10 +495,11 @@ func TestSstpDialer_UsesResolveClientForCredentialChain(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://issuer.example.com",
-			Aud:       []string{"https://peer.example.com"},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://issuer.example.com",
+			Aud:              []string{"https://peer.example.com"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,
@@ -596,10 +598,11 @@ func TestSstpDialer_FallsBackToInlineClientWhenResolverErrors(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://issuer.example.com",
-			Aud:       []string{"https://peer.example.com"},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://issuer.example.com",
+			Aud:              []string{"https://peer.example.com"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,
@@ -717,10 +720,11 @@ func TestSstpDialer_SignFailureIsError(t *testing.T) {
 	// key trips buildSstpSets' "no signing key" error path (AC 5).
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://issuer.example.com",
-			Aud:       []string{"https://peer.example.com"},
-			RouteMode: model.RouteModePublish,
+			Id:               txSid,
+			Iss:              "https://issuer.example.com",
+			Aud:              []string{"https://peer.example.com"},
+			RouteMode:        model.RouteModePublish,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,
@@ -804,10 +808,11 @@ func TestSstpDialer_EmptyAckDoesNotConfirmSentSets(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://issuer.example.com",
-			Aud:       []string{"https://peer.example.com"},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://issuer.example.com",
+			Aud:              []string{"https://peer.example.com"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		Status: model.StreamStateEnabled,
 		PairId: pairId,
@@ -919,10 +924,11 @@ func TestSstpDialer_IngestsResponseSetsViaVerifySET(t *testing.T) {
 	// dialer's inbound verify config is built with the right trust root.
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://us.example",
-			Aud:       []string{peerIssuer},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://us.example",
+			Aud:              []string{peerIssuer},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		SstpInbound: &model.StreamConfiguration{
 			Id:  "rx-sid-1",
@@ -1085,10 +1091,11 @@ func TestSstpDialer_ReceiveOnlyCycleIsNotPaced(t *testing.T) {
 
 	pair := model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{
-			Id:        txSid,
-			Iss:       "https://us.example",
-			Aud:       []string{peerIssuer},
-			RouteMode: model.RouteModeForward,
+			Id:               txSid,
+			Iss:              "https://us.example",
+			Aud:              []string{peerIssuer},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
 		},
 		SstpInbound: &model.StreamConfiguration{
 			Id:  "rx-sid-pacing",

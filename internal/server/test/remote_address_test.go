@@ -194,10 +194,11 @@ func (suite *RemoteAddressSuite) TestOutboundPushCapturesRemoteAddress() {
 	defer mockServer.Close()
 
 	streamConfig := model.StreamConfiguration{
-		Iss:             suite.instance.app.GetDefIssuer(),
-		Aud:             []string{"https://mock-receiver.example.com"},
-		EventsSupported: []string{"*"},
-		EventsRequested: []string{"*"},
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              suite.instance.app.GetDefIssuer(),
+		Aud:              []string{"https://mock-receiver.example.com"},
+		EventsSupported:  []string{"*"},
+		EventsRequested:  []string{"*"},
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:      model.DeliveryPush,
@@ -288,7 +289,8 @@ func (suite *RemoteAddressSuite) TestOutboundPollCapturesRemoteAddress() {
 	t.Setenv("I2SIG_POLL_RETRY_MAX_DELAY", "0.1")
 
 	streamConfig := model.StreamConfiguration{
-		Iss: "mock-transmitter",
+		TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+		Iss:              "mock-transmitter",
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,

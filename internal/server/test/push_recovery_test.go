@@ -50,10 +50,11 @@ func startMockReceiver(t *testing.T, eventsHandler, statusHandler http.HandlerFu
 func createPushStream(t *testing.T, instance *ssfInstance, eventsURL string) string {
 	t.Helper()
 	streamConfig := model.StreamConfiguration{
-		Iss:             instance.app.GetDefIssuer(),
-		Aud:             []string{"https://mock-receiver.example.com"},
-		EventsSupported: []string{"*"},
-		EventsRequested: []string{"*"},
+		Iss:              instance.app.GetDefIssuer(),
+		Aud:              []string{"https://mock-receiver.example.com"},
+		EventsSupported:  []string{"*"},
+		EventsRequested:  []string{"*"},
+		TxAllowPlaintext: true, // loopback httptest receiver (#322)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushTransmitMethod: &model.PushTransmitMethod{
 				Method:              model.DeliveryPush,

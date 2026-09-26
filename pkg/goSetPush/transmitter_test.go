@@ -28,6 +28,7 @@ func TestPushSET_ReusesConnectionsAcrossCalls(t *testing.T) {
 	const pushes = 5
 	for i := 0; i < pushes; i++ {
 		res := PushSET(context.Background(), "token", TransmitterConfig{
+			AllowPlaintext:     true,
 			EndpointURL:        srv.URL,
 			InsecureSkipVerify: true,
 		})

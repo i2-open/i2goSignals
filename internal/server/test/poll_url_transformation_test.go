@@ -81,9 +81,10 @@ func TestPollStatusUrlTransformation(t *testing.T) {
 
 			streamID := "test-" + tt.name
 			streamConfig := model.StreamConfiguration{
-				Id:            streamID,
-				Iss:           "transmitter.example.com",
-				IssuerJWKSUrl: ts.URL + "/jwks",
+				TxAllowPlaintext: true, // httptest peers are plaintext (#322)
+				Id:               streamID,
+				Iss:              "transmitter.example.com",
+				IssuerJWKSUrl:    ts.URL + "/jwks",
 				Delivery: &model.OneOfStreamConfigurationDelivery{
 					PollReceiveMethod: &model.PollReceiveMethod{
 						Method:      model.ReceivePoll,

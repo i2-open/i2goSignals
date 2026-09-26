@@ -108,6 +108,14 @@ type ReceiverConfig struct {
 	// HTTPClient is an optional custom HTTP client. If nil, a default is used.
 	HTTPClient *http.Client
 
+	// AllowPlaintext permits EndpointURL to use a scheme other than https.
+	// False (the default) is the business-stream TLS floor (ADR-0066 §2 as
+	// amended by ADR 0076): PollRaw and Poll refuse a plaintext endpoint before
+	// any request is built, whether or not HTTPClient is injected. It carries
+	// the stream's tx_allow_plaintext opt-out. Control streams never set it
+	// (ADR-0063 §1).
+	AllowPlaintext bool
+
 	// Logger is an optional structured logger. If nil, a default is used.
 	Logger *slog.Logger
 }
