@@ -65,7 +65,7 @@ BENCHTIME ?= 1x
 # here and nowhere else in the gate.
 LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... ./internal/server
 
-.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-pprof \
+.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-pprof \
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
@@ -88,6 +88,7 @@ help:
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
 	@echo "  dev-bench          - end-to-end load/routing benchmark against the dev stack: BENCH_E2E_EVENTS=$(BENCH_E2E_EVENTS) BENCH_E2E_CONCURRENCY=$(BENCH_E2E_CONCURRENCY) BENCH_E2E_ARGS=..."
+	@echo "  dev-bench-sweep    - dev-bench once per client count in BENCH_SWEEP_CLIENTS=$(BENCH_SWEEP_CLIENTS) with Mongo journal counters (see docs/perf/e2e-benchmark.md, Concurrency sweep)"
 	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
 	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test leak-check bench"
@@ -328,6 +329,22 @@ BENCH_E2E_CONCURRENCY ?= 16
 BENCH_E2E_ARGS        ?=
 dev-bench:
 	$(GO) run ./cmd/goSignalsBench --events=$(BENCH_E2E_EVENTS) --concurrency=$(BENCH_E2E_CONCURRENCY) $(BENCH_E2E_ARGS)
+
+# Concurrency sweep (docs/perf/e2e-benchmark.md, "Concurrency sweep"): one
+# dev-bench run per client count, each snapshotting the Mongo primary's
+# wiredTiger.log journal counters before and after (BENCH_MONGO_URI, host-side;
+# the dev replica set advertises mongo1..3, which must resolve to 127.0.0.1).
+# The server-side worker axis is set when the stack is started; record it with
+# BENCH_SWEEP_WORKERS so each JSON result carries it. Profiles: add
+# BENCH_E2E_ARGS="--pprof --pprof-block" (block needs I2SIG_PPROF_BLOCK_RATE).
+BENCH_SWEEP_CLIENTS ?= 1 4 16 64
+BENCH_SWEEP_WORKERS ?= default
+BENCH_MONGO_URI     ?= mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&authSource=admin
+dev-bench-sweep:
+	@for c in $(BENCH_SWEEP_CLIENTS); do \
+		$(MAKE) --no-print-directory dev-bench BENCH_E2E_CONCURRENCY=$$c \
+			BENCH_E2E_ARGS="--mongo-uri='$(BENCH_MONGO_URI)' --workers=$(BENCH_SWEEP_WORKERS) --label=sweep-c$$c-w$(BENCH_SWEEP_WORKERS) $(BENCH_E2E_ARGS)" || exit 1; \
+	done
 
 # Profile a running dev-stack node with `go tool pprof`.
 # The dev compose file sets I2SIG_PPROF_ADDR=:6060 on every goSignals node and

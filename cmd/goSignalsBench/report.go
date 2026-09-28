@@ -50,6 +50,9 @@ type benchResult struct {
 	// dials goSignals2 and carries the events in its requests) or "responder"
 	// (goSignals2 dials goSignals1 and receives the events in the responses).
 	SstpRole string `json:"sstp_role"`
+	// Workers records the server-side worker setting of the run (--workers);
+	// the harness cannot set it, the servers are started with it.
+	Workers string `json:"workers,omitempty"`
 
 	IngressStream string `json:"ingress_stream"`
 
@@ -70,6 +73,14 @@ type benchResult struct {
 	Notes        string  `json:"notes,omitempty"`
 
 	Profiles []string `json:"profiles,omitempty"`
+
+	// DaoGs1 / DaoGs2 are the EventDAO latency histograms (i2goSignals#328)
+	// accumulated during the run on each node, keyed by op.
+	DaoGs1        map[string]daoOpStats `json:"dao_gs1,omitempty"`
+	DaoGs2        map[string]daoOpStats `json:"dao_gs2,omitempty"`
+	DominantDaoOp string                `json:"dominant_dao_op,omitempty"` // most total wall time on goSignals1
+	// Journal is the WiredTiger journal delta on the Mongo primary (--mongo-uri).
+	Journal *journalResult `json:"journal,omitempty"`
 }
 
 func percentiles(durations []time.Duration) latencyStats {
@@ -186,6 +197,18 @@ func (r *benchResult) printSummary() {
 	if r.Notes != "" {
 		fmt.Printf("notes  : %s\n", r.Notes)
 	}
+	if r.Workers != "" {
+		fmt.Printf("workers: %s\n", r.Workers)
+	}
+	printDao("dao gs1", r.DaoGs1)
+	printDao("dao gs2", r.DaoGs2)
+	if r.DominantDaoOp != "" {
+		fmt.Printf("dominant DAO op (goSignals1 total time): %s\n", r.DominantDaoOp)
+	}
+	if j := r.Journal; j != nil {
+		fmt.Printf("journal: %s syncs=%d (%.2f/SET) writes=%d (%.2f/SET) flushes=%d bytes=%d sync-time=%.0fms\n",
+			j.Host, j.Syncs, j.SyncsPerSET, j.Writes, j.WritesPerSET, j.Flushes, j.BytesWritten, j.SyncMs)
+	}
 	for _, p := range r.Profiles {
 		fmt.Printf("profile: %s\n", p)
 	}
@@ -200,4 +223,18 @@ func goVersionString() string {
 // through the repo's slog handler, which double-stamps every line.
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+}
+
+// printDao prints one line per EventDAO op, busiest (total time) first.
+func printDao(prefix string, stats map[string]daoOpStats) {
+	ops := make([]string, 0, len(stats))
+	for op := range stats {
+		ops = append(ops, op)
+	}
+	sort.Slice(ops, func(i, j int) bool { return stats[ops[i]].TotalMs > stats[ops[j]].TotalMs })
+	for _, op := range ops {
+		s := stats[op]
+		fmt.Printf("%s: %-22s calls=%-6d total=%8.0fms mean=%6.2fms p50=%6.2fms p95=%6.2fms\n",
+			prefix, op, s.Calls, s.TotalMs, s.MeanMs, s.P50Ms, s.P95Ms)
+	}
 }

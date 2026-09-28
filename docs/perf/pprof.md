@@ -122,6 +122,11 @@ make dev-pprof PPROF_KIND=block
 make dev-down && make dev-up                                          # back to no sampling
 ```
 
+`goSignalsBench --pprof --pprof-block` captures a block delta profile of both
+nodes over the same window as its CPU profiles, when the stack was started with
+`I2SIG_PPROF_BLOCK_RATE` set; without it the block profile comes back empty.
+See [e2e-benchmark.md](e2e-benchmark.md#profiles-for-the-16-and-64-client-runs).
+
 ### Outside Docker
 
 ```bash

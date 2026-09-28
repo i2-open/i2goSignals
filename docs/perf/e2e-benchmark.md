@@ -124,6 +124,9 @@ Useful flags:
 | `--sstp-role initiator\|responder` | goSignals1's SSTP role, i.e. which node opens the HTTP connection |
 | `--issuer`, `--push-aud`, `--poll-aud`, `--sstp-aud` | issuer and per-leg audiences (URLs) |
 | `--pprof`, `--pprof-seconds` | fetch `debug/pprof/profile` from goSignals1 (`:6060`) and goSignals2 (`:6061`) during the run; files land in `bin/bench/pprof/` |
+| `--pprof-block` | with `--pprof`, also fetch a `debug/pprof/block` delta profile over the same window (needs `I2SIG_PPROF_BLOCK_RATE` on the servers) |
+| `--mongo-uri` | host-side Mongo URI (default `$BENCH_MONGO_URI`); snapshot the primary's journal counters before and after the run (see [Concurrency sweep](#concurrency-sweep)) |
+| `--workers` | free-text record of the server-side worker setting, stored in the result; it does not change the servers |
 | `--history <file>` | append a summary row to a Markdown table (see below) |
 | `--label` | free text stored with the result (what changed) |
 | `--keep` | leave the streams in place for inspection with the CLI / admin UI |
@@ -162,6 +165,107 @@ Binaries in the dev stack run under Delve from source, so symbols resolve
 without any extra setup. For heap, goroutine or mutex profiles use
 `make dev-pprof PPROF_KIND=heap` while a long run is in flight (see
 [pprof.md](pprof.md)).
+
+## Concurrency sweep
+
+The sweep answers one question: as ingest parallelism rises, what bounds
+throughput — Mongo round trips, the journal, or the server's own CPU and
+locks? It runs **5000 events** (`alternate` mix) at **1, 4, 16 and 64
+clients** for each worker setting, on the Mongo provider and again on the
+memory provider as a no-database control. The latest results are in
+[throughput-baseline-alpha20.md](throughput-baseline-alpha20.md).
+
+### The two axes
+
+- **Clients** — `--concurrency`, the number of parallel ingest connections.
+  The server has no ingest worker pool: each ingest request runs on its own
+  handler goroutine, so client count *is* ingest parallelism.
+- **Workers** — `I2SIG_PUSH_CONCURRENCY` on goSignals1, the push-delivery
+  pool size ([ADR 0037](../adr/0037-push-concurrency-derived-from-processors.md):
+  `GOMAXPROCS` clamped to 8..32 when unset, 14 on a fourteen-processor host).
+  It is read once at start-up, so it is set when the stack is started, not per
+  run. The sweep uses `default`, `8` and `32`. `--workers` only records the
+  setting in each JSON result.
+
+### Running it
+
+```bash
+# Mongo provider, one worker setting at a time
+I2SIG_PUSH_CONCURRENCY=8 docker compose -f docker-compose-dev.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_SWEEP_WORKERS=8
+
+# back to the derived default
+docker compose -f docker-compose-dev.yml up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep                                  # BENCH_SWEEP_WORKERS=default
+
+# memory provider (control): the overlay swaps MONGO_URL for memorydb:
+docker compose -f docker-compose-dev.yml -f docker-compose-dev-memory.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_MONGO_URI= \
+    BENCH_E2E_ARGS="--issuer=https://bench-mem.example.com --issuer-key=bin/bench/bench-mem.example.com.pem"
+```
+
+`dev-bench-sweep` runs `dev-bench` once per entry in
+`BENCH_SWEEP_CLIENTS` (default `1 4 16 64`), labels each result
+`sweep-c<clients>-w<workers>` and passes `BENCH_E2E_ARGS` through. Every run
+writes its own `bin/bench/bench-<timestamp>.json`.
+
+**Use a separate issuer for memory-provider runs.** A memory store starts
+empty on every restart, so goSignals1 no longer holds the issuer's key and the
+harness mints a new key pair and writes it to the `--issuer-key` file (default
+`bin/bench/<issuer host>.pem`). The Mongo stack still holds the old public
+key, so after that every SET the same issuer sends to the Mongo stack fails
+with HTTP 400. The harness now keeps the previous PEM as
+`<file>.<UTC stamp>.bak` before writing a new one, so the old key can be put
+back, but a distinct `--issuer` (and so a distinct key file) for memory runs,
+as above, avoids the problem.
+
+### Journal syncs per SET
+
+With `--mongo-uri` (or `BENCH_MONGO_URI`) set, the harness reads
+`db.serverStatus().wiredTiger.log` on the replica-set primary before and after
+the run and records the difference in the result's `journal` block: `log sync
+operations`, `log write operations`, `log flush operations`, bytes written and
+sync time, plus syncs and writes per ingested SET.
+
+- The URI is dialled **from the host**. The dev replica set advertises
+  `mongo1`..`mongo3` on ports 30001..30003, so `/etc/hosts` must map those
+  names to `127.0.0.1`; the Makefile default is
+  `mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&authSource=admin`.
+- The counters are **server-wide**. goSignals1 and goSignals2 share the replica
+  set, so a run's delta covers ingest on goSignals1 and delivery bookkeeping on
+  goSignals2 together, plus any background writes (leases, heartbeats).
+- An empty URI skips the probe; on the memory provider set `BENCH_MONGO_URI=`.
+
+### DAO latency
+
+Each result carries `dao_gs1` / `dao_gs2` (see
+[Ingest breakdown](#ingest-breakdown-dao-metrics)) and `dominant_dao_op`, the
+op with the most wall time on goSignals1 (`WatchPending` excluded). The lowest
+histogram bucket is 0.5 ms and quantiles interpolate from zero inside it, so
+on the memory provider a p50 of about **0.25 ms** means "under 0.5 ms", not a
+measured 0.25 ms.
+
+### Profiles for the 16- and 64-client runs
+
+Start the stack with block sampling on, then profile only the two runs that
+matter:
+
+```bash
+I2SIG_PPROF_BLOCK_RATE=1 docker compose -f docker-compose-dev.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_SWEEP_CLIENTS="16 64" \
+    BENCH_E2E_ARGS="--pprof --pprof-block --pprof-seconds=10"
+go tool pprof -top bin/bench/pprof/block-goSignals1-<stamp>.pb.gz
+```
+
+`--pprof-block` fetches `debug/pprof/block?seconds=N` alongside the CPU
+profile, so both cover the same window; files are
+`bin/bench/pprof/{cpu,block}-goSignals{1,2}-<stamp>.pb.gz`. Block sampling
+costs throughput at 64 clients, so take the sweep table from unprofiled runs.
+Recreate the two services without `I2SIG_PPROF_BLOCK_RATE` afterwards (see
+[pprof.md](pprof.md#mutex-and-block-profiling-opt-in)).
 
 ## Recording results over time
 

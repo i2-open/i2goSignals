@@ -62,6 +62,9 @@ type options struct {
 	pprof                    bool
 	pprofGs1, pprofGs2       string
 	pprofSeconds             int
+	pprofBlock               bool
+	mongoURI                 string
+	workers                  string
 	verbose                  bool
 }
 
@@ -94,6 +97,9 @@ func parseFlags() *options {
 	flag.StringVar(&o.pprofGs1, "pprof-gs1", "http://localhost:6060", "pprof base URL for goSignals1")
 	flag.StringVar(&o.pprofGs2, "pprof-gs2", "http://localhost:6061", "pprof base URL for goSignals2")
 	flag.IntVar(&o.pprofSeconds, "pprof-seconds", 0, "CPU profile window (default: 30s, or the drain timeout if smaller)")
+	flag.BoolVar(&o.pprofBlock, "pprof-block", false, "with --pprof, also capture block profiles over the same window (needs I2SIG_PPROF_BLOCK_RATE on the servers)")
+	flag.StringVar(&o.mongoURI, "mongo-uri", os.Getenv("BENCH_MONGO_URI"), "Mongo URI (host-side) to snapshot db.serverStatus().wiredTiger.log before and after the run; empty skips it")
+	flag.StringVar(&o.workers, "workers", "", "free-text record of the server-side worker setting for this run (e.g. I2SIG_PUSH_CONCURRENCY=8); recorded, not applied")
 	flag.BoolVar(&o.verbose, "v", false, "log each stream as it is created")
 	flag.Parse()
 	if o.issuerKeyFile == "" {
@@ -213,6 +219,19 @@ func run(o *options) error {
 	if err != nil {
 		return err
 	}
+	daoBefore1, daoErr1 := gs1.scrapeDaoHistograms()
+	daoBefore2, daoErr2 := gs2.scrapeDaoHistograms()
+	var journal *journalProbe
+	var journalBefore *journalCounters
+	if o.mongoURI != "" {
+		if journal, err = openJournalProbe(o.mongoURI); err != nil {
+			return err
+		}
+		defer journal.close()
+		if journalBefore, err = journal.snapshot(); err != nil {
+			return err
+		}
+	}
 
 	result := &benchResult{
 		Timestamp:     time.Now(),
@@ -225,6 +244,7 @@ func run(o *options) error {
 		Mix:           string(mix),
 		Issuer:        o.issuer,
 		SstpRole:      o.sstpRole,
+		Workers:       o.workers,
 		IngressStream: topo.ingress.Id,
 	}
 	expectPush, expectPoll, expectSstp := mix.expected(o.events)
@@ -285,6 +305,26 @@ func run(o *options) error {
 
 	result.Profiles = profiles.wait()
 
+	// ---- DAO histograms and journal counters -------------------------------
+	if daoErr1 == nil {
+		if after, err := gs1.scrapeDaoHistograms(); err == nil {
+			result.DaoGs1 = summarizeDao(diffDaoHistograms(daoBefore1, after))
+			result.DominantDaoOp = dominantDaoOp(result.DaoGs1)
+		}
+	}
+	if daoErr2 == nil {
+		if after, err := gs2.scrapeDaoHistograms(); err == nil {
+			result.DaoGs2 = summarizeDao(diffDaoHistograms(daoBefore2, after))
+		}
+	}
+	if journal != nil {
+		if after, err := journal.snapshot(); err != nil {
+			logf("warning: journal counters after the run: %v", err)
+		} else {
+			result.Journal = diffJournal(journalBefore, after, o.events-result.IngestErrors)
+		}
+	}
+
 	// ---- report ----------------------------------------------------------
 	result.printSummary()
 	path, err := writeJSON(o.outDir, result)
@@ -307,8 +347,9 @@ func run(o *options) error {
 // ensureIssuerKey makes sure goSignals1 holds a signing key named after the
 // issuer and that the harness holds the matching private key. The first run
 // mints the key and saves the PEM; later runs load it. After a `make
-// dev-clean` the server forgets the key and a new one is minted (overwriting
-// the file).
+// dev-clean` (or on a memory-provider restart) the server forgets the key and
+// a new one is minted; a PEM already at the path is first kept as a
+// timestamped .bak so a key another stack still holds is not lost.
 func ensureIssuerKey(gs1 *node, o *options) (*rsa.PrivateKey, error) {
 	if gs1.hasIssuerKey(o.issuer) {
 		pemBytes, readErr := os.ReadFile(o.issuerKeyFile)
@@ -329,11 +370,32 @@ func ensureIssuerKey(gs1 *node, o *options) (*rsa.PrivateKey, error) {
 	if mkErr := os.MkdirAll(filepath.Dir(o.issuerKeyFile), 0o755); mkErr != nil {
 		return nil, mkErr
 	}
+	if backup, bakErr := backupExisting(o.issuerKeyFile, time.Now()); bakErr != nil {
+		return nil, bakErr
+	} else if backup != "" {
+		logf("kept the previous issuer key PEM as %s", backup)
+	}
 	if writeErr := os.WriteFile(o.issuerKeyFile, pemBytes, 0o600); writeErr != nil {
 		return nil, writeErr
 	}
 	logf("minted issuer key %s on goSignals1, saved to %s", o.issuer, o.issuerKeyFile)
 	return k, nil
+}
+
+// backupExisting renames path to path.<UTC stamp>.bak when it exists and
+// returns the new name ("" when there was nothing to keep).
+func backupExisting(path string, now time.Time) (string, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	backup := path + "." + now.UTC().Format("20060102T150405Z") + ".bak"
+	if err := os.Rename(path, backup); err != nil {
+		return "", fmt.Errorf("keep previous issuer key: %w", err)
+	}
+	return backup, nil
 }
 
 // ensureSigningAlgKey makes sure goSignals1 holds the issuer key for
@@ -688,26 +750,50 @@ func startProfiles(o *options, client *http.Client) *profileJob {
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	job := &profileJob{}
+	kinds := profileKinds(o.pprofBlock)
 	for _, target := range []struct{ name, base string }{{"goSignals1", o.pprofGs1}, {"goSignals2", o.pprofGs2}} {
 		if target.base == "" {
 			continue
 		}
-		job.wg.Add(1)
-		go func(name, base string) {
-			defer job.wg.Done()
-			out := filepath.Join(dir, fmt.Sprintf("cpu-%s-%s.pb.gz", name, stamp))
-			url := fmt.Sprintf("%s/debug/pprof/profile?seconds=%d", strings.TrimRight(base, "/"), seconds)
-			if err := fetchToFile(client, url, out, time.Duration(seconds+30)*time.Second); err != nil {
-				logf("warning: pprof %s: %v", name, err)
-				return
-			}
-			job.mu.Lock()
-			job.files = append(job.files, out)
-			job.mu.Unlock()
-		}(target.name, target.base)
+		for _, k := range kinds {
+			job.wg.Add(1)
+			go func(name, base string, k profileKind) {
+				defer job.wg.Done()
+				out := filepath.Join(dir, fmt.Sprintf("%s-%s-%s.pb.gz", k.file, name, stamp))
+				url := fmt.Sprintf("%s/debug/pprof/%s?seconds=%d", strings.TrimRight(base, "/"), k.endpoint, seconds)
+				if err := fetchToFile(client, url, out, time.Duration(seconds+30)*time.Second); err != nil {
+					logf("warning: pprof %s %s: %v", k.file, name, err)
+					return
+				}
+				job.mu.Lock()
+				job.files = append(job.files, out)
+				job.mu.Unlock()
+			}(target.name, target.base, k)
+		}
 	}
-	logf("capturing %ds CPU profiles into %s", seconds, dir)
+	logf("capturing %ds %s profiles into %s", seconds, profileKindNames(kinds), dir)
 	return job
+}
+
+// profileKind is one pprof endpoint captured over the run window. Block (like
+// CPU) takes ?seconds=N and returns the delta over that window rather than the
+// totals since process start.
+type profileKind struct{ endpoint, file string }
+
+func profileKinds(block bool) []profileKind {
+	kinds := []profileKind{{endpoint: "profile", file: "cpu"}}
+	if block {
+		kinds = append(kinds, profileKind{endpoint: "block", file: "block"})
+	}
+	return kinds
+}
+
+func profileKindNames(kinds []profileKind) string {
+	names := make([]string, len(kinds))
+	for i, k := range kinds {
+		names[i] = k.file
+	}
+	return strings.Join(names, "+")
 }
 
 func fetchToFile(client *http.Client, url, out string, timeout time.Duration) error {
