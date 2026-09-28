@@ -632,3 +632,150 @@ func (s *EventDAOMongoSuite) TestMarkDeliveredMany_ListsDelivered() {
 	}
 	s.ElementsMatch([]string{"d-1", "d-2", "d-3"}, got)
 }
+
+// ackState is the stored outcome of an AckDelivered scenario: the pending
+// JTIs of each named stream and the delivered (jti, ackDate) of stream A.
+type ackState struct {
+	pendingA, pendingB []string
+	delivered          map[string]time.Time
+	deliveredDocs      int
+}
+
+func (s *EventDAOMongoSuite) readAckState(streamA, streamB string) ackState {
+	ctx := context.Background()
+	var st ackState
+	st.pendingA, _, _ = s.dao.GetPendingForStream(ctx, streamA, 100)
+	st.pendingB, _, _ = s.dao.GetPendingForStream(ctx, streamB, 100)
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamA)
+	s.Require().NoError(err)
+	st.delivered = map[string]time.Time{}
+	for _, d := range delivered {
+		s.Equal(streamA, d.StreamId)
+		st.delivered[d.Jti] = d.AckDate
+	}
+	st.deliveredDocs = len(delivered)
+	return st
+}
+
+// TestAckDelivered_OneTripAndFallbackAgree: both ack strategies store the same
+// state and return the same acked set. Only JTIs pending for the stream are
+// acked (each once, even when repeated in the batch); an unknown JTI and a
+// JTI already delivered get no delivered record; each acked JTI's delivered
+// record carries ackDate (the ADR 0055 purge anchor); another stream's
+// identical JTI stays pending; re-acking is a no-op.
+func (s *EventDAOMongoSuite) TestAckDelivered_OneTripAndFallbackAgree() {
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	earlier := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	ackDate := time.Now().Truncate(time.Millisecond)
+
+	run := func(oneTrip bool) ([]string, ackState) {
+		s.SetupTest()
+		ctx := context.Background()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA))
+		s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB))
+		s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "old", StreamId: streamA}, earlier))
+
+		acked, err := s.dao.AckDelivered(ctx, []string{"a-1", "a-3", "missing", "a-1", "old"}, streamA, ackDate)
+		s.Require().NoError(err, "oneTrip=%v", oneTrip)
+
+		again, err := s.dao.AckDelivered(ctx, []string{"a-1", "a-3"}, streamA, time.Now())
+		s.Require().NoError(err, "oneTrip=%v re-ack", oneTrip)
+		s.Empty(again, "oneTrip=%v: re-ack must ack nothing", oneTrip)
+
+		empty, err := s.dao.AckDelivered(ctx, nil, streamA, ackDate)
+		s.Require().NoError(err)
+		s.Nil(empty, "oneTrip=%v: empty ack must be a no-op", oneTrip)
+		return acked, s.readAckState(streamA, streamB)
+	}
+
+	for _, oneTrip := range []bool{true, false} {
+		acked, st := run(oneTrip)
+		s.ElementsMatch([]string{"a-1", "a-3"}, acked, "oneTrip=%v", oneTrip)
+		s.Equal([]string{"a-2"}, st.pendingA, "oneTrip=%v", oneTrip)
+		s.ElementsMatch([]string{"a-1", "b-1"}, st.pendingB, "oneTrip=%v: other stream untouched", oneTrip)
+		s.Equal(3, st.deliveredDocs, "oneTrip=%v: one delivered record per acked JTI, none for unknown/re-acked", oneTrip)
+		s.True(st.delivered["a-1"].Equal(ackDate), "oneTrip=%v a-1 ackDate %v", oneTrip, st.delivered["a-1"])
+		s.True(st.delivered["a-3"].Equal(ackDate), "oneTrip=%v a-3 ackDate %v", oneTrip, st.delivered["a-3"])
+		s.True(st.delivered["old"].Equal(earlier), "oneTrip=%v: an already-delivered JTI keeps its AckDate", oneTrip)
+	}
+}
+
+// commandCountingDAO returns an EventDAOMongo over the suite's collections on
+// a dedicated client that counts every command it sends by name.
+func (s *EventDAOMongoSuite) commandCountingDAO(oneTrip bool) (*EventDAOMongo, func() map[string]int) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, e *event.CommandStartedEvent) {
+		mu.Lock()
+		counts[e.CommandName]++
+		mu.Unlock()
+	}}
+	client, err := mongo.Connect(options.Client().ApplyURI(TestDbUrl).SetMonitor(monitor))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	db := client.Database(s.eventCol.Database().Name())
+	d := NewEventDAO(db.Collection(s.eventCol.Name()), db.Collection(s.pendingCol.Name()), db.Collection(s.deliveredCol.Name())).(*EventDAOMongo)
+	d.SetOneTripIngest(oneTrip)
+	return d, func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(counts))
+		for k, v := range counts {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+// TestAckDelivered_OneTripIsOneBulkWrite: acking a batch whose JTIs are all
+// pending costs exactly one command — one bulkWrite — where the fallback
+// costs find + delete + insert. An ack that names a JTI not pending costs one
+// extra delete, retracting the delivered record the bulkWrite wrote for it.
+func (s *EventDAOMongoSuite) TestAckDelivered_OneTripIsOneBulkWrite() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"p-1", "p-2", "p-3"}, streamID))
+
+	d, counts := s.commandCountingDAO(true)
+	acked, err := d.AckDelivered(ctx, []string{"p-1", "p-2"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"p-1", "p-2"}, acked)
+	s.Equal(map[string]int{"bulkWrite": 1}, counts(), "all-pending ack must be one round trip")
+
+	acked, err = d.AckDelivered(ctx, []string{"p-3", "gone"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.Equal([]string{"p-3"}, acked)
+	s.Equal(map[string]int{"bulkWrite": 2, "delete": 1}, counts(), "a non-pending JTI costs one retracting delete")
+
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamID)
+	s.Require().NoError(err)
+	got := make([]string, 0, len(delivered))
+	for _, ev := range delivered {
+		got = append(got, ev.Jti)
+	}
+	s.ElementsMatch([]string{"p-1", "p-2", "p-3"}, got)
+
+	fb, fbCounts := s.commandCountingDAO(false)
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"f-1"}, streamID))
+	acked, err = fb.AckDelivered(ctx, []string{"f-1"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.Equal([]string{"f-1"}, acked)
+	s.Equal(map[string]int{"find": 1, "delete": 1, "insert": 1}, fbCounts(), "fallback reuses find + delete + insert")
+}
+
+// TestAckDelivered_MalformedStream: a stream ID that is not an ObjectID is an
+// error on both paths and writes nothing.
+func (s *EventDAOMongoSuite) TestAckDelivered_MalformedStream() {
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	for _, oneTrip := range []bool{true, false} {
+		mongoDAO.SetOneTripIngest(oneTrip)
+		acked, err := s.dao.AckDelivered(context.Background(), []string{"x"}, "not-an-oid", time.Now())
+		s.Error(err, "oneTrip=%v", oneTrip)
+		s.Nil(acked, "oneTrip=%v", oneTrip)
+	}
+}

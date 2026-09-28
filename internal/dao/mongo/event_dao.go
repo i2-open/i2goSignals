@@ -690,6 +690,113 @@ func (d *EventDAOMongo) MarkDeliveredMany(ctx context.Context, events []interfac
 	return err
 }
 
+// ackBulkWriteOptions are the options of the one-trip ack bulkWrite. Verbose
+// results are what report, per JTI, whether a pending marker was deleted. The
+// call runs at w:1, the delivered collection's concern (#332): a client-level
+// bulkWrite takes a single concern, and an ack is post-persistence (ADR 0038
+// governs ingest only), so a pending delete rolled back on failover costs a
+// redelivery, which the receiver dedups by JTI, never a lost SET.
+func ackBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
+	return options.ClientBulkWrite().SetOrdered(true).SetVerboseResults(true).SetWriteConcern(writeconcern.W1())
+}
+
+// AckDelivered removes streamID's pending markers for jtis and records the
+// acked JTIs as delivered at ackDate. On MongoDB 8.0+ (the strategy
+// SetOneTripIngest selects) this is ONE multi-namespace bulkWrite; below 8.0
+// it is RemovePendingMany followed by MarkDeliveredMany.
+func (d *EventDAOMongo) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	if d.oneTrip.Load() {
+		return d.ackDeliveredOneTrip(ctx, jtis, streamID, ackDate)
+	}
+	removed, err := d.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil || len(removed) == 0 {
+		return nil, err
+	}
+	if err = d.MarkDeliveredMany(ctx, removed, ackDate); err != nil {
+		return nil, err
+	}
+	acked := make([]string, len(removed))
+	for i, ev := range removed {
+		acked[i] = ev.Jti
+	}
+	return acked, nil
+}
+
+// ackDeliveredOneTrip issues, as one ordered bulkWrite, a delete of each
+// JTI's pending markers for the stream followed by an insert of each JTI's
+// delivered record. A bulkWrite cannot make an insert conditional on a
+// delete, so the delivered insert is written for every JTI in the batch; the
+// verbose per-op delete counts then say which JTIs were really pending, and
+// the delivered records of any that were not (unknown or already acked, ADR
+// 0017) are retracted by _id in one follow-up delete. The common case, where
+// every acked JTI was pending, costs one round trip. Retracting by the _id
+// this call inserted never touches another ack's delivered record.
+func (d *EventDAOMongo) ackDeliveredOneTrip(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	pc, err := d.pendingColLoad()
+	if err != nil {
+		return nil, err
+	}
+	dc, err := d.deliveredColLoad()
+	if err != nil {
+		return nil, err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return nil, err
+	}
+
+	unique := make([]string, 0, len(jtis))
+	seen := make(map[string]struct{}, len(jtis))
+	for _, jti := range jtis {
+		if _, dup := seen[jti]; !dup {
+			seen[jti] = struct{}{}
+			unique = append(unique, jti)
+		}
+	}
+
+	n := len(unique)
+	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
+	dNS := mongo.ClientBulkWrite{Database: dc.Database().Name(), Collection: dc.Name()}
+	writes := make([]mongo.ClientBulkWrite, 2*n)
+	for i, jti := range unique {
+		del := pNS
+		del.Model = mongo.NewClientDeleteManyModel().SetFilter(bson.M{"sid": sid, "jti": jti})
+		writes[i] = del
+		ins := dNS
+		ins.Model = mongo.NewClientInsertOneModel().SetDocument(&deliveredDoc{Jti: jti, Sid: sid, AckDate: ackDate})
+		writes[n+i] = ins
+	}
+	res, err := pc.Database().Client().BulkWrite(ctx, writes, ackBulkWriteOptions())
+	if err != nil {
+		eLog.Error("Error bulk writing ack", "count", n, "streamID", streamID, "error", err)
+		return nil, err
+	}
+
+	acked := make([]string, 0, n)
+	var retract []any
+	for i, jti := range unique {
+		if res.DeleteResults[i].DeletedCount > 0 {
+			acked = append(acked, jti)
+			continue
+		}
+		ins, ok := res.InsertResults[n+i]
+		if !ok {
+			return nil, fmt.Errorf("ack bulkWrite: no insert result for op %d", n+i)
+		}
+		retract = append(retract, ins.InsertedID)
+	}
+	if len(retract) > 0 {
+		if _, err = dc.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": retract}}); err != nil {
+			eLog.Error("Error retracting delivered records of non-pending acks", "count", len(retract), "streamID", streamID, "error", err)
+			return nil, err
+		}
+	}
+	return acked, nil
+}
+
 // ListDeliveredForStream returns streamID's delivered (post-ack) events with
 // their AckDate — the retention purge clock's enumerator (ADR 0055).
 func (d *EventDAOMongo) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {

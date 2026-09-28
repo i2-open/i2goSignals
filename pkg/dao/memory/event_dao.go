@@ -357,6 +357,33 @@ func (d *EventDAOMemory) MarkDeliveredMany(_ context.Context, events []interface
 	return nil
 }
 
+// AckDelivered composes RemovePendingMany and MarkDeliveredMany: the removed
+// entries, each JTI once, are recorded as delivered at ackDate and returned.
+func (d *EventDAOMemory) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	removed, err := d.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil || len(removed) == 0 {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(removed))
+	events := removed[:0]
+	acked := make([]string, 0, len(removed))
+	for _, ev := range removed {
+		if _, dup := seen[ev.Jti]; dup {
+			continue
+		}
+		seen[ev.Jti] = struct{}{}
+		events = append(events, ev)
+		acked = append(acked, ev.Jti)
+	}
+	if err = d.MarkDeliveredMany(ctx, events, ackDate); err != nil {
+		return nil, err
+	}
+	return acked, nil
+}
+
 // ListDeliveredForStream returns a copy of streamID's delivered events (ADR 0055).
 func (d *EventDAOMemory) ListDeliveredForStream(_ context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
 	d.mu.RLock()

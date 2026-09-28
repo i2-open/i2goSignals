@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -697,4 +698,64 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestEventDAOMemory_AckDelivered asserts the one-call ack: only JTIs pending
+// for the stream are acked and returned (each once), each acked JTI gets one
+// delivered record carrying ackDate, unknown JTIs get none, other streams are
+// untouched, and re-acking is a no-op.
+func TestEventDAOMemory_AckDelivered(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
+	ackDate := time.Now().Truncate(time.Millisecond)
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA)
+	_ = dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB)
+
+	acked, err := dao.AckDelivered(ctx, []string{"a-1", "a-3", "missing", "a-1"}, streamA, ackDate)
+	if err != nil {
+		t.Fatalf("AckDelivered failed: %v", err)
+	}
+	if got := sortedCopy(acked); len(got) != 2 || got[0] != "a-1" || got[1] != "a-3" {
+		t.Fatalf("acked = %v, want exactly [a-1 a-3]", acked)
+	}
+
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	if len(jtis) != 1 || jtis[0] != "a-2" {
+		t.Errorf("stream A pending = %v, want [a-2]", jtis)
+	}
+	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	if len(jtis) != 2 {
+		t.Errorf("stream B pending = %v, must be untouched", jtis)
+	}
+
+	delivered, _ := dao.ListDeliveredForStream(ctx, streamA)
+	var dj []string
+	for _, d := range delivered {
+		if !d.AckDate.Equal(ackDate) || d.StreamId != streamA {
+			t.Errorf("delivered %+v: want stream %s ackDate %v", d, streamA, ackDate)
+		}
+		dj = append(dj, d.Jti)
+	}
+	if got := sortedCopy(dj); len(got) != 2 || got[0] != "a-1" || got[1] != "a-3" {
+		t.Fatalf("delivered = %v, want exactly [a-1 a-3]", dj)
+	}
+
+	acked, err = dao.AckDelivered(ctx, []string{"a-1", "a-3"}, streamA, time.Now())
+	if err != nil || len(acked) != 0 {
+		t.Errorf("re-ack: got (%v, %v), want no JTIs and no error", acked, err)
+	}
+	if delivered, _ = dao.ListDeliveredForStream(ctx, streamA); len(delivered) != 2 {
+		t.Errorf("re-ack must not add delivered records, got %d", len(delivered))
+	}
+	if acked, err = dao.AckDelivered(ctx, nil, streamA, ackDate); err != nil || acked != nil {
+		t.Errorf("empty batch: got (%v, %v), want (nil, nil)", acked, err)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }

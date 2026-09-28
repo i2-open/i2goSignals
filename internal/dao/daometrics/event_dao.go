@@ -208,6 +208,14 @@ func (d *eventDAO) MarkDeliveredMany(ctx context.Context, events []interfaces.De
 	return err
 }
 
+func (d *eventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	d.batch("AckDelivered", len(jtis))
+	start := time.Now()
+	acked, err := d.inner.AckDelivered(ctx, jtis, streamID, ackDate)
+	d.observe("AckDelivered", start, err)
+	return acked, err
+}
+
 func (d *eventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
 	start := time.Now()
 	evs, err := d.inner.ListDeliveredForStream(ctx, streamID)

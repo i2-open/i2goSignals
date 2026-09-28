@@ -133,6 +133,17 @@ type EventDAO interface {
 	// no-op.
 	MarkDeliveredMany(ctx context.Context, events []DeliverableEvent, ackDate time.Time) error
 
+	// AckDelivered acknowledges jtis for streamID: every entry of jtis that
+	// is pending for streamID is removed from pending and recorded as
+	// delivered at ackDate (the ADR 0055 purge anchor), and the acked JTIs
+	// are returned (a subset of jtis, each at most once, order unspecified).
+	// A JTI not pending for the stream — unknown or already acked — is
+	// skipped and gets no delivered record (ADR 0017: a no-op, not an
+	// error). Equivalent to RemovePendingMany followed by MarkDeliveredMany;
+	// on MongoDB 8.0+ it is one multi-namespace bulkWrite. An empty jtis
+	// returns (nil, nil).
+	AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error)
+
 	// --- Ack-anchored retention purge + occupancy sampling (ADR 0055) ---
 
 	// ListDeliveredForStream returns streamID's delivered (post-ack,

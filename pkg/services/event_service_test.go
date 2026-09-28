@@ -40,6 +40,10 @@ type fakeEventDAO struct {
 	gotPending             map[string][]string
 	markDeliveredManyCalls int
 	delivered              []interfaces.DeliverableEvent
+	// ackDeliveredCalls counts AckDelivered calls; AckDelivered composes
+	// RemovePendingMany + MarkDeliveredMany, as the memory provider does.
+	ackDeliveredCalls int
+	ackDeliveredJtis  [][]string
 }
 
 func (f *fakeEventDAO) Insert(_ context.Context, record *model.EventRecord) error {
@@ -125,6 +129,22 @@ func (f *fakeEventDAO) MarkDeliveredMany(_ context.Context, events []interfaces.
 	f.markDeliveredManyCalls++
 	f.delivered = append(f.delivered, events...)
 	return nil
+}
+func (f *fakeEventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	f.ackDeliveredCalls++
+	f.ackDeliveredJtis = append(f.ackDeliveredJtis, jtis)
+	removed, err := f.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil || len(removed) == 0 {
+		return nil, err
+	}
+	if err = f.MarkDeliveredMany(ctx, removed, ackDate); err != nil {
+		return nil, err
+	}
+	acked := make([]string, len(removed))
+	for i, ev := range removed {
+		acked[i] = ev.Jti
+	}
+	return acked, nil
 }
 func (f *fakeEventDAO) WatchPending(_ context.Context, _ func(jti string, streamID string)) error {
 	return nil
@@ -259,7 +279,7 @@ func TestAddOperationalEvent_HappyPathReturnsNewRecord(t *testing.T) {
 }
 
 // TestAckEvents_MarksOnlyRemovedDelivered asserts one AckEvents call makes one
-// batched RemovePendingMany call and one MarkDeliveredMany call carrying
+// AckDelivered call (the one-trip ack, #335) whose delivered records are
 // exactly the JTIs that were actually pending — never the unknown ones.
 func TestAckEvents_MarksOnlyRemovedDelivered(t *testing.T) {
 	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}, "j-3": {}}}
@@ -268,6 +288,9 @@ func TestAckEvents_MarksOnlyRemovedDelivered(t *testing.T) {
 	err := svc.AckEvents(context.Background(), []string{"j-1", "j-2", "j-3"}, "stream-1", 0)
 	if err != nil {
 		t.Fatalf("AckEvents: %v", err)
+	}
+	if fake.ackDeliveredCalls != 1 {
+		t.Fatalf("AckDelivered calls = %d, want 1", fake.ackDeliveredCalls)
 	}
 	if fake.removePendingManyCalls != 1 || fake.markDeliveredManyCalls != 1 {
 		t.Fatalf("calls: removePendingMany=%d markDeliveredMany=%d, want 1 and 1",
@@ -300,8 +323,28 @@ func TestAckEvents_NothingPendingSkipsDelivered(t *testing.T) {
 	if err := svc.AckEvents(context.Background(), nil, "stream-1", 0); err != nil {
 		t.Fatalf("AckEvents empty: %v", err)
 	}
-	if fake.removePendingManyCalls != 1 {
+	if fake.removePendingManyCalls != 1 || fake.ackDeliveredCalls != 1 {
 		t.Errorf("empty AckEvents must not call the DAO, got %d calls", fake.removePendingManyCalls)
+	}
+}
+
+// TestAckEvent_RoutesThroughAckDelivered: a single-JTI ack uses the same
+// one-trip DAO ack as a batch, not RemovePending + MarkDelivered.
+func TestAckEvent_RoutesThroughAckDelivered(t *testing.T) {
+	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}}}
+	svc := NewEventService(fake)
+
+	if err := svc.AckEvent(context.Background(), "j-1", "stream-1", 0); err != nil {
+		t.Fatalf("AckEvent: %v", err)
+	}
+	if fake.ackDeliveredCalls != 1 || fake.removePendingCalls != 0 {
+		t.Fatalf("calls: ackDelivered=%d removePending=%d, want 1 and 0", fake.ackDeliveredCalls, fake.removePendingCalls)
+	}
+	if len(fake.ackDeliveredJtis) != 1 || len(fake.ackDeliveredJtis[0]) != 1 || fake.ackDeliveredJtis[0][0] != "j-1" {
+		t.Errorf("AckDelivered jtis = %v, want [[j-1]]", fake.ackDeliveredJtis)
+	}
+	if len(fake.delivered) != 1 || fake.delivered[0].Jti != "j-1" {
+		t.Errorf("delivered = %v, want j-1", fake.delivered)
 	}
 }
 

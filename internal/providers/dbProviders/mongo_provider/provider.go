@@ -297,6 +297,9 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 // (ADR 0043) does not take a collection's concern: a client-level bulkWrite
 // uses the client's concern, and the client carries none, so that call sets
 // majority+journal itself (mongodao.EventStoreWriteConcern).
+// The one-trip ack bulkWrite (pending delete + delivered insert, #335) sets
+// w:1 itself: a rolled-back pending delete only re-delivers a SET the
+// receiver already dedups by JTI (ADR 0017).
 var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
 	CDbEvents:         mongodao.EventStoreWriteConcern(),
 	CDbPending:        mongodao.EventStoreWriteConcern(),

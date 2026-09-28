@@ -298,31 +298,24 @@ func (s *EventService) GetEventIds(ctx context.Context, streamID string, params 
 	return jtis, more
 }
 
+// AckEvent acknowledges one JTI for streamID through the same one-trip DAO
+// ack as AckEvents (#335). A JTI not pending for the stream is ignored.
 func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
 	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-	event, err := s.eventDAO.RemovePending(ctx, jtiString, streamID)
-	if err != nil {
-		esLog.Error("Error removing pending event", "error", err)
+	if _, err := s.eventDAO.AckDelivered(ctx, []string{jtiString}, streamID, time.Now()); err != nil {
+		esLog.Error("Error acknowledging event", "jti", jtiString, "streamID", streamID, "error", err)
 		return err
-	}
-
-	if event != nil {
-		err = s.eventDAO.MarkDelivered(ctx, event, time.Now())
-		if err != nil {
-			esLog.Error("Error marking event as delivered", "jti", event.Jti, "error", err)
-			return err
-		}
 	}
 	return nil
 }
 
 // AckEvents acknowledges jtis for streamID as one batch: the pending entries
-// are removed and recorded as delivered in a bounded number of DAO round trips
-// rather than three per JTI. A JTI not pending for the stream is ignored,
-// exactly as AckEvent ignores it. An empty jtis is a no-op. The fencing token
-// is checked once for the batch, as for AckEvent.
+// are removed and recorded as delivered by EventDAO.AckDelivered — one
+// multi-namespace bulkWrite on MongoDB 8.0+ (#335). A JTI not pending for the
+// stream is ignored, exactly as AckEvent ignores it. An empty jtis is a
+// no-op. The fencing token is checked once for the batch, as for AckEvent.
 func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
 	if len(jtis) == 0 {
 		return nil
@@ -330,16 +323,8 @@ func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID st
 	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-	events, err := s.eventDAO.RemovePendingMany(ctx, jtis, streamID)
-	if err != nil {
-		esLog.Error("Error removing pending events", "count", len(jtis), "streamID", streamID, "error", err)
-		return err
-	}
-	if len(events) == 0 {
-		return nil
-	}
-	if err = s.eventDAO.MarkDeliveredMany(ctx, events, time.Now()); err != nil {
-		esLog.Error("Error marking events as delivered", "count", len(events), "streamID", streamID, "error", err)
+	if _, err := s.eventDAO.AckDelivered(ctx, jtis, streamID, time.Now()); err != nil {
+		esLog.Error("Error acknowledging events", "count", len(jtis), "streamID", streamID, "error", err)
 		return err
 	}
 	return nil

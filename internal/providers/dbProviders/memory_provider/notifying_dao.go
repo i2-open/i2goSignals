@@ -229,6 +229,17 @@ func (d *notifyingEventDAO) MarkDeliveredMany(ctx context.Context, events []inte
 	return nil
 }
 
+func (d *notifyingEventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	acked, err := d.inner.AckDelivered(ctx, jtis, streamID, ackDate)
+	if err != nil {
+		return acked, err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return acked, nil
+}
+
 func (d *notifyingEventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
 	return d.inner.ListDeliveredForStream(ctx, streamID)
 }

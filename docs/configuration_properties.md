@@ -242,6 +242,15 @@ would fall back to the server default. The call therefore sets `w:majority`,
 The fallback path on Mongo older than 8.0 uses the `events` and `pendingEvents`
 handles, which are majority.
 
+The one-trip ack write (#335) is also a client-level `bulkWrite`: it deletes
+the acked `pendingEvents` rows and inserts their `deliveredEvents` rows in one
+round trip. It sets `w:1` for the whole call, so on Mongo 8.0+ the pending
+delete of an ack is `w:1` too. If a primary failover rolls that delete back,
+the SET is delivered again and the receiver discards it by JTI. Ingest
+durability (ADR 0038) is unchanged, because an ack happens after the SET is
+stored. The fallback on Mongo older than 8.0 uses the collection handles, so
+there the pending delete stays majority.
+
 A `w=` or `journal=` option in `MONGO_URL` sets a client-level concern. That
 concern is still overridden by every handle above and by the one-trip call.
 
