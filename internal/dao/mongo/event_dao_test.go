@@ -14,6 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/event"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -446,6 +447,109 @@ func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripAndFallbackAgree() {
 	s.ElementsMatch(want.pending, oneTripState.pending, "no marker for a duplicate, one per accepted (stream, jti)")
 	s.Equal(oneTripState.events, fallbackState.events, "fallback must store identical events")
 	s.ElementsMatch(oneTripState.pending, fallbackState.pending, "fallback must store identical pending markers")
+}
+
+// oneTripCountingDAO returns a one-trip EventDAOMongo over the suite's
+// collections on a dedicated client that counts the bulkWrite commands it
+// sends, so a test can prove how many resubmits a failure cost.
+func (s *EventDAOMongoSuite) oneTripCountingDAO() (*EventDAOMongo, func() int64) {
+	var bulkWrites atomic.Int64
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, e *event.CommandStartedEvent) {
+		if e.CommandName == "bulkWrite" {
+			bulkWrites.Add(1)
+		}
+	}}
+	client, err := mongo.Connect(options.Client().ApplyURI(TestDbUrl).SetMonitor(monitor))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	db := client.Database(s.eventCol.Database().Name())
+	d := NewEventDAO(db.Collection(s.eventCol.Name()), db.Collection(s.pendingCol.Name()), db.Collection(s.deliveredCol.Name())).(*EventDAOMongo)
+	d.SetOneTripIngest(true)
+	return d, bulkWrites.Load
+}
+
+// TestInsertWithPending_OneTripBodyFailureResubmitsRest: the grouped one-trip
+// bulkWrite puts every body before every marker, so a body failing at index 1
+// stops the ordered write before ANY marker, including those of the record
+// whose body already landed at index 0. The failed record gets
+// ErrDuplicateJTI and its markers are dropped; the rest (the later body and
+// every other record's markers) are resubmitted in exactly one more
+// bulkWrite, leaving no stored body without its markers and no orphan marker.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripBodyFailureResubmitsRest() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	s.Require().NoError(s.dao.Insert(ctx, &model.EventRecord{Jti: "r1", Original: "seed", SortTime: time.Now()}))
+	d, bulkWrites := s.oneTripCountingDAO()
+
+	recs := []*model.EventRecord{
+		{Jti: "r0", Original: "b0", SortTime: time.Now()},
+		{Jti: "r1", Original: "overwrite", SortTime: time.Now()},
+		{Jti: "r2", Original: "b2", SortTime: time.Now()},
+	}
+	pending := map[string][]string{
+		streamA: {"r0", "r1", "r2"},
+		streamB: {"r0", "r1", "r2"},
+	}
+	results, err := d.InsertWithPending(ctx, recs, pending)
+	s.Require().NoError(err)
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.ErrorIs(results[1], interfaces.ErrDuplicateJTI)
+	s.NoError(results[2])
+	s.Equal(int64(2), bulkWrites(), "one failure costs exactly one resubmit")
+
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r0": "b0", "r1": "seed", "r2": "b2"}, st.events)
+	s.ElementsMatch([]string{"A/r0", "B/r0", "A/r2", "B/r2"}, st.pending,
+		"markers of the landed body r0 are resubmitted; the duplicate r1 gets none")
+}
+
+// TestInsertWithPending_OneTripMarkerFailureResubmitsRest: a duplicate-key
+// failure at a marker index (injected with a unique pending index and a
+// pre-seeded marker) answers only that marker's record with a marker error,
+// drops the record's remaining marker, and resubmits every later record's
+// markers. r1's markers on BOTH streams are pre-seeded, so whichever comes
+// first fails; were the other resubmitted it would fail too and cost a third
+// bulkWrite, so the count of two proves it was dropped.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripMarkerFailureResubmitsRest() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	_, err := s.pendingCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+		Options: options.Index().SetName("testPendingUnique").SetUnique(true),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamA))
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamB))
+	d, bulkWrites := s.oneTripCountingDAO()
+
+	recs := []*model.EventRecord{
+		{Jti: "r0", Original: "b0", SortTime: time.Now()},
+		{Jti: "r1", Original: "b1", SortTime: time.Now()},
+		{Jti: "r2", Original: "b2", SortTime: time.Now()},
+	}
+	pending := map[string][]string{
+		streamA: {"r0", "r1", "r2"},
+		streamB: {"r0", "r1", "r2"},
+	}
+	results, err := d.InsertWithPending(ctx, recs, pending)
+	s.Require().NoError(err)
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.Require().Error(results[1])
+	s.NotErrorIs(results[1], interfaces.ErrDuplicateJTI, "a marker failure is not a duplicate SET")
+	s.Contains(results[1].Error(), "pending marker write failed")
+	s.NoError(results[2])
+	s.Equal(int64(2), bulkWrites(), "the failed record's other marker is dropped, not resubmitted")
+
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r0": "b0", "r1": "b1", "r2": "b2"}, st.events)
+	s.ElementsMatch([]string{"A/r0", "B/r0", "A/r1", "B/r1", "A/r2", "B/r2"}, st.pending,
+		"only the two seeded r1 markers exist for r1; r2's markers were resubmitted")
 }
 
 // TestInsertWithPending_MalformedStreamWritesNothing: a pending map naming a

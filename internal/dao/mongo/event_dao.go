@@ -231,45 +231,58 @@ func pendingSids(byJti map[string][]string) (map[string][]bson.ObjectID, error) 
 	return out, nil
 }
 
-// insertWithPendingOneTrip writes every record followed by its markers as ONE
-// ordered multi-namespace bulkWrite. Ordering is what keeps a duplicate from
-// leaving an orphan marker (ADR 0017): an ordered bulkWrite stops at the first
-// failed op, so a rejected events insert is never followed by its markers.
-// Every op before the failure is known to have succeeded; the remaining
-// records are resubmitted in a fresh bulkWrite, so a batch with k per-record
-// failures costs k+1 round trips and the common case costs one.
+// oneTripOp is one insert of insertWithPendingOneTrip: the events-collection
+// body (marker == false) or one pending marker of records[rec].
+type oneTripOp struct {
+	rec    int
+	marker bool
+	w      mongo.ClientBulkWrite
+}
+
+// insertWithPendingOneTrip writes every body, then every pending marker, as
+// ONE ordered multi-namespace bulkWrite (ADR 0043). Grouping the ops by
+// namespace lets mongod batch consecutive same-namespace inserts into one
+// storage write unit per namespace; interleaving body and markers per record
+// alternates namespaces on every op and defeats that batching.
+//
+// Ordering is what keeps a duplicate from leaving an orphan marker (ADR 0017):
+// an ordered bulkWrite stops at the first failed op, and every marker follows
+// every body, so a rejected body is never followed by a written marker. On a
+// failure at op k, every op before k is stored; op k's record gets its error
+// and its remaining ops are dropped; every other op after k, including the
+// markers of records whose bodies already landed, is resubmitted in the same
+// order. A record is reported successful only once its body and all its
+// markers are durable (ADR 0038). A batch with k per-record failures costs k+1
+// round trips and the common case costs one.
 func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, records []*model.EventRecord, streams map[string][]bson.ObjectID) ([]error, error) {
 	client := ec.Database().Client()
 	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
 	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
 	opts := oneTripBulkWriteOptions()
 
-	// A JTI repeated in the batch needs no special casing: the repeat's
-	// events insert fails the unique JTI index, and the ordered write stops
-	// before that repeat's markers.
-	results := make([]error, len(records))
-	for start := 0; start < len(records); {
-		var writes []mongo.ClientBulkWrite
-		// owner[k] is the record index op k belongs to; isEvent[k] is true
-		// for the events insert of that record.
-		var owner []int
-		var isEvent []bool
-		for i := start; i < len(records); i++ {
-			rec := records[i]
-			w := evNS
-			w.Model = mongo.NewClientInsertOneModel().SetDocument(rec)
-			writes = append(writes, w)
-			owner = append(owner, i)
-			isEvent = append(isEvent, true)
-			for _, sid := range streams[rec.Jti] {
-				w := pNS
-				w.Model = mongo.NewClientInsertOneModel().SetDocument(&pendingDoc{Jti: rec.Jti, Sid: sid})
-				writes = append(writes, w)
-				owner = append(owner, i)
-				isEvent = append(isEvent, false)
-			}
+	// A JTI repeated in the batch needs no special casing: the repeat's body
+	// insert fails the unique JTI index, and its markers are dropped before
+	// the resubmit.
+	ops := make([]oneTripOp, 0, len(records))
+	var marks []oneTripOp
+	for i, rec := range records {
+		w := evNS
+		w.Model = mongo.NewClientInsertOneModel().SetDocument(rec)
+		ops = append(ops, oneTripOp{rec: i, w: w})
+		for _, sid := range streams[rec.Jti] {
+			m := pNS
+			m.Model = mongo.NewClientInsertOneModel().SetDocument(&pendingDoc{Jti: rec.Jti, Sid: sid})
+			marks = append(marks, oneTripOp{rec: i, marker: true, w: m})
 		}
+	}
+	ops = append(ops, marks...)
 
+	results := make([]error, len(records))
+	for len(ops) > 0 {
+		writes := make([]mongo.ClientBulkWrite, len(ops))
+		for k, op := range ops {
+			writes[k] = op.w
+		}
 		_, err := client.BulkWrite(ctx, writes, opts)
 		if err == nil {
 			return results, nil
@@ -283,22 +296,27 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 		for k, e := range cbe.WriteErrors {
 			failed, we = k, e
 		}
-		if failed < 0 || failed >= len(writes) {
-			eLog.Error("Bulk write reported an out-of-range failure index", "index", failed, "ops", len(writes))
+		if failed < 0 || failed >= len(ops) {
+			eLog.Error("Bulk write reported an out-of-range failure index", "index", failed, "ops", len(ops))
 			return nil, err
 		}
-		// Every record wholly before the failed op is stored with its markers.
-		failedRec := owner[failed]
+		bad := ops[failed]
 		switch {
-		case isEvent[failed] && mongo.IsDuplicateKeyError(we):
-			results[failedRec] = interfaces.ErrDuplicateJTI
-		case isEvent[failed]:
-			results[failedRec] = errors.New(we.Error())
+		case !bad.marker && mongo.IsDuplicateKeyError(we):
+			results[bad.rec] = interfaces.ErrDuplicateJTI
+		case !bad.marker:
+			results[bad.rec] = errors.New(we.Error())
 		default:
 			// The body landed but a marker did not: not acknowledgeable.
-			results[failedRec] = fmt.Errorf("pending marker write failed: %s", we.Error())
+			results[bad.rec] = fmt.Errorf("pending marker write failed: %s", we.Error())
 		}
-		start = failedRec + 1
+		rest := make([]oneTripOp, 0, len(ops)-failed-1)
+		for _, op := range ops[failed+1:] {
+			if op.rec != bad.rec {
+				rest = append(rest, op)
+			}
+		}
+		ops = rest
 	}
 	return results, nil
 }

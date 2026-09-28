@@ -52,17 +52,30 @@ record: `nil`, `ErrDuplicateJTI`, or a store error. A batch-level error means
 nothing is known to be stored.
 
 - **MongoDB >= 8.0:** there is one ordered client-level `bulkWrite` across the
-  `events` and `pendingEvents` namespaces. Each record's events insert is
-  followed immediately by its marker inserts. An ordered bulkWrite stops at
-  the first failed op, so a rejected body is never followed by its markers.
-  That is how ADR 0017's "no orphan marker" rule holds without any
+  `events` and `pendingEvents` namespaces. The ops are **grouped by
+  namespace**: every record's events insert comes first, then every marker
+  insert. An ordered bulkWrite stops at the first failed op, and every marker
+  follows every body, so a rejected body is never followed by a written
+  marker. That is how ADR 0017's "no orphan marker" rule holds without any
   retraction. Every op before the failure is known to have succeeded. The
   failed op is mapped back to its record, which is answered `ErrDuplicateJTI`
   (a duplicate-key error on the body), a store error (any other body error),
   or "pending marker write failed" (the body landed but a marker did not).
-  The records after it are resubmitted in a fresh bulkWrite. A batch with k
-  per-record failures therefore costs k+1 round trips, and the common case
-  costs one.
+  That record's remaining ops are dropped, and every other op after the
+  failure is resubmitted, in the same order, in a fresh bulkWrite. The
+  resubmit includes the markers of records whose bodies landed before the
+  failure, so no stored body is left without its markers. No record is
+  reported successful until its body and all its markers are durable. A batch
+  with k per-record failures therefore costs k+1 round trips, and the common
+  case costs one.
+
+  The first cut interleaved the ops per record (a body, then its markers,
+  then the next body). That alternates namespaces on every op, and mongod
+  batches consecutive inserts only while they target the same namespace, so
+  each op became its own storage write unit. A server-side profile on Mongo
+  8.0.13 counted about 32 lock acquisitions per command for the interleaved
+  layout, against 4 when grouped. Grouping recovered 3-11% at the router (see
+  Measurements).
 - **Memory DAO:** this is the same loop in-process.
 - **Group commit:** the #330 decorator coalesces concurrent
   `InsertWithPending` calls into one inner call. It rebuilds the merged
@@ -149,3 +162,10 @@ little latency, while the client-level `bulkWrite` command costs more per op
 than two collection inserts. The end-to-end `goSignalsBench` run at 5000
 events / 16 clients is still to be done. The design is kept for the removal
 of speculative markers and `RetractPending`, but its throughput case is open.
+
+Profiling then showed the cost was the interleaved op layout, which defeats
+mongod's same-namespace insert batching (about 32 lock acquisitions per command,
+against 4 grouped). Grouping the ops by namespace took serial `ingest` from
+3.39 to 3.20 ms/op and `ingest-batch100` at 16 workers from 370 to 328 µs/SET.
+That is still about 5% behind the pre-#331 base at 16 workers, and the
+end-to-end run is still pending.

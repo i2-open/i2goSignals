@@ -52,6 +52,25 @@ flush is now one serial bulkWrite instead of two parallel inserts. The next
 step would be a profiler-level-2 comparison of `bulkWrite` against
 `insert` + `insert` durations on `goSignals1`.
 
+## Grouped op layout (follow-up)
+
+A server-side profile on Mongo 8.0.13 confirmed a cause. The first cut
+interleaved the ops per record (body, its markers, next body), alternating
+namespaces on every op. mongod batches consecutive inserts only while they
+target the same namespace, so the interleaved command took about 32 lock
+acquisitions, against 4 when the same ops are grouped. The write now sends all
+bodies, then all markers, in the same single ordered `bulkWrite` with
+majority+journal (ADR 0043 §2).
+
+| Benchmark | Interleaved | Grouped | Change |
+|---|---|---|---|
+| `ingest` (ms/op, serial) | 3.39 | 3.20 | -5.6% |
+| `ingest-batch100/workers=16` (µs/SET) | 370 | 328 | -11% |
+
+Grouping recovers 3-11% across the cases. At 16 workers it is still about 5%
+behind the pre-#331 base (313 µs/SET above). The end-to-end `goSignalsBench`
+run below is still pending.
+
 ## Gap: end-to-end 5000 events / 16 clients
 
 The acceptance point, `goSignalsBench` at 5000 events and 16 clients, was
