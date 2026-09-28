@@ -70,6 +70,25 @@ instead of minting one, pass
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
 | SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
 
+### Ingest breakdown (DAO metrics)
+
+The ingest latency above is the whole HTTP request. To see how much of it is the
+two Mongo writes the 202 waits on, scrape goSignals1's `/metrics` for
+`goSignals_dao_op_duration_seconds{op="InsertMany"}` and
+`{op="AddPendingMany"}` (with `goSignals_dao_batch_size` for per-document cost)
+and compare their p50 with `goSignals_http_duration_seconds`. The histograms,
+labels, buckets and example queries are in
+[`docs/Metrics.md` — DAO Metrics](../Metrics.md#dao-metrics). The design
+questions these numbers feed are in the research notes
+[event-store fast path](event-store-fast-path-research.md) and
+[streaming throughput](streaming-throughput-research.md).
+
+First reading (2026-09-28, dev stack, 2000 events, 16 workers, ingest p50
+27.6 ms at 503 ev/s): `/events/{id}` HTTP p50 24.7 ms; `InsertMany` p50 6.6 ms
+and `AddPendingMany` p50 5.7 ms, each with batch size 1 per request. The two
+writes run concurrently, so roughly 7 ms of the ~25 ms request is Mongo; the
+rest is per-request overhead outside the DAO.
+
 Delivery is always counted on goSignals2. goSignals1's `events_out_total` is only
 incremented on a push acknowledgement, never on a poll, so it cannot be used for
 the poll leg. `/metrics` is unauthenticated on the dev stack, so no extra

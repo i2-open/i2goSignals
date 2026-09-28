@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -430,6 +431,11 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	registerTo(reg, prometheusHandler.PushFailures)
 	registerTo(reg, prometheusHandler.PushStateTransitions)
 	registerTo(reg, prometheusHandler.PushRecoveryDuration)
+	// EventDAO latency + batch-size histograms (community #328); the providers
+	// wrap their live EventDAO with daometrics.Default.
+	for _, c := range daometrics.Default.Collectors() {
+		registerTo(reg, c)
+	}
 	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)
 	registerTo(reg, prometheusHandler.EventValidations)
 	registerTo(reg, newStreamCollector(sa))

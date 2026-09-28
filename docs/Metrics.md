@@ -62,6 +62,31 @@ Deliberately **not** labeled by `stream_id` or event URI: either would make the
 series count unbounded on a busy receiver. A stream on `NONE` engages no
 validators and therefore records nothing, so there is no `mode="NONE"` series.
 
+## DAO Metrics
+
+Per-call latency and batch size at the `EventDAO` seam, so the ingest write
+path (`InsertMany` body + `AddPendingMany` pending marker, both majority-acked
+and journaled before the 202 per ADR 0038) can be read apart from the HTTP time
+in `goSignals_http_duration_seconds`. Both persistence providers (Mongo and
+memory) wrap their live `EventDAO` in the `internal/dao/daometrics` decorator,
+so every call the router and retention engine make is observed.
+
+| Metric Name | Type | Labels | Buckets | Description |
+|-------------|------|--------|---------|-------------|
+| `goSignals_dao_op_duration_seconds` | Histogram | `op`, `outcome` | 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 s | Wall-time of each `EventDAO` call. `op` is the Go method name (`Insert`, `InsertMany`, `FindByJTI`, `FindByJTIs`, `FindByTimeRange`, `AddPending`, `AddPendingMany`, `GetPendingForStream`, `RemovePending`, `RemovePendingMany`, `RetractPending`, `ClearPendingForStream`, `MarkDelivered`, `MarkDeliveredMany`, `ListDeliveredForStream`, `RemoveDelivered`, `DeleteBodyIfUnreferenced`, `CountRetainedForStream`, `WatchPending`); `outcome` is `ok` or `error` (the call's returned error — `InsertMany`'s per-record results such as a duplicate JTI do not count as `error`). |
+| `goSignals_dao_batch_size` | Histogram | `op` | 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 | Items passed to each batch-taking call: `InsertMany` (records), `AddPendingMany`, `FindByJTIs`, `RemovePendingMany` (JTIs), `MarkDeliveredMany` (events). Divide an op's latency by its batch size for per-document cost. |
+
+Label cardinality is closed (method names × two outcomes); there is deliberately
+no `stream_id`. `WatchPending`'s latency is the watch set-up time on Mongo; on
+the memory store it blocks for the watch's lifetime, so ignore it there.
+
+Example — ingest p50 per write, beside the HTTP p50:
+
+```promql
+histogram_quantile(0.5, sum by (le, op) (rate(goSignals_dao_op_duration_seconds_bucket{op=~"InsertMany|AddPendingMany"}[1m])))
+histogram_quantile(0.5, sum by (le) (rate(goSignals_http_duration_seconds_bucket[1m])))
+```
+
 ## HTTP Metrics
 
 | Metric Name | Type | Labels | Description |
