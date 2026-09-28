@@ -17,13 +17,14 @@ behavior** once the system is running.
 1. [Delivery semantics invariant](#delivery-semantics-invariant)
 2. [Stream lifecycle and states](#stream-lifecycle-and-states)
 3. [Push delivery: failure classes and responses](#push-delivery-failure-classes-and-responses)
-4. [Receiver-status interrogation](#receiver-status-interrogation)
-5. [Idle keepalive (verify events)](#idle-keepalive-verify-events)
-6. [Operational events](#operational-events)
-7. [Recovery playbook](#recovery-playbook)
-8. [Event retention](#event-retention)
-9. [Signing key selection](#signing-key-selection)
-10. [Configuration knobs](#configuration-knobs)
+4. [Ingest status codes (push receiver and SSTP acceptor)](#ingest-status-codes-push-receiver-and-sstp-acceptor)
+5. [Receiver-status interrogation](#receiver-status-interrogation)
+6. [Idle keepalive (verify events)](#idle-keepalive-verify-events)
+7. [Operational events](#operational-events)
+8. [Recovery playbook](#recovery-playbook)
+9. [Event retention](#event-retention)
+10. [Signing key selection](#signing-key-selection)
+11. [Configuration knobs](#configuration-knobs)
 
 ## Delivery semantics invariant
 
@@ -195,6 +196,32 @@ There is **no dead-letter path** for RFC8935 errors. Operationally, every
 RFC8935 §2.4 code reflects a configuration problem (wrong audience, wrong
 issuer, missing key, etc.) and the operator must intervene. See the
 [recovery playbook](#recovery-playbook) for how to triage.
+
+## Ingest status codes (push receiver and SSTP acceptor)
+
+The table above is the transmitter's view. When this server is the
+**receiver** — an RFC 8935 push receiver endpoint, or the SSTP acceptor at
+`POST /sstp/{id}` — it answers as follows. A SET that is not durably stored is
+never acknowledged (ADR 0038), and a store failure is reported as retryable so
+the sender keeps the SET instead of dropping it.
+
+| Situation | Push receiver (RFC 8935) | SSTP acceptor | Sender should |
+|---|---|---|---|
+| SET stored | `202 Accepted` | `200`, JTI in `ack` | treat as delivered |
+| Duplicate JTI (already stored, ADR 0017) | `202 Accepted` | `200`, JTI in `ack` | treat as delivered |
+| SET fails parsing, signature, audience or event validation | `400` with an RFC 8935 §2.4 `err` (e.g. `invalid_request`) | `200`, per-JTI entry in `setErrs`; the rest of the message is unaffected | not retry that SET |
+| Event store cannot durably store the SET | `503 Service Unavailable` + `Retry-After`, body `{"err":"temporarily_unavailable",...}` | `503 Service Unavailable` + `Retry-After` for the **whole exchange**; nothing in it is acked and no outbound SETs are returned | resend after `Retry-After` |
+
+`Retry-After` is `I2SIG_INGEST_RETRY_AFTER` seconds (default `2`).
+`temporarily_unavailable` is not an RFC 8935 §2.4 registry code; the `503`
+status and `Retry-After` header are the signal, and the code is informational.
+A goSignals push transmitter classifies this response as rate-limited
+back-pressure: it honours `Retry-After` and retries with no cap (see the table
+above).
+
+When the SSTP acceptor refuses an exchange, SETs in it that were stored before
+the failure are stored already. The sender resends them with the rest, they
+come back as duplicates, and they are acked then.
 
 ## Receiver-status interrogation
 

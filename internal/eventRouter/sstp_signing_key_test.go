@@ -92,7 +92,7 @@ func TestSstpServer_SigningFailureSendsNoSetsAndPauses(t *testing.T) {
 	require.NoError(t, err)
 	h.router.signingKeys.put("DEFAULT", "", wrong, "wrong")
 
-	resp := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
 
 	assert.Empty(t, resp.Sets, "no SET is sent")
 	require.NotNil(t, resp.ReturnEvents)

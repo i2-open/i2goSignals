@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -166,6 +167,14 @@ func ParseReceivedSET(r *http.Request, config ReceiverConfig) (*ReceivedSET, *De
 
 // WriteDeliveryError writes an RFC8935 error response with a 400 Bad Request status and JSON body.
 func WriteDeliveryError(w http.ResponseWriter, errCode string, description string) {
+	WriteDeliveryErrorStatus(w, http.StatusBadRequest, errCode, description, 0)
+}
+
+// WriteDeliveryErrorStatus writes an RFC8935 error JSON body with the given HTTP
+// status. When retryAfter is positive it also sets a Retry-After header of that
+// many seconds (RFC9110 §10.2.3), e.g. with a 503 that tells the transmitter the
+// SET was not stored and should be resent later.
+func WriteDeliveryErrorStatus(w http.ResponseWriter, status int, errCode string, description string, retryAfter int) {
 	respBody := DeliveryErr{
 		ErrCode:     errCode,
 		Description: description,
@@ -176,7 +185,10 @@ func WriteDeliveryError(w http.ResponseWriter, errCode string, description strin
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	w.WriteHeader(status)
 	_, _ = w.Write(responseBytes)
 }
 

@@ -42,7 +42,7 @@ func TestSstpServer_PublishModeSignsWholeBatch(t *testing.T) {
 
 	resolved, err := h.router.streamService.GetStreamStateByPairId(context.Background(), pairId)
 	require.NoError(t, err)
-	resp := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
 
 	require.Len(t, resp.Sets, 12, "every real SET is served in one response; the ghost is skipped")
 	require.NotContains(t, resp.Sets, "ghost-jti")

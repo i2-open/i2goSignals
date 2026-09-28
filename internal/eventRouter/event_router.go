@@ -95,7 +95,12 @@ type EventRouter interface {
 	// here (PRD #49 slice 3 AC 2 — single pair resolution). Takes no cluster
 	// lease — every node can serve POST /sstp/{id} (PRD #154 Q11.1, Q15, Q19,
 	// Q20, Q46).
-	SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) goSetSstp.Message
+	//
+	// A non-nil error means an inbound SET could not be durably stored
+	// (errors.Is(err, ErrStoreUnavailable)); the returned message must then be
+	// discarded and the exchange refused with 503 + Retry-After so the peer
+	// resends it (#333, ADR 0038).
+	SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, error)
 	Shutdown()
 	SetEventCounter(inCounter, outCounter *prometheus.CounterVec)
 	// RegisterMeteringObserver installs the subject-carrying metering observer
@@ -933,6 +938,14 @@ func pushRunnerSettingsChanged(current, updated model.StreamConfiguration) bool 
 		current.Delivery.GetAuthorizationHeader() != updated.Delivery.GetAuthorizationHeader()
 }
 
+// ErrStoreUnavailable classifies an ingest result whose SET could not be
+// durably stored (the event body write failed for a reason other than a
+// duplicate JTI). It wraps the underlying DAO error. An ingest handler maps it
+// to 503 Service Unavailable with Retry-After — the SET was not persisted, so
+// it must not be acked (ADR 0038) — and reserves 400 for SETs that are
+// themselves invalid (#333).
+var ErrStoreUnavailable = errors.New("event store unavailable")
+
 /*
 HandleEvent takes a new event received and adds it to the local token store. It then looks at the event to
 evaluates if it should be added to any streams for outgoing propagation. `sid` is the inbound stream id.
@@ -1074,7 +1087,10 @@ func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, 
 			// INFO log emitted by the event service ("Duplicate JTI ingestion
 			// suppressed").
 			if !errors.Is(errs[i], interfaces.ErrDuplicateJTI) {
-				results[i] = errs[i]
+				// Any other body-write failure means the SET is NOT durably
+				// stored, so it must not be acked (ADR 0038). Classify it so the
+				// ingest handlers answer 503 + Retry-After instead of 400 (#333).
+				results[i] = fmt.Errorf("%w: %w", ErrStoreUnavailable, errs[i])
 			}
 			continue
 		}

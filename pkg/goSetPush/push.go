@@ -28,6 +28,12 @@ const (
 	ErrJweDecryptionFailed  = "jwe_decryption_failed"
 )
 
+// ErrTemporarilyUnavailable is the error code a receiver sends with a 503 when
+// it could not durably store a SET that was itself valid. It is not in the
+// RFC8935 §2.4 registry: the 503 status and its Retry-After header are the
+// signal a transmitter acts on, and the code only names the condition.
+const ErrTemporarilyUnavailable = "temporarily_unavailable"
+
 // DeliveryErr represents an RFC8935 SET delivery error response.
 // It is returned as JSON in the body of 400 Bad Request responses.
 type DeliveryErr struct {

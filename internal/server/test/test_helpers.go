@@ -177,6 +177,15 @@ func (instance *ssfInstance) GetPushUrl(stream model.StreamConfiguration) string
 
 func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, error) {
 	t.Helper()
+	return createServerWithHook(t, dbName, resetDb, nil)
+}
+
+// createServerWithHook is createServer with a seam: beforeApp, when non-nil, runs
+// against the opened persistence immediately before the application is built, so
+// a test can substitute a service (e.g. a failing EventDAO) that the router and
+// handlers will then share.
+func createServerWithHook(t *testing.T, dbName string, resetDb bool, beforeApp func(*dbProviders.Persistence)) (*ssfInstance, error) {
+	t.Helper()
 	var err error
 	var instance ssfInstance
 
@@ -208,6 +217,10 @@ func createServer(t *testing.T, dbName string, resetDb bool) (*ssfInstance, erro
 		// The in-memory adapter rebuilds its services on reset; refresh the
 		// cached service references so NewApplication sees the live ones.
 		persistence.Refresh()
+	}
+
+	if beforeApp != nil {
+		beforeApp(persistence)
 	}
 
 	// Build application and wrap with httptest.Server

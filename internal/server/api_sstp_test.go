@@ -160,11 +160,14 @@ func TestReceiveSstpEventHandler_SinglePairResolution_Interface(t *testing.T) {
 	assert.Equal(t, wantRec, m.Type.In(1),
 		"AC 2: SstpServerHandler must take the RESOLVED *StreamStateRecord — not a pairId — so the runner cannot re-look-up")
 
-	// Return value: a single goSetSstp.Message (no int status — pair-404 is
-	// owned by the HTTP handler after single-pair resolution).
-	require.Equal(t, 1, m.Type.NumOut(),
-		"AC 2: SstpServerHandler returns Message only — pair-404 is handler-owned")
+	// Return value: a goSetSstp.Message plus an error that is non-nil only when
+	// an inbound SET could not be stored (the handler answers 503, #333). There
+	// is no int status — pair-404 is owned by the HTTP handler after single-pair
+	// resolution.
+	require.Equal(t, 2, m.Type.NumOut(),
+		"AC 2: SstpServerHandler returns (Message, error) only — pair-404 is handler-owned")
 	assert.Equal(t, reflect.TypeOf(goSetSstp.Message{}), m.Type.Out(0))
+	assert.Equal(t, reflect.TypeOf((*error)(nil)).Elem(), m.Type.Out(1))
 }
 
 // TestReceiveSstpEvent_ProductionWiring_UsesPkgAcceptorPrimitives pins AC 8

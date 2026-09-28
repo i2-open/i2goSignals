@@ -169,9 +169,9 @@ func (a *adminRouterAdapter) CheckSstpSigningKey(*model.StreamStateRecord) error
 	return nil
 }
 
-func (a *adminRouterAdapter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) goSetSstp.Message {
+func (a *adminRouterAdapter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) (goSetSstp.Message, error) {
 	a.unsupported("SstpServerHandler")
-	return goSetSstp.Message{}
+	return goSetSstp.Message{}, nil
 }
 
 func (a *adminRouterAdapter) Shutdown() { a.unsupported("Shutdown") }
