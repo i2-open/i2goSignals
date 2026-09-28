@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
+	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -92,7 +93,7 @@ type MongoProvider struct {
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
 
-	// meteredEventDAO is eventDAO wrapped by daometrics (community #328):
+	// meteredEventDAO is eventDAO wrapped by groupcommit (#330) and daometrics (#328):
 	// the instance the EventService writes through and GetEventDAO hands out.
 	// The raw eventDAO is kept for the SetCollections rebind path.
 	meteredEventDAO interfaces.EventDAO
@@ -203,7 +204,9 @@ func (m *MongoProvider) initServices() {
 	m.tokenService.SetStreamDAO(m.streamDAO)
 	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
 	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
-	m.meteredEventDAO = daometrics.Wrap(m.eventDAO, daometrics.Default)
+	// groupcommit coalesces concurrent writes (community #330) beneath the
+	// daometrics wrapper.
+	m.meteredEventDAO = daometrics.Wrap(groupcommit.Wrap(m.eventDAO, groupcommit.ConfigFromEnv()), daometrics.Default)
 	m.eventService = services.NewEventService(m.meteredEventDAO)
 	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 	m.serverService = services.NewServerService(m.serverDAO)
@@ -251,7 +254,7 @@ func (m *MongoProvider) GetSubjectRelayService() *services.SubjectRelayService {
 // place via SetCollections, so the instance is stable for the process lifetime.
 // Exposed so dbProviders.Persistence can bind a RetentionEngine to the live
 // store (issue #229, ADR 0055 A5.2). It is the daometrics-instrumented wrapper
-// (community #328).
+// (community #328) over the groupcommit batcher (community #330).
 func (m *MongoProvider) GetEventDAO() interfaces.EventDAO { return m.meteredEventDAO }
 
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in

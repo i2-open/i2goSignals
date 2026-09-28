@@ -224,6 +224,15 @@ already negotiated it.
 | `I2SIG_STORE_MEM_DIRECTORY`    | Directory where the memory provider persists state to disk.                                              | `config/{dbName}`             |
 | `I2SIG_STORE_MEM_SAVE_RATE`    | Interval in seconds between periodic saves. `0` means write on every change.                             | `30`                          |
 
+## Store_GroupCommit
+
+Applies to both the Mongo and the memory provider. Concurrent event-body writes (`Insert`/`InsertMany`) and, per stream, pending-marker writes (`AddPending`/`AddPendingMany`) that arrive within the window are coalesced into one bulk write on the store. Each caller still gets its own result: a duplicate JTI (ADR 0017) is reported only to the caller that submitted it, and a batch that fails as a whole returns its error to every caller in it. Durability is unchanged — no caller is answered before the coalesced majority-journaled write completes (ADR 0038). A single call already carrying `I2SIG_STORE_GROUP_COMMIT_MAX` or more items bypasses the batcher.
+
+| Variable                           | Description                                                                                                                                                                                  | Default |
+|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `I2SIG_STORE_GROUP_COMMIT_WINDOW`  | Longest a batch waits for further callers after it opens, as a Go duration (`1ms`, `500us`). A batch flushes earlier once it reaches the maximum. `0` disables batching: calls go to the store 1:1, exactly as without the batcher. An unparsable or negative value logs a warning and uses the default. | `1ms`   |
+| `I2SIG_STORE_GROUP_COMMIT_MAX`     | Maximum items (records or pending JTIs) in one coalesced write. `1` disables batching. A non-integer or value below `1` logs a warning and uses the default.                                    | `128`   |
+
 ## Push
 
 Defaults shown as Go `time.Duration` strings (e.g. `1s`, `5m`, `6h`).
