@@ -217,6 +217,34 @@ already negotiated it.
 > [Event retention](operations.md#event-retention) in the Operations Guide for
 > the consequences and what to do about it.
 
+### Mongo write concern
+
+Each collection handle sets its own write concern. The Mongo client sets none,
+and no environment variable changes these values. The table below is also in a
+code comment at the wiring site (`collectionWriteConcerns` in
+`internal/providers/dbProviders/mongo_provider/provider.go`). The provider uses
+no transactions.
+
+| Collection                                                          | Write concern         | Why                                                                                                                                  |
+|---------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `events`                                                            | `w:majority`, `j:true` | Ingest durability contract (ADR 0038). A SET is majority-acknowledged and journaled before it is acked.                             |
+| `pendingEvents`                                                     | `w:majority`, `j:true` | Same contract (ADR 0038). A pending marker is stored before the ack.                                                                 |
+| `cluster_leases`                                                    | `w:majority`, `j:true` | A lease grant acknowledged at `w:1` can roll back on a primary failover, and then two nodes would own one stream. Fencing tokens rely on majority. |
+| `deliveredEvents`                                                   | `w:1`                 | Audit record and retention purge anchor (ADR 0055). A lost row only delays that event's purge. It never re-delivers or loses a SET. |
+| `cluster_nodes`                                                     | `w:1`                 | Heartbeat registry that is rewritten on every tick. A lost write is repaired by the next heartbeat.                                  |
+| `streams`, `keys`, `clients`, `servers`, `tokens`, `subject_filters` | `w:1`                 | Admin and configuration state. It is outside the ingest contract.                                                                    |
+
+The one-trip ingest write (ADR 0043) is a client-level multi-namespace
+`bulkWrite`. That call ignores the collection handles' concerns and uses the
+client's concern. The client sets none, so without an explicit concern the call
+would fall back to the server default. The call therefore sets `w:majority`,
+`j:true` itself (`EventStoreWriteConcern` in `internal/dao/mongo/event_dao.go`).
+The fallback path on Mongo older than 8.0 uses the `events` and `pendingEvents`
+handles, which are majority.
+
+A `w=` or `journal=` option in `MONGO_URL` sets a client-level concern. That
+concern is still overridden by every handle above and by the one-trip call.
+
 ## Store_Mem
 
 | Variable                       | Description                                                                                              | Default                       |

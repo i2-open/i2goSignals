@@ -275,6 +275,74 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 	return m.coordinator
 }
 
+// collectionWriteConcerns is the per-collection write concern table (#332).
+// Write concern lives on the collection handle, not the client, so the
+// durability cost is paid only where the contract requires it. Keep this
+// table in step with docs/configuration_properties.md ("Mongo write concern").
+//
+//	collection        concern            why
+//	events            majority, j:true   ADR 0038: stored before ack
+//	pendingEvents     majority, j:true   ADR 0038: stored before ack
+//	cluster_leases    majority, j:true   a w:1 lease grant can roll back on
+//	                                     failover, letting two nodes own one
+//	                                     stream; fencing needs majority
+//	deliveredEvents   w:1                audit / ADR 0055 purge anchor: a lost
+//	                                     row only delays purge
+//	cluster_nodes     w:1                heartbeat registry, rewritten each tick
+//	streams, keys, clients, servers,
+//	tokens, subject_filters
+//	                  w:1                non-contract admin/config state
+//
+// No transactions are used. The one-trip events+pending client bulkWrite
+// (ADR 0043) does not take a collection's concern: a client-level bulkWrite
+// uses the client's concern, and the client carries none, so that call sets
+// majority+journal itself (mongodao.EventStoreWriteConcern).
+var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
+	CDbEvents:         mongodao.EventStoreWriteConcern(),
+	CDbPending:        mongodao.EventStoreWriteConcern(),
+	CDbLeases:         mongodao.EventStoreWriteConcern(),
+	CDbDelivered:      writeconcern.W1(),
+	CDbNodes:          writeconcern.W1(),
+	CDbStreamCfg:      writeconcern.W1(),
+	CDbKeys:           writeconcern.W1(),
+	CDbClients:        writeconcern.W1(),
+	CDbServers:        writeconcern.W1(),
+	CDbTokens:         writeconcern.W1(),
+	CDbSubjectFilters: writeconcern.W1(),
+}
+
+// collection opens a handle on m.ssefDb with the write concern from
+// collectionWriteConcerns. An unlisted name falls back to majority+journal,
+// the safe default.
+func (m *MongoProvider) collection(name string) *mongo.Collection {
+	wc, ok := collectionWriteConcerns[name]
+	if !ok {
+		wc = mongodao.EventStoreWriteConcern()
+	}
+	return m.ssefDb.Collection(name, options.Collection().SetWriteConcern(wc))
+}
+
+// openCollections opens every collection handle on m.ssefDb.
+func (m *MongoProvider) openCollections() {
+	m.streamCol = m.collection(CDbStreamCfg)
+	m.keyCol = m.collection(CDbKeys)
+	m.deliveredCol = m.collection(CDbDelivered)
+	m.pendingCol = m.collection(CDbPending)
+	m.eventCol = m.collection(CDbEvents)
+	m.clientCol = m.collection(CDbClients)
+	m.serverCol = m.collection(CDbServers)
+	m.leaseCol = m.collection(CDbLeases)
+	m.nodeCol = m.collection(CDbNodes)
+	m.tokenCol = m.collection(CDbTokens)
+	m.subjectFilterCol = m.collection(CDbSubjectFilters)
+}
+
+// mongoClientOptions builds the client options. It deliberately sets no write
+// concern: each collection handle carries its own (collectionWriteConcerns).
+func mongoClientOptions(uri string) *options.ClientOptions {
+	return options.Client().ApplyURI(uri)
+}
+
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	dbNames, err := m.mongoClient.ListDatabaseNames(ctx, bson.M{})
 	if err != nil {
@@ -298,18 +366,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		m.ssefDb = m.mongoClient.Database(m.DbName)
 	}
 
-	// Initialize collections
-	m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
-	m.keyCol = m.ssefDb.Collection(CDbKeys)
-	m.deliveredCol = m.ssefDb.Collection(CDbDelivered)
-	m.pendingCol = m.ssefDb.Collection(CDbPending)
-	m.eventCol = m.ssefDb.Collection(CDbEvents)
-	m.clientCol = m.ssefDb.Collection(CDbClients)
-	m.serverCol = m.ssefDb.Collection(CDbServers)
-	m.leaseCol = m.ssefDb.Collection(CDbLeases)
-	m.nodeCol = m.ssefDb.Collection(CDbNodes)
-	m.tokenCol = m.ssefDb.Collection(CDbTokens)
-	m.subjectFilterCol = m.ssefDb.Collection(CDbSubjectFilters)
+	m.openCollections()
 
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
@@ -725,10 +782,7 @@ func (m *MongoProvider) connect() error {
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 60*time.Second)
 	defer cancel()
 
-	opts := options.Client().ApplyURI(m.DbUrl)
-	opts.WriteConcern = &writeconcern.WriteConcern{
-		W: "majority",
-	}
+	opts := mongoClientOptions(m.DbUrl)
 
 	// When SPIFFE mTLS is enabled for MongoDB, obtain the workload's X509-SVID
 	// and use it as the client certificate. This replaces username/password

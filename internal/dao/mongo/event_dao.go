@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
 
 var eLog = logger.Sub("EVENT_DAO")
@@ -33,6 +34,24 @@ type deliveredDoc struct {
 	Jti     string        `bson:"jti"`
 	Sid     bson.ObjectID `bson:"sid"`
 	AckDate time.Time     `bson:"ackDate"`
+}
+
+// EventStoreWriteConcern is the write concern of the ingest durability
+// contract (ADR 0038): events and pending markers are majority-acknowledged
+// and journaled before a SET is acked. It returns a fresh value so no caller
+// can mutate a shared one.
+func EventStoreWriteConcern() *writeconcern.WriteConcern {
+	journal := true
+	return &writeconcern.WriteConcern{W: "majority", Journal: &journal}
+}
+
+// oneTripBulkWriteOptions are the options of the one-trip events+pending
+// bulkWrite. A client-level bulkWrite ignores the collection handles' write
+// concern and uses the client's, and the client carries none (#332), so the
+// call must request majority+journal itself or it would fall to the server
+// default and weaken ADR 0038.
+func oneTripBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
+	return options.ClientBulkWrite().SetOrdered(true).SetWriteConcern(EventStoreWriteConcern())
 }
 
 var errEventNotInit = errors.New("mongo collection not initialized")
@@ -223,7 +242,7 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 	client := ec.Database().Client()
 	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
 	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
-	opts := options.ClientBulkWrite().SetOrdered(true)
+	opts := oneTripBulkWriteOptions()
 
 	// A JTI repeated in the batch needs no special casing: the repeat's
 	// events insert fails the unique JTI index, and the ordered write stops
