@@ -46,6 +46,7 @@ visibility into receiver health, recovery activity, and the T3 idle keepalive fe
 | `goSignals_router_push_idle_verify_total` | Counter | `stream_id`, `outcome` | Verify-event push outcomes (`acked` or `failed`). Dominated in production by T3 idle keepalives; operator-triggered verifies also pass through. |
 | `goSignals_router_delivery_inflight` | Gauge | `stream_id`, `transport` | JTIs a delivery runner (`transport` = `push` or `sstp`) has taken for sending and not yet acked or handed back (#336). It is bounded by `I2SIG_DELIVERY_INFLIGHT_MAX`; a stream sitting at the bound is waiting on its ack writes. The series is removed when the runner stops. |
 | `goSignals_router_delivery_ack_batch_size` | Histogram | `transport` | JTIs applied per coalesced ack write (#336). A mean well above the push batch size shows coalescing is saving store writes; a mean of one batch shows the window is too short for the send rate, or `I2SIG_ACK_COALESCE_WINDOW=0`. |
+| `goSignals_router_poll_claimed_inflight` | Gauge | `stream_id` | SETs of an RFC 8936 poll stream claimed by a poll response on this node and not yet acked, released or expired (#337). Set after each poll; a value near the stream's pending count means pollers are not acking and will see redelivery once `I2SIG_POLL_CLAIM_TTL` passes. Always 0 when `I2SIG_POLL_CLAIM_TTL=0`. The series is removed when the stream is removed. |
 
 ## Event Validation Metrics
 

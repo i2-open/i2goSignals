@@ -1,6 +1,8 @@
 package buffer
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -33,6 +35,22 @@ type EventPollBuffer struct {
 	defaultTimeoutSecs int
 	// maxTimeoutSecs caps receiver-supplied timeoutSecs. 0 disables the cap.
 	maxTimeoutSecs int
+	// claims holds the JTIs an RFC 8936 poll has taken and not yet had acked
+	// (#337), keyed by JTI. A claimed JTI is skipped by every other poll until
+	// it is acked, its claim is released, or the claim expires, so two
+	// overlapping polls on one stream get disjoint batches. An expired claim
+	// makes its JTI visible again, which keeps delivery at-least-once
+	// (ADR 0038). Claims are in-memory state of this node's buffer only: the
+	// pending list stays the durable source of truth, so no schema changes
+	// and a node restart (a fresh buffer) makes the whole pending set
+	// servable again.
+	claims map[string]pollClaim
+}
+
+// pollClaim is one poll's hold on a JTI.
+type pollClaim struct {
+	token   string
+	expires time.Time
 }
 
 // CreateEventPollBuffer queues up events via an in channel; subsequently
@@ -51,6 +69,7 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 		notifier:           make(chan struct{}),
 		defaultTimeoutSecs: defaultTimeoutSecs,
 		maxTimeoutSecs:     maxTimeoutSecs,
+		claims:             map[string]pollClaim{},
 	}
 
 	if len(initialJtis) > 0 {
@@ -194,10 +213,12 @@ func (b *EventPollBuffer) WakeupCh() <-chan struct{} {
 	return b.notifier
 }
 
+// AckEvents removes the JTIs from the buffer and releases any claim on them.
 func (b *EventPollBuffer) AckEvents(jtis []string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	for _, jti := range jtis {
+		delete(b.claims, jti)
 		for i, e := range b.events {
 			if e == jti {
 				b.events = append(b.events[:i], b.events[i+1:]...)
@@ -211,6 +232,68 @@ func (b *EventPollBuffer) Clear() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.events = []string{}
+	b.claims = map[string]pollClaim{}
+}
+
+// ReleaseClaim drops every claim taken under token without removing its
+// JTIs, so they are served by the next poll rather than after the claim
+// expires. The poll transmitter calls it when it could not send the batch.
+func (b *EventPollBuffer) ReleaseClaim(token string) {
+	if token == "" {
+		return
+	}
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	for jti, c := range b.claims {
+		if c.token == token {
+			delete(b.claims, jti)
+		}
+	}
+}
+
+// ClaimedCnt is the number of buffered JTIs held by an unexpired claim.
+func (b *EventPollBuffer) ClaimedCnt() int {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.expireClaimsLocked(time.Now())
+	return len(b.claims)
+}
+
+// expireClaimsLocked drops claims that expired by now and returns the
+// earliest expiry still outstanding (zero when none is).
+func (b *EventPollBuffer) expireClaimsLocked(now time.Time) time.Time {
+	var next time.Time
+	for jti, c := range b.claims {
+		if !c.expires.After(now) {
+			delete(b.claims, jti)
+			continue
+		}
+		if next.IsZero() || c.expires.Before(next) {
+			next = c.expires
+		}
+	}
+	return next
+}
+
+// unclaimedLocked returns the buffered JTIs no live claim holds, in buffer
+// (jti, ADR 0040) order.
+func (b *EventPollBuffer) unclaimedLocked() []string {
+	if len(b.claims) == 0 {
+		return b.events
+	}
+	out := make([]string, 0, len(b.events))
+	for _, jti := range b.events {
+		if _, held := b.claims[jti]; !held {
+			out = append(out, jti)
+		}
+	}
+	return out
+}
+
+func newClaimToken() string {
+	var raw [16]byte
+	_, _ = rand.Read(raw[:])
+	return hex.EncodeToString(raw[:])
 }
 
 // awaitNotify blocks until the buffer signals new events on notifier or deadline
@@ -234,44 +317,84 @@ func awaitNotify(notifier <-chan struct{}, deadline *time.Timer) bool {
 	}
 }
 
-// GetEvents returns all events in the buffer. Events remain in buffer until acknowledged.
+// GetEvents returns the unclaimed events in the buffer, up to
+// params.MaxEvents. Events remain in the buffer until acknowledged. It takes
+// no claim, so repeated calls return the same events.
 func (b *EventPollBuffer) GetEvents(params model.PollParameters) (*[]string, bool) {
+	_, values, more := b.collect(params, 0)
+	return values, more
+}
+
+// ClaimEvents is GetEvents for an RFC 8936 poll (#337): the JTIs it returns
+// are claimed under a fresh token for ttl, so an overlapping poll skips them
+// and is served the next disjoint slice. The claim ends when the JTIs are
+// acked (AckEvents), when ReleaseClaim(token) is called, or when ttl passes,
+// after which unacked JTIs are served again. With params.ReturnImmediately
+// false and nothing unclaimed it long-polls as GetEvents does, also waking
+// when a claim expires. A ttl <= 0 takes no claim and returns token "".
+func (b *EventPollBuffer) ClaimEvents(params model.PollParameters, ttl time.Duration) (string, *[]string, bool) {
+	return b.collect(params, ttl)
+}
+
+func (b *EventPollBuffer) collect(params model.PollParameters, ttl time.Duration) (string, *[]string, bool) {
 	b.mutex.Lock()
-	if len(b.events) == 0 {
-		if params.ReturnImmediately == false {
-			timeoutSecs := b.resolveTimeoutSecs(params.TimeoutSecs)
-			if timeoutSecs <= 0 {
-				// Empty buffer, no implicit long-poll: return immediately.
-				defer b.mutex.Unlock()
-				return nil, false
+	defer b.mutex.Unlock()
+
+	nextExpiry := b.expireClaimsLocked(time.Now())
+	available := b.unclaimedLocked()
+	if len(available) == 0 && !params.ReturnImmediately && !b.closed {
+		timeoutSecs := b.resolveTimeoutSecs(params.TimeoutSecs)
+		if timeoutSecs > 0 {
+			deadline := time.Now().Add(time.Duration(timeoutSecs) * time.Second)
+			for {
+				wait := time.Until(deadline)
+				if wait <= 0 {
+					break
+				}
+				// A claim expiring before the deadline frees its JTIs, so the
+				// wait ends then and the buffer is re-checked.
+				if !nextExpiry.IsZero() {
+					if untilExpiry := nextExpiry.Sub(time.Now()); untilExpiry < wait {
+						wait = max(untilExpiry, time.Millisecond)
+					}
+				}
+				notifier := b.notifier
+				b.mutex.Unlock()
+				notified := awaitNotify(notifier, time.NewTimer(wait))
+				b.mutex.Lock()
+				nextExpiry = b.expireClaimsLocked(time.Now())
+				available = b.unclaimedLocked()
+				// A notification (new events, a stream-state wakeup, Close)
+				// ends the long poll whatever the buffer holds, as before; an
+				// expiry wake-up only ends it once something is unclaimed.
+				if notified || len(available) > 0 || b.closed {
+					break
+				}
 			}
-			timeout := time.Duration(timeoutSecs) * time.Second
-			notifier := b.notifier
-			b.mutex.Unlock()
-			// The return value is deliberately ignored: whether we woke on the
-			// notifier or on the deadline, the buffer is re-checked below and an
-			// empty buffer is a legitimate long-poll result either way.
-			_ = awaitNotify(notifier, time.NewTimer(timeout))
-			b.mutex.Lock()
 		}
 	}
 
+	if len(available) == 0 {
+		return "", nil, false
+	}
+	n := len(available)
 	more := false
-	var values []string
-	defer b.mutex.Unlock()
-	eventsAvailable := len(b.events)
-	if eventsAvailable == 0 {
-		return nil, false
-	}
-
-	if params.MaxEvents > 0 && eventsAvailable > int(params.MaxEvents) {
+	if params.MaxEvents > 0 && n > int(params.MaxEvents) {
 		more = true
-		eventsAvailable = int(params.MaxEvents)
+		n = int(params.MaxEvents)
 	}
-	values = make([]string, eventsAvailable)
-	copy(values, b.events[:eventsAvailable])
+	values := make([]string, n)
+	copy(values, available[:n])
 
-	return &values, more
+	token := ""
+	if ttl > 0 {
+		token = newClaimToken()
+		expires := time.Now().Add(ttl)
+		for _, jti := range values {
+			b.claims[jti] = pollClaim{token: token, expires: expires}
+		}
+	}
+	return token, &values, more
 }
 
 type EventPushBuffer struct {

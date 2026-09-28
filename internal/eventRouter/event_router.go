@@ -243,6 +243,10 @@ type router struct {
 	// pollMaxTimeoutSecs is the resolved I2SIG_POLL_MAX_TIMEOUT cap on
 	// inbound receiver timeoutSecs values. 0 disables the cap.
 	pollMaxTimeoutSecs int
+	// pollClaimTTL is the resolved I2SIG_POLL_CLAIM_TTL: how long an RFC 8936
+	// poll holds the JTIs it returned before an unacked one is served again
+	// (#337). 0 takes no claims, so overlapping polls share a batch.
+	pollClaimTTL time.Duration
 	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
 	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
 	x509Source *workloadapi.X509Source
@@ -462,6 +466,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	eventLogger.Info("Poll long-poll timeouts resolved",
 		"I2SIG_POLL_DEFAULT_TIMEOUT", router.pollDefaultTimeoutSecs,
 		"I2SIG_POLL_MAX_TIMEOUT", router.pollMaxTimeoutSecs)
+	router.pollClaimTTL = pollClaimTTL()
+	eventLogger.Info("Poll claim TTL resolved (#337)", "I2SIG_POLL_CLAIM_TTL", router.pollClaimTTL)
 
 	states := router.streamService.GetStateMap(ctx)
 
@@ -1606,7 +1612,14 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		}
 	}
 
-	jtiSlice, more := pollBuffer.GetEvents(params)
+	// The batch is claimed (#337): an overlapping poll on this stream skips
+	// these JTIs and gets the next disjoint slice, and an unacked one is
+	// served again once the claim expires. The claims live in this node's
+	// in-memory poll buffer, beside the JTIs it already holds; the pending
+	// list stays the durable record, so there is no schema change and a
+	// restarted node serves the whole pending set again.
+	claimToken, jtiSlice, more := pollBuffer.ClaimEvents(params, r.pollClaimTTL)
+	defer pollClaimedGauge.WithLabelValues(sid).Set(float64(pollBuffer.ClaimedCnt()))
 
 	jtiSize := 0
 	if jtiSlice != nil {
@@ -1618,12 +1631,35 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		if signErr != nil {
 			// The key could not sign a SET: nothing is sent rather than a
 			// response that silently leaves it out, and the pause applies.
+			// Nothing was sent, so the batch is released for the next poll.
+			pollBuffer.ReleaseClaim(claimToken)
 			r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
 			return nil, false, PollKeyUnavailableStatus
 		}
 		return sets, more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
+}
+
+// defaultPollClaimTTL is the I2SIG_POLL_CLAIM_TTL default.
+const defaultPollClaimTTL = 30 * time.Second
+
+// pollClaimTTL resolves I2SIG_POLL_CLAIM_TTL: a Go duration ("30s") or a bare
+// number of seconds. 0 disables claims. An invalid or negative value gives
+// the default.
+func pollClaimTTL() time.Duration {
+	val := os.Getenv("I2SIG_POLL_CLAIM_TTL")
+	if val == "" {
+		return defaultPollClaimTTL
+	}
+	if secs, err := strconv.Atoi(val); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if d, err := time.ParseDuration(val); err == nil && d >= 0 {
+		return d
+	}
+	eventLogger.Warn("Ignoring invalid I2SIG_POLL_CLAIM_TTL (want a non-negative duration or seconds)", "value", val, "default", defaultPollClaimTTL)
+	return defaultPollClaimTTL
 }
 
 // assemblePollResponse builds the "sets" member of one RFC 8936 poll response:
@@ -2753,6 +2789,7 @@ func (r *router) RemoveStream(sid string) {
 
 		if pb, ok := r.pollBuffers[sid]; ok {
 			pb.Close()
+			pollClaimedGauge.DeleteLabelValues(sid)
 		}
 		delete(r.pollBuffers, sid)
 	}

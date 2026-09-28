@@ -78,12 +78,18 @@ var (
 		Help:      "JTIs applied per coalesced delivery ack write.",
 		Buckets:   []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512},
 	}, []string{"transport"})
+	pollClaimedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "goSignals",
+		Subsystem: "router",
+		Name:      "poll_claimed_inflight",
+		Help:      "JTIs an RFC 8936 poll stream has returned under an unexpired claim and not yet had acked (#337).",
+	}, []string{"stream_id"})
 )
 
 // DeliveryCollectors returns the acker's Prometheus collectors for the
 // server's registry.
 func DeliveryCollectors() []prometheus.Collector {
-	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist}
+	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge}
 }
 
 // ackerConfig configures one acker.
