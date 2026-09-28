@@ -183,7 +183,7 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 	_, _, _ = d.GetPendingForStream(ctx, "s", 10)
 	ev, _ := d.RemovePending(ctx, "j", "s")
 	_, _ = d.RemovePendingMany(ctx, []string{"k"}, "s")
-	_ = d.RetractPending(ctx, []string{"x"}, "s")
+	_, _ = d.InsertWithPending(ctx, []*model.EventRecord{{Jti: "w"}}, map[string][]string{"s": {"w"}})
 	_, _ = d.ClearPendingForStream(ctx, "s")
 	if ev == nil {
 		ev = &interfaces.DeliverableEvent{Jti: "j", StreamId: "s"}
@@ -202,7 +202,7 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 	for _, op := range []string{
 		"Insert", "InsertMany", "FindByJTI", "FindByJTIs", "FindByTimeRange",
 		"AddPending", "AddPendingMany", "GetPendingForStream", "RemovePending",
-		"RemovePendingMany", "RetractPending", "ClearPendingForStream",
+		"RemovePendingMany", "InsertWithPending", "ClearPendingForStream",
 		"MarkDelivered", "MarkDeliveredMany", "ListDeliveredForStream",
 		"RemoveDelivered", "DeleteBodyIfUnreferenced", "CountRetainedForStream",
 		"WatchPending",

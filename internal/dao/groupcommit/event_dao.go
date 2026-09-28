@@ -3,9 +3,10 @@
 //
 // Wrap decorates an EventDAO so that Insert/InsertMany calls arriving from
 // different goroutines within a short window are merged into ONE InsertMany
-// on the wrapped DAO, and AddPending/AddPendingMany calls for the same stream
-// are merged into ONE AddPendingMany. Every other method passes straight
-// through.
+// on the wrapped DAO, InsertWithPending calls are merged into ONE
+// InsertWithPending (the one-trip ingest write, ADR 0043), and
+// AddPending/AddPendingMany calls for the same stream are merged into ONE
+// AddPendingMany. Every other method passes straight through.
 //
 // Contract:
 //
@@ -118,6 +119,7 @@ func Wrap(inner interfaces.EventDAO, cfg Config) interfaces.EventDAO {
 		pending:  make(map[string]*coalescer[string]),
 	}
 	d.inserts = &coalescer[*model.EventRecord]{cfg: cfg, flush: d.flushInsert}
+	d.ingests = &coalescer[ingestItem]{cfg: cfg, flush: d.flushIngest}
 	return d
 }
 
@@ -224,6 +226,7 @@ type eventDAO struct {
 	cfg Config
 
 	inserts *coalescer[*model.EventRecord]
+	ingests *coalescer[ingestItem]
 
 	pendMu  sync.Mutex
 	pending map[string]*coalescer[string] // per stream ID, created on first use
@@ -293,4 +296,51 @@ func (d *eventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID s
 	}
 	_, err := d.pendingFor(streamID).submit(ctx, jtis)
 	return err
+}
+
+// ingestItem is one record of an InsertWithPending call with the streams its
+// caller wants it queued on. Carrying the streams per record lets a coalesced
+// write rebuild one merged pending map without mixing callers' intents.
+type ingestItem struct {
+	rec     *model.EventRecord
+	streams []string
+}
+
+// flushIngest is the coalesced InsertWithPending. The write runs on a
+// detached context (see the package doc).
+func (d *eventDAO) flushIngest(items []ingestItem) ([]error, error) {
+	records := make([]*model.EventRecord, len(items))
+	pending := make(map[string][]string)
+	for i, it := range items {
+		records[i] = it.rec
+		for _, sid := range it.streams {
+			pending[sid] = append(pending[sid], it.rec.Jti)
+		}
+	}
+	results, err := d.EventDAO.InsertWithPending(context.Background(), records, pending)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(records) {
+		// Defensive: see flushInsert.
+		aligned := make([]error, len(records))
+		copy(aligned, results)
+		results = aligned
+	}
+	return results, nil
+}
+
+func (d *eventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	if len(records) >= d.cfg.Max {
+		return d.EventDAO.InsertWithPending(ctx, records, pending)
+	}
+	byJti := interfaces.StreamsByJti(pending)
+	items := make([]ingestItem, len(records))
+	for i, r := range records {
+		items[i] = ingestItem{rec: r, streams: byJti[r.Jti]}
+	}
+	return d.ingests.submit(ctx, items)
 }

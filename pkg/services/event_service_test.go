@@ -32,9 +32,12 @@ type fakeEventDAO struct {
 	removePendingErr       error
 	removePendingCalls     int
 	removePendingManyCalls int
-	retractPendingErr      error
-	retractPendingCalls    int
-	retractedJtis          []string
+	// insertWithPending, when set, is the per-record result InsertWithPending
+	// returns; insertWithPendingErr is its whole-batch error. gotPending
+	// records the pending map it was handed.
+	insertWithPending      []error
+	insertWithPendingErr   error
+	gotPending             map[string][]string
 	markDeliveredManyCalls int
 	delivered              []interfaces.DeliverableEvent
 }
@@ -102,10 +105,15 @@ func (f *fakeEventDAO) RemovePendingMany(_ context.Context, jtis []string, strea
 	}
 	return removed, nil
 }
-func (f *fakeEventDAO) RetractPending(_ context.Context, jtis []string, _ string) error {
-	f.retractPendingCalls++
-	f.retractedJtis = append(f.retractedJtis, jtis...)
-	return f.retractPendingErr
+func (f *fakeEventDAO) InsertWithPending(_ context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	f.gotPending = pending
+	if f.insertWithPendingErr != nil {
+		return nil, f.insertWithPendingErr
+	}
+	if f.insertWithPending != nil {
+		return f.insertWithPending, nil
+	}
+	return make([]error, len(records)), nil
 }
 func (f *fakeEventDAO) ClearPendingForStream(_ context.Context, _ string) (int64, error) {
 	return 0, nil
@@ -310,5 +318,57 @@ func TestAckEvents_RemoveErrorPropagates(t *testing.T) {
 	}
 	if fake.markDeliveredManyCalls != 0 {
 		t.Errorf("MarkDeliveredMany must not run after a remove failure")
+	}
+}
+
+// TestAddEventsWithPending_MapsPerRecordOutcomes asserts the one-trip ingest
+// service contract (ADR 0043): the pending map reaches the DAO unchanged, an
+// accepted record comes back as itself, a duplicate comes back as the EXISTING
+// record paired with ErrDuplicateJTI, and any other per-record failure comes
+// back as a nil record with that error, so the router cannot ack it.
+func TestAddEventsWithPending_MapsPerRecordOutcomes(t *testing.T) {
+	existing := &model.EventRecord{Jti: "dup", Original: "first"}
+	markerErr := errors.New("pending marker write failed")
+	fake := &fakeEventDAO{
+		firstSeen:         existing,
+		insertWithPending: []error{nil, interfaces.ErrDuplicateJTI, markerErr},
+	}
+	svc := NewEventService(fake)
+	recs := NewIngestRecords(
+		[]*goSet.SecurityEventToken{newTokenWithJTI("ok"), newTokenWithJTI("dup"), newTokenWithJTI("bad")},
+		"stream-1", []string{"r-ok", "r-dup", "r-bad"})
+	pending := map[string][]string{"out-1": {"ok", "dup", "bad"}}
+
+	got, errs := svc.AddEventsWithPending(context.Background(), recs, "stream-1", pending)
+
+	if len(fake.gotPending["out-1"]) != 3 {
+		t.Errorf("pending map not passed through: %v", fake.gotPending)
+	}
+	if errs[0] != nil || got[0] != recs[0] {
+		t.Errorf("accepted: got (%v, %v), want the candidate and nil", got[0], errs[0])
+	}
+	if !errors.Is(errs[1], interfaces.ErrDuplicateJTI) || got[1] != existing {
+		t.Errorf("duplicate: got (%v, %v), want the existing record and ErrDuplicateJTI", got[1], errs[1])
+	}
+	if !errors.Is(errs[2], markerErr) || got[2] != nil {
+		t.Errorf("failure: got (%v, %v), want nil and the marker error", got[2], errs[2])
+	}
+}
+
+// TestAddEventsWithPending_BatchErrorFailsEveryRecord: a whole-batch failure
+// is reported at every position with no record, so nothing is acked.
+func TestAddEventsWithPending_BatchErrorFailsEveryRecord(t *testing.T) {
+	down := errors.New("store down")
+	svc := NewEventService(&fakeEventDAO{insertWithPendingErr: down})
+	recs := NewIngestRecords(
+		[]*goSet.SecurityEventToken{newTokenWithJTI("a"), newTokenWithJTI("b")},
+		"stream-1", []string{"", ""})
+
+	got, errs := svc.AddEventsWithPending(context.Background(), recs, "stream-1", nil)
+
+	for i := range recs {
+		if got[i] != nil || !errors.Is(errs[i], down) {
+			t.Errorf("position %d: got (%v, %v), want (nil, store down)", i, got[i], errs[i])
+		}
 	}
 }

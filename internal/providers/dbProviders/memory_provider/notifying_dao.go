@@ -139,6 +139,15 @@ func (d *notifyingEventDAO) InsertMany(ctx context.Context, records []*model.Eve
 	return results, nil
 }
 
+func (d *notifyingEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	results, err := d.inner.InsertWithPending(ctx, records, pending)
+	if err != nil {
+		return results, err
+	}
+	d.notify()
+	return results, nil
+}
+
 func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	return d.inner.FindByJTI(ctx, jti)
 }
@@ -191,16 +200,6 @@ func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string
 		d.notify()
 	}
 	return evs, nil
-}
-
-func (d *notifyingEventDAO) RetractPending(ctx context.Context, jtis []string, streamID string) error {
-	if err := d.inner.RetractPending(ctx, jtis, streamID); err != nil {
-		return err
-	}
-	if len(jtis) > 0 {
-		d.notify()
-	}
-	return nil
 }
 
 func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {

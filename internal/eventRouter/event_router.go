@@ -999,12 +999,12 @@ one pending-list write per matching outbound stream instead of one per SET. The 
 index-aligned with eventTokens; a nil entry means the SET was accepted (or was a duplicate JTI, which is
 swallowed exactly as HandleEvent swallows it) and may be acked.
 
-The body write and the delivery-intent writes are issued CONCURRENTLY rather than one after the other
-(ADR 0038), so ingest pays roughly one majority-acked replica-set round trip instead of two. That means a
-pending marker can be written for a SET whose body write later turns out to have been rejected — a
-duplicate JTI, or a failed insert — so the markers are speculative until ingest.Wait() reports the
-outcome. commitFanoutLocked retracts the markers of rejected SETs before any stream is woken, and no
-stream is woken, metered as egress, or handed a JTI until the body write has been joined.
+The fan-out is planned from the candidate records first, then the bodies and every matching stream's
+pending markers are committed in ONE store call (ADR 0043): a single multi-namespace bulkWrite on
+MongoDB 8.0+, so ingest pays one majority-acked replica-set round trip. A marker is only ever written for
+a SET whose body was stored, so there is no speculative marker to retract, and a SET is acknowledged
+only when its body AND its markers are durable (ADR 0038). No stream is woken, metered as egress, or
+handed a JTI until that write has returned.
 */
 func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
 	return r.handleEvents(r.ctx, eventTokens, rawEvents, sid)
@@ -1028,10 +1028,10 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		return results
 	}
 
-	// Leg A: the event bodies. Starts here and runs in the background; the
-	// candidate records are available immediately because they are built from
-	// the inbound tokens, not from anything the database returns.
-	ingest := r.eventService.BeginAddEvents(r.ctx, eventTokens, sid, rawEvents)
+	// The candidate records are built from the inbound tokens, not from
+	// anything the database returns, so the fan-out can be planned before the
+	// single write that stores them.
+	candidates := services.NewIngestRecords(eventTokens, sid, rawEvents)
 
 	// An SSTP inbound honours its own direction's RouteMode (#261, ADR-0031):
 	// IMPORT consumes the SET locally, FORWARD and PUBLISH fan it out. As on
@@ -1044,8 +1044,7 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 	// The tx SID is the exclusion key because it is what both fan-out maps are
 	// keyed by, and unlike PairId it is always populated.
 	//
-	// The route mode is a property of the inbound stream alone, so it is
-	// settled without waiting for leg A.
+	// The route mode is a property of the inbound stream alone.
 	importOnly := false
 	excludeSstpTxSid := ""
 	if sstpPair != nil {
@@ -1056,16 +1055,22 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		importOnly = true
 	}
 
-	// Leg B: the delivery intents, written while leg A is still in flight.
+	// Select the outbound streams each candidate is queued on. Nothing is
+	// written yet: the markers travel in the same store call as the bodies.
 	var targets []*fanoutTarget
 	if !importOnly {
 		r.mu.RLock()
-		targets = r.planFanoutLocked(dedupeCandidatesByJti(ingest.Candidates()), excludeSstpTxSid)
+		targets = r.planFanoutLocked(dedupeCandidatesByJti(candidates), excludeSstpTxSid)
 		r.mu.RUnlock()
 	}
+	pending := make(map[string][]string, len(targets))
+	for _, t := range targets {
+		pending[t.docID] = append(pending[t.docID], t.jtis...)
+	}
 
-	// Join leg A. Only now is it known which candidates were accepted.
-	accepted := r.reconcileIngest(ingest, results, streamState, eventTokens)
+	// One write: bodies + markers. Only now is it known which were accepted.
+	recs, errs := r.eventService.AddEventsWithPending(r.ctx, candidates, sid, pending)
+	accepted := r.reconcileIngest(recs, errs, results, streamState, eventTokens)
 	if len(targets) == 0 {
 		return results
 	}
@@ -1076,12 +1081,11 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 	return results
 }
 
-// reconcileIngest joins the in-flight body write, records the per-SET outcome
-// in results, meters the accepted SETs as ingress, and returns the accepted
-// records keyed by JTI so the fan-out can tell an accepted delivery intent
-// from a speculative one.
-func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, streamState *model.StreamStateRecord, eventTokens []*goSet.SecurityEventToken) map[string]*model.EventRecord {
-	recs, errs := ingest.Wait()
+// reconcileIngest records the per-SET outcome of the ingest write in results,
+// meters the accepted SETs as ingress, and returns the accepted records keyed
+// by JTI so the fan-out wakes and meters only SETs whose body and markers are
+// stored.
+func (r *router) reconcileIngest(recs []*model.EventRecord, errs []error, results []error, streamState *model.StreamStateRecord, eventTokens []*goSet.SecurityEventToken) map[string]*model.EventRecord {
 	accepted := make(map[string]*model.EventRecord, len(recs))
 	for i, rec := range recs {
 		if errs[i] != nil {
@@ -1092,8 +1096,9 @@ func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, 
 			// INFO log emitted by the event service ("Duplicate JTI ingestion
 			// suppressed").
 			if !errors.Is(errs[i], interfaces.ErrDuplicateJTI) {
-				// Any other body-write failure means the SET is NOT durably
-				// stored, so it must not be acked (ADR 0038). Classify it so the
+				// Any other failure means the SET's body or one of its pending
+				// markers is NOT durably stored, so it must not be acked (ADR
+				// 0038). Classify it so the
 				// ingest handlers answer 503 + Retry-After instead of 400 (#333).
 				results[i] = fmt.Errorf("%w: %w", ErrStoreUnavailable, errs[i])
 			}
@@ -1108,9 +1113,8 @@ func (r *router) reconcileIngest(ingest *services.IngestBatch, results []error, 
 
 // dedupeCandidatesByJti drops the later repeats of a JTI that appears more than
 // once in one inbound batch. Only one copy can ever be accepted — the second
-// insert of the same JTI reports ErrDuplicateJTI — so queueing both would leave
-// two identical pending markers that the compensating removal cannot tell
-// apart, and one of them would be delivered a second time.
+// insert of the same JTI reports ErrDuplicateJTI — so planning both would list
+// the JTI twice for the same stream.
 func dedupeCandidatesByJti(recs []*model.EventRecord) []*model.EventRecord {
 	seen := make(map[string]struct{}, len(recs))
 	out := make([]*model.EventRecord, 0, len(recs))
@@ -1124,35 +1128,26 @@ func dedupeCandidatesByJti(recs []*model.EventRecord) []*model.EventRecord {
 	return out
 }
 
-// fanoutTarget is one outbound stream a batch has been speculatively queued to:
-// its pending markers are written, but its buffer has not been woken and its
-// events have not been metered as egress. commitFanoutLocked finishes the job
-// once the body write has been joined.
+// fanoutTarget is one outbound stream a batch is planned to be queued on. Its
+// pending markers are written with the bodies by the ingest write (ADR 0043);
+// commitFanoutLocked then meters and wakes it for the accepted SETs.
 type fanoutTarget struct {
 	mode  string // PUSH | POLL | SSTP-CLIENT | SSTP-SERVER — selects the commit action and labels logs
 	key   string // buffer-map key: the SID for push/poll, the PairId for sstp-client, the tx SID for sstp-server
-	docID string // stream document id the pending markers were written under
+	docID string // stream document id the pending markers are written under
 	sid   string // StreamConfiguration.Id — the stream identity logs and metering use
 	jtis  []string
-
-	// queued records whether this target's marker write actually succeeded.
-	// Retraction is a compensating write (ADR 0038) and may only undo a marker
-	// this batch wrote: when the write failed there is nothing of ours to undo,
-	// and retracting anyway would delete an OLDER still-undelivered intent for
-	// the same JTI — silently dropping an event that was already accepted.
-	queued bool
 }
 
 // planFanoutLocked selects, for every outbound stream this router knows about,
-// the events of the batch that match it and writes their pending markers. It
-// wakes nothing: the batch's bodies may still be in flight. The caller must
-// hold r.mu (at least RLock).
+// the events of the batch that match it. It writes and wakes nothing. The
+// caller must hold r.mu (at least RLock).
 func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid string) []*fanoutTarget {
 	var targets []*fanoutTarget
 
 	// Check to see if the events should be routed to outbound push streams
 	for _, stream := range r.pushStreams {
-		if t := r.queueMatchingLocked(&stream, batch, "PUSH", stream.StreamConfiguration.Id); t != nil {
+		if t := r.selectMatchingLocked(&stream, batch, "PUSH", stream.StreamConfiguration.Id); t != nil {
 			targets = append(targets, t)
 		}
 	}
@@ -1160,7 +1155,7 @@ func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid s
 	// Check to see if the events should be routed to outbound polling streams
 	for k, pollStream := range r.pollStreams {
 		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
-		if t := r.queueMatchingLocked(&pollStream, batch, "POLL", pollStream.StreamConfiguration.Id); t != nil {
+		if t := r.selectMatchingLocked(&pollStream, batch, "POLL", pollStream.StreamConfiguration.Id); t != nil {
 			targets = append(targets, t)
 		}
 	}
@@ -1168,17 +1163,13 @@ func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid s
 	return append(targets, r.planSstpFanoutLocked(batch, excludeSstpTxSid)...)
 }
 
-// queueMatchingLocked selects the events of a batch that match an outbound
-// stream and appends them to the stream's pending list in one write, returning
-// the target the commit phase needs (nil when nothing matched). The caller must
-// hold r.mu (at least RLock). A pending-list write failure is logged and the
-// target is still returned, as the per-event path did: the buffer submit gives
-// the runner a chance to deliver from the event store.
+// selectMatchingLocked selects the events of a batch that match an outbound
+// stream, returning the target the ingest write and the commit phase need (nil
+// when nothing matched). The caller must hold r.mu (at least RLock).
 //
-// Egress metering is deliberately NOT done here. These markers are speculative
-// until the body write is joined, and a SET whose body was rejected must not be
-// counted as outbound.
-func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string, key string) *fanoutTarget {
+// Egress metering is deliberately NOT done here: a SET whose ingest write is
+// rejected must not be counted as outbound.
+func (r *router) selectMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string, key string) *fanoutTarget {
 	var jtis []string
 	for _, event := range batch {
 		if !r.eventService.MatchesStream(stream, event) {
@@ -1190,42 +1181,20 @@ func (r *router) queueMatchingLocked(stream *model.StreamStateRecord, batch []*m
 	if len(jtis) == 0 {
 		return nil
 	}
-	docID := stream.Id.Hex()
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-	queued := true
-	if err := r.eventService.AddEventsToStream(r.ctx, jtis, docID); err != nil {
-		eventLogger.Error("ROUTER: Error adding events to stream", "sid", stream.StreamConfiguration.Id, "mode", mode, "count", len(jtis), "error", err)
-		queued = false
-	}
-	return &fanoutTarget{mode: mode, key: key, docID: docID, sid: stream.StreamConfiguration.Id, jtis: jtis, queued: queued}
+	return &fanoutTarget{mode: mode, key: key, docID: stream.Id.Hex(), sid: stream.StreamConfiguration.Id, jtis: jtis}
 }
 
-// commitFanoutLocked finishes the fan-out once the body write has been joined:
-// it retracts the pending markers of every SET the body write rejected, meters
-// the survivors as egress, and wakes each target the way its delivery method
-// requires. The caller must hold r.mu (at least RLock).
+// commitFanoutLocked finishes the fan-out once the ingest write has returned:
+// it meters the accepted SETs as egress and wakes each target the way its
+// delivery method requires. A rejected SET has no marker (ADR 0043), so it is
+// simply skipped. The caller must hold r.mu (at least RLock).
 func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string]*model.EventRecord) {
 	for _, t := range targets {
 		keep := make([]string, 0, len(t.jtis))
-		var drop []string
 		for _, jti := range t.jtis {
 			if _, ok := accepted[jti]; ok {
 				keep = append(keep, jti)
-			} else {
-				drop = append(drop, jti)
-			}
-		}
-		if len(drop) > 0 && t.queued {
-			// Compensating write (ADR 0038). The marker was written before the
-			// body write reported this JTI rejected, so the delivery intent is
-			// retracted before anything can act on it — leaving it would
-			// re-deliver a SET whose first copy was already fanned out.
-			//
-			// Guarded by t.queued: retraction deletes the NEWEST marker for the
-			// JTI, so running it after a failed marker write would consume an
-			// older, still-undelivered intent that this batch never created.
-			if err := r.eventService.DiscardPending(r.ctx, drop, t.docID); err != nil {
-				eventLogger.Error("ROUTER: Error retracting speculative pending events", "sid", t.sid, "mode", t.mode, "count", len(drop), "error", err)
 			}
 		}
 		if len(keep) == 0 {
@@ -1382,7 +1351,7 @@ func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid s
 		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
-		if t := r.queueMatchingLocked(&pair, batch, "SSTP-CLIENT", pairId); t != nil {
+		if t := r.selectMatchingLocked(&pair, batch, "SSTP-CLIENT", pairId); t != nil {
 			targets = append(targets, t)
 		}
 	}
@@ -1393,7 +1362,7 @@ func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid s
 		}
 		// The server takes no client lease — every node may serve the
 		// long-poll — so the wake is not gated on lease ownership.
-		if t := r.queueMatchingLocked(&pair, batch, "SSTP-SERVER", txSid); t != nil {
+		if t := r.selectMatchingLocked(&pair, batch, "SSTP-SERVER", txSid); t != nil {
 			targets = append(targets, t)
 		}
 	}

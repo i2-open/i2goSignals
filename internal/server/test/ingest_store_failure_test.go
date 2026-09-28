@@ -46,6 +46,13 @@ func (d *toggleFailEventDAO) InsertMany(ctx context.Context, records []*model.Ev
 	return d.EventDAO.InsertMany(ctx, records)
 }
 
+func (d *toggleFailEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	if d.fail.Load() {
+		return nil, errStoreDown
+	}
+	return d.EventDAO.InsertWithPending(ctx, records, pending)
+}
+
 // createStoreFailureServer starts a server whose event store can be switched
 // into an outage through the returned DAO.
 func createStoreFailureServer(t *testing.T, dbName string) (*ssfInstance, *toggleFailEventDAO) {

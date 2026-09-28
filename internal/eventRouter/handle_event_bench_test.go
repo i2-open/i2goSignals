@@ -96,6 +96,12 @@ func newMongoRouterBench(b *testing.B) *mongoRouterBench {
 	projectId := parsed.ProjectId
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
 
+	// A PUBLISH-mode direction needs an active signing key for its issuer
+	// before the pair can be created (#308).
+	if _, err := p.KeyService.EnsureSigningKey(context.Background(), "https://tx.issuer.example", projectId); err != nil {
+		b.Fatal(err)
+	}
+
 	baseUrl, _ := url.Parse("https://local.example")
 	p.StreamService.SetBaseUrl(baseUrl)
 	pair, err := p.StreamService.CreateSstpPair(context.Background(), model.SstpPairBootstrap{

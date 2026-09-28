@@ -350,3 +350,93 @@ func TestConfigFromEnv(t *testing.T) {
 	t.Setenv(EnvMax, "1")
 	assert.False(t, ConfigFromEnv().Enabled(), "max 1 disables batching")
 }
+
+// ingestScenario drives concurrent InsertWithPending callers through dao. Each
+// caller queues its records on its own stream, one of its records repeats a
+// pre-existing JTI, and the last caller queues on two streams — so a coalesced
+// write must keep every caller's markers on that caller's streams only, and a
+// duplicate must leave no marker anywhere.
+func ingestScenario(t *testing.T, dao interfaces.EventDAO) outcome {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, dao.Insert(ctx, rec("existing")))
+
+	var mu sync.Mutex
+	out := outcome{errs: map[string]string{}, pending: map[string][]string{}}
+	var wg sync.WaitGroup
+	const callers = 12
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			a, b := fmt.Sprintf("ing-%02d-a", i), fmt.Sprintf("ing-%02d-b", i)
+			recs := []*model.EventRecord{rec(a), rec("existing"), rec(b)}
+			sid := streamIDs[i%2]
+			pending := map[string][]string{sid: {a, "existing", b}}
+			if i == callers-1 {
+				pending[streamIDs[2]] = []string{b}
+			}
+			res, err := dao.InsertWithPending(ctx, recs, pending)
+			mu.Lock()
+			defer mu.Unlock()
+			k := fmt.Sprintf("ing-%02d", i)
+			out.errs[k] = errText(err)
+			assert.Len(t, res, len(recs))
+			for j, e := range res {
+				out.errs[fmt.Sprintf("%s[%d]", k, j)] = errText(e)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < callers; i++ {
+		for _, s := range []string{"a", "b"} {
+			r, err := dao.FindByJTI(ctx, fmt.Sprintf("ing-%02d-%s", i, s))
+			require.NoError(t, err)
+			if r != nil {
+				out.stored = append(out.stored, r.Jti)
+			}
+		}
+	}
+	sort.Strings(out.stored)
+	for _, sid := range streamIDs {
+		jtis, _, err := dao.GetPendingForStream(ctx, sid, 1000)
+		require.NoError(t, err)
+		sort.Strings(jtis)
+		out.pending[sid] = jtis
+	}
+	return out
+}
+
+func TestInsertWithPendingCoalescesPerCaller(t *testing.T) {
+	for name, store := range stores {
+		t.Run(name, func(t *testing.T) {
+			got := ingestScenario(t, Wrap(store(t), batched))
+			dup := interfaces.ErrDuplicateJTI.Error()
+			for k, e := range got.errs {
+				if len(k) == len("ing-00[1]") && k[len(k)-3:] == "[1]" {
+					assert.Equal(t, dup, e, k)
+				} else {
+					assert.Empty(t, e, k)
+				}
+			}
+			assert.Len(t, got.stored, 24)
+			var even, odd []string
+			for i := 0; i < 12; i++ {
+				pair := []string{fmt.Sprintf("ing-%02d-a", i), fmt.Sprintf("ing-%02d-b", i)}
+				if i%2 == 0 {
+					even = append(even, pair...)
+				} else {
+					odd = append(odd, pair...)
+				}
+			}
+			sort.Strings(even)
+			sort.Strings(odd)
+			assert.Equal(t, even, got.pending[streamIDs[0]])
+			assert.Equal(t, odd, got.pending[streamIDs[1]])
+			assert.Equal(t, []string{"ing-11-b"}, got.pending[streamIDs[2]])
+
+			unbatched := ingestScenario(t, Wrap(store(t), Config{}))
+			assert.Equal(t, unbatched, got)
+		})
+	}
+}

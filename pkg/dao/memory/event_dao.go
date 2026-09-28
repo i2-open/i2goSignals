@@ -66,6 +66,31 @@ func (d *EventDAOMemory) InsertMany(_ context.Context, records []*model.EventRec
 	return results, nil
 }
 
+// InsertWithPending stores records and their pending markers under one lock
+// (ADR 0043): a marker is appended only for a record that was actually stored,
+// so a duplicate JTI never leaves a delivery intent behind.
+func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	streams := interfaces.StreamsByJti(pending)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	results := make([]error, len(records))
+	for i, rec := range records {
+		if results[i] = d.insertLocked(rec); results[i] != nil {
+			continue
+		}
+		for _, streamID := range streams[rec.Jti] {
+			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+				Jti:      rec.Jti,
+				StreamId: streamID,
+			})
+		}
+	}
+	return results, nil
+}
+
 // insertLocked applies the single-record insert semantics; d.mu must be held.
 func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// JTI is the persistence-layer dedup key. Reject the new write and leave
@@ -291,45 +316,6 @@ func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, str
 	}
 	d.pendingEvents[streamID] = newPending
 	return removed, nil
-}
-
-// RetractPending removes the last-appended pending entry for each JTI and
-// leaves any earlier entry for the same JTI in its original position (ADR
-// 0038), so retracting a speculative delivery intent cannot drop an older
-// intent that is still awaiting delivery.
-func (d *EventDAOMemory) RetractPending(_ context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	pending, ok := d.pendingEvents[streamID]
-	if !ok {
-		return nil
-	}
-	drop := make(map[int]struct{}, len(jtis))
-	for _, jti := range jtis {
-		for i := len(pending) - 1; i >= 0; i-- {
-			if _, taken := drop[i]; taken || pending[i].Jti != jti {
-				continue
-			}
-			drop[i] = struct{}{}
-			break
-		}
-	}
-	if len(drop) == 0 {
-		return nil
-	}
-	kept := make([]interfaces.DeliverableEvent, 0, len(pending)-len(drop))
-	for i, event := range pending {
-		if _, dropped := drop[i]; dropped {
-			continue
-		}
-		kept = append(kept, event)
-	}
-	d.pendingEvents[streamID] = kept
-	return nil
 }
 
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {

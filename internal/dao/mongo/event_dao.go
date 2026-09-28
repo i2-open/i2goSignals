@@ -3,6 +3,8 @@ package mongo
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -39,6 +41,25 @@ type EventDAOMongo struct {
 	events    collectionRef
 	pending   collectionRef
 	delivered collectionRef
+
+	// oneTrip selects the InsertWithPending strategy (ADR 0043): true issues
+	// one client-level bulkWrite across the events and pending namespaces
+	// (MongoDB >= 8.0); false uses the two-write fallback. The provider sets
+	// it from the server version at connect; the zero value is the fallback,
+	// which works on every supported server.
+	oneTrip atomic.Bool
+}
+
+// SetOneTripIngest selects the InsertWithPending strategy: true for the
+// single multi-namespace bulkWrite (MongoDB >= 8.0 only), false for the
+// two-write fallback.
+func (d *EventDAOMongo) SetOneTripIngest(enabled bool) {
+	d.oneTrip.Store(enabled)
+}
+
+// OneTripIngest reports the strategy SetOneTripIngest last selected.
+func (d *EventDAOMongo) OneTripIngest() bool {
+	return d.oneTrip.Load()
 }
 
 func NewEventDAO(eventCol, pendingCol, deliveredCol *mongo.Collection) interfaces.EventDAO {
@@ -141,6 +162,177 @@ func (d *EventDAOMongo) InsertMany(ctx context.Context, records []*model.EventRe
 			results[we.Index] = interfaces.ErrDuplicateJTI
 		} else {
 			results[we.Index] = errors.New(we.WriteError.Error())
+		}
+	}
+	return results, nil
+}
+
+// InsertWithPending persists records and their pending markers (ADR 0043).
+// On MongoDB >= 8.0 it is one ordered client-level bulkWrite spanning the
+// events and pending namespaces; below 8.0 it is the two-write fallback. Both
+// strategies store the same documents and report the same per-record outcomes.
+func (d *EventDAOMongo) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return nil, err
+	}
+	pc, err := d.pendingColLoad()
+	if err != nil {
+		return nil, err
+	}
+	streams, err := pendingSids(interfaces.StreamsByJti(pending))
+	if err != nil {
+		return nil, err
+	}
+	if d.oneTrip.Load() {
+		return insertWithPendingOneTrip(ctx, ec, pc, records, streams)
+	}
+	return d.insertWithPendingTwoWrite(ctx, records, streams)
+}
+
+// pendingSids converts the JTI -> stream-ID map to JTI -> ObjectID, the
+// on-disk sid type, failing the batch on a malformed stream ID before anything
+// is written.
+func pendingSids(byJti map[string][]string) (map[string][]bson.ObjectID, error) {
+	out := make(map[string][]bson.ObjectID, len(byJti))
+	for jti, streamIDs := range byJti {
+		sids := make([]bson.ObjectID, len(streamIDs))
+		for i, streamID := range streamIDs {
+			sid, err := ParseObjectID(streamID)
+			if err != nil {
+				return nil, err
+			}
+			sids[i] = sid
+		}
+		out[jti] = sids
+	}
+	return out, nil
+}
+
+// insertWithPendingOneTrip writes every record followed by its markers as ONE
+// ordered multi-namespace bulkWrite. Ordering is what keeps a duplicate from
+// leaving an orphan marker (ADR 0017): an ordered bulkWrite stops at the first
+// failed op, so a rejected events insert is never followed by its markers.
+// Every op before the failure is known to have succeeded; the remaining
+// records are resubmitted in a fresh bulkWrite, so a batch with k per-record
+// failures costs k+1 round trips and the common case costs one.
+func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, records []*model.EventRecord, streams map[string][]bson.ObjectID) ([]error, error) {
+	client := ec.Database().Client()
+	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
+	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
+	opts := options.ClientBulkWrite().SetOrdered(true)
+
+	// A JTI repeated in the batch needs no special casing: the repeat's
+	// events insert fails the unique JTI index, and the ordered write stops
+	// before that repeat's markers.
+	results := make([]error, len(records))
+	for start := 0; start < len(records); {
+		var writes []mongo.ClientBulkWrite
+		// owner[k] is the record index op k belongs to; isEvent[k] is true
+		// for the events insert of that record.
+		var owner []int
+		var isEvent []bool
+		for i := start; i < len(records); i++ {
+			rec := records[i]
+			w := evNS
+			w.Model = mongo.NewClientInsertOneModel().SetDocument(rec)
+			writes = append(writes, w)
+			owner = append(owner, i)
+			isEvent = append(isEvent, true)
+			for _, sid := range streams[rec.Jti] {
+				w := pNS
+				w.Model = mongo.NewClientInsertOneModel().SetDocument(&pendingDoc{Jti: rec.Jti, Sid: sid})
+				writes = append(writes, w)
+				owner = append(owner, i)
+				isEvent = append(isEvent, false)
+			}
+		}
+
+		_, err := client.BulkWrite(ctx, writes, opts)
+		if err == nil {
+			return results, nil
+		}
+		var cbe mongo.ClientBulkWriteException
+		if !errors.As(err, &cbe) || cbe.WriteError != nil || len(cbe.WriteConcernErrors) > 0 || len(cbe.WriteErrors) != 1 {
+			eLog.Error("Error bulk writing events with pending markers", "error", err)
+			return nil, err
+		}
+		failed, we := -1, mongo.WriteError{}
+		for k, e := range cbe.WriteErrors {
+			failed, we = k, e
+		}
+		if failed < 0 || failed >= len(writes) {
+			eLog.Error("Bulk write reported an out-of-range failure index", "index", failed, "ops", len(writes))
+			return nil, err
+		}
+		// Every record wholly before the failed op is stored with its markers.
+		failedRec := owner[failed]
+		switch {
+		case isEvent[failed] && mongo.IsDuplicateKeyError(we):
+			results[failedRec] = interfaces.ErrDuplicateJTI
+		case isEvent[failed]:
+			results[failedRec] = errors.New(we.Error())
+		default:
+			// The body landed but a marker did not: not acknowledgeable.
+			results[failedRec] = fmt.Errorf("pending marker write failed: %s", we.Error())
+		}
+		start = failedRec + 1
+	}
+	return results, nil
+}
+
+// insertWithPendingTwoWrite is the pre-8.0 fallback: insert the bodies, then
+// write markers for the records that were actually stored. Markers are only
+// ever written after their body is known to be accepted, so no speculative
+// marker exists and nothing needs retracting (ADR 0043 supersedes the ADR 0038
+// concurrent-write mechanism).
+func (d *EventDAOMongo) insertWithPendingTwoWrite(ctx context.Context, records []*model.EventRecord, streams map[string][]bson.ObjectID) ([]error, error) {
+	results, err := d.InsertMany(ctx, records)
+	if err != nil {
+		return nil, err
+	}
+	pc, err := d.pendingColLoad()
+	if err != nil {
+		return nil, err
+	}
+	var docs []any
+	var owners []int // record index each doc belongs to
+	for i, rec := range records {
+		if results[i] != nil {
+			continue
+		}
+		for _, sid := range streams[rec.Jti] {
+			docs = append(docs, &pendingDoc{Jti: rec.Jti, Sid: sid})
+			owners = append(owners, i)
+		}
+	}
+	if len(docs) == 0 {
+		return results, nil
+	}
+	_, err = pc.InsertMany(ctx, docs)
+	if err == nil {
+		return results, nil
+	}
+	var bwe mongo.BulkWriteException
+	if !errors.As(err, &bwe) || bwe.WriteConcernError != nil {
+		eLog.Error("Error bulk inserting pending markers", "error", err)
+		return nil, err
+	}
+	// Ordered insert: every doc before the first failure is stored; the
+	// failed doc's record and every record whose markers came after it are
+	// not acknowledgeable.
+	first := len(docs)
+	for _, we := range bwe.WriteErrors {
+		if we.Index >= 0 && we.Index < first {
+			first = we.Index
+		}
+	}
+	for k := first; k < len(docs); k++ {
+		if results[owners[k]] == nil {
+			results[owners[k]] = fmt.Errorf("pending marker write failed: %w", err)
 		}
 	}
 	return results, nil
@@ -404,46 +596,6 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 		return nil, err
 	}
 	return removed, nil
-}
-
-// RetractPending removes, for each JTI, exactly one pending entry of streamID
-// and leaves any other entry for the same JTI alone (ADR 0038). Retraction is
-// the exceptional path — it only runs when a speculative marker's body was
-// rejected — so it costs one round trip per JTI rather than a batched delete.
-//
-// WHICH duplicate is deleted does not matter. A pendingDoc carries only sid
-// and jti, so two markers for the same (sid, jti) are indistinguishable in
-// content, and GetPendingForStream now orders by jti (ADR 0040), which the two
-// share — the survivor holds the same position either way. The descending _id
-// sort is kept only to make the choice deterministic within a node. It is NOT
-// a "most recently inserted" guarantee across nodes: an ObjectID is a
-// second-granularity timestamp plus a per-process random value, so two nodes
-// marking the same JTI in the same second sort arbitrarily against each other.
-func (d *EventDAOMongo) RetractPending(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	c, err := d.pendingColLoad()
-	if err != nil {
-		return err
-	}
-	sid, err := ParseObjectID(streamID)
-	if err != nil {
-		return err
-	}
-	opts := options.FindOneAndDelete().SetSort(bson.D{{Key: "_id", Value: -1}})
-	for _, jti := range jtis {
-		res := c.FindOneAndDelete(ctx, bson.M{"sid": sid, "jti": jti}, opts)
-		if res.Err() == nil || errors.Is(res.Err(), mongo.ErrNoDocuments) {
-			continue
-		}
-		// Warn, not Error: the caller (router commit) logs this at ERROR with
-		// the stream and delivery mode attached. This is the low-level detail
-		// under that one signal, not a second one.
-		eLog.Warn("Error retracting pending event", "jti", jti, "error", res.Err())
-		return res.Err()
-	}
-	return nil
 }
 
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {

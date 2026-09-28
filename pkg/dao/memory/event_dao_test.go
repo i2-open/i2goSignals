@@ -643,50 +643,58 @@ func TestEventDAOMemory_AddPendingMany(t *testing.T) {
 	}
 }
 
-// TestEventDAOMemory_RetractPending asserts a retraction undoes exactly one
-// AddPending per JTI: the last-appended entry goes, an earlier entry for the
-// same JTI survives in its original position, an unknown JTI is skipped, and an
-// empty batch is a no-op (ADR 0038).
-func TestEventDAOMemory_RetractPending(t *testing.T) {
+// TestEventDAOMemory_InsertWithPending asserts the one-trip ingest seam (ADR
+// 0043): an accepted record gets exactly one marker per listed stream, a
+// duplicate JTI — already stored, or repeated in the batch — reports
+// ErrDuplicateJTI and adds no marker, and a pending JTI with no record is
+// ignored.
+func TestEventDAOMemory_InsertWithPending(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
-	streamID := ids.NewObjectID()
-	other := ids.NewObjectID()
+	streamA := ids.NewObjectID()
+	streamB := ids.NewObjectID()
 
-	// "dup" is recorded twice: once as a real delivery intent, once
-	// speculatively by a later batch whose body write was rejected.
-	_ = dao.AddPendingMany(ctx, []string{"dup", "keep-1", "keep-2"}, streamID)
-	_ = dao.AddPendingMany(ctx, []string{"dup", "spec-only"}, streamID)
-	_ = dao.AddPendingMany(ctx, []string{"dup"}, other)
-
-	if err := dao.RetractPending(ctx, []string{"dup", "spec-only", "never-seen"}, streamID); err != nil {
-		t.Fatalf("RetractPending failed: %v", err)
+	if err := dao.Insert(ctx, &model.EventRecord{Jti: "old"}); err != nil {
+		t.Fatalf("seed insert failed: %v", err)
 	}
-
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 10)
+	recs := []*model.EventRecord{{Jti: "new"}, {Jti: "old"}, {Jti: "new"}, {Jti: "solo"}}
+	pending := map[string][]string{
+		streamA: {"new", "old", "solo", "no-record"},
+		streamB: {"new", "old"},
+	}
+	results, err := dao.InsertWithPending(ctx, recs, pending)
 	if err != nil {
-		t.Fatalf("GetPendingForStream failed: %v", err)
+		t.Fatalf("InsertWithPending failed: %v", err)
 	}
-	want := []string{"dup", "keep-1", "keep-2"}
-	if total != int64(len(want)) || len(jtis) != len(want) {
-		t.Fatalf("Expected pending %v, got %v (total %d)", want, jtis, total)
-	}
-	for i := range want {
-		if jtis[i] != want[i] {
-			t.Errorf("Pending[%d]: expected %s, got %s", i, want[i], jtis[i])
+	wantDup := []bool{false, true, true, false}
+	for i, dup := range wantDup {
+		if dup != errors.Is(results[i], interfaces.ErrDuplicateJTI) || (!dup && results[i] != nil) {
+			t.Errorf("results[%d] = %v, want dup=%v", i, results[i], dup)
 		}
 	}
 
-	// Another stream's intent for the same JTI is untouched.
-	if _, total, _ = dao.GetPendingForStream(ctx, other, 10); total != 1 {
-		t.Errorf("Expected the other stream to keep its 1 pending entry, got %d", total)
+	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	if want := []string{"new", "solo"}; !equalStrings(jtis, want) {
+		t.Errorf("stream A pending = %v, want %v", jtis, want)
+	}
+	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	if want := []string{"new"}; !equalStrings(jtis, want) {
+		t.Errorf("stream B pending = %v, want %v", jtis, want)
 	}
 
-	// Empty input is a no-op.
-	if err := dao.RetractPending(ctx, nil, streamID); err != nil {
-		t.Errorf("RetractPending(nil) failed: %v", err)
+	if results, err = dao.InsertWithPending(ctx, nil, pending); results != nil || err != nil {
+		t.Errorf("empty batch = (%v, %v), want (nil, nil)", results, err)
 	}
-	if _, total, _ = dao.GetPendingForStream(ctx, streamID, 10); total != int64(len(want)) {
-		t.Errorf("Empty RetractPending must not change pending count: got %d", total)
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -365,37 +365,107 @@ func (s *EventDAOMongoSuite) TestGetPendingForStream_OrderIsStatedNotInherited()
 		"jti order must survive an unindexed collection scan")
 }
 
-// TestRetractPending_UndoesOneMarkerPerJti: a retraction removes the newest
-// pending entry per JTI, leaves an earlier entry for the same JTI in place and
-// in its original position, skips an unknown JTI, and never touches another
-// stream (ADR 0038).
-func (s *EventDAOMongoSuite) TestRetractPending_UndoesOneMarkerPerJti() {
+// storedIngestState is the full on-disk result of an InsertWithPending run:
+// the stored event JTIs (with their Original, to prove a duplicate did not
+// overwrite) and every pending document as a (sid, jti) pair.
+type storedIngestState struct {
+	events  map[string]string
+	pending []string
+}
+
+func (s *EventDAOMongoSuite) readIngestState(streamNames map[string]string) storedIngestState {
 	ctx := context.Background()
+	st := storedIngestState{events: map[string]string{}}
+	cur, err := s.eventCol.Find(ctx, bson.M{})
+	s.Require().NoError(err)
+	var evs []model.EventRecord
+	s.Require().NoError(cur.All(ctx, &evs))
+	for _, ev := range evs {
+		st.events[ev.Jti] = ev.Original
+	}
+	cur, err = s.pendingCol.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}}))
+	s.Require().NoError(err)
+	var docs []pendingDoc
+	s.Require().NoError(cur.All(ctx, &docs))
+	for _, d := range docs {
+		st.pending = append(st.pending, streamNames[d.Sid.Hex()]+"/"+d.Jti)
+	}
+	return st
+}
+
+// TestInsertWithPending_OneTripAndFallbackAgree runs the same batch through
+// the MongoDB 8.0 one-trip bulkWrite and the pre-8.0 two-write fallback (ADR
+// 0043) and asserts both report the same per-record outcomes and leave
+// identical stored state. The batch covers a JTI already stored, a JTI
+// repeated inside the batch, and a pending JTI with no record: a duplicate
+// must report ErrDuplicateJTI and leave NO pending marker (ADR 0017), and an
+// accepted record gets exactly one marker per stream.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripAndFallbackAgree() {
 	streamA := bson.NewObjectID().Hex()
 	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
 
-	// "dup" is recorded twice on streamA: a real delivery intent, then a
-	// speculative one whose body write was rejected.
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "keep-1", "keep-2"}, streamA))
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "spec-only"}, streamA))
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup"}, streamB))
+	run := func(oneTrip bool) ([]error, storedIngestState) {
+		s.SetupTest()
+		ctx := context.Background()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		s.Require().NoError(s.dao.Insert(ctx, &model.EventRecord{Jti: "old", Original: "seed", SortTime: time.Now()}))
+		recs := []*model.EventRecord{
+			{Jti: "new-1", Original: "n1", SortTime: time.Now()},
+			{Jti: "old", Original: "overwrite", SortTime: time.Now()},
+			{Jti: "new-1", Original: "n1-again", SortTime: time.Now()},
+			{Jti: "new-2", Original: "n2", SortTime: time.Now()},
+		}
+		pending := map[string][]string{
+			streamA: {"new-1", "old", "new-2", "no-record"},
+			streamB: {"old", "new-1"},
+		}
+		results, err := s.dao.InsertWithPending(ctx, recs, pending)
+		s.Require().NoError(err)
+		return results, s.readIngestState(names)
+	}
 
-	s.Require().NoError(s.dao.RetractPending(ctx, []string{"dup", "spec-only", "never-seen"}, streamA))
+	oneTripResults, oneTripState := run(true)
+	fallbackResults, fallbackState := run(false)
 
-	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
-	s.Require().NoError(err)
-	s.Equal(int64(3), total)
-	s.Equal([]string{"dup", "keep-1", "keep-2"}, jtis,
-		"the older intent for dup survives, in place, and only the speculative markers go")
+	for name, results := range map[string][]error{"one-trip": oneTripResults, "fallback": fallbackResults} {
+		s.Require().Len(results, 4, name)
+		s.NoError(results[0], name)
+		s.ErrorIs(results[1], interfaces.ErrDuplicateJTI, name)
+		s.ErrorIs(results[2], interfaces.ErrDuplicateJTI, name)
+		s.NoError(results[3], name)
+	}
+	want := storedIngestState{
+		events:  map[string]string{"old": "seed", "new-1": "n1", "new-2": "n2"},
+		pending: []string{"A/new-1", "A/new-2", "B/new-1"},
+	}
+	// Stream IDs sort as ObjectIDs; compare the pairs as a set.
+	s.Equal(want.events, oneTripState.events)
+	s.ElementsMatch(want.pending, oneTripState.pending, "no marker for a duplicate, one per accepted (stream, jti)")
+	s.Equal(oneTripState.events, fallbackState.events, "fallback must store identical events")
+	s.ElementsMatch(oneTripState.pending, fallbackState.pending, "fallback must store identical pending markers")
+}
 
-	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
-	s.Require().NoError(err)
-	s.Equal(int64(1), total, "another stream's intent for the same JTI is untouched")
-
-	s.Require().NoError(s.dao.RetractPending(ctx, nil, streamA))
-	_, total, err = s.dao.GetPendingForStream(ctx, streamA, 10)
-	s.Require().NoError(err)
-	s.Equal(int64(3), total, "empty RetractPending must be a no-op")
+// TestInsertWithPending_MalformedStreamWritesNothing: a pending map naming a
+// stream ID that is not an ObjectID fails the whole batch before anything is
+// written, on both paths, so no body is stored without its markers.
+func (s *EventDAOMongoSuite) TestInsertWithPending_MalformedStreamWritesNothing() {
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	for _, oneTrip := range []bool{true, false} {
+		s.SetupTest()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		results, err := s.dao.InsertWithPending(context.Background(),
+			[]*model.EventRecord{{Jti: "x", SortTime: time.Now()}},
+			map[string][]string{"not-an-object-id": {"x"}})
+		s.Error(err)
+		s.Nil(results)
+		st := s.readIngestState(nil)
+		s.Empty(st.events, "oneTrip=%v", oneTrip)
+		s.Empty(st.pending, "oneTrip=%v", oneTrip)
+	}
 }
 
 // TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly

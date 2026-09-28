@@ -173,136 +173,62 @@ func (s *EventService) existingAfterDuplicate(ctx context.Context, jti string, s
 	return existing, interfaces.ErrDuplicateJTI
 }
 
-// IngestBatch is one in-flight body write started by BeginAddEvents.
-//
-// The candidate records are built and returned synchronously so the caller can
-// route them and write their pending markers while the body write is still in
-// flight (ADR 0038); Wait joins the write and reports the same per-record
-// outcome AddEvents reports. Candidates is immutable once BeginAddEvents
-// returns — the result slice Wait reports is a separate slice — so a caller may
-// read the candidates concurrently with the write.
-type IngestBatch struct {
-	candidates []*model.EventRecord
-	done       chan struct{}
-	recs       []*model.EventRecord
-	errs       []error
-}
-
-// Candidates returns the records the batch is attempting to persist, index
-// aligned with the events passed to BeginAddEvents. They are available before
-// the write completes and are never mutated, so routing may read them while
-// the write is in flight. A candidate is not yet known to be accepted: Wait
-// decides that.
-func (b *IngestBatch) Candidates() []*model.EventRecord {
-	return b.candidates
-}
-
-// Wait blocks until the body write completes and returns the records and
-// errors with exactly AddEvents' semantics. It may be called more than once.
-func (b *IngestBatch) Wait() ([]*model.EventRecord, []error) {
-	<-b.done
-	return b.recs, b.errs
-}
-
-// BeginAddEvents starts persisting a batch of inbound SETs and returns before
-// the write completes. events and raws are index-aligned. The caller must Wait
-// on the returned batch before treating any record as accepted; a JTI that
-// already exists comes back paired with ErrDuplicateJTI, and a batch that
-// fails outright carries that error at every position.
-//
-// AddEvents is the synchronous form; the split exists so ingest can issue the
-// body write and the pending-marker writes concurrently rather than serially
-// (ADR 0038).
-func (s *EventService) BeginAddEvents(ctx context.Context, events []*goSet.SecurityEventToken, sid string, raws []string) *IngestBatch {
-	b := &IngestBatch{
-		candidates: make([]*model.EventRecord, len(events)),
-		recs:       make([]*model.EventRecord, len(events)),
-		errs:       make([]error, len(events)),
-		done:       make(chan struct{}),
-	}
+// NewIngestRecords builds the records a batch of inbound SETs will be stored
+// as, index-aligned with events and raws. They are candidates: routing plans
+// the fan-out from them, and AddEventsWithPending decides which are accepted.
+func NewIngestRecords(events []*goSet.SecurityEventToken, sid string, raws []string) []*model.EventRecord {
+	recs := make([]*model.EventRecord, len(events))
 	for i, ev := range events {
-		rec := newEventRecord(ev, sid, raws[i], false)
-		b.candidates[i], b.recs[i] = rec, rec
+		recs[i] = newEventRecord(ev, sid, raws[i], false)
 	}
-	if len(events) == 0 {
-		close(b.done)
-		return b
-	}
-	go func() {
-		defer close(b.done)
-		s.completeAddEvents(ctx, b, sid)
-	}()
-	return b
+	return recs
 }
 
-// completeAddEvents runs the bulk insert and folds the per-record outcomes into
-// the batch's result slices.
-func (s *EventService) completeAddEvents(ctx context.Context, b *IngestBatch, sid string) {
-	perRec, batchErr := s.eventDAO.InsertMany(ctx, b.recs)
-	if batchErr != nil {
-		esLog.Error("Error inserting event batch", "sid", sid, "count", len(b.recs), "error", batchErr)
-		for i := range b.errs {
-			b.recs[i], b.errs[i] = nil, batchErr
-		}
-		return
-	}
-	for i, err := range perRec {
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, interfaces.ErrDuplicateJTI) {
-			b.recs[i], b.errs[i] = s.existingAfterDuplicate(ctx, b.recs[i].Jti, sid)
-			continue
-		}
-		esLog.Error("Error inserting event", "jti", b.recs[i].Jti, "error", err)
-		b.recs[i], b.errs[i] = nil, err
-	}
-}
-
-// AddEvents persists a batch of inbound SETs in one DAO round trip. events and
-// raws are index-aligned; the returned records and errors are index-aligned
-// with them. A record whose JTI already exists comes back as the existing
-// record paired with ErrDuplicateJTI, exactly as AddEvent reports it. When the
-// batch itself fails before any record is attempted, every position carries
+// AddEventsWithPending persists a batch of candidate records together with
+// their delivery intents in one DAO call (ADR 0043). pending maps an outbound
+// stream document ID to the JTIs queued on it. The returned records and errors
+// are index-aligned with recs: nil error means the record and all of its
+// pending markers are durably stored; a JTI that already exists comes back as
+// the existing record paired with ErrDuplicateJTI, with no marker written for
+// it; any other error means the SET is not durably queued and must not be
+// acknowledged (ADR 0038). When the batch itself fails, every position carries
 // that error and every record is nil.
-func (s *EventService) AddEvents(ctx context.Context, events []*goSet.SecurityEventToken, sid string, raws []string) ([]*model.EventRecord, []error) {
-	return s.BeginAddEvents(ctx, events, sid, raws).Wait()
-}
-
-// DiscardPending retracts one speculative delivery intent per JTI from
-// streamID's pending list without recording anything as delivered. It is the
-// compensating write for a pending marker whose event body was ultimately
-// rejected — a duplicate JTI, or a failed body write — see ADR 0038. It undoes
-// exactly one AddPending per JTI, so an older still-undelivered intent for the
-// same JTI survives. AckEvents is the delivery-side counterpart: it also
-// removes pending entries, but removes them all and records them as delivered.
-func (s *EventService) DiscardPending(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
+func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]string) ([]*model.EventRecord, []error) {
+	out := make([]*model.EventRecord, len(recs))
+	errs := make([]error, len(recs))
+	if len(recs) == 0 {
+		return out, errs
 	}
-	// The error is returned, not logged: the router's commit phase logs it with
-	// the stream and delivery mode attached, and CONTEXT.md's log-level policy
-	// keeps ERROR an attention signal rather than a noise floor.
-	return s.eventDAO.RetractPending(ctx, jtis, streamID)
+	perRec, batchErr := s.eventDAO.InsertWithPending(ctx, recs, pending)
+	if batchErr != nil {
+		esLog.Error("Error inserting event batch", "sid", sid, "count", len(recs), "error", batchErr)
+		for i := range errs {
+			errs[i] = batchErr
+		}
+		return out, errs
+	}
+	for i, rec := range recs {
+		var err error
+		if i < len(perRec) {
+			err = perRec[i]
+		}
+		switch {
+		case err == nil:
+			out[i] = rec
+		case errors.Is(err, interfaces.ErrDuplicateJTI):
+			out[i], errs[i] = s.existingAfterDuplicate(ctx, rec.Jti, sid)
+		default:
+			esLog.Error("Error inserting event", "jti", rec.Jti, "error", err)
+			errs[i] = err
+		}
+	}
+	return out, errs
 }
 
 func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
 	err := s.eventDAO.AddPending(ctx, jti, streamID)
 	if err != nil {
 		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
-	}
-	return err
-}
-
-// AddEventsToStream appends a batch of already-persisted JTIs to a stream's
-// pending list in one DAO round trip, preserving order.
-func (s *EventService) AddEventsToStream(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	err := s.eventDAO.AddPendingMany(ctx, jtis, streamID)
-	if err != nil {
-		esLog.Error("Error adding pending events to stream", "count", len(jtis), "streamID", streamID, "error", err)
 	}
 	return err
 }
