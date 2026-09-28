@@ -169,11 +169,14 @@ type router struct {
 	// an outbound event against an SSTP-server pair and broadcast a wake-sstp-server
 	// to active nodes so a held long-poll returns the event (PRD #154 Q11.1, #167).
 	sstpServerStreams map[string]model.StreamStateRecord
-	// sstpSecondPushInFlight bounds the push-while-poll-held concurrency to at most
-	// one in-flight secondary POST per pair (keyed on PairId, Q7.2). A second
-	// outbound arrival while a push is already running coalesces into that push's
-	// buffer drain rather than opening a third parallel request.
-	sstpSecondPushInFlight map[string]bool
+	// sstpSecondPushInFlight counts, per pair (keyed on PairId), the
+	// push-while-poll-held batches in flight, bounded by sstpPushInFlightMax
+	// (K, #339; Q7.2 had it fixed at one). An outbound arrival while K are
+	// already running coalesces into their buffer drains rather than opening
+	// another parallel request.
+	sstpSecondPushInFlight map[string]int
+	// sstpPushInFlightMax is the resolved I2SIG_SSTP_PUSH_INFLIGHT (ADR 0044).
+	sstpPushInFlightMax int
 	// sstpInFlight tracks, per SSTP-client pair (keyed on PairId), the set of
 	// outbound JTIs currently claimed by an in-flight delivery cycle. drainSstpBuffer
 	// claims the JTIs it hands out and skips any already claimed, so the primary
@@ -345,7 +348,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpServerBuffers:      map[string]*buffer.EventPollBuffer{},
 		sstpServerStreams:      map[string]model.StreamStateRecord{},
-		sstpSecondPushInFlight: map[string]bool{},
+		sstpSecondPushInFlight: map[string]int{},
 		sstpInFlight:           map[string]map[string]bool{},
 		signingKeys:            newSigningKeyCache(),
 		enabled:                false,
@@ -451,6 +454,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	eventLogger.Info("Delivery ack coalescing resolved (#336)",
 		"inFlightMax", router.inFlightMax(),
 		"ackCoalesceWindow", router.ackCoalesceWindow)
+	router.sstpPushInFlightMax = sstpPushInFlight(router.inFlightMax(), router.backfillBatch)
+	eventLogger.Info("Delivery pipelining resolved (#339, ADR 0044)",
+		"pushInFlightBatches", router.pushInFlightBatches(),
+		"I2SIG_SSTP_PUSH_INFLIGHT", router.sstpPushInFlightMax)
 
 	signConcurrency := runtime.GOMAXPROCS(0)
 	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
@@ -1852,9 +1859,9 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 // goroutine should exit (buffer closed, stream disabled, runner stopped, shutdown).
 //
 // Every wait here is on heartbeatCtx, a child of the runner's context, so the runner's stop
-// signal ends it. The stop is also checked before each new batch and once each batch returns: a
-// batch already in pushBatch completes, acked or failed, and then a stopped runner sends nothing
-// more and acts on no failure from it (#309).
+// signal ends it. The stop is also checked before each new batch and once each batch returns: the
+// batches already in pushBatch (up to K, pushInFlightBatches) complete, acked or failed, and then a
+// stopped runner sends nothing more and acts on no failure from them (#309, #339).
 func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, runner *pushRunner, fencingToken int64) bool {
 	sid := stream.StreamConfiguration.Id
 	eventLogger.Info("PUSH-SRV: Starting transmission loop", "sid", sid)
@@ -1980,7 +1987,52 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 		return !runner.stopped()
 	}
 
+	// Up to K batches are on the wire at once (#339, ADR 0044). Each runs on its
+	// own goroutine and hands its result back on results; the out arm below is
+	// only armed while fewer than K are in flight. K collapses to 1 under
+	// I2SIG_PUSH_CONCURRENCY=1, so that knob still sends one SET at a time in
+	// buffer order (ADR 0040). Registered after the acker's defer, the wait
+	// below runs first: however the loop exits, every batch already sent
+	// completes and hands its acks to the acker before the acker is closed.
+	k := r.pushInFlightBatches()
+	results := make(chan pushBatchResult, k)
+	inflight := 0
+	var batches sync.WaitGroup
+	defer batches.Wait()
+
+	// fold applies the part of a batch result every path shares: a successful
+	// push is proof the stream is alive, so the T3 idle clock starts over (R1)
+	// — verify pushes included.
+	fold := func(res pushBatchResult) {
+		if res.acked > 0 {
+			idle.Reset()
+			keyWait.tries = 0
+		}
+	}
+	// quiesce waits for every batch still in flight before the loop blocks in a
+	// pause or recovery, so recovery starts from the same place the serial loop
+	// did: nothing on the wire. A failure in one of those batches is not
+	// dispatched again — its SETs were released and stay pending, so backfill
+	// resends them once recovery resumes. It reports a stale fence among them.
+	quiesce := func() (stale bool) {
+		for inflight > 0 {
+			res := <-results
+			inflight--
+			fold(res)
+			if res.staleFence {
+				stale = true
+			}
+		}
+		return stale
+	}
+
 	for {
+		// The nil-channel idiom: with K batches in flight the out arm is off and
+		// the loop waits for a result instead of taking more from the buffer.
+		var ready <-chan interface{}
+		if inflight < k {
+			ready = out
+		}
 		select {
 		case <-heartbeatCtx.Done():
 			// Heartbeat lost: re-acquire. Runner stopped or router shutting down: exit.
@@ -1991,7 +2043,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// acked stays pending for the owner.
 			eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
 			return !runner.stopped()
-		case v, ok := <-out:
+		case v, ok := <-ready:
 			if !ok {
 				return false // Buffer closed, stop entirely
 			}
@@ -2011,6 +2063,10 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				if signingKey, kid = r.pushSigningKey(stream); signingKey == nil {
 					// Nothing sent. The JTI just taken stays pending in the store
 					// and returns through backfill.
+					if quiesce() {
+						eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
+						return !runner.stopped()
+					}
 					switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
 					case RecoveryOutcomeResumed:
 						continue
@@ -2039,8 +2095,17 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if len(jtis) == 0 {
 				continue
 			}
-			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
-			res := r.pushBatchVia(jtis, stream, signingKey, kid, fencingToken, ack)
+			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis), "inflight", inflight+1)
+			inflight++
+			batches.Add(1)
+			go func(jtis []string, signingKey crypto.Signer, kid string) {
+				defer batches.Done()
+				// results holds K and at most K batches are in flight, so this
+				// send never blocks — even after the loop has returned.
+				results <- r.pushBatchVia(jtis, stream, signingKey, kid, fencingToken, ack)
+			}(jtis, signingKey, kid)
+		case res := <-results:
+			inflight--
 			if res.staleFence {
 				// The ack was refused: this node's lease expired or was taken
 				// over, so it no longer speaks for the stream (#334). Stop and
@@ -2049,18 +2114,25 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				return !runner.stopped()
 			}
 			if runner.stopped() {
-				// The in-flight batch has completed. A stopped runner sends nothing
-				// more, and a failure in that batch was a verdict on the settings
-				// being replaced, so it moves no stream state: whatever was not
-				// acked stays pending for the successor.
+				// The batch has completed. A stopped runner sends nothing more,
+				// and a failure in that batch was a verdict on the settings being
+				// replaced, so it moves no stream state: whatever was not acked
+				// stays pending for the successor.
 				return false
 			}
-
-			if res.acked > 0 {
-				// R1: a successful push is proof the stream is alive, so the T3
-				// idle clock starts over — verify pushes included.
-				idle.Reset()
-				keyWait.tries = 0
+			fold(res)
+			if res.signErr == nil && res.failedJti == "" {
+				continue
+			}
+			// A failure in one batch takes the stream into a pause or recovery.
+			// The other batches in flight finish first; their 202s are acked and
+			// whatever else they did not deliver is redelivered after recovery.
+			if quiesce() {
+				eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
+				return !runner.stopped()
+			}
+			if runner.stopped() {
+				return false
 			}
 			if res.signErr != nil {
 				// A SET the key could not sign was not sent: the transmitter's own
@@ -2075,9 +2147,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				default:
 					return !runner.stopped()
 				}
-			}
-			if res.failedJti == "" {
-				continue
 			}
 
 			// T1 reactive: dispatch the first failure into the right recovery mode (or
@@ -2094,8 +2163,9 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// key is expired or not yet valid takes its key-unavailable pause
 			// now, not at its next delivery, so its status says why nothing is
 			// being sent. A key merely missing (a replace in progress) waits for
-			// the next delivery, as before.
-			if !signing || runner.stopped() {
+			// the next delivery, as before. A stream with a batch in flight is
+			// not idle: that batch's own result reports a key it could not use.
+			if !signing || runner.stopped() || inflight > 0 {
 				continue
 			}
 			if key, _ := r.pushSigningKey(stream); key != nil {
@@ -2132,10 +2202,15 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// verify event via the operational-event direct-submission path. The new JTI lands
 			// in eventBuf and the next iteration of this loop will pull it from `out` and push
 			// it via the normal path. If the push succeeds, R1 resets the timer above; if it
-			// fails, the failure dispatch stops the timer for the duration of recovery.
+			// fails, the failure dispatch stops the timer for the duration of recovery. With a
+			// batch still in flight the stream is not idle — that batch's result decides.
 			//
 			// Pre-emptively re-arm here so we don't fire again while the verify push is in
 			// flight; the success-path reset is idempotent.
+			if inflight > 0 {
+				idle.Reset()
+				continue
+			}
 			if _, err := r.GenerateVerifyEvent(sid, ""); err != nil {
 				eventLogger.Warn("PUSH-SRV: T3 idle verify generation failed", "sid", sid, "error", err)
 			} else {
@@ -2499,6 +2574,32 @@ func (r *router) inFlightMax() int {
 		return m
 	}
 	return r.deliveryInFlightMax
+}
+
+// pushInFlightBatches is K, how many batches one push stream keeps on the wire
+// at once (#339, ADR 0044):
+//
+//	K = min(pushConcurrency, inFlightMax() / pushBatchMax()), at least 1
+//
+// The in-flight set bounds K from above — K full batches must fit in it — so
+// K never adds redelivery exposure beyond I2SIG_DELIVERY_INFLIGHT_MAX. Push
+// concurrency bounds it too, so a narrow pool is not multiplied into a wide
+// one, and I2SIG_PUSH_CONCURRENCY=1 gives K=1: one SET on the wire at a time,
+// in buffer order, the ADR 0040 ordering knob. With the defaults (in-flight
+// bound 256, batch 4x concurrency) K is 8 at concurrency 8, 4 at 16 and 2 at 32.
+func (r *router) pushInFlightBatches() int {
+	pc := r.pushConcurrency
+	if pc < 1 {
+		pc = 1
+	}
+	k := r.inFlightMax() / r.pushBatchMax()
+	if pc < k {
+		k = pc
+	}
+	if k < 1 {
+		k = 1
+	}
+	return k
 }
 
 // newPushAcker builds the acker for one push runner's tenure, bound to its

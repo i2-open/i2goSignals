@@ -898,15 +898,15 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		case <-wakeup:
 			// A new outbound SET arrived while the primary is held. Fire a
 			// bounded second push to flush it now. The guard in
-			// pushWhilePollHeld coalesces concurrent wakes to one in-flight
-			// push per pair.
+			// pushWhilePollHeld coalesces concurrent wakes to at most K
+			// in-flight pushes per pair (I2SIG_SSTP_PUSH_INFLIGHT, #339).
 			wakeup = d.outbound.WakeCh(pairId) // re-arm: Wakeup() swapped the notifier.
 			live, ok := d.outbound.RefreshPair(pairId)
 			if !ok {
 				continue // pair removed; primary's next refresh exits the loop.
 			}
-			// Skip the goroutine spawn entirely when the second-push slot is
-			// already held — otherwise a bursty wake stream (thousands of
+			// Skip the goroutine spawn entirely when all K second-push slots
+			// are already held — otherwise a bursty wake stream (thousands of
 			// subject-filter wakes/sec) queues thousands of no-op goroutines
 			// into secondPushWg and the outer function cannot return until
 			// each one is scheduled and drained, delaying failover for the
@@ -1244,9 +1244,13 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 // primary request is not cancelled; its loop observes the pause on its next
 // RefreshPair and exits.
 //
-// Concurrency is bounded to at most one in-flight secondary push per pair:
-// if a push is already running, this call returns ClassOK without opening a
-// third parallel request.
+// Concurrency is bounded to at most K in-flight secondary pushes per pair
+// (I2SIG_SSTP_PUSH_INFLIGHT, #339, ADR 0044; K=1 is the Q7.2 single slot): if
+// K are already running, this call returns ClassOK without opening another
+// parallel request. The K pushes draw disjoint claims from ClaimOutbound, so
+// no SET rides two of them, and their acks coalesce on the pair's acker
+// (#336). Each still carries returnEvents=false and no Ack, so the wire
+// exchange is the one Q7.2 defined.
 //
 // The push keeps draining, batch after batch, while the peer acks everything
 // it is sent and the buffer still holds more. Wakes that arrive while a push

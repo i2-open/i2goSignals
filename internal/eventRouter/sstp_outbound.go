@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
@@ -103,13 +105,13 @@ type SstpOutbound interface {
 	// Event.Original verbatim.
 	LoadSigningKey(streamID, issuer, alg string) (crypto.Signer, string)
 
-	// AcquireSecondPushSlot reserves the single in-flight push-while-poll-
-	// held slot for pairId (Q7.2 concurrency bound), returning false when a
-	// second push is already in flight for the pair. A coalesced call
-	// returns without opening a third parallel request.
+	// AcquireSecondPushSlot reserves one of the pair's K push-while-poll-held
+	// slots (I2SIG_SSTP_PUSH_INFLIGHT, #339; Q7.2 fixed K at one), returning
+	// false when K pushes are already in flight for the pair. A coalesced
+	// call returns without opening another parallel request.
 	AcquireSecondPushSlot(pairId string) bool
 
-	// ReleaseSecondPushSlot releases the second-push slot acquired by
+	// ReleaseSecondPushSlot releases a slot acquired by
 	// AcquireSecondPushSlot. Safe to call from a defer.
 	ReleaseSecondPushSlot(pairId string)
 
@@ -579,23 +581,60 @@ func (r *router) pauseSstpPair(stream *model.StreamStateRecord, reason string) {
 	r.mu.Unlock()
 }
 
-// acquireSstpSecondPushSlot reserves the single in-flight push-while-poll-
-// held slot for a pair, returning false when one is already held (Q7.2
-// concurrency bound).
+// maxSstpPushInFlight caps the derived I2SIG_SSTP_PUSH_INFLIGHT default. The
+// batches share the pair's one transport and its in-flight set, so past a few
+// the link, not the round trip, is the limit.
+const maxSstpPushInFlight = 4
+
+// sstpPushInFlight resolves I2SIG_SSTP_PUSH_INFLIGHT: K, how many
+// push-while-poll-held batches one SSTP-client pair keeps in flight (#339,
+// ADR 0044). The default is how many full claims (backfillBatch each) fit in
+// the in-flight set, clamped to [1, maxSstpPushInFlight] — 2 with the
+// defaults (256 / 100). 1 reproduces the single second-push slot (Q7.2).
+func sstpPushInFlight(inFlightMax, backfillBatch int) int {
+	if val := os.Getenv("I2SIG_SSTP_PUSH_INFLIGHT"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			return i
+		}
+		eventLogger.Warn("Ignoring invalid I2SIG_SSTP_PUSH_INFLIGHT (want a positive integer)", "value", val)
+	}
+	k := 1
+	if backfillBatch > 0 {
+		k = inFlightMax / backfillBatch
+	}
+	if k < 1 {
+		k = 1
+	}
+	if k > maxSstpPushInFlight {
+		k = maxSstpPushInFlight
+	}
+	return k
+}
+
+// acquireSstpSecondPushSlot reserves one of the pair's K push-while-poll-held
+// slots (#339; Q7.2 had one), returning false when all K are held.
 func (r *router) acquireSstpSecondPushSlot(pairId string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.sstpSecondPushInFlight[pairId] {
+	k := r.sstpPushInFlightMax
+	if k < 1 {
+		k = 1
+	}
+	if r.sstpSecondPushInFlight[pairId] >= k {
 		return false
 	}
-	r.sstpSecondPushInFlight[pairId] = true
+	r.sstpSecondPushInFlight[pairId]++
 	return true
 }
 
-// releaseSstpSecondPushSlot releases the in-flight push-while-poll-held slot.
+// releaseSstpSecondPushSlot releases one push-while-poll-held slot.
 func (r *router) releaseSstpSecondPushSlot(pairId string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if n := r.sstpSecondPushInFlight[pairId]; n > 1 {
+		r.sstpSecondPushInFlight[pairId] = n - 1
+		return
+	}
 	delete(r.sstpSecondPushInFlight, pairId)
 }
 

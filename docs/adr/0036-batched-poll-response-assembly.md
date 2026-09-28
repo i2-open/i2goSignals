@@ -7,7 +7,7 @@ Date: 2026-09-08
 
 ## Status
 
-Accepted (GH PR #283).
+Accepted (GH PR #283). Amended by ADR 0044: parallel polls no longer re-receive the same batch (#337 disjoint claims).
 
 ## Context
 
