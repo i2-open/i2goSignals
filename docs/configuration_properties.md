@@ -305,6 +305,7 @@ as floating-point seconds.
 | `I2SIG_POLL_AUTH_RETRY_DELAY`       | Sleep, in seconds, between auth-rejection retries on the poll path.                                                          | `15`           |
 | `I2SIG_POLL_AUTH_RETRY_LIMIT`       | Max auth-rejection retry attempts before disabling the stream.                                                               | `10`           |
 | `I2SIG_POLL_RESPECT_STATUS`         | `true` (default) — pause polling when the transmitter reports `paused`/`disabled`. `false` — keep polling regardless.        | `true`         |
+| `I2SIG_POLL_PIPELINE_DEPTH`        | Polls a poll receiver keeps outstanding against one upstream transmitter (#338). The next poll is sent as soon as the previous 200 response starts to arrive, or at once when acks are waiting. Acks for a response ride the next poll sent after that response is stored, and a SET whose store failed is not acked, so the transmitter sends it again. `1` sends one poll at a time, as before #338. A value above `4` is clamped to `4` with a WARN; a value that is not a positive integer warns and uses the default. Against a transmitter without disjoint claims (#337) overlapping polls can return the same SET twice; JTI dedup absorbs it. | `2`            |
 
 ### Poll transmitter — long-poll timeouts and response assembly
 

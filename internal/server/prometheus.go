@@ -441,6 +441,8 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	for _, c := range eventRouter.DeliveryCollectors() {
 		registerTo(reg, c)
 	}
+	// Poll-receiver outstanding polls (#338).
+	registerTo(reg, pollOutstandingGauge)
 	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)
 	registerTo(reg, prometheusHandler.EventValidations)
 	registerTo(reg, newStreamCollector(sa))

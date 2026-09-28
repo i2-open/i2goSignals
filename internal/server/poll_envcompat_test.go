@@ -91,3 +91,29 @@ func TestLoadPollConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 15*time.Second, cfg.UnauthorizedRetryDelay)
 	assert.Equal(t, 10, cfg.UnauthorizedRetryLimit)
 }
+
+// #338: I2SIG_POLL_PIPELINE_DEPTH defaults to 2, accepts 1-4, clamps a value
+// above 4 to 4, and ignores a value that is not a positive integer.
+func TestLoadPollConfig_PipelineDepth(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want int
+	}{
+		{"", 2},
+		{"1", 1},
+		{"2", 2},
+		{"3", 3},
+		{"4", 4},
+		{"5", 4},
+		{"64", 4},
+		{"0", 2},
+		{"-1", 2},
+		{"two", 2},
+	}
+	for _, tc := range cases {
+		t.Run("value="+tc.raw, func(t *testing.T) {
+			t.Setenv("I2SIG_POLL_PIPELINE_DEPTH", tc.raw)
+			assert.Equal(t, tc.want, loadPollConfig().PipelineDepth)
+		})
+	}
+}

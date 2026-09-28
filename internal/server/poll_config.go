@@ -1,7 +1,9 @@
 package server
 
 import (
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
@@ -21,7 +23,16 @@ type pollConfig struct {
 	UnauthorizedRetryLimit int
 	ForbiddenRetryDelay    time.Duration
 	ForbiddenRetryLimit    int
+	// PipelineDepth is the number of RFC 8936 polls the receiver keeps
+	// outstanding against one upstream transmitter (#338). 1 is the
+	// one-poll-at-a-time loop; the default is 2 and the ceiling 4.
+	PipelineDepth int
 }
+
+const (
+	defaultPollPipelineDepth = 2
+	maxPollPipelineDepth     = 4
+)
 
 func loadPollConfig() pollConfig {
 	cfg := pollConfig{
@@ -34,6 +45,7 @@ func loadPollConfig() pollConfig {
 		UnauthorizedRetryLimit: 10,
 		ForbiddenRetryDelay:    30 * time.Second,
 		ForbiddenRetryLimit:    3,
+		PipelineDepth:          defaultPollPipelineDepth,
 	}
 
 	if v, err := strconv.ParseFloat(envcompat.Lookup("I2SIG_POLL_RETRY_BASE_DELAY", "POLL_RETRY_BASE_DELAY"), 64); err == nil {
@@ -63,8 +75,31 @@ func loadPollConfig() pollConfig {
 	if v, err := strconv.Atoi(envcompat.Lookup("I2SIG_POLL_FORBIDDEN_RETRY_LIMIT", "POLL_FORBIDDEN_RETRY_LIMIT")); err == nil {
 		cfg.ForbiddenRetryLimit = v
 	}
+	cfg.PipelineDepth = loadPollPipelineDepth()
 
 	return cfg
+}
+
+// loadPollPipelineDepth reads I2SIG_POLL_PIPELINE_DEPTH (#338). Unset means the
+// default (2). A value above the ceiling is clamped to 4 with a WARN; a value
+// that is not a positive integer is ignored with a WARN and the default used.
+func loadPollPipelineDepth() int {
+	raw := os.Getenv("I2SIG_POLL_PIPELINE_DEPTH")
+	if raw == "" {
+		return defaultPollPipelineDepth
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v < 1 {
+		serverLog.Warn("POLL-RCV: Ignoring invalid I2SIG_POLL_PIPELINE_DEPTH (want an integer 1-4)",
+			"value", raw, "default", defaultPollPipelineDepth)
+		return defaultPollPipelineDepth
+	}
+	if v > maxPollPipelineDepth {
+		serverLog.Warn("POLL-RCV: I2SIG_POLL_PIPELINE_DEPTH above the maximum, clamping",
+			"value", v, "max", maxPollPipelineDepth)
+		return maxPollPipelineDepth
+	}
+	return v
 }
 
 // loadPollRespectStatus reads I2SIG_POLL_RESPECT_STATUS as a boolean, falling
