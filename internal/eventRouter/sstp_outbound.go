@@ -19,10 +19,13 @@ package eventRouter
 import (
 	"context"
 	"crypto"
+	"errors"
+	"sync"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -200,6 +203,12 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 	r.mu.RUnlock()
 	if buf == nil || !ok {
 		return nil
+	}
+	// Back-pressure (#336): a pair whose peer-acked SETs are still queued for
+	// their coalesced ack write at the in-flight bound writes them before it
+	// claims more.
+	if ack := r.sstpAcker(pairId); ack != nil && ack.size() >= r.inFlightMax() {
+		_ = ack.flush()
 	}
 	outJtis := r.drainSstpBuffer(pairId, buf, max)
 	if len(outJtis) > 0 {
@@ -492,7 +501,6 @@ func (r *router) releaseSstpClaims(pairId string, jtis []string) {
 // it is re-drained on a later cycle. Returns the number of acked (and
 // counted) events.
 func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord, fencingToken int64) int {
-	sid := stream.StreamConfiguration.Id
 	pairId := stream.PairId
 	if len(sent) == 0 {
 		return 0
@@ -520,18 +528,21 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 		count++
 	}
 
-	// Finding #1: ack the confirmed-delivered SETs in the provider as one
-	// batch, remove them from the outbound buffer so GetEvents (copy-only)
-	// never re-hands them out, and clear their in-flight claim.
+	// Finding #1: ack the confirmed-delivered SETs in the provider, remove
+	// them from the outbound buffer so GetEvents (copy-only) never re-hands
+	// them out, and clear their in-flight claim. The provider ack is queued on
+	// the pair's coalescing acker (#336) and the rest follows once it is
+	// written, so the claim holds the SET until its ack is durable: a
+	// concurrent cycle cannot re-send it meanwhile. A failed or fenced ack
+	// releases the claim and the SET, still pending, is retried.
 	if len(ackedJtis) > 0 {
-		_ = r.eventService.AckEvents(r.ctx, ackedJtis, sid, fencingToken)
+		events := make(map[string]sstpAckedSet, len(ackedJtis))
 		for _, jti := range ackedJtis {
-			r.IncrementCounter(stream, &sentByJti[jti].Event, false)
+			events[jti] = sstpAckedSet{ev: sentByJti[jti], buf: eventBuf}
 		}
-		if eventBuf != nil {
-			eventBuf.AckEvents(ackedJtis)
-		}
-		r.releaseSstpClaims(pairId, ackedJtis)
+		ack := r.sstpAckerFor(stream, fencingToken)
+		ack.addPending(events)
+		_ = ack.complete(ackedJtis, nil)
 	}
 
 	// Release the in-flight claim on any sent-but-unacked SET so it is
@@ -586,4 +597,110 @@ func (r *router) releaseSstpSecondPushSlot(pairId string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.sstpSecondPushInFlight, pairId)
+}
+
+// sstpPairAcker is one SSTP-client pair's coalescing acker (#336), bound to
+// the fencing token of the dialer tenure that created it.
+type sstpPairAcker struct {
+	*acker
+	token int64
+
+	mu     sync.Mutex
+	events map[string]sstpAckedSet
+}
+
+// sstpAckedSet is a peer-acked SET waiting for its coalesced ack write: its
+// sent record (for the eventsOut counter) and the outbound buffer it leaves.
+type sstpAckedSet struct {
+	ev  *model.EventRecord
+	buf *buffer.EventPollBuffer
+}
+
+// addPending records the sent records of JTIs about to be queued, for the
+// eventsOut counter once their ack is written.
+func (p *sstpPairAcker) addPending(events map[string]sstpAckedSet) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for jti, ev := range events {
+		p.events[jti] = ev
+	}
+}
+
+func (p *sstpPairAcker) takePending(jtis []string) []sstpAckedSet {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]sstpAckedSet, 0, len(jtis))
+	for _, jti := range jtis {
+		if set, ok := p.events[jti]; ok {
+			out = append(out, set)
+		}
+		delete(p.events, jti)
+	}
+	return out
+}
+
+// sstpAcker returns the pair's acker, or nil.
+func (r *router) sstpAcker(pairId string) *acker {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if p := r.sstpAckers[pairId]; p != nil {
+		return p.acker
+	}
+	return nil
+}
+
+// sstpAckerFor returns the pair's acker for fencingToken, creating it on
+// first use. An acker left from an earlier tenure is closed, which writes its
+// queued acks under their own token (refused, and so retried, if that tenure
+// has ended).
+func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int64) *sstpPairAcker {
+	pairId := stream.PairId
+	sid := stream.StreamConfiguration.Id
+	r.mu.Lock()
+	if r.sstpAckers == nil {
+		r.sstpAckers = map[string]*sstpPairAcker{}
+	}
+	cur := r.sstpAckers[pairId]
+	if cur != nil && cur.token == fencingToken {
+		r.mu.Unlock()
+		return cur
+	}
+	p := &sstpPairAcker{token: fencingToken, events: map[string]sstpAckedSet{}}
+	p.acker = newAcker(r.ctx, ackerConfig{
+		sid:       sid,
+		transport: "sstp",
+		window:    r.ackCoalesceWindow,
+		max:       r.inFlightMax(),
+		apply: func(ctx context.Context, jtis []string) error {
+			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
+			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
+				eventLogger.Error("SSTP: Error acking outbound events", "sid", sid, "count", len(jtis), "error", err)
+			}
+			return err
+		},
+		onApplied: func(jtis []string, err error) {
+			sets := p.takePending(jtis)
+			if err == nil {
+				byBuf := map[*buffer.EventPollBuffer][]string{}
+				for _, set := range sets {
+					if set.ev != nil {
+						r.IncrementCounter(stream, &set.ev.Event, false)
+						if set.buf != nil {
+							byBuf[set.buf] = append(byBuf[set.buf], set.ev.Jti)
+						}
+					}
+				}
+				for buf, bufJtis := range byBuf {
+					buf.AckEvents(bufJtis)
+				}
+			}
+			r.releaseSstpClaims(pairId, jtis)
+		},
+	})
+	r.sstpAckers[pairId] = p
+	r.mu.Unlock()
+	if cur != nil {
+		_ = cur.close()
+	}
+	return p
 }

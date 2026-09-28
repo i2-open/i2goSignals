@@ -44,6 +44,8 @@ visibility into receiver health, recovery activity, and the T3 idle keepalive fe
 | `goSignals_router_push_state_transitions_total` | Counter | `stream_id`, `from`, `to` | One increment per actual stream state change (`enabled`/`paused`/`disabled`). Mirrors the `PUSH-SRV: state transition` audit log. |
 | `goSignals_router_push_recovery_duration_seconds` | Histogram | `stream_id` | Wall-time elapsed inside `recoveryLoop`, from entry to exit. Long-tail buckets up to 6h to surface streams stuck in transport recovery. |
 | `goSignals_router_push_idle_verify_total` | Counter | `stream_id`, `outcome` | Verify-event push outcomes (`acked` or `failed`). Dominated in production by T3 idle keepalives; operator-triggered verifies also pass through. |
+| `goSignals_router_delivery_inflight` | Gauge | `stream_id`, `transport` | JTIs a delivery runner (`transport` = `push` or `sstp`) has taken for sending and not yet acked or handed back (#336). It is bounded by `I2SIG_DELIVERY_INFLIGHT_MAX`; a stream sitting at the bound is waiting on its ack writes. The series is removed when the runner stops. |
+| `goSignals_router_delivery_ack_batch_size` | Histogram | `transport` | JTIs applied per coalesced ack write (#336). A mean well above the push batch size shows coalescing is saving store writes; a mean of one batch shows the window is too short for the send rate, or `I2SIG_ACK_COALESCE_WINDOW=0`. |
 
 ## Event Validation Metrics
 

@@ -220,6 +220,17 @@ type router struct {
 	// derived from the available processors (ADR 0037). The batch the loop
 	// drains from the buffer per iteration is 4x this.
 	pushConcurrency int
+	// deliveryInFlightMax is the resolved I2SIG_DELIVERY_INFLIGHT_MAX, never
+	// below pushBatchMax(): how many JTIs one delivery runner may have sent
+	// and not yet acked (#336). ackCoalesceWindow is the resolved
+	// I2SIG_ACK_COALESCE_WINDOW; 0 (the zero value) acks each batch inline.
+	deliveryInFlightMax int
+	ackCoalesceWindow   time.Duration
+	// pushAckers holds each running push runner's acker by stream id, so
+	// backfill does not read back a JTI whose ack is still queued (#336).
+	pushAckers sync.Map
+	// sstpAckers holds each SSTP-client pair's acker by PairId (#336).
+	sstpAckers map[string]*sstpPairAcker
 	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
 	// one outbound message (a poll response or either SSTP leg) re-signs side
 	// by side (ADR 0036).
@@ -430,6 +441,12 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		"source", pushConcurrencySource,
 		"gomaxprocs", runtime.GOMAXPROCS(0),
 		"ackDeferralWindow", router.pushBatchMax())
+
+	router.deliveryInFlightMax = deliveryInFlightMax()
+	router.ackCoalesceWindow = ackCoalesceWindow()
+	eventLogger.Info("Delivery ack coalescing resolved (#336)",
+		"inFlightMax", router.inFlightMax(),
+		"ackCoalesceWindow", router.ackCoalesceWindow)
 
 	signConcurrency := runtime.GOMAXPROCS(0)
 	if val := os.Getenv("I2SIG_SIGN_CONCURRENCY"); val != "" {
@@ -1908,6 +1925,19 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	out := eventBuf.Out
 	wakeup := eventBuf.WakeupCh()
 
+	// Send and ack are decoupled (#336): a batch's acks queue on the acker and
+	// are written, coalesced, while the next batch goes out. The acker is bound
+	// to this tenure's fencing token, so an ack refused as stale fences it and
+	// the loop re-acquires. However the loop exits, the acks already queued are
+	// written first, before the handler releases the lease; SETs sent but not
+	// acked stay pending and are redelivered.
+	ack := r.newPushAcker(sid, fencingToken)
+	r.pushAckers.Store(sid, ack)
+	defer func() {
+		r.pushAckers.CompareAndDelete(sid, ack)
+		_ = ack.close()
+	}()
+
 	// A stop that landed during the pre-flight (which reads a cancelled fetch as
 	// "proceed") must not reach the select below, where a ready buffer could win.
 	if heartbeatCtx.Err() != nil {
@@ -1918,6 +1948,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 		select {
 		case <-heartbeatCtx.Done():
 			// Heartbeat lost: re-acquire. Runner stopped or router shutting down: exit.
+			return !runner.stopped()
+		case <-ack.fencedCh():
+			// A coalesced ack was refused on a stale fencing token (#334): this
+			// node no longer speaks for the stream. Re-acquire; what was not
+			// acked stays pending for the owner.
+			eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
 			return !runner.stopped()
 		case v, ok := <-out:
 			if !ok {
@@ -1954,8 +1990,21 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// something to run in parallel. A quiet stream yields a batch of one
 			// and behaves exactly as the serial loop did.
 			jtis := drainPushBatch(v.(string), out, eventBuf, r.pushBatchMax())
+			// Join the in-flight set. A JTI already in it (sent, its ack not yet
+			// written, and read back by backfill) is dropped, never resent. A
+			// full set waits here for the acker to drain: that is the bound.
+			jtis, err := ack.reserve(heartbeatCtx, jtis)
+			if err != nil {
+				if errors.Is(err, services.ErrStaleFencingToken) {
+					eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
+				}
+				return !runner.stopped()
+			}
+			if len(jtis) == 0 {
+				continue
+			}
 			eventLogger.Debug("PUSH-SRV: dispatching batch", "sid", sid, "count", len(jtis))
-			res := r.pushBatch(jtis, stream, signingKey, kid, fencingToken)
+			res := r.pushBatchVia(jtis, stream, signingKey, kid, fencingToken, ack)
 			if res.staleFence {
 				// The ack was refused: this node's lease expired or was taken
 				// over, so it no longer speaks for the stream (#334). Stop and
@@ -2299,6 +2348,18 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 		MaxEvents:         int32(r.backfillBatch),
 		ReturnImmediately: true,
 	})
+	// A JTI sent and awaiting its coalesced ack is still pending in the store,
+	// so it is not read back into the buffer (#336).
+	if v, ok := r.pushAckers.Load(sid); ok && len(jtis) > 0 {
+		ack := v.(*acker)
+		kept := jtis[:0]
+		for _, jti := range jtis {
+			if !ack.inFlight(jti) {
+				kept = append(kept, jti)
+			}
+		}
+		jtis = kept
+	}
 
 	if len(jtis) > 0 {
 		eventLogger.Debug("PUSH-SRV: Backfill found pending events", "sid", sid, "count", len(jtis))
@@ -2393,6 +2454,36 @@ func (r *router) pushBatchMax() int {
 	return 4 * r.pushConcurrency
 }
 
+// inFlightMax is the bound on one runner's in-flight set: the resolved
+// I2SIG_DELIVERY_INFLIGHT_MAX, raised to pushBatchMax() so a full batch always
+// fits. The ADR 0037 ack-deferral window (what a crash can redeliver) grows
+// from one batch to this bound once acks are coalesced (#336).
+func (r *router) inFlightMax() int {
+	if m := r.pushBatchMax(); r.deliveryInFlightMax < m {
+		return m
+	}
+	return r.deliveryInFlightMax
+}
+
+// newPushAcker builds the acker for one push runner's tenure, bound to its
+// fencing token.
+func (r *router) newPushAcker(sid string, fencingToken int64) *acker {
+	return newAcker(r.ctx, ackerConfig{
+		sid:       sid,
+		transport: "push",
+		window:    r.ackCoalesceWindow,
+		max:       r.inFlightMax(),
+		apply: func(ctx context.Context, jtis []string) error {
+			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
+			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
+				// Not acked: the SETs stay pending and are redelivered.
+				eventLogger.Error("PUSH-SRV: Error acking events", "sid", sid, "count", len(jtis), "error", err)
+			}
+			return err
+		},
+	})
+}
+
 // pushBatchResult is what pushBatch hands back to runPushLoop.
 type pushBatchResult struct {
 	// acked counts SETs the batch acked: 202s plus subject-filter discards.
@@ -2427,6 +2518,13 @@ type pushBatchResult struct {
 // already in flight run to completion and their 202s are acked. Failed and
 // never-dispatched JTIs stay pending for backfill.
 func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) pushBatchResult {
+	return r.pushBatchVia(jtis, config, signingKey, kid, fencingToken, nil)
+}
+
+// pushBatchVia is pushBatch with the batch's acks handed to ack (#336): the
+// acked JTIs queue for its next coalesced write and the rest leave its
+// in-flight set. A nil ack writes the ack inline, as pushBatch always did.
+func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64, ack *acker) pushBatchResult {
 	sid := config.StreamConfiguration.Id
 	res := pushBatchResult{key: signingKey, kid: kid}
 
@@ -2541,6 +2639,26 @@ func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signi
 		}
 	}
 
+	if ack != nil {
+		acked := make(map[string]struct{}, len(ackJtis))
+		for _, jti := range ackJtis {
+			acked[jti] = struct{}{}
+		}
+		released := make([]string, 0, len(jtis)-len(ackJtis))
+		for _, jti := range jtis {
+			if _, ok := acked[jti]; !ok {
+				released = append(released, jti)
+			}
+		}
+		if err := ack.complete(ackJtis, released); err != nil {
+			if errors.Is(err, services.ErrStaleFencingToken) {
+				res.staleFence = true
+				return res
+			}
+		}
+		res.acked = len(ackJtis)
+		return res
+	}
 	if len(ackJtis) > 0 {
 		if err := r.eventService.AckEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
 			if errors.Is(err, services.ErrStaleFencingToken) {
@@ -2663,6 +2781,10 @@ func (r *router) RemoveStream(sid string) {
 	// leaves no stale entries (keyed on PairId == sid for a pair).
 	delete(r.sstpInFlight, sid)
 	delete(r.sstpSecondPushInFlight, sid)
+	// The pair's acker is closed once the lock is released: its final write
+	// takes r.mu to clear claims (#336).
+	droppedAcker := r.sstpAckers[sid]
+	delete(r.sstpAckers, sid)
 	if sb, ok := r.sstpServerBuffers[sid]; ok {
 		sb.Close()
 		delete(r.sstpServerBuffers, sid)
@@ -2673,6 +2795,9 @@ func (r *router) RemoveStream(sid string) {
 
 	r.mu.Unlock()
 
+	if droppedAcker != nil {
+		_ = droppedAcker.close()
+	}
 	if unregisterPair {
 		r.sstpDialer.UnregisterPair(sid)
 	}
