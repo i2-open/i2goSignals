@@ -21,6 +21,7 @@ type MemoryCoordinator struct {
 	mu     sync.Mutex
 	leases map[string]*leaseEntry
 	nodes  map[string]model.ClusterNode
+	now    func() time.Time
 }
 
 type leaseEntry struct {
@@ -36,7 +37,19 @@ func NewMemoryCoordinator() *MemoryCoordinator {
 	return &MemoryCoordinator{
 		leases: make(map[string]*leaseEntry),
 		nodes:  make(map[string]model.ClusterNode),
+		now:    time.Now,
 	}
+}
+
+// SetClock replaces the clock the lease operations read, so a test can expire
+// a lease without sleeping. A nil clock restores time.Now.
+func (c *MemoryCoordinator) SetClock(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	c.now = now
 }
 
 // Compile-time check.
@@ -46,7 +59,7 @@ func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId strin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now().UTC()
+	now := c.now().UTC()
 	leaseUntil := now.Add(leaseDuration)
 
 	entry, ok := c.leases[resource]
@@ -62,10 +75,16 @@ func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId strin
 		return false, 0, nil
 	}
 
+	// A renewal by the holder of a live lease keeps its fencing token, so the
+	// holder's acks stay valid across heartbeats. Any acquisition of an expired
+	// or unowned lease, by the same node or another, starts a new tenure with
+	// the next token (#334).
+	if expired || !isOwner {
+		entry.fencingToken++
+	}
 	entry.ownerNodeId = nodeId
 	entry.leaseUntil = leaseUntil
 	entry.updatedAt = now
-	entry.fencingToken++
 	return true, entry.fencingToken, nil
 }
 
@@ -78,7 +97,7 @@ func (c *MemoryCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) 
 		return nil
 	}
 	// Match Mongo semantics: shorten the lease to "now" instead of deleting.
-	entry.leaseUntil = time.Now().UTC()
+	entry.leaseUntil = c.now().UTC()
 	entry.updatedAt = entry.leaseUntil
 	return nil
 }
@@ -88,7 +107,8 @@ func (c *MemoryCoordinator) GetLeaseOwner(resource string) (string, time.Time, i
 	defer c.mu.Unlock()
 
 	entry, ok := c.leases[resource]
-	if !ok {
+	if !ok || !entry.leaseUntil.After(c.now().UTC()) {
+		// An expired (or released) lease has no owner.
 		return "", time.Time{}, 0, nil
 	}
 	return entry.ownerNodeId, entry.leaseUntil, entry.fencingToken, nil

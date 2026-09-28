@@ -40,7 +40,19 @@ Leases are stored in the `cluster_leases` collection in MongoDB.
 ### Atomic Acquisition and Renewal
 Leases are acquired or renewed using an atomic `FindOneAndUpdate` operation:
 *   **Condition**: (lease is expired) OR (lease is owned by current node).
-*   **Update**: Set `ownerNodeId` to current node, extend `leaseUntil`, increment `fencingToken`.
+*   **Update**: Set `ownerNodeId` to current node and extend `leaseUntil`. `fencingToken` is kept when the current owner renews a live lease, and incremented when a new tenure starts (a first acquire, a takeover, or a re-acquire after the lease expired). The token therefore names one tenure of the lease.
+
+### Reading the Owner
+`GetLeaseOwner` reports an expired or released lease as unowned (empty owner, token 0), so a caller never mistakes a lapsed lease for a live one.
+
+### Release on Stop
+Push transmitter and poll receiver runners release their lease (`ReleaseLeaseIfOwned`) when they stop, after their heartbeat has stopped, so another node can take the stream at once instead of waiting out the TTL. The SSTP client releases its pair lease the same way.
+
+### Fenced Acks
+`AckEvent` / `AckEvents` carry the caller's fencing token. The event service checks it once per call, before any write, against the current lease for the stream:
+*   If the stream's lease is now held under a different token (or has expired), the ack is refused with `ErrStaleFencingToken` and nothing is written. A push runner that sees this stops its batch and goes back to re-acquire the lease.
+*   A lease lookup error fails closed: the ack is refused.
+*   Modes that hold no lease (poll transmitter, SSTP server) ack with `NoFencingToken` and are not fenced.
 
 ### Parameters
 *   **Lease Duration**: 30 seconds.

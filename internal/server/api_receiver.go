@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -1404,7 +1405,7 @@ func (ps *ClientPollStream) setTransmitterCausedStatus(stored *model.StreamState
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.currentStream().StreamConfiguration.Id
-	resource := fmt.Sprintf("poll-receiver:%s", sid)
+	resource := cluster.PollReceiverResource(sid)
 
 	defer func() {
 		ps.mu.Lock()
@@ -1413,6 +1414,18 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			close(ps.done) // wake any StopGracefully waiter: the in-flight poll has fully drained
 		}
 		ps.mu.Unlock()
+	}()
+	// Release the lease when the receiver stops (#334), before done is closed,
+	// so another node can take the stream at once instead of waiting out the
+	// TTL. runPollLoop has already stopped its heartbeat by then.
+	defer func() {
+		if err := ps.sa.Coordinator.ReleaseLeaseIfOwned(resource, ps.sa.NodeID); err != nil {
+			if ps.ctx.Err() != nil {
+				serverLog.Debug("POLL-RCV: Lease release failed during shutdown", "sid", sid, "error", err)
+			} else {
+				serverLog.Warn("POLL-RCV: Lease release failed", "sid", sid, "error", err)
+			}
+		}
 	}()
 
 	for {
@@ -1486,9 +1499,16 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 	// Heartbeat for lease renewal
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ps.ctx)
-	defer heartbeatCancel()
+	heartbeatDone := make(chan struct{})
+	// Wait for the heartbeat to exit, so a renewal in flight cannot re-take the
+	// lease after pollEventsReceiver releases it.
+	defer func() {
+		heartbeatCancel()
+		<-heartbeatDone
+	}()
 
 	go func() {
+		defer close(heartbeatDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {

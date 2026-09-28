@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -26,8 +27,32 @@ type ResetEgressObserver interface {
 	ObserveResetEgress(streamID string, event *model.EventRecord)
 }
 
+// NoFencingToken is the fencing token an ack carries from a delivery mode that
+// holds no cluster lease: a poll transmitter (ADR 0014) and the SSTP server
+// side. Such acks are not fenced.
+const NoFencingToken int64 = 0
+
+// ErrStaleFencingToken is returned by AckEvent and AckEvents when the ack's
+// fencing token is not the current token of the stream's lease: the caller's
+// lease expired or another node took it over. Nothing is written, and the
+// caller must stop delivering on its lease (#334).
+var ErrStaleFencingToken = errors.New("stale fencing token: lease no longer held")
+
+// FenceChecker reports the lease that fences acks for a stream. leased is
+// false for a stream delivered by a mode that holds no lease, whose acks are
+// then not fenced. Otherwise token is the resource's current fencing token,
+// or 0 when the lease has expired or been released. The event router
+// implements it from its stream registry and the ClusterCoordinator.
+type FenceChecker interface {
+	CurrentFence(streamID string) (resource string, token int64, leased bool, err error)
+}
+
 type EventService struct {
 	eventDAO interfaces.EventDAO
+	// fenceChecker, when non-nil, fences AckEvent and AckEvents: an ack for a
+	// leased stream is written only when its token is the lease's current one.
+	// nil leaves acks unfenced (a service with no cluster behind it).
+	fenceChecker FenceChecker
 	// resetEgressObserver, when non-nil, receives one call per event
 	// ResetEventStream re-queues, so reset re-deliveries are metered as fresh
 	// egress. nil (the default) leaves the reset path unmetered — the community
@@ -47,6 +72,35 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 // fan-out egress uses (ADR 0055 Q91.4).
 func (s *EventService) SetResetEgressObserver(observer ResetEgressObserver) {
 	s.resetEgressObserver = observer
+}
+
+// SetFenceChecker installs (or clears, with nil) the checker that fences acks
+// on the stream's lease token. The event router wires itself here at
+// construction, before any delivery starts.
+func (s *EventService) SetFenceChecker(checker FenceChecker) {
+	s.fenceChecker = checker
+}
+
+// checkFence verifies an ack's fencing token against the stream's lease, once
+// per ack call and before any write (ADR 0035). A stream with no lease, an ack
+// carrying NoFencingToken, or a service with no checker, is not fenced. A
+// lookup error fails closed.
+func (s *EventService) checkFence(streamID string, fencingToken int64) error {
+	if s.fenceChecker == nil || fencingToken == NoFencingToken {
+		// No cluster behind the service, or an ack from a delivery mode that
+		// holds no lease: every lease holder's token is at least 1.
+		return nil
+	}
+	resource, current, leased, err := s.fenceChecker.CurrentFence(streamID)
+	if err != nil {
+		esLog.Error("Fence check failed, ack not written", "streamID", streamID, "error", err)
+		return err
+	}
+	if !leased || fencingToken == current {
+		return nil
+	}
+	esLog.Warn("Rejected ack with stale fencing token", "streamID", streamID, "resource", resource, "token", fencingToken, "current", current)
+	return fmt.Errorf("%w: stream %s resource %s token %d current %d", ErrStaleFencingToken, streamID, resource, fencingToken, current)
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
@@ -319,7 +373,9 @@ func (s *EventService) GetEventIds(ctx context.Context, streamID string, params 
 }
 
 func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
-	// TODO: Use fencingToken to verify lease ownership before marking delivered
+	if err := s.checkFence(streamID, fencingToken); err != nil {
+		return err
+	}
 	event, err := s.eventDAO.RemovePending(ctx, jtiString, streamID)
 	if err != nil {
 		esLog.Error("Error removing pending event", "error", err)
@@ -339,11 +395,14 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 // AckEvents acknowledges jtis for streamID as one batch: the pending entries
 // are removed and recorded as delivered in a bounded number of DAO round trips
 // rather than three per JTI. A JTI not pending for the stream is ignored,
-// exactly as AckEvent ignores it. An empty jtis is a no-op.
+// exactly as AckEvent ignores it. An empty jtis is a no-op. The fencing token
+// is checked once for the batch, as for AckEvent.
 func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
-	// TODO: Use fencingToken to verify lease ownership before marking delivered
 	if len(jtis) == 0 {
 		return nil
+	}
+	if err := s.checkFence(streamID, fencingToken); err != nil {
+		return err
 	}
 	events, err := s.eventDAO.RemovePendingMany(ctx, jtis, streamID)
 	if err != nil {
