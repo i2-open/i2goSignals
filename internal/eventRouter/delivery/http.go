@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http/httptrace"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -23,17 +24,33 @@ import (
 // streamService may be nil — in that case the peer-address capture is
 // reported in the outcome but not persisted (tests). keyReloader may be nil —
 // in that case the jws_signature_failed retry is skipped.
+//
+// Deliver is called concurrently for one stream (the router's push worker pool
+// shares one *StreamStateRecord), so the compare-and-persist of RemoteAddress
+// runs under a per-stream mutex (issue #346). The lock lives in the adapter,
+// not the router's batch loop, so it holds however deliveries are scheduled.
 type HTTPAdapter struct {
-	streamService *services.StreamService
-	keyReloader   KeyReloader
+	addressStore remoteAddressStore
+	keyReloader  KeyReloader
+
+	// addrLocks maps stream id -> *sync.Mutex guarding that stream's
+	// RemoteAddress read, persist and in-memory write.
+	addrLocks sync.Map
+}
+
+// remoteAddressStore is the one StreamService method the adapter needs;
+// *services.StreamService satisfies it.
+type remoteAddressStore interface {
+	UpdateRemoteAddress(ctx context.Context, streamID string, addr *model.RemoteIP)
 }
 
 // NewHTTPAdapter wires the adapter for production.
 func NewHTTPAdapter(streamService *services.StreamService, keyReloader KeyReloader) *HTTPAdapter {
-	return &HTTPAdapter{
-		streamService: streamService,
-		keyReloader:   keyReloader,
+	a := &HTTPAdapter{keyReloader: keyReloader}
+	if streamService != nil {
+		a.addressStore = streamService
 	}
+	return a
 }
 
 // SetKeyReloader supplies the KeyReloader after construction. Used by the
@@ -156,8 +173,12 @@ func (a *HTTPAdapter) tokenString(req PushRequest) (string, error) {
 // recorded. Mirrors the existing only-when-changed guard that previously lived
 // in router.pushEvent. Honors the caller's ctx so the write fails fast on
 // router shutdown rather than racing against a closing storage.
+//
+// Concurrent deliveries on one stream share the record, so the read, persist
+// and write run under the stream's mutex: each change is persisted once, and
+// the in-memory and stored values converge on the last address observed.
 func (a *HTTPAdapter) persistRemoteAddress(ctx context.Context, stream *model.StreamStateRecord, endpointURL, captured string) {
-	if captured == "" || a.streamService == nil {
+	if captured == "" || a.addressStore == nil {
 		return
 	}
 	endpoint, _ := url.Parse(endpointURL)
@@ -166,9 +187,23 @@ func (a *HTTPAdapter) persistRemoteAddress(ctx context.Context, stream *model.St
 		scheme = endpoint.Scheme
 	}
 	remoteIP := model.BuildOutboundRemoteIP(scheme, captured)
+
+	sid := stream.StreamConfiguration.Id
+	lock := a.addressLock(sid)
+	lock.Lock()
+	defer lock.Unlock()
 	if remoteIP.Equals(stream.RemoteAddress) {
 		return
 	}
-	a.streamService.UpdateRemoteAddress(ctx, stream.StreamConfiguration.Id, remoteIP)
+	a.addressStore.UpdateRemoteAddress(ctx, sid, remoteIP)
 	stream.RemoteAddress = remoteIP
+}
+
+// addressLock returns the mutex guarding RemoteAddress for stream sid.
+func (a *HTTPAdapter) addressLock(sid string) *sync.Mutex {
+	if m, ok := a.addrLocks.Load(sid); ok {
+		return m.(*sync.Mutex)
+	}
+	m, _ := a.addrLocks.LoadOrStore(sid, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
