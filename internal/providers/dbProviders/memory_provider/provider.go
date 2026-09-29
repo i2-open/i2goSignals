@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
+	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -63,7 +65,7 @@ type MemoryProvider struct {
 	subjectFilterService *services.SubjectFilterService
 	subjectRelayService  *services.SubjectRelayService
 
-	// eventDAO is the notifyingEventDAO wrapper the eventService above writes
+	// eventDAO is the (metrics-instrumented) notifyingEventDAO wrapper the eventService above writes
 	// through. Held so GetEventDAO can hand out the SAME live instance (not the
 	// raw DAO, not a fresh wrapper). Reassigned in buildServices so a
 	// ResetDb(true) rebuild keeps it in lockstep with the new EventService
@@ -135,7 +137,12 @@ func (m *MemoryProvider) Name() string {
 // ResetDb(true) so the wiring stays in one place.
 func (m *MemoryProvider) buildServices() {
 	streamDAO := newNotifyingStreamDAO(m.rawStreamDAO, m.markDirty)
-	m.eventDAO = newNotifyingEventDAO(m.rawEventDAO, m.markDirty)
+	// daometrics wraps outermost so latency covers the whole write path the
+	// EventService sees (community #328); groupcommit coalesces concurrent
+	// writes beneath it (community #330).
+	m.eventDAO = daometrics.Wrap(
+		groupcommit.Wrap(newNotifyingEventDAO(m.rawEventDAO, m.markDirty), groupcommit.ConfigFromEnv()),
+		daometrics.Default)
 	keyDAO := newNotifyingKeyDAO(m.rawKeyDAO, m.markDirty)
 	clientDAO := newNotifyingClientDAO(m.rawClientDAO, m.markDirty)
 	serverDAO := newNotifyingServerDAO(m.rawServerDAO, m.markDirty)

@@ -67,9 +67,10 @@ func TestMemoryCoordinator_TakeoverAfterExpiry(t *testing.T) {
 }
 
 // TestMemoryCoordinator_FencingTokenMonotonic proves the fencing token
-// strictly increases on every successful acquire/renew, including when the
-// owner renews and when a new owner takes over. Receivers downstream of the
-// lease holder use this token to reject stale writes.
+// strictly increases on every new tenure (a first acquire, a takeover after
+// expiry, a re-acquire after release) and is kept by the holder's own renewal
+// of a live lease, so the holder's acks stay valid across heartbeats (#334).
+// Receivers downstream of the lease holder use this token to reject stale writes.
 func TestMemoryCoordinator_FencingTokenMonotonic(t *testing.T) {
 	c := NewMemoryCoordinator()
 	resource := "push-transmitter:s3"
@@ -77,11 +78,11 @@ func TestMemoryCoordinator_FencingTokenMonotonic(t *testing.T) {
 	_, t1, err := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
 	assert.NoError(t, err)
 
-	// Renew by same owner — token increments.
+	// Renew by same owner of a live lease — token is kept.
 	_, t2, _ := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
-	assert.Greater(t, t2, t1)
+	assert.Equal(t, t1, t2)
 
-	// Wait for expiry, takeover by another node — token still increments.
+	// Wait for expiry, takeover by another node — token increments.
 	time.Sleep(220 * time.Millisecond)
 	_, t3, _ := c.TryAcquireOrRenewLease(resource, "node-B", 200*time.Millisecond)
 	assert.Greater(t, t3, t2)
@@ -98,6 +99,45 @@ func TestMemoryCoordinator_FencingTokenMonotonic(t *testing.T) {
 	wg.Wait()
 	_, _, t4, _ := c.GetLeaseOwner(resource)
 	assert.Equal(t, t3, t4, "failed acquires must not change the fencing token")
+}
+
+// TestMemoryCoordinator_ExpiredLeaseReadsUnowned proves an elapsed lease
+// reads as unowned without any release, and that a re-acquire of an expired
+// lease by its former owner starts a new tenure with a higher token (#334).
+func TestMemoryCoordinator_ExpiredLeaseReadsUnowned(t *testing.T) {
+	c := NewMemoryCoordinator()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c.SetClock(func() time.Time { return clock })
+	resource := "push-transmitter:s5"
+
+	ok, t1, err := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	owner, _, tok, _ := c.GetLeaseOwner(resource)
+	assert.Equal(t, "node-A", owner)
+	assert.Equal(t, t1, tok)
+
+	clock = clock.Add(30 * time.Second)
+	owner, until, tok, err := c.GetLeaseOwner(resource)
+	assert.NoError(t, err)
+	assert.Equal(t, "", owner, "an expired lease has no owner")
+	assert.True(t, until.IsZero())
+	assert.Equal(t, int64(0), tok)
+
+	ok, t2, _ := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	assert.True(t, ok)
+	assert.Greater(t, t2, t1, "re-acquiring an expired lease is a new tenure")
+}
+
+// TestMemoryCoordinator_ReleasedLeaseReadsUnowned proves a released lease
+// reads as unowned at once.
+func TestMemoryCoordinator_ReleasedLeaseReadsUnowned(t *testing.T) {
+	c := NewMemoryCoordinator()
+	resource := "push-transmitter:s6"
+	_, _, _ = c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	assert.NoError(t, c.ReleaseLeaseIfOwned(resource, "node-A"))
+	owner, _, _, _ := c.GetLeaseOwner(resource)
+	assert.Equal(t, "", owner)
 }
 
 // TestMemoryCoordinator_ReleaseIfOwned proves only the current owner can

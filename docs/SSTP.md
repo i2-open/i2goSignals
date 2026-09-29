@@ -289,6 +289,13 @@ support"); a `WARN` is logged at create.
   `HandleEvent` keyed on rxSid (so the inbound counter carries
   `tfr=SSTP`, `stream_id=rxSid`). A duplicate JTI is swallowed by the #153
   ingestion short-circuit but still acked so the sender stops resending.
+- If the event store cannot durably store an inbound SET, the whole exchange is
+  refused with `503 Service Unavailable` and a `Retry-After` header
+  (`I2SIG_INGEST_RETRY_AFTER`, default 2 seconds). Nothing in the exchange is
+  acked and the outbound drain is skipped, so the peer resends; any SET stored
+  before the failure comes back as a duplicate and is acked then (issue #333,
+  ADR 0038). See the ingest status table in
+  [`operations.md`](operations.md#ingest-status-codes-push-receiver-and-sstp-acceptor).
 - Outbound long-poll drain (governed by `Status`): waits on the pair's outbound
   `EventPollBuffer` for the request duration, reusing
   `I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT` (no SSTP-specific

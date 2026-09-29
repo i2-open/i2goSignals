@@ -31,6 +31,28 @@ type MongoCoordinator struct {
 	// of leaving it to run out its own 5s budget against a socket nobody will
 	// read. Never nil — NewMongoCoordinator substitutes context.Background().
 	ctx context.Context
+
+	// clock, when set, replaces time.Now for the lease operations, so a test
+	// can expire a lease without sleeping. See SetClock.
+	clock atomic.Pointer[func() time.Time]
+}
+
+// SetClock replaces the clock the lease operations read. A nil clock
+// restores time.Now.
+func (c *MongoCoordinator) SetClock(now func() time.Time) {
+	if now == nil {
+		c.clock.Store(nil)
+		return
+	}
+	c.clock.Store(&now)
+}
+
+// now reads the coordinator's clock in UTC.
+func (c *MongoCoordinator) now() time.Time {
+	if f := c.clock.Load(); f != nil {
+		return (*f)().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // NewMongoCoordinator returns a coordinator with no collections bound, whose
@@ -88,7 +110,7 @@ func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string
 	ctx, cancel := c.opCtx()
 	defer cancel()
 
-	now := time.Now().UTC()
+	now := c.now()
 	leaseUntil := now.Add(leaseDuration)
 
 	filter := bson.M{
@@ -99,14 +121,27 @@ func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string
 		},
 	}
 
-	update := bson.M{
-		"$set": bson.M{
+	// A renewal by the holder of a live lease keeps its fencing token, so the
+	// holder's acks stay valid across heartbeats. Any acquisition of an expired
+	// or unowned lease, by the same node or another, starts a new tenure with
+	// the next token (#334). The pipeline form reads the stored owner and
+	// expiry before overwriting them.
+	renewal := bson.M{"$and": bson.A{
+		bson.M{"$eq": bson.A{"$ownerNodeId", nodeId}},
+		bson.M{"$gt": bson.A{"$leaseUntil", now}},
+	}}
+	update := mongo.Pipeline{
+		{{Key: "$set", Value: bson.M{
+			"fencingToken": bson.M{"$cond": bson.A{
+				renewal,
+				"$fencingToken",
+				bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$fencingToken", 0}}, 1}},
+			}},
 			"ownerNodeId": nodeId,
 			"leaseUntil":  leaseUntil,
 			"updatedAt":   now,
-		},
-		"$inc":         bson.M{"fencingToken": 1},
-		"$setOnInsert": bson.M{"createdAt": now},
+			"createdAt":   bson.M{"$ifNull": bson.A{"$createdAt", now}},
+		}}},
 	}
 
 	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
@@ -136,7 +171,7 @@ func (c *MongoCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) e
 		"_id":         resource,
 		"ownerNodeId": nodeId,
 	}
-	now := time.Now().UTC()
+	now := c.now()
 	update := bson.M{
 		"$set": bson.M{
 			"leaseUntil": now,
@@ -164,6 +199,10 @@ func (c *MongoCoordinator) GetLeaseOwner(resource string) (string, time.Time, in
 			return "", time.Time{}, 0, nil
 		}
 		return "", time.Time{}, 0, err
+	}
+	if !lease.LeaseUntil.After(c.now()) {
+		// An expired (or released) lease has no owner.
+		return "", time.Time{}, 0, nil
 	}
 
 	return lease.OwnerNodeId, lease.LeaseUntil, lease.FencingToken, nil

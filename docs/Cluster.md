@@ -40,7 +40,37 @@ Leases are stored in the `cluster_leases` collection in MongoDB.
 ### Atomic Acquisition and Renewal
 Leases are acquired or renewed using an atomic `FindOneAndUpdate` operation:
 *   **Condition**: (lease is expired) OR (lease is owned by current node).
-*   **Update**: Set `ownerNodeId` to current node, extend `leaseUntil`, increment `fencingToken`.
+*   **Update**: Set `ownerNodeId` to current node and extend `leaseUntil`. `fencingToken` is kept when the current owner renews a live lease, and incremented when a new tenure starts (a first acquire, a takeover, or a re-acquire after the lease expired). The token therefore names one tenure of the lease.
+
+### Reading the Owner
+`GetLeaseOwner` reports an expired or released lease as unowned (empty owner, token 0), so a caller never mistakes a lapsed lease for a live one.
+
+### Release on Stop
+Push transmitter and poll receiver runners release their lease (`ReleaseLeaseIfOwned`) when they stop, after their heartbeat has stopped, so another node can take the stream at once instead of waiting out the TTL. The SSTP client releases its pair lease the same way.
+
+### Local WAL: Drain Before Release
+With `I2SIG_STORE_WAL=local` (ADR 0045), a SET is acknowledged once it is in this node's WAL, before it reaches the store. A lease must not pass to another node while such SETs are only on this node's disk. So in local mode the stop order is (#341):
+1.  Ingest closes. A SET arriving now gets 503 + `Retry-After`, and the transmitter resends it, possibly to another node.
+2.  The background drain worker stops between batches, and the WAL is drained to the store synchronously, retrying store failures, for at most `I2SIG_STORE_WAL_DRAIN_TIMEOUT` (default 20s).
+3.  Only then are the delivery runners stopped. Each releases its lease as it exits (above), so the next holder finds every acknowledged SET in the store.
+
+If the drain times out, the node logs the residual depth at ERROR, and the entries stay on disk. Its leases are still released at stop and then expire normally. The residue is replayed when this node starts again. At start, a WAL that holds entries from a previous run is replayed to the store first. Until it is empty, ingest answers 503 + `Retry-After`. In the default `majority` mode, none of this applies and the stop order is unchanged.
+
+### Local WAL: Multi-Node Guard
+A SET acknowledged into one node's WAL is not in the store until the drain moves it. Another node that owns the stream's delivery lease cannot see it until then. Ring-fed delivery (`I2SIG_STORE_WAL_RING_FED=true`, #342) closes that gap on the buffering node. So local mode in a cluster requires ring-fed delivery (#343). The guard has a startup half and a runtime half:
+*   At startup, a node with `I2SIG_STORE_WAL=local` and ring-fed off first registers itself with the cluster coordinator, then asks for the active nodes. If any active node other than itself is registered, it logs an ERROR and refuses to start. The error names the condition and both fixes: set `I2SIG_STORE_WAL_RING_FED=true`, or return to `majority` (unset `I2SIG_STORE_WAL`). Registering before reading means two such nodes started at the same time see each other; at least one refuses, and if both do, the refused entries age out of the active window (60s) and the next start succeeds.
+*   If membership cannot be read, the node also refuses, since it cannot confirm it is alone.
+*   With ring-fed on, both halves are skipped and local mode is allowed in any cluster size.
+*   At runtime, after every 10s heartbeat, a running local-mode node without ring-fed reads the active peers. The first time it finds one, it logs an ERROR naming the peer and both fixes and suspends local ingest on itself: streams with `durability=local` are acknowledged at majority from then on (their effective durability reads `majority`), entries already in the WAL keep draining, and `goSignals_wal_local_ingest_suspended` reads 1. There is no re-arm; the node stays at majority until it restarts, so its durability contract does not flap with membership. A failed membership read is retried on the next heartbeat, not acted on.
+*   So when a second node joins, the joiner refuses to start and the running node steps down to majority. Either way no SET is acknowledged into a WAL another node's delivery cannot see for longer than one heartbeat.
+
+Even in local mode, only streams whose per-stream `durability` is `local` use the WAL. All other streams keep the majority contract.
+
+### Fenced Acks
+`AckEvent` / `AckEvents` carry the caller's fencing token. The event service checks it once per call, before any write, against the current lease for the stream:
+*   If the stream's lease is now held under a different token (or has expired), the ack is refused with `ErrStaleFencingToken` and nothing is written. A push runner that sees this stops its batch and goes back to re-acquire the lease.
+*   A lease lookup error fails closed: the ack is refused.
+*   Modes that hold no lease (poll transmitter, SSTP server) ack with `NoFencingToken`. The check passes only because the router reports no lease resource for the stream — a `NoFencingToken` ack on a leased stream (push, SSTP client) is refused, as is any token once the lease has expired.
 
 ### Parameters
 *   **Lease Duration**: 30 seconds.

@@ -44,6 +44,10 @@ visibility into receiver health, recovery activity, and the T3 idle keepalive fe
 | `goSignals_router_push_state_transitions_total` | Counter | `stream_id`, `from`, `to` | One increment per actual stream state change (`enabled`/`paused`/`disabled`). Mirrors the `PUSH-SRV: state transition` audit log. |
 | `goSignals_router_push_recovery_duration_seconds` | Histogram | `stream_id` | Wall-time elapsed inside `recoveryLoop`, from entry to exit. Long-tail buckets up to 6h to surface streams stuck in transport recovery. |
 | `goSignals_router_push_idle_verify_total` | Counter | `stream_id`, `outcome` | Verify-event push outcomes (`acked` or `failed`). Dominated in production by T3 idle keepalives; operator-triggered verifies also pass through. |
+| `goSignals_router_delivery_inflight` | Gauge | `stream_id`, `transport` | JTIs a delivery runner (`transport` = `push` or `sstp`) has taken for sending and not yet acked or handed back (#336). It is bounded by `I2SIG_DELIVERY_INFLIGHT_MAX`; a stream sitting at the bound is waiting on its ack writes. With pipelining (#339, ADR 0044) this spans up to K push batches or `I2SIG_SSTP_PUSH_INFLIGHT` SSTP second pushes at once. The series is removed when the runner stops. |
+| `goSignals_router_delivery_ack_batch_size` | Histogram | `transport` | JTIs applied per coalesced ack write (#336). A mean well above the push batch size shows coalescing is saving store writes; a mean of one batch shows the window is too short for the send rate, or `I2SIG_ACK_COALESCE_WINDOW=0`. |
+| `goSignals_router_poll_claimed_inflight` | Gauge | `stream_id` | SETs of an RFC 8936 poll stream claimed by a poll response on this node and not yet acked, released or expired (#337). Set after each poll; a value near the stream's pending count means pollers are not acking and will see redelivery once `I2SIG_POLL_CLAIM_TTL` passes. Always 0 when `I2SIG_POLL_CLAIM_TTL=0`. The series is removed when the stream is removed. |
+| `goSignals_router_poll_receiver_outstanding` | Gauge | `stream_id` | Polls a poll receiver stream on this node has sent to its upstream transmitter and not yet finished processing (#338). Bounded by `I2SIG_POLL_PIPELINE_DEPTH`. A stream sitting at the bound is limited by the transmitter's response time or by its own store writes. An idle long-poll stream shows 1, or more after it sends acks, until those polls return. The series is removed when the receiver stops. |
 
 ## Event Validation Metrics
 
@@ -61,6 +65,49 @@ produces, since `WARN` leaves the wire response unchanged — watch
 Deliberately **not** labeled by `stream_id` or event URI: either would make the
 series count unbounded on a busy receiver. A stream on `NONE` engages no
 validators and therefore records nothing, so there is no `mode="NONE"` series.
+
+## DAO Metrics
+
+Per-call latency and batch size at the `EventDAO` seam, so the ingest write
+path (`InsertWithPending`: the event bodies and their pending markers in one
+majority-acked, journaled write before the 202 — one multi-namespace
+`bulkWrite` on MongoDB 8.0+, ADR 0043; ADR 0038 contract) can be read apart from the HTTP time
+in `goSignals_http_duration_seconds`. Both persistence providers (Mongo and
+memory) wrap their live `EventDAO` in the `internal/dao/daometrics` decorator,
+so every call the router and retention engine make is observed.
+
+| Metric Name | Type | Labels | Buckets | Description |
+|-------------|------|--------|---------|-------------|
+| `goSignals_dao_op_duration_seconds` | Histogram | `op`, `outcome` | 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 s | Wall-time of each `EventDAO` call. `op` is the Go method name (`Insert`, `InsertMany`, `FindByJTI`, `FindByJTIs`, `FindByTimeRange`, `AddPending`, `AddPendingMany`, `GetPendingForStream`, `RemovePending`, `RemovePendingMany`, `InsertWithPending`, `ClearPendingForStream`, `MarkDelivered`, `MarkDeliveredMany`, `AckDelivered`, `ListDeliveredForStream`, `RemoveDelivered`, `DeleteBodyIfUnreferenced`, `CountRetainedForStream`, `WatchPending`); `outcome` is `ok` or `error` (the call's returned error — `InsertMany`'s and `InsertWithPending`'s per-record results such as a duplicate JTI do not count as `error`). |
+| `goSignals_dao_batch_size` | Histogram | `op` | 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 | Items passed to each batch-taking call: `InsertMany`, `InsertWithPending` (records), `AddPendingMany`, `FindByJTIs`, `RemovePendingMany` (JTIs), `MarkDeliveredMany` (events), `AckDelivered` (JTIs). Divide an op's latency by its batch size for per-document cost. |
+
+Label cardinality is closed (method names × two outcomes); there is deliberately
+no `stream_id`. `WatchPending`'s latency is the watch set-up time on Mongo; on
+the memory store it blocks for the watch's lifetime, so ignore it there.
+
+Example — ingest p50 per write, beside the HTTP p50:
+
+```promql
+histogram_quantile(0.5, sum by (le, op) (rate(goSignals_dao_op_duration_seconds_bucket{op="InsertWithPending"}[1m])))
+histogram_quantile(0.5, sum by (le) (rate(goSignals_http_duration_seconds_bucket[1m])))
+```
+
+## Local WAL Metrics
+
+These metrics cover the node-local ingest WAL used when `I2SIG_STORE_WAL=local` (ADR 0045, #341). They stay at zero in the default `majority` mode.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `goSignals_wal_depth` | Gauge | None | Entries (acknowledged inbound batches) in the local WAL not yet drained to the store. |
+| `goSignals_wal_drain_lag_seconds` | Gauge | None | Age of the oldest undrained entry, refreshed on every drain attempt. 0 when the WAL is empty. |
+| `goSignals_wal_drained_total` | Counter | None | SETs drained from the WAL to the store. A JTI the store already held counts as drained. |
+| `goSignals_wal_replayed_total` | Counter | None | SETs found in the WAL at start-up (left by a crash, or by a shutdown drain that timed out) and replayed to the store before ingest reopened. |
+| `goSignals_wal_drain_duration_seconds` | Histogram | None | Duration of one drain batch: the store write plus the WAL truncate. |
+| `goSignals_wal_append_seconds` | Histogram | None | One WAL append as ingest sees it: the wait behind the current group commit plus the write and fsync (ADR 0046). With `goSignals_wal_drain_duration_seconds` it separates a slow disk from a slow drain. |
+| `goSignals_wal_ring_fed_served_total` | Counter | None | SET bodies served to delivery from the local WAL before the drain stored them (`I2SIG_STORE_WAL_RING_FED=true`, #342). Stays at 0 with ring-feeding off. |
+| `goSignals_wal_local_ingest_suspended` | Gauge | None | 1 once this local-mode node found another active cluster node without ring-fed delivery and suspended local ingest (#343): `durability=local` streams run at majority until the node restarts. Alert on it; the fix is `I2SIG_STORE_WAL_RING_FED=true` on every node or a return to `majority`. |
+
+Alerting guidance: a depth that keeps growing, or a drain lag above a few seconds that does not fall, means the store is not keeping up or is unreachable. Acknowledged SETs are then single-node durable only, and are lost if this node's disk is lost. A non-zero `rate(goSignals_wal_replayed_total[5m])` after a restart means the previous run stopped with undrained entries.
 
 ## HTTP Metrics
 

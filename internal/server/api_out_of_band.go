@@ -1203,6 +1203,8 @@ func ListStreamStatesHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 			// stream still reports status "enabled", so without this the operator
 			// has nothing to look at.
 			sa.GetStreamService().OverlayJwksReadiness(masked)
+			// Report the effective ingest durability (issue #343).
+			sa.GetStreamService().OverlayEffectiveDurability(masked)
 			result = append(result, *masked)
 		}
 	}
@@ -1265,6 +1267,8 @@ func GetStreamStateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Overlay this node's JWKS readiness (ADR 0033) — GetStreamState reads from
 	// the DAO and never consults the receiver cache.
 	sa.GetStreamService().OverlayJwksReadiness(masked)
+	// Report the effective ingest durability (issue #343).
+	sa.GetStreamService().OverlayEffectiveDurability(masked)
 	resp, err := json.Marshal(masked)
 	if err != nil {
 		serverLog.Error("Internal error GetStreamState:", "error", err.Error())

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -266,4 +267,157 @@ func TestPendingFeedback_MergeIntoZeroValue(t *testing.T) {
 	assert.Equal(t, []string{"jti-1"}, carried.Acks)
 	assert.Contains(t, carried.SetErrs, "jti-bad")
 	assert.False(t, carried.empty())
+}
+
+// secondPushKPeer is a loopback SSTP peer that holds every request until
+// release is closed, records the peak number of requests open at once, checks
+// the Q7.2 wire shape of each (returnEvents=false, no Ack), and acks what it
+// was sent.
+type secondPushKPeer struct {
+	srv      *httptest.Server
+	release  chan struct{}
+	open     atomic.Int64
+	peak     atomic.Int64
+	requests atomic.Int64
+	mu       sync.Mutex
+	seen     map[string]int
+}
+
+func newSecondPushKPeer(t *testing.T) *secondPushKPeer {
+	p := &secondPushKPeer{release: make(chan struct{}), seen: map[string]int{}}
+	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var msg goSetSstp.Message
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Errorf("bad second-push body: %v", err)
+		}
+		if msg.ReturnEvents == nil || *msg.ReturnEvents {
+			t.Errorf("a second push must carry returnEvents=false")
+		}
+		if len(msg.Ack) != 0 {
+			t.Errorf("a second push must carry no Ack, got %v", msg.Ack)
+		}
+		p.requests.Add(1)
+		n := p.open.Add(1)
+		for {
+			old := p.peak.Load()
+			if n <= old || p.peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		<-p.release
+		p.open.Add(-1)
+		acks := make([]string, 0, len(msg.Sets))
+		p.mu.Lock()
+		for jti := range msg.Sets {
+			acks = append(acks, jti)
+			p.seen[jti]++
+		}
+		p.mu.Unlock()
+		w.Header().Set("Content-Type", goSetSstp.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(goSetSstp.Message{Ack: acks})
+	}))
+	return p
+}
+
+// runSecondPushK starts callers concurrent second pushes against a fake
+// outbound bounded to k slots, holding the peer until the slots are full.
+// It returns the peer, the fake, and how many calls returned while the peer
+// was still holding (the rejected ones).
+func runSecondPushK(t *testing.T, k, callers, queued int) (*secondPushKPeer, *fakeSstpOutbound, int64) {
+	t.Helper()
+	peer := newSecondPushKPeer(t)
+	t.Cleanup(peer.srv.Close)
+
+	pairId := fmt.Sprintf("pair-second-push-k%d", k)
+	pair := model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Id:               "tx-" + pairId,
+			Iss:              "https://us.example",
+			Aud:              []string{"https://peer.example"},
+			RouteMode:        model.RouteModeForward,
+			TxAllowPlaintext: true, // loopback httptest peer (#322)
+		},
+		Status: model.StreamStateEnabled,
+		PairId: pairId,
+		SstpMethod: &model.SstpMethod{
+			Role:                model.SstpRoleInitiator,
+			EndpointUrl:         peer.srv.URL,
+			AuthorizationHeader: "Bearer test-token",
+		},
+	}
+	evs := make([]*model.EventRecord, 0, queued)
+	for i := 1; i <= queued; i++ {
+		jti := fmt.Sprintf("sstp-k-%d", i)
+		evs = append(evs, &model.EventRecord{Jti: jti, Original: `{"jti":"` + jti + `","raw":true}`})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFakeSstpOutbound(ctx, pair, evs...)
+	fake.slotMax = k
+
+	dialer := NewSstpDialer(&oneShotCoordinator{}, "node-"+pairId, nil, SstpDialerConfig{
+		BaseDelay:     5 * time.Millisecond,
+		MaxDelay:      50 * time.Millisecond,
+		BackoffFactor: 2.0,
+		Jitter:        func() time.Duration { return 0 },
+		HTTPClient:    &http.Client{Timeout: 5 * time.Second},
+		BackfillBatch: 1,
+	})
+	dialer.Bind(fake)
+
+	var returned atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cls := dialer.pushWhilePollHeld(ctx, &pair, 1)
+			assert.Equal(t, goSetSstp.ClassOK, cls.Class)
+			returned.Add(1)
+		}()
+	}
+
+	require.Eventually(t, func() bool {
+		return peer.open.Load() == int64(k) && returned.Load() == int64(callers-k)
+	}, 5*time.Second, 5*time.Millisecond, "K second pushes open, the rest turned away")
+	// Hold briefly: no further push may open while all K slots are held.
+	time.Sleep(50 * time.Millisecond)
+	rejected := returned.Load()
+	close(peer.release)
+	wg.Wait()
+	return peer, fake, rejected
+}
+
+// #339: with I2SIG_SSTP_PUSH_INFLIGHT K=2 two second pushes are on the wire
+// at once, a third wake is turned away, the two draw disjoint claims so no SET
+// is sent twice, and every queued SET is acked. Each request keeps the Q7.2
+// shape (returnEvents=false, no Ack).
+func TestPushWhilePollHeld_KSecondPushesInFlight(t *testing.T) {
+	peer, fake, rejected := runSecondPushK(t, 2, 3, 6)
+
+	assert.Equal(t, int64(2), peer.peak.Load(), "K=2 second pushes on the wire at once")
+	assert.Equal(t, int64(1), rejected, "the third concurrent second push is turned away")
+	assert.Equal(t, 2, fake.slotPeak)
+	assert.Equal(t, 0, fake.slotsHeld, "every slot is released")
+	assert.Len(t, fake.ackedCopy(), 6, "every queued SET is acked")
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	require.Len(t, peer.seen, 6)
+	for jti, n := range peer.seen {
+		assert.Equal(t, 1, n, "%s rides exactly one second push (disjoint claims)", jti)
+	}
+}
+
+// #339: K=1 reproduces the Q7.2 single slot — one second push on the wire,
+// every other concurrent wake turned away.
+func TestPushWhilePollHeld_KOneIsTheSingleSlot(t *testing.T) {
+	peer, fake, rejected := runSecondPushK(t, 1, 3, 3)
+
+	assert.Equal(t, int64(1), peer.peak.Load(), "K=1: one second push at a time")
+	assert.Equal(t, int64(2), rejected)
+	assert.Equal(t, 1, fake.slotPeak)
+	assert.Len(t, fake.ackedCopy(), 3, "the single push drains the whole buffer")
 }

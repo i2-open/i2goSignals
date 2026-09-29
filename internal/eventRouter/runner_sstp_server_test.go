@@ -78,7 +78,7 @@ func TestSstpServer_IngestsInboundAndCountsRxMetric(t *testing.T) {
 	resolved, lookupErr := h.router.streamService.GetStreamStateByPairId(context.Background(), pairId)
 	require.NoError(t, lookupErr)
 	require.NotNil(t, resolved)
-	resp := h.router.SstpServerHandler(context.Background(), resolved,
+	resp, _ := h.router.SstpServerHandler(context.Background(), resolved,
 		goSetSstp.Message{ReturnImmediately: goSetSstp.BoolPtr(true)}, inbound)
 
 	assert.Contains(t, resp.Ack, jti, "ingested SET must be acked back to the sender")
@@ -106,13 +106,13 @@ func TestSstpServer_DuplicateInboundJtiSwallowed(t *testing.T) {
 	require.NotNil(t, resolved)
 
 	immediate := goSetSstp.Message{ReturnImmediately: goSetSstp.BoolPtr(true)}
-	resp1 := h.router.SstpServerHandler(context.Background(), resolved, immediate, inbound)
+	resp1, _ := h.router.SstpServerHandler(context.Background(), resolved, immediate, inbound)
 	require.Contains(t, resp1.Ack, jti)
 	require.InDelta(t, 1.0, inCounterValueSstp(t, h.inCounter, rxSid), 0.0001,
 		"first inbound increments eventsIn once")
 
 	// Second delivery of the same JTI.
-	resp2 := h.router.SstpServerHandler(context.Background(), resolved, immediate, inbound)
+	resp2, _ := h.router.SstpServerHandler(context.Background(), resolved, immediate, inbound)
 	assert.Contains(t, resp2.Ack, jti, "duplicate must still be acked so the sender stops resending")
 	assert.InDelta(t, 1.0, inCounterValueSstp(t, h.inCounter, rxSid), 0.0001,
 		"duplicate JTI must NOT increment eventsIn a second time")
@@ -134,7 +134,7 @@ func TestSstpServer_DrainsOutboundReturnsSets(t *testing.T) {
 	resolved, lookupErr := h.router.streamService.GetStreamStateByPairId(context.Background(), pairId)
 	require.NoError(t, lookupErr)
 	require.NotNil(t, resolved)
-	resp := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
 
 	require.Contains(t, resp.Sets, jti, "pending outbound SET must be returned in the response sets")
 	assert.NotEmpty(t, resp.Sets[jti], "returned SET must carry the encoded SET string")
@@ -158,7 +158,7 @@ func TestSstpServer_PausedPairReturnsReturnEventsFalse(t *testing.T) {
 	resolved, lookupErr := h.router.streamService.GetStreamStateByPairId(context.Background(), pairId)
 	require.NoError(t, lookupErr)
 	require.NotNil(t, resolved)
-	resp := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(context.Background(), resolved, goSetSstp.Message{}, nil)
 
 	require.NotNil(t, resp.ReturnEvents, "paused pair must set returnEvents explicitly")
 	assert.False(t, *resp.ReturnEvents, "paused pair must return returnEvents=false")
@@ -174,7 +174,7 @@ func TestSstpServer_PausedPairReturnsReturnEventsFalse(t *testing.T) {
 func TestSstpServer_NilRecReturnsEmptyResponse(t *testing.T) {
 	h := newSstpRunnerHarness(t)
 
-	resp := h.router.SstpServerHandler(context.Background(), nil, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(context.Background(), nil, goSetSstp.Message{}, nil)
 	assert.Empty(t, resp.Ack, "nil rec must not fabricate acks")
 	assert.Empty(t, resp.Sets, "nil rec must not fabricate outbound sets")
 	assert.Nil(t, resp.ReturnEvents, "nil rec must not set returnEvents")
@@ -230,7 +230,7 @@ func TestSstpServer_LongPollIgnoresContextCancel(t *testing.T) {
 	require.NotNil(t, resolved)
 
 	start := time.Now()
-	resp := h.router.SstpServerHandler(ctx, resolved, goSetSstp.Message{}, nil)
+	resp, _ := h.router.SstpServerHandler(ctx, resolved, goSetSstp.Message{}, nil)
 	elapsed := time.Since(start)
 
 	assert.Empty(t, resp.Sets, "no outbound events were queued")

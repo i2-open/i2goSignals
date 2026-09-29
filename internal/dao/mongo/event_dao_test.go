@@ -14,6 +14,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/event"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -365,37 +366,210 @@ func (s *EventDAOMongoSuite) TestGetPendingForStream_OrderIsStatedNotInherited()
 		"jti order must survive an unindexed collection scan")
 }
 
-// TestRetractPending_UndoesOneMarkerPerJti: a retraction removes the newest
-// pending entry per JTI, leaves an earlier entry for the same JTI in place and
-// in its original position, skips an unknown JTI, and never touches another
-// stream (ADR 0038).
-func (s *EventDAOMongoSuite) TestRetractPending_UndoesOneMarkerPerJti() {
+// storedIngestState is the full on-disk result of an InsertWithPending run:
+// the stored event JTIs (with their Original, to prove a duplicate did not
+// overwrite) and every pending document as a (sid, jti) pair.
+type storedIngestState struct {
+	events  map[string]string
+	pending []string
+}
+
+func (s *EventDAOMongoSuite) readIngestState(streamNames map[string]string) storedIngestState {
+	ctx := context.Background()
+	st := storedIngestState{events: map[string]string{}}
+	cur, err := s.eventCol.Find(ctx, bson.M{})
+	s.Require().NoError(err)
+	var evs []model.EventRecord
+	s.Require().NoError(cur.All(ctx, &evs))
+	for _, ev := range evs {
+		st.events[ev.Jti] = ev.Original
+	}
+	cur, err = s.pendingCol.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}}))
+	s.Require().NoError(err)
+	var docs []pendingDoc
+	s.Require().NoError(cur.All(ctx, &docs))
+	for _, d := range docs {
+		st.pending = append(st.pending, streamNames[d.Sid.Hex()]+"/"+d.Jti)
+	}
+	return st
+}
+
+// TestInsertWithPending_OneTripAndFallbackAgree runs the same batch through
+// the MongoDB 8.0 one-trip bulkWrite and the pre-8.0 two-write fallback (ADR
+// 0043) and asserts both report the same per-record outcomes and leave
+// identical stored state. The batch covers a JTI already stored, a JTI
+// repeated inside the batch, and a pending JTI with no record: a duplicate
+// must report ErrDuplicateJTI and leave NO pending marker (ADR 0017), and an
+// accepted record gets exactly one marker per stream.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripAndFallbackAgree() {
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+
+	run := func(oneTrip bool) ([]error, storedIngestState) {
+		s.SetupTest()
+		ctx := context.Background()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		s.Require().NoError(s.dao.Insert(ctx, &model.EventRecord{Jti: "old", Original: "seed", SortTime: time.Now()}))
+		recs := []*model.EventRecord{
+			{Jti: "new-1", Original: "n1", SortTime: time.Now()},
+			{Jti: "old", Original: "overwrite", SortTime: time.Now()},
+			{Jti: "new-1", Original: "n1-again", SortTime: time.Now()},
+			{Jti: "new-2", Original: "n2", SortTime: time.Now()},
+		}
+		pending := map[string][]string{
+			streamA: {"new-1", "old", "new-2", "no-record"},
+			streamB: {"old", "new-1"},
+		}
+		results, err := s.dao.InsertWithPending(ctx, recs, pending)
+		s.Require().NoError(err)
+		return results, s.readIngestState(names)
+	}
+
+	oneTripResults, oneTripState := run(true)
+	fallbackResults, fallbackState := run(false)
+
+	for name, results := range map[string][]error{"one-trip": oneTripResults, "fallback": fallbackResults} {
+		s.Require().Len(results, 4, name)
+		s.NoError(results[0], name)
+		s.ErrorIs(results[1], interfaces.ErrDuplicateJTI, name)
+		s.ErrorIs(results[2], interfaces.ErrDuplicateJTI, name)
+		s.NoError(results[3], name)
+	}
+	want := storedIngestState{
+		events:  map[string]string{"old": "seed", "new-1": "n1", "new-2": "n2"},
+		pending: []string{"A/new-1", "A/new-2", "B/new-1"},
+	}
+	// Stream IDs sort as ObjectIDs; compare the pairs as a set.
+	s.Equal(want.events, oneTripState.events)
+	s.ElementsMatch(want.pending, oneTripState.pending, "no marker for a duplicate, one per accepted (stream, jti)")
+	s.Equal(oneTripState.events, fallbackState.events, "fallback must store identical events")
+	s.ElementsMatch(oneTripState.pending, fallbackState.pending, "fallback must store identical pending markers")
+}
+
+// oneTripCountingDAO returns a one-trip EventDAOMongo over the suite's
+// collections on a dedicated client that counts the bulkWrite commands it
+// sends, so a test can prove how many resubmits a failure cost.
+func (s *EventDAOMongoSuite) oneTripCountingDAO() (*EventDAOMongo, func() int64) {
+	var bulkWrites atomic.Int64
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, e *event.CommandStartedEvent) {
+		if e.CommandName == "bulkWrite" {
+			bulkWrites.Add(1)
+		}
+	}}
+	client, err := mongo.Connect(options.Client().ApplyURI(TestDbUrl).SetMonitor(monitor))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	db := client.Database(s.eventCol.Database().Name())
+	d := NewEventDAO(db.Collection(s.eventCol.Name()), db.Collection(s.pendingCol.Name()), db.Collection(s.deliveredCol.Name())).(*EventDAOMongo)
+	d.SetOneTripIngest(true)
+	return d, bulkWrites.Load
+}
+
+// TestInsertWithPending_OneTripBodyFailureResubmitsRest: the grouped one-trip
+// bulkWrite puts every body before every marker, so a body failing at index 1
+// stops the ordered write before ANY marker, including those of the record
+// whose body already landed at index 0. The failed record gets
+// ErrDuplicateJTI and its markers are dropped; the rest (the later body and
+// every other record's markers) are resubmitted in exactly one more
+// bulkWrite, leaving no stored body without its markers and no orphan marker.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripBodyFailureResubmitsRest() {
 	ctx := context.Background()
 	streamA := bson.NewObjectID().Hex()
 	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	s.Require().NoError(s.dao.Insert(ctx, &model.EventRecord{Jti: "r1", Original: "seed", SortTime: time.Now()}))
+	d, bulkWrites := s.oneTripCountingDAO()
 
-	// "dup" is recorded twice on streamA: a real delivery intent, then a
-	// speculative one whose body write was rejected.
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "keep-1", "keep-2"}, streamA))
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup", "spec-only"}, streamA))
-	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"dup"}, streamB))
-
-	s.Require().NoError(s.dao.RetractPending(ctx, []string{"dup", "spec-only", "never-seen"}, streamA))
-
-	jtis, total, err := s.dao.GetPendingForStream(ctx, streamA, 10)
+	recs := []*model.EventRecord{
+		{Jti: "r0", Original: "b0", SortTime: time.Now()},
+		{Jti: "r1", Original: "overwrite", SortTime: time.Now()},
+		{Jti: "r2", Original: "b2", SortTime: time.Now()},
+	}
+	pending := map[string][]string{
+		streamA: {"r0", "r1", "r2"},
+		streamB: {"r0", "r1", "r2"},
+	}
+	results, err := d.InsertWithPending(ctx, recs, pending)
 	s.Require().NoError(err)
-	s.Equal(int64(3), total)
-	s.Equal([]string{"dup", "keep-1", "keep-2"}, jtis,
-		"the older intent for dup survives, in place, and only the speculative markers go")
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.ErrorIs(results[1], interfaces.ErrDuplicateJTI)
+	s.NoError(results[2])
+	s.Equal(int64(2), bulkWrites(), "one failure costs exactly one resubmit")
 
-	_, total, err = s.dao.GetPendingForStream(ctx, streamB, 10)
-	s.Require().NoError(err)
-	s.Equal(int64(1), total, "another stream's intent for the same JTI is untouched")
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r0": "b0", "r1": "seed", "r2": "b2"}, st.events)
+	s.ElementsMatch([]string{"A/r0", "B/r0", "A/r2", "B/r2"}, st.pending,
+		"markers of the landed body r0 are resubmitted; the duplicate r1 gets none")
+}
 
-	s.Require().NoError(s.dao.RetractPending(ctx, nil, streamA))
-	_, total, err = s.dao.GetPendingForStream(ctx, streamA, 10)
+// TestInsertWithPending_OneTripMarkerFailureResubmitsRest: a duplicate-key
+// failure at a marker index (injected with a unique pending index and a
+// pre-seeded marker) answers only that marker's record with a marker error,
+// drops the record's remaining marker, and resubmits every later record's
+// markers. r1's markers on BOTH streams are pre-seeded, so whichever comes
+// first fails; were the other resubmitted it would fail too and cost a third
+// bulkWrite, so the count of two proves it was dropped.
+func (s *EventDAOMongoSuite) TestInsertWithPending_OneTripMarkerFailureResubmitsRest() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	_, err := s.pendingCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+		Options: options.Index().SetName("testPendingUnique").SetUnique(true),
+	})
 	s.Require().NoError(err)
-	s.Equal(int64(3), total, "empty RetractPending must be a no-op")
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamA))
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamB))
+	d, bulkWrites := s.oneTripCountingDAO()
+
+	recs := []*model.EventRecord{
+		{Jti: "r0", Original: "b0", SortTime: time.Now()},
+		{Jti: "r1", Original: "b1", SortTime: time.Now()},
+		{Jti: "r2", Original: "b2", SortTime: time.Now()},
+	}
+	pending := map[string][]string{
+		streamA: {"r0", "r1", "r2"},
+		streamB: {"r0", "r1", "r2"},
+	}
+	results, err := d.InsertWithPending(ctx, recs, pending)
+	s.Require().NoError(err)
+	s.Require().Len(results, 3)
+	s.NoError(results[0])
+	s.Require().Error(results[1])
+	s.NotErrorIs(results[1], interfaces.ErrDuplicateJTI, "a marker failure is not a duplicate SET")
+	s.Contains(results[1].Error(), "pending marker write failed")
+	s.NoError(results[2])
+	s.Equal(int64(2), bulkWrites(), "the failed record's other marker is dropped, not resubmitted")
+
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r0": "b0", "r1": "b1", "r2": "b2"}, st.events)
+	s.ElementsMatch([]string{"A/r0", "B/r0", "A/r1", "B/r1", "A/r2", "B/r2"}, st.pending,
+		"only the two seeded r1 markers exist for r1; r2's markers were resubmitted")
+}
+
+// TestInsertWithPending_MalformedStreamWritesNothing: a pending map naming a
+// stream ID that is not an ObjectID fails the whole batch before anything is
+// written, on both paths, so no body is stored without its markers.
+func (s *EventDAOMongoSuite) TestInsertWithPending_MalformedStreamWritesNothing() {
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	for _, oneTrip := range []bool{true, false} {
+		s.SetupTest()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		results, err := s.dao.InsertWithPending(context.Background(),
+			[]*model.EventRecord{{Jti: "x", SortTime: time.Now()}},
+			map[string][]string{"not-an-object-id": {"x"}})
+		s.Error(err)
+		s.Nil(results)
+		st := s.readIngestState(nil)
+		s.Empty(st.events, "oneTrip=%v", oneTrip)
+		s.Empty(st.pending, "oneTrip=%v", oneTrip)
+	}
 }
 
 // TestRemovePendingMany_SubsetScopedToStream: one batched ack removes exactly
@@ -457,4 +631,225 @@ func (s *EventDAOMongoSuite) TestMarkDeliveredMany_ListsDelivered() {
 		got = append(got, d.Jti)
 	}
 	s.ElementsMatch([]string{"d-1", "d-2", "d-3"}, got)
+}
+
+// ackState is the stored outcome of an AckDelivered scenario: the pending
+// JTIs of each named stream and the delivered (jti, ackDate) of stream A.
+type ackState struct {
+	pendingA, pendingB []string
+	delivered          map[string]time.Time
+	deliveredDocs      int
+}
+
+func (s *EventDAOMongoSuite) readAckState(streamA, streamB string) ackState {
+	ctx := context.Background()
+	var st ackState
+	st.pendingA, _, _ = s.dao.GetPendingForStream(ctx, streamA, 100)
+	st.pendingB, _, _ = s.dao.GetPendingForStream(ctx, streamB, 100)
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamA)
+	s.Require().NoError(err)
+	st.delivered = map[string]time.Time{}
+	for _, d := range delivered {
+		s.Equal(streamA, d.StreamId)
+		st.delivered[d.Jti] = d.AckDate
+	}
+	st.deliveredDocs = len(delivered)
+	return st
+}
+
+// TestAckDelivered_OneTripAndFallbackAgree: both ack strategies store the same
+// state and return the same acked set. Only JTIs pending for the stream are
+// acked (each once, even when repeated in the batch); an unknown JTI and a
+// JTI already delivered get no delivered record; each acked JTI's delivered
+// record carries ackDate (the ADR 0055 purge anchor); another stream's
+// identical JTI stays pending; re-acking is a no-op.
+func (s *EventDAOMongoSuite) TestAckDelivered_OneTripAndFallbackAgree() {
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	earlier := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	ackDate := time.Now().Truncate(time.Millisecond)
+
+	run := func(oneTrip bool) ([]string, ackState) {
+		s.SetupTest()
+		ctx := context.Background()
+		mongoDAO.SetOneTripIngest(oneTrip)
+		s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA))
+		s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB))
+		s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "old", StreamId: streamA}, earlier))
+
+		acked, err := s.dao.AckDelivered(ctx, []string{"a-1", "a-3", "missing", "a-1", "old"}, streamA, ackDate)
+		s.Require().NoError(err, "oneTrip=%v", oneTrip)
+
+		again, err := s.dao.AckDelivered(ctx, []string{"a-1", "a-3"}, streamA, time.Now())
+		s.Require().NoError(err, "oneTrip=%v re-ack", oneTrip)
+		s.Empty(again, "oneTrip=%v: re-ack must ack nothing", oneTrip)
+
+		empty, err := s.dao.AckDelivered(ctx, nil, streamA, ackDate)
+		s.Require().NoError(err)
+		s.Nil(empty, "oneTrip=%v: empty ack must be a no-op", oneTrip)
+		return acked, s.readAckState(streamA, streamB)
+	}
+
+	for _, oneTrip := range []bool{true, false} {
+		acked, st := run(oneTrip)
+		s.ElementsMatch([]string{"a-1", "a-3"}, acked, "oneTrip=%v", oneTrip)
+		s.Equal([]string{"a-2"}, st.pendingA, "oneTrip=%v", oneTrip)
+		s.ElementsMatch([]string{"a-1", "b-1"}, st.pendingB, "oneTrip=%v: other stream untouched", oneTrip)
+		s.Equal(3, st.deliveredDocs, "oneTrip=%v: one delivered record per acked JTI, none for unknown/re-acked", oneTrip)
+		s.True(st.delivered["a-1"].Equal(ackDate), "oneTrip=%v a-1 ackDate %v", oneTrip, st.delivered["a-1"])
+		s.True(st.delivered["a-3"].Equal(ackDate), "oneTrip=%v a-3 ackDate %v", oneTrip, st.delivered["a-3"])
+		s.True(st.delivered["old"].Equal(earlier), "oneTrip=%v: an already-delivered JTI keeps its AckDate", oneTrip)
+	}
+}
+
+// commandCountingDAO returns an EventDAOMongo over the suite's collections on
+// a dedicated client that counts every command it sends by name.
+func (s *EventDAOMongoSuite) commandCountingDAO(oneTrip bool) (*EventDAOMongo, func() map[string]int) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	monitor := &event.CommandMonitor{Started: func(_ context.Context, e *event.CommandStartedEvent) {
+		mu.Lock()
+		counts[e.CommandName]++
+		mu.Unlock()
+	}}
+	client, err := mongo.Connect(options.Client().ApplyURI(TestDbUrl).SetMonitor(monitor))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	db := client.Database(s.eventCol.Database().Name())
+	d := NewEventDAO(db.Collection(s.eventCol.Name()), db.Collection(s.pendingCol.Name()), db.Collection(s.deliveredCol.Name())).(*EventDAOMongo)
+	d.SetOneTripIngest(oneTrip)
+	return d, func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(counts))
+		for k, v := range counts {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+// TestAckDelivered_OneTripIsOneBulkWrite: acking a batch whose JTIs are all
+// pending costs exactly one command — one bulkWrite — where the fallback
+// costs find + delete + insert. An ack that names a JTI not pending costs one
+// extra delete, retracting the delivered record the bulkWrite wrote for it.
+func (s *EventDAOMongoSuite) TestAckDelivered_OneTripIsOneBulkWrite() {
+	ctx := context.Background()
+	streamID := bson.NewObjectID().Hex()
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"p-1", "p-2", "p-3"}, streamID))
+
+	d, counts := s.commandCountingDAO(true)
+	acked, err := d.AckDelivered(ctx, []string{"p-1", "p-2"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"p-1", "p-2"}, acked)
+	s.Equal(map[string]int{"bulkWrite": 1}, counts(), "all-pending ack must be one round trip")
+
+	acked, err = d.AckDelivered(ctx, []string{"p-3", "gone"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.Equal([]string{"p-3"}, acked)
+	s.Equal(map[string]int{"bulkWrite": 2, "delete": 1}, counts(), "a non-pending JTI costs one retracting delete")
+
+	delivered, err := s.dao.ListDeliveredForStream(ctx, streamID)
+	s.Require().NoError(err)
+	got := make([]string, 0, len(delivered))
+	for _, ev := range delivered {
+		got = append(got, ev.Jti)
+	}
+	s.ElementsMatch([]string{"p-1", "p-2", "p-3"}, got)
+
+	fb, fbCounts := s.commandCountingDAO(false)
+	s.Require().NoError(s.dao.AddPendingMany(ctx, []string{"f-1"}, streamID))
+	acked, err = fb.AckDelivered(ctx, []string{"f-1"}, streamID, time.Now())
+	s.Require().NoError(err)
+	s.Equal([]string{"f-1"}, acked)
+	s.Equal(map[string]int{"find": 1, "delete": 1, "insert": 1}, fbCounts(), "fallback reuses find + delete + insert")
+}
+
+// TestAckDelivered_MalformedStream: a stream ID that is not an ObjectID is an
+// error on both paths and writes nothing.
+func (s *EventDAOMongoSuite) TestAckDelivered_MalformedStream() {
+	mongoDAO := s.dao.(*EventDAOMongo)
+	defer mongoDAO.SetOneTripIngest(false)
+	for _, oneTrip := range []bool{true, false} {
+		mongoDAO.SetOneTripIngest(oneTrip)
+		acked, err := s.dao.AckDelivered(context.Background(), []string{"x"}, "not-an-oid", time.Now())
+		s.Error(err, "oneTrip=%v", oneTrip)
+		s.Nil(acked, "oneTrip=%v", oneTrip)
+	}
+}
+
+// TestEnsurePending_QueuesOnlyWhereMissing pins the ADR 0043 residual repair
+// (#331): EnsurePending queues a JTI only on the streams holding neither a
+// pending nor a delivered record for it, reports exactly those streams, and a
+// repeat call queues nothing. A malformed stream ID fails before any write.
+func (s *EventDAOMongoSuite) TestEnsurePending_QueuesOnlyWhereMissing() {
+	ctx := context.Background()
+	hasPending := bson.NewObjectID().Hex()
+	wasDelivered := bson.NewObjectID().Hex()
+	missing := bson.NewObjectID().Hex()
+	names := map[string]string{hasPending: "P", wasDelivered: "D", missing: "M"}
+	s.Require().NoError(s.dao.AddPending(ctx, "ens", hasPending))
+	s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "ens", StreamId: wasDelivered}, time.Now()))
+
+	queued, err := s.dao.EnsurePending(ctx, "ens", nil)
+	s.Require().NoError(err)
+	s.Empty(queued)
+
+	_, err = s.dao.EnsurePending(ctx, "ens", []string{missing, "not-an-object-id"})
+	s.Require().Error(err, "a malformed stream ID fails the call")
+	s.ElementsMatch([]string{"P/ens"}, s.readIngestState(names).pending, "... before anything is written")
+
+	queued, err = s.dao.EnsurePending(ctx, "ens", []string{hasPending, wasDelivered, missing})
+	s.Require().NoError(err)
+	s.Equal([]string{missing}, queued)
+	s.ElementsMatch([]string{"P/ens", "M/ens"}, s.readIngestState(names).pending,
+		"queued only where no pending or delivered record exists")
+
+	queued, err = s.dao.EnsurePending(ctx, "ens", []string{hasPending, wasDelivered, missing})
+	s.Require().NoError(err)
+	s.Empty(queued, "idempotent")
+	s.ElementsMatch([]string{"P/ens", "M/ens"}, s.readIngestState(names).pending)
+}
+
+// TestInsertWithPending_MarkerFailureThenEnsurePendingRecovers replays the
+// #331 residual end to end at the DAO: a one-trip write lands r1's body, its
+// first marker fails (unique pending index + pre-seeded marker on stream A),
+// and the write drops r1's stream-B marker. The transmitter's retry is then a
+// duplicate, and EnsurePending — the repair the router runs for a duplicate —
+// queues r1 on B only.
+func (s *EventDAOMongoSuite) TestInsertWithPending_MarkerFailureThenEnsurePendingRecovers() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	_, err := s.pendingCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+		Options: options.Index().SetName("testPendingUnique").SetUnique(true),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamA))
+	d, _ := s.oneTripCountingDAO()
+
+	recs := []*model.EventRecord{{Jti: "r1", Original: "b1", SortTime: time.Now()}}
+	pending := map[string][]string{streamA: {"r1"}, streamB: {"r1"}}
+	results, err := d.InsertWithPending(ctx, recs, pending)
+	s.Require().NoError(err)
+	s.Require().Error(results[0], "the marker failure is reported (the router answers 503)")
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r1": "b1"}, st.events, "the body landed")
+	s.ElementsMatch([]string{"A/r1"}, st.pending, "the residual: no marker on B")
+
+	// The transmitter retries: the body is a duplicate ...
+	results, err = d.InsertWithPending(ctx, []*model.EventRecord{{Jti: "r1", Original: "b1-retry", SortTime: time.Now()}}, pending)
+	s.Require().NoError(err)
+	s.ErrorIs(results[0], interfaces.ErrDuplicateJTI)
+	// ... and the repair queues it where it is missing.
+	queued, err := d.EnsurePending(ctx, "r1", []string{streamA, streamB})
+	s.Require().NoError(err)
+	s.Equal([]string{streamB}, queued)
+	st = s.readIngestState(names)
+	s.Equal(map[string]string{"r1": "b1"}, st.events, "the stored copy wins")
+	s.ElementsMatch([]string{"A/r1", "B/r1"}, st.pending, "r1 is now queued on both streams, once each")
 }

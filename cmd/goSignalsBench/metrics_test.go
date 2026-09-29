@@ -13,10 +13,16 @@ goSignals_router_events_in_total{iss="a",stream_id="rx1",tfr="PUSH",type="urn:y"
 goSignals_router_events_in_total{iss="a",stream_id="rx2",tfr="POLL",type="urn:x"} 2.5 1700000000
 goSignals_router_events_out_total{iss="a",stream_id="tx1",tfr="PUSH",type="urn:x"} 9
 goSignals_http_duration_seconds_bucket{path="/events",le="0.005"} 12
+# TYPE goSignals_wal_depth gauge
+goSignals_wal_depth 42
+goSignals_wal_depth_bytes 4096
 `
 	c, err := parseCounters(strings.NewReader(text))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !c.HasWal || c.WalDepth != 42 {
+		t.Errorf("wal depth = %v (present %v), want 42 present", c.WalDepth, c.HasWal)
 	}
 	if got := c.In["rx1"]; got != 10 {
 		t.Errorf("rx1 in = %v, want 10", got)
@@ -41,5 +47,16 @@ func TestParseSampleRejectsMalformed(t *testing.T) {
 		if _, _, ok := parseSample(line); ok {
 			t.Errorf("expected %q to be rejected", line)
 		}
+	}
+}
+
+func TestParseCountersWithoutWalGauge(t *testing.T) {
+	text := "goSignals_router_events_in_total{iss=\"a\",stream_id=\"rx1\",tfr=\"PUSH\",type=\"urn:x\"} 7\n"
+	c, err := parseCounters(strings.NewReader(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HasWal {
+		t.Errorf("HasWal should be false when goSignals_wal_depth is absent")
 	}
 }

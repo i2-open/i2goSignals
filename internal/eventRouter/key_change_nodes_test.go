@@ -48,6 +48,9 @@ func newKeyChangeNodes(t *testing.T, seam delivery.PushDelivery) *keyChangeNodes
 	t.Setenv("I2SIG_PUSH_AUTH_RETRY_DELAY", "50ms")
 	t.Setenv("I2SIG_PUSH_AUTH_RETRY_LIMIT", "1000")
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	// These tests re-poll the same unacked SET to check which key signs it;
+	// turn poll claims off so a re-poll is served again at once (#337).
+	t.Setenv("I2SIG_POLL_CLAIM_TTL", "0")
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "key_change_nodes_test")
 	require.NoError(t, err)
 	t.Cleanup(func() {

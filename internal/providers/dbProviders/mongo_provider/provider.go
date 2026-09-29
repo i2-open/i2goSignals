@@ -3,12 +3,16 @@ package mongo_provider
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/daometrics"
+	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
 	mongodao "github.com/i2-open/i2goSignals/internal/dao/mongo"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -90,6 +94,16 @@ type MongoProvider struct {
 	serverDAO        *mongodao.ServerDAOMongo
 	tokenDAO         *mongodao.TokenDAOMongo
 	subjectFilterDAO *mongodao.SubjectFilterDAOMongo
+
+	// meteredEventDAO is eventDAO wrapped by groupcommit (#330) and daometrics (#328):
+	// the instance the EventService writes through and GetEventDAO hands out.
+	// The raw eventDAO is kept for the SetCollections rebind path.
+	meteredEventDAO interfaces.EventDAO
+
+	// serverVersion is the MongoDB server version reported by buildInfo on the
+	// last successful connect ("" when it could not be read). It selects the
+	// ingest write path (ADR 0043). Accessed under m.mu.
+	serverVersion string
 
 	// indexesEnsured records whether createIndexes has run in THIS process.
 	// It runs on every start (not just for a brand-new database) so a release
@@ -197,7 +211,10 @@ func (m *MongoProvider) initServices() {
 	m.tokenService.SetStreamDAO(m.streamDAO)
 	m.keyService = services.NewKeyService(m.keyDAO, m.TokenIssuer, m.tokenService, oauthServersFromEnv)
 	m.streamService = services.NewStreamService(m.streamDAO, m.keyService, m.DefaultIssuer, streamServiceConfigFromEnv())
-	m.eventService = services.NewEventService(m.eventDAO)
+	// groupcommit coalesces concurrent writes (community #330) beneath the
+	// daometrics wrapper.
+	m.meteredEventDAO = daometrics.Wrap(groupcommit.Wrap(m.eventDAO, groupcommit.ConfigFromEnv()), daometrics.Default)
+	m.eventService = services.NewEventService(m.meteredEventDAO)
 	m.clientService = services.NewClientService(m.clientDAO, m.keyService)
 	m.serverService = services.NewServerService(m.serverDAO)
 	m.subjectFilterService = services.NewSubjectFilterService(m.subjectFilterDAO)
@@ -243,8 +260,9 @@ func (m *MongoProvider) GetSubjectRelayService() *services.SubjectRelayService {
 // wired into the EventService (initServices). Rebinds on reconnect happen in
 // place via SetCollections, so the instance is stable for the process lifetime.
 // Exposed so dbProviders.Persistence can bind a RetentionEngine to the live
-// store (issue #229, ADR 0055 A5.2).
-func (m *MongoProvider) GetEventDAO() interfaces.EventDAO { return m.eventDAO }
+// store (issue #229, ADR 0055 A5.2). It is the daometrics-instrumented wrapper
+// (community #328) over the groupcommit batcher (community #330).
+func (m *MongoProvider) GetEventDAO() interfaces.EventDAO { return m.meteredEventDAO }
 
 // GetKeyDAO returns the underlying KeyDAO. Used by rebind tests in
 // internal/providers/dbProviders/mongo_provider/test/rebind_test.go to assert
@@ -255,6 +273,77 @@ func (m *MongoProvider) GetKeyDAO() interfaces.KeyDAO { return m.keyDAO }
 // state. Always non-nil after Open / initServices.
 func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 	return m.coordinator
+}
+
+// collectionWriteConcerns is the per-collection write concern table (#332).
+// Write concern lives on the collection handle, not the client, so the
+// durability cost is paid only where the contract requires it. Keep this
+// table in step with docs/configuration_properties.md ("Mongo write concern").
+//
+//	collection        concern            why
+//	events            majority, j:true   ADR 0038: stored before ack
+//	pendingEvents     majority, j:true   ADR 0038: stored before ack
+//	cluster_leases    majority, j:true   a w:1 lease grant can roll back on
+//	                                     failover, letting two nodes own one
+//	                                     stream; fencing needs majority
+//	deliveredEvents   w:1                audit / ADR 0055 purge anchor: a lost
+//	                                     row only delays purge
+//	cluster_nodes     w:1                heartbeat registry, rewritten each tick
+//	streams, keys, clients, servers,
+//	tokens, subject_filters
+//	                  w:1                non-contract admin/config state
+//
+// No transactions are used. The one-trip events+pending client bulkWrite
+// (ADR 0043) does not take a collection's concern: a client-level bulkWrite
+// uses the client's concern, and the client carries none, so that call sets
+// majority+journal itself (mongodao.EventStoreWriteConcern).
+// The one-trip ack bulkWrite (pending delete + delivered insert, #335) sets
+// w:1 itself: a rolled-back pending delete only re-delivers a SET the
+// receiver already dedups by JTI (ADR 0017).
+var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
+	CDbEvents:         mongodao.EventStoreWriteConcern(),
+	CDbPending:        mongodao.EventStoreWriteConcern(),
+	CDbLeases:         mongodao.EventStoreWriteConcern(),
+	CDbDelivered:      writeconcern.W1(),
+	CDbNodes:          writeconcern.W1(),
+	CDbStreamCfg:      writeconcern.W1(),
+	CDbKeys:           writeconcern.W1(),
+	CDbClients:        writeconcern.W1(),
+	CDbServers:        writeconcern.W1(),
+	CDbTokens:         writeconcern.W1(),
+	CDbSubjectFilters: writeconcern.W1(),
+}
+
+// collection opens a handle on m.ssefDb with the write concern from
+// collectionWriteConcerns. An unlisted name falls back to majority+journal,
+// the safe default.
+func (m *MongoProvider) collection(name string) *mongo.Collection {
+	wc, ok := collectionWriteConcerns[name]
+	if !ok {
+		wc = mongodao.EventStoreWriteConcern()
+	}
+	return m.ssefDb.Collection(name, options.Collection().SetWriteConcern(wc))
+}
+
+// openCollections opens every collection handle on m.ssefDb.
+func (m *MongoProvider) openCollections() {
+	m.streamCol = m.collection(CDbStreamCfg)
+	m.keyCol = m.collection(CDbKeys)
+	m.deliveredCol = m.collection(CDbDelivered)
+	m.pendingCol = m.collection(CDbPending)
+	m.eventCol = m.collection(CDbEvents)
+	m.clientCol = m.collection(CDbClients)
+	m.serverCol = m.collection(CDbServers)
+	m.leaseCol = m.collection(CDbLeases)
+	m.nodeCol = m.collection(CDbNodes)
+	m.tokenCol = m.collection(CDbTokens)
+	m.subjectFilterCol = m.collection(CDbSubjectFilters)
+}
+
+// mongoClientOptions builds the client options. It deliberately sets no write
+// concern: each collection handle carries its own (collectionWriteConcerns).
+func mongoClientOptions(uri string) *options.ClientOptions {
+	return options.Client().ApplyURI(uri)
 }
 
 func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
@@ -280,18 +369,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 		m.ssefDb = m.mongoClient.Database(m.DbName)
 	}
 
-	// Initialize collections
-	m.streamCol = m.ssefDb.Collection(CDbStreamCfg)
-	m.keyCol = m.ssefDb.Collection(CDbKeys)
-	m.deliveredCol = m.ssefDb.Collection(CDbDelivered)
-	m.pendingCol = m.ssefDb.Collection(CDbPending)
-	m.eventCol = m.ssefDb.Collection(CDbEvents)
-	m.clientCol = m.ssefDb.Collection(CDbClients)
-	m.serverCol = m.ssefDb.Collection(CDbServers)
-	m.leaseCol = m.ssefDb.Collection(CDbLeases)
-	m.nodeCol = m.ssefDb.Collection(CDbNodes)
-	m.tokenCol = m.ssefDb.Collection(CDbTokens)
-	m.subjectFilterCol = m.ssefDb.Collection(CDbSubjectFilters)
+	m.openCollections()
 
 	if m.coordinator == nil {
 		m.coordinator = NewMongoCoordinator(m.lifetimeCtx())
@@ -707,10 +785,7 @@ func (m *MongoProvider) connect() error {
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), 60*time.Second)
 	defer cancel()
 
-	opts := options.Client().ApplyURI(m.DbUrl)
-	opts.WriteConcern = &writeconcern.WriteConcern{
-		W: "majority",
-	}
+	opts := mongoClientOptions(m.DbUrl)
 
 	// When SPIFFE mTLS is enabled for MongoDB, obtain the workload's X509-SVID
 	// and use it as the client certificate. This replaces username/password
@@ -754,12 +829,62 @@ func (m *MongoProvider) connect() error {
 		return err
 	}
 
+	m.serverVersion = detectServerVersion(ctx, client)
+	m.eventDAO.SetOneTripIngest(selectIngestMode(m.serverVersion, pLog))
+
 	err = m.initialize(m.DbName, ctx)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// ServerVersion returns the MongoDB server version read at the last
+// successful connect, or "" when it could not be determined.
+func (m *MongoProvider) ServerVersion() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.serverVersion
+}
+
+// detectServerVersion runs buildInfo against the admin database. A failure is
+// not fatal: it returns "" and the caller falls back to the two-write ingest.
+func detectServerVersion(ctx context.Context, client *mongo.Client) string {
+	var info struct {
+		Version string `bson:"version"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&info); err != nil {
+		pLog.Warn("MongoDB: buildInfo failed; server version unknown", "error", err)
+		return ""
+	}
+	pLog.Info("MongoDB: connected", "serverVersion", info.Version)
+	return info.Version
+}
+
+// supportsOneTripIngest reports whether a server of the given version supports
+// the multi-namespace client bulkWrite the one-trip ingest needs (MongoDB 8.0+).
+// An empty or unparsable version is treated as unsupported.
+func supportsOneTripIngest(version string) bool {
+	major, _, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 8
+}
+
+// oneTripFallbackWarned makes the below-8.0 fallback WARN fire once per
+// process, not on every reconnect.
+var oneTripFallbackWarned sync.Once
+
+// selectIngestMode picks the ingest write path for version, warning once on
+// log when it has to fall back to the two-write path.
+func selectIngestMode(version string, log *slog.Logger) bool {
+	if supportsOneTripIngest(version) {
+		return true
+	}
+	oneTripFallbackWarned.Do(func() {
+		log.Warn("MongoDB: server older than 8.0 (or version unknown); ingest uses two sequential writes instead of one bulkWrite round trip (ADR 0043)", "serverVersion", version)
+	})
+	return false
 }
 
 func (m *MongoProvider) monitor() {

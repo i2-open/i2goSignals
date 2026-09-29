@@ -39,6 +39,9 @@ func TestKeyChangeSigningSuite(t *testing.T) {
 func (s *KeyChangeSigningSuite) SetupTest() {
 	ctx := context.Background()
 	s.T().Setenv("I2SIG_STORE_MEM_DIRECTORY", s.T().TempDir())
+	// These tests re-poll the same unacked SET to check which key signs it;
+	// turn poll claims off so a re-poll is served again at once (#337).
+	s.T().Setenv("I2SIG_POLL_CLAIM_TTL", "0")
 	persistence, err := dbProviders.OpenPersistence("memorydb:", "key-change-signing")
 	s.Require().NoError(err)
 	s.Require().NoError(persistence.KeyService.InitializeTokenKey(ctx, "DEFAULT"))

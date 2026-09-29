@@ -7,7 +7,7 @@ Date: 2026-09-08
 
 ## Status
 
-Accepted (community #286).
+Accepted (community #286); mechanism superseded by 0043, contract retained.
 
 ## Context
 

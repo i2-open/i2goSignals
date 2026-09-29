@@ -166,6 +166,38 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_UnknownEventValidationMo
 	s.Contains(rr.Body.String(), "ENFORE", "the response must name the offending value")
 }
 
+// A durability value other than majority/local is a caller mistake: 400 naming
+// the value, on create and on update (issue #343).
+func (s *ServerProvisioningAuthzSuite) TestStreamCreate_UnknownDurabilityIs400() {
+	tok := s.streamToken("proj-A")
+	cfg := model.StreamStateRecord{}
+	cfg.Durability = model.DurabilityMode("eventual")
+	body, _ := json.Marshal(cfg)
+
+	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, body, nil)
+	s.Equal(http.StatusBadRequest, rr.Code, "an unrecognized durability is a client error")
+	s.Contains(rr.Body.String(), "eventual", "the response must name the offending value")
+}
+
+func (s *ServerProvisioningAuthzSuite) TestStreamUpdate_UnknownDurabilityIs400() {
+	tok := s.adminToken("proj-A")
+	create, _ := json.Marshal(model.StreamStateRecord{Durability: model.DurabilityLocal})
+	cr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", tok, create, nil)
+	s.Require().Less(cr.Code, 300, cr.Body.String())
+	var created model.StreamConfiguration
+	s.Require().NoError(json.Unmarshal(cr.Body.Bytes(), &created))
+	s.Require().NotEmpty(created.Id)
+
+	cfg := model.StreamStateRecord{}
+	cfg.StreamConfiguration.Id = created.Id
+	cfg.Durability = model.DurabilityMode("eventual")
+	body, _ := json.Marshal(cfg)
+
+	rr := s.do(s.app.StreamUpdate, http.MethodPatch, "/stream", tok, body, nil)
+	s.Equal(http.StatusBadRequest, rr.Code, "an unrecognized durability is a client error")
+	s.Contains(rr.Body.String(), "eventual", "the response must name the offending value")
+}
+
 // An SSTP bootstrap whose receive_mode is not a receive-side choice is refused
 // with a 400 naming the field, beside the existing mode check (issue #306).
 // PUBLISH is the telling case: it is a valid mode, but a receiver cannot act on

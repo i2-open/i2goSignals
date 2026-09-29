@@ -66,6 +66,31 @@ func (d *EventDAOMemory) InsertMany(_ context.Context, records []*model.EventRec
 	return results, nil
 }
 
+// InsertWithPending stores records and their pending markers under one lock
+// (ADR 0043): a marker is appended only for a record that was actually stored,
+// so a duplicate JTI never leaves a delivery intent behind.
+func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	streams := interfaces.StreamsByJti(pending)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	results := make([]error, len(records))
+	for i, rec := range records {
+		if results[i] = d.insertLocked(rec); results[i] != nil {
+			continue
+		}
+		for _, streamID := range streams[rec.Jti] {
+			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+				Jti:      rec.Jti,
+				StreamId: streamID,
+			})
+		}
+	}
+	return results, nil
+}
+
 // insertLocked applies the single-record insert semantics; d.mu must be held.
 func (d *EventDAOMemory) insertLocked(record *model.EventRecord) error {
 	// JTI is the persistence-layer dedup key. Reject the new write and leave
@@ -205,6 +230,45 @@ func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, stream
 	return nil
 }
 
+// EnsurePending queues jti on each stream that has it neither pending nor
+// delivered (#331); a stream that already records it is left untouched.
+func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, streamIDs []string) ([]string, error) {
+	if len(streamIDs) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var queued []string
+	for _, streamID := range streamIDs {
+		if d.recordsJtiLocked(jti, streamID) {
+			continue
+		}
+		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+			Jti:      jti,
+			StreamId: streamID,
+		})
+		queued = append(queued, streamID)
+	}
+	return queued, nil
+}
+
+// recordsJtiLocked reports whether streamID has jti pending or delivered;
+// d.mu must be held.
+func (d *EventDAOMemory) recordsJtiLocked(jti string, streamID string) bool {
+	for _, evt := range d.pendingEvents[streamID] {
+		if evt.Jti == jti {
+			return true
+		}
+	}
+	for _, evt := range d.deliveredEvents[streamID] {
+		if evt.Jti == jti {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -293,45 +357,6 @@ func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, str
 	return removed, nil
 }
 
-// RetractPending removes the last-appended pending entry for each JTI and
-// leaves any earlier entry for the same JTI in its original position (ADR
-// 0038), so retracting a speculative delivery intent cannot drop an older
-// intent that is still awaiting delivery.
-func (d *EventDAOMemory) RetractPending(_ context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	pending, ok := d.pendingEvents[streamID]
-	if !ok {
-		return nil
-	}
-	drop := make(map[int]struct{}, len(jtis))
-	for _, jti := range jtis {
-		for i := len(pending) - 1; i >= 0; i-- {
-			if _, taken := drop[i]; taken || pending[i].Jti != jti {
-				continue
-			}
-			drop[i] = struct{}{}
-			break
-		}
-	}
-	if len(drop) == 0 {
-		return nil
-	}
-	kept := make([]interfaces.DeliverableEvent, 0, len(pending)-len(drop))
-	for i, event := range pending {
-		if _, dropped := drop[i]; dropped {
-			continue
-		}
-		kept = append(kept, event)
-	}
-	d.pendingEvents[streamID] = kept
-	return nil
-}
-
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -369,6 +394,33 @@ func (d *EventDAOMemory) MarkDeliveredMany(_ context.Context, events []interface
 		})
 	}
 	return nil
+}
+
+// AckDelivered composes RemovePendingMany and MarkDeliveredMany: the removed
+// entries, each JTI once, are recorded as delivered at ackDate and returned.
+func (d *EventDAOMemory) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	if len(jtis) == 0 {
+		return nil, nil
+	}
+	removed, err := d.RemovePendingMany(ctx, jtis, streamID)
+	if err != nil || len(removed) == 0 {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(removed))
+	events := removed[:0]
+	acked := make([]string, 0, len(removed))
+	for _, ev := range removed {
+		if _, dup := seen[ev.Jti]; dup {
+			continue
+		}
+		seen[ev.Jti] = struct{}{}
+		events = append(events, ev)
+		acked = append(acked, ev.Jti)
+	}
+	if err = d.MarkDeliveredMany(ctx, events, ackDate); err != nil {
+		return nil, err
+	}
+	return acked, nil
 }
 
 // ListDeliveredForStream returns a copy of streamID's delivered events (ADR 0055).

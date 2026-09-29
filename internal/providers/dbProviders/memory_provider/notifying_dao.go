@@ -139,6 +139,15 @@ func (d *notifyingEventDAO) InsertMany(ctx context.Context, records []*model.Eve
 	return results, nil
 }
 
+func (d *notifyingEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+	results, err := d.inner.InsertWithPending(ctx, records, pending)
+	if err != nil {
+		return results, err
+	}
+	d.notify()
+	return results, nil
+}
+
 func (d *notifyingEventDAO) FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error) {
 	return d.inner.FindByJTI(ctx, jti)
 }
@@ -169,6 +178,14 @@ func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, jtis []string, s
 	return nil
 }
 
+func (d *notifyingEventDAO) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
+	queued, err := d.inner.EnsurePending(ctx, jti, streamIDs)
+	if err == nil && len(queued) > 0 {
+		d.notify()
+	}
+	return queued, err
+}
+
 func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
 	return d.inner.GetPendingForStream(ctx, streamID, limit)
 }
@@ -191,16 +208,6 @@ func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string
 		d.notify()
 	}
 	return evs, nil
-}
-
-func (d *notifyingEventDAO) RetractPending(ctx context.Context, jtis []string, streamID string) error {
-	if err := d.inner.RetractPending(ctx, jtis, streamID); err != nil {
-		return err
-	}
-	if len(jtis) > 0 {
-		d.notify()
-	}
-	return nil
 }
 
 func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
@@ -228,6 +235,17 @@ func (d *notifyingEventDAO) MarkDeliveredMany(ctx context.Context, events []inte
 		d.notify()
 	}
 	return nil
+}
+
+func (d *notifyingEventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
+	acked, err := d.inner.AckDelivered(ctx, jtis, streamID, ackDate)
+	if err != nil {
+		return acked, err
+	}
+	if len(jtis) > 0 {
+		d.notify()
+	}
+	return acked, nil
 }
 
 func (d *notifyingEventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {

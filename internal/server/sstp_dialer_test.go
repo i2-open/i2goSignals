@@ -115,6 +115,13 @@ type fakeSstpOutbound struct {
 	ingested  []ingestedInboundSet
 	ingestErr error // when non-nil, HandleInboundEvent returns it
 	ctx       context.Context
+
+	// slotMax bounds the second-push slots like the router's
+	// I2SIG_SSTP_PUSH_INFLIGHT K (#339); 0 means unbounded. slotsHeld is the
+	// current count and slotPeak its high-water mark.
+	slotMax   int
+	slotsHeld int
+	slotPeak  int
 }
 
 // ingestedInboundSet captures one HandleInboundEvent call from the dialer's
@@ -250,11 +257,28 @@ func (f *fakeSstpOutbound) LoadSigningKey(streamID, issuer, alg string) (crypto.
 	return nil, ""
 }
 
-func (f *fakeSstpOutbound) AcquireSecondPushSlot(pairId string) bool { return true }
-func (f *fakeSstpOutbound) ReleaseSecondPushSlot(pairId string)      {}
-func (f *fakeSstpOutbound) BackfillBatch() int                       { return 100 }
-func (f *fakeSstpOutbound) SignConcurrency() int                     { return 2 }
-func (f *fakeSstpOutbound) Ctx() context.Context                     { return f.ctx }
+func (f *fakeSstpOutbound) AcquireSecondPushSlot(pairId string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.slotMax > 0 && f.slotsHeld >= f.slotMax {
+		return false
+	}
+	f.slotsHeld++
+	if f.slotsHeld > f.slotPeak {
+		f.slotPeak = f.slotsHeld
+	}
+	return true
+}
+
+func (f *fakeSstpOutbound) ReleaseSecondPushSlot(pairId string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slotsHeld--
+}
+
+func (f *fakeSstpOutbound) BackfillBatch() int   { return 100 }
+func (f *fakeSstpOutbound) SignConcurrency() int { return 2 }
+func (f *fakeSstpOutbound) Ctx() context.Context { return f.ctx }
 
 // PRD #49 slice 2c AC 2: inbound-half hooks. InboundVerifyConfig returns the
 // test's configured verify config (JWKS + ExpectedIssuer/Audiences), and

@@ -254,9 +254,11 @@ func TestLeaseHeartbeat_LosesTheLeaseToARealCoordinator(t *testing.T) {
 		stopHealthy()
 		synctest.Wait()
 
-		// Once the TTL lapses, node-b legitimately takes over.
+		// Once the TTL lapses, node-b legitimately takes over. It takes a long
+		// lease so it is still live when the test reads the owner below: an
+		// expired lease reads as unowned (#334).
 		time.Sleep(leaseTTL + time.Second)
-		stolen, bToken, err := coord.TryAcquireOrRenewLease(resource, "node-b", leaseTTL)
+		stolen, bToken, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
 		if err != nil || !stolen {
 			t.Fatalf("node-b could not take the expired lease: stolen=%v err=%v", stolen, err)
 		}

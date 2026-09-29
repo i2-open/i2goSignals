@@ -455,27 +455,35 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
-### Speculative delivery intent
+### One-trip ingest write
 
-A pending marker written **before** the event body it refers to is known to be
-stored. Ingest issues the body write and the pending-marker writes concurrently
-rather than in series (ADR 0038), so between the two a marker exists whose body
-may still be in flight, or may turn out to be rejected as a duplicate `jti`.
+Ingest stores a batch's event bodies **and** every matching stream's pending
+markers in ONE store call, `EventDAO.InsertWithPending` (ADR 0043). On MongoDB
+8.0+ it is a single ordered multi-namespace client `bulkWrite`, so ingest pays
+one majority-acked round trip; below 8.0 it falls back to two sequential writes
+(bodies, then markers for the accepted bodies only) and logs one WARN at
+startup. Either way a marker is written only for a SET whose body was stored, so
+there is no speculative marker to retract.
 
-The router's ingest path is therefore in two phases with the join between them:
-`planFanoutLocked` selects the matching streams and writes their markers,
-`IngestBatch.Wait` joins the body write, and `commitFanoutLocked` retracts the
-markers of every rejected candidate, meters the survivors as egress, and only
-then wakes the streams. `EventService.Candidates` is what makes the first phase
-possible: it hands the router the candidate records before the write completes,
-and those records must not be mutated while it holds them.
+The router's ingest path plans first and writes once: `planFanoutLocked` selects
+the matching streams (no write), `EventService.AddEventsWithPending` stores
+bodies and markers, and `commitFanoutLocked` meters the accepted SETs as egress
+and only then wakes the streams. A SET is acked only when its body and its
+markers are durable (ADR 0038's contract, retained).
 
-Two consequences worth knowing before debugging a delivery oddity. First, a
-crash between the two writes can leave a **body-less marker** — every delivery
-leg skips one without acking it, but nothing retires it (ADR 0038 bounds the
-exposure). Second, the pending list is cluster-visible, so a marker for a
-duplicate `jti` whose body already exists can be delivered a second time before
-it is retracted; `jti` dedup at the receiver (ADR 0017) is what covers that.
+Worth knowing before debugging a delivery oddity: a **body-less marker** can
+still exist — data left by an older build's concurrent ingest — and every
+delivery leg skips one without acking it. A crash between the fallback path's
+two writes leaves the opposite: a stored body with no marker, never acked.
+And if a body lands but one of its markers fails, the SET is answered 503; the
+retry resolves as a duplicate, and `router.requeueDuplicates` repairs it
+through `EventService.RequeueDuplicate` / `EventDAO.EnsurePending`, an
+idempotent `(sid, jti)` upsert that queues the SET on each target holding
+neither a pending nor a delivered record for it, then meters and wakes those
+targets like an accepted SET (#331). A duplicate with its markers in place
+changes nothing; a failed repair is answered 503 again. The WAL drain runs the
+same repair. The only residual is a retry that arrives after retention purged
+the delivered record, which is re-queued (at-least-once).
 
 ### Ingest read caches
 
@@ -540,7 +548,11 @@ Monotonically increasing per-resource counter handed back from
 that lost its lease can be rejected at the boundary even if it's still
 trying to write. The `MemoryCoordinator`'s contract guarantees the
 token never moves backward across the lifetime of a coordinator
-instance, even after takeover.
+instance, even after takeover. `EventService.AckEvent(s)` checks the
+token against the stream's current lease before writing; modes that
+hold no lease (poll transmitter, SSTP server side) pass
+`NoFencingToken` (0) and are exempt only because the router reports no
+lease resource for the stream — a 0 token on a leased stream is refused.
 
 ### Rebindable collection
 

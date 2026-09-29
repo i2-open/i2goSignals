@@ -17,15 +17,15 @@ import (
 // new batch, and every wait the runner makes (the lease wait, the pre-flight,
 // recoveryLoop and its sleeps, the idle and backfill timers) is on ctx, which
 // stop cancels. A batch already handed to pushBatch is not aborted: its pushes
-// and its ack run on the router context and complete normally, so at most one
-// batch goes out after stop. Router shutdown cancels ctx too, so a stopped
+// and its ack run on the router context and complete normally, so at most K
+// batches (pushInFlightBatches, #339) go out after stop. Router shutdown cancels ctx too, so a stopped
 // runner and a shut-down router exit the same way.
 //
 // Finished closes once the goroutine has fully exited, after its deferred
 // cleanup (the lease heartbeat, the lease-owner forget, the leases-held gauge).
 // A successor runner for the same stream starts only after it closes, so the
 // two never overlap: the successor's preload reads the store after the old
-// in-flight batch was acked, and the old runner's forget cannot clear the
+// in-flight batches were acked, and the old runner's forget cannot clear the
 // successor's lease-owner note.
 type pushRunner struct {
 	buf    *buffer.EventPushBuffer

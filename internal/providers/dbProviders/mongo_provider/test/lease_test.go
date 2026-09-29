@@ -52,11 +52,11 @@ func (s *LeaseTestSuite) TestLeaseAcquisition() {
 	s.False(acquired)
 	s.Equal(int64(0), token2)
 
-	// 3. Node 1 renews lease
+	// 3. Node 1 renews its live lease — the fencing token is kept (#334)
 	acquired, token3, err := s.provider.TryAcquireOrRenewLease(resource, node1, 2*time.Second)
 	s.NoError(err)
 	s.True(acquired)
-	s.Greater(token3, token1)
+	s.Equal(token1, token3)
 
 	// 4. Wait for lease to expire
 	time.Sleep(2500 * time.Millisecond)
@@ -86,6 +86,44 @@ func (s *LeaseTestSuite) TestLeaseRelease() {
 	acquired, _, err = s.provider.TryAcquireOrRenewLease(resource, node2, 10*time.Second)
 	s.NoError(err)
 	s.True(acquired)
+}
+
+// TestExpiredLeaseReadsUnowned proves, on an injected clock, that an elapsed
+// lease reads as unowned without a release, that a released lease reads as
+// unowned at once, and that re-acquiring an expired lease is a new tenure with
+// a higher token even for its former owner (#334).
+func (s *LeaseTestSuite) TestExpiredLeaseReadsUnowned() {
+	coord, ok := s.provider.Coordinator().(*mongo_provider.MongoCoordinator)
+	s.Require().True(ok)
+	clock := time.Now().UTC().Truncate(time.Millisecond)
+	coord.SetClock(func() time.Time { return clock })
+	defer coord.SetClock(nil)
+	resource := "test-resource-expiry"
+
+	acquired, t1, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
+	s.Require().NoError(err)
+	s.Require().True(acquired)
+	owner, _, tok, err := coord.GetLeaseOwner(resource)
+	s.NoError(err)
+	s.Equal("node-1", owner)
+	s.Equal(t1, tok)
+
+	clock = clock.Add(30 * time.Second)
+	owner, until, tok, err := coord.GetLeaseOwner(resource)
+	s.NoError(err)
+	s.Equal("", owner, "an expired lease has no owner")
+	s.True(until.IsZero())
+	s.Equal(int64(0), tok)
+
+	acquired, t2, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
+	s.NoError(err)
+	s.True(acquired)
+	s.Greater(t2, t1, "re-acquiring an expired lease is a new tenure")
+
+	s.NoError(coord.ReleaseLeaseIfOwned(resource, "node-1"))
+	owner, _, _, err = coord.GetLeaseOwner(resource)
+	s.NoError(err)
+	s.Equal("", owner, "a released lease has no owner")
 }
 
 func TestLeaseSuite(t *testing.T) {

@@ -13,16 +13,17 @@ import (
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
-// The ingest durability contract (ADR 0038): the event body and the pending
-// marker are written concurrently, so a crash between the two can leave a
-// pending marker whose body was never stored. These tests pin the behaviour
+// The ingest durability contract (ADR 0038): a SET is acked only once its body
+// and pending markers are durable. The one-trip ingest write (ADR 0043) never
+// writes a marker without its body, but a marker can still stand alone — data
+// written by an older build's concurrent ingest. These tests pin the behaviour
 // every delivery leg must have in that state — the orphan is skipped, is never
 // delivered, and is never acked, while its healthy neighbours in the same batch
 // are delivered normally.
 
 // orphanPendingMarker records a delivery intent for a JTI whose body is not in
-// the event store — exactly the state a crash between the two concurrent ingest
-// writes can leave behind.
+// the event store — the state an older build's concurrent ingest can leave
+// behind.
 func orphanPendingMarker(t *testing.T, h *filterPushHarness, sid string) string {
 	t.Helper()
 	const jti = "orphan-no-body"
@@ -125,9 +126,10 @@ func TestOrphanPendingMarker_SstpClientSkips(t *testing.T) {
 
 // TestIngest_PendingMarkerIsIndependentOfBody proves the state the tests above
 // exercise is reachable: a pending marker is a delivery intent recorded on its
-// own, so ingest may write it before, after, or concurrently with the body
-// (ADR 0038). The provider must not silently drop a marker whose body has not
-// landed yet — that would lose the event instead of merely deferring it.
+// own (ADR 0038), so it can exist without its body — data left by an older
+// build's concurrent ingest. The provider must not silently drop a
+// marker whose body has not landed — that would lose the event instead of
+// merely deferring it.
 func TestIngest_PendingMarkerIsIndependentOfBody(t *testing.T) {
 	h := newPushBatchHarness(t, delivery.NewMemoryAdapter(delivery.PushOutcome{
 		Classification: goSetPush.Classification{Class: goSetPush.ClassAccepted},

@@ -70,6 +70,25 @@ instead of minting one, pass
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
 | SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
 
+### Ingest breakdown (DAO metrics)
+
+The ingest latency above is the whole HTTP request. To see how much of it is the
+two Mongo writes the 202 waits on, scrape goSignals1's `/metrics` for
+`goSignals_dao_op_duration_seconds{op="InsertMany"}` and
+`{op="AddPendingMany"}` (with `goSignals_dao_batch_size` for per-document cost)
+and compare their p50 with `goSignals_http_duration_seconds`. The histograms,
+labels, buckets and example queries are in
+[`docs/Metrics.md` — DAO Metrics](../Metrics.md#dao-metrics). The design
+questions these numbers feed are in the research notes
+[event-store fast path](event-store-fast-path-research.md) and
+[streaming throughput](streaming-throughput-research.md).
+
+First reading (2026-09-28, dev stack, 2000 events, 16 workers, ingest p50
+27.6 ms at 503 ev/s): `/events/{id}` HTTP p50 24.7 ms; `InsertMany` p50 6.6 ms
+and `AddPendingMany` p50 5.7 ms, each with batch size 1 per request. The two
+writes run concurrently, so roughly 7 ms of the ~25 ms request is Mongo; the
+rest is per-request overhead outside the DAO.
+
 Delivery is always counted on goSignals2. goSignals1's `events_out_total` is only
 incremented on a push acknowledgement, never on a poll, so it cannot be used for
 the poll leg. `/metrics` is unauthenticated on the dev stack, so no extra
@@ -105,17 +124,101 @@ Useful flags:
 | `--sstp-role initiator\|responder` | goSignals1's SSTP role, i.e. which node opens the HTTP connection |
 | `--issuer`, `--push-aud`, `--poll-aud`, `--sstp-aud` | issuer and per-leg audiences (URLs) |
 | `--pprof`, `--pprof-seconds` | fetch `debug/pprof/profile` from goSignals1 (`:6060`) and goSignals2 (`:6061`) during the run; files land in `bin/bench/pprof/` |
+| `--pprof-block` | with `--pprof`, also fetch a `debug/pprof/block` delta profile over the same window (needs `I2SIG_PPROF_BLOCK_RATE` on the servers) |
+| `--mongo-uri` | host-side Mongo URI (default `$BENCH_MONGO_URI`); snapshot the primary's journal counters before and after the run (see [Concurrency sweep](#concurrency-sweep)) |
+| `--workers` | free-text record of the server-side worker setting, stored in the result; it does not change the servers |
+| `--signing-alg RS256\|ES256\|ML-DSA-65` | `signing_alg` on the push and poll transmitter streams (default: the server default). Anything but RS256 needs an issuer key of that algorithm; the harness mints one through `POST /key/{issuer}?alg=` when it is missing |
+| `--durability majority\|local` | `durability` on the ingress stream (default: the server default). `local` needs `I2SIG_STORE_WAL=local` on goSignals1; the harness then scrapes the ingress counters only once `goSignals_wal_depth` has drained to zero |
 | `--history <file>` | append a summary row to a Markdown table (see below) |
 | `--label` | free text stored with the result (what changed) |
+| `--note` | why the run was made (the change under test); written to the history `Note` column |
 | `--keep` | leave the streams in place for inspection with the CLI / admin UI |
 | `--drain-timeout` | give up waiting for goSignals2 (default 5m) |
 | `--gs1`, `--gs2`, `--ca`, `--bootstrap-token` | point at a different stack |
+| `--gs1b <url>` | a second member of goSignals1's cluster (e.g. `https://localhost:8887`); ingest workers alternate between `--gs1` and it (see [Two-node cluster ingest](#two-node-cluster-ingest)) |
+| `--gs1b-sync-timeout` | with `--gs1b`, how long to wait after creating the streams for the second node to register the run's outbound streams before ingest starts (default 90s; peers sync every 40 s) |
 
 Every run writes `bin/bench/bench-<timestamp>.json` with the full result
 (topology ids, latency percentiles, per-leg counts, profile paths).
 
+### Two-node cluster ingest
+
+With `--gs1b` the harness spreads ingest over two members of goSignals1's
+cluster: all streams are still created through `--gs1` (the cluster shares
+one Mongo store, so they exist on both nodes), then even-numbered workers post
+to `--gs1` and odd-numbered workers to `--gs1b`, each over its own connection
+pool. A node only learns about streams created on a peer through its 40 s
+background sync, and a SET that reaches `--gs1b` before it has registered the
+run's outbound streams matches nothing and is never delivered; so after
+creating the streams the harness polls `--gs1b`'s `/metrics` until a
+`goSignals_router_events_in_total` series exists for each outbound stream
+(push, poll and SSTP transmitters), failing the run after
+`--gs1b-sync-timeout`. The wait is reported as `gs1b stream sync: Ns`
+(`gs1b_sync_seconds` in the JSON). Before the ingress counter is read, `goSignals_wal_depth` must have
+drained to zero on **both** nodes, and `ingress_counted` is the sum of each
+node's `goSignals_router_events_in_total{stream_id=ingress}`. The result adds
+an `ingest split: gs1=N gs1b=M` line (`ingest_split` in the JSON, from the
+workers' 202 counts) and a `dao gs1b:` block; the history row format is
+unchanged, so use `--label` to mark cluster runs. `--pprof-gs1b` profiles the
+second node when set.
+
+The peer never forgets a stream either: a node keeps delivering to streams a
+previous run deleted, which inflates its fan-out work and leaves orphan
+pending markers. Until that is fixed, restart the second node before each
+two-node run (`docker compose -f docker-compose-benchmark.yml --profile
+cluster restart goSignals1b`). The two-node results and the coordination
+defects they exposed are in [cluster-perf.md](cluster-perf.md).
+
 Teardown of the poll receiver waits for its in-flight long poll to expire, so
 the last log line arrives about ten seconds after the summary.
+
+### Benchmark stack
+
+`docker-compose-dev.yml` is built for debugging, not measuring: every node runs
+under Delve from a debug build with a bind-mounted source tree, logs at INFO
+(one line per SET), and shares the host with Keycloak, Postgres, two SCIM
+servers, goSsfServer and the observability stack. On the same laptop the same
+run measured 2.3–2.5× slower there than on the benchmark stack.
+
+`docker-compose-benchmark.yml` is the same two goSignals nodes and three-member
+replica set on the production distroless image, LOG_LEVEL=WARN, pprof on, no
+other services, and a 1 GiB WiredTiger cache per member. goSignals1 runs the
+node-local WAL (`I2SIG_STORE_WAL=local`, ring-fed); goSignals2 stays at
+`majority`. It binds the same host ports as the dev stack, so stop that first.
+
+```bash
+make dev-down
+make bench-stack-up            # make build-docker + compose up --wait
+make dev-bench BENCH_E2E_EVENTS=20000 BENCH_E2E_CONCURRENCY=128 \
+     BENCH_E2E_ARGS="--durability=local --history docs/perf/e2e-history.md --label bench-stack"
+make bench-stack-logs
+make bench-stack-down          # add -v by hand to drop the volumes
+```
+
+Runtime knobs pass straight through from the environment: `BENCH_LOG_LEVEL`,
+`BENCH_SUBJECT_FILTERING`, `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`,
+`I2SIG_PUSH_CONCURRENCY`, `I2SIG_DELIVERY_INFLIGHT_MAX`,
+`I2SIG_PPROF_MUTEX_FRACTION`, `I2SIG_PPROF_BLOCK_RATE`, `BENCH_GS1_WAL`,
+`BENCH_GS2_WAL` and `BENCH_IMAGE`. Rows taken on this stack are labelled
+`bench-stack-*` in the history; do not compare them with dev-stack rows.
+
+### Signing algorithms
+
+Every ingested SET is re-signed once per outbound leg (push, poll and SSTP), so
+the transmitter's `signing_alg` is a first-order term in goSignals1's CPU:
+RSA-2048 signing costs about 1 ms per SET on an arm64 Docker VM, ECDSA P-256
+about 50 µs. `make dev-bench-algs` runs the same load once per algorithm in
+`BENCH_ALGS` (default `RS256 ES256`) and appends one history row each, labelled
+`algs-<alg>-c<clients>`, then prints those rows:
+
+```bash
+make dev-bench-algs BENCH_E2E_EVENTS=20000 BENCH_E2E_CONCURRENCY=128 \
+     BENCH_E2E_ARGS="--durability=local"
+make dev-bench-algs BENCH_ALGS="RS256 ES256 ML-DSA-65"
+```
+
+The JSON result and the summary line carry `signing_alg` and `durability`, so
+a row's algorithm is recoverable without the label.
 
 ### Aborted runs
 
@@ -143,6 +246,107 @@ Binaries in the dev stack run under Delve from source, so symbols resolve
 without any extra setup. For heap, goroutine or mutex profiles use
 `make dev-pprof PPROF_KIND=heap` while a long run is in flight (see
 [pprof.md](pprof.md)).
+
+## Concurrency sweep
+
+The sweep answers one question: as ingest parallelism rises, what bounds
+throughput — Mongo round trips, the journal, or the server's own CPU and
+locks? It runs **5000 events** (`alternate` mix) at **1, 4, 16 and 64
+clients** for each worker setting, on the Mongo provider and again on the
+memory provider as a no-database control. The latest results are in
+[throughput-baseline-alpha20.md](throughput-baseline-alpha20.md).
+
+### The two axes
+
+- **Clients** — `--concurrency`, the number of parallel ingest connections.
+  The server has no ingest worker pool: each ingest request runs on its own
+  handler goroutine, so client count *is* ingest parallelism.
+- **Workers** — `I2SIG_PUSH_CONCURRENCY` on goSignals1, the push-delivery
+  pool size ([ADR 0037](../adr/0037-push-concurrency-derived-from-processors.md):
+  `GOMAXPROCS` clamped to 8..32 when unset, 14 on a fourteen-processor host).
+  It is read once at start-up, so it is set when the stack is started, not per
+  run. The sweep uses `default`, `8` and `32`. `--workers` only records the
+  setting in each JSON result.
+
+### Running it
+
+```bash
+# Mongo provider, one worker setting at a time
+I2SIG_PUSH_CONCURRENCY=8 docker compose -f docker-compose-dev.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_SWEEP_WORKERS=8
+
+# back to the derived default
+docker compose -f docker-compose-dev.yml up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep                                  # BENCH_SWEEP_WORKERS=default
+
+# memory provider (control): the overlay swaps MONGO_URL for memorydb:
+docker compose -f docker-compose-dev.yml -f docker-compose-dev-memory.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_MONGO_URI= \
+    BENCH_E2E_ARGS="--issuer=https://bench-mem.example.com --issuer-key=bin/bench/bench-mem.example.com.pem"
+```
+
+`dev-bench-sweep` runs `dev-bench` once per entry in
+`BENCH_SWEEP_CLIENTS` (default `1 4 16 64`), labels each result
+`sweep-c<clients>-w<workers>` and passes `BENCH_E2E_ARGS` through. Every run
+writes its own `bin/bench/bench-<timestamp>.json`.
+
+**Use a separate issuer for memory-provider runs.** A memory store starts
+empty on every restart, so goSignals1 no longer holds the issuer's key and the
+harness mints a new key pair and writes it to the `--issuer-key` file (default
+`bin/bench/<issuer host>.pem`). The Mongo stack still holds the old public
+key, so after that every SET the same issuer sends to the Mongo stack fails
+with HTTP 400. The harness now keeps the previous PEM as
+`<file>.<UTC stamp>.bak` before writing a new one, so the old key can be put
+back, but a distinct `--issuer` (and so a distinct key file) for memory runs,
+as above, avoids the problem.
+
+### Journal syncs per SET
+
+With `--mongo-uri` (or `BENCH_MONGO_URI`) set, the harness reads
+`db.serverStatus().wiredTiger.log` on the replica-set primary before and after
+the run and records the difference in the result's `journal` block: `log sync
+operations`, `log write operations`, `log flush operations`, bytes written and
+sync time, plus syncs and writes per ingested SET.
+
+- The URI is dialled **from the host**. The dev replica set advertises
+  `mongo1`..`mongo3` on ports 30001..30003, so `/etc/hosts` must map those
+  names to `127.0.0.1`; the Makefile default is
+  `mongodb://root:dockTest@mongo1:30001,mongo2:30002,mongo3:30003/?replicaSet=dbrs&authSource=admin`.
+- The counters are **server-wide**. goSignals1 and goSignals2 share the replica
+  set, so a run's delta covers ingest on goSignals1 and delivery bookkeeping on
+  goSignals2 together, plus any background writes (leases, heartbeats).
+- An empty URI skips the probe; on the memory provider set `BENCH_MONGO_URI=`.
+
+### DAO latency
+
+Each result carries `dao_gs1` / `dao_gs2` (see
+[Ingest breakdown](#ingest-breakdown-dao-metrics)) and `dominant_dao_op`, the
+op with the most wall time on goSignals1 (`WatchPending` excluded). The lowest
+histogram bucket is 0.5 ms and quantiles interpolate from zero inside it, so
+on the memory provider a p50 of about **0.25 ms** means "under 0.5 ms", not a
+measured 0.25 ms.
+
+### Profiles for the 16- and 64-client runs
+
+Start the stack with block sampling on, then profile only the two runs that
+matter:
+
+```bash
+I2SIG_PPROF_BLOCK_RATE=1 docker compose -f docker-compose-dev.yml \
+    up -d --force-recreate goSignals1 goSignals2
+make dev-bench-sweep BENCH_SWEEP_CLIENTS="16 64" \
+    BENCH_E2E_ARGS="--pprof --pprof-block --pprof-seconds=10"
+go tool pprof -top bin/bench/pprof/block-goSignals1-<stamp>.pb.gz
+```
+
+`--pprof-block` fetches `debug/pprof/block?seconds=N` alongside the CPU
+profile, so both cover the same window; files are
+`bin/bench/pprof/{cpu,block}-goSignals{1,2}-<stamp>.pb.gz`. Block sampling
+costs throughput at 64 clients, so take the sweep table from unprofiled runs.
+Recreate the two services without `I2SIG_PPROF_BLOCK_RATE` afterwards (see
+[pprof.md](pprof.md#mutex-and-block-profiling-opt-in)).
 
 ## Recording results over time
 

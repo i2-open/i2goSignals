@@ -526,6 +526,32 @@ func (s *SstpPairE2ESuite) TestWakeSstpServer_UnblocksHeldLongPoll() {
 	}
 }
 
+// TestSstpWireShape_UnchangedByKInFlight pins the responder side of the wire
+// exchange that #339's K in-flight second pushes rely on (ADR 0044): with
+// nothing queued, a returnImmediately=true cycle and a returnEvents=false
+// second push each return promptly with an empty 200 instead of holding the
+// long-poll, exactly as before K was introduced. (The held
+// returnImmediately=false case is TestWakeSstpServer_UnblocksHeldLongPoll.)
+func (s *SstpPairE2ESuite) TestSstpWireShape_UnchangedByKInFlight() {
+	s.T().Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "10")
+	rec := s.createPairResponder(s.b, s.a, "peerA")
+
+	for _, body := range []string{
+		`{"sets":{},"returnImmediately":true}`,
+		`{"sets":{},"returnEvents":false}`,
+	} {
+		start := time.Now()
+		status, respBody := s.b.sstpPostRaw(s.T(), "/sstp/"+rec.PairId, rec.SstpMethod.AuthorizationHeader, []byte(body))
+		elapsed := time.Since(start)
+		s.Require().Equalf(http.StatusOK, status, "%s: 200, got %d: %s", body, status, string(respBody))
+		s.Lessf(elapsed, 3*time.Second, "%s returns without holding the long-poll", body)
+
+		var msg goSetSstp.Message
+		s.Require().NoError(json.Unmarshal(respBody, &msg))
+		s.Emptyf(msg.Sets, "%s: nothing queued, nothing returned", body)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 7: Lease takeover — requires a shared real-time cluster store (Mongo).
 // ---------------------------------------------------------------------------

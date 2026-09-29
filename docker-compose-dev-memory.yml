@@ -1,0 +1,19 @@
+# Overlay for docker-compose-dev.yml: run goSignals1 and goSignals2 on the
+# in-memory persistence provider instead of the Mongo replica set, for the
+# memory-provider half of the goSignalsBench concurrency sweep
+# (docs/perf/e2e-benchmark.md, "Concurrency sweep"). Dev/bench only.
+#
+#   docker compose -f docker-compose-dev.yml -f docker-compose-dev-memory.yml \
+#       up -d --force-recreate goSignals1 goSignals2
+#
+# Go back to Mongo by recreating the two services without this file. The
+# memory store is saved under /tmp inside the container, never the repo mount.
+services:
+    goSignals1:
+        environment:
+            - "MONGO_URL=memorydb:"
+            - I2SIG_STORE_MEM_DIRECTORY=/tmp/gosignals-mem
+    goSignals2:
+        environment:
+            - "MONGO_URL=memorydb:"
+            - I2SIG_STORE_MEM_DIRECTORY=/tmp/gosignals-mem

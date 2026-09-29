@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -26,8 +27,34 @@ type ResetEgressObserver interface {
 	ObserveResetEgress(streamID string, event *model.EventRecord)
 }
 
+// NoFencingToken is the fencing token an ack carries when the caller holds no
+// cluster lease: a poll transmitter (ADR 0014) and the SSTP server side. It is
+// accepted only for a stream the FenceChecker reports as unleased; on a leased
+// stream it is always rejected, as is any token once the lease has expired
+// (an expired lease reads as token 0).
+const NoFencingToken int64 = 0
+
+// ErrStaleFencingToken is returned by AckEvent and AckEvents when the ack's
+// fencing token is not the current token of the stream's lease: the caller's
+// lease expired or another node took it over. Nothing is written, and the
+// caller must stop delivering on its lease (#334).
+var ErrStaleFencingToken = errors.New("stale fencing token: lease no longer held")
+
+// FenceChecker reports the lease that fences acks for a stream. leased is
+// false for a stream delivered by a mode that holds no lease, whose acks are
+// then not fenced. Otherwise token is the resource's current fencing token,
+// or 0 when the lease has expired or been released. The event router
+// implements it from its stream registry and the ClusterCoordinator.
+type FenceChecker interface {
+	CurrentFence(streamID string) (resource string, token int64, leased bool, err error)
+}
+
 type EventService struct {
 	eventDAO interfaces.EventDAO
+	// fenceChecker, when non-nil, fences AckEvent and AckEvents: an ack for a
+	// leased stream is written only when its token is the lease's current one.
+	// nil leaves acks unfenced (a service with no cluster behind it).
+	fenceChecker FenceChecker
 	// resetEgressObserver, when non-nil, receives one call per event
 	// ResetEventStream re-queues, so reset re-deliveries are metered as fresh
 	// egress. nil (the default) leaves the reset path unmetered — the community
@@ -41,12 +68,52 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 	}
 }
 
+// WrapEventDAO replaces the service's EventDAO with wrap(current). The event
+// router uses it to put the ring-fed WAL read-through in front of the store
+// (#342). Call it at construction, before any concurrent use of the service.
+func (s *EventService) WrapEventDAO(wrap func(interfaces.EventDAO) interfaces.EventDAO) {
+	s.eventDAO = wrap(s.eventDAO)
+}
+
 // SetResetEgressObserver installs (or clears, with nil) the sink notified per
 // event re-queued by ResetEventStream. The event router wires itself here at
 // construction so reset re-deliveries flow to the same metering observer the
 // fan-out egress uses (ADR 0055 Q91.4).
 func (s *EventService) SetResetEgressObserver(observer ResetEgressObserver) {
 	s.resetEgressObserver = observer
+}
+
+// SetFenceChecker installs (or clears, with nil) the checker that fences acks
+// on the stream's lease token. The event router wires itself here at
+// construction, before any delivery starts.
+func (s *EventService) SetFenceChecker(checker FenceChecker) {
+	s.fenceChecker = checker
+}
+
+// checkFence verifies an ack's fencing token against the stream's lease, once
+// per ack call and before any write (ADR 0035). A stream with no lease, or a
+// service with no checker, is not fenced. Whether a stream is leased is the
+// checker's call, never the token's: NoFencingToken on a leased stream is
+// rejected (#334). A lookup error fails closed.
+func (s *EventService) checkFence(streamID string, fencingToken int64) error {
+	if s.fenceChecker == nil {
+		// No cluster behind the service.
+		return nil
+	}
+	resource, current, leased, err := s.fenceChecker.CurrentFence(streamID)
+	if err != nil {
+		esLog.Error("Fence check failed, ack not written", "streamID", streamID, "error", err)
+		return err
+	}
+	if !leased {
+		// Delivery mode that holds no lease (poll transmitter, SSTP server side).
+		return nil
+	}
+	if fencingToken != NoFencingToken && fencingToken == current {
+		return nil
+	}
+	esLog.Warn("Rejected ack with stale fencing token", "streamID", streamID, "resource", resource, "token", fencingToken, "current", current)
+	return fmt.Errorf("%w: stream %s resource %s token %d current %d", ErrStaleFencingToken, streamID, resource, fencingToken, current)
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
@@ -119,136 +186,84 @@ func (s *EventService) existingAfterDuplicate(ctx context.Context, jti string, s
 	return existing, interfaces.ErrDuplicateJTI
 }
 
-// IngestBatch is one in-flight body write started by BeginAddEvents.
-//
-// The candidate records are built and returned synchronously so the caller can
-// route them and write their pending markers while the body write is still in
-// flight (ADR 0038); Wait joins the write and reports the same per-record
-// outcome AddEvents reports. Candidates is immutable once BeginAddEvents
-// returns — the result slice Wait reports is a separate slice — so a caller may
-// read the candidates concurrently with the write.
-type IngestBatch struct {
-	candidates []*model.EventRecord
-	done       chan struct{}
-	recs       []*model.EventRecord
-	errs       []error
-}
-
-// Candidates returns the records the batch is attempting to persist, index
-// aligned with the events passed to BeginAddEvents. They are available before
-// the write completes and are never mutated, so routing may read them while
-// the write is in flight. A candidate is not yet known to be accepted: Wait
-// decides that.
-func (b *IngestBatch) Candidates() []*model.EventRecord {
-	return b.candidates
-}
-
-// Wait blocks until the body write completes and returns the records and
-// errors with exactly AddEvents' semantics. It may be called more than once.
-func (b *IngestBatch) Wait() ([]*model.EventRecord, []error) {
-	<-b.done
-	return b.recs, b.errs
-}
-
-// BeginAddEvents starts persisting a batch of inbound SETs and returns before
-// the write completes. events and raws are index-aligned. The caller must Wait
-// on the returned batch before treating any record as accepted; a JTI that
-// already exists comes back paired with ErrDuplicateJTI, and a batch that
-// fails outright carries that error at every position.
-//
-// AddEvents is the synchronous form; the split exists so ingest can issue the
-// body write and the pending-marker writes concurrently rather than serially
-// (ADR 0038).
-func (s *EventService) BeginAddEvents(ctx context.Context, events []*goSet.SecurityEventToken, sid string, raws []string) *IngestBatch {
-	b := &IngestBatch{
-		candidates: make([]*model.EventRecord, len(events)),
-		recs:       make([]*model.EventRecord, len(events)),
-		errs:       make([]error, len(events)),
-		done:       make(chan struct{}),
-	}
+// NewIngestRecords builds the records a batch of inbound SETs will be stored
+// as, index-aligned with events and raws. They are candidates: routing plans
+// the fan-out from them, and AddEventsWithPending decides which are accepted.
+func NewIngestRecords(events []*goSet.SecurityEventToken, sid string, raws []string) []*model.EventRecord {
+	recs := make([]*model.EventRecord, len(events))
 	for i, ev := range events {
-		rec := newEventRecord(ev, sid, raws[i], false)
-		b.candidates[i], b.recs[i] = rec, rec
+		recs[i] = newEventRecord(ev, sid, raws[i], false)
 	}
-	if len(events) == 0 {
-		close(b.done)
-		return b
-	}
-	go func() {
-		defer close(b.done)
-		s.completeAddEvents(ctx, b, sid)
-	}()
-	return b
+	return recs
 }
 
-// completeAddEvents runs the bulk insert and folds the per-record outcomes into
-// the batch's result slices.
-func (s *EventService) completeAddEvents(ctx context.Context, b *IngestBatch, sid string) {
-	perRec, batchErr := s.eventDAO.InsertMany(ctx, b.recs)
-	if batchErr != nil {
-		esLog.Error("Error inserting event batch", "sid", sid, "count", len(b.recs), "error", batchErr)
-		for i := range b.errs {
-			b.recs[i], b.errs[i] = nil, batchErr
-		}
-		return
-	}
-	for i, err := range perRec {
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, interfaces.ErrDuplicateJTI) {
-			b.recs[i], b.errs[i] = s.existingAfterDuplicate(ctx, b.recs[i].Jti, sid)
-			continue
-		}
-		esLog.Error("Error inserting event", "jti", b.recs[i].Jti, "error", err)
-		b.recs[i], b.errs[i] = nil, err
-	}
-}
-
-// AddEvents persists a batch of inbound SETs in one DAO round trip. events and
-// raws are index-aligned; the returned records and errors are index-aligned
-// with them. A record whose JTI already exists comes back as the existing
-// record paired with ErrDuplicateJTI, exactly as AddEvent reports it. When the
-// batch itself fails before any record is attempted, every position carries
+// AddEventsWithPending persists a batch of candidate records together with
+// their delivery intents in one DAO call (ADR 0043). pending maps an outbound
+// stream document ID to the JTIs queued on it. The returned records and errors
+// are index-aligned with recs: nil error means the record and all of its
+// pending markers are durably stored; a JTI that already exists comes back as
+// the existing record paired with ErrDuplicateJTI, with no marker written for
+// it; any other error means the SET is not durably queued and must not be
+// acknowledged (ADR 0038). When the batch itself fails, every position carries
 // that error and every record is nil.
-func (s *EventService) AddEvents(ctx context.Context, events []*goSet.SecurityEventToken, sid string, raws []string) ([]*model.EventRecord, []error) {
-	return s.BeginAddEvents(ctx, events, sid, raws).Wait()
+func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]string) ([]*model.EventRecord, []error) {
+	out := make([]*model.EventRecord, len(recs))
+	errs := make([]error, len(recs))
+	if len(recs) == 0 {
+		return out, errs
+	}
+	perRec, batchErr := s.eventDAO.InsertWithPending(ctx, recs, pending)
+	if batchErr != nil {
+		// WARN: the DAO already logged the failure at ERROR and the caller
+		// turns it into a retryable 503 (CONTEXT.md log-level policy).
+		esLog.Warn("Error inserting event batch", "sid", sid, "count", len(recs), "error", batchErr)
+		for i := range errs {
+			errs[i] = batchErr
+		}
+		return out, errs
+	}
+	for i, rec := range recs {
+		var err error
+		if i < len(perRec) {
+			err = perRec[i]
+		}
+		switch {
+		case err == nil:
+			out[i] = rec
+		case errors.Is(err, interfaces.ErrDuplicateJTI):
+			out[i], errs[i] = s.existingAfterDuplicate(ctx, rec.Jti, sid)
+		default:
+			esLog.Error("Error inserting event", "jti", rec.Jti, "error", err)
+			errs[i] = err
+		}
+	}
+	return out, errs
 }
 
-// DiscardPending retracts one speculative delivery intent per JTI from
-// streamID's pending list without recording anything as delivered. It is the
-// compensating write for a pending marker whose event body was ultimately
-// rejected — a duplicate JTI, or a failed body write — see ADR 0038. It undoes
-// exactly one AddPending per JTI, so an older still-undelivered intent for the
-// same JTI survives. AckEvents is the delivery-side counterpart: it also
-// removes pending entries, but removes them all and records them as delivered.
-func (s *EventService) DiscardPending(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
+// RequeueDuplicate closes the ADR 0043 residual (#331): a SET whose body
+// landed but whose marker write failed was answered 503, so its retry is a
+// duplicate for AddEventsWithPending and would otherwise be acked without ever
+// being queued. It queues jti on each of streamIDs that has neither a pending
+// nor a delivered record for it and returns the streams it queued on; a SET
+// that is still pending or already delivered everywhere is a no-op. An error
+// means the retry must again be answered 503, not acked.
+func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid string, streamIDs []string) ([]string, error) {
+	queued, err := s.eventDAO.EnsurePending(ctx, jti, streamIDs)
+	if err != nil {
+		// WARN: the DAO logged the failure at ERROR and the caller answers 503.
+		esLog.Warn("Error re-queuing duplicate SET", "jti", jti, "sid", sid, "error", err)
+		return nil, err
 	}
-	// The error is returned, not logged: the router's commit phase logs it with
-	// the stream and delivery mode attached, and CONTEXT.md's log-level policy
-	// keeps ERROR an attention signal rather than a noise floor.
-	return s.eventDAO.RetractPending(ctx, jtis, streamID)
+	if len(queued) > 0 {
+		esLog.Warn("Duplicate SET re-queued on streams it was never queued on (ADR 0043 residual, #331)", "jti", jti, "sid", sid, "streams", len(queued))
+	}
+	return queued, nil
 }
 
 func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
 	err := s.eventDAO.AddPending(ctx, jti, streamID)
 	if err != nil {
 		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
-	}
-	return err
-}
-
-// AddEventsToStream appends a batch of already-persisted JTIs to a stream's
-// pending list in one DAO round trip, preserving order.
-func (s *EventService) AddEventsToStream(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	err := s.eventDAO.AddPendingMany(ctx, jtis, streamID)
-	if err != nil {
-		esLog.Error("Error adding pending events to stream", "count", len(jtis), "streamID", streamID, "error", err)
 	}
 	return err
 }
@@ -318,43 +333,35 @@ func (s *EventService) GetEventIds(ctx context.Context, streamID string, params 
 	return jtis, more
 }
 
+// AckEvent acknowledges one JTI for streamID through the same one-trip DAO
+// ack as AckEvents (#335). A JTI not pending for the stream is ignored.
 func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
-	// TODO: Use fencingToken to verify lease ownership before marking delivered
-	event, err := s.eventDAO.RemovePending(ctx, jtiString, streamID)
-	if err != nil {
-		esLog.Error("Error removing pending event", "error", err)
+	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-
-	if event != nil {
-		err = s.eventDAO.MarkDelivered(ctx, event, time.Now())
-		if err != nil {
-			esLog.Error("Error marking event as delivered", "jti", event.Jti, "error", err)
-			return err
-		}
+	if _, err := s.eventDAO.AckDelivered(ctx, []string{jtiString}, streamID, time.Now()); err != nil {
+		// WARN: the DAO logs the failure; the SET stays pending and is redelivered.
+		esLog.Warn("Error acknowledging event", "jti", jtiString, "streamID", streamID, "error", err)
+		return err
 	}
 	return nil
 }
 
 // AckEvents acknowledges jtis for streamID as one batch: the pending entries
-// are removed and recorded as delivered in a bounded number of DAO round trips
-// rather than three per JTI. A JTI not pending for the stream is ignored,
-// exactly as AckEvent ignores it. An empty jtis is a no-op.
+// are removed and recorded as delivered by EventDAO.AckDelivered — one
+// multi-namespace bulkWrite on MongoDB 8.0+ (#335). A JTI not pending for the
+// stream is ignored, exactly as AckEvent ignores it. An empty jtis is a
+// no-op. The fencing token is checked once for the batch, as for AckEvent.
 func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
-	// TODO: Use fencingToken to verify lease ownership before marking delivered
 	if len(jtis) == 0 {
 		return nil
 	}
-	events, err := s.eventDAO.RemovePendingMany(ctx, jtis, streamID)
-	if err != nil {
-		esLog.Error("Error removing pending events", "count", len(jtis), "streamID", streamID, "error", err)
+	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-	if len(events) == 0 {
-		return nil
-	}
-	if err = s.eventDAO.MarkDeliveredMany(ctx, events, time.Now()); err != nil {
-		esLog.Error("Error marking events as delivered", "count", len(events), "streamID", streamID, "error", err)
+	if _, err := s.eventDAO.AckDelivered(ctx, jtis, streamID, time.Now()); err != nil {
+		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.
+		esLog.Warn("Error acknowledging events", "count", len(jtis), "streamID", streamID, "error", err)
 		return err
 	}
 	return nil

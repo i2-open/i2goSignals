@@ -89,6 +89,23 @@ type EventDAO interface {
 	// batch as a whole could not be attempted (the per-record slice is then
 	// nil). An empty batch returns (nil, nil).
 	InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error)
+	// InsertWithPending persists records together with their delivery intents
+	// (ADR 0043). pending maps a stream document ID to the JTIs of records that
+	// must be queued on that stream. The returned slice is index-aligned with
+	// records:
+	//
+	//   - nil: the record AND every pending marker for its JTI are stored.
+	//   - ErrDuplicateJTI: the JTI already existed (ADR 0017); the existing
+	//     record is untouched and NO pending marker was written for it.
+	//   - any other error: the record, or one of its markers, was not stored,
+	//     so the SET must not be acknowledged (ADR 0038).
+	//
+	// When a JTI appears more than once in records, its markers are written
+	// once, with the copy that is stored; later copies report ErrDuplicateJTI.
+	// A JTI in pending with no matching record is ignored. A non-nil error means
+	// the batch as a whole failed (the per-record slice is then nil). An empty
+	// batch returns (nil, nil).
+	InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error)
 	FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error)
 	FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error)
 	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
@@ -99,6 +116,15 @@ type EventDAO interface {
 	// bulk write; equivalent to AddPending per JTI but one round trip. An
 	// empty jtis is a no-op.
 	AddPendingMany(ctx context.Context, jtis []string, streamID string) error
+	// EnsurePending queues jti on every stream of streamIDs that holds neither
+	// a pending nor a delivered record for it, and returns the stream IDs it
+	// queued on (a subset of streamIDs, order unspecified). A stream that
+	// already has the JTI pending or delivered is left untouched, so the call
+	// is idempotent. It is the ADR 0043 residual repair (#331): a retry of a
+	// SET whose body landed but whose marker write failed is a duplicate for
+	// InsertWithPending, and this is how that duplicate is (re)queued. An empty
+	// streamIDs returns (nil, nil).
+	EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error)
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
 	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
 	// RemovePendingMany removes every entry of jtis that is pending for
@@ -107,19 +133,6 @@ type EventDAO interface {
 	// RemovePending returns nil for it. Equivalent to RemovePending per JTI
 	// but a bounded number of round trips. An empty jtis returns (nil, nil).
 	RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]DeliverableEvent, error)
-	// RetractPending undoes exactly one AddPending per JTI: for each of jtis it
-	// removes exactly one pending entry of streamID and leaves any other entry
-	// for the same JTI in place. WHICH entry is removed is unspecified — an
-	// implementation picks deterministically within a node, but the choice is
-	// not ordered across nodes, and it does not matter: a pending entry carries
-	// only the stream and the JTI, so two entries for the same pair are
-	// indistinguishable, and GetPendingForStream orders by JTI (ADR 0040), which
-	// both share. It is the compensating write for a speculative delivery intent
-	// whose event body turned out to be rejected (ADR 0038); removing every
-	// entry instead would silently drop an older, still-undelivered intent for
-	// the same JTI. A JTI with no pending entry is skipped. An empty jtis is a
-	// no-op.
-	RetractPending(ctx context.Context, jtis []string, streamID string) error
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)
 
 	// Delivered events
@@ -128,6 +141,17 @@ type EventDAO interface {
 	// bulk write; equivalent to MarkDelivered per event. An empty events is a
 	// no-op.
 	MarkDeliveredMany(ctx context.Context, events []DeliverableEvent, ackDate time.Time) error
+
+	// AckDelivered acknowledges jtis for streamID: every entry of jtis that
+	// is pending for streamID is removed from pending and recorded as
+	// delivered at ackDate (the ADR 0055 purge anchor), and the acked JTIs
+	// are returned (a subset of jtis, each at most once, order unspecified).
+	// A JTI not pending for the stream — unknown or already acked — is
+	// skipped and gets no delivered record (ADR 0017: a no-op, not an
+	// error). Equivalent to RemovePendingMany followed by MarkDeliveredMany;
+	// on MongoDB 8.0+ it is one multi-namespace bulkWrite. An empty jtis
+	// returns (nil, nil).
+	AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error)
 
 	// --- Ack-anchored retention purge + occupancy sampling (ADR 0055) ---
 

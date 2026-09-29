@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -149,7 +150,16 @@ func ReceiveSstpEventHandler(sa SsfApplicationInterface, w http.ResponseWriter, 
 		empty := goSetSstp.Message{}
 		msg = &empty
 	}
-	resp := sa.GetEventRouter().SstpServerHandler(r.Context(), rec, *msg, parsedIn)
+	resp, ingestErr := sa.GetEventRouter().SstpServerHandler(r.Context(), rec, *msg, parsedIn)
+	if ingestErr != nil {
+		// An inbound SET could not be durably stored (#333): refuse the whole
+		// exchange with 503 + Retry-After so the peer resends it. SETs of this
+		// exchange that were stored return as duplicate JTIs and are acked then.
+		w.Header().Set("Retry-After", strconv.Itoa(ingestRetryAfterSeconds()))
+		writeSstpError(w, http.StatusServiceUnavailable, goSetPush.ErrTemporarilyUnavailable,
+			"An inbound SET could not be stored; retry later")
+		return
+	}
 
 	// Merge per-JTI verify errors into the response's setErrs before sending.
 	for jti, se := range parseErrs {

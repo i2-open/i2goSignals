@@ -10,7 +10,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
@@ -18,9 +17,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
@@ -1404,7 +1403,7 @@ func (ps *ClientPollStream) setTransmitterCausedStatus(stored *model.StreamState
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.currentStream().StreamConfiguration.Id
-	resource := fmt.Sprintf("poll-receiver:%s", sid)
+	resource := cluster.PollReceiverResource(sid)
 
 	defer func() {
 		ps.mu.Lock()
@@ -1413,6 +1412,18 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 			close(ps.done) // wake any StopGracefully waiter: the in-flight poll has fully drained
 		}
 		ps.mu.Unlock()
+	}()
+	// Release the lease when the receiver stops (#334), before done is closed,
+	// so another node can take the stream at once instead of waiting out the
+	// TTL. runPollLoop has already stopped its heartbeat by then.
+	defer func() {
+		if err := ps.sa.Coordinator.ReleaseLeaseIfOwned(resource, ps.sa.NodeID); err != nil {
+			if ps.ctx.Err() != nil {
+				serverLog.Debug("POLL-RCV: Lease release failed during shutdown", "sid", sid, "error", err)
+			} else {
+				serverLog.Warn("POLL-RCV: Lease release failed", "sid", sid, "error", err)
+			}
+		}
 	}()
 
 	for {
@@ -1486,9 +1497,16 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 
 	// Heartbeat for lease renewal
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ps.ctx)
-	defer heartbeatCancel()
+	heartbeatDone := make(chan struct{})
+	// Wait for the heartbeat to exit, so a renewal in flight cannot re-take the
+	// lease after pollEventsReceiver releases it.
+	defer func() {
+		heartbeatCancel()
+		<-heartbeatDone
+	}()
 
 	go func() {
+		defer close(heartbeatDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -1556,333 +1574,337 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 	forbiddenCount := 0
 	var firstErrorTime time.Time
 
-	for {
-		ps.mu.RLock()
-		stream := ps.stream
-		active := ps.active
-		ps.mu.RUnlock()
+	// handlePollError applies the retry policy to a failed poll. It runs only
+	// with no poll outstanding, so refreshing the client cannot pull a
+	// connection out from under a poll in flight. It returns true when the
+	// loop must stop.
+	handlePollError := func(err error, httpStatus int) bool {
+		if httpStatus == http.StatusUnauthorized {
+			unauthorizedCount++
+			if unauthorizedCount >= unauthorizedRetryLimit {
+				errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled after %d unauthorized attempts", sid, unauthorizedCount)
+				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+				ps.mu.Lock()
+				ps.active = false
+				ps.mu.Unlock()
+				return true
+			}
 
-		// An operator pause or any disable stops the loop before the next poll
-		// (#310). A poll already in flight has completed and its SETs were
-		// processed; their acks ride the next poll, which is never sent, so the
-		// transmitter redelivers them (RFC8936 at-least-once).
-		if !active || pollHalted(stream) {
-			break
+			delaySeconds := float64(unauthorizedRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(unauthorizedCount-1))
+			if delaySeconds > maxDelay {
+				delaySeconds = maxDelay
+			}
+			delay := time.Duration(delaySeconds * float64(time.Second))
+
+			serverLog.Warn("POLL-RCV: Unauthorized response, retrying after delay", "sid", sid, "delay", delay, "attempt", unauthorizedCount)
+			authMethod := "by client credential"
+			if auth != "" {
+				authMethod = "static token: " + maskAuthorization(auth)
+			}
+			serverLog.Debug("POLL-RCV: Authentication method", "sid", sid, "method", authMethod)
+			ps.setRetryReason(fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
+			// Cancellable backoff: the enclosing poll loop retries 401s until the
+			// stream is disabled, so each iteration must not strand a timer.
+			if !eventRouter.SleepCtx(heartbeatCtx, delay) {
+				return true
+			}
+			// Refresh the stream state; the loop stops at the top if an operator
+			// paused or disabled it meanwhile.
+			refreshed := ps.refreshStream()
+			// Refresh the client and auth header before retrying.
+			// Close the old X509Source before creating a new one.
+			closeClient()
+			var cerr error
+			client, auth, closeClient, cerr = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
+			if cerr != nil {
+				serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", cerr)
+			}
+			return false
+		}
+
+		if httpStatus == http.StatusForbidden {
+			forbiddenCount++
+			if forbiddenCount >= forbiddenRetryLimit {
+				scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
+				errMsg := fmt.Sprintf(
+					"POLL-RCV[%s] Stream disabled after %d forbidden (403) attempts. "+
+						"Transmitter rejected the token. Likely cause: OAuth client_credentials scope mismatch. "+
+						"Requested scopes: %s. Required scope: '%s'.",
+					sid, forbiddenCount, scopesDesc, authSupport.ScopeEventDelivery)
+				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+				ps.mu.Lock()
+				ps.active = false
+				ps.mu.Unlock()
+				return true
+			}
+
+			delaySeconds := float64(forbiddenRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(forbiddenCount-1))
+			if delaySeconds > maxDelay {
+				delaySeconds = maxDelay
+			}
+			delay := time.Duration(delaySeconds * float64(time.Second))
+
+			scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
+			serverLog.Warn("POLL-RCV: Forbidden response, retrying after delay",
+				"sid", sid, "delay", delay, "attempt", forbiddenCount, "limit", forbiddenRetryLimit,
+				"requested_scopes", scopesDesc, "required_scope", authSupport.ScopeEventDelivery)
+			ps.setRetryReason(
+				fmt.Sprintf("forbidden response (403), retrying after %v (attempt %d/%d). "+
+					"Requested scopes: %s. Required scope: '%s'.",
+					delay, forbiddenCount, forbiddenRetryLimit, scopesDesc, authSupport.ScopeEventDelivery))
+
+			// Cancellable backoff — see the 401 path above.
+			if !eventRouter.SleepCtx(heartbeatCtx, delay) {
+				return true
+			}
+			refreshed := ps.refreshStream()
+			closeClient()
+			var cerr error
+			client, auth, closeClient, cerr = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
+			if cerr != nil {
+				serverLog.Error("POLL-RCV: Failed to refresh client/auth after 403", "sid", sid, "error", cerr)
+			}
+			return false
+		}
+
+		if isConnectionError(err) || httpStatus == http.StatusServiceUnavailable {
+			if firstErrorTime.IsZero() {
+				firstErrorTime = time.Now()
+			}
+			serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
+			if time.Since(firstErrorTime) > retryLimit {
+				serverLog.Error("POLL-RCV: Exceeded retry limit, disabling stream", "sid", sid, "elapsed", time.Since(firstErrorTime), "limit", retryLimit)
+				ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
+				ps.mu.Lock()
+				ps.active = false
+				ps.mu.Unlock()
+				return true // Stop the loop so the goroutine exits
+			}
+
+			delaySeconds := baseDelay * math.Pow(backoffFactor, float64(retryCount))
+			if delaySeconds > maxDelay {
+				delaySeconds = maxDelay
+			}
+			delay := time.Duration(delaySeconds * float64(time.Second))
+			ps.setRetryReason(fmt.Sprintf("retry being attempted (delay %v, attempt %d)", delay, retryCount+1))
+			serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", sid, "delay", delay, "attempt", retryCount+1)
+
+			// Cancellable backoff — see the 401 path above.
+			if !eventRouter.SleepCtx(heartbeatCtx, delay) {
+				return true
+			}
+			retryCount++
+
+			// Complement retry with transmitter status check. It re-reads the
+			// stream, so an operator pause or disable made during the backoff, or
+			// a transmitter that paused or disabled the stream, aborts the retry.
+			if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+				return true
+			}
+			return false
+		}
+		if httpStatus == http.StatusNotFound {
+			ps.setRetryReason("HTTP Not Found (404) response, retrying")
+			// WARN, not ERROR (deliberately demoted): the poll is retried, so no
+			// human action is needed yet (CONTEXT.md log-level policy).
+			serverLog.Warn("POLL-RCV: Stream Not found", "sid", sid, "url", eventUrl, "status", httpStatus)
+			return false
+		}
+
+		// General error (other HTTP errors or request failures)
+		errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
+		ps.setRetryReason(errMsg)
+		// WARN, not ERROR (deliberately demoted): the poll is retried, so no
+		// human action is needed yet (CONTEXT.md log-level policy).
+		serverLog.Warn("POLL-RCV: Request error", "sid", sid, "url", eventUrl, "error", err.Error())
+		return false
+	}
+
+	// Poll pipeline (#338). The dispatcher below owns every piece of loop state;
+	// each poll runs on its own goroutine (executePoll) and reports a
+	// pollOutcome. A poll is sent when fewer than `depth` are outstanding AND
+	// either the previous poll's 200 response has begun to arrive (or it has
+	// ended) or acks are waiting to be sent, so an idle stream holds few
+	// requests open. Acks earned by a response are carried on the next poll
+	// sent after its ingest completes, without waiting for an idle long-poll
+	// to return (ADR 0036);
+	// a SET whose ingest failed is not acked (ADR 0038). With depth 1 this is
+	// the one-poll-at-a-time loop: send, read, ingest, ack on the next poll.
+	depth := pollCfg.PipelineDepth
+	outstandingGauge := pollOutstandingGauge.WithLabelValues(sid)
+	defer pollOutstandingGauge.DeleteLabelValues(sid)
+	results := make(chan pollOutcome, depth)
+	var pollWG sync.WaitGroup
+	// Every return path either has no poll outstanding or has heartbeatCtx
+	// cancelled, which aborts the outstanding requests; wait for them so no
+	// poll goroutine outlives the loop (and its client).
+	defer pollWG.Wait()
+
+	outstanding := 0
+	var seq, latestSeq uint64
+	var latestStarted chan struct{}
+	canIssue := true
+	stopping := false
+	var pendingErr *pollOutcome
+
+	for {
+		// Acks waiting to be sent also release the next poll, so they are not
+		// held behind an idle long-poll until it times out.
+		ackReady := len(acks) > 0 || len(setErrs) > 0
+		if !stopping && pendingErr == nil && (canIssue || ackReady) && outstanding < depth {
+			ps.mu.RLock()
+			stream := ps.stream
+			active := ps.active
+			ps.mu.RUnlock()
+
+			// An operator pause or any disable stops the loop before the next
+			// poll (#310). Polls already in flight complete and their SETs are
+			// processed; their acks ride the next poll, which is never sent, so
+			// the transmitter redelivers them (RFC8936 at-least-once).
+			if !active || pollHalted(stream) {
+				stopping = true
+				continue
+			}
+
+			select {
+			case <-heartbeatCtx.Done():
+				serverLog.Info("POLL-RCV: Heartbeat cancelled, stopping poll loop", "sid", sid)
+				return
+			default:
+			}
+
+			// A transmitter-caused pause (a record adopted from the store after
+			// a restart, a lease takeover or a background sync) does not poll: it
+			// waits on the transmitter's status endpoint and resumes by itself.
+			// Outstanding polls finish first.
+			if waitingOnTransmitter(stream) {
+				if outstanding == 0 {
+					if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
+						return
+					}
+					continue
+				}
+			} else {
+				seq++
+				latestSeq = seq
+				latestStarted = make(chan struct{})
+				issue := pollIssue{
+					seq:           seq,
+					sid:           sid,
+					stream:        stream,
+					eventUrl:      eventUrl,
+					receiveMethod: receiveMethod,
+					client:        client,
+					auth:          auth,
+					acks:          acks,
+					setErrs:       setErrs,
+					started:       latestStarted,
+				}
+				// The acks and setErrs are now carried by this poll.
+				acks = nil
+				setErrs = nil
+				canIssue = false
+				outstanding++
+				outstandingGauge.Set(float64(outstanding))
+				pollWG.Add(1)
+				go func() {
+					defer pollWG.Done()
+					results <- ps.executePoll(heartbeatCtx, issue)
+				}()
+				continue
+			}
+		}
+
+		if outstanding == 0 {
+			if stopping {
+				break
+			}
+			if pendingErr != nil {
+				failed := pendingErr
+				pendingErr = nil
+				if handlePollError(failed.err, failed.httpStatus) {
+					return
+				}
+				canIssue = true
+			}
+			continue
 		}
 
 		select {
+		case <-latestStarted:
+			// The latest poll's response has begun to arrive: the next may go.
+			latestStarted = nil
+			canIssue = true
+			continue
 		case <-heartbeatCtx.Done():
+			// Stop or lease loss: the outstanding requests share heartbeatCtx
+			// and are cancelled with it; the deferred wait collects them.
 			serverLog.Info("POLL-RCV: Heartbeat cancelled, stopping poll loop", "sid", sid)
 			return
-		default:
-		}
-
-		// A transmitter-caused pause (a record adopted from the store after a
-		// restart, a lease takeover or a background sync) does not poll: it waits
-		// on the transmitter's status endpoint and resumes by itself.
-		if waitingOnTransmitter(stream) {
-			if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
-				return
+		case r := <-results:
+			outstanding--
+			outstandingGauge.Set(float64(outstanding))
+			if r.seq == latestSeq {
+				latestStarted = nil
+				canIssue = true
 			}
-			continue
-		}
 
-		pollReq := goSetPoll.PollRequest{
-			Acks:    acks,
-			SetErrs: setErrs,
-		}
-		if receiveMethod.PollConfig != nil {
-			pollReq.MaxEvents = receiveMethod.PollConfig.MaxEvents
-			pollReq.ReturnImmediately = receiveMethod.PollConfig.ReturnImmediately
-			pollReq.TimeoutSecs = receiveMethod.PollConfig.TimeoutSecs
-		}
+			if r.err != nil {
+				// What the failed poll carried rides a later poll, as the
+				// one-at-a-time loop resent it. Stop sending, let the outstanding
+				// polls finish, then apply the retry policy for the first failure.
+				acks = append(acks, r.sentAcks...)
+				setErrs = mergeSetErrs(setErrs, r.sentErrs)
+				if pendingErr == nil {
+					pendingErr = &r
+				}
+				continue
+			}
 
-		serverLog.Debug("POLL-RCV Initiating POLL request", "sid", sid, "url", eventUrl, "acks", len(acks), "setErrs", len(setErrs))
-		var capturedPollAddr string
-		pollTrace := &httptrace.ClientTrace{
-			GotConn: func(info httptrace.GotConnInfo) {
-				capturedPollAddr = info.Conn.RemoteAddr().String()
-			},
-		}
-		tracedCtx := httptrace.WithClientTrace(heartbeatCtx, pollTrace)
+			acks = append(acks, r.acks...)
+			setErrs = mergeSetErrs(setErrs, r.setErrs)
 
-		// Resolve this receiver's event_validation mode and engage the matching
-		// validators (spec #247 #251). Re-resolved every iteration so an operator
-		// changing the mode on a live stream takes effect on the next poll; under
-		// NONE the validator set is nil and Poll takes exactly the pre-#247 path.
-		validationMode := resolveReceiveValidationMode(ps.sa.StreamService, stream)
-		validators := buildReceiveValidatorSet(stream, validationMode)
-		// The verification material is resolved per iteration for the same
-		// reason: an iss / issuerJWKSUrl patch (#306) replaces the receiver
-		// cache entry, and a JWKS captured once before the loop would keep
-		// verifying against the old key set for the life of this goroutine.
-		// The lookup is a cache read unless the entry is due for retry.
-		jwks := ps.sa.StreamService.GetIssuerJwksForReceiver(context.Background(), stream.StreamConfiguration.Id)
-
-		parsed, httpStatus, err := goSetPoll.Poll(tracedCtx, pollReq, goSetPoll.ReceiverConfig{
-			EndpointURL:       eventUrl,
-			Authorization:     auth,
-			HTTPClient:        client,
-			JWKS:              jwks,
-			ExpectedIssuer:    stream.Iss,
-			ExpectedAudiences: stream.Aud,
-			// Signing-only (#184): make verification of pulled SETs mandatory so a
-			// nil JWKS rejects rather than silently accepting unsigned events.
-			RequireSignature: stream.SigningOnly,
-			Validators:       validators,
-			// Business-stream TLS floor (#322): an http:// transmitter is refused
-			// inside Poll unless the stream carries the tx_allow_plaintext opt-out.
-			AllowPlaintext: stream.TxAllowPlaintext,
-		})
-
-		if err != nil {
-			if httpStatus == http.StatusUnauthorized {
-				unauthorizedCount++
-				if unauthorizedCount >= unauthorizedRetryLimit {
-					errMsg := fmt.Sprintf("POLL-RCV[%s] Stream disabled after %d unauthorized attempts", sid, unauthorizedCount)
-					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
+			// Persist the resolved peer address on first connection or when it changes
+			if r.remoteAddr != "" {
+				endpointURL, _ := url.Parse(eventUrl)
+				scheme := "http"
+				if endpointURL != nil && endpointURL.Scheme != "" {
+					scheme = endpointURL.Scheme
+				}
+				remoteIP := model.BuildOutboundRemoteIP(scheme, r.remoteAddr)
+				ps.mu.RLock()
+				currentRemote := ps.stream.RemoteAddress
+				ps.mu.RUnlock()
+				if !remoteIP.Equals(currentRemote) {
+					serverLog.Debug("POLL-RCV: Remote address information", "sid", sid, "old", currentRemote.String(), "new", remoteIP.String())
+					ps.sa.StreamService.UpdateRemoteAddress(context.Background(), sid, remoteIP)
 					ps.mu.Lock()
-					ps.active = false
+					ps.stream.RemoteAddress = remoteIP
 					ps.mu.Unlock()
+				}
+			}
+
+			// Successful poll - reset retry count and error tracking
+			retryCount = 0
+			unauthorizedCount = 0
+			firstErrorTime = time.Time{}
+			// A successful poll never changes the status: it clears the reason a
+			// retry left while the status is enabled, and never writes enabled
+			// over a pause or disable (#310).
+			if current := ps.currentStream(); current.Status == model.StreamStateEnabled && current.ErrorMsg != "" {
+				ps.setRetryReason("")
+			}
+
+			// If the poll returned no events, add a small delay before the next
+			// one to avoid tight loops. This provides a safety valve while
+			// maintaining high performance for actual event delivery.
+			if r.setCnt == 0 && !r.more {
+				// Runs on every empty poll, i.e. continuously on an idle stream. A
+				// time.After here armed (and abandoned) a runtime timer ten times a
+				// second per idle receiver stream.
+				if !eventRouter.SleepCtx(heartbeatCtx, emptyPollBackoff) {
 					return
 				}
-
-				delaySeconds := float64(unauthorizedRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(unauthorizedCount-1))
-				if delaySeconds > maxDelay {
-					delaySeconds = maxDelay
-				}
-				delay := time.Duration(delaySeconds * float64(time.Second))
-
-				serverLog.Warn("POLL-RCV: Unauthorized response, retrying after delay", "sid", sid, "delay", delay, "attempt", unauthorizedCount)
-				authMethod := "by client credential"
-				if auth != "" {
-					authMethod = "static token: " + maskAuthorization(auth)
-				}
-				serverLog.Debug("POLL-RCV: Authentication method", "sid", sid, "method", authMethod)
-				ps.setRetryReason(fmt.Sprintf("unauthorized response (401), retrying after %v delay (attempt %d)", delay, unauthorizedCount))
-				// Cancellable backoff: the enclosing poll loop retries 401s until the
-				// stream is disabled, so each iteration must not strand a timer.
-				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
-					return
-				}
-				// Refresh the stream state; the loop stops at the top if an operator
-				// paused or disabled it meanwhile.
-				refreshed := ps.refreshStream()
-				// Refresh the client and auth header before retrying.
-				// Close the old X509Source before creating a new one.
-				closeClient()
-				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
-				if err != nil {
-					serverLog.Error("POLL-RCV: Failed to refresh client/auth after 401", "sid", sid, "error", err)
-				}
-				continue
-			}
-
-			if httpStatus == http.StatusForbidden {
-				forbiddenCount++
-				if forbiddenCount >= forbiddenRetryLimit {
-					scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
-					errMsg := fmt.Sprintf(
-						"POLL-RCV[%s] Stream disabled after %d forbidden (403) attempts. "+
-							"Transmitter rejected the token. Likely cause: OAuth client_credentials scope mismatch. "+
-							"Requested scopes: %s. Required scope: '%s'.",
-						sid, forbiddenCount, scopesDesc, authSupport.ScopeEventDelivery)
-					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, errMsg)
-					ps.mu.Lock()
-					ps.active = false
-					ps.mu.Unlock()
-					return
-				}
-
-				delaySeconds := float64(forbiddenRetryDelay) / float64(time.Second) * math.Pow(backoffFactor, float64(forbiddenCount-1))
-				if delaySeconds > maxDelay {
-					delaySeconds = maxDelay
-				}
-				delay := time.Duration(delaySeconds * float64(time.Second))
-
-				scopesDesc := ps.sa.describeRequestedScopes(ps.ctx, ps.currentStream())
-				serverLog.Warn("POLL-RCV: Forbidden response, retrying after delay",
-					"sid", sid, "delay", delay, "attempt", forbiddenCount, "limit", forbiddenRetryLimit,
-					"requested_scopes", scopesDesc, "required_scope", authSupport.ScopeEventDelivery)
-				ps.setRetryReason(
-					fmt.Sprintf("forbidden response (403), retrying after %v (attempt %d/%d). "+
-						"Requested scopes: %s. Required scope: '%s'.",
-						delay, forbiddenCount, forbiddenRetryLimit, scopesDesc, authSupport.ScopeEventDelivery))
-
-				// Cancellable backoff — see the 401 path above.
-				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
-					return
-				}
-				refreshed := ps.refreshStream()
-				closeClient()
-				client, auth, closeClient, err = ps.sa.getHTTPClientForStream(ps.ctx, refreshed)
-				if err != nil {
-					serverLog.Error("POLL-RCV: Failed to refresh client/auth after 403", "sid", sid, "error", err)
-				}
-				continue
-			}
-
-			if isConnectionError(err) || httpStatus == http.StatusServiceUnavailable {
-				if firstErrorTime.IsZero() {
-					firstErrorTime = time.Now()
-				}
-				serverLog.Warn("POLL-RCV: Polling connection error", "sid", sid, "error", err)
-				if time.Since(firstErrorTime) > retryLimit {
-					serverLog.Error("POLL-RCV: Exceeded retry limit, disabling stream", "sid", sid, "elapsed", time.Since(firstErrorTime), "limit", retryLimit)
-					ps.sa.updateStreamAfterError(sid, model.StreamStateDisable, fmt.Sprintf("connection error: %s", err.Error()))
-					ps.mu.Lock()
-					ps.active = false
-					ps.mu.Unlock()
-					return // Use return instead of break to ensure loop exits and goroutine stops
-				}
-
-				delaySeconds := baseDelay * math.Pow(backoffFactor, float64(retryCount))
-				if delaySeconds > maxDelay {
-					delaySeconds = maxDelay
-				}
-				delay := time.Duration(delaySeconds * float64(time.Second))
-				ps.setRetryReason(fmt.Sprintf("retry being attempted (delay %v, attempt %d)", delay, retryCount+1))
-				serverLog.Info("POLL-RCV: Connection error, retrying...", "sid", sid, "delay", delay, "attempt", retryCount+1)
-
-				// Cancellable backoff — see the 401 path above.
-				if !eventRouter.SleepCtx(heartbeatCtx, delay) {
-					return
-				}
-				retryCount++
-
-				// Complement retry with transmitter status check. It re-reads the
-				// stream, so an operator pause or disable made during the backoff, or
-				// a transmitter that paused or disabled the stream, aborts the retry.
-				if ok, _ := ps.handleTransmitterStatus(heartbeatCtx, statusCheckInterval); !ok {
-					return
-				}
-				continue
-			}
-			if httpStatus == http.StatusNotFound {
-				ps.setRetryReason("HTTP Not Found (404) response, retrying")
-				// WARN, not ERROR (deliberately demoted): the poll is retried, so no
-				// human action is needed yet (CONTEXT.md log-level policy).
-				serverLog.Warn("POLL-RCV: Stream Not found", "sid", sid, "url", eventUrl, "status", httpStatus)
-				continue
-			}
-
-			// General error (other HTTP errors or request failures)
-			errMsg := fmt.Sprintf("POLL-RCV[%s url: %s] Error: %s", sid, eventUrl, err.Error())
-			ps.setRetryReason(errMsg)
-			// WARN, not ERROR (deliberately demoted): the poll is retried, so no
-			// human action is needed yet (CONTEXT.md log-level policy).
-			serverLog.Warn("POLL-RCV: Request error", "sid", sid, "url", eventUrl, "error", err.Error())
-			continue
-		}
-
-		// Reset the error list for next poll
-		setErrs = make(map[string]goSetPoll.SetErrType)
-		acks = []string{}
-
-		setCnt := len(parsed.Sets)
-		serverLog.Debug("POLL-RCV: Response received", "sid", sid, "setCnt", setCnt, "hasMore", parsed.MoreAvailable)
-
-		// Carry over the parse / iss / aud errors goSetPoll reported, to be sent
-		// back in the next poll's setErrs. Merged rather than assigned so the
-		// event_validation rejections added below are not clobbered.
-		for jti, setErr := range parsed.Errors {
-			setErrs[jti] = setErr
-		}
-
-		// Process successfully parsed and validated SETs. Rejections are decided
-		// per JTI below; what survives is ingested as one batch (one bulk insert,
-		// one pending-list write per matching outbound stream) via HandleEvents.
-		batchJtis := make([]string, 0, len(parsed.ParsedSETs))
-		batchTokens := make([]*goSet.SecurityEventToken, 0, len(parsed.ParsedSETs))
-		batchRaws := make([]string, 0, len(parsed.ParsedSETs))
-		for jti, token := range parsed.ParsedSETs {
-			// Apply the stream's event_validation mode to the dispositions
-			// goSetPoll computed (spec #247 #251). A rejected jti is reported in
-			// setErrs with invalid_request and is never routed; other jtis in the
-			// same batch still ack normally, because the decision is per-jti even
-			// though it is whole-SET within a jti.
-			//
-			// It is ALSO acked. RFC8936 §2.4 keeps ack and setErrs separate and
-			// leaves a transmitter free to keep an un-acked SET pending, so
-			// reporting the error alone means a transmitter that does not read
-			// setErrs as an acknowledgement re-delivers the same SET on every poll
-			// forever — and with a bounded maxEvents or JTI-ordered service, the
-			// poison SET occupies the batch every cycle and nothing behind it is
-			// ever delivered. The stream livelocks while still reporting enabled.
-			//
-			// Acking it says "do not send this again", which is true: a payload
-			// that fails validation fails identically on resend. The setErr is
-			// what carries WHY, so the transmitter still learns the SET was
-			// rejected rather than processed. This is the disposition the other
-			// two transports already take — push clears a corroborated rejection,
-			// SSTP maps invalid_request to Clear.
-			if decision := applyEventValidation(validationMode, validationTransportPoll,
-				sid, jti, parsed.Validations[jti], ps.sa.Stats); decision.Reject {
-				setErrs[jti] = goSetPoll.SetErrType{
-					Error:       decision.ErrCode,
-					Description: decision.Description,
-				}
-				acks = append(acks, jti)
-				continue
-			}
-
-			serverLog.Debug("POLL-RCV: Handling Event", "sid", sid, "jti", jti)
-			batchJtis = append(batchJtis, jti)
-			batchTokens = append(batchTokens, token)
-			batchRaws = append(batchRaws, parsed.Sets[jti])
-		}
-		var ingestErrs []error
-		if len(batchTokens) > 0 {
-			ingestErrs = ps.sa.EventRouter.HandleEvents(batchTokens, batchRaws, sid)
-		}
-		for i, ingestErr := range ingestErrs {
-			if ingestErr != nil {
-				serverLog.Error("POLL-RCV: Error handling event", "sid", sid, "jti", batchJtis[i], "error", ingestErr)
-				// We don't acknowledge if we couldn't handle it
-				continue
-			}
-			acks = append(acks, batchJtis[i])
-		}
-
-		// Persist the resolved peer address on first connection or when it changes
-		if capturedPollAddr != "" {
-			endpointURL, _ := url.Parse(eventUrl)
-			scheme := "http"
-			if endpointURL != nil && endpointURL.Scheme != "" {
-				scheme = endpointURL.Scheme
-			}
-			remoteIP := model.BuildOutboundRemoteIP(scheme, capturedPollAddr)
-			ps.mu.RLock()
-			currentRemote := ps.stream.RemoteAddress
-			ps.mu.RUnlock()
-			if !remoteIP.Equals(currentRemote) {
-				serverLog.Debug("POLL-RCV: Remote address information", "sid", sid, "old", currentRemote.String(), "new", remoteIP.String())
-				ps.sa.StreamService.UpdateRemoteAddress(context.Background(), sid, remoteIP)
-				ps.mu.Lock()
-				ps.stream.RemoteAddress = remoteIP
-				ps.mu.Unlock()
-			}
-		}
-
-		// Successful poll - reset retry count and error tracking
-		retryCount = 0
-		unauthorizedCount = 0
-		firstErrorTime = time.Time{}
-		// A successful poll never changes the status: it clears the reason a retry
-		// left while the status is enabled, and never writes enabled over a pause
-		// or disable (#310).
-		if current := ps.currentStream(); current.Status == model.StreamStateEnabled && current.ErrorMsg != "" {
-			ps.setRetryReason("")
-		}
-
-		// If the last poll returned no events, add a small delay to avoid tight loops.
-		// This provides a safety valve while maintaining high performance for actual event delivery.
-		if setCnt == 0 && !parsed.MoreAvailable {
-			// Runs on every empty poll, i.e. continuously on an idle stream. A
-			// time.After here armed (and abandoned) a runtime timer ten times a
-			// second per idle receiver stream.
-			if !eventRouter.SleepCtx(heartbeatCtx, emptyPollBackoff) {
-				return
 			}
 		}
 	}
@@ -2050,6 +2072,17 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 	// Application-layer: route the event
 	err = sa.GetEventRouter().HandleEventCtx(ctx, received.Token, received.TokenString, sid)
 	if err != nil {
+		if errors.Is(err, eventRouter.ErrStoreUnavailable) {
+			// The SET is valid but was not durably stored, so it is not acked
+			// (ADR 0038): 503 + Retry-After tells the transmitter to resend it
+			// rather than drop it as a bad request (#333).
+			// WARN, not ERROR: the transmitter retries on 503 and the store
+			// layer already logs the underlying failure (CONTEXT.md log-level policy).
+			serverLog.Warn("PUSH-RCV: SET could not be stored", "sid", sid, "jti", received.Token.ID, "error", err)
+			goSetPush.WriteDeliveryErrorStatus(w, http.StatusServiceUnavailable, goSetPush.ErrTemporarilyUnavailable,
+				"The SET could not be stored; retry later", ingestRetryAfterSeconds())
+			return
+		}
 		goSetPush.WriteDeliveryError(w, goSetPush.ErrInvalidRequest, "Unexpected error: "+err.Error())
 		return
 	}

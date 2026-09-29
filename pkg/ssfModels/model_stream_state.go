@@ -154,6 +154,15 @@ type StreamStateRecord struct {
 	// COM-0018) this single field governs the INBOUND leg.
 	EventValidation EventValidationMode `json:"event_validation,omitempty" bson:"event_validation,omitempty"`
 
+	// Durability is the per-stream ingest durability mode (spec #111 Stage 3,
+	// issue #343, ADR 0045): DurabilityMajority (default; unset means the same)
+	// or DurabilityLocal. Like RetentionWindowDays it is a goSignals operator
+	// knob kept OFF the SSF wire-format StreamConfiguration. `local` is honoured
+	// only when the deployment runs I2SIG_STORE_WAL=local; otherwise it is
+	// stored and reported but the stream runs at majority. On an SSTP pair the
+	// single field governs the pair's inbound (ingest) leg.
+	Durability DurabilityMode `json:"durability,omitempty" bson:"durability,omitempty"`
+
 	// --- SSTP bidirectional pair fields (PRD #154, ADR 0018) ---
 	// A single StreamStateRecord represents both directions of an SSTP pair on
 	// one node: the embedded StreamConfiguration is the transmit (outbound)
@@ -226,6 +235,13 @@ type StreamStateRecord struct {
 	// direction of an SSTP pair, whose cache entry is keyed by the inbound SID
 	// (ADR 0018).
 	InboundJwksReadiness *JwksReadiness `json:"inbound_jwks_readiness,omitempty" bson:"-"`
+
+	// EffectiveDurability is the durability this stream's ingest actually runs
+	// at on this node (issue #343): DurabilityLocal only when the deployment
+	// runs I2SIG_STORE_WAL=local AND Durability is local, else
+	// DurabilityMajority. Derived, never persisted; the admin stream-state
+	// surfaces overlay it via StreamService.OverlayEffectiveDurability.
+	EffectiveDurability DurabilityMode `json:"effective_durability,omitempty" bson:"-"`
 }
 
 // JWKS readiness states (ADR 0033). Readiness is node-local and derived: it
@@ -347,6 +363,7 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.SubjectRemovalGraceSeconds = mod.SubjectRemovalGraceSeconds
 	ss.RetentionWindowDays = mod.RetentionWindowDays
 	ss.EventValidation = mod.EventValidation
+	ss.Durability = mod.Durability
 	ss.SstpInbound = mod.SstpInbound
 	ss.SstpMethod = mod.SstpMethod
 	ss.PairId = mod.PairId

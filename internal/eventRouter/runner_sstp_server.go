@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"time"
 
@@ -43,13 +44,13 @@ type SstpInboundSet struct {
 // It ingests the already-parsed inbound SETs (persist-then-route via HandleEvent,
 // counting eventsIn with tfr=SSTP, stream_id=rxSid), then long-polls the outbound
 // EventPollBuffer and returns the resulting SSTP response message.
-func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) goSetSstp.Message {
+func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, parsedIn []SstpInboundSet) (goSetSstp.Message, error) {
 	resp := goSetSstp.Message{}
 	if rec == nil {
 		// Defensive: the handler must resolve the pair before calling. If a
 		// caller nonetheless passes nil, refuse to fabricate state — return
 		// an empty response rather than panicking or re-looking-up.
-		return resp
+		return resp, nil
 	}
 
 	// Seed the request memo with the pair the HTTP handler already resolved
@@ -82,7 +83,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// cross-node ack and redeliver forever.
 		buf := r.sstpServerBufferFor(txSid)
 		buf.AckEvents(inbound.Ack)
-		_ = r.eventService.AckEvents(r.ctx, inbound.Ack, txSid, 0)
+		_ = r.eventService.AckEvents(r.ctx, inbound.Ack, txSid, services.NoFencingToken)
 	}
 
 	// Outbound setErr consumption: the peer's request also carries, in
@@ -120,7 +121,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		if len(disposition.Clear) > 0 {
 			buf := r.sstpServerBufferFor(txSid)
 			buf.AckEvents(disposition.Clear)
-			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, 0)
+			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, services.NoFencingToken)
 		}
 		if len(disposition.Fatal) > 0 {
 			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing pair",
@@ -154,12 +155,28 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		for i, in := range batch {
 			tokens[i], raws[i] = in.Token, in.Raw
 		}
+		var storeErr error
 		for i, ingestErr := range r.HandleEventsCtx(ctx, tokens, raws, rxSid) {
+			if errors.Is(ingestErr, ErrStoreUnavailable) {
+				storeErr = ingestErr
+				continue
+			}
 			if ingestErr != nil {
 				resp.SetErrs = appendSstpSetErr(resp.SetErrs, batch[i].Jti, ingestErr)
 				continue
 			}
 			resp.Ack = append(resp.Ack, batch[i].Jti)
+		}
+		if storeErr != nil {
+			// A SET the peer sent could not be durably stored (#333). Refuse the
+			// whole exchange so the peer resends it: the SETs that were stored
+			// come back as duplicate JTIs and are acked then, and nothing is
+			// drained outbound into a response that will not be sent.
+			// WARN, not ERROR: the peer resends on 503 and the store layer
+			// already logs the underlying failure (CONTEXT.md log-level policy).
+			eventLogger.Warn("SSTP-SRV: inbound SET could not be stored, refusing exchange",
+				"sid", txSid, "error", storeErr)
+			return goSetSstp.Message{}, storeErr
 		}
 	}
 
@@ -170,7 +187,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// HTTP handler.
 	if rec.Status != model.StreamStateEnabled {
 		resp.ReturnEvents = goSetSstp.BoolPtr(false)
-		return resp
+		return resp, nil
 	}
 
 	// Outbound long-poll drain: wait on the pair's EventPollBuffer for the duration
@@ -183,13 +200,13 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// half is already applied, so the exchange still answers 200 with its acks.
 		r.takeKeyUnavailablePause(rec, "SSTP-SRV", signErr)
 		resp.ReturnEvents = goSetSstp.BoolPtr(false)
-		return resp
+		return resp, nil
 	}
 	if len(sets) > 0 {
 		resp.Sets = sets
 	}
 
-	return resp
+	return resp, nil
 }
 
 // drainSstpOutbound long-polls the pair's outbound EventPollBuffer and returns the
