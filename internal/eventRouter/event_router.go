@@ -1378,7 +1378,8 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 // serves the SET before the drain stores it, and defers the cross-node wake to
 // commit: a remote owner reads only the store, and a wake sent before the store
 // write would find nothing (and coalescing would swallow a second one). The
-// caller must hold r.mu (at least RLock).
+// caller must hold r.mu (at least RLock) for any scope that includes the local
+// half; wakeRemoteOnly reads no router map and may be called without it.
 func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wakeScope) {
 	local := scope != wakeRemoteOnly
 	remote := scope != wakeLocalOnly

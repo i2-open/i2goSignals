@@ -730,29 +730,49 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		// and wake a remote owner now that the store holds the SET (#347).
 		// A re-queued duplicate was fed then too, and its held ack (if it
 		// has already been delivered) removes the marker written above.
+		committed := make([]*fanoutTarget, 0, len(targets))
 		r.mu.RLock()
-		defer r.mu.RUnlock()
 		for _, t := range targets {
-			committed := false
+			hit := false
 			for _, jti := range t.jtis {
 				rec, ok := accepted[jti]
 				if !ok {
 					rec, ok = requeued[t.docID][jti]
 				}
 				if ok {
-					committed = true
+					hit = true
 					r.observeMeteredEvent(t.sid, DirectionEgress, &rec.Event)
 				}
 			}
-			if committed {
-				r.wakeTargetScopedLocked(t, nil, wakeRemoteOnly)
+			if hit {
+				committed = append(committed, t)
 			}
 		}
+		r.mu.RUnlock()
+		r.wakeCommittedRemote(committed)
 		return
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	r.commitFanoutLocked(targets, accepted, requeued)
+}
+
+// wakeCommittedRemote sends the cross-node wake for ring-fed targets whose
+// SETs the drain has just stored (#347). It runs on the drain path once per
+// committed entry, so it holds no router lock and reads no uncached lease: a
+// remote wake touches no router map, the PUSH owner comes from the lease-owner
+// cache, and an SSTP-client target is woken by the coalesced broadcast (at
+// most one per pair per 250ms, which every node but the lease owner ignores)
+// instead of a cluster_leases read per entry. The append-time local wake has
+// already served a locally owned pair.
+func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
+	for _, t := range targets {
+		if t.mode == "SSTP-CLIENT" {
+			go r.broadcastSstpClientWake(t.key)
+			continue
+		}
+		r.wakeTargetScopedLocked(t, nil, wakeRemoteOnly)
+	}
 }
 
 // endReplayIfDrained lifts the start-up ingest gate once every entry found in
