@@ -251,6 +251,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.
 		PushDelivery:    delivery.NewHTTPAdapter(persistence.StreamService, nil),
 		SstpDialerHooks: sstpDialer,
+		// Non-nil only when I2SIG_STORE_WAL=local (ADR 0045).
+		WAL: persistence.WAL,
 	}, nodeID)
 
 	// Late-bind the router as the dialer's narrow outbound surface. The

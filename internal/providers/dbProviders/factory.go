@@ -2,6 +2,7 @@ package dbProviders
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
@@ -9,8 +10,10 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
+	"github.com/i2-open/i2goSignals/internal/wal"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
+	"github.com/i2-open/i2goSignals/pkg/nodeid"
 	"github.com/i2-open/i2goSignals/pkg/services"
 )
 
@@ -47,6 +50,11 @@ type Persistence struct {
 
 	Coordinator cluster.ClusterCoordinator
 	Storage     storage.Storage
+
+	// WAL is the node-local write-ahead log opened when I2SIG_STORE_WAL=local
+	// (ADR 0045); nil in the default majority mode. Hand it to the event
+	// router (RouterDeps.WAL), which owns and closes it.
+	WAL wal.Log
 
 	// src is the underlying provider used to refresh service references
 	// after a Storage.ResetDb(true) call. The memory adapter rebuilds its
@@ -108,6 +116,52 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Validate the durability mode before touching the store: an unknown value
+	// refuses startup rather than silently picking a contract (ADR 0045).
+	walMode, err := wal.ModeFromEnv()
+	if err != nil {
+		factoryLog.Error("Invalid ingest durability mode", "error", err)
+		return nil, err
+	}
+	p, err := openPersistence(ctx, mongoUrl, dbName)
+	if err != nil || walMode != wal.ModeLocal {
+		return p, err
+	}
+	if err := attachLocalWal(p, nodeid.Resolve(), wal.DirFromEnv()); err != nil {
+		if p.Storage != nil {
+			_ = p.Storage.Close()
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
+// attachLocalWal opens the local WAL for I2SIG_STORE_WAL=local. Until the
+// ring-fed delivery work (#343) lands, local mode is single-node only: it
+// refuses to start when the coordinator reports any other active node, or
+// when it cannot tell.
+func attachLocalWal(p *Persistence, selfID string, dir string) error {
+	if p.Coordinator != nil {
+		nodes, err := p.Coordinator.GetActiveNodes()
+		if err != nil {
+			return fmt.Errorf("%s=local: cannot confirm single-node cluster: %w", wal.EnvMode, err)
+		}
+		for _, n := range nodes {
+			if n.Id != selfID {
+				return fmt.Errorf("%s=local is single-node only: active cluster node %q found (this node %q)", wal.EnvMode, n.Id, selfID)
+			}
+		}
+	}
+	l, err := wal.OpenBolt(dir)
+	if err != nil {
+		return err
+	}
+	p.WAL = l
+	factoryLog.Warn("Ingest durability is LOCAL: SETs are acknowledged after a node-local fsync, before the store write (ADR 0045). Acknowledged SETs not yet drained are lost if this node's disk is lost.", "dir", dir)
+	return nil
+}
+
+func openPersistence(ctx context.Context, mongoUrl string, dbName string) (*Persistence, error) {
 	if strings.HasPrefix(mongoUrl, "memorydb:") || mongoUrl == "" {
 		mp, err := memory_provider.Open(mongoUrl, dbName)
 		if err != nil {

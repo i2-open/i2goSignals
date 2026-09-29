@@ -26,6 +26,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	"github.com/i2-open/i2goSignals/internal/wal"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -198,7 +199,10 @@ type router struct {
 	// honest on every transition it drives; leaseOwnerCacheTTL is the backstop
 	// for a peer takeover. Never consulted to authorise delivery — see
 	// lease_owner_cache.go.
-	leaseOwners          *leaseOwnerCache
+	leaseOwners *leaseOwnerCache
+	// wal is the local-durability ingest state (I2SIG_STORE_WAL=local, ADR
+	// 0045); nil in the default majority mode.
+	wal                  *localWal
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -322,6 +326,12 @@ type RouterDeps struct {
 	// HYBRID upstream removes on the backfill tick (PRD #97 issue #100).
 	// When nil the deferred-relay sweep is a no-op.
 	SubjectRelayService *services.SubjectRelayService
+	// WAL, when non-nil, switches ingest to local durability
+	// (I2SIG_STORE_WAL=local, ADR 0045): a SET is acked once fsynced to this
+	// node-local log and a drain worker moves it to the store. The router owns
+	// the log from here and closes it on Shutdown. Nil (the default) keeps the
+	// majority contract of ADR 0038.
+	WAL wal.Log
 }
 
 // The router is the reset-egress sink EventService reports re-queued events to
@@ -509,6 +519,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		})
 	} else {
 		eventLogger.Info("Background watcher disabled (using wake-up calls and backfill)")
+	}
+
+	if deps.WAL != nil {
+		router.startLocalWal(deps.WAL)
 	}
 
 	return router
@@ -1083,6 +1097,10 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		excludeSstpTxSid = sstpPair.StreamConfiguration.Id
 	} else if (streamState != nil && streamState.IsReceiver()) && streamState.GetRouteMode() == model.RouteModeImport {
 		importOnly = true
+	}
+
+	if r.wal != nil {
+		return r.handleEventsLocal(candidates, sid, importOnly, excludeSstpTxSid, results)
 	}
 
 	// Select the outbound streams each candidate is queued on. Nothing is
@@ -2954,6 +2972,9 @@ func (r *router) CloseStream(sid string) {
 
 // Shutdown closes all the PushHandlers. Events will continue to be routed but only delivered when server restarts
 func (r *router) Shutdown() {
+	// Stop the local-WAL drain worker first, outside r.mu: it takes r.mu to
+	// wake targets. Undrained entries stay in the log (ADR 0045).
+	r.stopLocalWal()
 	// This will shut down the threads that are pushing events.
 	r.mu.Lock()
 	defer r.mu.Unlock()
