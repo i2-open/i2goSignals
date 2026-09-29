@@ -134,8 +134,9 @@ type Log interface {
 	// sequence number of the last one. It returns only after the data is
 	// fsynced; concurrent Appends are group-committed.
 	Append(batch [][]byte) (uint64, error)
-	// ReadFrom returns up to limit entries with Seq >= seq, in order.
-	// Entries whose checksum fails (a torn write) are skipped.
+	// ReadFrom returns up to limit entries with Seq >= seq, in order. A
+	// torn tail is trimmed when the log is opened, so every entry returned
+	// has a verified checksum.
 	ReadFrom(seq uint64, limit int) ([]Entry, error)
 	// Truncate removes every entry with Seq <= seq.
 	Truncate(seq uint64) error

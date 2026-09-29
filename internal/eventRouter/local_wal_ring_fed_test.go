@@ -129,7 +129,7 @@ func TestLocalWal_RingFedRebuildDoesNotStack(t *testing.T) {
 	p := openMemPersistence(t)
 	es := services.NewEventService(p.EventDAO)
 	build := func() *router {
-		log, err := wal.OpenBolt(t.TempDir())
+		log, err := wal.Open(t.TempDir())
 		require.NoError(t, err)
 		r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: es, Coordinator: p.Coordinator, WAL: log, WALRingFed: true}, "node-wal-test").(*router)
 		return r

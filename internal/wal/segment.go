@@ -134,10 +134,6 @@ func Open(dir string) (Log, error) {
 	return l, nil
 }
 
-// OpenBolt is kept for callers written against the bbolt backend; it opens
-// the segment log.
-func OpenBolt(dir string) (Log, error) { return Open(dir) }
-
 func segmentPath(dir string, index int) string {
 	return filepath.Join(dir, fmt.Sprintf("%s%08d%s", segmentPrefix, index, segmentSuffix))
 }
@@ -248,6 +244,10 @@ func (l *segmentLog) loadSegment(index int, path string, last bool) (*segment, e
 			_ = f.Close()
 			return nil, fmt.Errorf("wal: trim %s: %w", path, err)
 		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("wal: sync trimmed %s: %w", path, err)
+		}
 	}
 	return seg, nil
 }
@@ -312,17 +312,21 @@ func (l *segmentLog) roll() (*segment, error) {
 	copy(hdr, segmentMagic)
 	binary.BigEndian.PutUint32(hdr[8:], segmentVersion)
 	binary.BigEndian.PutUint64(hdr[12:], l.nextSeq)
-	if _, err := f.Write(hdr); err != nil {
+	// A file left behind by a failed roll would make every later roll fail
+	// with EEXIST at the same index, so each error path removes it.
+	discard := func(err error) (*segment, error) {
 		_ = f.Close()
-		return nil, fmt.Errorf("wal: write %s header: %w", path, err)
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if _, err := f.Write(hdr); err != nil {
+		return discard(fmt.Errorf("wal: write %s header: %w", path, err))
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("wal: sync %s: %w", path, err)
+		return discard(fmt.Errorf("wal: sync %s: %w", path, err))
 	}
 	if err := syncDir(l.dir); err != nil {
-		_ = f.Close()
-		return nil, err
+		return discard(err)
 	}
 	seg := &segment{index: index, path: path, f: f, size: segmentHeader}
 	l.imu.Lock()
@@ -445,11 +449,13 @@ func (l *segmentLog) commit(reqs []*appendReq) {
 		fail(err)
 		return
 	}
+	rolled := false
 	if seg.size > segmentHeader && seg.size+int64(len(l.buf)) > maxSegmentBytes {
 		if seg, err = l.roll(); err != nil {
 			fail(err)
 			return
 		}
+		rolled = true
 	}
 	base := seg.size
 	// Positional write: after recovery the descriptor's offset may sit past a
@@ -476,7 +482,9 @@ func (l *segmentLog) commit(reqs []*appendReq) {
 	}
 	seg.live += added
 	l.nextSeq = max(seq, through+1)
-	if removed > 0 {
+	// A roll can leave a fully drained predecessor behind, so sweep after
+	// one as well as after a truncate.
+	if removed > 0 || rolled {
 		l.dropEmptySegments()
 	}
 	l.imu.Unlock()

@@ -224,7 +224,7 @@ func attachLocalWal(p *Persistence, selfID string, dir string, ringFed bool) err
 		factoryLog.Error("Refusing to enable local ingest durability", "error", err)
 		return err
 	}
-	l, err := wal.OpenBolt(dir)
+	l, err := wal.Open(dir)
 	if err != nil {
 		return err
 	}

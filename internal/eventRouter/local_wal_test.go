@@ -82,7 +82,7 @@ func newWalRouter(t *testing.T, p *dbProviders.Persistence, walDir string, dao *
 // adjust before the router is built (nil leaves them as they are).
 func newWalRouterWith(t *testing.T, p *dbProviders.Persistence, walDir string, dao *gatedEventDAO, adjust func(*RouterDeps)) *walSetup {
 	t.Helper()
-	log, err := wal.OpenBolt(walDir)
+	log, err := wal.Open(walDir)
 	require.NoError(t, err)
 	if dao == nil {
 		dao = &gatedEventDAO{EventDAO: p.EventDAO}

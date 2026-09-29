@@ -219,7 +219,7 @@ func TestLocalWal_ShutdownDrainTimeoutLeavesResidue(t *testing.T) {
 	assert.Equal(t, "ERROR", timedOut[0]["level"])
 	assert.EqualValues(t, 1, timedOut[0]["depth"])
 
-	reopened, err := wal.OpenBolt(dir)
+	reopened, err := wal.Open(dir)
 	require.NoError(t, err)
 	defer func() { _ = reopened.Close() }()
 	assert.Equal(t, 1, reopened.Depth(), "the residue stays on disk for the next start")

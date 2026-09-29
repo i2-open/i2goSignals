@@ -103,6 +103,7 @@ These metrics cover the node-local ingest WAL used when `I2SIG_STORE_WAL=local` 
 | `goSignals_wal_drained_total` | Counter | None | SETs drained from the WAL to the store. A JTI the store already held counts as drained. |
 | `goSignals_wal_replayed_total` | Counter | None | SETs found in the WAL at start-up (left by a crash, or by a shutdown drain that timed out) and replayed to the store before ingest reopened. |
 | `goSignals_wal_drain_duration_seconds` | Histogram | None | Duration of one drain batch: the store write plus the WAL truncate. |
+| `goSignals_wal_append_seconds` | Histogram | None | One WAL append as ingest sees it: the wait behind the current group commit plus the write and fsync (ADR 0046). With `goSignals_wal_drain_duration_seconds` it separates a slow disk from a slow drain. |
 | `goSignals_wal_ring_fed_served_total` | Counter | None | SET bodies served to delivery from the local WAL before the drain stored them (`I2SIG_STORE_WAL_RING_FED=true`, #342). Stays at 0 with ring-feeding off. |
 | `goSignals_wal_local_ingest_suspended` | Gauge | None | 1 once this local-mode node found another active cluster node without ring-fed delivery and suspended local ingest (#343): `durability=local` streams run at majority until the node restarts. Alert on it; the fix is `I2SIG_STORE_WAL_RING_FED=true` on every node or a return to `majority`. |
 

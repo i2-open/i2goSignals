@@ -89,8 +89,12 @@ If `ingest.wal` (the ADR 0045 bbolt file) exists in the WAL directory, open
 reads it, carries its undrained records into the segment log with sequence
 numbers that continue after bbolt's counter, removes the file and fsyncs the
 directory. The migration runs once, before ingest starts, and needs no
-operator action. bbolt stays in `go.mod` for this reader only and can be
-dropped once every deployment has passed through a segment-log release.
+operator action. A crash between the last migrated append and the file
+removal migrates the file again on the next start; the duplicated entries
+are absorbed by JTI dedup at the store (ADR 0017), and ring-fed delivery may
+serve them twice, which ADR 0045 already allows. bbolt stays in `go.mod` for
+this reader only and can be dropped once every deployment has passed
+through a segment-log release.
 
 ### 6. One process per directory
 
@@ -98,7 +102,8 @@ dropped once every deployment has passed through a segment-log release.
 second process opening the same directory fails at once with
 `wal: <dir>/wal.lock is locked by another process` instead of corrupting the
 tail. This is a same-kernel guard: two containers on one Docker host sharing
-a bind mount are caught, two hosts sharing an NFS export are not.
+a bind mount are caught, two hosts sharing an NFS export are not. The guard
+is Unix-only; on other platforms the lock file is created without exclusion.
 
 ### 7. Metric
 

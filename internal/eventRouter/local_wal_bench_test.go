@@ -22,7 +22,7 @@ func BenchmarkMongoRouterWalIngest(b *testing.B) {
 		b.Run(mode, func(b *testing.B) {
 			var log wal.Log
 			if mode == "local" {
-				l, err := wal.OpenBolt(b.TempDir())
+				l, err := wal.Open(b.TempDir())
 				if err != nil {
 					b.Fatal(err)
 				}

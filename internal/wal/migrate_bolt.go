@@ -17,9 +17,11 @@ import (
 var bucketName = []byte("wal")
 
 // migrateBolt moves the entries of an ingest.wal written by the bbolt
-// backend into the segment log and removes the file. Sequence numbers
-// continue from the bbolt counter so a drain position carried across the
-// restart stays valid. Called on Open, after recovery, before any append.
+// backend into the segment log and removes the file. The migrated entries
+// are renumbered from after bbolt's counter so no sequence number is ever
+// reused. A crash between the last append and the remove migrates the file
+// again on the next start; the duplicate entries are absorbed by JTI dedup
+// at the store (ADR 0017). Called on Open, after recovery, before any append.
 func (l *segmentLog) migrateBolt() error {
 	path := filepath.Join(l.dir, FileName)
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
