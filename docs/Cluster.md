@@ -150,6 +150,8 @@ A live stream's lease row is never deleted, however long it has been expired. De
 
 As a fallback and to ensure eventual consistency, transmitter loops periodically perform a "backfill" by polling MongoDB for any pending events that might have been missed by the wake-up mechanism (e.g., due to network transient issues). The backfill interval and batch size are configurable.
 
+An SSTP-client pair loop whose primary long-poll is held by the peer re-checks its outbound work on the same interval (1 second), whether or not a wake was seen, so a wake lost to coalescing or a failed wake call delays those SETs by at most one interval rather than until the long-poll returns (#347).
+
 ## Observability
 
 Nodes register themselves in the `cluster_nodes` collection with metadata:

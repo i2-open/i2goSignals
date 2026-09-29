@@ -120,9 +120,10 @@ type SstpDialerConfig struct {
 	BackfillBatch int
 
 	// BackfillInterval is how often a pair loop re-checks for outbound work
-	// it could not push when it was announced: a wake turned away because
-	// every second-push slot was held, or a push that ended with SETs still
-	// unacked (#347). 0 means 1s, the router's PUSH backfill interval.
+	// while its primary long-poll is held: work whose wake was lost upstream,
+	// a wake turned away because every second-push slot was held, or a push
+	// that ended with SETs still unacked (#347). 0 means 1s, the router's PUSH
+	// backfill interval.
 	BackfillInterval time.Duration
 
 	// EventValidationDefault is the server-wide event_validation default
@@ -896,11 +897,19 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 	// A wake is edge-triggered: it says only "this pair has work", once. One
 	// turned away because every second-push slot is held, or one whose push
 	// ended with SETs still unacked, is remembered in owed rather than dropped
-	// (#347). owed is paid when a second push finishes (pushDone) and, failing
-	// that, on the backfill ticker, so the work never waits for the primary
-	// long-poll to return.
+	// (#347), and owed is paid as soon as a second push finishes (pushDone).
+	// A wake can also be lost before it gets here (sender or receiver
+	// coalescing, a failed wake call), which nothing on this node can see, so
+	// the backfill ticker re-checks the pair every interval regardless of
+	// owed — the safety net the PUSH loop's backfill ticker already is. An
+	// idle check claims nothing and opens no request.
 	owed := false
-	pushDone := make(chan secondPushOutcome, 1)
+	// pushDone is a coalescing "a push finished" signal; the outcome that
+	// matters travels in pushOwed, which a push sets before signalling so a
+	// secondPushRemaining is never lost when several pushes (K>1) finish at
+	// once and only one signal fits in the channel.
+	pushDone := make(chan struct{}, 1)
+	var pushOwed atomic.Bool
 	backfill := time.NewTicker(d.cfg.BackfillInterval)
 	defer backfill.Stop()
 
@@ -929,9 +938,12 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		go func() {
 			defer secondPushWg.Done()
 			_, outcome := d.runSecondPush(ctx, &streamCopy, fencingToken)
+			if outcome == secondPushRemaining || outcome == secondPushSkipped {
+				pushOwed.Store(true)
+			}
 			// Coalesce: one pending completion is enough to re-check.
 			select {
-			case pushDone <- outcome:
+			case pushDone <- struct{}{}:
 			default:
 			}
 		}()
@@ -956,7 +968,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 			// in-flight pushes per pair (I2SIG_SSTP_PUSH_INFLIGHT, #339).
 			wakeup = d.outbound.WakeCh(pairId) // re-arm: Wakeup() swapped the notifier.
 			spawn()
-		case outcome := <-pushDone:
+		case <-pushDone:
 			// A push finished and freed its slot. A wake turned away while it
 			// held that slot is paid now. SETs the peer left unacked wait for
 			// the next backfill tick rather than being re-sent at once; a
@@ -964,13 +976,13 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 			if owed {
 				spawn()
 			}
-			if outcome == secondPushRemaining || outcome == secondPushSkipped {
+			if pushOwed.Swap(false) {
 				owed = true
 			}
 		case <-backfill.C:
-			if owed {
-				spawn()
-			}
+			// Level-triggered safety net: look for outbound work every tick,
+			// owed or not, so a wake lost upstream costs at most one interval.
+			spawn()
 		}
 	}
 }
