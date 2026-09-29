@@ -23,6 +23,10 @@ type nodesCoordinator struct {
 
 func (c *nodesCoordinator) GetActiveNodes() ([]model.ClusterNode, error) { return c.nodes, c.err }
 
+// RegisterNode accepts the guard's pre-check announce (#343) without
+// changing the stubbed membership.
+func (c *nodesCoordinator) RegisterNode(model.ClusterNode) error { return nil }
+
 func TestOpenPersistence_WalModeUnknownRefused(t *testing.T) {
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	t.Setenv(wal.EnvMode, "sometimes")
@@ -139,4 +143,52 @@ func TestOpenPersistence_RingFedOnlyInLocalMode(t *testing.T) {
 	assert.True(t, p.WALRingFed)
 	assert.NoError(t, p.WAL.Close())
 	_ = p.Storage.Close()
+}
+
+// TestPeerNodes: the membership read behind the #343 guard excludes this
+// node and returns the others.
+func TestPeerNodes(t *testing.T) {
+	now := time.Now().UTC()
+	coord := memory_provider.NewMemoryCoordinator()
+	require.NoError(t, coord.RegisterNode(model.ClusterNode{Id: "node-a", StartedAt: now, LastSeenAt: now}))
+	peers, err := PeerNodes(coord, "node-a")
+	require.NoError(t, err)
+	assert.Empty(t, peers)
+
+	require.NoError(t, coord.RegisterNode(model.ClusterNode{Id: "node-b", StartedAt: now, LastSeenAt: now}))
+	peers, err = PeerNodes(coord, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node-b"}, peers)
+
+	_, err = PeerNodes(&nodesCoordinator{err: errors.New("down")}, "node-a")
+	require.Error(t, err)
+}
+
+// TestAttachLocalWal_AnnouncesSelfBeforeCheck: the guard registers this node
+// before it reads membership (#343), so the second of two local-mode nodes
+// started together sees the first and refuses instead of both passing an
+// empty read.
+func TestAttachLocalWal_AnnouncesSelfBeforeCheck(t *testing.T) {
+	coord := memory_provider.NewMemoryCoordinator()
+	pa := &Persistence{Coordinator: coord}
+	require.NoError(t, attachLocalWal(pa, "node-a", t.TempDir(), false))
+	t.Cleanup(func() { _ = pa.WAL.Close() })
+	nodes, err := coord.GetActiveNodes()
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "node-a", nodes[0].Id, "the first node registered itself before checking")
+
+	pb := &Persistence{Coordinator: coord}
+	err = attachLocalWal(pb, "node-b", t.TempDir(), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "node-a")
+	assert.Nil(t, pb.WAL)
+
+	// With ring-fed on there is nothing to announce or check.
+	pc := &Persistence{Coordinator: memory_provider.NewMemoryCoordinator()}
+	require.NoError(t, attachLocalWal(pc, "node-c", t.TempDir(), true))
+	t.Cleanup(func() { _ = pc.WAL.Close() })
+	n, err := pc.Coordinator.GetActiveNodeCount()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
 }

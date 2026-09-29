@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -15,6 +16,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
 	"github.com/i2-open/i2goSignals/pkg/services"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
 var factoryLog = logger.Sub("dbProviders")
@@ -150,6 +152,25 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 	return p, nil
 }
 
+// PeerNodes returns the ids of the active cluster nodes other than selfID.
+// selfID is excluded so a quick restart does not count its own stale entry.
+// It is the membership read behind the multi-node guard for
+// I2SIG_STORE_WAL=local (#343), at startup (CheckLocalModeCluster) and on
+// every heartbeat afterwards (the server's enforcement).
+func PeerNodes(coord cluster.ClusterCoordinator, selfID string) ([]string, error) {
+	nodes, err := coord.GetActiveNodes()
+	if err != nil {
+		return nil, err
+	}
+	var peers []string
+	for _, n := range nodes {
+		if n.Id != selfID {
+			peers = append(peers, n.Id)
+		}
+	}
+	return peers, nil
+}
+
 // CheckLocalModeCluster is the multi-node refuse-to-start guard for
 // I2SIG_STORE_WAL=local (spec #111 Stage 3, issue #343). A node in local mode
 // may join a cluster with other active nodes only when ring-fed delivery
@@ -157,36 +178,48 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 // node's WAL is still delivered before the drain lands it in the shared store.
 // Without it the node refuses to enable local ingest (and so refuses to
 // start); it also refuses when it cannot tell how many nodes are active.
-// selfID is excluded so a quick restart does not count its own stale entry.
+// The check is startup-only; a peer that joins later is caught by the
+// server's heartbeat enforcement, which suspends local ingest on the running
+// node (see SignalsApplication.enforceLocalModeCluster).
 func CheckLocalModeCluster(coord cluster.ClusterCoordinator, selfID string, ringFed bool) error {
 	if coord == nil || ringFed {
 		return nil
 	}
-	nodes, err := coord.GetActiveNodes()
+	peers, err := PeerNodes(coord, selfID)
 	if err != nil {
 		return fmt.Errorf("%s=local: cannot confirm the active cluster node count: %w; either enable ring-fed delivery (%s=true) or run in majority mode (unset %s)",
 			wal.EnvMode, err, wal.EnvRingFed, wal.EnvMode)
 	}
-	active := 1 // this node
-	var peer string
-	for _, n := range nodes {
-		if n.Id != selfID {
-			active++
-			if peer == "" {
-				peer = n.Id
-			}
-		}
-	}
-	if active > 1 {
+	if len(peers) > 0 {
 		return fmt.Errorf("%s=local refused: %d active cluster nodes (peer %q, this node %q) and ring-fed delivery is disabled; either enable ring-fed delivery (%s=true) or run in majority mode (unset %s)",
-			wal.EnvMode, active, peer, selfID, wal.EnvRingFed, wal.EnvMode)
+			wal.EnvMode, len(peers)+1, peers[0], selfID, wal.EnvRingFed, wal.EnvMode)
 	}
 	return nil
+}
+
+// announceNode registers selfID with the coordinator before the multi-node
+// guard reads membership, so two local-mode nodes started at the same time
+// see each other instead of both passing an empty read (#343). The server's
+// backgroundSync upserts the full record (address, version) moments later.
+// A node the guard then refuses leaves this entry behind; it ages out of the
+// active window, and until then a peer starting in the same state also
+// refuses, which is the safe side of the race.
+func announceNode(coord cluster.ClusterCoordinator, selfID string) {
+	if coord == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if err := coord.RegisterNode(model.ClusterNode{Id: selfID, StartedAt: now, LastSeenAt: now}); err != nil {
+		factoryLog.Warn("Could not register this node before the local-mode cluster check", "error", err, "nodeID", selfID)
+	}
 }
 
 // attachLocalWal opens the local WAL for I2SIG_STORE_WAL=local after the
 // multi-node guard (CheckLocalModeCluster) passes.
 func attachLocalWal(p *Persistence, selfID string, dir string, ringFed bool) error {
+	if !ringFed {
+		announceNode(p.Coordinator, selfID)
+	}
 	if err := CheckLocalModeCluster(p.Coordinator, selfID, ringFed); err != nil {
 		factoryLog.Error("Refusing to enable local ingest durability", "error", err)
 		return err

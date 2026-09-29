@@ -713,7 +713,9 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 		apply: func(ctx context.Context, jtis []string) error {
 			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
 			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
-				eventLogger.Error("SSTP: Error acking outbound events", "sid", sid, "count", len(jtis), "error", err)
+				// Not acked: the SETs stay pending and are redelivered, so WARN
+				// (the DAO logs the store failure itself).
+				eventLogger.Warn("SSTP: Error acking outbound events", "sid", sid, "count", len(jtis), "error", err)
 			}
 			return err
 		},

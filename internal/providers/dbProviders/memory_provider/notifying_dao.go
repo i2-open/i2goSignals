@@ -178,6 +178,14 @@ func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, jtis []string, s
 	return nil
 }
 
+func (d *notifyingEventDAO) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
+	queued, err := d.inner.EnsurePending(ctx, jti, streamIDs)
+	if err == nil && len(queued) > 0 {
+		d.notify()
+	}
+	return queued, err
+}
+
 func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
 	return d.inner.GetPendingForStream(ctx, streamID, limit)
 }

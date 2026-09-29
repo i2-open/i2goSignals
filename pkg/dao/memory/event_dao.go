@@ -230,6 +230,45 @@ func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, stream
 	return nil
 }
 
+// EnsurePending queues jti on each stream that has it neither pending nor
+// delivered (#331); a stream that already records it is left untouched.
+func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, streamIDs []string) ([]string, error) {
+	if len(streamIDs) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var queued []string
+	for _, streamID := range streamIDs {
+		if d.recordsJtiLocked(jti, streamID) {
+			continue
+		}
+		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
+			Jti:      jti,
+			StreamId: streamID,
+		})
+		queued = append(queued, streamID)
+	}
+	return queued, nil
+}
+
+// recordsJtiLocked reports whether streamID has jti pending or delivered;
+// d.mu must be held.
+func (d *EventDAOMemory) recordsJtiLocked(jti string, streamID string) bool {
+	for _, evt := range d.pendingEvents[streamID] {
+		if evt.Jti == jti {
+			return true
+		}
+	}
+	for _, evt := range d.deliveredEvents[streamID] {
+		if evt.Jti == jti {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

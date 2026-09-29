@@ -475,9 +475,15 @@ Worth knowing before debugging a delivery oddity: a **body-less marker** can
 still exist — data left by an older build's concurrent ingest — and every
 delivery leg skips one without acking it. A crash between the fallback path's
 two writes leaves the opposite: a stored body with no marker, never acked.
-And if a body lands but one of its markers fails, the SET is answered 503; a
-retry then resolves as a duplicate with no marker, so that SET is never queued
-(the same residual the two-write path always had).
+And if a body lands but one of its markers fails, the SET is answered 503; the
+retry resolves as a duplicate, and `router.requeueDuplicates` repairs it
+through `EventService.RequeueDuplicate` / `EventDAO.EnsurePending`, an
+idempotent `(sid, jti)` upsert that queues the SET on each target holding
+neither a pending nor a delivered record for it, then meters and wakes those
+targets like an accepted SET (#331). A duplicate with its markers in place
+changes nothing; a failed repair is answered 503 again. The WAL drain runs the
+same repair. The only residual is a retry that arrives after retention purged
+the delivered record, which is re-queued (at-least-once).
 
 ### Ingest read caches
 
@@ -542,7 +548,11 @@ Monotonically increasing per-resource counter handed back from
 that lost its lease can be rejected at the boundary even if it's still
 trying to write. The `MemoryCoordinator`'s contract guarantees the
 token never moves backward across the lifetime of a coordinator
-instance, even after takeover.
+instance, even after takeover. `EventService.AckEvent(s)` checks the
+token against the stream's current lease before writing; modes that
+hold no lease (poll transmitter, SSTP server side) pass
+`NoFencingToken` (0) and are exempt only because the router reports no
+lease resource for the stream — a 0 token on a leased stream is refused.
 
 ### Rebindable collection
 

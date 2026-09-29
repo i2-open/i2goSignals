@@ -82,6 +82,10 @@ func TestPushFence_StaleTokenAckRejectedAfterTakeover(t *testing.T) {
 	err = h.eventService.AckEvent(t.Context(), jtis[0], sid, oldToken)
 	require.ErrorIs(t, err, services.ErrStaleFencingToken)
 	assert.Equal(t, before, h.pendingCount(sid), "a stale ack writes nothing")
+	// Token 0 is never accepted on a leased stream once a coordinator is wired.
+	err = h.eventService.AckEvent(t.Context(), jtis[0], sid, services.NoFencingToken)
+	require.ErrorIs(t, err, services.ErrStaleFencingToken)
+	assert.Equal(t, before, h.pendingCount(sid), "a zero-token ack writes nothing")
 
 	// The current holder's token is accepted.
 	require.NoError(t, h.eventService.AckEvent(t.Context(), jtis[0], sid, newToken))

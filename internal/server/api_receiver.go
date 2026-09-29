@@ -2076,7 +2076,9 @@ func receivePushForStream(sa SsfApplicationInterface, w http.ResponseWriter, r *
 			// The SET is valid but was not durably stored, so it is not acked
 			// (ADR 0038): 503 + Retry-After tells the transmitter to resend it
 			// rather than drop it as a bad request (#333).
-			serverLog.Error("PUSH-RCV: SET could not be stored", "sid", sid, "jti", received.Token.ID, "error", err)
+			// WARN, not ERROR: the transmitter retries on 503 and the store
+			// layer already logs the underlying failure (CONTEXT.md log-level policy).
+			serverLog.Warn("PUSH-RCV: SET could not be stored", "sid", sid, "jti", received.Token.ID, "error", err)
 			goSetPush.WriteDeliveryErrorStatus(w, http.StatusServiceUnavailable, goSetPush.ErrTemporarilyUnavailable,
 				"The SET could not be stored; retry later", ingestRetryAfterSeconds())
 			return

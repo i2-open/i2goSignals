@@ -208,7 +208,10 @@ type router struct {
 	walRT *walReadThrough
 	// durabilityWarned holds the stream ids already WARNed for asking for
 	// local durability on a majority deployment (issue #343): one WARN each.
-	durabilityWarned     sync.Map
+	durabilityWarned sync.Map
+	// localIngestSuspended is set by SuspendLocalIngest (#343): the WAL stays
+	// open for the drain, but no new SET is acked into it.
+	localIngestSuspended atomic.Bool
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -1143,6 +1146,7 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 
 	// One write: bodies + markers. Only now is it known which were accepted.
 	recs, errs := r.eventService.AddEventsWithPending(r.ctx, candidates, sid, pending)
+	requeued := r.requeueDuplicates(r.ctx, recs, errs, targets)
 	accepted := r.reconcileIngest(recs, errs, results, streamState, eventTokens)
 	if len(targets) == 0 {
 		return results
@@ -1150,8 +1154,70 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	r.commitFanoutLocked(targets, accepted)
+	r.commitFanoutLocked(targets, accepted, requeued)
 	return results
+}
+
+// requeueDuplicates closes the ADR 0043 residual (#331). A SET whose body
+// landed but whose marker write failed was answered 503, so the transmitter's
+// retry comes back from the ingest write as ErrDuplicateJTI, with no marker
+// written. For each such duplicate it asks the store to queue the JTI on every
+// planned target that holds neither a pending nor a delivered record for it,
+// and returns what was newly queued, keyed by target document ID then JTI, so
+// the commit phase wakes exactly those targets. A duplicate that is still
+// pending or already delivered on every target is left alone (the idempotent
+// 202 of ADR 0017). If the repair itself fails, the duplicate's error is
+// replaced in errs so reconcileIngest answers 503 and the transmitter retries
+// again. A JTI that appears twice in one batch is skipped: its markers were
+// written with the accepted copy.
+func (r *router) requeueDuplicates(ctx context.Context, recs []*model.EventRecord, errs []error, targets []*fanoutTarget) map[string]map[string]*model.EventRecord {
+	if len(targets) == 0 {
+		return nil
+	}
+	var requeued map[string]map[string]*model.EventRecord
+	for i, rec := range recs {
+		if rec == nil || !errors.Is(errs[i], interfaces.ErrDuplicateJTI) {
+			continue
+		}
+		if acceptedInBatch(recs, errs, rec.Jti) {
+			continue
+		}
+		var docIDs []string
+		for _, t := range targets {
+			if slices.Contains(t.jtis, rec.Jti) {
+				docIDs = append(docIDs, t.docID)
+			}
+		}
+		if len(docIDs) == 0 {
+			continue
+		}
+		queued, err := r.eventService.RequeueDuplicate(ctx, rec.Jti, rec.Sid, docIDs)
+		if err != nil {
+			errs[i] = fmt.Errorf("re-queuing duplicate: %w", err)
+			continue
+		}
+		for _, docID := range queued {
+			if requeued == nil {
+				requeued = map[string]map[string]*model.EventRecord{}
+			}
+			if requeued[docID] == nil {
+				requeued[docID] = map[string]*model.EventRecord{}
+			}
+			requeued[docID][rec.Jti] = rec
+		}
+	}
+	return requeued
+}
+
+// acceptedInBatch reports whether some copy of jti in recs was stored by this
+// write (a nil error).
+func acceptedInBatch(recs []*model.EventRecord, errs []error, jti string) bool {
+	for i, rec := range recs {
+		if rec != nil && rec.Jti == jti && errs[i] == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // reconcileIngest records the per-SET outcome of the ingest write in results,
@@ -1261,20 +1327,26 @@ func (r *router) selectMatchingLocked(stream *model.StreamStateRecord, batch []*
 // commitFanoutLocked finishes the fan-out once the ingest write has returned:
 // it meters the accepted SETs as egress and wakes each target the way its
 // delivery method requires. A rejected SET has no marker (ADR 0043), so it is
-// simply skipped. The caller must hold r.mu (at least RLock).
-func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string]*model.EventRecord) {
+// simply skipped. requeued (may be nil) names, per target document ID, the
+// duplicates whose missing marker requeueDuplicates wrote this batch; they are
+// metered and woken on those targets only. The caller must hold r.mu (at least
+// RLock).
+func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string]*model.EventRecord, requeued map[string]map[string]*model.EventRecord) {
 	for _, t := range targets {
 		keep := make([]string, 0, len(t.jtis))
 		for _, jti := range t.jtis {
-			if _, ok := accepted[jti]; ok {
-				keep = append(keep, jti)
+			rec, ok := accepted[jti]
+			if !ok {
+				rec, ok = requeued[t.docID][jti]
 			}
+			if !ok {
+				continue
+			}
+			keep = append(keep, jti)
+			r.observeMeteredEvent(t.sid, DirectionEgress, &rec.Event)
 		}
 		if len(keep) == 0 {
 			continue
-		}
-		for _, jti := range keep {
-			r.observeMeteredEvent(t.sid, DirectionEgress, &accepted[jti].Event)
 		}
 		r.wakeTargetLocked(t, keep)
 	}
@@ -2656,8 +2728,9 @@ func (r *router) newPushAcker(sid string, fencingToken int64) *acker {
 		apply: func(ctx context.Context, jtis []string) error {
 			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
 			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
-				// Not acked: the SETs stay pending and are redelivered.
-				eventLogger.Error("PUSH-SRV: Error acking events", "sid", sid, "count", len(jtis), "error", err)
+				// Not acked: the SETs stay pending and are redelivered, so WARN
+				// (the DAO logs the store failure itself).
+				eventLogger.Warn("PUSH-SRV: Error acking events", "sid", sid, "count", len(jtis), "error", err)
 			}
 			return err
 		},

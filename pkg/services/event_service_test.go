@@ -89,6 +89,9 @@ func (f *fakeEventDAO) AddPending(_ context.Context, _ string, _ string) error {
 func (f *fakeEventDAO) AddPendingMany(_ context.Context, _ []string, _ string) error {
 	return nil
 }
+func (f *fakeEventDAO) EnsurePending(_ context.Context, _ string, _ []string) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeEventDAO) GetPendingForStream(_ context.Context, _ string, _ int32) ([]string, int64, error) {
 	return nil, 0, nil
 }

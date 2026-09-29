@@ -759,3 +759,48 @@ func sortedCopy(in []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestEventDAOMemory_EnsurePending pins the ADR 0043 residual repair (#331):
+// a JTI is queued only on the streams that hold neither a pending nor a
+// delivered record for it, the call reports exactly those streams, and a
+// repeat call is a no-op.
+func TestEventDAOMemory_EnsurePending(t *testing.T) {
+	dao := NewEventDAO()
+	ctx := context.Background()
+	if err := dao.Insert(ctx, &model.EventRecord{Jti: "ens", Original: `{"jti":"ens"}`, SortTime: time.Now()}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := dao.AddPending(ctx, "ens", "has-pending"); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+	if err := dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "ens", StreamId: "was-delivered"}, time.Now()); err != nil {
+		t.Fatalf("MarkDelivered: %v", err)
+	}
+
+	queued, err := dao.EnsurePending(ctx, "ens", nil)
+	if err != nil || queued != nil {
+		t.Fatalf("empty streamIDs: got (%v, %v), want (nil, nil)", queued, err)
+	}
+
+	queued, err = dao.EnsurePending(ctx, "ens", []string{"has-pending", "was-delivered", "missing"})
+	if err != nil {
+		t.Fatalf("EnsurePending: %v", err)
+	}
+	if len(queued) != 1 || queued[0] != "missing" {
+		t.Fatalf("queued = %v, want [missing]", queued)
+	}
+	for stream, want := range map[string]int{"has-pending": 1, "was-delivered": 0, "missing": 1} {
+		evs, _, err := dao.GetPendingForStream(ctx, stream, 10)
+		if err != nil {
+			t.Fatalf("GetPendingForStream(%s): %v", stream, err)
+		}
+		if len(evs) != want {
+			t.Errorf("stream %s: %d pending, want %d", stream, len(evs), want)
+		}
+	}
+
+	queued, err = dao.EnsurePending(ctx, "ens", []string{"has-pending", "was-delivered", "missing"})
+	if err != nil || len(queued) != 0 {
+		t.Fatalf("repeat call: got (%v, %v), want nothing queued", queued, err)
+	}
+}

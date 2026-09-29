@@ -364,7 +364,6 @@ func (ss *StreamStateRecord) Update(mod *StreamStateRecord) {
 	ss.RetentionWindowDays = mod.RetentionWindowDays
 	ss.EventValidation = mod.EventValidation
 	ss.Durability = mod.Durability
-	ss.EffectiveDurability = mod.EffectiveDurability
 	ss.SstpInbound = mod.SstpInbound
 	ss.SstpMethod = mod.SstpMethod
 	ss.PairId = mod.PairId

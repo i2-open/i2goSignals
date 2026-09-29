@@ -476,6 +476,61 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID str
 	return err
 }
 
+// EnsurePending upserts one pending marker per stream that has neither a
+// pending nor a delivered record for jti (#331). The upsert is keyed on
+// (sid, jti), so a concurrent duplicate cannot produce a second marker, and a
+// stream whose delivered record exists is skipped rather than re-queued.
+func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
+	if len(streamIDs) == 0 {
+		return nil, nil
+	}
+	pc, err := d.pendingColLoad()
+	if err != nil {
+		return nil, err
+	}
+	dc, err := d.deliveredColLoad()
+	if err != nil {
+		return nil, err
+	}
+	sids := make([]bson.ObjectID, len(streamIDs))
+	for i, streamID := range streamIDs {
+		if sids[i], err = ParseObjectID(streamID); err != nil {
+			return nil, err
+		}
+	}
+	cursor, err := dc.Find(ctx, bson.M{"jti": jti, "sid": bson.M{"$in": sids}},
+		options.Find().SetProjection(bson.M{"sid": 1}))
+	if err != nil {
+		eLog.Error("Error checking delivered records before re-queue", "jti", jti, "error", err)
+		return nil, err
+	}
+	var delivered []deliveredDoc
+	if err = cursor.All(ctx, &delivered); err != nil {
+		eLog.Error("Error parsing delivered records before re-queue", "jti", jti, "error", err)
+		return nil, err
+	}
+	done := make(map[bson.ObjectID]struct{}, len(delivered))
+	for _, doc := range delivered {
+		done[doc.Sid] = struct{}{}
+	}
+	var queued []string
+	for i, sid := range sids {
+		if _, ok := done[sid]; ok {
+			continue
+		}
+		res, uerr := pc.UpdateOne(ctx, bson.M{"sid": sid, "jti": jti},
+			bson.M{"$setOnInsert": bson.M{"sid": sid, "jti": jti}}, options.UpdateOne().SetUpsert(true))
+		if uerr != nil {
+			eLog.Error("Error re-queuing pending marker", "jti", jti, "sid", streamIDs[i], "error", uerr)
+			return queued, uerr
+		}
+		if res.UpsertedCount == 1 {
+			queued = append(queued, streamIDs[i])
+		}
+	}
+	return queued, nil
+}
+
 func (d *EventDAOMongo) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
 	if len(jtis) == 0 {
 		return nil

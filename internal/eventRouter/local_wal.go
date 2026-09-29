@@ -76,6 +76,10 @@ type walMetrics struct {
 	replayed      prometheus.Counter
 	drainDuration prometheus.Histogram
 	ringFedServed prometheus.Counter
+	// suspended is 1 once a running local-mode node found another active
+	// cluster node without ring-fed delivery and stopped ingesting locally
+	// (#343); it stays 1 until restart.
+	suspended prometheus.Gauge
 }
 
 func newWalMetrics() *walMetrics {
@@ -105,11 +109,15 @@ func newWalMetrics() *walMetrics {
 			Namespace: "goSignals", Subsystem: "wal", Name: "ring_fed_served_total",
 			Help: "SET bodies served to delivery from the local WAL before the drain stored them (I2SIG_STORE_WAL_RING_FED).",
 		}),
+		suspended: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "goSignals", Subsystem: "wal", Name: "local_ingest_suspended",
+			Help: "1 when this local-mode node found another active cluster node without ring-fed delivery and suspended local ingest until restart (#343); streams with durability=local then run at majority.",
+		}),
 	}
 }
 
 func (m *walMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration, m.ringFedServed}
+	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration, m.ringFedServed, m.suspended}
 }
 
 // walMetricsDefault is the process's local-WAL metric set; a router picks it
@@ -187,10 +195,12 @@ func (r *router) startLocalWal(log wal.Log) {
 	// before a restart and not yet drained).
 	var from uint64
 	var replay []*walEntry
+	readFailed := false
 	for {
 		entries, err := log.ReadFrom(from, walReadEntries)
 		if err != nil {
 			eventLogger.Error("ROUTER: local WAL read failed at startup", "error", err)
+			readFailed = true
 			break
 		}
 		if len(entries) == 0 {
@@ -208,6 +218,13 @@ func (r *router) startLocalWal(log wal.Log) {
 			lw.replayThrough = e.Seq
 			from = e.Seq + 1
 		}
+	}
+	if readFailed && log.Depth() > 0 {
+		// The log holds entries we could not read past. Their JTIs are unknown
+		// to the buffered set, so they must be replayed by the drain worker
+		// before ingest resumes; otherwise the gate below would never arm and
+		// new SETs would be acked ahead of older ones (#341).
+		lw.replayThrough = ^uint64(0)
 	}
 	if lw.replayThrough > 0 {
 		// A previous run acked these and stopped before draining them (a crash,
@@ -360,13 +377,41 @@ func (r *router) ingestsLocally(streamState, sstpPair *model.StreamStateRecord) 
 		return false
 	}
 	if r.wal != nil {
-		return true
+		if !r.localIngestSuspended.Load() {
+			return true
+		}
+		if _, warned := r.durabilityWarned.LoadOrStore("suspended:"+rec.StreamConfiguration.Id, struct{}{}); !warned {
+			eventLogger.Warn("ROUTER: stream durability=local ignored: local ingest is suspended on this node (another cluster node is active without ring-fed delivery, #343); running at majority until restart",
+				"sid", rec.StreamConfiguration.Id)
+		}
+		return false
 	}
 	if _, warned := r.durabilityWarned.LoadOrStore(rec.StreamConfiguration.Id, struct{}{}); !warned {
 		eventLogger.Warn("ROUTER: stream durability=local ignored: this deployment is not in local mode (I2SIG_STORE_WAL); running at majority",
 			"sid", rec.StreamConfiguration.Id)
 	}
 	return false
+}
+
+// LocalIngestSuspender is implemented by a router running in local mode
+// (I2SIG_STORE_WAL=local). The server calls SuspendLocalIngest when its
+// heartbeat finds another active cluster node and ring-fed delivery is off
+// (#343): the startup guard only covers the node that joins, so the node
+// already running has to step down by itself.
+type LocalIngestSuspender interface {
+	SuspendLocalIngest()
+}
+
+// SuspendLocalIngest stops routing new SETs through the local WAL: every
+// stream, including those with durability=local, is acked at majority from
+// now on. Entries already in the WAL keep draining. There is no re-arm; the
+// node stays at majority until it restarts, so its durability contract does
+// not flap with cluster membership.
+func (r *router) SuspendLocalIngest() {
+	if r.wal == nil || r.localIngestSuspended.Swap(true) {
+		return
+	}
+	r.wal.metrics.suspended.Set(1)
 }
 
 func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, importOnly bool, excludeSstpTxSid string, results []error) []error {
@@ -566,13 +611,16 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 	for _, d := range batch {
 		n := len(d.entry.Records)
 		eRecs, eErrs := recs[d.start:d.start+n], errs[d.start:d.start+n]
+		// commitWalEntry first: it repairs a duplicate whose marker is
+		// missing (#331) and, when that repair fails, rewrites the
+		// duplicate's error so the entry is held for the next pass.
+		r.commitWalEntry(ctx, d.entry, eRecs, eErrs, streams)
 		stored := true
 		for i := range eErrs {
 			if eErrs[i] != nil && !errors.Is(eErrs[i], interfaces.ErrDuplicateJTI) {
 				stored = false
 			}
 		}
-		r.commitWalEntry(ctx, d.entry, eRecs, eErrs, streams)
 		if !stored {
 			blocked = true
 		}
@@ -628,9 +676,10 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 }
 
 // commitWalEntry meters the entry's newly stored SETs as ingress and egress
-// and wakes their targets. A record that came back as a duplicate or a store
-// failure is skipped; a failed one is retried by the next pass, where a record
-// already stored this pass comes back as a duplicate and is not re-metered.
+// and wakes their targets. A store failure is skipped and retried by the next
+// pass, where a record already stored this pass comes back as a duplicate and
+// is not re-metered. A duplicate is re-queued on any target that holds neither
+// a pending nor a delivered record for it (#331) and metered as egress there.
 func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.EventRecord, errs []error, streams map[string]*model.StreamStateRecord) {
 	stream, seen := streams[e.Sid]
 	if !seen {
@@ -642,6 +691,14 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		streams[e.Sid] = s
 		stream = s
 	}
+	targets := make([]*fanoutTarget, len(e.Targets))
+	for i, t := range e.Targets {
+		targets[i] = &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}
+	}
+	// A duplicate whose marker is missing is re-queued exactly as on the
+	// majority path (#331); a failed repair rewrites errs[i] so the drain
+	// holds the entry.
+	requeued := r.requeueDuplicates(ctx, recs, errs, targets)
 	accepted := make(map[string]*model.EventRecord, len(recs))
 	for i, rec := range recs {
 		if errs[i] != nil || rec == nil {
@@ -654,27 +711,29 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		}
 		accepted[rec.Jti] = rec
 	}
-	if len(accepted) == 0 || len(e.Targets) == 0 {
+	if (len(accepted) == 0 && len(requeued) == 0) || len(targets) == 0 {
 		return
 	}
 	if r.walRT != nil {
 		// Ring-fed: the targets were woken at append (ringFeed); only meter.
-		for _, t := range e.Targets {
-			for _, jti := range t.Jtis {
-				if rec, ok := accepted[jti]; ok {
-					r.observeMeteredEvent(t.Sid, DirectionEgress, &rec.Event)
+		// A re-queued duplicate was fed then too, and its held ack (if it
+		// has already been delivered) removes the marker written above.
+		for _, t := range targets {
+			for _, jti := range t.jtis {
+				rec, ok := accepted[jti]
+				if !ok {
+					rec, ok = requeued[t.docID][jti]
+				}
+				if ok {
+					r.observeMeteredEvent(t.sid, DirectionEgress, &rec.Event)
 				}
 			}
 		}
 		return
 	}
-	targets := make([]*fanoutTarget, len(e.Targets))
-	for i, t := range e.Targets {
-		targets[i] = &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}
-	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	r.commitFanoutLocked(targets, accepted)
+	r.commitFanoutLocked(targets, accepted, requeued)
 }
 
 // endReplayIfDrained lifts the start-up ingest gate once every entry found in

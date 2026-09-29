@@ -178,13 +178,21 @@ report it as the derived, never-persisted `effective_durability`. The
 streams.
 
 **Multi-node.** In a cluster, `local` requires ring-fed delivery
-(`I2SIG_STORE_WAL_RING_FED=true`). Without ring-fed, `OpenPersistence` asks
-the cluster coordinator for the active nodes. If any active node other than
-this one (`nodeid.Resolve()`) is registered, or membership cannot be read,
-it logs an ERROR and refuses to start. The error names the condition and the
-two fixes: enable ring-fed delivery, or return to `majority`. A node that
-joins later runs the same check at its own startup, so it refuses to enable
-local ingest for itself. With ring-fed on, the check is skipped.
+(`I2SIG_STORE_WAL_RING_FED=true`). Without ring-fed, `OpenPersistence` first
+registers this node (`nodeid.Resolve()`) with the cluster coordinator and
+then asks for the active nodes, so two nodes started together see each other
+rather than both passing an empty read. If any active node other than this
+one is registered, or membership cannot be read, it logs an ERROR and refuses
+to start. The error names the condition and the two fixes: enable ring-fed
+delivery, or return to `majority`. The startup check only covers the node
+that joins, so the server repeats the membership read after every heartbeat
+(`enforceLocalModeCluster`): the first time a running local-mode node finds a
+peer it logs the same ERROR and suspends local ingest on itself
+(`EventRouter.SuspendLocalIngest`, `StreamService.SetDeploymentDurabilityLocal(false)`).
+Streams with `durability=local` are then acked at majority, the WAL keeps
+draining, `goSignals_wal_local_ingest_suspended` reads 1, and the node stays
+that way until restart; there is no re-arm, so the contract does not flap
+with membership. With ring-fed on, both halves are skipped.
 
 ### 6. Lifecycle is #341's
 

@@ -139,12 +139,20 @@ not maintaining two mechanisms.
 - **Residuals.** The one-trip write is ordered but not atomic. A crash, or a
   marker failure, after a body lands but before all its markers land leaves a
   body with missing markers. That SET was answered 503, not acked. A retry by
-  the transmitter is then a duplicate, so it is acknowledged but not re-queued
-  on the streams whose marker was missing. The same holds in the fallback
-  between its two writes. This is the same residual as the pre-0038
-  sequential form ("body stored, never queued"). The inverse residue, a marker
-  with no body, can no longer be produced by this build. The delivery legs
-  still skip such a marker if an older build left one.
+  the transmitter is then a duplicate, and the router repairs it (#331): for
+  every duplicate it calls `EventDAO.EnsurePending(jti, targets)`, an
+  idempotent upsert keyed on `(sid, jti)` that queues the JTI on each target
+  stream holding neither a pending nor a delivered record for it, and the
+  re-queued targets are metered and woken exactly as an accepted SET's are.
+  A duplicate whose markers are all in place changes nothing. If the repair
+  itself fails the duplicate is answered 503, not acked, so the transmitter
+  keeps retrying. The same repair covers the fallback between its two writes
+  and the ADR 0045 WAL drain. What remains is at-least-once by design: a
+  retry that arrives after ADR 0055 retention has purged the delivered
+  record, or after a stream's configuration changed to match the SET, is
+  re-queued on that stream. The inverse residue, a marker with no body, can
+  no longer be produced by this build. The delivery legs still skip such a
+  marker if an older build left one.
 - Mongo < 8.0 deployments keep working, with one WARN at startup and two
   sequential writes per batch.
 

@@ -88,6 +88,37 @@ func TestAck_UnleasedStreamNotFenced(t *testing.T) {
 	}
 }
 
+// TestAck_NoFencingTokenRejectedOnLeasedStream: token 0 is never accepted on
+// a leased stream once a coordinator is wired (#334) — the exemption for
+// lease-less modes comes from the checker, not from the token.
+func TestAck_NoFencingTokenRejectedOnLeasedStream(t *testing.T) {
+	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}}}
+	svc := NewEventService(fake)
+	svc.SetFenceChecker(&fakeFence{token: 7, leased: true})
+
+	if err := svc.AckEvents(context.Background(), []string{"j-1"}, "s1", NoFencingToken); !errors.Is(err, ErrStaleFencingToken) {
+		t.Fatalf("AckEvents err = %v, want ErrStaleFencingToken", err)
+	}
+	if fake.markDeliveredManyCalls != 0 || fake.removePendingManyCalls != 0 {
+		t.Error("zero-token ack on a leased stream was written")
+	}
+}
+
+// TestAck_NoFencingTokenRejectedOnExpiredLease: an expired lease reads as
+// token 0; a 0-token ack must not match it.
+func TestAck_NoFencingTokenRejectedOnExpiredLease(t *testing.T) {
+	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}}}
+	svc := NewEventService(fake)
+	svc.SetFenceChecker(&fakeFence{token: 0, leased: true})
+
+	if err := svc.AckEvent(context.Background(), "j-1", "s1", NoFencingToken); !errors.Is(err, ErrStaleFencingToken) {
+		t.Fatalf("AckEvent err = %v, want ErrStaleFencingToken", err)
+	}
+	if fake.markDeliveredManyCalls != 0 {
+		t.Error("zero-token ack on an expired lease was written")
+	}
+}
+
 // TestAck_FenceLookupErrorFailsClosed: a checker error is returned and nothing
 // is written.
 func TestAck_FenceLookupErrorFailsClosed(t *testing.T) {

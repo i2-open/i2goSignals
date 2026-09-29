@@ -116,6 +116,15 @@ type EventDAO interface {
 	// bulk write; equivalent to AddPending per JTI but one round trip. An
 	// empty jtis is a no-op.
 	AddPendingMany(ctx context.Context, jtis []string, streamID string) error
+	// EnsurePending queues jti on every stream of streamIDs that holds neither
+	// a pending nor a delivered record for it, and returns the stream IDs it
+	// queued on (a subset of streamIDs, order unspecified). A stream that
+	// already has the JTI pending or delivered is left untouched, so the call
+	// is idempotent. It is the ADR 0043 residual repair (#331): a retry of a
+	// SET whose body landed but whose marker write failed is a duplicate for
+	// InsertWithPending, and this is how that duplicate is (re)queued. An empty
+	// streamIDs returns (nil, nil).
+	EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error)
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
 	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
 	// RemovePendingMany removes every entry of jtis that is pending for

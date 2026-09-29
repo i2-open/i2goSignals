@@ -180,6 +180,19 @@ func TestAcker_CloseFlushes(t *testing.T) {
 	assert.Len(t, rec.snapshot(), 1)
 }
 
+// A completion that lands after close (a push whose response arrived while the
+// runner was stopping) is still written: with the flush loop gone, it drains
+// inline instead of sitting in a queue nobody applies.
+func TestAcker_CompleteAfterCloseDrainsInline(t *testing.T) {
+	rec := &ackRecorder{}
+	a := newAcker(context.Background(), ackerConfig{sid: "s", transport: "push", apply: rec.apply, window: time.Hour, max: 64})
+	_, _ = a.reserve(context.Background(), []string{"a", "b", "c"})
+	require.NoError(t, a.close())
+	assert.Empty(t, rec.snapshot())
+	require.NoError(t, a.complete([]string{"c"}, nil))
+	assert.Equal(t, [][]string{{"c"}}, rec.snapshot())
+}
+
 // An ack refused on a stale fencing token fences the acker: the fenced
 // channel closes, later reservations and completions fail with the error, and
 // nothing is written again.

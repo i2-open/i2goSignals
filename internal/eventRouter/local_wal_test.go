@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -217,14 +218,38 @@ func TestLocalWal_DuplicateInStoreCountsAsDrained(t *testing.T) {
 	s := newWalRouter(t, p, t.TempDir(), nil)
 	tok := newRiscToken("wal-dup", dupTestIssuer, s.audience)
 	recs := services.NewIngestRecords([]*goSet.SecurityEventToken{tok}, s.streamID, []string{"first"})
-	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, nil)
+	pending := map[string][]string{s.stream.Id.Hex(): {"wal-dup"}}
+	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, pending)
 	require.NoError(t, errs[0])
 
 	require.NoError(t, s.router.HandleEvent(tok, "second", s.streamID))
 	s.waitDrained(t)
 	assert.Equal(t, "first", p.EventService.GetEventRecord(context.Background(), "wal-dup").Original, "the stored copy wins")
-	assert.Empty(t, s.pending(t), "a duplicate gets no second marker")
+	assert.Equal(t, []string{"wal-dup"}, s.pending(t), "a duplicate gets no second marker")
 	assert.InDelta(t, 0.0, inCounterValue(t, s.inCounter, s.streamID), 0.0001, "a duplicate is not metered")
+}
+
+// TestLocalWal_DuplicateWithoutMarkerIsRequeued: a body that reached the store
+// without its pending marker (the ADR 0043 residual, #331) is re-queued when
+// its retry drains through the WAL, so the SET is still delivered exactly once.
+func TestLocalWal_DuplicateWithoutMarkerIsRequeued(t *testing.T) {
+	p := openMemPersistence(t)
+	s := newWalRouter(t, p, t.TempDir(), nil)
+	tok := newRiscToken("wal-orphan", dupTestIssuer, s.audience)
+	recs := services.NewIngestRecords([]*goSet.SecurityEventToken{tok}, s.streamID, []string{"first"})
+	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, nil)
+	require.NoError(t, errs[0])
+	require.Empty(t, s.pending(t), "precondition: body stored, marker missing")
+
+	require.NoError(t, s.router.HandleEvent(tok, "second", s.streamID))
+	s.waitDrained(t)
+	assert.Equal(t, []string{"wal-orphan"}, s.pending(t), "the retry re-queues the orphaned body exactly once")
+	assert.InDelta(t, 0.0, inCounterValue(t, s.inCounter, s.streamID), 0.0001, "a duplicate is still not metered as ingress")
+
+	// A further retry finds the marker in place and changes nothing.
+	require.NoError(t, s.router.HandleEvent(tok, "third", s.streamID))
+	s.waitDrained(t)
+	assert.Equal(t, []string{"wal-orphan"}, s.pending(t))
 }
 
 func TestLocalWal_AppendFailureIsStoreUnavailable(t *testing.T) {
@@ -378,4 +403,35 @@ func TestLocalWal_LocalStreamOnMajorityDeploymentUsesStore(t *testing.T) {
 	assert.NotNil(t, p.EventService.GetEventRecord(context.Background(), "dur-ignored"), "stored before the ack")
 	_, warned := r.durabilityWarned.Load(st.StreamConfiguration.Id)
 	assert.True(t, warned, "the ignored local setting is WARNed once")
+}
+
+// TestLocalWal_SuspendLocalIngestFallsBackToStore: once the server suspends
+// local ingest (#343, a peer joined without ring-fed), a durability=local
+// stream is acked at majority: nothing new enters the WAL, the SET is stored
+// before the ack, the WARN fires once, and the gauge reads 1. A second
+// SuspendLocalIngest is a no-op.
+func TestLocalWal_SuspendLocalIngestFallsBackToStore(t *testing.T) {
+	p := openMemPersistence(t)
+	s := newWalRouter(t, p, t.TempDir(), nil)
+	require.Equal(t, float64(0), testutil.ToFloat64(s.router.wal.metrics.suspended))
+
+	require.NoError(t, s.router.HandleEvent(newRiscToken("pre-suspend", dupTestIssuer, s.audience), `{"raw":1}`, s.streamID))
+	require.Equal(t, 1, s.log.Depth(), "before suspension a local stream is acked into the WAL")
+	s.waitDrained(t)
+
+	s.router.SuspendLocalIngest()
+	s.router.SuspendLocalIngest()
+	assert.Equal(t, float64(1), testutil.ToFloat64(s.router.wal.metrics.suspended))
+
+	require.NoError(t, s.router.HandleEvent(newRiscToken("post-suspend", dupTestIssuer, s.audience), `{"raw":2}`, s.streamID))
+	assert.Equal(t, 0, s.log.Depth(), "after suspension the WAL is not used")
+	assert.True(t, s.stored("post-suspend"), "stored before the ack")
+	_, warned := s.router.durabilityWarned.Load("suspended:" + s.streamID)
+	assert.True(t, warned, "the suspension is WARNed once per stream")
+
+	// With the store down, a local stream now fails like a majority one.
+	s.dao.failures.Store(1)
+	err := s.router.HandleEvent(newRiscToken("post-suspend-down", dupTestIssuer, s.audience), `{"raw":3}`, s.streamID)
+	require.ErrorIs(t, err, ErrStoreUnavailable)
+	assert.Equal(t, 0, s.log.Depth())
 }

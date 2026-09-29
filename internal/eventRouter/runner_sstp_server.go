@@ -172,7 +172,9 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			// whole exchange so the peer resends it: the SETs that were stored
 			// come back as duplicate JTIs and are acked then, and nothing is
 			// drained outbound into a response that will not be sent.
-			eventLogger.Error("SSTP-SRV: inbound SET could not be stored, refusing exchange",
+			// WARN, not ERROR: the peer resends on 503 and the store layer
+			// already logs the underlying failure (CONTEXT.md log-level policy).
+			eventLogger.Warn("SSTP-SRV: inbound SET could not be stored, refusing exchange",
 				"sid", txSid, "error", storeErr)
 			return goSetSstp.Message{}, storeErr
 		}

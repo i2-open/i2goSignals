@@ -285,9 +285,12 @@ func (a *acker) complete(acked, released []string) error {
 	}
 	a.queue = append(a.queue, acked...)
 	full := len(a.queue) >= a.cfg.sizeCap
+	closed := a.closed
 	a.shrankLocked()
 	a.mu.Unlock()
-	if a.cfg.window <= 0 {
+	// After close the flush loop is gone, so a late completion drains inline
+	// rather than sitting in a queue nobody will apply.
+	if a.cfg.window <= 0 || closed {
 		return a.drain()
 	}
 	if full {

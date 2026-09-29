@@ -180,6 +180,7 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 	_, _ = d.FindByTimeRange(ctx, time.Now(), nil, nil)
 	_ = d.AddPending(ctx, "j", "s")
 	_ = d.AddPendingMany(ctx, []string{"k"}, "s")
+	_, _ = d.EnsurePending(ctx, "q", []string{"s"})
 	_, _, _ = d.GetPendingForStream(ctx, "s", 10)
 	ev, _ := d.RemovePending(ctx, "j", "s")
 	_, _ = d.RemovePendingMany(ctx, []string{"k"}, "s")
@@ -201,7 +202,7 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 
 	for _, op := range []string{
 		"Insert", "InsertMany", "FindByJTI", "FindByJTIs", "FindByTimeRange",
-		"AddPending", "AddPendingMany", "GetPendingForStream", "RemovePending",
+		"AddPending", "AddPendingMany", "EnsurePending", "GetPendingForStream", "RemovePending",
 		"RemovePendingMany", "InsertWithPending", "ClearPendingForStream",
 		"MarkDelivered", "MarkDeliveredMany", "ListDeliveredForStream",
 		"RemoveDelivered", "DeleteBodyIfUnreferenced", "CountRetainedForStream",

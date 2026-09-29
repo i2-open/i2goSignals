@@ -779,3 +779,77 @@ func (s *EventDAOMongoSuite) TestAckDelivered_MalformedStream() {
 		s.Nil(acked, "oneTrip=%v", oneTrip)
 	}
 }
+
+// TestEnsurePending_QueuesOnlyWhereMissing pins the ADR 0043 residual repair
+// (#331): EnsurePending queues a JTI only on the streams holding neither a
+// pending nor a delivered record for it, reports exactly those streams, and a
+// repeat call queues nothing. A malformed stream ID fails before any write.
+func (s *EventDAOMongoSuite) TestEnsurePending_QueuesOnlyWhereMissing() {
+	ctx := context.Background()
+	hasPending := bson.NewObjectID().Hex()
+	wasDelivered := bson.NewObjectID().Hex()
+	missing := bson.NewObjectID().Hex()
+	names := map[string]string{hasPending: "P", wasDelivered: "D", missing: "M"}
+	s.Require().NoError(s.dao.AddPending(ctx, "ens", hasPending))
+	s.Require().NoError(s.dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "ens", StreamId: wasDelivered}, time.Now()))
+
+	queued, err := s.dao.EnsurePending(ctx, "ens", nil)
+	s.Require().NoError(err)
+	s.Empty(queued)
+
+	_, err = s.dao.EnsurePending(ctx, "ens", []string{missing, "not-an-object-id"})
+	s.Require().Error(err, "a malformed stream ID fails the call")
+	s.ElementsMatch([]string{"P/ens"}, s.readIngestState(names).pending, "... before anything is written")
+
+	queued, err = s.dao.EnsurePending(ctx, "ens", []string{hasPending, wasDelivered, missing})
+	s.Require().NoError(err)
+	s.Equal([]string{missing}, queued)
+	s.ElementsMatch([]string{"P/ens", "M/ens"}, s.readIngestState(names).pending,
+		"queued only where no pending or delivered record exists")
+
+	queued, err = s.dao.EnsurePending(ctx, "ens", []string{hasPending, wasDelivered, missing})
+	s.Require().NoError(err)
+	s.Empty(queued, "idempotent")
+	s.ElementsMatch([]string{"P/ens", "M/ens"}, s.readIngestState(names).pending)
+}
+
+// TestInsertWithPending_MarkerFailureThenEnsurePendingRecovers replays the
+// #331 residual end to end at the DAO: a one-trip write lands r1's body, its
+// first marker fails (unique pending index + pre-seeded marker on stream A),
+// and the write drops r1's stream-B marker. The transmitter's retry is then a
+// duplicate, and EnsurePending — the repair the router runs for a duplicate —
+// queues r1 on B only.
+func (s *EventDAOMongoSuite) TestInsertWithPending_MarkerFailureThenEnsurePendingRecovers() {
+	ctx := context.Background()
+	streamA := bson.NewObjectID().Hex()
+	streamB := bson.NewObjectID().Hex()
+	names := map[string]string{streamA: "A", streamB: "B"}
+	_, err := s.pendingCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
+		Options: options.Index().SetName("testPendingUnique").SetUnique(true),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.dao.AddPending(ctx, "r1", streamA))
+	d, _ := s.oneTripCountingDAO()
+
+	recs := []*model.EventRecord{{Jti: "r1", Original: "b1", SortTime: time.Now()}}
+	pending := map[string][]string{streamA: {"r1"}, streamB: {"r1"}}
+	results, err := d.InsertWithPending(ctx, recs, pending)
+	s.Require().NoError(err)
+	s.Require().Error(results[0], "the marker failure is reported (the router answers 503)")
+	st := s.readIngestState(names)
+	s.Equal(map[string]string{"r1": "b1"}, st.events, "the body landed")
+	s.ElementsMatch([]string{"A/r1"}, st.pending, "the residual: no marker on B")
+
+	// The transmitter retries: the body is a duplicate ...
+	results, err = d.InsertWithPending(ctx, []*model.EventRecord{{Jti: "r1", Original: "b1-retry", SortTime: time.Now()}}, pending)
+	s.Require().NoError(err)
+	s.ErrorIs(results[0], interfaces.ErrDuplicateJTI)
+	// ... and the repair queues it where it is missing.
+	queued, err := d.EnsurePending(ctx, "r1", []string{streamA, streamB})
+	s.Require().NoError(err)
+	s.Equal([]string{streamB}, queued)
+	st = s.readIngestState(names)
+	s.Equal(map[string]string{"r1": "b1"}, st.events, "the stored copy wins")
+	s.ElementsMatch([]string{"A/r1", "B/r1"}, st.pending, "r1 is now queued on both streams, once each")
+}

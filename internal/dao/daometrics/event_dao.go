@@ -164,6 +164,13 @@ func (d *eventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID s
 	return err
 }
 
+func (d *eventDAO) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
+	start := time.Now()
+	queued, err := d.inner.EnsurePending(ctx, jti, streamIDs)
+	d.observe("EnsurePending", start, err)
+	return queued, err
+}
+
 func (d *eventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
 	start := time.Now()
 	jtis, total, err := d.inner.GetPendingForStream(ctx, streamID, limit)

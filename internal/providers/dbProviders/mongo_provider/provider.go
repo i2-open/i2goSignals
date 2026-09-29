@@ -855,7 +855,7 @@ func detectServerVersion(ctx context.Context, client *mongo.Client) string {
 		Version string `bson:"version"`
 	}
 	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&info); err != nil {
-		pLog.Warn("MongoDB: buildInfo failed; server version unknown", "err", err)
+		pLog.Warn("MongoDB: buildInfo failed; server version unknown", "error", err)
 		return ""
 	}
 	pLog.Info("MongoDB: connected", "serverVersion", info.Version)

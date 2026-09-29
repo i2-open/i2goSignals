@@ -81,6 +81,12 @@ type SignalsApplication struct {
 	mu                   sync.RWMutex
 	Stats                *PrometheusHandler
 	NodeID               string
+	// localModeUnfenced is true when this node runs I2SIG_STORE_WAL=local
+	// without ring-fed delivery, the only configuration the multi-node guard
+	// applies to (#343). localIngestSuspended records that the guard fired at
+	// runtime; it is set once and never cleared.
+	localModeUnfenced    bool
+	localIngestSuspended bool
 	StartedAt            time.Time
 	stopSync             chan struct{}
 	InternalServer       *http.Server
@@ -202,6 +208,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		NodeID:               nodeID,
 		StartedAt:            time.Now().UTC(),
 		stopSync:             make(chan struct{}),
+		localModeUnfenced:    persistence.WAL != nil && !persistence.WALRingFed,
 	}
 
 	// Initialize Auth if available
@@ -350,12 +357,14 @@ func (sa *SignalsApplication) backgroundSync() {
 
 	// Initial registration
 	sa.registerNode()
+	sa.enforceLocalModeCluster()
 
 	syncCounter := 0
 	for {
 		select {
 		case <-ticker.C:
 			sa.registerNode()
+			sa.enforceLocalModeCluster()
 
 			syncCounter++
 			if syncCounter >= 4 { // Every 40s
@@ -372,6 +381,38 @@ func (sa *SignalsApplication) backgroundSync() {
 		case <-sa.stopSync:
 			return
 		}
+	}
+}
+
+// enforceLocalModeCluster is the runtime half of the I2SIG_STORE_WAL=local
+// multi-node guard (#343). The startup check (dbProviders.CheckLocalModeCluster)
+// only stops the node that joins; the node already running would keep acking
+// SETs into a WAL that the joiner's delivery runners cannot see. So after
+// every heartbeat a local-mode node without ring-fed delivery reads the active
+// peers, and the first time it finds one it suspends local ingest on itself:
+// streams with durability=local are acked at majority from then on, the WAL
+// keeps draining, and the node stays that way until it restarts. Runs on the
+// backgroundSync goroutine only, so the one-shot flag needs no lock.
+func (sa *SignalsApplication) enforceLocalModeCluster() {
+	if !sa.localModeUnfenced || sa.localIngestSuspended || sa.Coordinator == nil {
+		return
+	}
+	peers, err := dbProviders.PeerNodes(sa.Coordinator, sa.NodeID)
+	if err != nil {
+		serverLog.Warn("Local-mode cluster check skipped: cannot read active cluster nodes; retrying on the next heartbeat", "error", err)
+		return
+	}
+	if len(peers) == 0 {
+		return
+	}
+	sa.localIngestSuspended = true
+	serverLog.Error("I2SIG_STORE_WAL=local: another active cluster node was found and ring-fed delivery is disabled; local ingest is suspended on this node until restart and streams with durability=local run at majority (#343). Either enable ring-fed delivery (I2SIG_STORE_WAL_RING_FED=true) on every node or run in majority mode (unset I2SIG_STORE_WAL).",
+		"peer", peers[0], "activeNodes", len(peers)+1, "nodeID", sa.NodeID)
+	if sa.StreamService != nil {
+		sa.StreamService.SetDeploymentDurabilityLocal(false)
+	}
+	if s, ok := sa.EventRouter.(eventRouter.LocalIngestSuspender); ok {
+		s.SuspendLocalIngest()
 	}
 }
 
