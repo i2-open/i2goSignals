@@ -56,6 +56,15 @@ With `I2SIG_STORE_WAL=local` (ADR 0045), a SET is acknowledged once it is in thi
 
 If the drain times out, the node logs the residual depth at ERROR, and the entries stay on disk. Its leases are still released at stop and then expire normally. The residue is replayed when this node starts again. At start, a WAL that holds entries from a previous run is replayed to the store first. Until it is empty, ingest answers 503 + `Retry-After`. In the default `majority` mode, none of this applies and the stop order is unchanged.
 
+### Local WAL: Multi-Node Refuse-to-Start Guard
+A SET acknowledged into one node's WAL is not in the store until the drain moves it. Another node that owns the stream's delivery lease cannot see it until then. Ring-fed delivery (`I2SIG_STORE_WAL_RING_FED=true`, #342) closes that gap on the buffering node. So local mode in a cluster requires ring-fed delivery (#343):
+*   At startup, a node with `I2SIG_STORE_WAL=local` and ring-fed off asks the cluster coordinator for the active nodes. If any active node other than itself is registered, it logs an ERROR and refuses to start. The error names the condition and both fixes: set `I2SIG_STORE_WAL_RING_FED=true`, or return to `majority` (unset `I2SIG_STORE_WAL`).
+*   If membership cannot be read, the node also refuses, since it cannot confirm it is alone.
+*   With ring-fed on, the check is skipped and local mode is allowed in any cluster size.
+*   A node that joins an existing cluster later runs the same check at its own startup, so it refuses to enable local ingest for itself. Nodes that are already running are not affected.
+
+Even in local mode, only streams whose per-stream `durability` is `local` use the WAL. All other streams keep the majority contract.
+
 ### Fenced Acks
 `AckEvent` / `AckEvents` carry the caller's fencing token. The event service checks it once per call, before any write, against the current lease for the stream:
 *   If the stream's lease is now held under a different token (or has expired), the ack is refused with `ErrStaleFencingToken` and nothing is written. A push runner that sees this stops its batch and goes back to re-acquire the lease.

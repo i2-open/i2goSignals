@@ -112,6 +112,13 @@ func newWalRouterWith(t *testing.T, p *dbProviders.Persistence, walDir string, d
 
 func ensureWalPollStream(t *testing.T, p *dbProviders.Persistence, audience string) *model.StreamStateRecord {
 	t.Helper()
+	return ensurePollStreamDurability(t, p, audience, model.DurabilityLocal)
+}
+
+// ensurePollStreamDurability registers a poll stream for audience carrying the
+// given per-stream durability (issue #343).
+func ensurePollStreamDurability(t *testing.T, p *dbProviders.Persistence, audience string, durability model.DurabilityMode) *model.StreamStateRecord {
+	t.Helper()
 	h := &testHarness{streamService: p.StreamService, keyService: p.KeyService}
 	projectId := projectIdFromHarness(t, h)
 	if _, err := p.KeyService.CreateKeyPair(context.Background(), dupTestIssuer, "sig", projectId); err != nil {
@@ -126,7 +133,7 @@ func ensureWalPollStream(t *testing.T, p *dbProviders.Persistence, audience stri
 		},
 	}
 	ctx := context.WithValue(context.Background(), authSupport.AuthContextKey, authSupport.ConvertProject(projectId))
-	created, err := p.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg}, projectId, nil)
+	created, err := p.StreamService.CreateStream(ctx, model.StreamStateRecord{StreamConfiguration: cfg, Durability: durability}, projectId, nil)
 	require.NoError(t, err)
 	state, err := p.StreamService.GetStreamState(context.Background(), created.Id)
 	require.NoError(t, err)
@@ -323,4 +330,52 @@ func assertWalRetention(t *testing.T, p *dbProviders.Persistence) {
 	count, err = p.EventDAO.CountRetainedForStream(ctx, s.streamID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
+}
+
+// TestLocalWal_PerStreamDurabilitySelectsIngestPath is the issue #343 seam: on
+// a local-mode router a durability=local stream is acked from the WAL, while a
+// majority or unset stream keeps the ADR 0038 direct store write.
+func TestLocalWal_PerStreamDurabilitySelectsIngestPath(t *testing.T) {
+	p := openMemPersistence(t)
+	s := newWalRouter(t, p, t.TempDir(), nil)
+
+	for _, mode := range []model.DurabilityMode{model.DurabilityMajority, model.DurabilityUnset} {
+		aud := "https://majority-" + string(mode) + ".example.com"
+		st := ensurePollStreamDurability(t, p, aud, mode)
+		s.router.UpdateStreamState(st)
+		jti := "dur-majority-" + string(mode)
+		require.NoError(t, s.router.HandleEvent(newRiscToken(jti, dupTestIssuer, aud), `{"raw":2}`, st.StreamConfiguration.Id))
+		assert.Equal(t, 0, s.log.Depth(), "durability %q must not use the WAL", mode)
+		assert.True(t, s.stored(jti), "durability %q is stored before the ack", mode)
+	}
+
+	// With the store failing, a local stream still acks: the SET is in the WAL.
+	s.dao.failures.Store(1 << 20)
+	require.NoError(t, s.router.HandleEvent(newRiscToken("dur-local", dupTestIssuer, s.audience), `{"raw":1}`, s.streamID))
+	assert.Equal(t, 1, s.log.Depth(), "a local stream is acked into the WAL")
+	assert.False(t, s.stored("dur-local"))
+	s.dao.failures.Store(0)
+	s.waitDrained(t)
+	assert.True(t, s.stored("dur-local"))
+}
+
+// TestLocalWal_LocalStreamOnMajorityDeploymentUsesStore: a durability=local
+// stream on a router without a WAL runs at majority (stored before the ack).
+func TestLocalWal_LocalStreamOnMajorityDeploymentUsesStore(t *testing.T) {
+	p := openMemPersistence(t)
+	r := NewRouter(RouterDeps{
+		StreamService: p.StreamService,
+		KeyService:    p.KeyService,
+		EventService:  p.EventService,
+		Coordinator:   p.Coordinator,
+	}, "node-majority-test").(*router)
+	t.Cleanup(r.Shutdown)
+	aud := "https://receiver.example.com"
+	st := ensureWalPollStream(t, p, aud)
+	r.UpdateStreamState(st)
+
+	require.NoError(t, r.HandleEvent(newRiscToken("dur-ignored", dupTestIssuer, aud), `{"raw":3}`, st.StreamConfiguration.Id))
+	assert.NotNil(t, p.EventService.GetEventRecord(context.Background(), "dur-ignored"), "stored before the ack")
+	_, warned := r.durabilityWarned.Load(st.StreamConfiguration.Id)
+	assert.True(t, warned, "the ignored local setting is WARNed once")
 }

@@ -205,7 +205,10 @@ type router struct {
 	wal *localWal
 	// walRT is the ring-fed read-through in front of the EventService's DAO
 	// (I2SIG_STORE_WAL_RING_FED, #342); nil unless local mode and ring-fed.
-	walRT                *walReadThrough
+	walRT *walReadThrough
+	// durabilityWarned holds the stream ids already WARNed for asking for
+	// local durability on a majority deployment (issue #343): one WARN each.
+	durabilityWarned     sync.Map
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -1118,7 +1121,10 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		importOnly = true
 	}
 
-	if r.wal != nil {
+	// The resolved per-stream durability (issue #343): the WAL only when the
+	// deployment runs local AND the ingress stream opted in. A majority stream
+	// keeps the full ADR 0038 contract even on a local node.
+	if r.ingestsLocally(streamState, sstpPair) {
 		return r.handleEventsLocal(candidates, sid, importOnly, excludeSstpTxSid, results)
 	}
 

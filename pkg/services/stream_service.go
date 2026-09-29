@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -72,6 +73,10 @@ type StreamService struct {
 	minVerificationInterval int
 	maxInactivityTimeout    int
 	eventValidationDefault  model.EventValidationMode
+
+	// deploymentLocal is true when the deployment runs I2SIG_STORE_WAL=local
+	// (issue #343); it only feeds the effective-durability read overlay.
+	deploymentLocal atomic.Bool
 
 	// now is the clock the JWKS retry backoff is measured against (ADR 0033).
 	// It is a field rather than a direct time.Now call so the lazy, per-entry
@@ -442,6 +447,12 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// Per-receiver event-validation mode (spec #247 #250) — shape-checked here,
 	// direction-checked by applyEventValidation once the record exists.
 	if err := validateEventValidationMode(request.EventValidation); err != nil {
+		return model.StreamConfiguration{}, err
+	}
+
+	// Per-stream ingest durability (issue #343) — shape-checked here, stored by
+	// applyDurability once the record exists.
+	if err := validateDurability(request.Durability); err != nil {
 		return model.StreamConfiguration{}, err
 	}
 
@@ -966,6 +977,9 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 	// shape-checked above by validateEventValidationMode.
 	applyEventValidation(streamRec, request.EventValidation)
 
+	// Per-stream ingest durability (issue #343); already shape-checked above.
+	applyDurability(streamRec, request.Durability)
+
 	// PRD #89 #95: reject (or WARN on) a subject-filter mode that is
 	// incompatible with the stream's upstream before the stream is persisted.
 	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
@@ -1327,6 +1341,12 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 		return nil, err
 	}
 
+	// Per-stream ingest durability (issue #343), checked ahead of the SSTP
+	// dispatch so a malformed value is rejected on both patch paths.
+	if err := validateDurability(configReq.Durability); err != nil {
+		return nil, err
+	}
+
 	// Same for events_requested patterns — checked ahead of the SSTP dispatch so
 	// an uncompilable pattern cannot narrow events_delivered on either path.
 	if err := validateEventPatterns(configReq.EventsRequested); err != nil {
@@ -1538,6 +1558,9 @@ func (s *StreamService) UpdateStream(ctx context.Context, streamID string, proje
 	// already shape-checked above by validateEventValidationMode.
 	applyEventValidation(streamRec, configReq.EventValidation)
 
+	// Per-stream ingest durability (issue #343); already shape-checked above.
+	applyDurability(streamRec, configReq.Durability)
+
 	// PRD #89 #95: re-validate the subject-filter mode against the upstream
 	// whenever the mode or event source could have changed.
 	if err = s.validateSubjectFilterMode(ctx, streamRec); err != nil {
@@ -1663,7 +1686,9 @@ func (s *StreamService) GetStreamConfigBySID(ctx context.Context, sid string) (*
 //     surface (ADR 0022 §3) and the stored record is left untouched;
 //   - OverlayJwksReadiness second, onto that masked copy. Readiness is
 //     node-local and derived (bson:"-"), so records read from the DAO never
-//     carry it and it is absent unless overlaid (ADR 0033).
+//     carry it and it is absent unless overlaid (ADR 0033);
+//   - OverlayEffectiveDurability last, reporting the stream's effective
+//     ingest durability on this deployment (issue #343).
 //
 // Delivery endpoints are returned as stored: the base-URL rewrite the HTTP
 // route applies is scoped to that listener's externally visible base and does
@@ -1685,6 +1710,7 @@ func (s *StreamService) ListStreams(ctx context.Context) []model.StreamStateReco
 	for i := range recs {
 		masked := recs[i].MaskCredentials()
 		s.OverlayJwksReadiness(masked)
+		s.OverlayEffectiveDurability(masked)
 		res[i] = *masked
 	}
 	return res

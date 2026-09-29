@@ -84,6 +84,9 @@ func (p *Persistence) Refresh() {
 	p.SubjectFilterService = p.src.GetSubjectFilterService()
 	p.SubjectRelayService = p.src.GetSubjectRelayService()
 	p.EventDAO = p.src.GetEventDAO()
+	if p.WAL != nil && p.StreamService != nil {
+		p.StreamService.SetDeploymentDurabilityLocal(true)
+	}
 }
 
 // serviceSource is the accessor surface present on both *MemoryProvider and
@@ -136,38 +139,64 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 	if err != nil || walMode != wal.ModeLocal {
 		return p, err
 	}
-	if err := attachLocalWal(p, nodeid.Resolve(), wal.DirFromEnv()); err != nil {
+	if err := attachLocalWal(p, nodeid.Resolve(), wal.DirFromEnv(), ringFed); err != nil {
 		if p.Storage != nil {
 			_ = p.Storage.Close()
 		}
 		return nil, err
 	}
 	p.WALRingFed = ringFed
+	p.StreamService.SetDeploymentDurabilityLocal(true)
 	return p, nil
 }
 
-// attachLocalWal opens the local WAL for I2SIG_STORE_WAL=local. Until the
-// ring-fed delivery work (#343) lands, local mode is single-node only: it
-// refuses to start when the coordinator reports any other active node, or
-// when it cannot tell.
-func attachLocalWal(p *Persistence, selfID string, dir string) error {
-	if p.Coordinator != nil {
-		nodes, err := p.Coordinator.GetActiveNodes()
-		if err != nil {
-			return fmt.Errorf("%s=local: cannot confirm single-node cluster: %w", wal.EnvMode, err)
-		}
-		for _, n := range nodes {
-			if n.Id != selfID {
-				return fmt.Errorf("%s=local is single-node only: active cluster node %q found (this node %q)", wal.EnvMode, n.Id, selfID)
+// CheckLocalModeCluster is the multi-node refuse-to-start guard for
+// I2SIG_STORE_WAL=local (spec #111 Stage 3, issue #343). A node in local mode
+// may join a cluster with other active nodes only when ring-fed delivery
+// (I2SIG_STORE_WAL_RING_FED=true, #342) is enabled, so a SET acked into this
+// node's WAL is still delivered before the drain lands it in the shared store.
+// Without it the node refuses to enable local ingest (and so refuses to
+// start); it also refuses when it cannot tell how many nodes are active.
+// selfID is excluded so a quick restart does not count its own stale entry.
+func CheckLocalModeCluster(coord cluster.ClusterCoordinator, selfID string, ringFed bool) error {
+	if coord == nil || ringFed {
+		return nil
+	}
+	nodes, err := coord.GetActiveNodes()
+	if err != nil {
+		return fmt.Errorf("%s=local: cannot confirm the active cluster node count: %w; either enable ring-fed delivery (%s=true) or run in majority mode (unset %s)",
+			wal.EnvMode, err, wal.EnvRingFed, wal.EnvMode)
+	}
+	active := 1 // this node
+	var peer string
+	for _, n := range nodes {
+		if n.Id != selfID {
+			active++
+			if peer == "" {
+				peer = n.Id
 			}
 		}
+	}
+	if active > 1 {
+		return fmt.Errorf("%s=local refused: %d active cluster nodes (peer %q, this node %q) and ring-fed delivery is disabled; either enable ring-fed delivery (%s=true) or run in majority mode (unset %s)",
+			wal.EnvMode, active, peer, selfID, wal.EnvRingFed, wal.EnvMode)
+	}
+	return nil
+}
+
+// attachLocalWal opens the local WAL for I2SIG_STORE_WAL=local after the
+// multi-node guard (CheckLocalModeCluster) passes.
+func attachLocalWal(p *Persistence, selfID string, dir string, ringFed bool) error {
+	if err := CheckLocalModeCluster(p.Coordinator, selfID, ringFed); err != nil {
+		factoryLog.Error("Refusing to enable local ingest durability", "error", err)
+		return err
 	}
 	l, err := wal.OpenBolt(dir)
 	if err != nil {
 		return err
 	}
 	p.WAL = l
-	factoryLog.Warn("Ingest durability is LOCAL: SETs are acknowledged after a node-local fsync, before the store write (ADR 0045). Acknowledged SETs not yet drained are lost if this node's disk is lost.", "dir", dir)
+	factoryLog.Warn("Ingest durability is LOCAL for streams with durability=local: SETs are acknowledged after a node-local fsync, before the store write (ADR 0045). Acknowledged SETs not yet drained are lost if this node's disk is lost.", "dir", dir, "ringFed", ringFed)
 	return nil
 }
 

@@ -153,11 +153,38 @@ needs no new routing layer. It reuses the wake-up plus backfill behaviour
 the code already has. The replicated-buffer alternative (write to two nodes
 before the 202) is Mongo majority re-implemented, and it is rejected.
 
-Until #342 and #343 land, `local` is **single-node only**. As a temporary
-guard, `OpenPersistence` in `local` mode asks the cluster coordinator for
-the active nodes. It refuses to start if any active node has an ID other
-than this node's (`nodeid.Resolve()`), or if membership cannot be read. #343
-replaces this guard with the permanent per-stream rule.
+#340 shipped a temporary single-node guard. #343 replaces it with the
+permanent multi-node rule, below.
+
+#### 5a. Per-stream durability and the multi-node rule (#343)
+
+**Per-stream.** `I2SIG_STORE_WAL=local` is a deployment ceiling, not a
+stream setting. Each stream carries an optional `durability` operator knob
+on its `StreamStateRecord`, off the SSF wire format, like `event_validation`
+and `retention_window_days`:
+
+- `majority` is the default, and an unset value means the same. The stream
+  keeps the full ADR 0038 contract, even on a `local` node.
+- `local` opts the stream into the WAL path of section 2. It takes effect
+  only when the node runs `I2SIG_STORE_WAL=local`. Elsewhere the value is
+  stored and reported, the stream runs at majority, and the router logs one
+  WARN per stream.
+- Any other value is rejected with 400 on create or update.
+
+The effective mode is resolved per SET at the ingest seam, from the ingress
+stream record (for SSTP, the pair record). The stream-state read surfaces
+report it as the derived, never-persisted `effective_durability`. The
+#341 lifecycle and #342 ring-fed behaviour are unchanged for `local`
+streams.
+
+**Multi-node.** In a cluster, `local` requires ring-fed delivery
+(`I2SIG_STORE_WAL_RING_FED=true`). Without ring-fed, `OpenPersistence` asks
+the cluster coordinator for the active nodes. If any active node other than
+this one (`nodeid.Resolve()`) is registered, or membership cannot be read,
+it logs an ERROR and refuses to start. The error names the condition and the
+two fixes: enable ring-fed delivery, or return to `majority`. A node that
+joins later runs the same check at its own startup, so it refuses to enable
+local ingest for itself. With ring-fed on, the check is skipped.
 
 ### 6. Lifecycle is #341's
 

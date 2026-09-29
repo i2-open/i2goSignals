@@ -346,6 +346,29 @@ func decodeWalEntry(b []byte) (*walEntry, error) {
 
 // handleEventsLocal is the local-durability ingest path. results is
 // index-aligned with candidates; a nil entry may be acked.
+// ingestsLocally reports whether a SET arriving on the ingress stream takes
+// the local-WAL path (issue #343): only when this deployment runs
+// I2SIG_STORE_WAL=local (r.wal non-nil) AND the stream's durability is local.
+// For an SSTP pair the pair record carries the knob. A stream asking for local
+// on a majority deployment runs at majority and is WARNed about once.
+func (r *router) ingestsLocally(streamState, sstpPair *model.StreamStateRecord) bool {
+	rec := streamState
+	if sstpPair != nil {
+		rec = sstpPair
+	}
+	if rec == nil || !rec.Durability.IsLocal() {
+		return false
+	}
+	if r.wal != nil {
+		return true
+	}
+	if _, warned := r.durabilityWarned.LoadOrStore(rec.StreamConfiguration.Id, struct{}{}); !warned {
+		eventLogger.Warn("ROUTER: stream durability=local ignored: this deployment is not in local mode (I2SIG_STORE_WAL); running at majority",
+			"sid", rec.StreamConfiguration.Id)
+	}
+	return false
+}
+
 func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, importOnly bool, excludeSstpTxSid string, results []error) []error {
 	lw := r.wal
 

@@ -439,6 +439,10 @@ func (s *StreamService) updateSstpPair(ctx context.Context, streamRec *model.Str
 	// story 12). The request value was shape-checked by UpdateStream.
 	applyEventValidation(streamRec, patch.EventValidation)
 
+	// Per-stream ingest durability (issue #343). The single field governs the
+	// pair's inbound (ingest) leg; shape-checked by UpdateStream.
+	applyDurability(streamRec, patch.Durability)
+
 	// Whichever direction the patch names, the pair's transmit direction must
 	// still have an active signing key afterwards when it re-signs (#308).
 	if err := s.RequireActiveSigningKey(ctx, streamRec); err != nil {
