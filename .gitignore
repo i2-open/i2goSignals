@@ -16,6 +16,7 @@
 /bin/linux/arm64/goSignalsServer
 /bin/linux/arm64/goSsfServer
 /bin/linux/arm64/healthcheck
+/goSignalsBench
 /bin/
 /cluster-monitor
 /genTlsKeys
@@ -46,3 +47,5 @@ __debug_bin*
 # removes them on every exit path, but a hard kill can leave them behind.
 /go.mod.qa-backup
 /go.sum.qa-backup
+# spec-111 baseline test output kept for local comparison
+/.spec-111-baseline-tests.txt

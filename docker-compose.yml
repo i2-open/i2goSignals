@@ -48,6 +48,9 @@ volumes:
   mongo2_data: {}
   mongo3_data: {}
   mongo_config: {}
+  # /app/resources holds the Mongo resume token and the local WAL
+  # (I2SIG_STORE_WAL_DIR); a named volume keeps them across container restarts.
+  gosignals1_resources: {}
 
 services:
   mongo1:
@@ -209,6 +212,8 @@ services:
       - "2345:2345"
     env_file:
       - ./config/goSignals1.env
+    volumes:
+      - gosignals1_resources:/app/resources
     healthcheck:
       test: [ "CMD", "sh", "-c", "/app/healthcheck -k https://localhost:8888/health || /app/healthcheck http://localhost:8888/health" ]
       interval: 10s
