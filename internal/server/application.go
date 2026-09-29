@@ -253,6 +253,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		SstpDialerHooks: sstpDialer,
 		// Non-nil only when I2SIG_STORE_WAL=local (ADR 0045).
 		WAL: persistence.WAL,
+		// I2SIG_STORE_WAL_RING_FED (#342); only meaningful with a WAL.
+		WALRingFed: persistence.WALRingFed,
 	}, nodeID)
 
 	// Late-bind the router as the dialer's narrow outbound surface. The

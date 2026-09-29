@@ -55,6 +55,10 @@ type Persistence struct {
 	// (ADR 0045); nil in the default majority mode. Hand it to the event
 	// router (RouterDeps.WAL), which owns and closes it.
 	WAL wal.Log
+	// WALRingFed is I2SIG_STORE_WAL_RING_FED (#342): with a WAL, the router
+	// serves undrained WAL entries to its delivery runners. Always false in
+	// majority mode. Hand it to the router (RouterDeps.WALRingFed).
+	WALRingFed bool
 
 	// src is the underlying provider used to refresh service references
 	// after a Storage.ResetDb(true) call. The memory adapter rebuilds its
@@ -123,6 +127,11 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 		factoryLog.Error("Invalid ingest durability mode", "error", err)
 		return nil, err
 	}
+	ringFed, err := wal.RingFedFromEnv()
+	if err != nil {
+		factoryLog.Error("Invalid ring-fed delivery setting", "error", err)
+		return nil, err
+	}
 	p, err := openPersistence(ctx, mongoUrl, dbName)
 	if err != nil || walMode != wal.ModeLocal {
 		return p, err
@@ -133,6 +142,7 @@ func OpenPersistenceWithContext(ctx context.Context, mongoUrl string, dbName str
 		}
 		return nil, err
 	}
+	p.WALRingFed = ringFed
 	return p, nil
 }
 

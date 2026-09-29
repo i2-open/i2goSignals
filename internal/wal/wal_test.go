@@ -51,6 +51,20 @@ func TestParseDrainTimeout(t *testing.T) {
 	}
 }
 
+func TestParseRingFed(t *testing.T) {
+	for in, want := range map[string]bool{"": false, "true": true, " TRUE ": true, "1": true, "false": false, "0": false} {
+		got, err := ParseRingFed(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, bad := range []string{"yes", "on", "local"} {
+		got, err := ParseRingFed(bad)
+		assert.Error(t, err, bad)
+		assert.Contains(t, err.Error(), EnvRingFed)
+		assert.False(t, got)
+	}
+}
+
 func TestBolt_AppendReadTruncateReopen(t *testing.T) {
 	dir := t.TempDir()
 	l, err := OpenBolt(dir)

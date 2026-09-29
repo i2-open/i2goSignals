@@ -28,6 +28,10 @@ const (
 	EnvDrainTimeout = "I2SIG_STORE_WAL_DRAIN_TIMEOUT"
 	// DefaultDrainTimeout is used when EnvDrainTimeout is unset or invalid.
 	DefaultDrainTimeout = 20 * time.Second
+	// EnvRingFed enables ring-fed delivery in local mode (#342): delivery
+	// runners on the buffering node read SETs from the WAL before the drain
+	// lands them in the store. Ignored in majority mode.
+	EnvRingFed = "I2SIG_STORE_WAL_RING_FED"
 )
 
 // Mode is the ingest durability mode.
@@ -96,6 +100,26 @@ func ParseDrainTimeout(v string) (time.Duration, error) {
 // DrainTimeoutFromEnv reads and parses EnvDrainTimeout.
 func DrainTimeoutFromEnv() (time.Duration, error) {
 	return ParseDrainTimeout(os.Getenv(EnvDrainTimeout))
+}
+
+// ParseRingFed parses an I2SIG_STORE_WAL_RING_FED value with
+// strconv.ParseBool. Empty means false; a malformed value returns false with
+// an error for the caller to log.
+func ParseRingFed(v string) (bool, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s: invalid boolean %q", EnvRingFed, v)
+	}
+	return b, nil
+}
+
+// RingFedFromEnv reads and parses EnvRingFed.
+func RingFedFromEnv() (bool, error) {
+	return ParseRingFed(os.Getenv(EnvRingFed))
 }
 
 // Entry is one durable WAL record.

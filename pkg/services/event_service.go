@@ -66,6 +66,13 @@ func NewEventService(eventDAO interfaces.EventDAO) *EventService {
 	}
 }
 
+// WrapEventDAO replaces the service's EventDAO with wrap(current). The event
+// router uses it to put the ring-fed WAL read-through in front of the store
+// (#342). Call it at construction, before any concurrent use of the service.
+func (s *EventService) WrapEventDAO(wrap func(interfaces.EventDAO) interfaces.EventDAO) {
+	s.eventDAO = wrap(s.eventDAO)
+}
+
 // SetResetEgressObserver installs (or clears, with nil) the sink notified per
 // event re-queued by ResetEventStream. The event router wires itself here at
 // construction so reset re-deliveries flow to the same metering observer the

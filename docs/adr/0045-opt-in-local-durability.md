@@ -193,6 +193,10 @@ keeps the default.
   with `majority`.
 - In `local` mode, a SET is visible to delivery and to the counters only
   after it drains. On a busy node, the delivery tail grows by the drain lag.
+  #342 adds `I2SIG_STORE_WAL_RING_FED=true`, which removes that lag on the
+  buffering node: the runners read undrained SETs from memory and are woken
+  at append, and acks taken before the drain are held and written right
+  after the SET. Counters still move at drain. See `docs/perf/ring-fed-342.md`.
 - A SET whose append failed is answered 503, and its JTI reservation is
   released, so a retry is accepted.
 - A SET acknowledged in `local` mode that turns out to be a duplicate of one

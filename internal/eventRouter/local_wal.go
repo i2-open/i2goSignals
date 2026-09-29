@@ -75,6 +75,7 @@ type walMetrics struct {
 	drained       prometheus.Counter
 	replayed      prometheus.Counter
 	drainDuration prometheus.Histogram
+	ringFedServed prometheus.Counter
 }
 
 func newWalMetrics() *walMetrics {
@@ -100,11 +101,15 @@ func newWalMetrics() *walMetrics {
 			Help:    "Duration of one local WAL drain batch: the store write plus the log truncate.",
 			Buckets: []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
 		}),
+		ringFedServed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "goSignals", Subsystem: "wal", Name: "ring_fed_served_total",
+			Help: "SET bodies served to delivery from the local WAL before the drain stored them (I2SIG_STORE_WAL_RING_FED).",
+		}),
 	}
 }
 
 func (m *walMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration}
+	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration, m.ringFedServed}
 }
 
 // walMetricsDefault is the process's local-WAL metric set; a router picks it
@@ -181,6 +186,7 @@ func (r *router) startLocalWal(log wal.Log) {
 	// Rebuild the buffered-JTI set from whatever is still in the log (acked
 	// before a restart and not yet drained).
 	var from uint64
+	var replay []*walEntry
 	for {
 		entries, err := log.ReadFrom(from, walReadEntries)
 		if err != nil {
@@ -194,6 +200,9 @@ func (r *router) startLocalWal(log wal.Log) {
 			if we, err := decodeWalEntry(e.Data); err == nil {
 				for _, rec := range we.Records {
 					lw.buffered[rec.Jti] = struct{}{}
+				}
+				if r.walRT != nil {
+					replay = append(replay, we)
 				}
 			}
 			lw.replayThrough = e.Seq
@@ -210,6 +219,14 @@ func (r *router) startLocalWal(log wal.Log) {
 	r.wal = lw
 	r.refreshWalGauges(lw)
 	eventLogger.Info("ROUTER: local-durability ingest enabled (I2SIG_STORE_WAL=local)", "buffered", log.Depth(), "drainTimeout", lw.drainTimeout)
+	if r.walRT != nil {
+		// Ring-fed (#342): the runners read undrained entries from memory, so
+		// a replayed entry is deliverable now, not once the replay stores it.
+		for _, we := range replay {
+			r.ringFeed(we)
+		}
+		eventLogger.Info("ROUTER: ring-fed delivery enabled; runners read the local WAL before the drain", "env", wal.EnvRingFed, "replayed", len(replay))
+	}
 	go r.runWalDrain()
 	lw.signal()
 }
@@ -395,8 +412,27 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 		return results
 	}
 	lw.metrics.depth.Set(float64(lw.log.Depth()))
+	if r.walRT != nil {
+		r.ringFeed(entry)
+	}
 	lw.signal()
 	return results
+}
+
+// ringFeed makes a WAL entry readable through the ring-fed overlay and wakes
+// its targets (#342). The wake happens here, once, and never again at drain:
+// a buffer re-woken with a JTI its runner already delivered and acked would
+// deliver it a second time.
+func (r *router) ringFeed(e *walEntry) {
+	r.walRT.overlay.add(e)
+	if len(e.Targets) == 0 {
+		return
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, t := range e.Targets {
+		r.wakeTargetLocked(&fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}, t.Jtis)
+	}
 }
 
 // runWalDrain is the background drain worker. It stops between passes when
@@ -502,6 +538,7 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 	truncateTo := uint64(0)
 	blocked := false
 	var doneJtis []string
+	var doneEntries []*walEntry
 	var drainedN, replayedN int
 	for _, d := range batch {
 		n := len(d.entry.Records)
@@ -518,6 +555,7 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 		}
 		if !blocked {
 			truncateTo = d.seq
+			doneEntries = append(doneEntries, d.entry)
 			for _, rec := range d.entry.Records {
 				doneJtis = append(doneJtis, rec.Jti)
 			}
@@ -532,8 +570,20 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 		truncateTo = lastSeq
 	}
 	if truncateTo > 0 {
+		if r.walRT != nil {
+			// Acks and clears taken from the overlay reach the store before
+			// the log lets go of the entry; on failure the entry is retried.
+			if herr := r.walRT.applyHeld(ctx, doneEntries); herr != nil {
+				return false, fmt.Errorf("local WAL: applying held acks: %w", herr)
+			}
+		}
 		if terr := lw.log.Truncate(truncateTo); terr != nil {
 			return false, terr
+		}
+		if r.walRT != nil {
+			for _, e := range doneEntries {
+				r.walRT.overlay.remove(e)
+			}
 		}
 		lw.mu.Lock()
 		for _, jti := range doneJtis {
@@ -582,6 +632,17 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		accepted[rec.Jti] = rec
 	}
 	if len(accepted) == 0 || len(e.Targets) == 0 {
+		return
+	}
+	if r.walRT != nil {
+		// Ring-fed: the targets were woken at append (ringFeed); only meter.
+		for _, t := range e.Targets {
+			for _, jti := range t.Jtis {
+				if rec, ok := accepted[jti]; ok {
+					r.observeMeteredEvent(t.Sid, DirectionEgress, &rec.Event)
+				}
+			}
+		}
 		return
 	}
 	targets := make([]*fanoutTarget, len(e.Targets))

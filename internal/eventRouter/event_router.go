@@ -202,7 +202,10 @@ type router struct {
 	leaseOwners *leaseOwnerCache
 	// wal is the local-durability ingest state (I2SIG_STORE_WAL=local, ADR
 	// 0045); nil in the default majority mode.
-	wal                  *localWal
+	wal *localWal
+	// walRT is the ring-fed read-through in front of the EventService's DAO
+	// (I2SIG_STORE_WAL_RING_FED, #342); nil unless local mode and ring-fed.
+	walRT                *walReadThrough
 	streamService        *services.StreamService
 	keyService           signerSource
 	eventService         *services.EventService
@@ -332,6 +335,10 @@ type RouterDeps struct {
 	// the log from here and closes it on Shutdown. Nil (the default) keeps the
 	// majority contract of ADR 0038.
 	WAL wal.Log
+	// WALRingFed, with a WAL, lets the delivery runners on this node read
+	// acknowledged SETs from the WAL before the drain stores them
+	// (I2SIG_STORE_WAL_RING_FED, #342). Ignored without a WAL.
+	WALRingFed bool
 }
 
 // The router is the reset-egress sink EventService reports re-queued events to
@@ -381,6 +388,18 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	// lease expired or was taken over is rejected before it writes.
 	if deps.EventService != nil && deps.Coordinator != nil {
 		deps.EventService.SetFenceChecker(router)
+	}
+	// Ring-fed delivery (#342): runners read undrained WAL entries through a
+	// read-through in front of the store. Wired before any runner starts.
+	if deps.WAL != nil && deps.WALRingFed && deps.EventService != nil {
+		deps.EventService.WrapEventDAO(func(base interfaces.EventDAO) interfaces.EventDAO {
+			if prev, ok := base.(*walReadThrough); ok {
+				// A router rebuilt on the same service replaces, not stacks.
+				base = prev.EventDAO
+			}
+			router.walRT = newWalReadThrough(base, walMetricsDefault)
+			return router.walRT
+		})
 	}
 
 	if deps.PushDelivery != nil {

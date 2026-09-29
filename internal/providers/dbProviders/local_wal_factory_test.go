@@ -76,3 +76,34 @@ func TestAttachLocalWal_AllowsSelfOnly(t *testing.T) {
 	require.NotNil(t, p.WAL)
 	assert.NoError(t, p.WAL.Close())
 }
+
+func TestOpenPersistence_RingFedMalformedRefused(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	t.Setenv(wal.EnvMode, "local")
+	t.Setenv(wal.EnvDir, t.TempDir())
+	t.Setenv(wal.EnvRingFed, "sometimes")
+	p, err := OpenPersistence("memorydb:", "test_wal_ringfed_bad")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), wal.EnvRingFed)
+	assert.Nil(t, p)
+}
+
+func TestOpenPersistence_RingFedOnlyInLocalMode(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	t.Setenv(wal.EnvRingFed, "true")
+	t.Setenv(wal.EnvMode, "majority")
+	p, err := OpenPersistence("memorydb:", "test_wal_ringfed_majority")
+	require.NoError(t, err)
+	assert.False(t, p.WALRingFed, "ignored in majority mode")
+	_ = p.Storage.Close()
+
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	t.Setenv(wal.EnvMode, "local")
+	t.Setenv(wal.EnvDir, t.TempDir())
+	p, err = OpenPersistence("memorydb:", "test_wal_ringfed_local")
+	require.NoError(t, err)
+	require.NotNil(t, p.WAL)
+	assert.True(t, p.WALRingFed)
+	assert.NoError(t, p.WAL.Close())
+	_ = p.Storage.Close()
+}
