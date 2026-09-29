@@ -124,10 +124,19 @@ As a fallback and to ensure eventual consistency, transmitter loops periodically
 
 Nodes register themselves in the `cluster_nodes` collection with metadata:
 *   `_id`: Node ID.
-*   `address`: Host/port.
+*   `address`: The wake-up address peers call (see below).
 *   `version`: Build version.
 *   `startedAt`: Startup timestamp.
 *   `lastSeenAt`: Last heartbeat timestamp.
+
+### Advertised wake-up address
+
+Each node writes the address its peers use for wake-up calls into `address`, at registration and on every heartbeat:
+
+*   `I2SIG_CLUSTER_ADVERTISE_URL`, when set, is stored verbatim (e.g. `http://goSignals1b:8898`).
+*   Otherwise it is derived as `http://<BASE_URL host>:<port>`, where the port is `I2SIG_CLUSTER_INTERNAL_PORT` if set, else the `BASE_URL` port. The scheme is always `http`, so pair a derived address with `I2SIG_CLUSTER_INTERNAL_PORT` (the internal listener serves plain HTTP unless SPIFFE mTLS is on) rather than a TLS main port.
+
+When every node shares one `BASE_URL` (a load-balanced or public name), the derived addresses collide: every node advertises the same address, wake-up calls reach only one node, and cross-node delivery silently falls back to the periodic backfill (SSTP stalls). Give each node its own `I2SIG_CLUSTER_ADVERTISE_URL` (or a per-node `BASE_URL`). A node that finds another live node advertising its own address logs one WARN per peer naming both node ids (`nodeID`, `peerNodeID`).
 
 ## Failure Modes and Handling
 
@@ -144,6 +153,7 @@ To demonstrate clustering in a Docker environment, use the provided cluster conf
 
 In this setup, you can observe that:
 1. Both `goSignals1a` and `goSignals1b` connect to the same MongoDB database (`goSignals1`).
+   Both share `BASE_URL=https://gosignals1:8888/`, so each sets `I2SIG_CLUSTER_INTERNAL_PORT=8898` and its own `I2SIG_CLUSTER_ADVERTISE_URL`; `cluster_nodes` shows `http://goSignals1:8898` and `http://goSignals1b:8898`.
 2. They will compete for leases for any stream defined in that database.
 3. If you stop the container holding a lease, the other node will automatically take over after the lease expires (approx. 30 seconds).
 
