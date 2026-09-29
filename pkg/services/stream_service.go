@@ -1975,17 +1975,29 @@ func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.
 }
 
 func (s *StreamService) GetStateMap(ctx context.Context) map[string]model.StreamStateRecord {
-	states, err := s.streamDAO.List(ctx)
+	stateMap, err := s.LoadStateMap(ctx)
 	if err != nil {
 		ssLog.Error("Error getting state map", "error", err)
 		return nil
+	}
+	return stateMap
+}
+
+// LoadStateMap is GetStateMap that reports a store failure instead of
+// returning nil. Stream-table reconciliation (#350) needs to tell "the store has
+// no streams" from "the store could not be read": only the first may drop the
+// streams a node is running.
+func (s *StreamService) LoadStateMap(ctx context.Context) (map[string]model.StreamStateRecord, error) {
+	states, err := s.streamDAO.List(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	stateMap := make(map[string]model.StreamStateRecord, len(states))
 	for _, state := range states {
 		stateMap[state.StreamConfiguration.Id] = state
 	}
-	return stateMap
+	return stateMap, nil
 }
 
 // ListReceiverStreams returns the streams that receive events on this server

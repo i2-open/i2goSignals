@@ -1,12 +1,8 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
-	"os"
 	"time"
-
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 )
 
 // SSTP cluster wake-up endpoints (PRD #154 slice 10, issue #167).
@@ -68,39 +64,15 @@ func (sa *SignalsApplication) WakeSstpServer(w http.ResponseWriter, r *http.Requ
 // within the coalescing window writes 202 directly and returns ok=false so the
 // wake is not re-dispatched (idempotency, issue #167).
 func (sa *SignalsApplication) authorizeSstpWake(w http.ResponseWriter, r *http.Request, mode string) (string, bool) {
-	var req WakeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	sid, ok := authenticateClusterCall(w, r, mode)
+	if !ok {
 		return "", false
-	}
-	if req.Sid == "" {
-		http.Error(w, "invalid sid", http.StatusBadRequest)
-		return "", false
-	}
-
-	// --- Authentication (identical to WakeTransmitter) ---
-	// SPIFFE peer cert first; HMAC shared secret otherwise.
-	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		if !isPeerSpiffeAuthenticated(r.TLS) {
-			serverLog.Warn("CLUSTER: invalid SPIFFE peer certificate", "remote", r.RemoteAddr, "mode", mode)
-			w.WriteHeader(http.StatusUnauthorized)
-			return "", false
-		}
-		serverLog.Debug("CLUSTER: SPIFFE peer authenticated", "remote", r.RemoteAddr, "mode", mode)
-	} else {
-		secret := os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN")
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" || len(authHeader) < 7 ||
-			!authSupport.ValidateClusterToken(secret, authHeader[7:], req.Sid, mode, 30*time.Second) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return "", false
-		}
 	}
 
 	// --- Coalescing / idempotency ---
 	// Reuse the wake-transmitter recentWakes map; the mode keeps SSTP keys
 	// distinct from push/poll keys for the same id.
-	key := req.Sid + ":" + mode
+	key := sid + ":" + mode
 	recentWakesMu.Lock()
 	lastWake, exists := recentWakes[key]
 	if exists && time.Since(lastWake) < 250*time.Millisecond {
@@ -111,5 +83,5 @@ func (sa *SignalsApplication) authorizeSstpWake(w http.ResponseWriter, r *http.R
 	recentWakes[key] = time.Now()
 	recentWakesMu.Unlock()
 
-	return req.Sid, true
+	return sid, true
 }

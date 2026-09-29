@@ -301,3 +301,58 @@ func (c *MongoCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) {
 
 	return &node, nil
 }
+
+var _ cluster.Reaper = (*MongoCoordinator)(nil)
+
+func (c *MongoCoordinator) PurgeStaleNodes(before time.Time) (int, error) {
+	col := c.nodeCol.Load()
+	if col == nil {
+		return 0, errors.New("mongo coordinator not initialized")
+	}
+	ctx, cancel := c.opCtx()
+	defer cancel()
+	res, err := col.DeleteMany(ctx, bson.M{"lastSeenAt": bson.M{"$lt": before}})
+	if err != nil {
+		return 0, err
+	}
+	return int(res.DeletedCount), nil
+}
+
+func (c *MongoCoordinator) PurgeExpiredLeases(before time.Time, keep func(resource string) bool) (int, error) {
+	col := c.leaseCol.Load()
+	if col == nil {
+		return 0, errors.New("mongo coordinator not initialized")
+	}
+	ctx, cancel := c.opCtx()
+	defer cancel()
+
+	expired := bson.M{"leaseUntil": bson.M{"$lt": before}}
+	cursor, err := col.Find(ctx, expired, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct {
+		Id string `bson:"_id"`
+	}
+	err = cursor.All(ctx, &rows)
+	_ = cursor.Close(ctx)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if keep == nil || !keep(row.Id) {
+			ids = append(ids, row.Id)
+		}
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// Re-check the expiry in the delete so a lease acquired between the scan
+	// and the delete survives.
+	res, err := col.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}, "leaseUntil": bson.M{"$lt": before}})
+	if err != nil {
+		return 0, err
+	}
+	return int(res.DeletedCount), nil
+}

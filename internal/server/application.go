@@ -96,6 +96,9 @@ type SignalsApplication struct {
 	// node's wake-up address (#348), so each clash is logged once. Touched
 	// only from registerNode on the backgroundSync goroutine.
 	dupAddrWarned map[string]bool
+	// syncMu serializes stream-table syncs: the periodic one on the
+	// backgroundSync goroutine and those a peer's stream-changed call runs.
+	syncMu sync.Mutex
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -374,13 +377,9 @@ func (sa *SignalsApplication) backgroundSync() {
 			if syncCounter >= 4 { // Every 40s
 				syncCounter = 0
 				serverLog.Debug("Periodic background sync starting")
-				sa.InitializeReceivers()
-
-				// Sync router state
-				states := sa.StreamService.GetStateMap(context.Background())
-				for _, state := range states {
-					sa.EventRouter.UpdateStreamState(&state)
-				}
+				// The fallback for a missed stream-changed call: start new
+				// streams, drop deleted ones, purge stale cluster rows.
+				sa.syncStreamTable()
 			}
 		case <-sa.stopSync:
 			return

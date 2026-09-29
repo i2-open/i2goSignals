@@ -374,6 +374,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		writeStreamNotFoundOrFault(w, err, "StreamDelete: deleting stream", authContext.StreamId, "")
 		return
 	}
+	notifyStreamChanged(sa, authContext.StreamId)
 	// sa.EventRouter.RemoveStream(authContext)
 	// SSF 1.0 §8.1.5 Stream Configuration Delete: a successful delete answers
 	// 204 No Content (the response carries no body).
@@ -614,6 +615,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
+	notifyStreamChanged(sa, configResp.Id)
 
 	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
@@ -658,6 +660,8 @@ func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		writeStreamNotFoundOrFault(w, err, "SSTP delete: deleting pair", sid, "")
 		return
 	}
+
+	notifyStreamChanged(sa, sid)
 
 	status := http.StatusOK
 	if outcome.PartialFailure() {
@@ -728,6 +732,7 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Start the SSTP-client runner (initiator) / register the responder side so
 	// the pair begins serving immediately, mirroring the StreamConfiguration path.
 	sa.GetEventRouter().UpdateStreamState(&rec)
+	notifyStreamChanged(sa, rec.StreamConfiguration.Id)
 
 	serverLog.Info("SSTP pair CREATED", "pairId", rec.PairId, "role", bootstrap.Role)
 

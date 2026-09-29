@@ -116,6 +116,36 @@ SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are ke
 *   **`POST /_cluster/wake-sstp-client`** — the request body's `sid` field carries the pair's **`PairId`**. Broadcast to all cluster nodes when a node receives an inbound event whose target SSTP-client pair is owned (via the `sstp-client:<PairId>` lease) by a different node, so the lease owner drains the pending event into the next outbound cycle.
 *   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Broadcast when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the receiver side returns the event immediately.
 
+## Stream-table reconciliation
+
+Each node keeps its own in-memory table of the outbound streams it serves (push transmitters, poll receivers, SSTP pairs). A stream created or deleted through one node changes only the shared store, so every node reconciles its table against the store (#349, #350):
+
+*   **Periodic sync** — every 40 seconds the background sync reads every stream from the store, (re)applies each one to the router, and removes every stream the router serves that the store no longer has. This is the fallback that always runs.
+*   **Stream-changed broadcast** — after a stream or SSTP pair is created or deleted, the node that handled the request calls `POST /_cluster/stream-changed` on every other active node with an advertised address. The receiving node runs the same reconcile at once and answers `202`. The call uses the wake-up authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer, minted with its own `stream-changed` mode so a wake-up token is not accepted here). Stream-changed calls are **not** coalesced: a create followed at once by a delete of the same stream must both be seen.
+*   **Synchronous, bounded** — the create/delete request returns only after every peer has answered or timed out (2 seconds per peer, called in parallel). A peer that misses the call catches up on its next periodic sync, within 40 seconds.
+*   **No store read on the hot path** — a node that routes an event and finds no matching stream does not re-read the store to look for a new one; that would put a store read on every unmatched event. New streams arrive through the broadcast or the periodic sync.
+
+A reconcile snapshots the streams the router serves **before** it reads the store, so a stream created locally after the snapshot is never removed. If the store read fails, nothing is removed and the cluster-row GC below is skipped.
+
+### Deleted streams
+
+When a reconcile finds that a stream is gone from the store, the router removes it: its transmitter runner stops, its lease is released at once (not left to expire), and later events write no pending marker for it.
+
+A periodic sync that runs between the router's `RemoveStream` and the store's `DeleteStream` on the deleting node can re-add the stream for one cycle; the next reconcile removes it again.
+
+### Orphan pending events
+
+`DeleteStream` removes the stream document only. Pending-event markers already written for the stream stay in the store, but they are inert: nothing reads them once no node serves the stream, and no new marker is written for it. They are not purged.
+
+### Cluster-row GC
+
+After each successful reconcile, a node purges cluster rows left behind by nodes and streams that no longer exist. The GC window is 90 seconds (three lease TTLs):
+
+*   **`cluster_nodes`** — a node row whose `lastSeenAt` is older than the window is deleted.
+*   **`cluster_leases`** — a lease row whose `leaseUntil` is older than the window is deleted **only** when its resource (`push-transmitter:<sid>`, `poll-receiver:<sid>`, `sstp-client:<PairId>`) names a stream or pair no longer in the store. Lease rows of unknown kinds are kept.
+
+A live stream's lease row is never deleted, however long it has been expired. Deleting a lease row restarts its fencing token at 1, which would let a stale holder's acks validate again; a stream that no longer exists has no holder left to fence.
+
 ## Periodic Backfill
 
 As a fallback and to ensure eventual consistency, transmitter loops periodically perform a "backfill" by polling MongoDB for any pending events that might have been missed by the wake-up mechanism (e.g., due to network transient issues). The backfill interval and batch size are configurable.

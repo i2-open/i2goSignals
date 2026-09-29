@@ -1,0 +1,176 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// tableRouter is a router double that implements eventRouter.StreamTable: it
+// records each stream-table sync and each stream-changed broadcast, and its
+// syncs report the store's streams as the real router would.
+type tableRouter struct {
+	recordingRouter
+	app        *SignalsApplication
+	mu         sync.Mutex
+	syncs      int
+	broadcasts []string
+}
+
+func (tr *tableRouter) StreamIds() []string { return nil }
+
+func (tr *tableRouter) SyncStreamTable(ctx context.Context) (map[string]model.StreamStateRecord, error) {
+	tr.mu.Lock()
+	tr.syncs++
+	tr.mu.Unlock()
+	return tr.app.StreamService.LoadStateMap(ctx)
+}
+
+func (tr *tableRouter) BroadcastStreamChanged(sid string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.broadcasts = append(tr.broadcasts, sid)
+}
+
+func (tr *tableRouter) syncCount() int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.syncs
+}
+
+func (tr *tableRouter) broadcastSids() []string {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return append([]string(nil), tr.broadcasts...)
+}
+
+var _ eventRouter.StreamTable = (*tableRouter)(nil)
+
+// tableApp is the real test application with the router replaced by a
+// tableRouter.
+type tableApp struct {
+	*statusRefreshApp
+	router *tableRouter
+}
+
+func (a *tableApp) GetEventRouter() eventRouter.EventRouter { return a.router }
+
+func newTableApp(t *testing.T) *tableApp {
+	t.Helper()
+	base := newStatusRefreshApp(t)
+	tr := &tableRouter{app: base.SignalsApplication}
+	base.EventRouter = tr
+	return &tableApp{statusRefreshApp: base, router: tr}
+}
+
+func streamChangedReq(secret, sid string) *http.Request {
+	return wakeSstpReq("/_cluster/stream-changed", secret, sid, eventRouter.StreamChangedMode)
+}
+
+// An authenticated stream-changed call reconciles the stream table before it
+// answers 202, and every call does so: a create followed at once by a delete of
+// the same stream must both be seen, so the calls are not coalesced (#349).
+func TestStreamChanged_ReconcilesOnEveryCall(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	app := newTableApp(t)
+
+	for i := 1; i <= 2; i++ {
+		w := httptest.NewRecorder()
+		app.StreamChanged(w, streamChangedReq("test-secret", "sid-1"))
+		assert.Equal(t, http.StatusAccepted, w.Code)
+		assert.Equal(t, i, app.router.syncCount())
+	}
+}
+
+// A stream-changed call without a valid cluster token is refused and changes
+// nothing; a token minted for a wake-up route does not validate here.
+func TestStreamChanged_RejectsUnauthenticated(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	app := newTableApp(t)
+
+	body, _ := json.Marshal(map[string]string{"sid": "sid-1", "mode": eventRouter.StreamChangedMode})
+	w := httptest.NewRecorder()
+	app.StreamChanged(w, httptest.NewRequest(http.MethodPost, "/_cluster/stream-changed", bytes.NewReader(body)))
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	w = httptest.NewRecorder()
+	app.StreamChanged(w, wakeSstpReq("/_cluster/stream-changed", "test-secret", "sid-1", "sstp-client"))
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	assert.Equal(t, 0, app.router.syncCount())
+}
+
+// Creating a stream and deleting it tell the other nodes, each before the
+// request answers, so a peer serves the new stream (and stops serving the
+// deleted one) without waiting for its periodic sync (#349, #350).
+func TestStreamCreateAndDelete_AnnounceToPeers(t *testing.T) {
+	app := newTableApp(t)
+	bearer := app.adminBearer(t)
+
+	create := *statusPlainRecord("DEFAULT", "", "")
+	create.StreamConfiguration.Id = ""
+	body, err := json.Marshal(create)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/stream", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rr := httptest.NewRecorder()
+	StreamCreateHandler(app, rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created model.StreamConfiguration
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	assert.Equal(t, []string{created.Id}, app.router.broadcastSids(), "a create is announced")
+
+	req = httptest.NewRequest(http.MethodDelete, "/stream?stream_id="+created.Id, nil)
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rr = httptest.NewRecorder()
+	StreamDeleteHandler(app, rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	assert.Equal(t, []string{created.Id, created.Id}, app.router.broadcastSids(), "a delete is announced")
+}
+
+// After a successful stream-table sync the cluster rows left behind are
+// purged: a node silent for longer than the GC window, and an expired lease
+// whose stream is gone from the store. A lease whose stream still exists keeps
+// its row, and with it its fencing history (#350).
+func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
+	app := newTableApp(t)
+	persistStatusPlain(t, app.statusRefreshApp, model.StreamStateEnabled, "")
+	coord, ok := app.Coordinator.(*memory_provider.MemoryCoordinator)
+	require.True(t, ok)
+
+	past := time.Now().UTC().Add(-10 * time.Minute)
+	coord.SetClock(func() time.Time { return past })
+	gone, live := cluster.PushTransmitterResource("deleted-sid"), cluster.PushTransmitterResource(statusPlainSid)
+	for _, res := range []string{gone, live} {
+		ok, _, err := coord.TryAcquireOrRenewLease(res, "node-old", time.Second)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	coord.SetClock(nil)
+	require.NoError(t, coord.RegisterNode(model.ClusterNode{Id: "node-old", LastSeenAt: past}))
+	require.NoError(t, coord.RegisterNode(model.ClusterNode{Id: "node-now", LastSeenAt: time.Now().UTC()}))
+
+	app.syncStreamTable()
+	require.Equal(t, 1, app.router.syncCount())
+
+	_, token, _ := coord.TryAcquireOrRenewLease(gone, "node-now", time.Second)
+	assert.Equal(t, int64(1), token, "the deleted stream's lease row is purged")
+	_, token, _ = coord.TryAcquireOrRenewLease(live, "node-now", time.Second)
+	assert.Equal(t, int64(2), token, "a live stream's lease row is kept")
+	old, _ := coord.GetNode("node-old")
+	assert.Nil(t, old, "a node silent past the GC window is purged")
+	current, _ := coord.GetNode("node-now")
+	assert.NotNil(t, current)
+}

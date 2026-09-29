@@ -159,3 +159,32 @@ func (c *MemoryCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) {
 	}
 	return &n, nil
 }
+
+var _ cluster.Reaper = (*MemoryCoordinator)(nil)
+
+func (c *MemoryCoordinator) PurgeStaleNodes(before time.Time) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for id, node := range c.nodes {
+		if node.LastSeenAt.Before(before) {
+			delete(c.nodes, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (c *MemoryCoordinator) PurgeExpiredLeases(before time.Time, keep func(resource string) bool) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for resource, entry := range c.leases {
+		if !entry.leaseUntil.Before(before) || (keep != nil && keep(resource)) {
+			continue
+		}
+		delete(c.leases, resource)
+		n++
+	}
+	return n, nil
+}

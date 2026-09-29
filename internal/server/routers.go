@@ -255,6 +255,15 @@ func (h *HttpRouter) peerRoutes() Routes {
 			h.sa.WakeSstpServer,
 			false,
 		},
+		// A peer created or deleted a stream: reconcile the stream table now
+		// (#349, #350). Same SPIFFE/HMAC auth, never coalesced.
+		Route{
+			"StreamChanged",
+			http.MethodPost,
+			"/_cluster/stream-changed",
+			h.sa.StreamChanged,
+			false,
+		},
 
 		Route{
 			"ProtectedResourceMetadata",
