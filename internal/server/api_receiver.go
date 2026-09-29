@@ -82,7 +82,13 @@ InitializeReceivers handles updates to a receiver client polling stream when cha
 func (sa *SignalsApplication) InitializeReceivers() {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-	states := sa.StreamService.GetStateMap(context.Background())
+	states, err := sa.StreamService.LoadStateMap(context.Background())
+	if err != nil {
+		// A failed read is not an empty stream table: closing every receiver
+		// here would stop delivery until the next successful sync (#349).
+		serverLog.Warn("RCV: stream store read failed; keeping receivers until the next sync", "error", err)
+		return
+	}
 
 	newPushReceivers := make(map[string]model.StreamStateRecord)
 	currentPollClients := make(map[string]bool)

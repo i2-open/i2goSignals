@@ -13,6 +13,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
+	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,4 +174,32 @@ func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
 	assert.Nil(t, old, "a node silent past the GC window is purged")
 	current, _ := coord.GetNode("node-now")
 	assert.NotNil(t, current)
+}
+
+// #349 review: a stream-changed call from a peer reconciles the receivers too.
+// When the store cannot be read, the reconcile must keep the receivers this
+// node runs — as it keeps the router's streams — rather than read the failed
+// read as "no receivers" and close every poll and push receiver client.
+func TestSyncStreamTable_StoreReadErrorKeepsReceivers(t *testing.T) {
+	app := newTableApp(t)
+	dao := &failingStreamDAO{StreamDAO: memory.NewStreamDAO()}
+	app.statusRefreshApp.withStreamDAO(dao)
+
+	pollCancelled, pushCancelled := false, false
+	pollRec := &model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Id: "rcv-poll"}}
+	pushRec := &model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{Id: "rcv-push"}}
+	app.pollClients = map[string]*ClientPollStream{
+		"rcv-poll": {stream: pollRec, active: true, cancel: func() { pollCancelled = true }},
+	}
+	app.pushClients = map[string]*ReceiverPushStream{
+		"rcv-push": {stream: pushRec, active: true, cancel: func() { pushCancelled = true }},
+	}
+
+	dao.failList = true
+	app.syncStreamTable()
+
+	assert.Contains(t, app.pollClients, "rcv-poll", "a failed store read keeps the poll receiver")
+	assert.Contains(t, app.pushClients, "rcv-push", "a failed store read keeps the push receiver")
+	assert.False(t, pollCancelled)
+	assert.False(t, pushCancelled)
 }

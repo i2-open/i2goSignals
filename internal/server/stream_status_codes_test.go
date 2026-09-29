@@ -49,6 +49,14 @@ type failingStreamDAO struct {
 	interfaces.StreamDAO
 	failFind   bool
 	failUpdate bool
+	failList   bool
+}
+
+func (d *failingStreamDAO) List(ctx context.Context) ([]model.StreamStateRecord, error) {
+	if d.failList {
+		return nil, errStoreDown
+	}
+	return d.StreamDAO.List(ctx)
 }
 
 func (d *failingStreamDAO) FindByID(ctx context.Context, id string) (*model.StreamStateRecord, error) {
