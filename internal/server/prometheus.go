@@ -441,6 +441,10 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	for _, c := range eventRouter.DeliveryCollectors() {
 		registerTo(reg, c)
 	}
+	// Local WAL depth, drain lag, drained/replayed counts, drain duration (#341).
+	for _, c := range eventRouter.WALCollectors() {
+		registerTo(reg, c)
+	}
 	// Poll-receiver outstanding polls (#338).
 	registerTo(reg, pollOutstandingGauge)
 	registerTo(reg, prometheusHandler.PushIdleVerifyOutcomes)

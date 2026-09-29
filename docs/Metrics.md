@@ -92,6 +92,20 @@ histogram_quantile(0.5, sum by (le, op) (rate(goSignals_dao_op_duration_seconds_
 histogram_quantile(0.5, sum by (le) (rate(goSignals_http_duration_seconds_bucket[1m])))
 ```
 
+## Local WAL Metrics
+
+These metrics cover the node-local ingest WAL used when `I2SIG_STORE_WAL=local` (ADR 0045, #341). They stay at zero in the default `majority` mode.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `goSignals_wal_depth` | Gauge | None | Entries (acknowledged inbound batches) in the local WAL not yet drained to the store. |
+| `goSignals_wal_drain_lag_seconds` | Gauge | None | Age of the oldest undrained entry, refreshed on every drain attempt. 0 when the WAL is empty. |
+| `goSignals_wal_drained_total` | Counter | None | SETs drained from the WAL to the store. A JTI the store already held counts as drained. |
+| `goSignals_wal_replayed_total` | Counter | None | SETs found in the WAL at start-up (left by a crash, or by a shutdown drain that timed out) and replayed to the store before ingest reopened. |
+| `goSignals_wal_drain_duration_seconds` | Histogram | None | Duration of one drain batch: the store write plus the WAL truncate. |
+
+Alerting guidance: a depth that keeps growing, or a drain lag above a few seconds that does not fall, means the store is not keeping up or is unreachable. Acknowledged SETs are then single-node durable only, and are lost if this node's disk is lost. A non-zero `rate(goSignals_wal_replayed_total[5m])` after a restart means the previous run stopped with undrained entries.
+
 ## HTTP Metrics
 
 | Metric Name | Type | Labels | Description |

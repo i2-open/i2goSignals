@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -21,6 +23,11 @@ const (
 	DefaultDir = "data/wal"
 	// FileName is the WAL file inside the WAL directory.
 	FileName = "ingest.wal"
+	// EnvDrainTimeout bounds the graceful-stop drain of the WAL to the store
+	// (local mode only). On timeout the residue stays on disk for the next start.
+	EnvDrainTimeout = "I2SIG_STORE_WAL_DRAIN_TIMEOUT"
+	// DefaultDrainTimeout is used when EnvDrainTimeout is unset or invalid.
+	DefaultDrainTimeout = 20 * time.Second
 )
 
 // Mode is the ingest durability mode.
@@ -61,6 +68,34 @@ func DirFromEnv() string {
 		return d
 	}
 	return DefaultDir
+}
+
+// ParseDrainTimeout parses an I2SIG_STORE_WAL_DRAIN_TIMEOUT value: a Go
+// duration ("20s", "1m") or a bare number of seconds. Empty means
+// DefaultDrainTimeout. A malformed or non-positive value returns
+// DefaultDrainTimeout with an error for the caller to log.
+func ParseDrainTimeout(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultDrainTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		secs, ferr := strconv.ParseFloat(v, 64)
+		if ferr != nil {
+			return DefaultDrainTimeout, fmt.Errorf("%s: invalid duration %q", EnvDrainTimeout, v)
+		}
+		d = time.Duration(secs * float64(time.Second))
+	}
+	if d <= 0 {
+		return DefaultDrainTimeout, fmt.Errorf("%s: must be positive, got %q", EnvDrainTimeout, v)
+	}
+	return d, nil
+}
+
+// DrainTimeoutFromEnv reads and parses EnvDrainTimeout.
+func DrainTimeoutFromEnv() (time.Duration, error) {
+	return ParseDrainTimeout(os.Getenv(EnvDrainTimeout))
 }
 
 // Entry is one durable WAL record.

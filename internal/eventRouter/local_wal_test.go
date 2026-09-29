@@ -74,18 +74,29 @@ func openMemPersistence(t *testing.T) *dbProviders.Persistence {
 // through a gatedEventDAO, and registers one poll stream the test SETs match.
 func newWalRouter(t *testing.T, p *dbProviders.Persistence, walDir string, dao *gatedEventDAO) *walSetup {
 	t.Helper()
+	return newWalRouterWith(t, p, walDir, dao, nil)
+}
+
+// newWalRouterWith is newWalRouter with the router's deps passed through
+// adjust before the router is built (nil leaves them as they are).
+func newWalRouterWith(t *testing.T, p *dbProviders.Persistence, walDir string, dao *gatedEventDAO, adjust func(*RouterDeps)) *walSetup {
+	t.Helper()
 	log, err := wal.OpenBolt(walDir)
 	require.NoError(t, err)
 	if dao == nil {
 		dao = &gatedEventDAO{EventDAO: p.EventDAO}
 	}
-	r := NewRouter(RouterDeps{
+	deps := RouterDeps{
 		StreamService: p.StreamService,
 		KeyService:    p.KeyService,
 		EventService:  services.NewEventService(dao),
 		Coordinator:   p.Coordinator,
 		WAL:           log,
-	}, "node-wal-test").(*router)
+	}
+	if adjust != nil {
+		adjust(&deps)
+	}
+	r := NewRouter(deps, "node-wal-test").(*router)
 	t.Cleanup(r.Shutdown)
 
 	inCounter := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_wal_events_in_total", Help: "test"}, []string{"type", "iss", "tfr", "stream_id"})
@@ -226,6 +237,8 @@ func TestLocalWal_AppendFailureIsStoreUnavailable(t *testing.T) {
 // An acked SET still in the WAL when the router stops is drained by the next
 // router over the same log.
 func TestLocalWal_UndrainedEntriesDrainOnRestart(t *testing.T) {
+	// The store stays gated, so the graceful-stop drain runs out of time.
+	t.Setenv(wal.EnvDrainTimeout, "100ms")
 	p := openMemPersistence(t)
 	dir := t.TempDir()
 	gate := make(chan struct{})

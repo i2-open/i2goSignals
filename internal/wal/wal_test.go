@@ -37,6 +37,20 @@ func TestDirFromEnv(t *testing.T) {
 	assert.Equal(t, "/x/y", DirFromEnv())
 }
 
+func TestParseDrainTimeout(t *testing.T) {
+	for in, want := range map[string]time.Duration{"": DefaultDrainTimeout, "5s": 5 * time.Second, " 1m ": time.Minute, "2.5": 2500 * time.Millisecond} {
+		got, err := ParseDrainTimeout(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, bad := range []string{"soon", "0", "-3s"} {
+		got, err := ParseDrainTimeout(bad)
+		assert.Error(t, err, bad)
+		assert.Contains(t, err.Error(), EnvDrainTimeout)
+		assert.Equal(t, DefaultDrainTimeout, got, "a bad value falls back to the default")
+	}
+}
+
 func TestBolt_AppendReadTruncateReopen(t *testing.T) {
 	dir := t.TempDir()
 	l, err := OpenBolt(dir)

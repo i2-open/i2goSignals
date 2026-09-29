@@ -48,6 +48,14 @@ Leases are acquired or renewed using an atomic `FindOneAndUpdate` operation:
 ### Release on Stop
 Push transmitter and poll receiver runners release their lease (`ReleaseLeaseIfOwned`) when they stop, after their heartbeat has stopped, so another node can take the stream at once instead of waiting out the TTL. The SSTP client releases its pair lease the same way.
 
+### Local WAL: Drain Before Release
+With `I2SIG_STORE_WAL=local` (ADR 0045), a SET is acknowledged once it is in this node's WAL, before it reaches the store. A lease must not pass to another node while such SETs are only on this node's disk. So in local mode the stop order is (#341):
+1.  Ingest closes. A SET arriving now gets 503 + `Retry-After`, and the transmitter resends it, possibly to another node.
+2.  The background drain worker stops between batches, and the WAL is drained to the store synchronously, retrying store failures, for at most `I2SIG_STORE_WAL_DRAIN_TIMEOUT` (default 20s).
+3.  Only then are the delivery runners stopped. Each releases its lease as it exits (above), so the next holder finds every acknowledged SET in the store.
+
+If the drain times out, the node logs the residual depth at ERROR, and the entries stay on disk. Its leases are still released at stop and then expire normally. The residue is replayed when this node starts again. At start, a WAL that holds entries from a previous run is replayed to the store first. Until it is empty, ingest answers 503 + `Retry-After`. In the default `majority` mode, none of this applies and the stop order is unchanged.
+
 ### Fenced Acks
 `AckEvent` / `AckEvents` carry the caller's fencing token. The event service checks it once per call, before any write, against the current lease for the stream:
 *   If the stream's lease is now held under a different token (or has expired), the ack is refused with `ErrStaleFencingToken` and nothing is written. A push runner that sees this stops its batch and goes back to re-acquire the lease.

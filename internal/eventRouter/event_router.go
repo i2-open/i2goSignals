@@ -2972,9 +2972,13 @@ func (r *router) CloseStream(sid string) {
 
 // Shutdown closes all the PushHandlers. Events will continue to be routed but only delivered when server restarts
 func (r *router) Shutdown() {
-	// Stop the local-WAL drain worker first, outside r.mu: it takes r.mu to
-	// wake targets. Undrained entries stay in the log (ADR 0045).
-	r.stopLocalWal()
+	// In local-WAL mode, close ingest and drain the WAL to the store before
+	// anything below stops the delivery runners: each runner releases its
+	// stream lease as it exits (#334), and a lease must not pass to a peer
+	// while SETs this node acked are still only on its disk (#341, ADR 0038).
+	// Runs outside r.mu, which the drain takes to wake targets. On drain
+	// timeout the residue stays in the log for the next start (ADR 0045).
+	r.shutdownLocalWal()
 	// This will shut down the threads that are pushing events.
 	r.mu.Lock()
 	defer r.mu.Unlock()
