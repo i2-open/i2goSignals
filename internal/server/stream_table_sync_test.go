@@ -13,6 +13,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -202,4 +203,126 @@ func TestSyncStreamTable_StoreReadErrorKeepsReceivers(t *testing.T) {
 	assert.Contains(t, app.pushClients, "rcv-push", "a failed store read keeps the push receiver")
 	assert.False(t, pollCancelled)
 	assert.False(t, pushCancelled)
+}
+
+// servingRouter is a router double that tracks the streams it serves the way
+// the real router does: UpdateStreamState adds one, RemoveStream drops it, and
+// a stream-table sync adds every stream in the store and drops the rest.
+type servingRouter struct {
+	recordingRouter
+	app    *SignalsApplication
+	mu     sync.Mutex
+	served map[string]bool
+}
+
+func (sr *servingRouter) UpdateStreamState(state *model.StreamStateRecord) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.served[state.StreamConfiguration.Id] = true
+}
+
+func (sr *servingRouter) RemoveStream(sid string) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	delete(sr.served, sid)
+}
+
+func (sr *servingRouter) serves(sid string) bool {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.served[sid]
+}
+
+func (sr *servingRouter) StreamIds() []string {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	ids := make([]string, 0, len(sr.served))
+	for sid := range sr.served {
+		ids = append(ids, sid)
+	}
+	return ids
+}
+
+func (sr *servingRouter) SyncStreamTable(ctx context.Context) (map[string]model.StreamStateRecord, error) {
+	known := sr.StreamIds()
+	states, err := sr.app.StreamService.LoadStateMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, state := range states {
+		sr.UpdateStreamState(&state)
+	}
+	for _, sid := range known {
+		if _, ok := states[sid]; !ok {
+			sr.RemoveStream(sid)
+		}
+	}
+	return states, nil
+}
+
+func (sr *servingRouter) BroadcastStreamChanged(string) {}
+
+var _ eventRouter.StreamTable = (*servingRouter)(nil)
+
+type servingApp struct {
+	*statusRefreshApp
+	router *servingRouter
+}
+
+func (a *servingApp) GetEventRouter() eventRouter.EventRouter { return a.router }
+
+// gatedDeleteStreamDAO holds a stream delete until the test opens the gate,
+// and says when a delete has started.
+type gatedDeleteStreamDAO struct {
+	interfaces.StreamDAO
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func (d *gatedDeleteStreamDAO) Delete(ctx context.Context, id string) error {
+	close(d.entered)
+	<-d.gate
+	return d.StreamDAO.Delete(ctx, id)
+}
+
+// #350 review: a stream delete stops the router's stream and then deletes it
+// from the store. A stream-table sync that runs between the two used to read
+// the stream from the store and serve it again, writing pending markers for a
+// deleted stream until the next periodic sync. The delete and the sync are
+// serialized, so once both are done the deleted stream is not served.
+func TestStreamDelete_ConcurrentSyncDoesNotReAddTheStream(t *testing.T) {
+	base := newStatusRefreshApp(t)
+	dao := &gatedDeleteStreamDAO{StreamDAO: memory.NewStreamDAO(), entered: make(chan struct{}), gate: make(chan struct{})}
+	base.withStreamDAO(dao)
+	sr := &servingRouter{app: base.SignalsApplication, served: map[string]bool{}}
+	base.EventRouter = sr
+	app := &servingApp{statusRefreshApp: base, router: sr}
+	persistStatusPlain(t, base, model.StreamStateEnabled, "")
+	sr.UpdateStreamState(statusPlainRecord("DEFAULT", "", ""))
+	bearer := base.adminBearer(t)
+
+	deleted := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodDelete, "/stream?stream_id="+statusPlainSid, nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rr := httptest.NewRecorder()
+		StreamDeleteHandler(app, rr, req)
+		deleted <- rr.Code
+	}()
+	<-dao.entered // the router has stopped the stream; the store delete is held
+
+	synced := make(chan struct{})
+	go func() {
+		defer close(synced)
+		base.syncStreamTable()
+	}()
+	select {
+	case <-synced:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(dao.gate)
+	require.Equal(t, http.StatusNoContent, <-deleted)
+	<-synced
+
+	assert.False(t, sr.serves(statusPlainSid), "the deleted stream is not served again")
 }

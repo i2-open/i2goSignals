@@ -362,6 +362,11 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// logged but never blocks local deletion.
 	sa.CascadeReceiverStreamDelete(r.Context(), state)
 
+	// The teardown and the store delete run under the stream-table lock: a
+	// stream-table sync between them would read the stream from the store and
+	// start it again (#350).
+	unlock := lockStreamTable(sa)
+
 	// Final teardown of the (now-drained) receiver and its bookkeeping. The
 	// context-cancel here is a no-op when the poll goroutine already exited.
 	sa.CloseReceiver(authContext.StreamId)
@@ -370,6 +375,7 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	sa.GetEventRouter().RemoveStream(authContext.StreamId)
 
 	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
+	unlock()
 	if err != nil {
 		writeStreamNotFoundOrFault(w, err, "StreamDelete: deleting stream", authContext.StreamId, "")
 		return

@@ -131,7 +131,7 @@ A reconcile snapshots the streams the router serves **before** it reads the stor
 
 When a reconcile finds that a stream is gone from the store, the router removes it: its transmitter runner stops, its lease is released at once (not left to expire), and later events write no pending marker for it.
 
-A periodic sync that runs between the router's `RemoveStream` and the store's `DeleteStream` on the deleting node can re-add the stream for one cycle; the next reconcile removes it again.
+On the deleting node, the stream delete holds the stream-table lock from the receiver teardown through the router's `RemoveStream` to the store's `DeleteStream`, so no reconcile can run between them and re-add the stream. An SSTP pair delete does not take the lock, because `DeleteSstpPair` may make a courtesy call to the peer. A reconcile that runs between its `RemoveStream` and the store delete can re-add the pair for one cycle, and the next reconcile removes it again.
 
 ### Orphan pending events
 

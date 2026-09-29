@@ -57,6 +57,28 @@ func (sa *SignalsApplication) syncStreamTable() {
 	sa.purgeClusterRows(states)
 }
 
+// streamTableLocker is implemented by an application that reconciles its
+// stream table in the background.
+type streamTableLocker interface {
+	lockStreamTable() (unlock func())
+}
+
+// lockStreamTable holds off stream-table syncs until unlock is called. A
+// local delete takes it so that no sync re-adds the stream between the
+// router's RemoveStream and the store's delete (#350). An application with no
+// background sync gets a no-op.
+func lockStreamTable(sa SsfApplicationInterface) (unlock func()) {
+	if l, ok := sa.(streamTableLocker); ok {
+		return l.lockStreamTable()
+	}
+	return func() {}
+}
+
+func (sa *SignalsApplication) lockStreamTable() (unlock func()) {
+	sa.syncMu.Lock()
+	return sa.syncMu.Unlock
+}
+
 // purgeClusterRows deletes the cluster_nodes rows of nodes unseen for the GC
 // window, and the cluster_leases rows expired for the GC window whose stream
 // or pair is no longer in the store. A lease of an unknown kind is kept.
