@@ -486,6 +486,20 @@ func (b *EventPushBuffer) Cnt() int {
 	return len(b.events)
 }
 
+// Queued returns a snapshot of the JTIs the buffer holds, oldest first. A JTI
+// submitted but not yet taken off the input channel is not included.
+func (b *EventPushBuffer) Queued() []string {
+	b.eventsMutex.Lock()
+	defer b.eventsMutex.Unlock()
+	out := make([]string, 0, len(b.events))
+	for _, v := range b.events {
+		if jti, ok := v.(string); ok {
+			out = append(out, jti)
+		}
+	}
+	return out
+}
+
 func (b *EventPushBuffer) addEvents(jtis []string) {
 	b.eventsMutex.Lock()
 	defer b.eventsMutex.Unlock()

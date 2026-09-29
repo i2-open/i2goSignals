@@ -85,7 +85,8 @@ router guarantees, and where it does not.
   carrying the stream id but not the JTIs. Success is logged at DEBUG,
   failure at ERROR (`Wake-up call failed`). Whether the call succeeds or
   not, PUSH targets are fed by the 1 s backfill, 100 SETs at a time, and
-  SSTP targets stall after a dropped wake (defect D).
+  SSTP targets stall after a dropped wake (defect D; fixed by #347, see
+  below).
 - **Leases.** TTL 30 s, heartbeat 10 s. One failed renewal drops the lease
   and the loop stops; the next acquisition attempt is 15 s later, so a
   transient Mongo hiccup costs a stream up to 15 s of delivery with no SET
@@ -96,7 +97,8 @@ router guarantees, and where it does not.
   buffer is non-empty. Under sustained load on the owner, SETs ingested on
   the peer are picked up only when the owner's own buffer drains, and then
   100 per second. The peer's SETs queue behind the owner's for as long as
-  the owner stays busy, then trickle. This is part of defect D.
+  the owner stays busy, then trickle. This is part of defect D. Since #347
+  the gate applies to the ticker only; a wake backfills past it.
 
 ## Defects found
 
@@ -220,6 +222,30 @@ Fix proposal, in order of leverage:
 4. Optionally carry the JTIs in the wake body (the coalescing window can
    batch them), so the owner submits them without a Mongo read at all.
 
+**Status (#347): items 1 to 3 are fixed; item 4 is deferred.**
+
+- **PUSH:** a wake now calls `backfillPushBufferOnWake`, which reads past
+  the JTIs already queued or in flight whatever the buffer depth. It
+  repeats while a read comes back full, up to 10 batches per wake. The 1 s
+  ticker still uses the gated `backfillPushBuffer`.
+- **SSTP client:** the dialer remembers a wake it turned away because every
+  second-push slot was held, and tries again when a second push completes.
+  It also keeps trying on a 1 s backfill ticker (`BackfillInterval`) while
+  work is owed, including after a push that left SETs unacked. A second
+  push loops `ClaimOutbound` until a claim comes back empty. The store
+  fallback in `ClaimOutbound` now reads past the JTIs already claimed by a
+  push in flight.
+- **`local` mode:** ring-fed delivery still wakes local runners at WAL
+  append. The cross-node wake (PUSH to a remote owner, SSTP-client to a
+  remote owner, and the SSTP-server broadcast) is now sent from
+  `commitWalEntry`, after the drain has stored the SET.
+- The wake can deliver a SET twice, never lose one: a JTI still on the push
+  buffer's input channel can be read from the store again. Receivers already
+  have to tolerate this under RFC 8935.
+
+The two-node numbers after the fix are **pending a bench run** (PUSH and
+SSTP, `majority` and `local`). The measurements above predate the fix.
+
 ## Recommended order
 
 1. **D** (#347, hand-off) and **B** (#348, advertise address). D caps cross-node PUSH
@@ -232,5 +258,6 @@ Fix proposal, in order of leverage:
 3. Backfill gating and the one-strike lease renewal are tuning, not
    defects; revisit after 1 and 2 with a two-node soak.
 
-Two-node numbers are therefore a measurement of ingest scaling only until D
-is fixed. For delivery, the single-node rows remain the reference.
+The two-node numbers above measure ingest scaling only, because they were
+taken before D was fixed. Until the post-fix bench run is recorded, the
+single-node rows remain the reference for delivery.

@@ -1357,9 +1357,31 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 	}
 }
 
+// wakeScope selects which half of a target's wake wakeTargetScopedLocked does:
+// the local buffer submit, the cross-node wake-up, or both.
+type wakeScope int
+
+const (
+	wakeAll wakeScope = iota
+	wakeLocalOnly
+	wakeRemoteOnly
+)
+
 // wakeTargetLocked hands one target's accepted JTIs to whichever runner owns
 // its delivery method. The caller must hold r.mu (at least RLock).
 func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
+	r.wakeTargetScopedLocked(t, jtis, wakeAll)
+}
+
+// wakeTargetScopedLocked is wakeTargetLocked limited to one scope. Ring-fed
+// local durability (#347) wakes local runners at WAL append, where the overlay
+// serves the SET before the drain stores it, and defers the cross-node wake to
+// commit: a remote owner reads only the store, and a wake sent before the store
+// write would find nothing (and coalescing would swallow a second one). The
+// caller must hold r.mu (at least RLock).
+func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wakeScope) {
+	local := scope != wakeRemoteOnly
+	remote := scope != wakeLocalOnly
 	switch t.mode {
 	case "PUSH":
 		// Lease-aware routing. The owner is read through leaseOwners rather than
@@ -1381,12 +1403,15 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 			// across the body-write join, and RemoveStream may have deleted the
 			// buffer in that window. The markers are already durable, so backfill
 			// still delivers them; only the wake-up is lost.
+			if !local {
+				return
+			}
 			if buf, ok := r.pushBuffers[t.key]; ok {
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
 				}
 			}
-		} else {
+		} else if remote {
 			// Remote owner, send one wake-up for the batch
 			go r.sendWakeup(t.key, "push", ownerNodeId, "")
 		}
@@ -1397,6 +1422,9 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		// Ideally we'd broadcast to all nodes, but let's start with local.
 		// Comma-ok for the same reason as the push arm above: the stream may have
 		// been removed while r.mu was released across the body-write join.
+		if !local {
+			return
+		}
 		if buf, ok := r.pollBuffers[t.key]; ok {
 			for _, jti := range jtis {
 				buf.SubmitEvent(jti)
@@ -1419,24 +1447,31 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
 		}
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
+			if !local {
+				return
+			}
 			if buf, ok := r.sstpBuffers[t.key]; ok {
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
 				}
 				buf.Wakeup()
 			}
-		} else {
+		} else if remote {
 			go r.broadcastSstpClientWake(t.key)
 		}
 
 	case "SSTP-SERVER":
-		if buf, ok := r.sstpServerBuffers[t.key]; ok {
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
+		if local {
+			if buf, ok := r.sstpServerBuffers[t.key]; ok {
+				for _, jti := range jtis {
+					buf.SubmitEvent(jti)
+				}
+				buf.Wakeup()
 			}
-			buf.Wakeup()
 		}
-		go r.broadcastSstpServerWake(t.key)
+		if remote {
+			go r.broadcastSstpServerWake(t.key)
+		}
 	}
 }
 
@@ -2313,7 +2348,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				return false
 			}
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
-			r.backfillPushBuffer(sid, eventBuf)
+			r.backfillPushBufferOnWake(sid, eventBuf)
 		case <-idle.C():
 			if runner.stopped() {
 				return false
@@ -2595,6 +2630,71 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 	if len(jtis) > 0 {
 		eventLogger.Debug("PUSH-SRV: Backfill found pending events", "sid", sid, "count", len(jtis))
 		eventBuf.SubmitEvents(jtis)
+	}
+}
+
+// maxWakeBackfillBatches caps how many backfill batches one wake may queue,
+// so a wake on a stream with a deep backlog does not read it all into memory
+// at once. The ticker's backfill keeps refilling the buffer as it drains.
+const maxWakeBackfillBatches = 10
+
+// backfillPushBufferOnWake is the wake's backfill, and it is level-triggered
+// (#347). A wake, most often a cross-node one for a SET another node wrote,
+// says only "this stream has work", and it arrives once. backfillPushBuffer
+// returns while the buffer holds anything, so a wake that found the loop busy
+// was dropped. Here the store is read regardless of buffer depth, past the
+// JTIs already queued or in flight, and read again until a short read shows
+// nothing newer is pending (or the cap is reached).
+//
+// It runs on the push loop's goroutine, which is also where the buffer is
+// popped and the acker reserved, so every JTI the loop has taken is either
+// still queued or in flight. A JTI submitted locally but still on the
+// buffer's input channel can be queued twice; the acker's reserve drops the
+// second copy while the first is in flight, and delivery stays at-least-once.
+func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPushBuffer) {
+	known := map[string]struct{}{}
+	for _, jti := range eventBuf.Queued() {
+		known[jti] = struct{}{}
+	}
+	var ack *acker
+	inFlight := 0
+	if v, ok := r.pushAckers.Load(sid); ok {
+		ack = v.(*acker)
+		inFlight = ack.size()
+	}
+
+	batch := r.backfillBatch
+	if batch < 1 {
+		batch = 1
+	}
+	submitted := 0
+	for submitted < batch*maxWakeBackfillBatches {
+		limit := len(known) + inFlight + batch
+		jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+			MaxEvents:         int32(limit),
+			ReturnImmediately: true,
+		})
+		fresh := make([]string, 0, len(jtis))
+		for _, jti := range jtis {
+			if _, ok := known[jti]; ok {
+				continue
+			}
+			// A JTI sent and awaiting its coalesced ack is still pending in
+			// the store, so it is not read back into the buffer (#336).
+			if ack != nil && ack.inFlight(jti) {
+				continue
+			}
+			known[jti] = struct{}{}
+			fresh = append(fresh, jti)
+		}
+		if len(fresh) > 0 {
+			eventLogger.Debug("PUSH-SRV: Wake backfill found pending events", "sid", sid, "count", len(fresh))
+			eventBuf.SubmitEvents(fresh)
+			submitted += len(fresh)
+		}
+		if len(jtis) < limit || len(fresh) == 0 {
+			return
+		}
 	}
 }
 

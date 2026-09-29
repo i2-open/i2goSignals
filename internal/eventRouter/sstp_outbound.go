@@ -227,11 +227,19 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 	// this final drain silently return 0 events during a graceful
 	// shutdown, adding delivery latency until the next takeover. The
 	// call is ReturnImmediately, so it will not block on the provider.
+	//
+	// The read reaches past the JTIs already claimed by a push or cycle still
+	// in flight: the store returns pending JTIs oldest first, so reading only
+	// max of them came back all-claimed, and empty, while later pending SETs
+	// waited for the primary long-poll (#347).
+	r.mu.RLock()
+	claimed := len(r.sstpInFlight[pairId])
+	r.mu.RUnlock()
 	pending, _ := r.eventService.GetEventIds(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
-		MaxEvents:         int32(max),
+		MaxEvents:         int32(max + claimed),
 		ReturnImmediately: true,
 	})
-	return r.claimSstpJtis(pairId, pending)
+	return r.claimSstpJtisUpTo(pairId, pending, max)
 }
 
 func (r *router) ResolveEvents(pairId string, claimed []string) []*model.EventRecord {
@@ -443,7 +451,12 @@ func (r *router) releaseSstpEventClaims(pairId string, events []*model.EventReco
 // this in-memory claim is purely a same-node dedup and is safe across
 // takeover.
 func (r *router) claimSstpJtis(pairId string, candidates []string) []string {
-	if len(candidates) == 0 {
+	return r.claimSstpJtisUpTo(pairId, candidates, len(candidates))
+}
+
+// claimSstpJtisUpTo is claimSstpJtis that claims at most max of candidates.
+func (r *router) claimSstpJtisUpTo(pairId string, candidates []string, max int) []string {
+	if len(candidates) == 0 || max <= 0 {
 		return nil
 	}
 	r.mu.Lock()
@@ -460,6 +473,9 @@ func (r *router) claimSstpJtis(pairId string, candidates []string) []string {
 		}
 		claimed[jti] = true
 		out = append(out, jti)
+		if len(out) >= max {
+			break
+		}
 	}
 	return out
 }

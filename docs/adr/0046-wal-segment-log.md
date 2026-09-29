@@ -152,8 +152,12 @@ log does not change that. What running it on more than one node requires:
   in both durability modes. Ring-fed `local` mode adds to it: the target is
   woken at append, before the peer's drain has committed the SET to Mongo,
   and never again. `docs/perf/cluster-perf.md` has the measurements and
-  the fix options; until they land, a two-node deployment scales ingest,
-  not delivery.
+  the fix options.
+  **Fixed by #347** (items 1 to 3): wakes are level-triggered, and the SSTP
+  dialer has a 1 s backfill while it owes work. Ring-fed mode wakes local
+  runners at append and sends the cross-node wake from `commitWalEntry`,
+  after the store write. Carrying the JTIs in the wake body is deferred.
+  The post-fix two-node numbers are pending a bench run.
 
 ## Consequences
 
