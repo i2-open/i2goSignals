@@ -127,17 +127,98 @@ Useful flags:
 | `--pprof-block` | with `--pprof`, also fetch a `debug/pprof/block` delta profile over the same window (needs `I2SIG_PPROF_BLOCK_RATE` on the servers) |
 | `--mongo-uri` | host-side Mongo URI (default `$BENCH_MONGO_URI`); snapshot the primary's journal counters before and after the run (see [Concurrency sweep](#concurrency-sweep)) |
 | `--workers` | free-text record of the server-side worker setting, stored in the result; it does not change the servers |
+| `--signing-alg RS256\|ES256\|ML-DSA-65` | `signing_alg` on the push and poll transmitter streams (default: the server default). Anything but RS256 needs an issuer key of that algorithm; the harness mints one through `POST /key/{issuer}?alg=` when it is missing |
+| `--durability majority\|local` | `durability` on the ingress stream (default: the server default). `local` needs `I2SIG_STORE_WAL=local` on goSignals1; the harness then scrapes the ingress counters only once `goSignals_wal_depth` has drained to zero |
 | `--history <file>` | append a summary row to a Markdown table (see below) |
 | `--label` | free text stored with the result (what changed) |
+| `--note` | why the run was made (the change under test); written to the history `Note` column |
 | `--keep` | leave the streams in place for inspection with the CLI / admin UI |
 | `--drain-timeout` | give up waiting for goSignals2 (default 5m) |
 | `--gs1`, `--gs2`, `--ca`, `--bootstrap-token` | point at a different stack |
+| `--gs1b <url>` | a second member of goSignals1's cluster (e.g. `https://localhost:8887`); ingest workers alternate between `--gs1` and it (see [Two-node cluster ingest](#two-node-cluster-ingest)) |
+| `--gs1b-sync-timeout` | with `--gs1b`, how long to wait after creating the streams for the second node to register the run's outbound streams before ingest starts (default 90s; peers sync every 40 s) |
 
 Every run writes `bin/bench/bench-<timestamp>.json` with the full result
 (topology ids, latency percentiles, per-leg counts, profile paths).
 
+### Two-node cluster ingest
+
+With `--gs1b` the harness spreads ingest over two members of goSignals1's
+cluster: all streams are still created through `--gs1` (the cluster shares
+one Mongo store, so they exist on both nodes), then even-numbered workers post
+to `--gs1` and odd-numbered workers to `--gs1b`, each over its own connection
+pool. A node only learns about streams created on a peer through its 40 s
+background sync, and a SET that reaches `--gs1b` before it has registered the
+run's outbound streams matches nothing and is never delivered; so after
+creating the streams the harness polls `--gs1b`'s `/metrics` until a
+`goSignals_router_events_in_total` series exists for each outbound stream
+(push, poll and SSTP transmitters), failing the run after
+`--gs1b-sync-timeout`. The wait is reported as `gs1b stream sync: Ns`
+(`gs1b_sync_seconds` in the JSON). Before the ingress counter is read, `goSignals_wal_depth` must have
+drained to zero on **both** nodes, and `ingress_counted` is the sum of each
+node's `goSignals_router_events_in_total{stream_id=ingress}`. The result adds
+an `ingest split: gs1=N gs1b=M` line (`ingest_split` in the JSON, from the
+workers' 202 counts) and a `dao gs1b:` block; the history row format is
+unchanged, so use `--label` to mark cluster runs. `--pprof-gs1b` profiles the
+second node when set.
+
+The peer never forgets a stream either: a node keeps delivering to streams a
+previous run deleted, which inflates its fan-out work and leaves orphan
+pending markers. Until that is fixed, restart the second node before each
+two-node run (`docker compose -f docker-compose-benchmark.yml --profile
+cluster restart goSignals1b`). The two-node results and the coordination
+defects they exposed are in [cluster-perf.md](cluster-perf.md).
+
 Teardown of the poll receiver waits for its in-flight long poll to expire, so
 the last log line arrives about ten seconds after the summary.
+
+### Benchmark stack
+
+`docker-compose-dev.yml` is built for debugging, not measuring: every node runs
+under Delve from a debug build with a bind-mounted source tree, logs at INFO
+(one line per SET), and shares the host with Keycloak, Postgres, two SCIM
+servers, goSsfServer and the observability stack. On the same laptop the same
+run measured 2.3–2.5× slower there than on the benchmark stack.
+
+`docker-compose-benchmark.yml` is the same two goSignals nodes and three-member
+replica set on the production distroless image, LOG_LEVEL=WARN, pprof on, no
+other services, and a 1 GiB WiredTiger cache per member. goSignals1 runs the
+node-local WAL (`I2SIG_STORE_WAL=local`, ring-fed); goSignals2 stays at
+`majority`. It binds the same host ports as the dev stack, so stop that first.
+
+```bash
+make dev-down
+make bench-stack-up            # make build-docker + compose up --wait
+make dev-bench BENCH_E2E_EVENTS=20000 BENCH_E2E_CONCURRENCY=128 \
+     BENCH_E2E_ARGS="--durability=local --history docs/perf/e2e-history.md --label bench-stack"
+make bench-stack-logs
+make bench-stack-down          # add -v by hand to drop the volumes
+```
+
+Runtime knobs pass straight through from the environment: `BENCH_LOG_LEVEL`,
+`BENCH_SUBJECT_FILTERING`, `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`,
+`I2SIG_PUSH_CONCURRENCY`, `I2SIG_DELIVERY_INFLIGHT_MAX`,
+`I2SIG_PPROF_MUTEX_FRACTION`, `I2SIG_PPROF_BLOCK_RATE`, `BENCH_GS1_WAL`,
+`BENCH_GS2_WAL` and `BENCH_IMAGE`. Rows taken on this stack are labelled
+`bench-stack-*` in the history; do not compare them with dev-stack rows.
+
+### Signing algorithms
+
+Every ingested SET is re-signed once per outbound leg (push, poll and SSTP), so
+the transmitter's `signing_alg` is a first-order term in goSignals1's CPU:
+RSA-2048 signing costs about 1 ms per SET on an arm64 Docker VM, ECDSA P-256
+about 50 µs. `make dev-bench-algs` runs the same load once per algorithm in
+`BENCH_ALGS` (default `RS256 ES256`) and appends one history row each, labelled
+`algs-<alg>-c<clients>`, then prints those rows:
+
+```bash
+make dev-bench-algs BENCH_E2E_EVENTS=20000 BENCH_E2E_CONCURRENCY=128 \
+     BENCH_E2E_ARGS="--durability=local"
+make dev-bench-algs BENCH_ALGS="RS256 ES256 ML-DSA-65"
+```
+
+The JSON result and the summary line carry `signing_alg` and `durability`, so
+a row's algorithm is recoverable without the label.
 
 ### Aborted runs
 

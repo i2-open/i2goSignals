@@ -38,9 +38,20 @@ docker run --rm --network i2gosignals_backend \
     sh -c 'mkdir /tmp/w && cd /src && tar --exclude=./.mongo --exclude=./.git -cf - . | tar -xf - -C /tmp/w && cd /tmp/w && go test -run xxx -bench BenchmarkMongoRouterWalIngest -benchtime=1x -count=3 ./internal/eventRouter/'
 ```
 
-The WAL micro-benchmarks are in `internal/wal/bolt_bench_test.go`:
-`BenchmarkBoltAppendSerial`, and `BenchmarkBoltAppend16` (16 concurrent
-1 KB appends per op).
+The WAL micro-benchmarks are in `internal/wal/segment_bench_test.go`:
+`BenchmarkSegmentAppendSerial`, and `BenchmarkSegmentAppend16` (16 concurrent
+1 KB appends per op). The bbolt numbers below predate ADR 0046, which
+replaced bbolt with a segment log (macOS: 16-way 18.5 -> 9.7 ms, serial
+9.4 -> 4.5 ms).
+
+End to end on the benchmark stack (`docker-compose-benchmark.yml`, 20000
+events, 128 clients, `--durability=local`, same session, rows labelled
+`algs-*-c128` in `e2e-history.md`): bbolt RS256 3271 / ES256 3920 ingest
+ev/s; segment log RS256 3406 / ES256 4140 (p99 ingest latency 80.9 -> 69.8 ms
+and 68.1 -> 61.0 ms). The new `goSignals_wal_append_seconds` histogram put
+one append at about 7 ms mean, p99 under 25 ms, so inside the Linux VM the
+WAL is now roughly a quarter of the 30 ms ingest p50; the rest is signature
+verification and handler work, not the disk.
 
 ## Results (2026-09-28, Apple M3 Max, 3 runs)
 
@@ -64,20 +75,17 @@ The WAL micro-benchmarks are in `internal/wal/bolt_bench_test.go`:
   Linux VM. `local` mode pays off only on a host with cheap, honest fsync.
 - **Group commit matters.** With bbolt's `DB.Batch`, whose batches close on a
   fixed timer, `local` reached only 125 ev/s on macOS. Under a slow fsync,
-  batches degrade to about one call each. The leader-based group commit in
-  `internal/wal/bolt.go` brought this to about 550 ev/s. Routing the drain's
+  batches degrade to about one call each. The leader-based group commit (then in
+  `internal/wal/bolt.go`, now `segment.go`) brought this to about 550 ev/s. Routing the drain's
   `Truncate` through the same commit queue brought it to about 800 ev/s.
 
-## Gap: no end-to-end goSignalsBench run
+## End-to-end runs
 
-The end-to-end `goSignalsBench` harness drives the 2-node dev cluster. Until
-#343, the temporary single-node guard makes `local` mode refuse to start
-there. So no end-to-end `local` measurement was taken. The in-process
-benchmark above stands in for it.
-
-To take the end-to-end measurement:
-
-1. Bring up a single-node stack: one goSignals server plus Mongo.
-2. Set `I2SIG_STORE_WAL=local` and give `I2SIG_STORE_WAL_DIR` a volume.
-3. Run the usual `goSignalsBench` push profile against it.
-4. Repeat with `majority` to get the baseline.
+The end-to-end `goSignalsBench` measurements were taken on
+`docker-compose-benchmark.yml` once #343 lifted the single-node guard: the
+single-node `algs-*-c128` rows quoted above, and the two-node
+`cluster-*-c128` rows in [e2e-history.md](e2e-history.md). The two-node runs
+are analysed in [cluster-perf.md](cluster-perf.md); in short, a second node
+scales ingest but not delivery, because the cross-node hand-off is a
+payload-less wake followed by a bounded backfill, and `local` mode's
+wake-before-drain adds to that gap.

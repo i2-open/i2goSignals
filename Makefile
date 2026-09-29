@@ -65,7 +65,7 @@ BENCHTIME ?= 1x
 # here and nowhere else in the gate.
 LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... ./internal/server
 
-.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-pprof \
+.PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-bench-algs dev-pprof \
     generate-certs check-certs licenses-check \
     build-docker build-docker-multiarch docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
@@ -87,8 +87,10 @@ help:
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
+	@echo "  bench-stack-up / bench-stack-down / bench-stack-logs - production-image stack for dev-bench (docker-compose-benchmark.yml, no Delve)"
 	@echo "  dev-bench          - end-to-end load/routing benchmark against the dev stack: BENCH_E2E_EVENTS=$(BENCH_E2E_EVENTS) BENCH_E2E_CONCURRENCY=$(BENCH_E2E_CONCURRENCY) BENCH_E2E_ARGS=..."
 	@echo "  dev-bench-sweep    - dev-bench once per client count in BENCH_SWEEP_CLIENTS=$(BENCH_SWEEP_CLIENTS) with Mongo journal counters (see docs/perf/e2e-benchmark.md, Concurrency sweep)"
+	@echo "  dev-bench-algs     - dev-bench once per signing algorithm in BENCH_ALGS=$(BENCH_ALGS), one history row each (see docs/perf/e2e-benchmark.md, Signing algorithms)"
 	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
 	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test leak-check bench"
@@ -317,6 +319,23 @@ dev-down:
 dev-logs:
 	$(DOCKER) compose -f docker-compose-dev.yml logs -f goSignals1
 
+# Benchmark stack: the production image (no Delve, no source bind mount),
+# WARN logging, two goSignals nodes and the Mongo replica set only. Shares
+# host ports with the dev stack, so `make dev-down` first. `make dev-bench`
+# targets it unchanged (same localhost ports, same bootstrap token).
+# BENCH_CLUSTER=1 adds goSignals1b, a second member of goSignals1's cluster
+# (host port 8887); pair it with BENCH_E2E_ARGS="--gs1b=https://localhost:8887".
+BENCH_CLUSTER ?=
+BENCH_COMPOSE  = $(DOCKER) compose -f docker-compose-benchmark.yml $(if $(BENCH_CLUSTER),--profile cluster,)
+bench-stack-up: check-certs build-docker
+	$(BENCH_COMPOSE) up -d --wait
+
+bench-stack-down:
+	$(DOCKER) compose -f docker-compose-benchmark.yml --profile cluster down
+
+bench-stack-logs:
+	$(BENCH_COMPOSE) logs -f goSignals1 goSignals2 $(if $(BENCH_CLUSTER),goSignals1b,)
+
 # End-to-end benchmark of the dev stack (cmd/goSignalsBench).
 # Builds push + poll streams between goSignals1 and goSignals2, pushes
 # BENCH_E2E_EVENTS SETs into a goSignals1 receiver and measures ingest and
@@ -345,6 +364,22 @@ dev-bench-sweep:
 		$(MAKE) --no-print-directory dev-bench BENCH_E2E_CONCURRENCY=$$c \
 			BENCH_E2E_ARGS="--mongo-uri='$(BENCH_MONGO_URI)' --workers=$(BENCH_SWEEP_WORKERS) --label=sweep-c$$c-w$(BENCH_SWEEP_WORKERS) $(BENCH_E2E_ARGS)" || exit 1; \
 	done
+
+# Signing-algorithm comparison (docs/perf/e2e-benchmark.md, "Signing
+# algorithms"): one dev-bench run per algorithm in BENCH_ALGS against the same
+# stack, same events and client count, so the rows differ only in what the
+# transmitter streams sign with. Every SET is signed once per outbound leg, so
+# the algorithm is a first-order term in goSignals1's CPU. Rows land in
+# BENCH_HISTORY labelled algs-<alg>-c<clients>; extra flags go in BENCH_E2E_ARGS
+# (for example --durability=local).
+BENCH_ALGS    ?= RS256 ES256
+BENCH_HISTORY ?= docs/perf/e2e-history.md
+dev-bench-algs:
+	@for a in $(BENCH_ALGS); do \
+		$(MAKE) --no-print-directory dev-bench \
+			BENCH_E2E_ARGS="--signing-alg=$$a --mongo-uri='$(BENCH_MONGO_URI)' --history=$(BENCH_HISTORY) --label=algs-$$a-c$(BENCH_E2E_CONCURRENCY) $(BENCH_E2E_ARGS)" || exit 1; \
+	done
+	@echo ">> last $(words $(BENCH_ALGS)) rows of $(BENCH_HISTORY):"; tail -n $(words $(BENCH_ALGS)) $(BENCH_HISTORY)
 
 # Profile a running dev-stack node with `go tool pprof`.
 # The dev compose file sets I2SIG_PPROF_ADDR=:6060 on every goSignals node and

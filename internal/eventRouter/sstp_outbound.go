@@ -613,9 +613,15 @@ func sstpPushInFlight(inFlightMax, backfillBatch int) int {
 
 // acquireSstpSecondPushSlot reserves one of the pair's K push-while-poll-held
 // slots (#339; Q7.2 had one), returning false when all K are held.
+//
+// The counters live under sstpSlotMu rather than r.mu: the dialer probes a
+// slot on every wake (a burst of subject-filter wakes is thousands per
+// second), and taking the router's write lock for each probe stalled every
+// ingest, match and drain sharing r.mu. sstpPushInFlightMax is set once at
+// construction, so reading it here needs no lock.
 func (r *router) acquireSstpSecondPushSlot(pairId string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.sstpSlotMu.Lock()
+	defer r.sstpSlotMu.Unlock()
 	k := r.sstpPushInFlightMax
 	if k < 1 {
 		k = 1
@@ -629,8 +635,8 @@ func (r *router) acquireSstpSecondPushSlot(pairId string) bool {
 
 // releaseSstpSecondPushSlot releases one push-while-poll-held slot.
 func (r *router) releaseSstpSecondPushSlot(pairId string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.sstpSlotMu.Lock()
+	defer r.sstpSlotMu.Unlock()
 	if n := r.sstpSecondPushInFlight[pairId]; n > 1 {
 		r.sstpSecondPushInFlight[pairId] = n - 1
 		return

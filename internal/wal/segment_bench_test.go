@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// BenchmarkBoltAppend16 is 16 concurrent single-record appends per op.
-func BenchmarkBoltAppend16(b *testing.B) {
-	l, err := OpenBolt(b.TempDir())
+// BenchmarkSegmentAppend16 is 16 concurrent single-record appends per op.
+func BenchmarkSegmentAppend16(b *testing.B) {
+	l, err := Open(b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -29,9 +29,9 @@ func BenchmarkBoltAppend16(b *testing.B) {
 	}
 }
 
-// BenchmarkBoltAppendSerial is one single-record append (one commit) per op.
-func BenchmarkBoltAppendSerial(b *testing.B) {
-	l, err := OpenBolt(b.TempDir())
+// BenchmarkSegmentAppendSerial is one single-record append (one commit) per op.
+func BenchmarkSegmentAppendSerial(b *testing.B) {
+	l, err := Open(b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}

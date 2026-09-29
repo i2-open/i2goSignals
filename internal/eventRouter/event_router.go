@@ -175,8 +175,13 @@ type router struct {
 	// (K, #339; Q7.2 had it fixed at one). An outbound arrival while K are
 	// already running coalesces into their buffer drains rather than opening
 	// another parallel request.
+	// Guarded by sstpSlotMu, not r.mu (lock order: r.mu, then sstpSlotMu;
+	// never the reverse), so the dialer's per-wake slot probe does not
+	// contend with ingest and delivery on the router lock.
 	sstpSecondPushInFlight map[string]int
-	// sstpPushInFlightMax is the resolved I2SIG_SSTP_PUSH_INFLIGHT (ADR 0044).
+	sstpSlotMu             sync.Mutex
+	// sstpPushInFlightMax is the resolved I2SIG_SSTP_PUSH_INFLIGHT (ADR 0044),
+	// fixed at construction and read without a lock.
 	sstpPushInFlightMax int
 	// sstpInFlight tracks, per SSTP-client pair (keyed on PairId), the set of
 	// outbound JTIs currently claimed by an in-flight delivery cycle. drainSstpBuffer
@@ -3034,7 +3039,9 @@ func (r *router) RemoveStream(sid string) {
 	// Drop the pair's in-flight claim set and second-push slot so a removed pair
 	// leaves no stale entries (keyed on PairId == sid for a pair).
 	delete(r.sstpInFlight, sid)
+	r.sstpSlotMu.Lock()
 	delete(r.sstpSecondPushInFlight, sid)
+	r.sstpSlotMu.Unlock()
 	// The pair's acker is closed once the lock is released: its final write
 	// takes r.mu to clear claims (#336).
 	droppedAcker := r.sstpAckers[sid]

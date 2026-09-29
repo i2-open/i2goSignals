@@ -39,6 +39,14 @@ func parseAudMix(s string) (audMix, error) {
 	return "", fmt.Errorf("unknown --mix %q (alternate|all|push|poll|sstp)", s)
 }
 
+// usesSstp reports whether the mix sends any event over the SSTP leg. When it
+// does not, the harness skips creating the SSTP pair, so a run can target a
+// server that rejects the pair (older scope rules) or has no SSTP at all.
+func (m audMix) usesSstp() bool {
+	_, _, sstp := m.expected(legCount)
+	return sstp > 0
+}
+
 // expected returns how many of n events each leg should deliver.
 func (m audMix) expected(n int) (push, poll, sstp int) {
 	switch m {

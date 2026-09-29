@@ -196,6 +196,9 @@ services:
       - ./config/goSignals1.env
     environment:
       - I2SIG_CLUSTER_NODE_ID=goSignals1b
+      # The env file's WAL directory belongs to goSignals1; a WAL directory is
+      # owned by one node and a second node pointed at it refuses to start.
+      - I2SIG_STORE_WAL_DIR=/app/bin/wal/goSignals1b
       - BASE_URL=https://gosignals1:8888/
       - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123

@@ -912,6 +912,8 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 			// each one is scheduled and drained, delaying failover for the
 			// wakeup burst's duration. pushWhilePollHeld re-checks the slot
 			// itself — this is a fast reject to prevent goroutine backlog.
+			// The probe is cheap: slot accounting has its own small mutex
+			// and never touches the router's lock.
 			if !d.outbound.AcquireSecondPushSlot(pairId) {
 				continue
 			}

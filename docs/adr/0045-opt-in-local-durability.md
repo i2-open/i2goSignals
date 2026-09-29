@@ -45,7 +45,8 @@ explicit downgrade, and never a silent one. Startup logs a WARN that says
 so.
 
 The WAL lives in `I2SIG_STORE_WAL_DIR` (default `data/wal`, relative to the
-working directory). It is one file, `ingest.wal`.
+working directory). It was one bbolt file, `ingest.wal`; ADR 0046 replaced
+it with a directory of segment files and migrates the bbolt file on open.
 
 ### 2. The ingest path in `local` mode
 
@@ -104,6 +105,11 @@ ordinary Mongo record, and `RetentionEngine.PurgeExpired` purges it the same
 way (US 34, `TestLocalWal_DrainedSetIsPurgedByRetention_{Memory,Mongo}`).
 
 ### 4. The store: bbolt
+
+> **Amended by ADR 0046.** The store is now an append-only segment log
+> with one fsync per group; bbolt remains only as the reader for migrating
+> an existing `ingest.wal`. The interface and the group-commit shape below
+> are unchanged.
 
 The WAL is a small interface in `internal/wal`:
 `Append(batch) (seq, error)`, `ReadFrom(seq, limit)`, `Truncate(seq)`,

@@ -2,9 +2,12 @@ package wal
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,9 +68,9 @@ func TestParseRingFed(t *testing.T) {
 	}
 }
 
-func TestBolt_AppendReadTruncateReopen(t *testing.T) {
+func TestSegment_AppendReadTruncateReopen(t *testing.T) {
 	dir := t.TempDir()
-	l, err := OpenBolt(dir)
+	l, err := Open(dir)
 	require.NoError(t, err)
 
 	seq, err := l.Append([][]byte{[]byte("a"), []byte("b")})
@@ -93,7 +96,7 @@ func TestBolt_AppendReadTruncateReopen(t *testing.T) {
 	assert.Equal(t, 1, l.Depth())
 	require.NoError(t, l.Close())
 
-	l, err = OpenBolt(dir)
+	l, err = Open(dir)
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	assert.Equal(t, 1, l.Depth())
@@ -107,8 +110,8 @@ func TestBolt_AppendReadTruncateReopen(t *testing.T) {
 	assert.Equal(t, uint64(4), seq)
 }
 
-func TestBolt_ClosedErrors(t *testing.T) {
-	l, err := OpenBolt(t.TempDir())
+func TestSegment_ClosedErrors(t *testing.T) {
+	l, err := Open(t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 	require.NoError(t, l.Close())
@@ -119,8 +122,23 @@ func TestBolt_ClosedErrors(t *testing.T) {
 	assert.ErrorIs(t, l.Truncate(1), ErrClosed)
 }
 
-func TestBolt_ConcurrentAppendsGroupCommit(t *testing.T) {
-	l, err := OpenBolt(t.TempDir())
+// A second process (here a second Open) on the same directory is refused
+// while the first holds it, and admitted once it closes.
+func TestSegment_DirectoryLock(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(dir)
+	require.NoError(t, err)
+	_, err = Open(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "locked")
+	require.NoError(t, l.Close())
+	l2, err := Open(dir)
+	require.NoError(t, err)
+	require.NoError(t, l2.Close())
+}
+
+func TestSegment_ConcurrentAppendsGroupCommit(t *testing.T) {
+	l, err := Open(t.TempDir())
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	var wg sync.WaitGroup
@@ -139,49 +157,222 @@ func TestBolt_ConcurrentAppendsGroupCommit(t *testing.T) {
 	assert.Equal(t, 32, l.Depth())
 }
 
-// A torn/partial record (bad or short checksum) is ignored on read.
-func TestBolt_PartialRecordIgnored(t *testing.T) {
+// Concurrent appends, reads and truncates never observe a record that is
+// not durable, and the final state is consistent (run with -race).
+func TestSegment_ConcurrentReadersAndDrain(t *testing.T) {
+	l, err := Open(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	const writers, per = 8, 50
+	var writersWg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		writersWg.Add(1)
+		go func() {
+			defer writersWg.Done()
+			for i := 0; i < per; i++ {
+				_, err := l.Append([][]byte{[]byte("x")})
+				assert.NoError(t, err)
+			}
+		}()
+	}
+	stop := make(chan struct{})
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			es, err := l.ReadFrom(0, 16)
+			if !assert.NoError(t, err) {
+				return
+			}
+			if len(es) > 0 {
+				assert.NoError(t, l.Truncate(es[len(es)-1].Seq))
+			}
+		}
+	}()
+	writersWg.Wait()
+	close(stop)
+	<-drained
+	es, err := l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(es), l.Depth())
+	if len(es) > 0 {
+		require.NoError(t, l.Truncate(es[len(es)-1].Seq))
+	}
+	assert.Equal(t, 0, l.Depth())
+}
+
+// A short tail (crash mid-write) is cut off on open; the records before it
+// are intact and the next append continues at a clean boundary.
+func TestSegment_TornTailTrimmed(t *testing.T) {
 	dir := t.TempDir()
-	l, err := OpenBolt(dir)
+	l, err := Open(dir)
 	require.NoError(t, err)
 	_, err = l.Append([][]byte{[]byte("good")})
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 
-	db, err := bolt.Open(dir+"/"+FileName, 0o600, nil)
+	path := segmentPath(dir, 1)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	require.NoError(t, err)
-	require.NoError(t, db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		if err := b.Put(seqKey(2), []byte{1, 2}); err != nil {
-			return err
-		}
-		v := encode([]byte("corrupted"))
-		v[len(v)-1] ^= 0xff
-		return b.Put(seqKey(3), v)
-	}))
-	require.NoError(t, db.Close())
+	// A record header claiming 100 bytes of payload with only two present.
+	short := binary.BigEndian.AppendUint32(nil, 100)
+	short = append(short, 0, 0, 0, 0, recEntry)
+	short = binary.BigEndian.AppendUint64(short, 2)
+	short = append(short, 1, 2)
+	_, err = f.Write(short)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 
-	l, err = OpenBolt(dir)
+	l, err = Open(dir)
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	es, err := l.ReadFrom(0, 0)
 	require.NoError(t, err)
 	require.Len(t, es, 1)
 	assert.Equal(t, "good", string(es[0].Data))
-	// Truncate past the bad records clears them.
+	seq, err := l.Append([][]byte{[]byte("next")})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), seq)
+	require.NoError(t, l.Close())
+
+	l, err = Open(dir)
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	es, err = l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	require.Len(t, es, 2)
+	assert.Equal(t, "next", string(es[1].Data))
+	// Truncate past everything clears the log.
 	require.NoError(t, l.Truncate(3))
 	assert.Equal(t, 0, l.Depth())
 }
 
+// A checksum failure ends the readable prefix: the record and anything
+// after it are not returned.
+func TestSegment_CorruptRecordEndsPrefix(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(dir)
+	require.NoError(t, err)
+	_, err = l.Append([][]byte{[]byte("one"), []byte("two"), []byte("three")})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// Flip a payload byte of the second record.
+	path := segmentPath(dir, 1)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	second := segmentHeader + recordHeader + len("one") + recordHeader
+	data[second] ^= 0xff
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	l, err = Open(dir)
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	es, err := l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	require.Len(t, es, 1)
+	assert.Equal(t, "one", string(es[0].Data))
+	assert.Equal(t, 1, l.Depth())
+}
+
+// Segments roll over at maxSegmentBytes and are deleted once every entry in
+// them is truncated; entries stay readable across the boundary and reopen.
+func TestSegment_RolloverAndDelete(t *testing.T) {
+	old := maxSegmentBytes
+	maxSegmentBytes = 4096
+	defer func() { maxSegmentBytes = old }()
+
+	dir := t.TempDir()
+	l, err := Open(dir)
+	require.NoError(t, err)
+	payload := make([]byte, 1024)
+	for i := 0; i < 12; i++ {
+		_, err := l.Append([][]byte{payload})
+		require.NoError(t, err)
+	}
+	segs, _ := filepath.Glob(filepath.Join(dir, segmentPrefix+"*"+segmentSuffix))
+	assert.Greater(t, len(segs), 2, "expected rollovers")
+
+	es, err := l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	require.Len(t, es, 12)
+
+	require.NoError(t, l.Truncate(8))
+	assert.Equal(t, 4, l.Depth())
+	after, _ := filepath.Glob(filepath.Join(dir, segmentPrefix+"*"+segmentSuffix))
+	assert.Less(t, len(after), len(segs), "fully drained segments are removed")
+	require.NoError(t, l.Close())
+
+	l, err = Open(dir)
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	assert.Equal(t, 4, l.Depth())
+	es, err = l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	require.Len(t, es, 4)
+	assert.Equal(t, uint64(9), es[0].Seq)
+	seq, err := l.Append([][]byte{payload})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(13), seq)
+}
+
+// An ingest.wal from the bbolt backend is carried into the segment log on
+// open, its sequence counter continues, and the file is removed.
+func TestSegment_MigratesBoltFile(t *testing.T) {
+	dir := t.TempDir()
+	db, err := bolt.Open(filepath.Join(dir, FileName), 0o600, nil)
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(bucketName)
+		if err != nil {
+			return err
+		}
+		for _, s := range []string{"a", "b", "c"} {
+			seq, err := b.NextSequence()
+			if err != nil {
+				return err
+			}
+			k := binary.BigEndian.AppendUint64(nil, seq)
+			v := binary.BigEndian.AppendUint32(nil, crc32.Checksum([]byte(s), crcTable))
+			if err := b.Put(k, append(v, s...)); err != nil {
+				return err
+			}
+		}
+		// Seq 1 was drained by the old backend.
+		return b.Delete(binary.BigEndian.AppendUint64(nil, 1))
+	}))
+	require.NoError(t, db.Close())
+
+	l, err := Open(dir)
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	es, err := l.ReadFrom(0, 0)
+	require.NoError(t, err)
+	require.Len(t, es, 2)
+	assert.Equal(t, "b", string(es[0].Data))
+	assert.Equal(t, uint64(4), es[0].Seq, "migrated entries continue after the bbolt counter")
+	assert.Equal(t, 2, l.Depth())
+	_, err = os.Stat(filepath.Join(dir, FileName))
+	assert.True(t, os.IsNotExist(err), "legacy file removed")
+	seq, err := l.Append([][]byte{[]byte("d")})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), seq)
+}
+
 const envCrashChild = "I2SIG_WAL_CRASH_CHILD_DIR"
 
-// TestCrashChild is the subprocess body for TestBolt_KillDuringAppend.
+// TestCrashChild is the subprocess body for TestSegment_KillDuringAppend.
 func TestCrashChild(t *testing.T) {
 	dir := os.Getenv(envCrashChild)
 	if dir == "" {
 		t.Skip("subprocess helper")
 	}
-	l, err := OpenBolt(dir)
+	l, err := Open(dir)
 	if err != nil {
 		fmt.Println("ERR", err)
 		os.Exit(2)
@@ -199,7 +390,7 @@ func TestCrashChild(t *testing.T) {
 
 // Every append acknowledged before a SIGKILL is present and valid after
 // reopening; nothing half-written is returned.
-func TestBolt_KillDuringAppend(t *testing.T) {
+func TestSegment_KillDuringAppend(t *testing.T) {
 	if testing.Short() {
 		t.Skip("subprocess crash test")
 	}
@@ -247,7 +438,7 @@ wait:
 	}
 	require.Greater(t, count, 0, "child acknowledged nothing")
 
-	l, err := OpenBolt(dir)
+	l, err := Open(dir)
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	es, err := l.ReadFrom(0, 0)

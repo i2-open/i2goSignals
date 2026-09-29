@@ -40,6 +40,8 @@ import (
 
 type options struct {
 	gs1, gs2                 string
+	gs1b                     string // second member of goSignals1's cluster (ingest only)
+	gs1bSyncTimeout          time.Duration
 	gs1Internal, gs2Internal string
 	caFile                   string
 	insecure                 bool
@@ -50,6 +52,7 @@ type options struct {
 	sstpAud                  string
 	sstpRole                 string // SSTP HTTP role played by goSignals1
 	signingAlg               string // signing_alg on the push and poll transmitter streams
+	durability               string // per-stream durability on the ingress stream (#343)
 	events                   int
 	concurrency              int
 	mix                      string
@@ -59,8 +62,10 @@ type options struct {
 	outDir                   string
 	history                  string
 	label                    string
+	note                     string // --note: reason for the run, recorded in the history row
 	pprof                    bool
 	pprofGs1, pprofGs2       string
+	pprofGs1b                string
 	pprofSeconds             int
 	pprofBlock               bool
 	mongoURI                 string
@@ -72,6 +77,7 @@ func parseFlags() *options {
 	o := &options{}
 	flag.StringVar(&o.gs1, "gs1", "https://localhost:8888", "host-side base URL of goSignals1 (ingress + transmitters)")
 	flag.StringVar(&o.gs2, "gs2", "https://localhost:8889", "host-side base URL of goSignals2 (receivers)")
+	flag.StringVar(&o.gs1b, "gs1b", "", "host-side base URL of a second node in goSignals1's cluster (e.g. https://localhost:8887); ingest workers alternate between --gs1 and it")
 	flag.StringVar(&o.gs1Internal, "gs1-internal", "", "base URL goSignals2 uses to reach goSignals1 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.gs2Internal, "gs2-internal", "", "base URL goSignals1 uses to reach goSignals2 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.caFile, "ca", "config/certs/ca-cert.pem", "CA certificate used to verify both servers")
@@ -84,6 +90,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.sstpAud, "sstp-aud", "https://bench.sstp.example.com", "audience routed over the SSTP leg")
 	flag.StringVar(&o.sstpRole, "sstp-role", model.SstpRoleInitiator, "SSTP HTTP role goSignals1 plays: initiator (goSignals1 dials goSignals2) or responder (goSignals2 dials goSignals1)")
 	flag.StringVar(&o.signingAlg, "signing-alg", "", "signing_alg for the push and poll transmitter streams: \"\" or RS256 (default), ES256, ML-DSA-65")
+	flag.StringVar(&o.durability, "durability", "", "durability of the ingress stream on goSignals1: \"\" or majority (default), local (needs I2SIG_STORE_WAL=local on goSignals1, #343)")
 	flag.IntVar(&o.events, "events", 1000, "number of SETs to push into goSignals1")
 	flag.IntVar(&o.concurrency, "concurrency", 8, "parallel ingest connections")
 	flag.StringVar(&o.mix, "mix", string(mixAlternate), "audience mix per event: alternate|all|push|poll|sstp")
@@ -93,9 +100,12 @@ func parseFlags() *options {
 	flag.StringVar(&o.outDir, "out", "bin/bench", "directory for JSON results (and default key file)")
 	flag.StringVar(&o.history, "history", "", "Markdown file to append a summary row to (e.g. docs/perf/e2e-history.md)")
 	flag.StringVar(&o.label, "label", "", "free-text label recorded with the result")
+	flag.StringVar(&o.note, "note", "", "why this run was made (the change under test); written to the --history Note column")
 	flag.BoolVar(&o.pprof, "pprof", false, "capture CPU profiles from both nodes during the run (needs I2SIG_PPROF_ADDR)")
 	flag.StringVar(&o.pprofGs1, "pprof-gs1", "http://localhost:6060", "pprof base URL for goSignals1")
 	flag.StringVar(&o.pprofGs2, "pprof-gs2", "http://localhost:6061", "pprof base URL for goSignals2")
+	flag.StringVar(&o.pprofGs1b, "pprof-gs1b", "", "pprof base URL for the --gs1b node (empty: not profiled)")
+	flag.DurationVar(&o.gs1bSyncTimeout, "gs1b-sync-timeout", 90*time.Second, "how long to wait for goSignals1b to register the run's streams (peers sync every 40s)")
 	flag.IntVar(&o.pprofSeconds, "pprof-seconds", 0, "CPU profile window (default: 30s, or the drain timeout if smaller)")
 	flag.BoolVar(&o.pprofBlock, "pprof-block", false, "with --pprof, also capture block profiles over the same window (needs I2SIG_PPROF_BLOCK_RATE on the servers)")
 	flag.StringVar(&o.mongoURI, "mongo-uri", os.Getenv("BENCH_MONGO_URI"), "Mongo URI (host-side) to snapshot db.serverStatus().wiredTiger.log before and after the run; empty skips it")
@@ -172,6 +182,22 @@ func run(o *options) error {
 	if err := gs2.bootstrap(o.bootstrapToken); err != nil {
 		return fmt.Errorf("goSignals2: %w", err)
 	}
+	// gs1b is a second member of goSignals1's cluster. It shares the Mongo
+	// store, so every stream and client token created on gs1 is valid on it;
+	// it gets its own HTTP client so the two connection pools stay separate.
+	var gs1b *node
+	if o.gs1b != "" {
+		client1b, err := newHTTPClient(o.caFile, o.insecure)
+		if err != nil {
+			return err
+		}
+		gs1b = &node{name: "goSignals1b", hostBase: strings.TrimRight(o.gs1b, "/"), http: client1b}
+		if _, err := gs1b.scrapeCounters(); err != nil {
+			return fmt.Errorf("goSignals1b (--gs1b) is not up: %w", err)
+		}
+		gs1b.token = gs1.token
+		logf("second cluster member %s is up; ingest workers alternate gs1/gs1b", gs1b.hostBase)
+	}
 
 	key, err := ensureIssuerKey(gs1, o)
 	if err != nil {
@@ -182,7 +208,7 @@ func run(o *options) error {
 	}
 
 	removeOrphans(o, gs1, gs2)
-	topo, err := buildTopology(gs1, gs2, o)
+	topo, err := buildTopology(gs1, gs2, o, mix)
 	if err != nil {
 		return err
 	}
@@ -197,6 +223,23 @@ func run(o *options) error {
 			stop()
 			cleanup()
 		}()
+	}
+
+	// A peer learns about streams created on gs1 only through its periodic
+	// background sync (every 40 s), so gs1b must have registered the run's
+	// outbound streams before it receives any SET, or its fan-out matches
+	// nothing and those SETs are lost.
+	var gs1bSync time.Duration
+	if gs1b != nil {
+		outbound := []string{topo.txPush.Id, topo.txPoll.Id}
+		if topo.sstp1 != nil {
+			outbound = append(outbound, topo.sstp1.PairId)
+		}
+		logf("waiting up to %s for %s to register outbound streams %v", o.gs1bSyncTimeout, gs1b.name, outbound)
+		if gs1bSync, err = gs1b.waitForStreams(outbound, o.gs1bSyncTimeout, 500*time.Millisecond); err != nil {
+			return err
+		}
+		logf("%s registered the outbound streams after %.1fs", gs1b.name, gs1bSync.Seconds())
 	}
 
 	logf("pre-signing %d SETs (issuer %s, mix %s)", o.events, o.issuer, mix)
@@ -215,12 +258,24 @@ func run(o *options) error {
 	if err != nil {
 		return err
 	}
-	before1, err := gs1.scrapeCounters()
-	if err != nil {
-		return err
+	// ingressNodes are the cluster members that accept ingest; index 0 is gs1.
+	ingressNodes := []*node{gs1}
+	if gs1b != nil {
+		ingressNodes = append(ingressNodes, gs1b)
+	}
+	beforeIngress := make([]*streamCounters, len(ingressNodes))
+	for i, n := range ingressNodes {
+		if beforeIngress[i], err = n.scrapeCounters(); err != nil {
+			return err
+		}
 	}
 	daoBefore1, daoErr1 := gs1.scrapeDaoHistograms()
 	daoBefore2, daoErr2 := gs2.scrapeDaoHistograms()
+	var daoBefore1b daoHistograms
+	daoErr1b := errors.New("no gs1b")
+	if gs1b != nil {
+		daoBefore1b, daoErr1b = gs1b.scrapeDaoHistograms()
+	}
 	var journal *journalProbe
 	var journalBefore *journalCounters
 	if o.mongoURI != "" {
@@ -236,6 +291,7 @@ func run(o *options) error {
 	result := &benchResult{
 		Timestamp:     time.Now(),
 		Label:         o.label,
+		Note:          o.note,
 		GitRevision:   gitRevision(),
 		GoVersion:     goVersionString(),
 		Host:          hostDescription(),
@@ -245,21 +301,35 @@ func run(o *options) error {
 		Issuer:        o.issuer,
 		SstpRole:      o.sstpRole,
 		Workers:       o.workers,
+		SigningAlg:    o.signingAlg,
+		Durability:    o.durability,
 		IngressStream: topo.ingress.Id,
+	}
+	if gs1b != nil {
+		result.Gs1b = gs1b.hostBase
+		result.Gs1bSyncSeconds = gs1bSync.Seconds()
 	}
 	expectPush, expectPoll, expectSstp := mix.expected(o.events)
 	result.Push = legResult{Transport: "PUSH", Audience: o.pushAud, TxStream: topo.txPush.Id, RxStream: topo.rxPush.Id, Expected: expectPush}
 	result.Poll = legResult{Transport: "POLL", Audience: o.pollAud, TxStream: topo.txPoll.Id, RxStream: topo.rxPoll.Id, Expected: expectPoll}
-	result.Sstp = legResult{Transport: "SSTP", Audience: o.sstpAud, TxStream: topo.sstp1.PairId, RxStream: topo.sstp2.SstpInbound.Id, Expected: expectSstp}
+	result.Sstp = legResult{Transport: "SSTP", Audience: o.sstpAud, Expected: expectSstp}
+	if topo.sstp1 != nil {
+		result.Sstp.TxStream, result.Sstp.RxStream = topo.sstp1.PairId, topo.sstp2.SstpInbound.Id
+	}
 
 	profiles := startProfiles(o, gs1.http)
 
 	// ---- ingest ----------------------------------------------------------
-	logf("ingesting %d SETs with %d workers -> %s%s", len(events), o.concurrency, gs1.hostBase, ingressPath)
+	if gs1b != nil {
+		logf("ingesting %d SETs with %d workers -> %s%s (even workers) and %s%s (odd workers)", len(events), o.concurrency, gs1.hostBase, ingressPath, gs1b.hostBase, ingressPath)
+	} else {
+		logf("ingesting %d SETs with %d workers -> %s%s", len(events), o.concurrency, gs1.hostBase, ingressPath)
+	}
 	start := time.Now()
 	latencies := make([]time.Duration, len(events))
 	var errCount atomic.Int64
 	var firstErr atomic.Value
+	accepted := make([]atomic.Int64, len(ingressNodes)) // SETs each node returned 202 for
 	next := make(chan int, len(events))
 	for i := range events {
 		next <- i
@@ -268,15 +338,19 @@ func run(o *options) error {
 	var wg sync.WaitGroup
 	for w := 0; w < o.concurrency; w++ {
 		wg.Add(1)
+		target := ingestTarget(w, len(ingressNodes))
 		go func() {
 			defer wg.Done()
+			n := ingressNodes[target]
 			for i := range next {
 				t0 := time.Now()
-				_, err := gs1.pushSET(ingressPath, ingressBearer, events[i].jws)
+				_, err := n.pushSET(ingressPath, ingressBearer, events[i].jws)
 				latencies[i] = time.Since(t0)
 				if err != nil {
 					errCount.Add(1)
 					firstErr.CompareAndSwap(nil, err)
+				} else {
+					accepted[target].Add(1)
 				}
 			}
 		}()
@@ -290,10 +364,13 @@ func run(o *options) error {
 	if fe := firstErr.Load(); fe != nil {
 		result.Notes = "first ingest error: " + fe.(error).Error()
 	}
+	if gs1b != nil {
+		result.IngestSplit = &ingestSplit{Gs1: int(accepted[0].Load()), Gs1b: int(accepted[1].Load())}
+	}
 	logf("ingest done: %.2fs, %.0f ev/s, %d errors", result.IngestSeconds, result.IngestEventsPerSecond, result.IngestErrors)
 
 	// ---- drain -----------------------------------------------------------
-	drainErr := waitForDrain(gs1, gs2, before1, before2, topo, result, start, ingestEnd, o)
+	drainErr := waitForDrain(ingressNodes, gs2, beforeIngress, before2, topo, result, start, ingestEnd, o)
 	result.TotalSeconds = time.Since(start).Seconds()
 	result.Success = drainErr == nil && result.IngestErrors == 0 && result.Push.Complete && result.Poll.Complete && result.Sstp.Complete
 	if drainErr != nil {
@@ -310,6 +387,11 @@ func run(o *options) error {
 		if after, err := gs1.scrapeDaoHistograms(); err == nil {
 			result.DaoGs1 = summarizeDao(diffDaoHistograms(daoBefore1, after))
 			result.DominantDaoOp = dominantDaoOp(result.DaoGs1)
+		}
+	}
+	if daoErr1b == nil {
+		if after, err := gs1b.scrapeDaoHistograms(); err == nil {
+			result.DaoGs1b = summarizeDao(diffDaoHistograms(daoBefore1b, after))
 		}
 	}
 	if daoErr2 == nil {
@@ -419,7 +501,7 @@ func ensureSigningAlgKey(gs1 *node, o *options) error {
 	return nil
 }
 
-func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
+func buildTopology(gs1, gs2 *node, o *options, mix audMix) (*topology, error) {
 	t := &topology{}
 	events := benchEventTypes
 
@@ -430,6 +512,7 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 		Aud:             []string{o.pushAud, o.pollAud, o.sstpAud},
 		EventsRequested: events,
 		RouteMode:       model.RouteModeForward,
+		Durability:      o.durability,
 		Delivery:        map[string]any{"method": model.ReceivePush},
 	})
 	if err != nil {
@@ -525,21 +608,28 @@ func buildTopology(gs1, gs2 *node, o *options) (*topology, error) {
 	}
 	t.rxPoll = rxPoll
 
-	// 5. SSTP pair. Events travel goSignals1 -> goSignals2 whichever HTTP
-	// role each node plays; --sstp-role only decides who dials whom.
-	sstp1, sstp2, sstpEndpoint, err := buildSstpPair(gs1, gs2, o, jwksURL, events)
-	if err != nil {
-		return nil, err
+	// 5. SSTP pair, only when the mix sends events over it. Events travel
+	// goSignals1 -> goSignals2 whichever HTTP role each node plays;
+	// --sstp-role only decides who dials whom.
+	sstpDesc := "none (mix has no SSTP leg)"
+	if mix.usesSstp() {
+		sstp1, sstp2, sstpEndpoint, err := buildSstpPair(gs1, gs2, o, jwksURL, events)
+		if err != nil {
+			return nil, err
+		}
+		t.sstp1, t.sstp2 = sstp1, sstp2
+		sstpDesc = fmt.Sprintf("sstp1=%s sstp2=%s(rx %s)", sstp1.PairId, sstp2.PairId, sstp2.SstpInbound.Id)
+		if o.verbose {
+			logf("sstp leg  goSignals1 is %s, initiator dials %s", o.sstpRole, sstpEndpoint)
+		}
 	}
-	t.sstp1, t.sstp2 = sstp1, sstp2
 
-	logf("streams: ingress=%s txPush=%s rxPush=%s txPoll=%s rxPoll=%s sstp1=%s sstp2=%s(rx %s)",
-		ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPoll.Id, sstp1.PairId, sstp2.PairId, sstp2.SstpInbound.Id)
+	logf("streams: ingress=%s txPush=%s rxPush=%s txPoll=%s rxPoll=%s %s",
+		ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPoll.Id, sstpDesc)
 	if o.verbose {
 		logf("ingress endpoint %s", ingress.Delivery.PushReceiveMethod.EndpointUrl)
 		logf("push leg  %s -> %s", txPush.Id, pushEndpoint)
 		logf("poll leg  %s <- %s", pollEndpoint, rxPoll.Id)
-		logf("sstp leg  goSignals1 is %s, initiator dials %s", o.sstpRole, sstpEndpoint)
 		logf("issuer jwks %s", jwksURL)
 	}
 	return t, nil
@@ -645,9 +735,21 @@ func pairOf(r *model.StreamStateRecord) string {
 	return r.PairId
 }
 
+// ingestTarget picks which ingress node (index into the ingest node list)
+// worker w posts to: workers alternate round-robin, so with two cluster
+// members even workers hit gs1 and odd workers hit gs1b.
+func ingestTarget(worker, nodes int) int {
+	if nodes <= 1 {
+		return 0
+	}
+	return worker % nodes
+}
+
 // waitForDrain scrapes both nodes until goSignals2 has counted every expected
-// event on each leg, or the timeout elapses.
-func waitForDrain(gs1, gs2 *node, before1, before2 *streamCounters, t *topology, r *benchResult, start, ingestEnd time.Time, o *options) error {
+// event on each leg, or the timeout elapses. ingressNodes are the cluster
+// members that accepted ingest (gs1, plus gs1b when set), with their
+// pre-run counters in beforeIngress.
+func waitForDrain(ingressNodes []*node, gs2 *node, beforeIngress []*streamCounters, before2 *streamCounters, t *topology, r *benchResult, start, ingestEnd time.Time, o *options) error {
 	deadline := time.Now().Add(o.drainTimeout)
 	legs := []*legResult{&r.Push, &r.Poll, &r.Sstp}
 	for _, leg := range legs {
@@ -702,8 +804,39 @@ func waitForDrain(gs1, gs2 *node, before1, before2 *streamCounters, t *topology,
 		}
 		time.Sleep(o.pollInterval)
 	}
-	if now1, err := gs1.scrapeCounters(); err == nil {
-		r.IngressCounted = int(now1.In[t.ingress.Id] - before1.In[t.ingress.Id])
+	// On a node running a local WAL with ring-fed delivery, ingress is metered
+	// when the drain stores the SET, which can be after the receivers have
+	// already counted delivery. Wait for the WAL to empty before reading the
+	// ingress counter so `counted` reflects every acknowledged SET. With a
+	// second cluster member every node's WAL must be empty, and the per-node
+	// events_in_total counters are summed.
+	nowIngress := make([]*streamCounters, len(ingressNodes))
+	scrapeAll := func() (pending float64, err error) {
+		for i, n := range ingressNodes {
+			if nowIngress[i], err = n.scrapeCounters(); err != nil {
+				return 0, err
+			}
+			if nowIngress[i].HasWal {
+				pending += nowIngress[i].WalDepth
+			}
+		}
+		return pending, nil
+	}
+	pending, err := scrapeAll()
+	for err == nil && pending > 0 && time.Now().Before(deadline) {
+		time.Sleep(o.pollInterval)
+		pending, err = scrapeAll()
+	}
+	if err == nil {
+		r.IngressCounted = 0
+		for i := range ingressNodes {
+			r.IngressCounted += int(nowIngress[i].In[t.ingress.Id] - beforeIngress[i].In[t.ingress.Id])
+		}
+		for i, n := range ingressNodes {
+			if nowIngress[i].HasWal && nowIngress[i].WalDepth > 0 {
+				logf("warning: %s WAL still holds %.0f undrained SETs after %s; ingress counted=%d is incomplete", n.name, nowIngress[i].WalDepth, o.drainTimeout, r.IngressCounted)
+			}
+		}
 	}
 	for _, leg := range legs {
 		if !leg.Complete {
@@ -751,7 +884,11 @@ func startProfiles(o *options, client *http.Client) *profileJob {
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	job := &profileJob{}
 	kinds := profileKinds(o.pprofBlock)
-	for _, target := range []struct{ name, base string }{{"goSignals1", o.pprofGs1}, {"goSignals2", o.pprofGs2}} {
+	targets := []struct{ name, base string }{{"goSignals1", o.pprofGs1}, {"goSignals2", o.pprofGs2}}
+	if o.gs1b != "" {
+		targets = append(targets, struct{ name, base string }{"goSignals1b", o.pprofGs1b})
+	}
+	for _, target := range targets {
 		if target.base == "" {
 			continue
 		}

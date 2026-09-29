@@ -75,7 +75,10 @@ type walMetrics struct {
 	drained       prometheus.Counter
 	replayed      prometheus.Counter
 	drainDuration prometheus.Histogram
-	ringFedServed prometheus.Counter
+	// appendDuration is the wall time of one log append as seen by ingest:
+	// queueing behind the current group commit plus the write and fsync.
+	appendDuration prometheus.Histogram
+	ringFedServed  prometheus.Counter
 	// suspended is 1 once a running local-mode node found another active
 	// cluster node without ring-fed delivery and stopped ingesting locally
 	// (#343); it stays 1 until restart.
@@ -105,6 +108,11 @@ func newWalMetrics() *walMetrics {
 			Help:    "Duration of one local WAL drain batch: the store write plus the log truncate.",
 			Buckets: []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
 		}),
+		appendDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "goSignals", Subsystem: "wal", Name: "append_seconds",
+			Help:    "Duration of one local WAL append as seen by ingest: the wait for the group commit plus its write and fsync.",
+			Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}),
 		ringFedServed: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "goSignals", Subsystem: "wal", Name: "ring_fed_served_total",
 			Help: "SET bodies served to delivery from the local WAL before the drain stored them (I2SIG_STORE_WAL_RING_FED).",
@@ -117,7 +125,7 @@ func newWalMetrics() *walMetrics {
 }
 
 func (m *walMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration, m.ringFedServed, m.suspended}
+	return []prometheus.Collector{m.depth, m.drainLag, m.drained, m.replayed, m.drainDuration, m.appendDuration, m.ringFedServed, m.suspended}
 }
 
 // walMetricsDefault is the process's local-WAL metric set; a router picks it
@@ -465,7 +473,9 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 
 	data, err := encodeWalEntry(entry)
 	if err == nil {
+		start := time.Now()
 		_, err = lw.log.Append([][]byte{data})
+		lw.metrics.appendDuration.Observe(time.Since(start).Seconds())
 	}
 	if err != nil {
 		lw.mu.Lock()
