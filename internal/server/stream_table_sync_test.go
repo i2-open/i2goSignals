@@ -46,6 +46,8 @@ func (tr *tableRouter) BroadcastStreamChanged(sid string) {
 	tr.broadcasts = append(tr.broadcasts, sid)
 }
 
+func (tr *tableRouter) AwaitPushStopped(context.Context, string) bool { return true }
+
 func (tr *tableRouter) syncCount() int {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
@@ -86,7 +88,7 @@ func streamChangedReq(secret, sid string) *http.Request {
 // is removed. Every call does so (a create followed at once by a delete of the
 // same stream must both be seen), and only that stream is touched; the full
 // store scan and the cluster-row purge stay on the periodic sync, so a large
-// store cannot hold the peer's call past its 2s bound (#349).
+// store cannot hold the peer's call past its bound (#349).
 func TestStreamChanged_ReconcilesOnlyTheNamedStream(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
 	base := newStatusRefreshApp(t)
@@ -230,6 +232,9 @@ type servingRouter struct {
 	mu     sync.Mutex
 	served map[string]bool
 	syncs  int
+	// runnerStopped, when set, stands in for a held stream's push runner:
+	// AwaitPushStopped waits for it to close.
+	runnerStopped chan struct{}
 }
 
 func (sr *servingRouter) syncCount() int {
@@ -287,6 +292,18 @@ func (sr *servingRouter) SyncStreamTable(ctx context.Context) (map[string]model.
 }
 
 func (sr *servingRouter) BroadcastStreamChanged(string) {}
+
+func (sr *servingRouter) AwaitPushStopped(ctx context.Context, _ string) bool {
+	if sr.runnerStopped == nil {
+		return true
+	}
+	select {
+	case <-sr.runnerStopped:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 var _ eventRouter.StreamTable = (*servingRouter)(nil)
 
@@ -406,4 +423,57 @@ func TestStreamChanged_StoreReadErrorIsNotAcked(t *testing.T) {
 	base.StreamChanged(w, streamChangedReq("test-secret", "sid-1"))
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.True(t, sr.serves("sid-1"), "a failed read removes nothing")
+}
+
+// A stream-changed call that holds a stream (a pause, a disable or a delete)
+// answers 202 only once this node's push runner for it has stopped, so the
+// peer's ack means nothing more is sent; a runner still running after
+// streamChangedStopTimeout gets 503, and the peer retries. An enabled stream
+// is acked without waiting.
+func TestStreamChanged_HeldStreamAckedAfterTheRunnerStops(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	base := newStatusRefreshApp(t)
+	sr := &servingRouter{app: base.SignalsApplication, served: map[string]bool{}, runnerStopped: make(chan struct{})}
+	base.EventRouter = sr
+
+	persistStatusPlain(t, base, model.StreamStateEnabled, "")
+	w := httptest.NewRecorder()
+	base.StreamChanged(w, streamChangedReq("test-secret", statusPlainSid))
+	assert.Equal(t, http.StatusAccepted, w.Code, "an enabled stream does not wait for a runner")
+
+	persistStatusPlain(t, base, model.StreamStatePause, "operator hold")
+	answered := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		base.StreamChanged(w, streamChangedReq("test-secret", statusPlainSid))
+		answered <- w.Code
+	}()
+	select {
+	case code := <-answered:
+		t.Fatalf("answered %d before the runner stopped", code)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(sr.runnerStopped)
+	select {
+	case code := <-answered:
+		assert.Equal(t, http.StatusAccepted, code)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no answer after the runner stopped")
+	}
+}
+
+// A held stream whose runner does not stop within streamChangedStopTimeout
+// is not acked: the call answers 503 and the peer retries.
+func TestStreamChanged_HeldStreamRunnerNotStoppedIsNotAcked(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	base := newStatusRefreshApp(t)
+	sr := &servingRouter{app: base.SignalsApplication, served: map[string]bool{}, runnerStopped: make(chan struct{})}
+	base.EventRouter = sr
+	persistStatusPlain(t, base, model.StreamStateDisable, "operator hold")
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	base.StreamChanged(w, streamChangedReq("test-secret", statusPlainSid))
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.GreaterOrEqual(t, time.Since(start), streamChangedStopTimeout)
 }

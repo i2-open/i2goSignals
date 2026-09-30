@@ -170,7 +170,9 @@ func (r *router) pendingPushJtis(sid string) []string {
 
 // retirePushRunnerLocked fires the stop signal of sid's runner and unregisters
 // the runner and its buffer, returning the retired runner (nil when sid has
-// none). It does not wait for the runner to exit. The caller holds r.mu.
+// none). It does not wait for the runner to exit: AwaitPushStopped does, and
+// the runner is kept in pushStoppingRunners until it has. The caller holds
+// r.mu.
 func (r *router) retirePushRunnerLocked(sid string) *pushRunner {
 	if pb, ok := r.pushBuffers[sid]; ok {
 		pb.Close()
@@ -183,7 +185,68 @@ func (r *router) retirePushRunnerLocked(sid string) *pushRunner {
 	delete(r.pushRunners, sid)
 	runner.stop()
 	drainPushBufferWhenFinished(runner)
+	if runner.live() {
+		if r.pushStoppingRunners == nil {
+			r.pushStoppingRunners = map[string]*pushRunner{}
+		}
+		r.pushStoppingRunners[sid] = runner
+		go func() {
+			<-runner.finished()
+			r.forgetStoppedRunner(sid, runner)
+		}()
+	}
 	return runner
+}
+
+// forgetStoppedRunner removes runner from pushStoppingRunners, once it has
+// finished, unless a later retired runner has replaced it there.
+func (r *router) forgetStoppedRunner(sid string, runner *pushRunner) {
+	r.mu.Lock()
+	if r.pushStoppingRunners[sid] == runner {
+		delete(r.pushStoppingRunners, sid)
+	}
+	r.mu.Unlock()
+}
+
+// stoppingRunnerLocked returns sid's retired runner that has not exited yet,
+// or nil. The caller holds r.mu (read or write).
+func (r *router) stoppingRunnerLocked(sid string) *pushRunner {
+	runner := r.pushStoppingRunners[sid]
+	if runner == nil || !runner.live() {
+		return nil
+	}
+	return runner
+}
+
+// pushStopping reports whether sid has a retired push runner on this node
+// that has not exited yet.
+func (r *router) pushStopping(sid string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.stoppingRunnerLocked(sid) != nil
+}
+
+// AwaitPushStopped waits for sid's retired push runner, if there is one, to
+// exit. A pause, disable or delete applied through UpdateStreamState or
+// RemoveStream retires the runner at once but does not wait, so this is how a
+// caller learns the change has taken effect: once it returns true, the runner
+// sends nothing more and has released its lease. It returns false when ctx
+// ends first.
+func (r *router) AwaitPushStopped(ctx context.Context, sid string) bool {
+	for {
+		r.mu.RLock()
+		runner := r.stoppingRunnerLocked(sid)
+		r.mu.RUnlock()
+		if runner == nil {
+			return true
+		}
+		select {
+		case <-runner.finished():
+			r.forgetStoppedRunner(sid, runner)
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 // drainPushBufferWhenFinished empties a closed runner buffer once its runner
@@ -285,9 +348,10 @@ func (r *router) pushRunnerLiveLocked(sid string) bool {
 // pushStreamHeldOff reports whether sid's push stream has been paused or
 // disabled by someone other than its runner: an operator's status change, on
 // this node or, through the stream-changed call, on another. UpdateStreamState
-// writes such a change to the pushStreams copy only; the runner runs on its
-// own record and so checks the copy before each batch and on each backfill
-// tick, and exits when this reports true.
+// retires the runner on such a change at once; this check is the backstop for
+// a runner that change did not reach (one started from a stale copy, say).
+// The runner runs on its own record and so checks the copy before each batch
+// and on each backfill tick, and exits when this reports true.
 //
 // The copy can be stale the other way too. A runner that ends its own pause
 // (receiver recovery, a signing key back) writes enabled to the store and its

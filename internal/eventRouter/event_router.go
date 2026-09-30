@@ -152,6 +152,20 @@ type router struct {
 	// pushHandoffs holds the pending restart hand-off for each push stream
 	// whose runner has been stopped and whose successor has not started yet.
 	pushHandoffs map[string]*pushHandoff
+	// pushStoppingRunners holds, for each push stream, the runner last retired
+	// on this node while it has not yet exited, for AwaitPushStopped. It is
+	// removed once the runner has finished.
+	pushStoppingRunners map[string]*pushRunner
+	// pushOwnPause holds, for each push stream whose runner has paused it
+	// (receiver recovery, a missing signing key), the reason the runner
+	// stored. A paused record with that reason is the runner's own pause and
+	// leaves it running; any other pause or disable stops it. Set when the
+	// runner pauses, cleared when it writes any other status. Guarded by r.mu.
+	pushOwnPause map[string]string
+	// peerNotifiers holds the background stream-changed sender of each peer
+	// with calls still to make. Guarded by notifyMu.
+	peerNotifiers map[string]*peerNotifier
+	notifyMu      sync.Mutex
 	// runningPushRunners counts push runner goroutines on this node that have
 	// started and not yet finished, retired ones included.
 	runningPushRunners atomic.Int64
@@ -370,6 +384,9 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pushBuffers:            map[string]*buffer.EventPushBuffer{},
 		pushRunners:            map[string]*pushRunner{},
 		pushHandoffs:           map[string]*pushHandoff{},
+		pushStoppingRunners:    map[string]*pushRunner{},
+		pushOwnPause:           map[string]string{},
+		peerNotifiers:          map[string]*peerNotifier{},
 		pollBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpClientStreams:      map[string]model.StreamStateRecord{},
 		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
@@ -937,6 +954,20 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		restart := pushRunnerSettingsChanged(currentState.StreamConfiguration, stream.StreamConfiguration)
 		currentState.Update(stream)
 		r.pushStreams[sid] = currentState
+		if currentState.Status != model.StreamStateEnabled && !r.isOwnPauseLocked(sid, &currentState) {
+			// An operator's pause or disable (or the runner's own disable, read
+			// back) holds the stream: its runner is retired now, and a pending
+			// restart starts none. The runner sends at most the batches already
+			// out; AwaitPushStopped waits for it to exit. The runner's own pause
+			// leaves it running, since it is what ends that pause. A later
+			// re-enable starts a new runner.
+			delete(r.pushHandoffs, sid)
+			delete(r.pushOwnPause, sid)
+			if runner := r.retirePushRunnerLocked(sid); runner != nil && runner.live() {
+				eventLogger.Info("PUSH-SRV: stream no longer enabled, stopping its runner", "sid", sid, "status", currentState.Status)
+			}
+			return
+		}
 		if !restart {
 			// A push transmitter set to enabled with no live runner gets one
 			// (#308), whatever stopped the last: its key, the receiver-401 limit,
@@ -967,8 +998,12 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		// starts once it has exited, so nothing goes out with the old settings
 		// afterwards and nothing is sent twice. This request does not wait.
 		// SETs routed meanwhile are already durable (no buffer is registered to
-		// wake), so the successor's preload picks them up.
+		// wake), so the successor's preload picks them up. A runner retired
+		// earlier by a pause and still stopping is waited for the same way.
 		old := r.retirePushRunnerLocked(sid)
+		if old == nil {
+			old = r.stoppingRunnerLocked(sid)
+		}
 		handoff := &pushHandoff{done: make(chan struct{})}
 		r.pushHandoffs[sid] = handoff
 		go r.completePushHandoff(sid, old, handoff)
@@ -996,6 +1031,14 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		return
 	}
 	r.pushStreams[sid] = *stream
+	if old := r.stoppingRunnerLocked(sid); old != nil {
+		// A runner removed a moment ago is still stopping: start the new one
+		// only once it has exited, so the two never overlap.
+		handoff := &pushHandoff{done: make(chan struct{})}
+		r.pushHandoffs[sid] = handoff
+		go r.completePushHandoff(sid, old, handoff)
+		return
+	}
 	r.initPushStreamLocked(sid, stream, jtis)
 }
 
@@ -2014,6 +2057,14 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 			continue
 		}
 
+		// A newly acquired lease may be a takeover on a copy of the stream
+		// that is behind the store: confirm the stream is still there and
+		// enabled before sending anything. The deferred release gives the
+		// lease back.
+		if !r.leaseStreamEnabled(sid) {
+			return
+		}
+
 		// Lease acquired, start the actual push loop
 		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid)
 		shouldRetry := r.runPushLoop(resource, stream, runner, fencingToken)
@@ -2022,6 +2073,28 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 		}
 		// Loop back to re-acquire; the top of the loop exits on a stop or shutdown.
 	}
+}
+
+// leaseStreamEnabled reads push stream sid from the store once its runner has
+// acquired the lease, and reports whether the runner may deliver. A stream gone
+// from the store, or stored as paused or disabled, may not: this node's copy
+// has not caught up with a change made elsewhere. A store read that fails is
+// logged and lets the runner proceed, as its copy says enabled.
+func (r *router) leaseStreamEnabled(sid string) bool {
+	stored, err := r.streamService.GetStreamState(r.ctx, sid)
+	switch {
+	case errors.Is(err, interfaces.ErrNotFound):
+		eventLogger.Info("PUSH-SRV: stream no longer in the store after taking its lease; PushHandler exiting.", "sid", sid)
+		return false
+	case err != nil || stored == nil:
+		eventLogger.Warn("PUSH-SRV: cannot read the stream after taking its lease; proceeding", "sid", sid, "error", err)
+		return true
+	case stored.Status != model.StreamStateEnabled:
+		eventLogger.Info("PUSH-SRV: stream not enabled in the store after taking its lease; PushHandler exiting.",
+			"sid", sid, "status", stored.Status)
+		return false
+	}
+	return true
 }
 
 // runPushLoop handles the event push loop for a given stream, including lease renewal, T2
@@ -3159,6 +3232,7 @@ func (r *router) RemoveStream(sid string) {
 		r.retirePushRunnerLocked(sid)
 		delete(r.pushHandoffs, sid)
 		delete(r.pushStreams, sid)
+		delete(r.pushOwnPause, sid)
 	} else {
 		_, ok := r.pollStreams[sid]
 		if ok {

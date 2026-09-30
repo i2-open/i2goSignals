@@ -55,10 +55,11 @@ func TestUpdateStreamState_PushRunnerRestartsOnTransmitSettingChange(t *testing.
 	first := h.pushBufferFor(sid)
 	require.NotNil(t, first, "first registration starts a runner")
 
-	// Status-only sync: same runner, same buffer.
+	// A sync that changes no transmit setting: same runner, same buffer. (A
+	// pause or disable retires the runner; see push_status_hold_test.go.)
 	statusOnly := stream.DeepCopy()
-	statusOnly.Status = model.StreamStatePause
-	statusOnly.ErrorMsg = "operator paused"
+	statusOnly.Status = model.StreamStateEnabled
+	statusOnly.ErrorMsg = "operator note"
 	h.router.UpdateStreamState(statusOnly)
 	same := h.pushBufferFor(sid)
 	require.NotNil(t, same)
@@ -509,9 +510,9 @@ func TestPushRunnerRestart_RunnerInRecoveryRecoversAgainWhileTheReceiverStillFai
 }
 
 // An operator's pause stays authoritative across a restart. A stream the
-// operator paused while its runner was in recovery gets no delivery after a
-// restart-triggering update, though the new endpoint would accept, and the
-// runner the hand-off starts exits.
+// operator paused while its runner was in recovery has its runner stopped at
+// once, and gets no delivery after a restart-triggering update, though the new
+// endpoint would accept: the held stream starts no runner.
 func TestPushRunnerRestart_OperatorPauseSurvivesTheRestart(t *testing.T) {
 	h, rx, sid, old := startRunnerInRecovery(t, false)
 	const newEndpoint = "https://receiver2.example.com/events"
@@ -522,12 +523,11 @@ func TestPushRunnerRestart_OperatorPauseSurvivesTheRestart(t *testing.T) {
 	rec, err := h.streamService.GetStreamState(ctx, sid)
 	require.NoError(t, err)
 	h.router.UpdateStreamState(rec)
+	waitFinished(t, old, "the operator's pause stops the runner in recoveryLoop")
 
 	h.saveAndSync(t, sid, endpointPatch(newEndpoint))
 
-	waitFinished(t, old, "the runner in recoveryLoop exits after the restart")
-	next := h.waitReplacementRunner(t, sid, old)
-	waitFinished(t, next, "the runner started on the operator's pause exits")
+	assert.Nil(t, h.runnerFor(sid), "the held stream starts no runner")
 	assert.False(t, h.router.pushRunnerLive(sid))
 	assert.Equal(t, int64(0), h.router.runningPushRunners.Load())
 	status, reason := h.storedStatus(t, sid)

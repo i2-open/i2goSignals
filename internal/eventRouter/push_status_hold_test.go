@@ -69,7 +69,9 @@ func TestPushStatusHold_OperatorPauseStopsLiveRunner(t *testing.T) {
 
 			h.setStatus(t, sid, status, "operator hold")
 			sent := len(rx.snapshot())
-			h.submitPending(t, sid, 2)
+			// The hold retired the runner and its buffer at once, so SETs routed
+			// now are only stored pending, as on a node with no runner.
+			h.addPendingEvents(t, sid, 2)
 
 			waitFinished(t, runner, "the runner exits once the stream is held off")
 			assert.Len(t, rx.settle(t), sent, "nothing is sent on a held-off stream")
@@ -122,4 +124,31 @@ func TestPushStatusHold_StaleCopyDoesNotHoldOff(t *testing.T) {
 	refreshed := h.router.pushStreams[sid].Status
 	h.router.mu.RUnlock()
 	assert.Equal(t, model.StreamStateEnabled, refreshed, "the copy is refreshed from the store")
+}
+
+// A runner that takes the stream's lease reads the stream from the store
+// before pushing: a copy that says enabled while the store says paused (a
+// change made elsewhere this node has not caught up with) delivers nothing,
+// and the runner exits.
+func TestPushStatusHold_TakeoverReadsTheStore(t *testing.T) {
+	rx := newHoldingReceiver()
+	rx.release()
+	h := newRestartHarness(t, rx)
+	stream := h.createPushStream(t, "NONE")
+	sid := stream.StreamConfiguration.Id
+	h.addPendingEvents(t, sid, 2)
+	h.streamService.UpdateStreamStatus(context.Background(), sid, model.StreamStatePause, "paused elsewhere")
+
+	stale := stream.DeepCopy()
+	require.Equal(t, model.StreamStateEnabled, stale.Status)
+	h.router.UpdateStreamState(stale)
+
+	var runner *pushRunner
+	require.Eventually(t, func() bool { runner = h.runnerFor(sid); return runner != nil }, 5*time.Second, 5*time.Millisecond)
+	waitFinished(t, runner, "the runner exits after reading the paused stream")
+	assert.Empty(t, rx.settle(t), "nothing is delivered on a stream the store says is paused")
+	assert.Equal(t, 2, h.pendingCount(sid), "the SETs stay pending")
+	stored, reason := h.storedStatus(t, sid)
+	assert.Equal(t, model.StreamStatePause, stored)
+	assert.Equal(t, "paused elsewhere", reason)
 }

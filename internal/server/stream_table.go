@@ -30,8 +30,13 @@ const (
 	streamTableSyncTimeout = 10 * time.Second
 
 	// streamChangedReadTimeout bounds the one-stream store read a
-	// stream-changed call makes, inside the peer's 2s call bound.
+	// stream-changed call makes, well inside the peer's call bound.
 	streamChangedReadTimeout = 1500 * time.Millisecond
+
+	// streamChangedStopTimeout bounds how long a stream-changed call waits
+	// for this node's push runner on a removed or held stream to stop, inside
+	// the peer's holder window.
+	streamChangedStopTimeout = 4 * time.Second
 )
 
 // syncStreamTable reconciles this node with the store: the receivers first,
@@ -122,33 +127,52 @@ func (sa *SignalsApplication) purgeClusterRows(states map[string]model.StreamSta
 
 // StreamChanged handles POST /_cluster/stream-changed: a peer created,
 // updated, re-statused or deleted a stream. After authenticating, it
-// reconciles that one stream and answers 202 when done — the ack the peer's
-// broadcast waits for — or 503 when the store could not be read, so the peer
-// retries; the full store scan and the cluster-row purge stay on
-// the periodic sync, so the call finishes inside the peer's 2s bound however
-// large the store (#349). Unlike the wake-up routes it is never coalesced: a
-// create and a quick delete of the same stream must both be seen, and a
-// redundant reconcile is harmless.
+// reconciles that one stream and answers 202 when done — the ack the peer
+// waits for when this node holds the stream's lease — or 503 when the store
+// could not be read, so the peer retries. When the stream was removed, or is
+// stored as not enabled, done means this node's push runner for it has
+// stopped: the call waits up to streamChangedStopTimeout for that, and answers
+// 503 if it has not. An SSTP pair's pause is reconcile-only: its client runner
+// stops on its own status check, not here. The full store scan and the
+// cluster-row purge stay on the periodic sync, so the call stays inside the
+// peer's bound however large the store (#349). The sender coalesces repeated
+// calls for one stream that a peer has not yet acked; a redundant reconcile
+// is harmless.
 func (sa *SignalsApplication) StreamChanged(w http.ResponseWriter, r *http.Request) {
 	sid, ok := authenticateClusterCall(w, r, eventRouter.StreamChangedMode)
 	if !ok {
 		return
 	}
 	serverLog.Debug("CLUSTER: stream-changed from a peer; reconciling the stream", "sid", sid)
-	if !sa.reconcileStream(sid) {
+	reconciled, held := sa.reconcileStream(sid)
+	if !reconciled {
 		// Not reconciled: no ack, so the peer retries.
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
+	}
+	if held {
+		if table, ok := sa.EventRouter.(eventRouter.StreamTable); ok {
+			ctx, cancel := context.WithTimeout(r.Context(), streamChangedStopTimeout)
+			stopped := table.AwaitPushStopped(ctx, sid)
+			cancel()
+			if !stopped {
+				serverLog.Warn("CLUSTER: stream-changed: the stream's push runner has not stopped yet; the peer retries", "sid", sid)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // reconcileStream brings this node in line with the store for stream sid: a
 // stream in the store is applied to the router and the receivers, one gone
-// from the store is removed from both. A store read that fails changes
-// nothing and reports false; the periodic sync catches up. syncMu is held only
-// for this one stream's work.
-func (sa *SignalsApplication) reconcileStream(sid string) bool {
+// from the store is removed from both. held reports that the stream was
+// removed or is stored as not enabled, so its push runner is stopping. A
+// store read that fails changes nothing and reports reconciled false; the
+// periodic sync catches up. syncMu is held only for this one stream's work,
+// not while the caller waits for the runner to stop.
+func (sa *SignalsApplication) reconcileStream(sid string) (reconciled, held bool) {
 	sa.syncMu.Lock()
 	defer sa.syncMu.Unlock()
 
@@ -159,14 +183,15 @@ func (sa *SignalsApplication) reconcileStream(sid string) bool {
 	case errors.Is(err, interfaces.ErrNotFound):
 		sa.CloseReceiver(sid)
 		sa.EventRouter.RemoveStream(sid)
+		return true, true
 	case err != nil:
 		serverLog.Warn("CLUSTER: stream-changed could not read the stream; the periodic sync catches up", "sid", sid, "error", err)
-		return false
+		return false, false
 	default:
 		sa.reconcileReceiver(state)
 		sa.EventRouter.UpdateStreamState(state)
+		return true, state.Status != model.StreamStateEnabled
 	}
-	return true
 }
 
 // authenticateClusterCall parses a {"sid","mode"} cluster call and
@@ -220,9 +245,10 @@ func authenticateCluster(w http.ResponseWriter, r *http.Request, sid, mode strin
 
 // notifyStreamChanged tells the other nodes that stream sid was created,
 // updated, re-statused or deleted here, so each reconciles its stream table
-// now. It waits for every active peer to ack (retrying for up to the router's
-// ack window) so that
-// when the request answers, the cluster already serves the new state; a peer
+// now. It waits only for the node holding the stream's lease, whose runner a
+// change affects, and only for the router's holder window: when the request
+// answers, the runner serving the stream has the new state (or has stopped,
+// for a delete or hold). Every other peer is told in the background, and one
 // that never acks catches up on its periodic sync.
 func notifyStreamChanged(sa SsfApplicationInterface, sid string) {
 	if table, ok := sa.GetEventRouter().(eventRouter.StreamTable); ok {

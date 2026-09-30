@@ -78,10 +78,32 @@ func TestSyncStreamTable_DropsStreamDeletedElsewhere(t *testing.T) {
 	assert.Equal(t, before, h.pendingCount(sid), "no marker is written for a dropped stream")
 }
 
-// A stream created, updated, re-statused or deleted on this node is announced to every other active
-// node on POST /_cluster/stream-changed with the cluster bearer token, so the
-// peer reconciles its stream table at once instead of on its 40s sync (#349,
-// #350). This node and address-less nodes are skipped.
+// countingPeer is a stub peer that answers stream-changed calls with the
+// status status() returns, counting the calls.
+func countingPeer(t *testing.T, status func(call int32) int) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status(calls.Add(1)))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// holdLease makes node the stream's push-transmitter lease holder.
+func holdLease(t *testing.T, r *router, sid, node string) {
+	t.Helper()
+	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), node, 30*time.Second)
+	require.NoError(t, err)
+	require.True(t, acquired)
+}
+
+// A stream created, updated, re-statused or deleted on this node is announced
+// to every other active node on POST /_cluster/stream-changed with the
+// cluster bearer token, so the peer reconciles its stream table at once
+// instead of on its 40s sync (#349, #350). This node and address-less nodes
+// are skipped. With no lease holder the broadcast returns at once and the
+// peers are told in the background.
 func TestBroadcastStreamChanged_TellsEveryOtherActiveNode(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
 	h := newRestartHarness(t, newHoldingReceiver())
@@ -96,9 +118,12 @@ func TestBroadcastStreamChanged_TellsEveryOtherActiveNode(t *testing.T) {
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-C", Address: peerC.URL, LastSeenAt: now}))
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-D", LastSeenAt: now}))
 
+	start := time.Now()
 	r.BroadcastStreamChanged("sid-new")
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "with no lease holder nothing is waited for")
 
-	require.Len(t, calls, 2, "one call per other node with an address, and the broadcast has returned")
+	require.Eventually(t, func() bool { return len(calls) == 2 }, 5*time.Second, 10*time.Millisecond,
+		"one call per other node with an address")
 	for i := 0; i < 2; i++ {
 		got := <-calls
 		assert.Equal(t, "/_cluster/stream-changed", got.path)
@@ -106,59 +131,85 @@ func TestBroadcastStreamChanged_TellsEveryOtherActiveNode(t *testing.T) {
 		require.True(t, len(got.auth) > 7)
 		assert.True(t, authSupport.ValidateClusterToken("test-secret", got.auth[7:], "sid-new", "stream-changed", 30*time.Second))
 	}
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, calls, "an acked peer is not called again")
 }
 
-// A peer that does not ack a stream-changed call (it could not reconcile, or
-// the call failed) is retried until it does, and the broadcast returns only
-// then; a peer that acked is not called again.
-func TestBroadcastStreamChanged_RetriesUntilEveryPeerAcks(t *testing.T) {
+// The broadcast waits only for the stream's lease holder. A non-holder whose
+// calls fail does not delay it, and is told in the background once it
+// recovers; a peer that acked is not called again.
+func TestBroadcastStreamChanged_WaitsOnlyForTheHolder(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
 	h := newRestartHarness(t, newHoldingReceiver())
 	r := h.router
 
-	peer := func(failures int32) (*httptest.Server, *atomic.Int32) {
-		var calls atomic.Int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if calls.Add(1) <= failures {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusAccepted)
-		}))
-		t.Cleanup(srv.Close)
-		return srv, &calls
-	}
-	flaky, flakyCalls := peer(2)
-	steady, steadyCalls := peer(0)
+	holder, holderCalls := countingPeer(t, func(int32) int { return http.StatusAccepted })
+	flaky, flakyCalls := countingPeer(t, func(call int32) int {
+		if call <= 2 {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusAccepted
+	})
 	now := time.Now().UTC()
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-holder", Address: holder.URL, LastSeenAt: now}))
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-flaky", Address: flaky.URL, LastSeenAt: now}))
-	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-steady", Address: steady.URL, LastSeenAt: now}))
+	holdLease(t, r, "sid-held", "node-holder")
 
-	r.BroadcastStreamChanged("sid-new")
+	start := time.Now()
+	r.BroadcastStreamChanged("sid-held")
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "a failing non-holder does not delay the broadcast")
+	assert.Equal(t, int32(1), holderCalls.Load(), "the holder acked before the broadcast returned")
 
-	assert.Equal(t, int32(3), flakyCalls.Load(), "the peer is retried until it acks")
-	assert.Equal(t, int32(1), steadyCalls.Load(), "a peer that acked is not called again")
+	require.Eventually(t, func() bool { return flakyCalls.Load() == 3 }, 10*time.Second, 20*time.Millisecond,
+		"the non-holder is retried in the background until it acks")
+	time.Sleep(1500 * time.Millisecond)
+	assert.Equal(t, int32(3), flakyCalls.Load(), "an acked peer is not called again")
+	assert.Equal(t, int32(1), holderCalls.Load(), "the settled holder is not told again")
+}
+
+// A lease holder that never acks holds the broadcast for the holder window
+// only; it is then left to the background notifier.
+func TestBroadcastStreamChanged_UnackedHolderBoundedByWindow(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	h := newRestartHarness(t, newHoldingReceiver())
+	r := h.router
+
+	holder, holderCalls := countingPeer(t, func(int32) int { return http.StatusServiceUnavailable })
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-holder", Address: holder.URL, LastSeenAt: time.Now().UTC()}))
+	holdLease(t, r, "sid-held", "node-holder")
+
+	start := time.Now()
+	r.BroadcastStreamChanged("sid-held")
+	took := time.Since(start)
+	assert.GreaterOrEqual(t, took, streamChangedHolderWindow-streamChangedRetryInterval)
+	assert.Less(t, took, streamChangedHolderWindow+time.Second, "the broadcast returns after the holder window")
+	called := holderCalls.Load()
+	assert.GreaterOrEqual(t, called, int32(4), "the holder is retried every second within the window")
+	require.Eventually(t, func() bool { return holderCalls.Load() > called }, 5*time.Second, 20*time.Millisecond,
+		"the unacked holder is told again in the background")
 }
 
 // A peer that refuses a stream-changed call with a 4xx (a token mismatch, say)
-// is not retried: no retry can fix it, so the broadcast does not hold the
-// request for the whole ack window.
+// is not retried: no retry can fix it.
 func TestBroadcastStreamChanged_RefusedPeerIsNotRetried(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
 	h := newRestartHarness(t, newHoldingReceiver())
 	r := h.router
 
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	t.Cleanup(srv.Close)
+	srv, calls := countingPeer(t, func(int32) int { return http.StatusUnauthorized })
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-misconfigured", Address: srv.URL, LastSeenAt: time.Now().UTC()}))
 
 	start := time.Now()
 	r.BroadcastStreamChanged("sid-new")
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "the broadcast returns at once")
 
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(streamChangedRetryInterval + 500*time.Millisecond)
 	assert.Equal(t, int32(1), calls.Load(), "a refused call is not retried")
-	assert.Less(t, time.Since(start), streamChangedRetryInterval, "the broadcast returns at once")
+	require.Eventually(t, func() bool {
+		r.notifyMu.Lock()
+		defer r.notifyMu.Unlock()
+		_, running := r.peerNotifiers["node-misconfigured"]
+		return !running
+	}, 2*time.Second, 10*time.Millisecond, "the notifier exits once nothing is pending")
 }

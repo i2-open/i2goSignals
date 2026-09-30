@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -33,18 +33,24 @@ const (
 	// StreamChangedPath is the internal route a peer is told on.
 	StreamChangedPath = "/_cluster/stream-changed"
 
-	// streamChangedTimeout bounds one stream-changed call to a peer, so a dead
-	// peer does not hold a round for the router client's full 5s.
-	streamChangedTimeout = 2 * time.Second
-	// streamChangedRetryInterval is the pause between broadcast rounds that
-	// retry the peers that have not acked.
+	// streamChangedTimeout bounds one background stream-changed call to a
+	// peer. It leaves room for a lease holder that waits for its runner to
+	// stop before it acks, so a dead peer holds its notifier no longer.
+	streamChangedTimeout = 5 * time.Second
+	// streamChangedRetryInterval is the pause between calls to a lease holder
+	// that has not acked, and the first backoff of a peer's notifier.
 	streamChangedRetryInterval = time.Second
-	// streamChangedAckWindow bounds how long a broadcast (and so the stream
-	// request that waits for it) retries an unacked peer; a peer still unacked
-	// after that catches up on its periodic sync. The window is shorter than
-	// the coordinator's active-node window, so a peer that has just died is
-	// retried for all of it.
-	streamChangedAckWindow = 15 * time.Second
+	// streamChangedHolderWindow bounds how long a broadcast (and so the stream
+	// request that waits for it) waits for the node holding the stream's
+	// lease to ack. A holder still unacked after that is told in the
+	// background, like every other peer.
+	streamChangedHolderWindow = 5 * time.Second
+	// streamChangedMaxBackoff caps the backoff between a peer notifier's
+	// retries.
+	streamChangedMaxBackoff = 8 * time.Second
+	// streamChangedGiveUp is how long a peer notifier keeps retrying one
+	// stream before it gives up; the peer catches up on its periodic sync.
+	streamChangedGiveUp = 60 * time.Second
 )
 
 // StreamTable is the router's stream-table reconciliation surface. It is a
@@ -62,10 +68,17 @@ type StreamTable interface {
 	SyncStreamTable(ctx context.Context) (map[string]model.StreamStateRecord, error)
 	// BroadcastStreamChanged tells every other active node that stream sid was
 	// created, updated, re-statused or deleted, so each reconciles now rather
-	// than on its next periodic sync. It retries a peer until it acks, and
-	// returns once every active peer has acked or refused the call, or
-	// streamChangedAckWindow has passed.
+	// than on its next periodic sync. It waits only for the node holding the
+	// stream's lease, the one whose runner must act on the change: when that
+	// is this node, until its stopping runner has exited; when it is a peer,
+	// until the peer acks, retrying for up to streamChangedHolderWindow. Every
+	// other peer, and a holder that has not acked, is told in the background.
+	// With no holder it does not wait at all.
 	BroadcastStreamChanged(sid string)
+	// AwaitPushStopped waits until every push runner for sid that this node
+	// has retired (a pause, a disable, a delete or a restart) has exited, and
+	// reports whether they all did before ctx ended.
+	AwaitPushStopped(ctx context.Context, sid string) bool
 }
 
 var _ StreamTable = (*router)(nil)
@@ -123,78 +136,256 @@ func (r *router) BroadcastStreamChanged(sid string) {
 	if r.coordinator == nil {
 		return
 	}
-	settled := map[string]bool{}  // acked, or refused and not retried
-	lastErr := map[string]error{} // why each unsettled peer has not acked
-	deadline := time.Now().Add(streamChangedAckWindow)
+	nodes, err := r.coordinator.GetActiveNodes()
+	if err != nil {
+		eventLogger.Warn("ROUTER: cannot list peers for stream-changed; they catch up on their next sync", "sid", sid, "error", err)
+		return
+	}
+
+	settled := ""
+	holder := r.streamHolder(sid)
+	switch {
+	case holder == r.nodeId || r.pushStopping(sid):
+		// The runner is on this node, and the request handler has already
+		// applied the change to it: wait for a retired runner to exit.
+		ctx, cancel := context.WithTimeout(r.ctx, streamChangedHolderWindow)
+		stopped := r.AwaitPushStopped(ctx, sid)
+		cancel()
+		if !stopped {
+			eventLogger.Warn("ROUTER: the stream's runner did not stop within the window; returning anyway", "sid", sid, "window", streamChangedHolderWindow)
+		}
+	case holder != "":
+		for _, node := range nodes {
+			if node.Id != holder {
+				continue
+			}
+			if node.Address == "" {
+				eventLogger.Warn("ROUTER: the stream's lease holder has no address; it catches up on its next sync", "sid", sid, "node", holder)
+				settled = holder
+			} else if r.tellHolder(node, sid) {
+				settled = holder
+			}
+		}
+	}
+
+	for _, node := range nodes {
+		if node.Id == r.nodeId || node.Address == "" || node.Id == settled {
+			continue
+		}
+		r.notifyPeer(node.Id, sid)
+	}
+}
+
+// announceStreamChanged tells every other active node, in the background
+// only, that stream sid's status changed here. The push runner calls it for
+// the status it writes itself (a recovery or key pause, its end, a disable),
+// so a peer's copy of the stream follows without waiting for its periodic
+// sync. Nothing waits for an ack.
+func (r *router) announceStreamChanged(sid string) {
+	if r.coordinator == nil || r.ctx == nil || r.ctx.Err() != nil {
+		return
+	}
+	go func() {
+		nodes, err := r.coordinator.GetActiveNodes()
+		if err != nil {
+			eventLogger.Warn("ROUTER: cannot list peers to announce a status change; they catch up on their next sync", "sid", sid, "error", err)
+			return
+		}
+		for _, node := range nodes {
+			if node.Id != r.nodeId && node.Address != "" {
+				r.notifyPeer(node.Id, sid)
+			}
+		}
+	}()
+}
+
+// streamHolder names the node whose runner serves stream sid: the unexpired
+// owner of its push-transmitter lease, else of its SSTP-client lease (a
+// pair's id is its sid). It is "" when neither lease is held, or the owner
+// cannot be read.
+func (r *router) streamHolder(sid string) string {
+	for _, resource := range []string{cluster.PushTransmitterResource(sid), cluster.SstpClientResource(sid)} {
+		owner, until, _, err := r.coordinator.GetLeaseOwner(resource)
+		if err != nil {
+			eventLogger.Debug("ROUTER: cannot read the stream's lease owner", "sid", sid, "resource", resource, "error", err)
+			continue
+		}
+		if owner != "" && (until.IsZero() || until.After(time.Now())) {
+			return owner
+		}
+	}
+	return ""
+}
+
+// tellHolder calls the lease holder synchronously, retrying every
+// streamChangedRetryInterval until it acks or refuses, or
+// streamChangedHolderWindow has passed; each call may take the rest of the
+// window. It reports whether the holder is settled: acked, or refused (which
+// no retry can fix). A holder that never acks is logged and left to the
+// background notifier.
+func (r *router) tellHolder(node model.ClusterNode, sid string) bool {
+	deadline := time.Now().Add(streamChangedHolderWindow)
 	retry := time.NewTimer(streamChangedRetryInterval)
 	defer retry.Stop()
 	for {
-		nodes, err := r.coordinator.GetActiveNodes()
-		if err != nil {
-			eventLogger.Warn("ROUTER: cannot list peers for stream-changed; they catch up on their next sync", "sid", sid, "error", err)
-			return
+		done, err := r.callStreamChanged(node.Address, sid, time.Until(deadline))
+		if done {
+			return true
 		}
-		// Each round re-reads the active nodes, so a peer that has dropped out
-		// of the cluster is no longer waited for, and one that joined is told.
-		var pending []model.ClusterNode
-		for _, node := range nodes {
-			if node.Id != r.nodeId && node.Address != "" && !settled[node.Id] {
-				pending = append(pending, node)
-			}
-		}
-		if len(pending) == 0 {
-			return
-		}
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		for _, node := range pending {
-			wg.Add(1)
-			go func(node model.ClusterNode) {
-				defer wg.Done()
-				done, err := r.callStreamChanged(node.Address, sid)
-				mu.Lock()
-				defer mu.Unlock()
-				if done {
-					settled[node.Id] = true
-				} else {
-					lastErr[node.Id] = err
-				}
-			}(node)
-		}
-		wg.Wait()
-		var missing []string
-		for _, node := range pending {
-			if !settled[node.Id] {
-				missing = append(missing, node.Id+": "+lastErr[node.Id].Error())
-			}
-		}
-		if len(missing) == 0 {
-			// Every peer of this round acked; one more round catches a peer
-			// that joined meanwhile, and otherwise returns at once.
-			continue
-		}
-		if !time.Now().Add(streamChangedRetryInterval).Before(deadline) {
-			eventLogger.Warn("ROUTER: peers did not acknowledge stream-changed; they catch up on their next sync", "sid", sid, "nodes", missing)
-			return
+		if time.Until(deadline) < streamChangedRetryInterval {
+			eventLogger.Warn("ROUTER: the stream's lease holder did not acknowledge stream-changed; telling it in the background",
+				"sid", sid, "node", node.Id, "window", streamChangedHolderWindow, "error", err)
+			return false
 		}
 		retry.Reset(streamChangedRetryInterval)
+		select {
+		case <-r.ctx.Done():
+			return false
+		case <-retry.C:
+		}
+	}
+}
+
+// peerNotifier is the background stream-changed sender for one peer. Its
+// pending set holds the streams the peer has still to be told about; a stream
+// changed again before the peer acked is coalesced into one entry, since the
+// peer reads the store's latest state either way. Guarded by r.notifyMu.
+type peerNotifier struct {
+	pending map[string]*pendingNotice
+}
+
+// pendingNotice is one stream a peer has still to be told about. since is
+// when it was last queued, for the give-up; gen counts the times it was, so an
+// ack for an earlier change does not clear a later one.
+type pendingNotice struct {
+	since time.Time
+	gen   int
+}
+
+// notifyPeer queues a stream-changed call for sid to peer id, starting the
+// peer's notifier when it has none. It never blocks on the network.
+func (r *router) notifyPeer(id, sid string) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	if r.ctx.Err() != nil {
+		return
+	}
+	if r.peerNotifiers == nil {
+		r.peerNotifiers = map[string]*peerNotifier{}
+	}
+	n, ok := r.peerNotifiers[id]
+	if !ok {
+		n = &peerNotifier{pending: map[string]*pendingNotice{}}
+		r.peerNotifiers[id] = n
+		go r.runPeerNotifier(id, n)
+	}
+	if p, queued := n.pending[sid]; queued {
+		p.gen++
+		p.since = time.Now()
+		return
+	}
+	n.pending[sid] = &pendingNotice{since: time.Now()}
+}
+
+// runPeerNotifier sends peer id its pending stream-changed calls, one at a
+// time. A stream leaves the set when the peer acks it, or refuses it (a 4xx
+// other than 408 or 429, which no retry can fix; logged at WARN), or after
+// streamChangedGiveUp without an ack (WARN). While a call fails, the notifier
+// backs off from streamChangedRetryInterval, doubling up to
+// streamChangedMaxBackoff. It drops everything and exits when the peer is no
+// longer active, and exits when the set is empty or the router shuts down.
+func (r *router) runPeerNotifier(id string, n *peerNotifier) {
+	backoff := streamChangedRetryInterval
+	retry := time.NewTimer(backoff)
+	defer retry.Stop()
+	for {
+		r.notifyMu.Lock()
+		if len(n.pending) == 0 {
+			delete(r.peerNotifiers, id)
+			r.notifyMu.Unlock()
+			return
+		}
+		batch := make(map[string]int, len(n.pending))
+		for sid, p := range n.pending {
+			batch[sid] = p.gen
+		}
+		r.notifyMu.Unlock()
+
+		address, active, err := r.peerAddress(id)
+		if err == nil && !active {
+			r.notifyMu.Lock()
+			eventLogger.Debug("ROUTER: peer is no longer active; dropping its stream-changed calls", "node", id, "count", len(n.pending))
+			n.pending = map[string]*pendingNotice{}
+			delete(r.peerNotifiers, id)
+			r.notifyMu.Unlock()
+			return
+		}
+
+		failed := false
+		for sid, gen := range batch {
+			var done bool
+			var callErr error = err
+			if err == nil {
+				done, callErr = r.callStreamChanged(address, sid, streamChangedTimeout)
+			}
+			r.notifyMu.Lock()
+			p := n.pending[sid]
+			switch {
+			case done && p.gen == gen:
+				delete(n.pending, sid)
+			case done:
+				// Changed again while the call was out: tell the peer again.
+			case time.Since(p.since) >= streamChangedGiveUp:
+				eventLogger.Warn("ROUTER: peer did not acknowledge stream-changed; it catches up on its next sync",
+					"node", id, "sid", sid, "after", streamChangedGiveUp, "error", callErr)
+				delete(n.pending, sid)
+			default:
+				failed = true
+			}
+			r.notifyMu.Unlock()
+			if r.ctx.Err() != nil {
+				return
+			}
+		}
+		if !failed {
+			backoff = streamChangedRetryInterval
+			continue
+		}
+		retry.Reset(backoff)
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-retry.C:
 		}
+		backoff = min(backoff*2, streamChangedMaxBackoff)
 	}
+}
+
+// peerAddress reports peer id's address and whether it is still an active
+// node with one. A listing error is returned, and the peer kept.
+func (r *router) peerAddress(id string) (address string, active bool, err error) {
+	nodes, err := r.coordinator.GetActiveNodes()
+	if err != nil {
+		return "", true, fmt.Errorf("cannot list active nodes: %w", err)
+	}
+	for _, node := range nodes {
+		if node.Id == id && node.Address != "" {
+			return node.Address, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // callStreamChanged POSTs one stream-changed notification to a peer, with the
 // shared-HMAC cluster bearer (SPIFFE mTLS, when configured, comes from the
 // transport). done reports that the call needs no retry: the peer acked (202:
 // it has reconciled the stream), or refused the call outright (a 4xx such as a
-// token mismatch, which a retry cannot fix; logged here). Otherwise err says
-// why the peer has not acked, and the broadcast retries.
-func (r *router) callStreamChanged(address, sid string) (done bool, err error) {
+// token mismatch, which a retry cannot fix; logged here, and err says so).
+// Otherwise err says why the peer has not acked, and the caller retries. The
+// call is bounded by timeout.
+func (r *router) callStreamChanged(address, sid string, timeout time.Duration) (done bool, err error) {
 	url := strings.TrimSuffix(address, "/") + StreamChangedPath
-	ctx, cancel := context.WithTimeout(r.ctx, streamChangedTimeout)
+	ctx, cancel := context.WithTimeout(r.ctx, timeout)
 	defer cancel()
 
 	body, _ := json.Marshal(map[string]string{"sid": sid, "mode": StreamChangedMode})

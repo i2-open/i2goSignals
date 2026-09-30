@@ -101,7 +101,10 @@ func (r *router) awaitSigningKey(ctx context.Context, stream *model.StreamStateR
 			if cause == nil {
 				wait.tries = 0
 			}
-			r.updateStream(stream, model.StreamStateEnabled, "")
+			if !r.resumeOwnPause(stream) {
+				r.logKeyWaitResolved(sid, RecoveryOutcomeDisabled, cfg.Clock().Sub(started))
+				return RecoveryOutcomeDisabled
+			}
 			r.logKeyWaitResolved(sid, RecoveryOutcomeResumed, cfg.Clock().Sub(started))
 			return RecoveryOutcomeResumed
 		}

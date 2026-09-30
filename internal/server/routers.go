@@ -257,7 +257,8 @@ func (h *HttpRouter) peerRoutes() Routes {
 			false,
 		},
 		// A peer created, updated, re-statused or deleted a stream: reconcile it now
-		// (#349, #350). Same SPIFFE/HMAC auth, never coalesced.
+		// (#349, #350). Same SPIFFE/HMAC auth; the sender coalesces repeats for a
+		// stream a peer has not yet acked, not a window as the wake-ups do.
 		Route{
 			"StreamChanged",
 			http.MethodPost,
