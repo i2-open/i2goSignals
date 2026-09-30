@@ -281,3 +281,41 @@ func (r *router) pushRunnerLiveLocked(sid string) bool {
 	runner, ok := r.pushRunners[sid]
 	return ok && runner.live()
 }
+
+// pushStreamHeldOff reports whether sid's push stream has been paused or
+// disabled by someone other than its runner: an operator's status change, on
+// this node or, through the stream-changed call, on another. UpdateStreamState
+// writes such a change to the pushStreams copy only; the runner runs on its
+// own record and so checks the copy before each batch and on each backfill
+// tick, and exits when this reports true.
+//
+// The copy can be stale the other way too. A runner that ends its own pause
+// (receiver recovery, a signing key back) writes enabled to the store and its
+// own record only, so a sync made during the pause may have left the copy
+// paused. A copy that is not enabled is therefore confirmed against the store:
+// only a stored pause or disable holds the runner off, and a stored enabled
+// record refreshes the copy. A store read that fails holds nothing off.
+func (r *router) pushStreamHeldOff(sid string) bool {
+	r.mu.RLock()
+	state, present := r.pushStreams[sid]
+	r.mu.RUnlock()
+	if !present || state.Status == model.StreamStateEnabled {
+		return false
+	}
+	stored, err := r.streamService.GetStreamState(r.ctx, sid)
+	if err != nil || stored == nil {
+		return false
+	}
+	if stored.Status != model.StreamStateEnabled {
+		return true
+	}
+	r.mu.Lock()
+	// Refresh the copy only if nothing has changed it since it was read, so a
+	// status change that lands meanwhile is not overwritten.
+	if cur, ok := r.pushStreams[sid]; ok && cur.Status == state.Status && cur.ErrorMsg == state.ErrorMsg {
+		cur.SetStatus(stored.Status, stored.ErrorMsg)
+		r.pushStreams[sid] = cur
+	}
+	r.mu.Unlock()
+	return false
+}

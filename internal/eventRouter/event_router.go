@@ -1979,7 +1979,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 			eventLogger.Info("PUSH-SRV runner stopped. PushHandler exiting.", "sid", sid)
 			return
 		}
-		if stream.Status != model.StreamStateEnabled {
+		if stream.Status != model.StreamStateEnabled || r.pushStreamHeldOff(sid) {
 			eventLogger.Info("PUSH-SRV is no longer enabled. PushHandler exiting.", "sid", sid)
 			return
 		}
@@ -2234,6 +2234,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				// The JTI is still pending in the store for the successor.
 				return false
 			}
+			if r.pushStreamHeldOff(sid) {
+				// Paused or disabled elsewhere: the JTI stays pending, and a
+				// re-enable starts a runner that sends it.
+				eventLogger.Info("PUSH-SRV: stream paused or disabled, runner exiting", "sid", sid)
+				return false
+			}
 			// The signing key is resolved for every batch from the router's cache,
 			// so a key suspended, revoked or rotated since the last batch (the
 			// key-status handler evicts it) is never used (#308). A jws_signature_failed
@@ -2368,6 +2374,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			}
 		case <-backfillTicker.C:
 			if runner.stopped() {
+				return false
+			}
+			if inflight == 0 && r.pushStreamHeldOff(sid) {
+				// An idle runner on a paused stream exits here, so its lease is
+				// released, rather than holding it until the next SET arrives.
+				eventLogger.Info("PUSH-SRV: stream paused or disabled, runner exiting", "sid", sid)
 				return false
 			}
 			if backlog {
