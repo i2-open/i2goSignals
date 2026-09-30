@@ -104,3 +104,39 @@ func TestLocalWal_RingFedCommitWakeReadsNoLease(t *testing.T) {
 	assert.Equal(t, pairId, got.body["sid"], "the remote owner is still woken once the SET is stored")
 	assert.Equal(t, atAppend, counting.reads.Load(), "the commit-time wake adds no lease read")
 }
+
+// #347 review: when this node holds the pair's sstp-client lease, the
+// append-time wake has already fed its own buffer, so the commit-time wake has
+// no one to tell. It must not broadcast to the other nodes, which would only
+// ignore it.
+func TestLocalWal_RingFedCommitWakeSkipsBroadcastWhenSelfOwns(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	p := openMemPersistence(t)
+	gate := make(chan struct{})
+	s := newWalRouterWith(t, p, t.TempDir(), &gatedEventDAO{EventDAO: p.EventDAO, gate: gate}, ringFed)
+	r := s.router
+
+	pairId := "pair-rf-self"
+	pair := sstpClientPairForMatch("sstp-tx-rf-self", pairId)
+	r.mu.Lock()
+	r.sstpClientStreams[pairId] = *pair
+	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.mu.Unlock()
+
+	wakes := make(chan capturedSstpWake, 4)
+	peer := stubWakePeer(t, wakes)
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
+	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), r.nodeId, 30*time.Second)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	require.NoError(t, r.HandleEvent(newRiscToken("rf-self-1", dupTestIssuer, s.audience), `{"raw":true}`, s.streamID))
+	close(gate)
+	s.waitDrained(t)
+	require.True(t, s.stored("rf-self-1"))
+	select {
+	case got := <-wakes:
+		t.Fatalf("the lease owner broadcast a wake to its peers: %+v", got)
+	case <-time.After(400 * time.Millisecond):
+	}
+}

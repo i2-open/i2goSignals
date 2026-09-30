@@ -759,19 +759,12 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 
 // wakeCommittedRemote sends the cross-node wake for ring-fed targets whose
 // SETs the drain has just stored (#347). It runs on the drain path once per
-// committed entry, so it holds no router lock and reads no uncached lease: a
-// remote wake touches no router map, the PUSH owner comes from the lease-owner
-// cache, and an SSTP-client target is woken by the coalesced broadcast (at
-// most one per pair per 250ms, which every node but the lease owner ignores)
-// instead of a cluster_leases read per entry. The append-time local wake has
-// already served a locally owned pair.
+// committed entry, so it holds no router lock and reads no uncached lease (see
+// wakeTargetRemote). The append-time local wake has already served a locally
+// owned target.
 func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
 	for _, t := range targets {
-		if t.mode == "SSTP-CLIENT" {
-			go r.broadcastSstpClientWake(t.key)
-			continue
-		}
-		r.wakeTargetScopedLocked(t, nil, wakeRemoteOnly)
+		r.wakeTargetRemote(t)
 	}
 }
 

@@ -1357,13 +1357,12 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 }
 
 // wakeScope selects which half of a target's wake wakeTargetScopedLocked does:
-// the local buffer submit, the cross-node wake-up, or both.
+// the local buffer submit alone, or that and the cross-node wake-up.
 type wakeScope int
 
 const (
 	wakeAll wakeScope = iota
 	wakeLocalOnly
-	wakeRemoteOnly
 )
 
 // wakeTargetLocked hands one target's accepted JTIs to whichever runner owns
@@ -1375,27 +1374,14 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 // wakeTargetScopedLocked is wakeTargetLocked limited to one scope. Ring-fed
 // local durability (#347) wakes local runners at WAL append, where the overlay
 // serves the SET before the drain stores it, and defers the cross-node wake to
-// commit: a remote owner reads only the store, and a wake sent before the store
-// write would find nothing (and coalescing would swallow a second one). The
-// caller must hold r.mu (at least RLock) for any scope that includes the local
-// half; wakeRemoteOnly reads no router map and may be called without it.
+// commit (wakeTargetRemote): a remote owner reads only the store, and a wake
+// sent before the store write would find nothing (and coalescing would swallow
+// a second one). The caller must hold r.mu (at least RLock).
 func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wakeScope) {
-	local := scope != wakeRemoteOnly
 	remote := scope != wakeLocalOnly
 	switch t.mode {
 	case "PUSH":
-		// Lease-aware routing. The owner is read through leaseOwners rather than
-		// straight from the coordinator: one inbound SET produced one
-		// cluster_leases round trip inside the request, and the answer changes
-		// only when a lease changes hands (issue #287). The cache is kept honest
-		// by this node's own push lifecycle and expires within leaseOwnerCacheTTL
-		// otherwise; it steers a wake-up and never authorises a delivery.
-		resource := cluster.PushTransmitterResource(t.key)
-		ownerNodeId := r.leaseOwners.owner(resource, func() (string, error) {
-			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
-			return owner, err
-		})
-
+		ownerNodeId := r.pushLeaseOwner(t.key)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			// Local owner or no owner (we'll try to take it or backfill will find it).
 			// The comma-ok is load-bearing since the fan-out was split in two: the
@@ -1403,9 +1389,6 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 			// across the body-write join, and RemoveStream may have deleted the
 			// buffer in that window. The markers are already durable, so backfill
 			// still delivers them; only the wake-up is lost.
-			if !local {
-				return
-			}
 			if buf, ok := r.pushBuffers[t.key]; ok {
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
@@ -1422,9 +1405,6 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		// Ideally we'd broadcast to all nodes, but let's start with local.
 		// Comma-ok for the same reason as the push arm above: the stream may have
 		// been removed while r.mu was released across the body-write join.
-		if !local {
-			return
-		}
 		if buf, ok := r.pollBuffers[t.key]; ok {
 			for _, jti := range jtis {
 				buf.SubmitEvent(jti)
@@ -1432,12 +1412,14 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		}
 
 	case "SSTP-CLIENT":
-		// Deliberately NOT cached. The sstp-client lease is acquired, renewed and
-		// released by the dialer in internal/server, not by this router, so there
-		// is no first-hand transition for a cache here to hook — it would be a
-		// bare TTL with no invalidation story, which issue #287 rules out. The
-		// per-event cluster_leases cost the profiler measured was on the push
-		// leg; this read happens once per SSTP fan-out batch.
+		// Deliberately NOT cached for this decision. The sstp-client lease is
+		// acquired, renewed and released by the dialer in internal/server, not
+		// by this router, so there is no first-hand transition for a cache here
+		// to hook — it would be a bare TTL with no invalidation story, which
+		// issue #287 rules out. The per-event cluster_leases cost the profiler
+		// measured was on the push leg; this read happens once per SSTP fan-out
+		// batch. The owner read is noted in leaseOwners only so the ring-fed
+		// commit wake (wakeTargetRemote) can skip a broadcast to itself.
 		resource := cluster.SstpClientResource(t.key)
 		ownerNodeId, _, _, leaseErr := r.coordinator.GetLeaseOwner(resource)
 		if leaseErr != nil {
@@ -1445,11 +1427,10 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 			// silently makes every node deliver. Say so; the push arm reports
 			// its equivalent through leaseOwners.
 			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
+		} else {
+			r.leaseOwners.note(resource, ownerNodeId)
 		}
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
-			if !local {
-				return
-			}
 			if buf, ok := r.sstpBuffers[t.key]; ok {
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
@@ -1461,18 +1442,53 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		}
 
 	case "SSTP-SERVER":
-		if local {
-			if buf, ok := r.sstpServerBuffers[t.key]; ok {
-				for _, jti := range jtis {
-					buf.SubmitEvent(jti)
-				}
-				buf.Wakeup()
+		if buf, ok := r.sstpServerBuffers[t.key]; ok {
+			for _, jti := range jtis {
+				buf.SubmitEvent(jti)
 			}
+			buf.Wakeup()
 		}
 		if remote {
 			go r.broadcastSstpServerWake(t.key)
 		}
 	}
+}
+
+// wakeTargetRemote is the cross-node half of a target's wake alone, for the
+// ring-fed commit (#347). It reads no router map, so it needs no router lock,
+// and no uncached lease: the PUSH owner comes from leaseOwners, and an
+// SSTP-client target is woken by the coalesced broadcast (at most one per pair
+// per 250ms, which every node but the lease owner ignores) unless the owner
+// noted at append is this node, whose buffer the append-time wake already fed.
+func (r *router) wakeTargetRemote(t *fanoutTarget) {
+	switch t.mode {
+	case "PUSH":
+		if ownerNodeId := r.pushLeaseOwner(t.key); ownerNodeId != "" && ownerNodeId != r.nodeId {
+			go r.sendWakeup(t.key, "push", ownerNodeId, "")
+		}
+	case "SSTP-CLIENT":
+		if r.leaseOwners.peek(cluster.SstpClientResource(t.key)) == r.nodeId {
+			return
+		}
+		go r.broadcastSstpClientWake(t.key)
+	case "SSTP-SERVER":
+		go r.broadcastSstpServerWake(t.key)
+	}
+}
+
+// pushLeaseOwner returns the owner of sid's push-transmitter lease. It is read
+// through leaseOwners rather than straight from the coordinator: one inbound
+// SET produced one cluster_leases round trip inside the request, and the
+// answer changes only when a lease changes hands (issue #287). The cache is
+// kept honest by this node's own push lifecycle and expires within
+// leaseOwnerCacheTTL otherwise; it steers a wake-up and never authorises a
+// delivery.
+func (r *router) pushLeaseOwner(sid string) string {
+	resource := cluster.PushTransmitterResource(sid)
+	return r.leaseOwners.owner(resource, func() (string, error) {
+		owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+		return owner, err
+	})
 }
 
 // sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
