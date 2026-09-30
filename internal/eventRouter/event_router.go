@@ -2064,14 +2064,15 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 	}
 }
 
-// leaseStreamEnabled reads push stream from the store once its runner has
+// leaseStreamEnabled reads the push stream from the store once its runner has
 // acquired the lease, and reports whether the runner may deliver. A stream gone
 // from the store, or stored as paused or disabled by an operator, may not: this
 // node's copy has not caught up with a change made elsewhere. A stream its last
 // holder's runner paused itself (receiver recovery, a missing signing key) is
 // taken over: that holder has lost the lease, so this runner ends the pause and
 // retries, pausing again if the receiver still fails or the key is still
-// missing. A store read that fails is logged and lets the runner proceed.
+// missing. An operator's change stored after the read wins, and the runner
+// exits. A store read that fails is logged and lets the runner proceed.
 func (r *router) leaseStreamEnabled(stream *model.StreamStateRecord) bool {
 	sid := stream.StreamConfiguration.Id
 	stored, err := r.streamService.GetStreamState(r.ctx, sid)
@@ -2083,10 +2084,13 @@ func (r *router) leaseStreamEnabled(stream *model.StreamStateRecord) bool {
 		eventLogger.Warn("PUSH-SRV: cannot read the stream after taking its lease; proceeding", "sid", sid, "error", err)
 		return true
 	case isRunnerPause(stored):
-		eventLogger.Info("PUSH-SRV: took over a stream its previous runner paused; resuming so this runner retries",
+		if !r.takeOverRunnerPause(stream, stored) {
+			eventLogger.Info("PUSH-SRV: stream status changed before its previous runner's pause could be taken over; PushHandler exiting.",
+				"sid", sid)
+			return false
+		}
+		eventLogger.Info("PUSH-SRV: took over a stream its previous runner paused; resumed so this runner retries",
 			"sid", sid, "reason", stored.ErrorMsg)
-		stream.SetStatus(stored.Status, stored.ErrorMsg)
-		r.updateStream(stream, model.StreamStateEnabled, "")
 		return true
 	case stored.Status != model.StreamStateEnabled:
 		eventLogger.Info("PUSH-SRV: stream not enabled in the store after taking its lease; PushHandler exiting.",

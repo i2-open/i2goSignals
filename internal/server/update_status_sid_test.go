@@ -388,6 +388,20 @@ func TestUpdateStatus_NonSstpStreamUnaffected(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rr.Code, "an unknown SID is not found (#305)")
 }
 
+// TestUpdateStatus_RejectsRunnerReasonPrefix: an operator's reason may not
+// carry the prefix that marks a push runner's own pause, which a lease
+// takeover ends, so such a request is refused and the stream is left alone.
+func TestUpdateStatus_RejectsRunnerReasonPrefix(t *testing.T) {
+	app := newStatusRefreshApp(t)
+	persistStatusPlain(t, app, model.StreamStateEnabled, "")
+	bearer := app.adminBearer(t)
+
+	rr := app.postStatus(t, bearer, statusPlainSid, model.StreamStatePause, eventRouter.PushRunnerReasonPrefix+"maintenance")
+	assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	assert.Equal(t, 0, app.refreshes(), "nothing is written")
+	assert.Equal(t, model.StreamStatus{Status: model.StreamStateEnabled}, app.getStatus(t, bearer, statusPlainSid))
+}
+
 // TestUpdateStatus_TokenBindingFallback pins #303 item 3 at the handler: with no
 // stream_id parameter, a token bound to exactly one stream acts on that stream,
 // while a broad-scope token — and a pair bearer binding two SIDs — still 403.

@@ -155,7 +155,7 @@ func TestPushStatusHold_TakeoverReadsTheStore(t *testing.T) {
 
 // runnerPauseReason is a pause reason as a push runner stores it for its own
 // receiver-recovery pause, here as read back from another node's runner.
-const runnerPauseReason = "PUSH-SRV: transport failure on jti=x; entering transport-backoff recovery"
+const runnerPauseReason = PushRunnerReasonPrefix + "transport failure on jti=x; entering transport-backoff recovery"
 
 // A pause stored by a runner itself, on this node or another, leaves this
 // node's runner running: a standby keeps waiting for the lease, so it can take

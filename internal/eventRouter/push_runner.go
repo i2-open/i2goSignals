@@ -365,8 +365,9 @@ func (r *router) pushRunnerLiveLocked(sid string) bool {
 // (receiver recovery, a signing key back) writes enabled to the store and its
 // own record only, so a sync made during the pause may have left the copy
 // paused. A copy that is not enabled is therefore confirmed against the store:
-// only an operator's stored pause or disable holds the runner off, and a stored enabled
-// record refreshes the copy. A store read that fails holds nothing off.
+// only an operator's stored pause or disable holds the runner off, and a
+// stored enabled record refreshes the copy. A store read that fails holds
+// nothing off.
 func (r *router) pushStreamHeldOff(sid string) bool {
 	r.mu.RLock()
 	state, present := r.pushStreams[sid]

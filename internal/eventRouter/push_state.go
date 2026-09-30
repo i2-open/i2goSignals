@@ -19,7 +19,7 @@ import (
 //   - Emits a structured INFO log naming the from/to states and the reason. Recovery callers
 //     should pass a reason that captures the trigger (failure class, RFC8935 code, etc.).
 //   - Tells the other nodes in the background that the stream changed, so their copies
-//     follow. A pause stored here carries pushRunnerReasonPrefix (see isRunnerPause).
+//     follow. A pause stored here carries PushRunnerReasonPrefix (see isRunnerPause).
 //
 // updateStream is a no-op (returns immediately, no log, no persist) when the requested state and
 // reason match the current state — this keeps recoveryLoop polling cheap when the receiver stays
@@ -38,7 +38,12 @@ func (r *router) updateStream(stream *model.StreamStateRecord, newState string, 
 	r.streamService.UpdateStreamStatus(r.ctx, sid, newState, reason)
 	// SetStatus mirrors the store: on an SSTP pair both halves move (#303).
 	stream.SetStatus(newState, reason)
+	r.noteTransition(sid, from, newState, reason)
+}
 
+// noteTransition logs and counts a status change already written to the store
+// and announces it to the peers.
+func (r *router) noteTransition(sid, from, newState, reason string) {
 	eventLogger.Info("PUSH-SRV: state transition",
 		"sid", sid,
 		"from", from,
@@ -53,16 +58,18 @@ func (r *router) updateStream(stream *model.StreamStateRecord, newState string, 
 	r.announceStreamChanged(sid)
 }
 
-// pushRunnerReasonPrefix starts every reason a push runner stores with the
-// pause it takes itself (receiver recovery, a missing signing key).
-const pushRunnerReasonPrefix = "PUSH-SRV: "
+// PushRunnerReasonPrefix starts every reason a push runner stores with the
+// pause it takes itself (receiver recovery, a missing signing key). The
+// stream-status API refuses it in an operator's reason, so only a runner's
+// own pause carries it.
+const PushRunnerReasonPrefix = "PUSH-SRV: "
 
 // isRunnerPause reports whether rec is paused by a push runner itself rather
 // than by an operator. The store carries the reason, so every node reads it
 // alike: such a pause leaves each node's runner running, since the holder's is
 // what ends it and a standby's takes the stream over if the holder dies.
 func isRunnerPause(rec *model.StreamStateRecord) bool {
-	return rec.Status == model.StreamStatePause && strings.HasPrefix(rec.ErrorMsg, pushRunnerReasonPrefix)
+	return rec.Status == model.StreamStatePause && strings.HasPrefix(rec.ErrorMsg, PushRunnerReasonPrefix)
 }
 
 // resumeOwnPause ends the pause stream's runner took itself (receiver
@@ -93,5 +100,20 @@ func (r *router) resumeOwnPause(stream *model.StreamStateRecord) bool {
 		}
 	}
 	r.updateStream(stream, model.StreamStateEnabled, "")
+	return true
+}
+
+// takeOverRunnerPause ends, for a runner that has just taken the lease, the
+// pause its previous holder's runner took itself; stored is the record read
+// after the lease was taken. Enabled is written only while the store still
+// holds that pause (ResumePausedWithReason), so an operator's change made
+// after the read wins: nothing is written and it reports false.
+func (r *router) takeOverRunnerPause(stream *model.StreamStateRecord, stored *model.StreamStateRecord) bool {
+	sid := stream.StreamConfiguration.Id
+	if !r.streamService.ResumePausedWithReason(r.ctx, sid, stored.ErrorMsg) {
+		return false
+	}
+	stream.SetStatus(model.StreamStateEnabled, "")
+	r.noteTransition(sid, stored.Status, model.StreamStateEnabled, "")
 	return true
 }

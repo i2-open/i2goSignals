@@ -16,8 +16,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
@@ -948,6 +950,12 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	err := json.NewDecoder(r.Body).Decode(&jsonRequest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The prefix marks a push runner's own pause, which a lease takeover ends;
+	// an operator's reason carrying it would be taken for one.
+	if strings.HasPrefix(jsonRequest.Reason, eventRouter.PushRunnerReasonPrefix) {
+		http.Error(w, "reason may not start with "+strconv.Quote(eventRouter.PushRunnerReasonPrefix), http.StatusBadRequest)
 		return
 	}
 	modified := false
