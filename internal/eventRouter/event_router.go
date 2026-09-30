@@ -1802,7 +1802,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		})
 		if len(jtis) > 0 {
 			eventLogger.Debug("POLL-SRV: Prefetched events", "sid", sid, "count", len(jtis))
-			pollBuffer.SubmitEvents(jtis)
+			pollBuffer.AddEvents(jtis)
 		}
 	}
 

@@ -22,8 +22,13 @@ type EventBuf interface {
 }
 
 type EventPollBuffer struct {
-	in        chan string
-	events    []string
+	in     chan string
+	events []string
+	// queued is the set of JTIs in events. A JTI is queued once however many
+	// times it is submitted: a wake and a poll's prefetch can both submit it,
+	// and an ack removes only one copy, so a second copy would be served again
+	// after its ack.
+	queued    map[string]struct{}
 	mutex     sync.Mutex
 	closed    bool
 	notifier  chan struct{}
@@ -64,6 +69,7 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 	buffer := &EventPollBuffer{
 		in:                 make(chan string, 100),
 		events:             []string{},
+		queued:             map[string]struct{}{},
 		pollReady:          false,
 		closed:             false,
 		notifier:           make(chan struct{}),
@@ -103,8 +109,7 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 			buffer.mutex.Lock()
 			if !ok {
 				inCh = nil
-			} else {
-				buffer.events = append(buffer.events, v)
+			} else if buffer.enqueueLocked(v) {
 				if !buffer.closed {
 					close(buffer.notifier)
 					buffer.notifier = make(chan struct{})
@@ -154,7 +159,39 @@ func (b *EventPollBuffer) addEvents(jtis []string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	for _, jti := range jtis {
-		b.events = append(b.events, jti)
+		b.enqueueLocked(jti)
+	}
+}
+
+// enqueueLocked appends jti unless it is already queued, and reports whether
+// it did.
+func (b *EventPollBuffer) enqueueLocked(jti string) bool {
+	if _, dup := b.queued[jti]; dup {
+		return false
+	}
+	b.queued[jti] = struct{}{}
+	b.events = append(b.events, jti)
+	return true
+}
+
+// AddEvents queues jtis before it returns, where SubmitEvents hands them to
+// the pump goroutine. A poll that prefetched them serves them in the same
+// call rather than finding the buffer still empty.
+func (b *EventPollBuffer) AddEvents(jtis []string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	if b.closed {
+		return
+	}
+	added := false
+	for _, jti := range jtis {
+		if b.enqueueLocked(jti) {
+			added = true
+		}
+	}
+	if added {
+		close(b.notifier)
+		b.notifier = make(chan struct{})
 	}
 }
 
@@ -219,6 +256,10 @@ func (b *EventPollBuffer) AckEvents(jtis []string) {
 	defer b.mutex.Unlock()
 	for _, jti := range jtis {
 		delete(b.claims, jti)
+		if _, ok := b.queued[jti]; !ok {
+			continue
+		}
+		delete(b.queued, jti)
 		for i, e := range b.events {
 			if e == jti {
 				b.events = append(b.events[:i], b.events[i+1:]...)
@@ -232,6 +273,7 @@ func (b *EventPollBuffer) Clear() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.events = []string{}
+	b.queued = map[string]struct{}{}
 	b.claims = map[string]pollClaim{}
 }
 
