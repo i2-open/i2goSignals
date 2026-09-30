@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -23,16 +25,21 @@ const (
 	// between tenures, is never purged.
 	clusterGCWindow = 90 * time.Second
 
-	// streamChangedSyncTimeout bounds the store read a stream-changed call
-	// triggers.
-	streamChangedSyncTimeout = 10 * time.Second
+	// streamTableSyncTimeout bounds the store read of one periodic
+	// stream-table sync.
+	streamTableSyncTimeout = 10 * time.Second
+
+	// streamChangedReadTimeout bounds the one-stream store read a
+	// stream-changed call makes, inside the peer's 2s call bound.
+	streamChangedReadTimeout = 1500 * time.Millisecond
 )
 
 // syncStreamTable reconciles this node with the store: the receivers first,
 // then the router's outbound streams (new ones start, ones gone from the store
 // stop and release their leases), then, when the store read succeeded, the
-// stale cluster rows. It runs from the periodic background sync and on every
-// stream-changed call from a peer; syncMu serializes the two.
+// stale cluster rows. It runs from the periodic background sync; syncMu
+// serializes it with a stream-changed call's one-stream reconcile and with a
+// local delete.
 func (sa *SignalsApplication) syncStreamTable() {
 	sa.syncMu.Lock()
 	defer sa.syncMu.Unlock()
@@ -41,12 +48,9 @@ func (sa *SignalsApplication) syncStreamTable() {
 
 	table, ok := sa.EventRouter.(eventRouter.StreamTable)
 	if !ok {
-		for _, state := range sa.StreamService.GetStateMap(context.Background()) {
-			sa.EventRouter.UpdateStreamState(&state)
-		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), streamChangedSyncTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), streamTableSyncTimeout)
 	defer cancel()
 	states, err := table.SyncStreamTable(ctx)
 	if err != nil {
@@ -117,18 +121,44 @@ func (sa *SignalsApplication) purgeClusterRows(states map[string]model.StreamSta
 }
 
 // StreamChanged handles POST /_cluster/stream-changed: a peer created or
-// deleted a stream. After authenticating, it reconciles the stream table at
-// once and answers 202 when done. Unlike the wake-up routes it is never
-// coalesced: a create and a quick delete of the same stream must both be seen,
-// and a redundant sync is harmless.
+// deleted a stream. After authenticating, it reconciles that one stream and
+// answers 202 when done; the full store scan and the cluster-row purge stay on
+// the periodic sync, so the call finishes inside the peer's 2s bound however
+// large the store (#349). Unlike the wake-up routes it is never coalesced: a
+// create and a quick delete of the same stream must both be seen, and a
+// redundant reconcile is harmless.
 func (sa *SignalsApplication) StreamChanged(w http.ResponseWriter, r *http.Request) {
 	sid, ok := authenticateClusterCall(w, r, eventRouter.StreamChangedMode)
 	if !ok {
 		return
 	}
-	serverLog.Debug("CLUSTER: stream-changed from a peer; reconciling the stream table", "sid", sid)
-	sa.syncStreamTable()
+	serverLog.Debug("CLUSTER: stream-changed from a peer; reconciling the stream", "sid", sid)
+	sa.reconcileStream(sid)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// reconcileStream brings this node in line with the store for stream sid: a
+// stream in the store is applied to the router and the receivers, one gone
+// from the store is removed from both. A store read that fails changes
+// nothing; the periodic sync catches up. syncMu is held only for this one
+// stream's work.
+func (sa *SignalsApplication) reconcileStream(sid string) {
+	sa.syncMu.Lock()
+	defer sa.syncMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), streamChangedReadTimeout)
+	defer cancel()
+	state, err := sa.StreamService.GetStreamState(ctx, sid)
+	switch {
+	case errors.Is(err, interfaces.ErrNotFound):
+		sa.CloseReceiver(sid)
+		sa.EventRouter.RemoveStream(sid)
+	case err != nil:
+		serverLog.Warn("CLUSTER: stream-changed could not read the stream; the periodic sync catches up", "sid", sid, "error", err)
+	default:
+		sa.reconcileReceiver(state)
+		sa.EventRouter.UpdateStreamState(state)
+	}
 }
 
 // authenticateClusterCall parses a {"sid","mode"} cluster call and

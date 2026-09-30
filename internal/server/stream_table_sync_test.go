@@ -81,19 +81,35 @@ func streamChangedReq(secret, sid string) *http.Request {
 	return wakeSstpReq("/_cluster/stream-changed", secret, sid, eventRouter.StreamChangedMode)
 }
 
-// An authenticated stream-changed call reconciles the stream table before it
-// answers 202, and every call does so: a create followed at once by a delete of
-// the same stream must both be seen, so the calls are not coalesced (#349).
-func TestStreamChanged_ReconcilesOnEveryCall(t *testing.T) {
+// An authenticated stream-changed call reconciles the stream it names before
+// it answers 202: a stream now in the store is served, one gone from the store
+// is removed. Every call does so (a create followed at once by a delete of the
+// same stream must both be seen), and only that stream is touched; the full
+// store scan and the cluster-row purge stay on the periodic sync, so a large
+// store cannot hold the peer's call past its 2s bound (#349).
+func TestStreamChanged_ReconcilesOnlyTheNamedStream(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
-	app := newTableApp(t)
+	base := newStatusRefreshApp(t)
+	sr := &servingRouter{app: base.SignalsApplication, served: map[string]bool{}}
+	base.EventRouter = sr
+	// A stream this node serves that is no longer in the store: only a full
+	// sync would remove it.
+	sr.served["gone-elsewhere"] = true
 
-	for i := 1; i <= 2; i++ {
-		w := httptest.NewRecorder()
-		app.StreamChanged(w, streamChangedReq("test-secret", "sid-1"))
-		assert.Equal(t, http.StatusAccepted, w.Code)
-		assert.Equal(t, i, app.router.syncCount())
-	}
+	persistStatusPlain(t, base, model.StreamStateEnabled, "")
+	w := httptest.NewRecorder()
+	base.StreamChanged(w, streamChangedReq("test-secret", statusPlainSid))
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.True(t, sr.serves(statusPlainSid), "the created stream is served before the call answers")
+	assert.True(t, sr.serves("gone-elsewhere"), "no other stream is reconciled")
+
+	require.NoError(t, base.StreamService.DeleteStream(context.Background(), statusPlainSid))
+	w = httptest.NewRecorder()
+	base.StreamChanged(w, streamChangedReq("test-secret", statusPlainSid))
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.False(t, sr.serves(statusPlainSid), "the deleted stream is removed before the call answers")
+	assert.True(t, sr.serves("gone-elsewhere"), "no other stream is reconciled")
+	assert.Zero(t, sr.syncCount(), "no full stream-table sync")
 }
 
 // A stream-changed call without a valid cluster token is refused and changes
@@ -213,6 +229,13 @@ type servingRouter struct {
 	app    *SignalsApplication
 	mu     sync.Mutex
 	served map[string]bool
+	syncs  int
+}
+
+func (sr *servingRouter) syncCount() int {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.syncs
 }
 
 func (sr *servingRouter) UpdateStreamState(state *model.StreamStateRecord) {
@@ -244,6 +267,9 @@ func (sr *servingRouter) StreamIds() []string {
 }
 
 func (sr *servingRouter) SyncStreamTable(ctx context.Context) (map[string]model.StreamStateRecord, error) {
+	sr.mu.Lock()
+	sr.syncs++
+	sr.mu.Unlock()
 	known := sr.StreamIds()
 	states, err := sr.app.StreamService.LoadStateMap(ctx)
 	if err != nil {

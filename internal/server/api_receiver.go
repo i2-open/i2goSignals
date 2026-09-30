@@ -135,6 +135,36 @@ func (sa *SignalsApplication) InitializeReceivers() {
 	}
 }
 
+// reconcileReceiver is InitializeReceivers for the one stream in state: it
+// starts or refreshes the stream's push or poll receiver, and closes the one
+// it no longer needs.
+func (sa *SignalsApplication) reconcileReceiver(state *model.StreamStateRecord) {
+	sid := state.StreamConfiguration.Id
+	isPush := state.IsReceiver() && state.GetType() == model.ReceivePush
+	isPoll := state.IsReceiver() && state.GetType() == model.ReceivePoll
+
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if isPush {
+		sa.handleClientPushReceiver(state)
+		sa.pushReceivers[sid] = *state
+	} else {
+		delete(sa.pushReceivers, sid)
+		if pc, ok := sa.pushClients[sid]; ok {
+			serverLog.Info("PUSH-RCV: Closing Push Receiver", "sid", sid)
+			pc.Close()
+			delete(sa.pushClients, sid)
+		}
+	}
+	if isPoll {
+		sa.handleClientPollReceiver(state)
+	} else if pc, ok := sa.pollClients[sid]; ok {
+		serverLog.Info("POLL-RCV: Closing Poll Receiver", "sid", sid)
+		pc.Close()
+		delete(sa.pollClients, sid)
+	}
+}
+
 func (sa *SignalsApplication) GetPushReceiverCnt() float64 {
 	sa.mu.RLock()
 	defer sa.mu.RUnlock()
