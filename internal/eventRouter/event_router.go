@@ -2150,6 +2150,16 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	// buffer order (ADR 0040). Registered after the acker's defer, the wait
 	// below runs first: however the loop exits, every batch already sent
 	// completes and hands its acks to the acker before the acker is closed.
+	// backlog is set while the last backfill read came back full: more SETs
+	// are pending than were queued. The loop then reads again each time a
+	// batch completes and the buffer runs low, so a burst deeper than one
+	// read drains at delivery speed, not one batch per backfill tick (#347).
+	backlog := false
+	refillAt := r.backfillBatch
+	if refillAt < 1 {
+		refillAt = 1
+	}
+
 	k := r.pushInFlightBatches()
 	results := make(chan pushBatchResult, k)
 	inflight := 0
@@ -2278,6 +2288,9 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			}
 			fold(res)
 			if res.signErr == nil && res.failedJti == "" {
+				if backlog && eventBuf.Cnt() < refillAt {
+					backlog = r.backfillPushBufferOnWake(sid, eventBuf)
+				}
 				continue
 			}
 			// A failure in one batch takes the stream into a pause or recovery.
@@ -2342,14 +2355,18 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if runner.stopped() {
 				return false
 			}
-			r.backfillPushBuffer(sid, eventBuf)
+			if backlog {
+				backlog = r.backfillPushBufferOnWake(sid, eventBuf)
+			} else {
+				backlog = r.backfillPushBuffer(sid, eventBuf)
+			}
 			r.sweepDeferredHybridRelays(heartbeatCtx, stream)
 		case <-wakeup:
 			if runner.stopped() {
 				return false
 			}
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
-			r.backfillPushBufferOnWake(sid, eventBuf)
+			backlog = r.backfillPushBufferOnWake(sid, eventBuf)
 		case <-idle.C():
 			if runner.stopped() {
 				return false
@@ -2606,15 +2623,19 @@ func (r *router) sweepDeferredHybridRelays(ctx context.Context, stream *model.St
 	}
 }
 
-func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer) {
+// backfillPushBuffer is the ticker's backfill: it refills an empty buffer
+// with one batch. It reports whether that read came back full, i.e. more may
+// be pending behind it.
+func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer) (full bool) {
 	if eventBuf.Cnt() > 0 {
-		return
+		return false
 	}
 
 	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 		MaxEvents:         int32(r.backfillBatch),
 		ReturnImmediately: true,
 	})
+	full = r.backfillBatch > 0 && len(jtis) >= r.backfillBatch
 	// A JTI sent and awaiting its coalesced ack is still pending in the store,
 	// so it is not read back into the buffer (#336).
 	if v, ok := r.pushAckers.Load(sid); ok && len(jtis) > 0 {
@@ -2632,11 +2653,14 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 		eventLogger.Debug("PUSH-SRV: Backfill found pending events", "sid", sid, "count", len(jtis))
 		eventBuf.SubmitEvents(jtis)
 	}
+	return full
 }
 
 // maxWakeBackfillBatches caps how many backfill batches one wake may queue,
 // so a wake on a stream with a deep backlog does not read it all into memory
-// at once. The ticker's backfill keeps refilling the buffer as it drains.
+// at once. A capped read reports a backlog, and the push loop reads again as
+// the buffer drains (not on the next tick), so the tail is not left to the
+// ticker's one-batch-per-interval refill.
 const maxWakeBackfillBatches = 10
 
 // backfillPushBufferOnWake is the wake's backfill, and it is level-triggered
@@ -2652,7 +2676,10 @@ const maxWakeBackfillBatches = 10
 // still queued or in flight. A JTI submitted locally but still on the
 // buffer's input channel can be queued twice; the acker's reserve drops the
 // second copy while the first is in flight, and delivery stays at-least-once.
-func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPushBuffer) {
+//
+// It reports backlog when it stopped at the cap with the store still handing
+// back full reads: more is pending than one wake may queue.
+func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPushBuffer) (backlog bool) {
 	known := map[string]struct{}{}
 	for _, jti := range eventBuf.Queued() {
 		known[jti] = struct{}{}
@@ -2694,9 +2721,10 @@ func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPush
 			submitted += len(fresh)
 		}
 		if len(jtis) < limit || len(fresh) == 0 {
-			return
+			return false
 		}
 	}
+	return true
 }
 
 // drainPushBatch collects up to max JTIs for one push batch: first, then
