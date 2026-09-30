@@ -230,12 +230,11 @@ type router struct {
 	meteringObserver atomic.Pointer[meteringObserverHolder]
 	stats            statsTracker
 
-	httpClient          *http.Client
-	clusterSecret       string
-	recentOutboundWakes map[string]time.Time
-	outboundWakesMu     sync.Mutex
-	backfillInterval    time.Duration
-	backfillBatch       int
+	httpClient       *http.Client
+	clusterSecret    string
+	outboundWakes    *WakeCoalescer
+	backfillInterval time.Duration
+	backfillBatch    int
 	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
 	// POSTs a push stream's lease holder keeps in flight at once. Unset, it is
 	// derived from the available processors (ADR 0037). The batch the loop
@@ -384,7 +383,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		cancel:                 cancel,
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes:    make(map[string]time.Time),
+		outboundWakes:          NewWakeCoalescer(WakeCoalesceWindow),
 		leaseOwners:            newLeaseOwnerCache(),
 	}
 
@@ -1638,19 +1637,19 @@ func (r *router) NotifySubjectFilterChange(sid string) {
 }
 
 func (r *router) sendWakeup(sid, mode, ownerNodeId, reason string) {
-	// Rate limiting / Coalescing. The reason is part of the key so a
+	// Coalescing, on both edges (#347): a wake suppressed inside the window
+	// arms one trailing wake. The reason is part of the key so a
 	// filter-change notification is never coalesced away by a buffer wake-up
 	// (or vice versa) that happens to target the same stream.
 	key := sid + ":" + mode + ":" + reason
-	r.outboundWakesMu.Lock()
-	lastWake, exists := r.recentOutboundWakes[key]
-	if exists && time.Since(lastWake) < 250*time.Millisecond {
-		r.outboundWakesMu.Unlock()
+	if !r.outboundWakes.Admit(key, func() { r.callWakeupNode(sid, mode, ownerNodeId, reason) }) {
 		return
 	}
-	r.recentOutboundWakes[key] = time.Now()
-	r.outboundWakesMu.Unlock()
+	r.callWakeupNode(sid, mode, ownerNodeId, reason)
+}
 
+// callWakeupNode resolves the owner node's address and sends it the wake.
+func (r *router) callWakeupNode(sid, mode, ownerNodeId, reason string) {
 	node, err := r.coordinator.GetNode(ownerNodeId)
 	if err != nil || node == nil {
 		eventLogger.Error("ROUTER: Error getting node info for wake-up", "nodeId", ownerNodeId, "error", err)

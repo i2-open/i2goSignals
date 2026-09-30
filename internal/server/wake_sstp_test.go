@@ -183,28 +183,39 @@ func TestWakeSstpServer_RejectsUnauthenticated(t *testing.T) {
 	assert.Equal(t, 0, rr.serverWakeCount(), "an unauthenticated wake must not reach the router")
 }
 
-// TestWakeSstpClient_DuplicateIsNoOp verifies issue #167 idempotency: a second
-// wake-sstp-client for the same pair inside the coalescing window is accepted with
-// 202 but does NOT re-dispatch a wake to the router.
-func TestWakeSstpClient_DuplicateIsNoOp(t *testing.T) {
+// isolateClusterWakes gives the test a fresh inbound coalescer, so no
+// neighbouring test's (or earlier -count run's) window suppresses its wakes.
+func isolateClusterWakes(t *testing.T) {
+	t.Helper()
+	prev := clusterWakes
+	clusterWakes = eventRouter.NewWakeCoalescer(eventRouter.WakeCoalesceWindow)
+	t.Cleanup(func() { clusterWakes = prev })
+}
+
+// TestWakeSstpClient_DuplicatesCoalesceIntoOneTrailingWake verifies issue #167
+// idempotency with #347's trailing edge: wake-sstp-client calls for the same pair
+// inside the coalescing window are all accepted with 202, the first wakes the
+// router at once, and the rest share one trailing wake at the window's end, so
+// the last wake of a burst is never lost.
+func TestWakeSstpClient_DuplicatesCoalesceIntoOneTrailingWake(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
-	// Isolate the shared coalescing map from any neighbouring test's residue.
-	recentWakesMu.Lock()
-	delete(recentWakes, "pair-dup:"+sstpWakeClientMode)
-	recentWakesMu.Unlock()
+	isolateClusterWakes(t)
 
 	rr := &recordingRouter{}
 	sa := &SignalsApplication{EventRouter: rr}
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		req := wakeSstpReq("/_cluster/wake-sstp-client", "test-secret", "pair-dup", "sstp-client")
 		w := httptest.NewRecorder()
 		sa.WakeSstpClient(w, req)
-		assert.Equal(t, http.StatusAccepted, w.Code, "both wake-ups are accepted")
+		assert.Equal(t, http.StatusAccepted, w.Code, "every wake-up is accepted")
 	}
 
-	assert.Equal(t, 1, rr.clientWakeCount(),
-		"a duplicate wake-up inside the coalescing window must be a no-op")
+	assert.Equal(t, 1, rr.clientWakeCount(), "only the leading wake-up is dispatched at once")
+	require.Eventually(t, func() bool { return rr.clientWakeCount() == 2 }, 2*time.Second, 5*time.Millisecond,
+		"the suppressed wake-ups arm one trailing wake")
+	time.Sleep(400 * time.Millisecond)
+	assert.Equal(t, 2, rr.clientWakeCount(), "the suppressed wake-ups share one trailing wake")
 }
 
 // nonSpiffeLeafCert returns a self-signed leaf certificate carrying no SPIFFE URI

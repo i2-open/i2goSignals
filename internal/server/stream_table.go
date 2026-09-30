@@ -136,34 +136,48 @@ func (sa *SignalsApplication) StreamChanged(w http.ResponseWriter, r *http.Reque
 // I2SIG_CLUSTER_INTERNAL_TOKEN HMAC bearer bound to sid and mode. It returns
 // the sid, or writes 400/401 and returns ok=false.
 func authenticateClusterCall(w http.ResponseWriter, r *http.Request, mode string) (string, bool) {
+	req, ok := decodeWakeRequest(w, r)
+	if !ok || !authenticateCluster(w, r, req.Sid, mode) {
+		return "", false
+	}
+	return req.Sid, true
+}
+
+// decodeWakeRequest reads a cluster call's body; a body without a sid is a 400.
+func decodeWakeRequest(w http.ResponseWriter, r *http.Request) (WakeRequest, bool) {
 	var req WakeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return "", false
+		return req, false
 	}
 	if req.Sid == "" {
 		http.Error(w, "invalid sid", http.StatusBadRequest)
-		return "", false
+		return req, false
 	}
+	return req, true
+}
 
-	// SPIFFE peer cert first; HMAC shared secret otherwise.
+// authenticateCluster checks a peer node's call for sid and mode: a SPIFFE
+// peer certificate first, the HMAC shared secret otherwise. It writes 401 on
+// failure.
+func authenticateCluster(w http.ResponseWriter, r *http.Request, sid, mode string) bool {
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		if !isPeerSpiffeAuthenticated(r.TLS) {
 			serverLog.Warn("CLUSTER: invalid SPIFFE peer certificate", "remote", r.RemoteAddr, "mode", mode)
 			w.WriteHeader(http.StatusUnauthorized)
-			return "", false
+			return false
 		}
 		serverLog.Debug("CLUSTER: SPIFFE peer authenticated", "remote", r.RemoteAddr, "mode", mode)
-		return req.Sid, true
+		return true
 	}
 	secret := os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN")
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" || len(authHeader) < 7 ||
-		!authSupport.ValidateClusterToken(secret, authHeader[7:], req.Sid, mode, 30*time.Second) {
+		!authSupport.ValidateClusterToken(secret, authHeader[7:], sid, mode, 30*time.Second) {
 		w.WriteHeader(http.StatusUnauthorized)
-		return "", false
+		return false
 	}
-	return req.Sid, true
+	return true
 }
 
 // notifyStreamChanged tells the other nodes that stream sid was created or

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
@@ -46,17 +45,17 @@ func (r *router) broadcastSstpServerWake(txSid string) {
 // the receiver.
 func (r *router) broadcastSstpWake(path, mode, id string) {
 	// Coalesce locally so a burst of outbound events for the same pair does not
-	// fan out a storm of identical broadcasts within the window.
+	// fan out a storm of identical broadcasts within the window; a suppressed
+	// wake arms one trailing broadcast so the burst's tail is not lost (#347).
 	key := path + ":" + id
-	r.outboundWakesMu.Lock()
-	lastWake, exists := r.recentOutboundWakes[key]
-	if exists && time.Since(lastWake) < 250*time.Millisecond {
-		r.outboundWakesMu.Unlock()
+	if !r.outboundWakes.Admit(key, func() { r.sendSstpWake(path, mode, id) }) {
 		return
 	}
-	r.recentOutboundWakes[key] = time.Now()
-	r.outboundWakesMu.Unlock()
+	r.sendSstpWake(path, mode, id)
+}
 
+// sendSstpWake posts the wake to every active node other than this one.
+func (r *router) sendSstpWake(path, mode, id string) {
 	nodes, err := r.coordinator.GetActiveNodes()
 	if err != nil {
 		eventLogger.Error("ROUTER: error listing active nodes for SSTP wake-up", "path", path, "error", err)

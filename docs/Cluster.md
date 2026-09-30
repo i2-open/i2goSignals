@@ -109,9 +109,13 @@ When a node receives or generates an event that needs to be routed to an outboun
 
 This mechanism is secured using a shared HMAC secret (`I2SIG_CLUSTER_INTERNAL_TOKEN`) and includes rate-limiting to prevent denial-of-service.
 
+Wake-ups are coalesced per target over a 250 ms window, on the sending and on the receiving node, and on **both edges** (#347): the first wake of a burst goes out (or is acted on) at once, and any further wake inside the window arms one trailing wake at the window's end, shared by the rest of the burst. A wake says only "this target has work", so the last wake of a burst is never lost.
+
+On a push stream the owner's wake backfill reads the store past what is already queued or in flight, up to a cap of ten backfill batches per wake. A read that stops at the cap, or a periodic backfill that comes back full, marks a backlog: the loop then reads again each time a batch completes and the buffer runs low, so a burst deeper than the cap drains at delivery speed rather than one batch per backfill interval.
+
 ### SSTP wake-up endpoints
 
-SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are kept separate for telemetry. Both reuse the wake-transmitter authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer) and the same coalescing window, so duplicate wake-ups are idempotent no-ops:
+SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are kept separate for telemetry. Both reuse the wake-transmitter authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer) and the same two-edge coalescing window, so duplicate wake-ups inside the window collapse into one trailing wake:
 
 *   **`POST /_cluster/wake-sstp-client`** — the request body's `sid` field carries the pair's **`PairId`**. Broadcast to all cluster nodes when a node receives an inbound event whose target SSTP-client pair is owned (via the `sstp-client:<PairId>` lease) by a different node, so the lease owner drains the pending event into the next outbound cycle.
 *   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Broadcast when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the receiver side returns the event immediately.
