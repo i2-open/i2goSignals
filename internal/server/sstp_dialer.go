@@ -866,6 +866,22 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 	}
 }
 
+// secondPushDebt is the outbound work a pair loop still owes a second push
+// while its primary cycle is held (#347).
+type secondPushDebt struct {
+	// owed: a wake was turned away (every slot held) or a push ended with
+	// SETs unacked, so the next freed slot re-runs a second push. Touched only
+	// by the pair loop's goroutine.
+	owed bool
+	// pushOwed carries a push's "work remains" outcome to the pair loop; a
+	// push sets it before signalling pushDone so a secondPushRemaining is
+	// never lost when several pushes (K>1) finish at once and only one signal
+	// fits in the channel.
+	pushOwed atomic.Bool
+	// pushDone is a coalescing "a push finished" signal.
+	pushDone chan struct{}
+}
+
 // runPrimaryCycleWithSecondPush runs one primary SSTP cycle in a goroutine
 // while the calling loop watches the outbound buffer's wake signal. When a
 // new outbound SET arrives WHILE the primary is still held open as a
@@ -896,24 +912,18 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 
 	// A wake is edge-triggered: it says only "this pair has work", once. One
 	// turned away because every second-push slot is held, or one whose push
-	// ended with SETs still unacked, is remembered in owed rather than dropped
-	// (#347), and owed is paid as soon as a second push finishes (pushDone).
+	// ended with SETs still unacked, is remembered in debt.owed rather than
+	// dropped (#347), and is paid as soon as a second push finishes.
 	// A wake can also be lost before it gets here (sender or receiver
 	// coalescing, a failed wake call), which nothing on this node can see, so
 	// the backfill ticker re-checks the pair every interval regardless of
-	// owed — the safety net the PUSH loop's backfill ticker already is. An
+	// debt — the safety net the PUSH loop's backfill ticker already is. An
 	// idle check claims nothing and opens no request.
-	owed := false
-	// pushDone is a coalescing "a push finished" signal; the outcome that
-	// matters travels in pushOwed, which a push sets before signalling so a
-	// secondPushRemaining is never lost when several pushes (K>1) finish at
-	// once and only one signal fits in the channel.
-	pushDone := make(chan struct{}, 1)
-	var pushOwed atomic.Bool
+	debt := &secondPushDebt{pushDone: make(chan struct{}, 1)}
 	backfill := time.NewTicker(d.cfg.BackfillInterval)
 	defer backfill.Stop()
 
-	spawn := func() bool {
+	trySecondPush := func() bool {
 		live, ok := d.outbound.RefreshPair(pairId)
 		if !ok {
 			return false // pair removed; primary's next refresh exits the loop.
@@ -928,22 +938,22 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		// The probe is cheap: slot accounting has its own small mutex
 		// and never touches the router's lock.
 		if !d.outbound.AcquireSecondPushSlot(pairId) {
-			owed = true
+			debt.owed = true
 			return false
 		}
 		d.outbound.ReleaseSecondPushSlot(pairId)
-		owed = false
+		debt.owed = false
 		streamCopy := live
 		secondPushWg.Add(1)
 		go func() {
 			defer secondPushWg.Done()
 			_, outcome := d.runSecondPush(ctx, &streamCopy, fencingToken)
 			if outcome == secondPushRemaining || outcome == secondPushSkipped {
-				pushOwed.Store(true)
+				debt.pushOwed.Store(true)
 			}
 			// Coalesce: one pending completion is enough to re-check.
 			select {
-			case pushDone <- struct{}{}:
+			case debt.pushDone <- struct{}{}:
 			default:
 			}
 		}()
@@ -967,22 +977,22 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 			// runSecondPush coalesces concurrent wakes to at most K
 			// in-flight pushes per pair (I2SIG_SSTP_PUSH_INFLIGHT, #339).
 			wakeup = d.outbound.WakeCh(pairId) // re-arm: Wakeup() swapped the notifier.
-			spawn()
-		case <-pushDone:
+			trySecondPush()
+		case <-debt.pushDone:
 			// A push finished and freed its slot. A wake turned away while it
 			// held that slot is paid now. SETs the peer left unacked wait for
 			// the next backfill tick rather than being re-sent at once; a
 			// failed push leaves its SETs to the primary's retry path.
-			if owed {
-				spawn()
+			if debt.owed {
+				trySecondPush()
 			}
-			if pushOwed.Swap(false) {
-				owed = true
+			if debt.pushOwed.Swap(false) {
+				debt.owed = true
 			}
 		case <-backfill.C:
 			// Level-triggered safety net: look for outbound work every tick,
 			// owed or not, so a wake lost upstream costs at most one interval.
-			spawn()
+			trySecondPush()
 		}
 	}
 }
