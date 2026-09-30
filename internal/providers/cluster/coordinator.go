@@ -8,7 +8,6 @@
 package cluster
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -61,22 +60,30 @@ type ClusterCoordinator interface {
 	GetNode(nodeId string) (*model.ClusterNode, error)
 }
 
+// The kind prefixes of the lease resources, shared by the resource builders
+// below and ResourceId.
+const (
+	pushTransmitterKind = "push-transmitter"
+	pollReceiverKind    = "poll-receiver"
+	sstpClientKind      = "sstp-client"
+)
+
 // PushTransmitterResource is the lease resource a push transmitter's runner
 // holds for stream sid.
 func PushTransmitterResource(sid string) string {
-	return fmt.Sprintf("push-transmitter:%s", sid)
+	return pushTransmitterKind + ":" + sid
 }
 
 // PollReceiverResource is the lease resource a poll receiver holds for
 // stream sid.
 func PollReceiverResource(sid string) string {
-	return fmt.Sprintf("poll-receiver:%s", sid)
+	return pollReceiverKind + ":" + sid
 }
 
 // SstpClientResource is the lease resource an SSTP client (dialer) holds for
 // pair pairId.
 func SstpClientResource(pairId string) string {
-	return fmt.Sprintf("sstp-client:%s", pairId)
+	return sstpClientKind + ":" + pairId
 }
 
 // Reaper is the optional garbage-collection half of a coordinator (#350).
@@ -108,7 +115,7 @@ func ResourceId(resource string) (kind, id string, ok bool) {
 		return "", "", false
 	}
 	switch kind {
-	case "push-transmitter", "poll-receiver", "sstp-client":
+	case pushTransmitterKind, pollReceiverKind, sstpClientKind:
 		return kind, id, true
 	}
 	return "", "", false

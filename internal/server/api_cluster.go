@@ -115,7 +115,7 @@ func (sa *SignalsApplication) startInternalServer() {
 	mux.HandleFunc("/_cluster/wake-transmitter", sa.WakeTransmitter)
 	mux.HandleFunc("/_cluster/wake-sstp-client", sa.WakeSstpClient)
 	mux.HandleFunc("/_cluster/wake-sstp-server", sa.WakeSstpServer)
-	mux.HandleFunc("/_cluster/stream-changed", sa.StreamChanged)
+	mux.HandleFunc(eventRouter.StreamChangedPath, sa.StreamChanged)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

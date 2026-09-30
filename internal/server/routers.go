@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/goSignals"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -260,7 +261,7 @@ func (h *HttpRouter) peerRoutes() Routes {
 		Route{
 			"StreamChanged",
 			http.MethodPost,
-			"/_cluster/stream-changed",
+			eventRouter.StreamChangedPath,
 			h.sa.StreamChanged,
 			false,
 		},
