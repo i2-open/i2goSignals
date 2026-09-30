@@ -220,7 +220,8 @@ func authenticateCluster(w http.ResponseWriter, r *http.Request, sid, mode strin
 
 // notifyStreamChanged tells the other nodes that stream sid was created,
 // updated, re-statused or deleted here, so each reconciles its stream table
-// now. It waits for every active peer to ack (retrying for up to 15s) so that
+// now. It waits for every active peer to ack (retrying for up to the router's
+// ack window) so that
 // when the request answers, the cluster already serves the new state; a peer
 // that never acks catches up on its periodic sync.
 func notifyStreamChanged(sa SsfApplicationInterface, sid string) {

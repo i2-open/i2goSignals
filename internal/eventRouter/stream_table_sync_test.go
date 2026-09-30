@@ -78,7 +78,7 @@ func TestSyncStreamTable_DropsStreamDeletedElsewhere(t *testing.T) {
 	assert.Equal(t, before, h.pendingCount(sid), "no marker is written for a dropped stream")
 }
 
-// A stream created or deleted on this node is announced to every other active
+// A stream created, updated, re-statused or deleted on this node is announced to every other active
 // node on POST /_cluster/stream-changed with the cluster bearer token, so the
 // peer reconciles its stream table at once instead of on its 40s sync (#349,
 // #350). This node and address-less nodes are skipped.
@@ -138,4 +138,27 @@ func TestBroadcastStreamChanged_RetriesUntilEveryPeerAcks(t *testing.T) {
 
 	assert.Equal(t, int32(3), flakyCalls.Load(), "the peer is retried until it acks")
 	assert.Equal(t, int32(1), steadyCalls.Load(), "a peer that acked is not called again")
+}
+
+// A peer that refuses a stream-changed call with a 4xx (a token mismatch, say)
+// is not retried: no retry can fix it, so the broadcast does not hold the
+// request for the whole ack window.
+func TestBroadcastStreamChanged_RefusedPeerIsNotRetried(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	h := newRestartHarness(t, newHoldingReceiver())
+	r := h.router
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-misconfigured", Address: srv.URL, LastSeenAt: time.Now().UTC()}))
+
+	start := time.Now()
+	r.BroadcastStreamChanged("sid-new")
+
+	assert.Equal(t, int32(1), calls.Load(), "a refused call is not retried")
+	assert.Less(t, time.Since(start), streamChangedRetryInterval, "the broadcast returns at once")
 }

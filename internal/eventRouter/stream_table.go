@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -39,9 +40,10 @@ const (
 	// retry the peers that have not acked.
 	streamChangedRetryInterval = time.Second
 	// streamChangedAckWindow bounds how long a broadcast (and so the stream
-	// request that waits for it) retries an unacked peer. A peer still unacked
-	// after it catches up on its periodic sync; one that has stopped
-	// heartbeating drops out of the active nodes and is no longer waited for.
+	// request that waits for it) retries an unacked peer; a peer still unacked
+	// after that catches up on its periodic sync. The window is shorter than
+	// the coordinator's active-node window, so a peer that has just died is
+	// retried for all of it.
 	streamChangedAckWindow = 15 * time.Second
 )
 
@@ -61,7 +63,8 @@ type StreamTable interface {
 	// BroadcastStreamChanged tells every other active node that stream sid was
 	// created, updated, re-statused or deleted, so each reconciles now rather
 	// than on its next periodic sync. It retries a peer until it acks, and
-	// returns once every active peer has acked or the ack window has passed.
+	// returns once every active peer has acked or refused the call, or
+	// streamChangedAckWindow has passed.
 	BroadcastStreamChanged(sid string)
 }
 
@@ -120,7 +123,8 @@ func (r *router) BroadcastStreamChanged(sid string) {
 	if r.coordinator == nil {
 		return
 	}
-	acked := map[string]bool{}
+	settled := map[string]bool{}  // acked, or refused and not retried
+	lastErr := map[string]error{} // why each unsettled peer has not acked
 	deadline := time.Now().Add(streamChangedAckWindow)
 	retry := time.NewTimer(streamChangedRetryInterval)
 	defer retry.Stop()
@@ -131,10 +135,10 @@ func (r *router) BroadcastStreamChanged(sid string) {
 			return
 		}
 		// Each round re-reads the active nodes, so a peer that has dropped out
-		// of the cluster is no longer waited for.
+		// of the cluster is no longer waited for, and one that joined is told.
 		var pending []model.ClusterNode
 		for _, node := range nodes {
-			if node.Id != r.nodeId && node.Address != "" && !acked[node.Id] {
+			if node.Id != r.nodeId && node.Address != "" && !settled[node.Id] {
 				pending = append(pending, node)
 			}
 		}
@@ -147,18 +151,21 @@ func (r *router) BroadcastStreamChanged(sid string) {
 			wg.Add(1)
 			go func(node model.ClusterNode) {
 				defer wg.Done()
-				if r.callStreamChanged(node.Address, sid) {
-					mu.Lock()
-					acked[node.Id] = true
-					mu.Unlock()
+				done, err := r.callStreamChanged(node.Address, sid)
+				mu.Lock()
+				defer mu.Unlock()
+				if done {
+					settled[node.Id] = true
+				} else {
+					lastErr[node.Id] = err
 				}
 			}(node)
 		}
 		wg.Wait()
 		var missing []string
 		for _, node := range pending {
-			if !acked[node.Id] {
-				missing = append(missing, node.Id)
+			if !settled[node.Id] {
+				missing = append(missing, node.Id+": "+lastErr[node.Id].Error())
 			}
 		}
 		if len(missing) == 0 {
@@ -181,9 +188,11 @@ func (r *router) BroadcastStreamChanged(sid string) {
 
 // callStreamChanged POSTs one stream-changed notification to a peer, with the
 // shared-HMAC cluster bearer (SPIFFE mTLS, when configured, comes from the
-// transport). It reports whether the peer acked (202: it has reconciled the
-// stream); a failure is logged and the broadcast retries.
-func (r *router) callStreamChanged(address, sid string) bool {
+// transport). done reports that the call needs no retry: the peer acked (202:
+// it has reconciled the stream), or refused the call outright (a 4xx such as a
+// token mismatch, which a retry cannot fix; logged here). Otherwise err says
+// why the peer has not acked, and the broadcast retries.
+func (r *router) callStreamChanged(address, sid string) (done bool, err error) {
 	url := strings.TrimSuffix(address, "/") + StreamChangedPath
 	ctx, cancel := context.WithTimeout(r.ctx, streamChangedTimeout)
 	defer cancel()
@@ -192,7 +201,7 @@ func (r *router) callStreamChanged(address, sid string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		eventLogger.Warn("ROUTER: error creating stream-changed request", "url", url, "error", err)
-		return false
+		return true, err
 	}
 	req.Header.Set("Authorization", "Bearer "+authSupport.GenerateClusterToken(r.clusterSecret, sid, StreamChangedMode))
 	req.Header.Set("Content-Type", "application/json")
@@ -200,13 +209,18 @@ func (r *router) callStreamChanged(address, sid string) bool {
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		eventLogger.Debug("ROUTER: stream-changed call failed; retrying", "url", url, "sid", sid, "error", err)
-		return false
+		return false, err
 	}
 	defer httpSupport.HandleRespClose(resp)
-	if resp.StatusCode != http.StatusAccepted {
+	switch code := resp.StatusCode; {
+	case code == http.StatusAccepted:
+		eventLogger.Debug("ROUTER: stream-changed delivered", "url", url, "sid", sid)
+		return true, nil
+	case code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests:
+		eventLogger.Warn("ROUTER: stream-changed call refused; the peer catches up on its next sync", "url", url, "sid", sid, "status", resp.Status)
+		return true, fmt.Errorf("refused: %s", resp.Status)
+	default:
 		eventLogger.Debug("ROUTER: stream-changed call not acked; retrying", "url", url, "sid", sid, "status", resp.Status)
-		return false
+		return false, fmt.Errorf("not acked: %s", resp.Status)
 	}
-	eventLogger.Debug("ROUTER: stream-changed delivered", "url", url, "sid", sid)
-	return true
 }
