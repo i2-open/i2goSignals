@@ -152,3 +152,51 @@ func TestPushStatusHold_TakeoverReadsTheStore(t *testing.T) {
 	assert.Equal(t, model.StreamStatePause, stored)
 	assert.Equal(t, "paused elsewhere", reason)
 }
+
+// runnerPauseReason is a pause reason as a push runner stores it for its own
+// receiver-recovery pause, here as read back from another node's runner.
+const runnerPauseReason = "PUSH-SRV: transport failure on jti=x; entering transport-backoff recovery"
+
+// A pause stored by a runner itself, on this node or another, leaves this
+// node's runner running: a standby keeps waiting for the lease, so it can take
+// the stream over if the holder dies mid-recovery.
+func TestPushStatusHold_RunnerPauseKeepsStandby(t *testing.T) {
+	h, _, sid := startDeliveringPushStream(t)
+	runner := h.runnerFor(sid)
+
+	h.setStatus(t, sid, model.StreamStatePause, runnerPauseReason)
+
+	assert.Never(t, func() bool { return !runner.live() }, 300*time.Millisecond, 20*time.Millisecond,
+		"a runner's own pause does not retire the runner")
+	assert.Same(t, runner, h.runnerFor(sid))
+}
+
+// A runner that takes the lease of a stream stored with a runner's own pause
+// (its last holder died mid-recovery) ends that pause and delivers, whether
+// its copy was enabled or was synced with the pause.
+func TestPushStatusHold_TakeoverResumesRunnerPause(t *testing.T) {
+	for name, copyPaused := range map[string]bool{"enabled copy": false, "paused copy": true} {
+		t.Run(name, func(t *testing.T) {
+			rx := newHoldingReceiver()
+			rx.release()
+			h := newRestartHarness(t, rx)
+			stream := h.createPushStream(t, "NONE")
+			sid := stream.StreamConfiguration.Id
+			h.addPendingEvents(t, sid, 2)
+			h.streamService.UpdateStreamStatus(context.Background(), sid, model.StreamStatePause, runnerPauseReason)
+
+			rec := stream.DeepCopy()
+			if copyPaused {
+				rec.SetStatus(model.StreamStatePause, runnerPauseReason)
+			}
+			h.router.UpdateStreamState(rec)
+
+			require.Eventually(t, func() bool { return h.pendingCount(sid) == 0 }, 10*time.Second, 20*time.Millisecond,
+				"the new holder delivers what queued during the pause")
+			assert.Len(t, rx.snapshot(), 2)
+			stored, reason := h.storedStatus(t, sid)
+			assert.Equal(t, model.StreamStateEnabled, stored, "the takeover ends the runner's pause")
+			assert.Empty(t, reason)
+		})
+	}
+}

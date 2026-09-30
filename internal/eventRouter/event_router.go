@@ -156,12 +156,6 @@ type router struct {
 	// on this node while it has not yet exited, for AwaitPushStopped. It is
 	// removed once the runner has finished.
 	pushStoppingRunners map[string]*pushRunner
-	// pushOwnPause holds, for each push stream whose runner has paused it
-	// (receiver recovery, a missing signing key), the reason the runner
-	// stored. A paused record with that reason is the runner's own pause and
-	// leaves it running; any other pause or disable stops it. Set when the
-	// runner pauses, cleared when it writes any other status. Guarded by r.mu.
-	pushOwnPause map[string]string
 	// peerNotifiers holds the background stream-changed sender of each peer
 	// with calls still to make. Guarded by notifyMu.
 	peerNotifiers map[string]*peerNotifier
@@ -385,7 +379,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pushRunners:            map[string]*pushRunner{},
 		pushHandoffs:           map[string]*pushHandoff{},
 		pushStoppingRunners:    map[string]*pushRunner{},
-		pushOwnPause:           map[string]string{},
 		peerNotifiers:          map[string]*peerNotifier{},
 		pollBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpClientStreams:      map[string]model.StreamStateRecord{},
@@ -954,15 +947,15 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		restart := pushRunnerSettingsChanged(currentState.StreamConfiguration, stream.StreamConfiguration)
 		currentState.Update(stream)
 		r.pushStreams[sid] = currentState
-		if currentState.Status != model.StreamStateEnabled && !r.isOwnPauseLocked(sid, &currentState) {
+		if currentState.Status != model.StreamStateEnabled && !isRunnerPause(&currentState) {
 			// An operator's pause or disable (or the runner's own disable, read
 			// back) holds the stream: its runner is retired now, and a pending
 			// restart starts none. The runner sends at most the batches already
-			// out; AwaitPushStopped waits for it to exit. The runner's own pause
-			// leaves it running, since it is what ends that pause. A later
-			// re-enable starts a new runner.
+			// out; AwaitPushStopped waits for it to exit. A runner's own pause,
+			// stored by this node's runner or another's, leaves it running: the
+			// holder's ends that pause, and a standby takes the stream over if
+			// the holder dies. A later re-enable starts a new runner.
 			delete(r.pushHandoffs, sid)
-			delete(r.pushOwnPause, sid)
 			if runner := r.retirePushRunnerLocked(sid); runner != nil && runner.live() {
 				eventLogger.Info("PUSH-SRV: stream no longer enabled, stopping its runner", "sid", sid, "status", currentState.Status)
 			}
@@ -1004,9 +997,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		if old == nil {
 			old = r.stoppingRunnerLocked(sid)
 		}
-		handoff := &pushHandoff{done: make(chan struct{})}
-		r.pushHandoffs[sid] = handoff
-		go r.completePushHandoff(sid, old, handoff)
+		r.startHandoffLocked(sid, old)
 		return
 	}
 	// preload the buffer with any existing events
@@ -1034,9 +1025,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	if old := r.stoppingRunnerLocked(sid); old != nil {
 		// A runner removed a moment ago is still stopping: start the new one
 		// only once it has exited, so the two never overlap.
-		handoff := &pushHandoff{done: make(chan struct{})}
-		r.pushHandoffs[sid] = handoff
-		go r.completePushHandoff(sid, old, handoff)
+		r.startHandoffLocked(sid, old)
 		return
 	}
 	r.initPushStreamLocked(sid, stream, jtis)
@@ -2022,7 +2011,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 			eventLogger.Info("PUSH-SRV runner stopped. PushHandler exiting.", "sid", sid)
 			return
 		}
-		if stream.Status != model.StreamStateEnabled || r.pushStreamHeldOff(sid) {
+		if (stream.Status != model.StreamStateEnabled && !isRunnerPause(stream)) || r.pushStreamHeldOff(sid) {
 			eventLogger.Info("PUSH-SRV is no longer enabled. PushHandler exiting.", "sid", sid)
 			return
 		}
@@ -2061,7 +2050,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 		// that is behind the store: confirm the stream is still there and
 		// enabled before sending anything. The deferred release gives the
 		// lease back.
-		if !r.leaseStreamEnabled(sid) {
+		if !r.leaseStreamEnabled(stream) {
 			return
 		}
 
@@ -2075,12 +2064,16 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 	}
 }
 
-// leaseStreamEnabled reads push stream sid from the store once its runner has
+// leaseStreamEnabled reads push stream from the store once its runner has
 // acquired the lease, and reports whether the runner may deliver. A stream gone
-// from the store, or stored as paused or disabled, may not: this node's copy
-// has not caught up with a change made elsewhere. A store read that fails is
-// logged and lets the runner proceed, as its copy says enabled.
-func (r *router) leaseStreamEnabled(sid string) bool {
+// from the store, or stored as paused or disabled by an operator, may not: this
+// node's copy has not caught up with a change made elsewhere. A stream its last
+// holder's runner paused itself (receiver recovery, a missing signing key) is
+// taken over: that holder has lost the lease, so this runner ends the pause and
+// retries, pausing again if the receiver still fails or the key is still
+// missing. A store read that fails is logged and lets the runner proceed.
+func (r *router) leaseStreamEnabled(stream *model.StreamStateRecord) bool {
+	sid := stream.StreamConfiguration.Id
 	stored, err := r.streamService.GetStreamState(r.ctx, sid)
 	switch {
 	case errors.Is(err, interfaces.ErrNotFound):
@@ -2089,10 +2082,19 @@ func (r *router) leaseStreamEnabled(sid string) bool {
 	case err != nil || stored == nil:
 		eventLogger.Warn("PUSH-SRV: cannot read the stream after taking its lease; proceeding", "sid", sid, "error", err)
 		return true
+	case isRunnerPause(stored):
+		eventLogger.Info("PUSH-SRV: took over a stream its previous runner paused; resuming so this runner retries",
+			"sid", sid, "reason", stored.ErrorMsg)
+		stream.SetStatus(stored.Status, stored.ErrorMsg)
+		r.updateStream(stream, model.StreamStateEnabled, "")
+		return true
 	case stored.Status != model.StreamStateEnabled:
 		eventLogger.Info("PUSH-SRV: stream not enabled in the store after taking its lease; PushHandler exiting.",
 			"sid", sid, "status", stored.Status)
 		return false
+	}
+	if stream.Status != model.StreamStateEnabled {
+		stream.SetStatus(model.StreamStateEnabled, "")
 	}
 	return true
 }
@@ -3232,7 +3234,6 @@ func (r *router) RemoveStream(sid string) {
 		r.retirePushRunnerLocked(sid)
 		delete(r.pushHandoffs, sid)
 		delete(r.pushStreams, sid)
-		delete(r.pushOwnPause, sid)
 	} else {
 		_, ok := r.pollStreams[sid]
 		if ok {

@@ -262,6 +262,14 @@ func drainPushBufferWhenFinished(runner *pushRunner) {
 	}()
 }
 
+// startHandoffLocked registers a restart hand-off for sid and completes it in
+// the background once old, if any, has exited. The caller holds r.mu.
+func (r *router) startHandoffLocked(sid string, old *pushRunner) {
+	handoff := &pushHandoff{done: make(chan struct{})}
+	r.pushHandoffs[sid] = handoff
+	go r.completePushHandoff(sid, old, handoff)
+}
+
 // completePushHandoff finishes a restart in the background. It waits for the
 // old runner's finished signal without holding r.mu, then preloads the stream's
 // pending JTIs and starts the new runner on the latest record in pushStreams.
@@ -357,7 +365,7 @@ func (r *router) pushRunnerLiveLocked(sid string) bool {
 // (receiver recovery, a signing key back) writes enabled to the store and its
 // own record only, so a sync made during the pause may have left the copy
 // paused. A copy that is not enabled is therefore confirmed against the store:
-// only a stored pause or disable holds the runner off, and a stored enabled
+// only an operator's stored pause or disable holds the runner off, and a stored enabled
 // record refreshes the copy. A store read that fails holds nothing off.
 func (r *router) pushStreamHeldOff(sid string) bool {
 	r.mu.RLock()
@@ -368,6 +376,11 @@ func (r *router) pushStreamHeldOff(sid string) bool {
 	}
 	stored, err := r.streamService.GetStreamState(r.ctx, sid)
 	if err != nil || stored == nil {
+		return false
+	}
+	if isRunnerPause(stored) {
+		// A runner's own pause, perhaps another node's: the holder ends it,
+		// and a standby takes it over (leaseStreamEnabled).
 		return false
 	}
 	if stored.Status != model.StreamStateEnabled {

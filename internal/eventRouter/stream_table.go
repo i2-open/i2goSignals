@@ -75,9 +75,9 @@ type StreamTable interface {
 	// other peer, and a holder that has not acked, is told in the background.
 	// With no holder it does not wait at all.
 	BroadcastStreamChanged(sid string)
-	// AwaitPushStopped waits until every push runner for sid that this node
-	// has retired (a pause, a disable, a delete or a restart) has exited, and
-	// reports whether they all did before ctx ended.
+	// AwaitPushStopped waits until the push runner for sid that this node
+	// retired last (a pause, a disable, a delete or a restart) has exited, and
+	// reports whether it did before ctx ended.
 	AwaitPushStopped(ctx context.Context, sid string) bool
 }
 
@@ -145,9 +145,10 @@ func (r *router) BroadcastStreamChanged(sid string) {
 	settled := ""
 	holder := r.streamHolder(sid)
 	switch {
-	case holder == r.nodeId || r.pushStopping(sid):
+	case holder == r.nodeId || (holder == "" && r.pushStopping(sid)):
 		// The runner is on this node, and the request handler has already
-		// applied the change to it: wait for a retired runner to exit.
+		// applied the change to it: wait for a retired runner to exit. With no
+		// holder, a runner retired here may just have released its lease.
 		ctx, cancel := context.WithTimeout(r.ctx, streamChangedHolderWindow)
 		stopped := r.AwaitPushStopped(ctx, sid)
 		cancel()
@@ -255,7 +256,8 @@ type peerNotifier struct {
 }
 
 // pendingNotice is one stream a peer has still to be told about. since is
-// when it was last queued, for the give-up; gen counts the times it was, so an
+// when it was first queued, for the give-up, so a stream that keeps changing
+// still gives up on a peer that never acks; gen counts the times it was, so an
 // ack for an earlier change does not clear a later one.
 type pendingNotice struct {
 	since time.Time
@@ -267,7 +269,7 @@ type pendingNotice struct {
 func (r *router) notifyPeer(id, sid string) {
 	r.notifyMu.Lock()
 	defer r.notifyMu.Unlock()
-	if r.ctx.Err() != nil {
+	if r.ctx == nil || r.ctx.Err() != nil {
 		return
 	}
 	if r.peerNotifiers == nil {
@@ -281,7 +283,6 @@ func (r *router) notifyPeer(id, sid string) {
 	}
 	if p, queued := n.pending[sid]; queued {
 		p.gen++
-		p.since = time.Now()
 		return
 	}
 	n.pending[sid] = &pendingNotice{since: time.Now()}
