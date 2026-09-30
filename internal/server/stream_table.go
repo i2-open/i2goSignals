@@ -120,9 +120,11 @@ func (sa *SignalsApplication) purgeClusterRows(states map[string]model.StreamSta
 	}
 }
 
-// StreamChanged handles POST /_cluster/stream-changed: a peer created or
-// deleted a stream. After authenticating, it reconciles that one stream and
-// answers 202 when done; the full store scan and the cluster-row purge stay on
+// StreamChanged handles POST /_cluster/stream-changed: a peer created,
+// updated, re-statused or deleted a stream. After authenticating, it
+// reconciles that one stream and answers 202 when done — the ack the peer's
+// broadcast waits for — or 503 when the store could not be read, so the peer
+// retries; the full store scan and the cluster-row purge stay on
 // the periodic sync, so the call finishes inside the peer's 2s bound however
 // large the store (#349). Unlike the wake-up routes it is never coalesced: a
 // create and a quick delete of the same stream must both be seen, and a
@@ -133,16 +135,20 @@ func (sa *SignalsApplication) StreamChanged(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	serverLog.Debug("CLUSTER: stream-changed from a peer; reconciling the stream", "sid", sid)
-	sa.reconcileStream(sid)
+	if !sa.reconcileStream(sid) {
+		// Not reconciled: no ack, so the peer retries.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // reconcileStream brings this node in line with the store for stream sid: a
 // stream in the store is applied to the router and the receivers, one gone
 // from the store is removed from both. A store read that fails changes
-// nothing; the periodic sync catches up. syncMu is held only for this one
-// stream's work.
-func (sa *SignalsApplication) reconcileStream(sid string) {
+// nothing and reports false; the periodic sync catches up. syncMu is held only
+// for this one stream's work.
+func (sa *SignalsApplication) reconcileStream(sid string) bool {
 	sa.syncMu.Lock()
 	defer sa.syncMu.Unlock()
 
@@ -155,10 +161,12 @@ func (sa *SignalsApplication) reconcileStream(sid string) {
 		sa.EventRouter.RemoveStream(sid)
 	case err != nil:
 		serverLog.Warn("CLUSTER: stream-changed could not read the stream; the periodic sync catches up", "sid", sid, "error", err)
+		return false
 	default:
 		sa.reconcileReceiver(state)
 		sa.EventRouter.UpdateStreamState(state)
 	}
+	return true
 }
 
 // authenticateClusterCall parses a {"sid","mode"} cluster call and
@@ -210,11 +218,11 @@ func authenticateCluster(w http.ResponseWriter, r *http.Request, sid, mode strin
 	return true
 }
 
-// notifyStreamChanged tells the other nodes that stream sid was created or
-// deleted here, so each reconciles its stream table now. It waits for the
-// peers (each bounded at 2s) so that when the create or delete answers, the
-// cluster already serves the new state; a peer that misses it catches up on
-// its periodic sync.
+// notifyStreamChanged tells the other nodes that stream sid was created,
+// updated, re-statused or deleted here, so each reconciles its stream table
+// now. It waits for every active peer to ack (retrying for up to 15s) so that
+// when the request answers, the cluster already serves the new state; a peer
+// that never acks catches up on its periodic sync.
 func notifyStreamChanged(sa SsfApplicationInterface, sid string) {
 	if table, ok := sa.GetEventRouter().(eventRouter.StreamTable); ok {
 		table.BroadcastStreamChanged(sid)

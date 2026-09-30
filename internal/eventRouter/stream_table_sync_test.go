@@ -3,6 +3,9 @@ package eventRouter
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,4 +106,36 @@ func TestBroadcastStreamChanged_TellsEveryOtherActiveNode(t *testing.T) {
 		require.True(t, len(got.auth) > 7)
 		assert.True(t, authSupport.ValidateClusterToken("test-secret", got.auth[7:], "sid-new", "stream-changed", 30*time.Second))
 	}
+}
+
+// A peer that does not ack a stream-changed call (it could not reconcile, or
+// the call failed) is retried until it does, and the broadcast returns only
+// then; a peer that acked is not called again.
+func TestBroadcastStreamChanged_RetriesUntilEveryPeerAcks(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	h := newRestartHarness(t, newHoldingReceiver())
+	r := h.router
+
+	peer := func(failures int32) (*httptest.Server, *atomic.Int32) {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) <= failures {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &calls
+	}
+	flaky, flakyCalls := peer(2)
+	steady, steadyCalls := peer(0)
+	now := time.Now().UTC()
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-flaky", Address: flaky.URL, LastSeenAt: now}))
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-steady", Address: steady.URL, LastSeenAt: now}))
+
+	r.BroadcastStreamChanged("sid-new")
+
+	assert.Equal(t, int32(3), flakyCalls.Load(), "the peer is retried until it acks")
+	assert.Equal(t, int32(1), steadyCalls.Load(), "a peer that acked is not called again")
 }

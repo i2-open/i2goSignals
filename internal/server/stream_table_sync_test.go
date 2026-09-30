@@ -352,3 +352,58 @@ func TestStreamDelete_ConcurrentSyncDoesNotReAddTheStream(t *testing.T) {
 
 	assert.False(t, sr.serves(statusPlainSid), "the deleted stream is not served again")
 }
+
+// A status change and a stream update are announced to the other nodes too,
+// so a pause or disable stops the stream's runner on whichever node holds its
+// lease, and a re-enable or config change is served cluster-wide without
+// waiting for the periodic sync. A status request that changes nothing is not
+// announced.
+func TestStreamStatusAndUpdate_AnnounceToPeers(t *testing.T) {
+	app := newTableApp(t)
+	persistStatusPlain(t, app.statusRefreshApp, model.StreamStateEnabled, "")
+	bearer := app.adminBearer(t)
+
+	postStatus := func(status string) {
+		body, err := json.Marshal(model.UpdateStreamStatus{Status: status, Reason: "operator"})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/status?stream_id="+statusPlainSid, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rr := httptest.NewRecorder()
+		UpdateStatusHandler(app, rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	postStatus(model.StreamStatePause)
+	assert.Equal(t, []string{statusPlainSid}, app.router.broadcastSids(), "a pause is announced")
+	postStatus(model.StreamStatePause)
+	assert.Len(t, app.router.broadcastSids(), 1, "an unchanged status is not announced")
+	postStatus(model.StreamStateEnabled)
+	assert.Len(t, app.router.broadcastSids(), 2, "a re-enable is announced")
+
+	body, err := json.Marshal(map[string]any{"stream_id": statusPlainSid, "description": "updated"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPatch, "/stream", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rr := httptest.NewRecorder()
+	StreamUpdateHandler(app, rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, []string{statusPlainSid, statusPlainSid, statusPlainSid}, app.router.broadcastSids(), "an update is announced")
+}
+
+// A stream-changed call whose store read fails answers 503, not 202: the 202
+// is the ack the peer's broadcast waits for, so it must mean this node has
+// reconciled the stream. The peer then retries. Nothing is removed.
+func TestStreamChanged_StoreReadErrorIsNotAcked(t *testing.T) {
+	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
+	base := newStatusRefreshApp(t)
+	dao := &failingStreamDAO{StreamDAO: memory.NewStreamDAO()}
+	base.withStreamDAO(dao)
+	sr := &servingRouter{app: base.SignalsApplication, served: map[string]bool{"sid-1": true}}
+	base.EventRouter = sr
+
+	dao.failFind = true
+	w := httptest.NewRecorder()
+	base.StreamChanged(w, streamChangedReq("test-secret", "sid-1"))
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.True(t, sr.serves("sid-1"), "a failed read removes nothing")
+}

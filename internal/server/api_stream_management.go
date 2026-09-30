@@ -896,6 +896,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		sa.GetEventRouter().UpdateStreamState(state)
 		sa.HandleReceiver(state)
 	}
+	notifyStreamChanged(sa, streamId)
 
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 
@@ -1000,6 +1001,10 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if modified {
 		sa.GetEventRouter().UpdateStreamState(streamState)
 		sa.HandleReceiver(streamState)
+		// The peers apply the new status too: a pause or disable must stop the
+		// runner wherever it runs, and a re-enable start one wherever the lease
+		// lands.
+		notifyStreamChanged(sa, authCtx.StreamId)
 	}
 
 	statusResp, err := sa.GetStreamService().GetStatus(r.Context(), authCtx.StreamId)
