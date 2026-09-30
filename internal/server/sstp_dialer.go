@@ -238,7 +238,7 @@ func (f sstpPendingFeedback) empty() bool {
 }
 
 // merge folds other into f, de-duplicating acks. Used to fold feedback produced
-// off the primary cycle (pushWhilePollHeld) back into the pair loop's carried
+// off the primary cycle (runSecondPush) back into the pair loop's carried
 // value. A JTI can never land in both Acks and SetErrs — runInboundHalf puts
 // each inbound JTI in exactly one — so no cross-field reconciliation is needed.
 func (f *sstpPendingFeedback) merge(other sstpPendingFeedback) {
@@ -424,7 +424,7 @@ type SstpDialer struct {
 	// deferredMu guards deferred.
 	deferredMu sync.Mutex
 	// deferred holds inbound feedback produced OUTSIDE the primary cycle — today
-	// only by pushWhilePollHeld, which runs in its own goroutine while the pair
+	// only by runSecondPush, which runs in its own goroutine while the pair
 	// loop carries its pending feedback as a plain value it cannot safely mutate
 	// from there. The pair loop drains this into that value at the top of each
 	// cycle, so a SET ingested (or rejected) on a second push is still acked or
@@ -923,7 +923,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		// subject-filter wakes/sec) queues thousands of no-op goroutines
 		// into secondPushWg and the outer function cannot return until
 		// each one is scheduled and drained, delaying failover for the
-		// wakeup burst's duration. pushWhilePollHeld re-checks the slot
+		// wakeup burst's duration. runSecondPush re-checks the slot
 		// itself — this is a fast reject to prevent goroutine backlog.
 		// The probe is cheap: slot accounting has its own small mutex
 		// and never touches the router's lock.
@@ -964,7 +964,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		case <-wakeup:
 			// A new outbound SET arrived while the primary is held. Fire a
 			// bounded second push to flush it now. The guard in
-			// pushWhilePollHeld coalesces concurrent wakes to at most K
+			// runSecondPush coalesces concurrent wakes to at most K
 			// in-flight pushes per pair (I2SIG_SSTP_PUSH_INFLIGHT, #339).
 			wakeup = d.outbound.WakeCh(pairId) // re-arm: Wakeup() swapped the notifier.
 			spawn()
@@ -1297,7 +1297,23 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 	return false
 }
 
-// pushWhilePollHeld performs a SECOND, parallel SSTP POST to flush queued
+// secondPushOutcome is how a push-while-poll-held run ended, so the pair loop
+// knows whether outbound work may still be owed (#347).
+type secondPushOutcome int
+
+const (
+	// secondPushDrained: a claim came back empty — nothing was left to send.
+	secondPushDrained secondPushOutcome = iota
+	// secondPushSkipped: every slot was held, so nothing was claimed.
+	secondPushSkipped
+	// secondPushRemaining: the peer left part of a batch unacked.
+	secondPushRemaining
+	// secondPushFailed: the exchange failed or paused the pair; the primary
+	// cycle owns the retry.
+	secondPushFailed
+)
+
+// runSecondPush performs a SECOND, parallel SSTP POST to flush queued
 // outbound SETs while the pair's primary long-poll cycle is held open by
 // the peer (Q7.2, #166). It carries returnEvents=false so the peer returns
 // immediately. On 4xx it pauses the pair, both halves (#303); on
@@ -1319,28 +1335,9 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 // wake would leave whatever queued up meanwhile stranded until the primary
 // long-poll returns (the responder's poll timeout, 30s by default) or the
 // next new event happens to arrive.
-func (d *SstpDialer) pushWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) goSetSstp.Classification {
-	cls, _ := d.runSecondPush(ctx, stream, fencingToken)
-	return cls
-}
-
-// secondPushOutcome is how a push-while-poll-held run ended, so the pair loop
-// knows whether outbound work may still be owed (#347).
-type secondPushOutcome int
-
-const (
-	// secondPushDrained: a claim came back empty — nothing was left to send.
-	secondPushDrained secondPushOutcome = iota
-	// secondPushSkipped: every slot was held, so nothing was claimed.
-	secondPushSkipped
-	// secondPushRemaining: the peer left part of a batch unacked.
-	secondPushRemaining
-	// secondPushFailed: the exchange failed or paused the pair; the primary
-	// cycle owns the retry.
-	secondPushFailed
-)
-
-// runSecondPush is pushWhilePollHeld that also reports how the run ended.
+//
+// It reports how the run ended, so the pair loop knows whether outbound work
+// may still be owed.
 func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) (goSetSstp.Classification, secondPushOutcome) {
 	pairId := stream.PairId
 

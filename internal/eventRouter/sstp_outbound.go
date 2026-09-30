@@ -239,7 +239,7 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 		MaxEvents:         int32(max + claimed),
 		ReturnImmediately: true,
 	})
-	return r.claimSstpJtisUpTo(pairId, pending, max)
+	return r.claimSstpJtis(pairId, pending, max)
 }
 
 func (r *router) ResolveEvents(pairId string, claimed []string) []*model.EventRecord {
@@ -385,7 +385,7 @@ func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer
 	}
 	candidates := make([]string, len(*jtis))
 	copy(candidates, *jtis)
-	return r.claimSstpJtis(pairId, candidates)
+	return r.claimSstpJtis(pairId, candidates, len(candidates))
 }
 
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to
@@ -449,13 +449,8 @@ func (r *router) releaseSstpEventClaims(pairId string, events []*model.EventReco
 // peer-ack) or ReleaseJtis / ReleaseOutbound (on delivery failure). The
 // events collection / pending list remains the durable source of truth, so
 // this in-memory claim is purely a same-node dedup and is safe across
-// takeover.
-func (r *router) claimSstpJtis(pairId string, candidates []string) []string {
-	return r.claimSstpJtisUpTo(pairId, candidates, len(candidates))
-}
-
-// claimSstpJtisUpTo is claimSstpJtis that claims at most max of candidates.
-func (r *router) claimSstpJtisUpTo(pairId string, candidates []string, max int) []string {
+// takeover. It claims at most max of the candidates.
+func (r *router) claimSstpJtis(pairId string, candidates []string, max int) []string {
 	if len(candidates) == 0 || max <= 0 {
 		return nil
 	}
