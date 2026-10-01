@@ -152,6 +152,14 @@ type router struct {
 	// pushHandoffs holds the pending restart hand-off for each push stream
 	// whose runner has been stopped and whose successor has not started yet.
 	pushHandoffs map[string]*pushHandoff
+	// pushStoppingRunners holds, for each push stream, the runner last retired
+	// on this node while it has not yet exited, for AwaitPushStopped. It is
+	// removed once the runner has finished.
+	pushStoppingRunners map[string]*pushRunner
+	// peerNotifiers holds the background stream-changed sender of each peer
+	// with calls still to make. Guarded by notifyMu.
+	peerNotifiers map[string]*peerNotifier
+	notifyMu      sync.Mutex
 	// runningPushRunners counts push runner goroutines on this node that have
 	// started and not yet finished, retired ones included.
 	runningPushRunners atomic.Int64
@@ -230,12 +238,11 @@ type router struct {
 	meteringObserver atomic.Pointer[meteringObserverHolder]
 	stats            statsTracker
 
-	httpClient          *http.Client
-	clusterSecret       string
-	recentOutboundWakes map[string]time.Time
-	outboundWakesMu     sync.Mutex
-	backfillInterval    time.Duration
-	backfillBatch       int
+	httpClient       *http.Client
+	clusterSecret    string
+	outboundWakes    *WakeCoalescer
+	backfillInterval time.Duration
+	backfillBatch    int
 	// pushConcurrency is the resolved I2SIG_PUSH_CONCURRENCY: how many RFC 8935
 	// POSTs a push stream's lease holder keeps in flight at once. Unset, it is
 	// derived from the available processors (ADR 0037). The batch the loop
@@ -371,6 +378,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		pushBuffers:            map[string]*buffer.EventPushBuffer{},
 		pushRunners:            map[string]*pushRunner{},
 		pushHandoffs:           map[string]*pushHandoff{},
+		pushStoppingRunners:    map[string]*pushRunner{},
+		peerNotifiers:          map[string]*peerNotifier{},
 		pollBuffers:            map[string]*buffer.EventPollBuffer{},
 		sstpClientStreams:      map[string]model.StreamStateRecord{},
 		sstpBuffers:            map[string]*buffer.EventPollBuffer{},
@@ -384,7 +393,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		cancel:                 cancel,
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		clusterSecret:          os.Getenv("I2SIG_CLUSTER_INTERNAL_TOKEN"),
-		recentOutboundWakes:    make(map[string]time.Time),
+		outboundWakes:          NewWakeCoalescer(WakeCoalesceWindow),
 		leaseOwners:            newLeaseOwnerCache(),
 	}
 
@@ -938,6 +947,20 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		restart := pushRunnerSettingsChanged(currentState.StreamConfiguration, stream.StreamConfiguration)
 		currentState.Update(stream)
 		r.pushStreams[sid] = currentState
+		if currentState.Status != model.StreamStateEnabled && !isRunnerPause(&currentState) {
+			// An operator's pause or disable (or the runner's own disable, read
+			// back) holds the stream: its runner is retired now, and a pending
+			// restart starts none. The runner sends at most the batches already
+			// out; AwaitPushStopped waits for it to exit. A runner's own pause,
+			// stored by this node's runner or another's, leaves it running: the
+			// holder's ends that pause, and a standby takes the stream over if
+			// the holder dies. A later re-enable starts a new runner.
+			delete(r.pushHandoffs, sid)
+			if runner := r.retirePushRunnerLocked(sid); runner != nil && runner.live() {
+				eventLogger.Info("PUSH-SRV: stream no longer enabled, stopping its runner", "sid", sid, "status", currentState.Status)
+			}
+			return
+		}
 		if !restart {
 			// A push transmitter set to enabled with no live runner gets one
 			// (#308), whatever stopped the last: its key, the receiver-401 limit,
@@ -968,11 +991,13 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		// starts once it has exited, so nothing goes out with the old settings
 		// afterwards and nothing is sent twice. This request does not wait.
 		// SETs routed meanwhile are already durable (no buffer is registered to
-		// wake), so the successor's preload picks them up.
+		// wake), so the successor's preload picks them up. A runner retired
+		// earlier by a pause and still stopping is waited for the same way.
 		old := r.retirePushRunnerLocked(sid)
-		handoff := &pushHandoff{done: make(chan struct{})}
-		r.pushHandoffs[sid] = handoff
-		go r.completePushHandoff(sid, old, handoff)
+		if old == nil {
+			old = r.stoppingRunnerLocked(sid)
+		}
+		r.startHandoffLocked(sid, old)
 		return
 	}
 	// preload the buffer with any existing events
@@ -997,6 +1022,12 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 		return
 	}
 	r.pushStreams[sid] = *stream
+	if old := r.stoppingRunnerLocked(sid); old != nil {
+		// A runner removed a moment ago is still stopping: start the new one
+		// only once it has exited, so the two never overlap.
+		r.startHandoffLocked(sid, old)
+		return
+	}
 	r.initPushStreamLocked(sid, stream, jtis)
 }
 
@@ -1357,23 +1388,32 @@ func (r *router) commitFanoutLocked(targets []*fanoutTarget, accepted map[string
 	}
 }
 
+// wakeScope selects which half of a target's wake wakeTargetScopedLocked does:
+// the local buffer submit alone, or that and the cross-node wake-up.
+type wakeScope int
+
+const (
+	wakeAll wakeScope = iota
+	wakeLocalOnly
+)
+
 // wakeTargetLocked hands one target's accepted JTIs to whichever runner owns
 // its delivery method. The caller must hold r.mu (at least RLock).
 func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
+	r.wakeTargetScopedLocked(t, jtis, wakeAll)
+}
+
+// wakeTargetScopedLocked is wakeTargetLocked limited to one scope. Ring-fed
+// local durability (#347) wakes local runners at WAL append, where the overlay
+// serves the SET before the drain stores it, and defers the cross-node wake to
+// commit (wakeTargetRemote): a remote owner reads only the store, and a wake
+// sent before the store write would find nothing (and coalescing would swallow
+// a second one). The caller must hold r.mu (at least RLock).
+func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wakeScope) {
+	remote := scope != wakeLocalOnly
 	switch t.mode {
 	case "PUSH":
-		// Lease-aware routing. The owner is read through leaseOwners rather than
-		// straight from the coordinator: one inbound SET produced one
-		// cluster_leases round trip inside the request, and the answer changes
-		// only when a lease changes hands (issue #287). The cache is kept honest
-		// by this node's own push lifecycle and expires within leaseOwnerCacheTTL
-		// otherwise; it steers a wake-up and never authorises a delivery.
-		resource := cluster.PushTransmitterResource(t.key)
-		ownerNodeId := r.leaseOwners.owner(resource, func() (string, error) {
-			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
-			return owner, err
-		})
-
+		ownerNodeId := r.pushLeaseOwner(t.key)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			// Local owner or no owner (we'll try to take it or backfill will find it).
 			// The comma-ok is load-bearing since the fan-out was split in two: the
@@ -1386,7 +1426,7 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 					buf.SubmitEvent(jti)
 				}
 			}
-		} else {
+		} else if remote {
 			// Remote owner, send one wake-up for the batch
 			go r.sendWakeup(t.key, "push", ownerNodeId, "")
 		}
@@ -1404,12 +1444,14 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 		}
 
 	case "SSTP-CLIENT":
-		// Deliberately NOT cached. The sstp-client lease is acquired, renewed and
-		// released by the dialer in internal/server, not by this router, so there
-		// is no first-hand transition for a cache here to hook — it would be a
-		// bare TTL with no invalidation story, which issue #287 rules out. The
-		// per-event cluster_leases cost the profiler measured was on the push
-		// leg; this read happens once per SSTP fan-out batch.
+		// Deliberately NOT cached for this decision. The sstp-client lease is
+		// acquired, renewed and released by the dialer in internal/server, not
+		// by this router, so there is no first-hand transition for a cache here
+		// to hook — it would be a bare TTL with no invalidation story, which
+		// issue #287 rules out. The per-event cluster_leases cost the profiler
+		// measured was on the push leg; this read happens once per SSTP fan-out
+		// batch. The owner read is noted in leaseOwners only so the ring-fed
+		// commit wake (wakeTargetRemote) can skip a broadcast to itself.
 		resource := cluster.SstpClientResource(t.key)
 		ownerNodeId, _, _, leaseErr := r.coordinator.GetLeaseOwner(resource)
 		if leaseErr != nil {
@@ -1417,6 +1459,8 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 			// silently makes every node deliver. Say so; the push arm reports
 			// its equivalent through leaseOwners.
 			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
+		} else {
+			r.leaseOwners.note(resource, ownerNodeId)
 		}
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[t.key]; ok {
@@ -1425,7 +1469,7 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 				}
 				buf.Wakeup()
 			}
-		} else {
+		} else if remote {
 			go r.broadcastSstpClientWake(t.key)
 		}
 
@@ -1436,8 +1480,47 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 			}
 			buf.Wakeup()
 		}
+		if remote {
+			go r.broadcastSstpServerWake(t.key)
+		}
+	}
+}
+
+// wakeTargetRemote is the cross-node half of a target's wake alone, for the
+// ring-fed commit (#347). It reads no router map, so it needs no router lock,
+// and no uncached lease: the PUSH owner comes from leaseOwners, and an
+// SSTP-client target is woken by the coalesced broadcast (at most one per pair
+// per 250ms, which every node but the lease owner ignores) unless the owner
+// noted at append is this node, whose buffer the append-time wake already fed.
+func (r *router) wakeTargetRemote(t *fanoutTarget) {
+	switch t.mode {
+	case "PUSH":
+		if ownerNodeId := r.pushLeaseOwner(t.key); ownerNodeId != "" && ownerNodeId != r.nodeId {
+			go r.sendWakeup(t.key, "push", ownerNodeId, "")
+		}
+	case "SSTP-CLIENT":
+		if r.leaseOwners.peek(cluster.SstpClientResource(t.key)) == r.nodeId {
+			return
+		}
+		go r.broadcastSstpClientWake(t.key)
+	case "SSTP-SERVER":
 		go r.broadcastSstpServerWake(t.key)
 	}
+}
+
+// pushLeaseOwner returns the owner of sid's push-transmitter lease. It is read
+// through leaseOwners rather than straight from the coordinator: one inbound
+// SET produced one cluster_leases round trip inside the request, and the
+// answer changes only when a lease changes hands (issue #287). The cache is
+// kept honest by this node's own push lifecycle and expires within
+// leaseOwnerCacheTTL otherwise; it steers a wake-up and never authorises a
+// delivery.
+func (r *router) pushLeaseOwner(sid string) string {
+	resource := cluster.PushTransmitterResource(sid)
+	return r.leaseOwners.owner(resource, func() (string, error) {
+		owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+		return owner, err
+	})
 }
 
 // sstpInboundRouteMode returns the RouteMode governing a pair's inbound (rx)
@@ -1602,19 +1685,19 @@ func (r *router) NotifySubjectFilterChange(sid string) {
 }
 
 func (r *router) sendWakeup(sid, mode, ownerNodeId, reason string) {
-	// Rate limiting / Coalescing. The reason is part of the key so a
+	// Coalescing, on both edges (#347): a wake suppressed inside the window
+	// arms one trailing wake. The reason is part of the key so a
 	// filter-change notification is never coalesced away by a buffer wake-up
 	// (or vice versa) that happens to target the same stream.
 	key := sid + ":" + mode + ":" + reason
-	r.outboundWakesMu.Lock()
-	lastWake, exists := r.recentOutboundWakes[key]
-	if exists && time.Since(lastWake) < 250*time.Millisecond {
-		r.outboundWakesMu.Unlock()
+	if !r.outboundWakes.Admit(key, func() { r.callWakeupNode(sid, mode, ownerNodeId, reason) }) {
 		return
 	}
-	r.recentOutboundWakes[key] = time.Now()
-	r.outboundWakesMu.Unlock()
+	r.callWakeupNode(sid, mode, ownerNodeId, reason)
+}
 
+// callWakeupNode resolves the owner node's address and sends it the wake.
+func (r *router) callWakeupNode(sid, mode, ownerNodeId, reason string) {
 	node, err := r.coordinator.GetNode(ownerNodeId)
 	if err != nil || node == nil {
 		eventLogger.Error("ROUTER: Error getting node info for wake-up", "nodeId", ownerNodeId, "error", err)
@@ -1719,7 +1802,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		})
 		if len(jtis) > 0 {
 			eventLogger.Debug("POLL-SRV: Prefetched events", "sid", sid, "count", len(jtis))
-			pollBuffer.SubmitEvents(jtis)
+			pollBuffer.AddEvents(jtis)
 		}
 	}
 
@@ -1928,7 +2011,7 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 			eventLogger.Info("PUSH-SRV runner stopped. PushHandler exiting.", "sid", sid)
 			return
 		}
-		if stream.Status != model.StreamStateEnabled {
+		if (stream.Status != model.StreamStateEnabled && !isRunnerPause(stream)) || r.pushStreamHeldOff(sid) {
 			eventLogger.Info("PUSH-SRV is no longer enabled. PushHandler exiting.", "sid", sid)
 			return
 		}
@@ -1963,6 +2046,14 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 			continue
 		}
 
+		// A newly acquired lease may be a takeover on a copy of the stream
+		// that is behind the store: confirm the stream is still there and
+		// enabled before sending anything. The deferred release gives the
+		// lease back.
+		if !r.leaseStreamEnabled(stream) {
+			return
+		}
+
 		// Lease acquired, start the actual push loop
 		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid)
 		shouldRetry := r.runPushLoop(resource, stream, runner, fencingToken)
@@ -1971,6 +2062,45 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 		}
 		// Loop back to re-acquire; the top of the loop exits on a stop or shutdown.
 	}
+}
+
+// leaseStreamEnabled reads the push stream from the store once its runner has
+// acquired the lease, and reports whether the runner may deliver. A stream gone
+// from the store, or stored as paused or disabled by an operator, may not: this
+// node's copy has not caught up with a change made elsewhere. A stream its last
+// holder's runner paused itself (receiver recovery, a missing signing key) is
+// taken over: that holder has lost the lease, so this runner ends the pause and
+// retries, pausing again if the receiver still fails or the key is still
+// missing. An operator's change stored after the read wins, and the runner
+// exits. A store read that fails is logged and lets the runner proceed.
+func (r *router) leaseStreamEnabled(stream *model.StreamStateRecord) bool {
+	sid := stream.StreamConfiguration.Id
+	stored, err := r.streamService.GetStreamState(r.ctx, sid)
+	switch {
+	case errors.Is(err, interfaces.ErrNotFound):
+		eventLogger.Info("PUSH-SRV: stream no longer in the store after taking its lease; PushHandler exiting.", "sid", sid)
+		return false
+	case err != nil || stored == nil:
+		eventLogger.Warn("PUSH-SRV: cannot read the stream after taking its lease; proceeding", "sid", sid, "error", err)
+		return true
+	case isRunnerPause(stored):
+		if !r.takeOverRunnerPause(stream, stored) {
+			eventLogger.Info("PUSH-SRV: stream status changed before its previous runner's pause could be taken over; PushHandler exiting.",
+				"sid", sid)
+			return false
+		}
+		eventLogger.Info("PUSH-SRV: took over a stream its previous runner paused; resumed so this runner retries",
+			"sid", sid, "reason", stored.ErrorMsg)
+		return true
+	case stored.Status != model.StreamStateEnabled:
+		eventLogger.Info("PUSH-SRV: stream not enabled in the store after taking its lease; PushHandler exiting.",
+			"sid", sid, "status", stored.Status)
+		return false
+	}
+	if stream.Status != model.StreamStateEnabled {
+		stream.SetStatus(model.StreamStateEnabled, "")
+	}
+	return true
 }
 
 // runPushLoop handles the event push loop for a given stream, including lease renewal, T2
@@ -2114,6 +2244,16 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	// buffer order (ADR 0040). Registered after the acker's defer, the wait
 	// below runs first: however the loop exits, every batch already sent
 	// completes and hands its acks to the acker before the acker is closed.
+	// backlog is set while the last backfill read came back full: more SETs
+	// are pending than were queued. The loop then reads again each time a
+	// batch completes and the buffer runs low, so a burst deeper than one
+	// read drains at delivery speed, not one batch per backfill tick (#347).
+	backlog := false
+	refillAt := r.backfillBatch
+	if refillAt < 1 {
+		refillAt = 1
+	}
+
 	k := r.pushInFlightBatches()
 	results := make(chan pushBatchResult, k)
 	inflight := 0
@@ -2171,6 +2311,12 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				// Checked before taking a new batch: select picks at random among
 				// ready arms, so a stop does not win over a queued JTI on its own.
 				// The JTI is still pending in the store for the successor.
+				return false
+			}
+			if r.pushStreamHeldOff(sid) {
+				// Paused or disabled elsewhere: the JTI stays pending, and a
+				// re-enable starts a runner that sends it.
+				eventLogger.Info("PUSH-SRV: stream paused or disabled, runner exiting", "sid", sid)
 				return false
 			}
 			// The signing key is resolved for every batch from the router's cache,
@@ -2242,6 +2388,9 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			}
 			fold(res)
 			if res.signErr == nil && res.failedJti == "" {
+				if backlog && eventBuf.Cnt() < refillAt {
+					backlog = r.backfillPushBufferOnWake(sid, eventBuf)
+				}
 				continue
 			}
 			// A failure in one batch takes the stream into a pause or recovery.
@@ -2306,14 +2455,24 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			if runner.stopped() {
 				return false
 			}
-			r.backfillPushBuffer(sid, eventBuf)
+			if inflight == 0 && r.pushStreamHeldOff(sid) {
+				// An idle runner on a paused stream exits here, so its lease is
+				// released, rather than holding it until the next SET arrives.
+				eventLogger.Info("PUSH-SRV: stream paused or disabled, runner exiting", "sid", sid)
+				return false
+			}
+			if backlog {
+				backlog = r.backfillPushBufferOnWake(sid, eventBuf)
+			} else {
+				backlog = r.backfillPushBuffer(sid, eventBuf)
+			}
 			r.sweepDeferredHybridRelays(heartbeatCtx, stream)
 		case <-wakeup:
 			if runner.stopped() {
 				return false
 			}
 			eventLogger.Debug("PUSH-SRV: Wake-up received, triggering backfill", "sid", sid)
-			r.backfillPushBuffer(sid, eventBuf)
+			backlog = r.backfillPushBufferOnWake(sid, eventBuf)
 		case <-idle.C():
 			if runner.stopped() {
 				return false
@@ -2570,15 +2729,19 @@ func (r *router) sweepDeferredHybridRelays(ctx context.Context, stream *model.St
 	}
 }
 
-func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer) {
+// backfillPushBuffer is the ticker's backfill: it refills an empty buffer
+// with one batch. It reports whether that read came back full, i.e. more may
+// be pending behind it.
+func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer) (full bool) {
 	if eventBuf.Cnt() > 0 {
-		return
+		return false
 	}
 
 	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
 		MaxEvents:         int32(r.backfillBatch),
 		ReturnImmediately: true,
 	})
+	full = r.backfillBatch > 0 && len(jtis) >= r.backfillBatch
 	// A JTI sent and awaiting its coalesced ack is still pending in the store,
 	// so it is not read back into the buffer (#336).
 	if v, ok := r.pushAckers.Load(sid); ok && len(jtis) > 0 {
@@ -2596,6 +2759,78 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 		eventLogger.Debug("PUSH-SRV: Backfill found pending events", "sid", sid, "count", len(jtis))
 		eventBuf.SubmitEvents(jtis)
 	}
+	return full
+}
+
+// maxWakeBackfillBatches caps how many backfill batches one wake may queue,
+// so a wake on a stream with a deep backlog does not read it all into memory
+// at once. A capped read reports a backlog, and the push loop reads again as
+// the buffer drains (not on the next tick), so the tail is not left to the
+// ticker's one-batch-per-interval refill.
+const maxWakeBackfillBatches = 10
+
+// backfillPushBufferOnWake is the wake's backfill, and it is level-triggered
+// (#347). A wake, most often a cross-node one for a SET another node wrote,
+// says only "this stream has work", and it arrives once. backfillPushBuffer
+// returns while the buffer holds anything, so a wake that found the loop busy
+// was dropped. Here the store is read regardless of buffer depth, past the
+// JTIs already queued or in flight, and read again until a short read shows
+// nothing newer is pending (or the cap is reached).
+//
+// It runs on the push loop's goroutine, which is also where the buffer is
+// popped and the acker reserved, so every JTI the loop has taken is either
+// still queued or in flight. A JTI submitted locally but still on the
+// buffer's input channel can be queued twice; the acker's reserve drops the
+// second copy while the first is in flight, and delivery stays at-least-once.
+//
+// It reports backlog when it stopped at the cap with the store still handing
+// back full reads: more is pending than one wake may queue.
+func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPushBuffer) (backlog bool) {
+	known := map[string]struct{}{}
+	for _, jti := range eventBuf.Queued() {
+		known[jti] = struct{}{}
+	}
+	var ack *acker
+	inFlight := 0
+	if v, ok := r.pushAckers.Load(sid); ok {
+		ack = v.(*acker)
+		inFlight = ack.size()
+	}
+
+	batch := r.backfillBatch
+	if batch < 1 {
+		batch = 1
+	}
+	submitted := 0
+	for submitted < batch*maxWakeBackfillBatches {
+		limit := len(known) + inFlight + batch
+		jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+			MaxEvents:         int32(limit),
+			ReturnImmediately: true,
+		})
+		fresh := make([]string, 0, len(jtis))
+		for _, jti := range jtis {
+			if _, ok := known[jti]; ok {
+				continue
+			}
+			// A JTI sent and awaiting its coalesced ack is still pending in
+			// the store, so it is not read back into the buffer (#336).
+			if ack != nil && ack.inFlight(jti) {
+				continue
+			}
+			known[jti] = struct{}{}
+			fresh = append(fresh, jti)
+		}
+		if len(fresh) > 0 {
+			eventLogger.Debug("PUSH-SRV: Wake backfill found pending events", "sid", sid, "count", len(fresh))
+			eventBuf.SubmitEvents(fresh)
+			submitted += len(fresh)
+		}
+		if len(jtis) < limit || len(fresh) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // drainPushBatch collects up to max JTIs for one push batch: first, then

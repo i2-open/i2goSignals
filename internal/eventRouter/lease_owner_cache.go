@@ -90,6 +90,20 @@ func (c *leaseOwnerCache) owner(resource string, load func() (string, error)) st
 	return owner
 }
 
+// peek returns the cached, unexpired owner of resource, or "" — it never loads.
+func (c *leaseOwnerCache) peek(resource string) string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[resource]
+	c.mu.Unlock()
+	if ok && c.now().Before(entry.expires) {
+		return entry.owner
+	}
+	return ""
+}
+
 // note records an owner this node observed first-hand — its own successful
 // acquire or renew. This is the invalidation hook that matters: it makes the
 // cache correct at the instant of the transition rather than TTL later.

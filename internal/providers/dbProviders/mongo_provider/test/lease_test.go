@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
+	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -124,6 +125,55 @@ func (s *LeaseTestSuite) TestExpiredLeaseReadsUnowned() {
 	owner, _, _, err = coord.GetLeaseOwner(resource)
 	s.NoError(err)
 	s.Equal("", owner, "a released lease has no owner")
+}
+
+// TestPurgeExpiredLeasesAndStaleNodes proves the Mongo Reaper matches the
+// memory reference (#350): an expired lease row whose resource keep rejects is
+// deleted (the next tenure restarts at token 1), a kept or live row is
+// untouched, and a node last seen before the cutoff is deleted.
+func (s *LeaseTestSuite) TestPurgeExpiredLeasesAndStaleNodes() {
+	coord, ok := s.provider.Coordinator().(*mongo_provider.MongoCoordinator)
+	s.Require().True(ok)
+	clock := time.Now().UTC().Truncate(time.Millisecond)
+	coord.SetClock(func() time.Time { return clock })
+	defer coord.SetClock(nil)
+
+	deleted, kept, live := "push-transmitter:reap-deleted", "push-transmitter:reap-kept", "push-transmitter:reap-live"
+	for _, res := range []string{deleted, kept, live} {
+		for i := 0; i < 3; i++ {
+			acquired, _, err := coord.TryAcquireOrRenewLease(res, "node-1", time.Second)
+			s.Require().NoError(err)
+			s.Require().True(acquired)
+			s.Require().NoError(coord.ReleaseLeaseIfOwned(res, "node-1"))
+		}
+	}
+	clock = clock.Add(5 * time.Minute)
+	_, _, err := coord.TryAcquireOrRenewLease(live, "node-1", 30*time.Second)
+	s.Require().NoError(err)
+
+	keep := func(resource string) bool { return resource == kept }
+	n, err := coord.PurgeExpiredLeases(clock.Add(-90*time.Second), keep)
+	s.Require().NoError(err)
+	s.GreaterOrEqual(n, 1, "other suite tests may leave expired rows too")
+
+	_, tok, _ := coord.TryAcquireOrRenewLease(deleted, "node-2", time.Second)
+	s.Equal(int64(1), tok, "the purged row is gone")
+	_, tok, _ = coord.TryAcquireOrRenewLease(kept, "node-2", time.Second)
+	s.Equal(int64(4), tok, "a kept row keeps its fencing history")
+	owner, _, _, _ := coord.GetLeaseOwner(live)
+	s.Equal("node-1", owner, "a live lease is untouched")
+
+	now := time.Now().UTC()
+	s.Require().NoError(coord.RegisterNode(model.ClusterNode{Id: "reap-gone", LastSeenAt: now.Add(-5 * time.Minute)}))
+	s.Require().NoError(coord.RegisterNode(model.ClusterNode{Id: "reap-live", LastSeenAt: now}))
+	_, err = coord.PurgeStaleNodes(now.Add(-90 * time.Second))
+	s.Require().NoError(err)
+	gone, err := coord.GetNode("reap-gone")
+	s.NoError(err)
+	s.Nil(gone)
+	liveNode, err := coord.GetNode("reap-live")
+	s.NoError(err)
+	s.NotNil(liveNode)
 }
 
 func TestLeaseSuite(t *testing.T) {

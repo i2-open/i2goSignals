@@ -16,8 +16,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
@@ -362,6 +364,11 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	// logged but never blocks local deletion.
 	sa.CascadeReceiverStreamDelete(r.Context(), state)
 
+	// The teardown and the store delete run under the stream-table lock: a
+	// stream-table sync between them would read the stream from the store and
+	// start it again (#350).
+	unlock := lockStreamTable(sa)
+
 	// Final teardown of the (now-drained) receiver and its bookkeeping. The
 	// context-cancel here is a no-op when the poll goroutine already exited.
 	sa.CloseReceiver(authContext.StreamId)
@@ -370,10 +377,12 @@ func StreamDeleteHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	sa.GetEventRouter().RemoveStream(authContext.StreamId)
 
 	err = sa.GetStreamService().DeleteStream(r.Context(), authContext.StreamId)
+	unlock()
 	if err != nil {
 		writeStreamNotFoundOrFault(w, err, "StreamDelete: deleting stream", authContext.StreamId, "")
 		return
 	}
+	notifyStreamChanged(sa, authContext.StreamId)
 	// sa.EventRouter.RemoveStream(authContext)
 	// SSF 1.0 §8.1.5 Stream Configuration Delete: a successful delete answers
 	// 204 No Content (the response carries no body).
@@ -614,6 +623,7 @@ func StreamCreateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	}
 	sa.GetEventRouter().UpdateStreamState(state)
 	sa.HandleReceiver(state)
+	notifyStreamChanged(sa, configResp.Id)
 
 	serverLog.Info(fmt.Sprintf("Stream %s CREATED", configResp.Id))
 
@@ -658,6 +668,8 @@ func deleteSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 		writeStreamNotFoundOrFault(w, err, "SSTP delete: deleting pair", sid, "")
 		return
 	}
+
+	notifyStreamChanged(sa, sid)
 
 	status := http.StatusOK
 	if outcome.PartialFailure() {
@@ -728,6 +740,7 @@ func createSstpPairHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	// Start the SSTP-client runner (initiator) / register the responder side so
 	// the pair begins serving immediately, mirroring the StreamConfiguration path.
 	sa.GetEventRouter().UpdateStreamState(&rec)
+	notifyStreamChanged(sa, rec.StreamConfiguration.Id)
 
 	serverLog.Info("SSTP pair CREATED", "pairId", rec.PairId, "role", bootstrap.Role)
 
@@ -885,6 +898,7 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		sa.GetEventRouter().UpdateStreamState(state)
 		sa.HandleReceiver(state)
 	}
+	notifyStreamChanged(sa, streamId)
 
 	serverLog.Info(fmt.Sprintf("Stream %s UPDATED", streamId))
 
@@ -938,6 +952,12 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The prefix marks a push runner's own pause, which a lease takeover ends;
+	// an operator's reason carrying it would be taken for one.
+	if strings.HasPrefix(jsonRequest.Reason, eventRouter.PushRunnerReasonPrefix) {
+		http.Error(w, "reason may not start with "+strconv.Quote(eventRouter.PushRunnerReasonPrefix), http.StatusBadRequest)
+		return
+	}
 	modified := false
 	// Resolve the SID the way GetStatus does (#303): GetStreamState is a document
 	// _id lookup, so the inbound SID of an SSTP pair 404'd here while GET /status
@@ -989,6 +1009,10 @@ func UpdateStatusHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	if modified {
 		sa.GetEventRouter().UpdateStreamState(streamState)
 		sa.HandleReceiver(streamState)
+		// The peers apply the new status too: a pause or disable must stop the
+		// runner wherever it runs, and a re-enable start one wherever the lease
+		// lands.
+		notifyStreamChanged(sa, authCtx.StreamId)
 	}
 
 	statusResp, err := sa.GetStreamService().GetStatus(r.Context(), authCtx.StreamId)

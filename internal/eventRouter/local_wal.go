@@ -498,9 +498,10 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 }
 
 // ringFeed makes a WAL entry readable through the ring-fed overlay and wakes
-// its targets (#342). The wake happens here, once, and never again at drain:
-// a buffer re-woken with a JTI its runner already delivered and acked would
-// deliver it a second time.
+// its local targets (#342). The local wake happens here, once, and never again
+// at drain: a buffer re-woken with a JTI its runner already delivered and acked
+// would deliver it a second time. The overlay is local, so the cross-node wake
+// waits for commitWalEntry, after the store write (#347).
 func (r *router) ringFeed(e *walEntry) {
 	r.walRT.overlay.add(e)
 	if len(e.Targets) == 0 {
@@ -509,7 +510,7 @@ func (r *router) ringFeed(e *walEntry) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, t := range e.Targets {
-		r.wakeTargetLocked(&fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}, t.Jtis)
+		r.wakeTargetScopedLocked(&fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}, t.Jtis, wakeLocalOnly)
 	}
 }
 
@@ -725,25 +726,46 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		return
 	}
 	if r.walRT != nil {
-		// Ring-fed: the targets were woken at append (ringFeed); only meter.
+		// Ring-fed: the local runners were woken at append (ringFeed); meter,
+		// and wake a remote owner now that the store holds the SET (#347).
 		// A re-queued duplicate was fed then too, and its held ack (if it
 		// has already been delivered) removes the marker written above.
+		committed := make([]*fanoutTarget, 0, len(targets))
+		r.mu.RLock()
 		for _, t := range targets {
+			hit := false
 			for _, jti := range t.jtis {
 				rec, ok := accepted[jti]
 				if !ok {
 					rec, ok = requeued[t.docID][jti]
 				}
 				if ok {
+					hit = true
 					r.observeMeteredEvent(t.sid, DirectionEgress, &rec.Event)
 				}
 			}
+			if hit {
+				committed = append(committed, t)
+			}
 		}
+		r.mu.RUnlock()
+		r.wakeCommittedRemote(committed)
 		return
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	r.commitFanoutLocked(targets, accepted, requeued)
+}
+
+// wakeCommittedRemote sends the cross-node wake for ring-fed targets whose
+// SETs the drain has just stored (#347). It runs on the drain path once per
+// committed entry, so it holds no router lock and reads no uncached lease (see
+// wakeTargetRemote). The append-time local wake has already served a locally
+// owned target.
+func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
+	for _, t := range targets {
+		r.wakeTargetRemote(t)
+	}
 }
 
 // endReplayIfDrained lifts the start-up ingest gate once every entry found in

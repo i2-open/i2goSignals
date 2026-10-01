@@ -132,3 +132,42 @@ func TestPauseEnabledForKeyUnavailable(t *testing.T) {
 	assert.Equal(t, "operator", stored.ErrorMsg)
 	assert.Nil(t, stored.KeyUnavailableSince)
 }
+
+// TestResumePausedWithReason: a lease takeover ends a push runner's own pause
+// only while the store still holds that pause, so an operator's pause with
+// another reason, or a disable, made after the takeover read the stream stands.
+func TestResumePausedWithReason(t *testing.T) {
+	h := newRetryHarness(t)
+	ctx := context.Background()
+	const runnerReason = "PUSH-SRV: transport failure"
+
+	cases := []struct {
+		name       string
+		status     string
+		reason     string
+		wantResume bool
+	}{
+		{"runner pause", model.StreamStatePause, runnerReason, true},
+		{"operator pause", model.StreamStatePause, "operator", false},
+		{"operator disable", model.StreamStateDisable, runnerReason, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newReceiverFixture(t, model.DeliveryPoll, model.RouteModePublish, "resume-"+tc.name)
+			require.NoError(t, h.streamDAO.Create(ctx, rec))
+			sid := rec.StreamConfiguration.Id
+			h.svc.UpdateStreamStatus(ctx, sid, tc.status, tc.reason)
+
+			assert.Equal(t, tc.wantResume, h.svc.ResumePausedWithReason(ctx, sid, runnerReason))
+			stored, err := h.svc.GetStreamState(ctx, sid)
+			require.NoError(t, err)
+			if tc.wantResume {
+				assert.Equal(t, model.StreamStateEnabled, stored.Status)
+				assert.Empty(t, stored.ErrorMsg)
+			} else {
+				assert.Equal(t, tc.status, stored.Status, "the operator's status stands")
+				assert.Equal(t, tc.reason, stored.ErrorMsg)
+			}
+		})
+	}
+}

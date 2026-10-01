@@ -87,6 +87,39 @@ func TestPollClaim_AckAndReleaseFreeClaims(t *testing.T) {
 	})
 }
 
+// A JTI submitted twice (a wake and a poll's prefetch) is served once per
+// batch, and its ack removes every copy rather than leaving one to serve.
+func TestPollClaim_DuplicateSubmitIsServedOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := claimBuffer(t, "a")
+		b.SubmitEvents([]string{"a", "b"})
+		b.SubmitEvent("a")
+		synctest.Wait()
+
+		params := model.PollParameters{ReturnImmediately: true}
+		_, first, more := b.ClaimEvents(params, time.Minute)
+		require.Equal(t, []string{"a", "b"}, *first)
+		require.False(t, more, "the hidden copies are not counted as more")
+		b.AckEvents(*first)
+		require.Zero(t, b.Cnt(), "an ack removes every copy")
+		_, again, _ := b.ClaimEvents(params, time.Minute)
+		require.Nil(t, again, "an acked JTI is not served again")
+
+		b.SubmitEvent("a")
+		synctest.Wait()
+		require.Equal(t, 1, b.Cnt(), "a JTI submitted after its ack is queued again")
+	})
+}
+
+// AddEvents queues before it returns, so the next claim serves the JTIs.
+func TestPollClaim_AddEventsIsServedAtOnce(t *testing.T) {
+	b := claimBuffer(t)
+	b.AddEvents([]string{"a", "b", "a"})
+	_, got, _ := b.ClaimEvents(model.PollParameters{ReturnImmediately: true}, time.Minute)
+	require.NotNil(t, got)
+	require.Equal(t, []string{"a", "b"}, *got)
+}
+
 func TestPollClaim_ZeroTTLTakesNoClaim(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := claimBuffer(t, jtiList(3)...)

@@ -312,7 +312,7 @@ func (r *router) nudgePushRunnersKeyCheck() {
 // stream store, then the router, so the poll copy and the SSTP dial loop react.
 // The stored record is re-read first and written only while it is still in the
 // same pause, so an operator change made meanwhile, or another node's check,
-// wins.
+// wins. The other nodes are told in the background.
 func (r *router) resolveKeyUnavailablePause(listed *model.StreamStateRecord, status, reason string) {
 	sc := listed.StreamConfiguration
 	sid := sc.Id
@@ -334,6 +334,7 @@ func (r *router) resolveKeyUnavailablePause(listed *model.StreamStateRecord, sta
 	if fresh, err := r.streamService.GetStreamStateBySID(r.ctx, sid); err == nil && fresh != nil {
 		r.UpdateStreamState(fresh)
 	}
+	r.announceStreamChanged(sid)
 }
 
 // syncResolvedKeyPause brings this node's copy of stored up to date when that

@@ -92,6 +92,13 @@ type SignalsApplication struct {
 	InternalServer       *http.Server
 	// PprofServer is the optional net/http/pprof listener (I2SIG_PPROF_ADDR).
 	PprofServer *http.Server
+	// dupAddrWarned holds the peers already warned about for advertising this
+	// node's wake-up address (#348), so each clash is logged once. Touched
+	// only from registerNode on the backgroundSync goroutine.
+	dupAddrWarned map[string]bool
+	// syncMu serializes stream-table syncs: the periodic one on the
+	// backgroundSync goroutine and those a peer's stream-changed call runs.
+	syncMu sync.Mutex
 }
 
 func (sa *SignalsApplication) Name() string {
@@ -370,13 +377,9 @@ func (sa *SignalsApplication) backgroundSync() {
 			if syncCounter >= 4 { // Every 40s
 				syncCounter = 0
 				serverLog.Debug("Periodic background sync starting")
-				sa.InitializeReceivers()
-
-				// Sync router state
-				states := sa.StreamService.GetStateMap(context.Background())
-				for _, state := range states {
-					sa.EventRouter.UpdateStreamState(&state)
-				}
+				// The fallback for a missed stream-changed call: start new
+				// streams, drop deleted ones, purge stale cluster rows.
+				sa.syncStreamTable()
 			}
 		case <-sa.stopSync:
 			return
@@ -416,8 +419,65 @@ func (sa *SignalsApplication) enforceLocalModeCluster() {
 	}
 }
 
+// CEnvClusterAdvertiseUrl names the wake-up address a node advertises to its
+// peers in cluster_nodes. When set it is stored verbatim; when unset the
+// address is derived from BASE_URL and I2SIG_CLUSTER_INTERNAL_PORT (#348).
+const CEnvClusterAdvertiseUrl = "I2SIG_CLUSTER_ADVERTISE_URL"
+
 // registerNode registers the current node in the cluster with its ID, address, version, and timestamps.
 func (sa *SignalsApplication) registerNode() {
+	addr := sa.advertisedAddress()
+
+	node := model.ClusterNode{
+		Id:         sa.NodeID,
+		Address:    addr,
+		Version:    constants.GoSignalsVersion,
+		StartedAt:  sa.StartedAt,
+		LastSeenAt: time.Now().UTC(),
+	}
+	if sa.Coordinator == nil {
+		serverLog.Warn("RegisterNode skipped: coordinator not initialized")
+		return
+	}
+	err := sa.Coordinator.RegisterNode(node)
+	if err != nil {
+		serverLog.Error("Failed to register node", "error", err)
+		return
+	}
+	sa.warnDuplicateAdvertisedAddress(addr)
+}
+
+// warnDuplicateAdvertisedAddress logs one WARN per live peer that advertises
+// the same wake-up address as this node (#348). Wake-up calls addressed to
+// either node reach only one of them, so cross-node delivery silently falls
+// back to the backfill. Host case is ignored, as DNS ignores it.
+func (sa *SignalsApplication) warnDuplicateAdvertisedAddress(addr string) {
+	nodes, err := sa.Coordinator.GetActiveNodes()
+	if err != nil {
+		serverLog.Debug("Duplicate advertised-address check skipped: cannot read active cluster nodes", "error", err)
+		return
+	}
+	for _, n := range nodes {
+		if n.Id == sa.NodeID || !strings.EqualFold(n.Address, addr) || sa.dupAddrWarned[n.Id] {
+			continue
+		}
+		if sa.dupAddrWarned == nil {
+			sa.dupAddrWarned = make(map[string]bool)
+		}
+		sa.dupAddrWarned[n.Id] = true
+		serverLog.Warn("CLUSTER: another live cluster node advertises the same wake-up address; wake-up calls meant for one node reach the other and cross-node delivery falls back to backfill. Give each node its own address with "+CEnvClusterAdvertiseUrl+" or a per-node BASE_URL (see docs/Cluster.md).",
+			"address", addr, "nodeID", sa.NodeID, "peerNodeID", n.Id)
+	}
+}
+
+// advertisedAddress is the wake-up address this node publishes in
+// cluster_nodes: I2SIG_CLUSTER_ADVERTISE_URL verbatim when set, else
+// http://<BASE_URL host>:<I2SIG_CLUSTER_INTERNAL_PORT or main port>.
+func (sa *SignalsApplication) advertisedAddress() string {
+	if v := strings.TrimSpace(os.Getenv(CEnvClusterAdvertiseUrl)); v != "" {
+		return v
+	}
+
 	sa.mu.RLock()
 	server := sa.Server
 	baseUrl := sa.BaseUrl
@@ -451,22 +511,7 @@ func (sa *SignalsApplication) registerNode() {
 	if !strings.HasPrefix(addr, "http") {
 		addr = "http://" + addr
 	}
-
-	node := model.ClusterNode{
-		Id:         sa.NodeID,
-		Address:    addr,
-		Version:    constants.GoSignalsVersion,
-		StartedAt:  sa.StartedAt,
-		LastSeenAt: time.Now().UTC(),
-	}
-	if sa.Coordinator == nil {
-		serverLog.Warn("RegisterNode skipped: coordinator not initialized")
-		return
-	}
-	err := sa.Coordinator.RegisterNode(node)
-	if err != nil {
-		serverLog.Error("Failed to register node", "error", err)
-	}
+	return addr
 }
 
 // StartServer creates a real net/http server wrapping the application handler.

@@ -172,6 +172,10 @@ services:
       - BASE_URL=https://gosignals1:8888/
       - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      # Wake-up calls between goSignals1 and goSignals1b go over the plain
+      # HTTP internal listener; each node advertises its own address (#348).
+      - I2SIG_CLUSTER_INTERNAL_PORT=8898
+      - I2SIG_CLUSTER_ADVERTISE_URL=http://goSignals1:8898
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals1b:
@@ -192,9 +196,13 @@ services:
       # The env file's WAL directory belongs to goSignals1; a WAL directory is
       # owned by one node and a second node pointed at it refuses to start.
       - I2SIG_STORE_WAL_DIR=/app/resources/wal/goSignals1b
+      # BASE_URL names goSignals1 (the cluster's public address), so the
+      # wake-up address is set explicitly or peers would call goSignals1 (#348).
       - BASE_URL=https://gosignals1:8888/
       - I2SIG_ISSUER_DEFAULT=https://gosignals1:8888
       - I2SIG_CLUSTER_INTERNAL_TOKEN=cluster-secret-123
+      - I2SIG_CLUSTER_INTERNAL_PORT=8898
+      - I2SIG_CLUSTER_ADVERTISE_URL=http://goSignals1b:8898
       - I2SIG_STORE_MONGO_WATCH_ENABLED=false
 
   goSignals2:

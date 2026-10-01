@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/goSignals"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -253,6 +254,16 @@ func (h *HttpRouter) peerRoutes() Routes {
 			http.MethodPost,
 			"/_cluster/wake-sstp-server",
 			h.sa.WakeSstpServer,
+			false,
+		},
+		// A peer created, updated, re-statused or deleted a stream: reconcile it now
+		// (#349, #350). Same SPIFFE/HMAC auth; the sender coalesces repeats for a
+		// stream a peer has not yet acked, not a window as the wake-ups do.
+		Route{
+			"StreamChanged",
+			http.MethodPost,
+			eventRouter.StreamChangedPath,
+			h.sa.StreamChanged,
 			false,
 		},
 

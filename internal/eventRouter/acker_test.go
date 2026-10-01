@@ -333,7 +333,7 @@ func TestSstpAckCoalescing_ClaimHeldUntilAckWritten(t *testing.T) {
 	for _, jti := range jtis {
 		h.persistOutboundEvent(t, txSid, jti)
 	}
-	claimed := r.claimSstpJtis(pairId, jtis)
+	claimed := r.claimSstpJtis(pairId, jtis, len(jtis))
 	require.Len(t, claimed, 3)
 	sent := r.eventService.GetEventRecords(context.Background(), claimed)
 	require.Len(t, sent, 3)
@@ -352,7 +352,7 @@ func TestSstpAckCoalescing_ClaimHeldUntilAckWritten(t *testing.T) {
 	assert.Equal(t, 2, n)
 	assert.Equal(t, 2, claims(), "the acked SETs stay claimed until their ack is written; the unacked one is released")
 	assert.Equal(t, 3, pending())
-	assert.Empty(t, r.claimSstpJtis(pairId, jtis[:2]), "a claimed SET is not handed out again")
+	assert.Empty(t, r.claimSstpJtis(pairId, jtis[:2], 2), "a claimed SET is not handed out again")
 
 	ack := r.sstpAcker(pairId)
 	require.NotNil(t, ack)

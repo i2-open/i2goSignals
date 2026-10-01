@@ -292,7 +292,11 @@ func (r *router) recoveryLoop(ctx context.Context, stream *model.StreamStateReco
 		if err == nil && status != nil {
 			switch status.Status {
 			case model.StreamStateEnabled:
-				r.updateStream(stream, model.StreamStateEnabled, "")
+				// An operator's pause or disable stored during recovery wins.
+				if !r.resumeOwnPause(stream) {
+					r.logRecoveryResolved(sid, RecoveryOutcomeDisabled, currentMode, cfg.Clock().Sub(started))
+					return RecoveryOutcomeDisabled
+				}
 				r.logRecoveryResolved(sid, RecoveryOutcomeResumed, currentMode, cfg.Clock().Sub(started))
 				return RecoveryOutcomeResumed
 

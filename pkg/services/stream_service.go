@@ -1810,6 +1810,18 @@ func (s *StreamService) PauseEnabledForKeyUnavailable(ctx context.Context, strea
 	})
 }
 
+// ResumePausedWithReason ends a pause a push runner took itself: enabled is
+// written only while the stored stream is still paused with reason, the
+// status in one conditional write, so an operator's disable or re-enable made
+// after the caller read the stream wins, and so does an operator's pause
+// already stored with another reason. It reports whether enabled was written.
+func (s *StreamService) ResumePausedWithReason(ctx context.Context, streamID string, reason string) bool {
+	return s.updateStreamStatus(ctx, streamID, statusWrite{
+		status:   model.StreamStateEnabled,
+		ifStatus: model.StreamStatePause, ifReason: reason,
+	})
+}
+
 // statusWrite is one status write together with the marker it carries, if any:
 // TransmitterCaused (#310) or KeyUnavailableSince (#312). Whichever marker a
 // write does not set, it clears.
@@ -1823,6 +1835,9 @@ type statusWrite struct {
 	// status is still ifStatus, in one conditional write (UpdateIfStatus), so
 	// a change made after the caller read the stream wins (#318).
 	ifStatus string
+	// ifReason, with ifStatus, also requires the stored reason to be ifReason
+	// when the record is read. Only the status is in the conditional write.
+	ifReason string
 }
 
 // applyTo writes w onto rec in memory the way the DAO writes it.
@@ -1886,7 +1901,7 @@ func (s *StreamService) updateStreamStatusIf(ctx context.Context, streamID strin
 		}
 		rec = found
 	}
-	if rec.Status != w.ifStatus {
+	if rec.Status != w.ifStatus || (w.ifReason != "" && rec.ErrorMsg != w.ifReason) {
 		return false
 	}
 	persist := rec.DeepCopy()
@@ -1975,17 +1990,29 @@ func (s *StreamService) GetStatus(ctx context.Context, streamID string) (*model.
 }
 
 func (s *StreamService) GetStateMap(ctx context.Context) map[string]model.StreamStateRecord {
-	states, err := s.streamDAO.List(ctx)
+	stateMap, err := s.LoadStateMap(ctx)
 	if err != nil {
 		ssLog.Error("Error getting state map", "error", err)
 		return nil
+	}
+	return stateMap
+}
+
+// LoadStateMap is GetStateMap that reports a store failure instead of
+// returning nil. Stream-table reconciliation (#350) needs to tell "the store has
+// no streams" from "the store could not be read": only the first may drop the
+// streams a node is running.
+func (s *StreamService) LoadStateMap(ctx context.Context) (map[string]model.StreamStateRecord, error) {
+	states, err := s.streamDAO.List(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	stateMap := make(map[string]model.StreamStateRecord, len(states))
 	for _, state := range states {
 		stateMap[state.StreamConfiguration.Id] = state
 	}
-	return stateMap
+	return stateMap, nil
 }
 
 // ListReceiverStreams returns the streams that receive events on this server

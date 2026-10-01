@@ -8,7 +8,7 @@
 package cluster
 
 import (
-	"fmt"
+	"strings"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -60,20 +60,63 @@ type ClusterCoordinator interface {
 	GetNode(nodeId string) (*model.ClusterNode, error)
 }
 
+// The kind prefixes of the lease resources, shared by the resource builders
+// below and ResourceId.
+const (
+	pushTransmitterKind = "push-transmitter"
+	pollReceiverKind    = "poll-receiver"
+	sstpClientKind      = "sstp-client"
+)
+
 // PushTransmitterResource is the lease resource a push transmitter's runner
 // holds for stream sid.
 func PushTransmitterResource(sid string) string {
-	return fmt.Sprintf("push-transmitter:%s", sid)
+	return pushTransmitterKind + ":" + sid
 }
 
 // PollReceiverResource is the lease resource a poll receiver holds for
 // stream sid.
 func PollReceiverResource(sid string) string {
-	return fmt.Sprintf("poll-receiver:%s", sid)
+	return pollReceiverKind + ":" + sid
 }
 
 // SstpClientResource is the lease resource an SSTP client (dialer) holds for
 // pair pairId.
 func SstpClientResource(pairId string) string {
-	return fmt.Sprintf("sstp-client:%s", pairId)
+	return sstpClientKind + ":" + pairId
+}
+
+// Reaper is the optional garbage-collection half of a coordinator (#350).
+// Nodes that stopped heartbeating and leases whose stream was deleted leave
+// rows behind; a node that implements Reaper lets the periodic stream-table
+// sync remove them. It is a separate interface so test coordinators need not
+// implement it.
+//
+// A lease row carries its resource's fencing history, and deleting it restarts
+// the next tenure at token 1. So a lease is purged only once it has been
+// expired since before the cutoff AND keep reports its resource unwanted —
+// that is, its stream is gone from the store.
+type Reaper interface {
+	// PurgeStaleNodes deletes the nodes last seen before the cutoff and
+	// returns how many it deleted.
+	PurgeStaleNodes(before time.Time) (int, error)
+	// PurgeExpiredLeases deletes the lease rows that expired before the cutoff
+	// and whose resource keep rejects, and returns how many it deleted. A
+	// lease renewed between the scan and the delete is not deleted.
+	PurgeExpiredLeases(before time.Time, keep func(resource string) bool) (int, error)
+}
+
+// ResourceId splits a lease resource into its kind prefix and the stream or
+// pair id it guards. ok is false for a resource that is not one of the known
+// kinds (push-transmitter, poll-receiver, sstp-client).
+func ResourceId(resource string) (kind, id string, ok bool) {
+	kind, id, found := strings.Cut(resource, ":")
+	if !found || id == "" {
+		return "", "", false
+	}
+	switch kind {
+	case pushTransmitterKind, pollReceiverKind, sstpClientKind:
+		return kind, id, true
+	}
+	return "", "", false
 }

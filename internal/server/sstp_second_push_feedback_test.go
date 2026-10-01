@@ -19,7 +19,7 @@ import (
 )
 
 // A peer may ship queued outbound SETs on ANY 200, including the response to a
-// returnEvents=false second push. pushWhilePollHeld ingests those, but it runs
+// returnEvents=false second push. runSecondPush ingests those, but it runs
 // in its own goroutine while the pair loop holds its pending feedback as a value
 // it cannot touch — so the feedback used to be computed and thrown away. The
 // peer therefore never learned we had taken the SETs, its outbound never cleared
@@ -104,7 +104,7 @@ func TestPushWhilePollHeld_DefersInboundFeedbackForTheNextRequest(t *testing.T) 
 
 	// Drive the second push directly: the wake-driven spawn is the pair loop's
 	// concern, and this is the goroutine whose feedback was being dropped.
-	cls := dialer.pushWhilePollHeld(ctx, &pair, 1)
+	cls, _ := dialer.runSecondPush(ctx, &pair, 1)
 	require.Equal(t, goSetSstp.ClassOK, cls.Class)
 
 	require.Len(t, fake.ingestedCopy(), 1, "the response SET must still be ingested")
@@ -180,7 +180,7 @@ func TestPushWhilePollHeld_DrainsUntilOutboundEmpty(t *testing.T) {
 	})
 	dialer.Bind(fake)
 
-	cls := dialer.pushWhilePollHeld(ctx, &pair, 1)
+	cls, _ := dialer.runSecondPush(ctx, &pair, 1)
 	require.Equal(t, goSetSstp.ClassOK, cls.Class)
 
 	assert.Equal(t, int64(3), requestCount.Load(),
@@ -374,7 +374,7 @@ func runSecondPushK(t *testing.T, k, callers, queued int) (*secondPushKPeer, *fa
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cls := dialer.pushWhilePollHeld(ctx, &pair, 1)
+			cls, _ := dialer.runSecondPush(ctx, &pair, 1)
 			assert.Equal(t, goSetSstp.ClassOK, cls.Class)
 			returned.Add(1)
 		}()

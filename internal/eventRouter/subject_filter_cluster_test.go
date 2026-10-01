@@ -131,7 +131,7 @@ func TestNotifySubjectFilterChange_LocalOwnerInvalidatesWithoutHop(t *testing.T)
 
 	assert.True(t, h.routerFilter.Allows(ctx, stream, event),
 		"a local-owner notification must invalidate the cache so the change takes effect")
-	assert.Empty(t, h.router.recentOutboundWakes,
+	assert.True(t, h.router.outboundWakes.Empty(),
 		"a local-owner notification must not send a cluster wake-up call")
 }
 
