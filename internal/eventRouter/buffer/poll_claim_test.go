@@ -87,20 +87,21 @@ func TestPollClaim_AckAndReleaseFreeClaims(t *testing.T) {
 	})
 }
 
-// A JTI submitted twice (a wake and a poll's prefetch) is queued once, so
-// its ack takes it out of the buffer rather than leaving a copy to serve.
-func TestPollClaim_DuplicateSubmitIsQueuedOnce(t *testing.T) {
+// A JTI submitted twice (a wake and a poll's prefetch) is served once per
+// batch, and its ack removes every copy rather than leaving one to serve.
+func TestPollClaim_DuplicateSubmitIsServedOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := claimBuffer(t, "a")
 		b.SubmitEvents([]string{"a", "b"})
 		b.SubmitEvent("a")
 		synctest.Wait()
-		require.Equal(t, 2, b.Cnt())
 
 		params := model.PollParameters{ReturnImmediately: true}
-		_, first, _ := b.ClaimEvents(params, time.Minute)
+		_, first, more := b.ClaimEvents(params, time.Minute)
 		require.Equal(t, []string{"a", "b"}, *first)
+		require.False(t, more, "the hidden copies are not counted as more")
 		b.AckEvents(*first)
+		require.Zero(t, b.Cnt(), "an ack removes every copy")
 		_, again, _ := b.ClaimEvents(params, time.Minute)
 		require.Nil(t, again, "an acked JTI is not served again")
 

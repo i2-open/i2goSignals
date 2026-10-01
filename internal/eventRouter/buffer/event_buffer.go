@@ -22,13 +22,25 @@ type EventBuf interface {
 }
 
 type EventPollBuffer struct {
-	in     chan string
-	events []string
-	// queued is the set of JTIs in events. A JTI is queued once however many
-	// times it is submitted: a wake and a poll's prefetch can both submit it,
-	// and an ack removes only one copy, so a second copy would be served again
-	// after its ack.
-	queued    map[string]struct{}
+	in chan string
+	// events holds the queued JTIs in submit order.
+	//
+	// Design note — duplicates are tolerated here, not prevented. A wake and
+	// a poll's prefetch can both submit the same JTI, so it may appear more
+	// than once. The alternative, a set of queued JTIs consulted on every
+	// submit, made submit a map insert and ack a map delete per JTI, and the
+	// set grew with the backlog (BenchmarkPollBufferSubmitDrain ~5x slower at
+	// depth). Instead the submit path stays a plain append, and the duplicate
+	// is made harmless where it would be seen, at no cost when there is none:
+	// a claiming poll serves a JTI once per batch (the claim it writes anyway
+	// doubles as the batch's seen-set) and that claim hides the other copies
+	// from an overlapping poll; AckEvents removes the served batch with one
+	// merge walk and only builds a set, reused across calls, when a tail is
+	// left that could hold a copy. A claim-less GetEvents (the SSTP pushers,
+	// which never prefetch) serves the queue as is. Copies only accumulate
+	// for the life of one delivery, so the slice stays close to the true
+	// backlog.
+	events    []string
 	mutex     sync.Mutex
 	closed    bool
 	notifier  chan struct{}
@@ -50,6 +62,9 @@ type EventPollBuffer struct {
 	// and a node restart (a fresh buffer) makes the whole pending set
 	// servable again.
 	claims map[string]pollClaim
+	// ackScratch is the set AckEvents reuses for the tail pass, kept so an
+	// ack allocates nothing.
+	ackScratch map[string]struct{}
 }
 
 // pollClaim is one poll's hold on a JTI.
@@ -69,7 +84,6 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 	buffer := &EventPollBuffer{
 		in:                 make(chan string, 100),
 		events:             []string{},
-		queued:             map[string]struct{}{},
 		pollReady:          false,
 		closed:             false,
 		notifier:           make(chan struct{}),
@@ -109,7 +123,8 @@ func CreateEventPollBuffer(initialJtis []string, defaultTimeoutSecs, maxTimeoutS
 			buffer.mutex.Lock()
 			if !ok {
 				inCh = nil
-			} else if buffer.enqueueLocked(v) {
+			} else {
+				buffer.events = append(buffer.events, v)
 				if !buffer.closed {
 					close(buffer.notifier)
 					buffer.notifier = make(chan struct{})
@@ -158,20 +173,7 @@ func (b *EventPollBuffer) Cnt() int {
 func (b *EventPollBuffer) addEvents(jtis []string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	for _, jti := range jtis {
-		b.enqueueLocked(jti)
-	}
-}
-
-// enqueueLocked appends jti unless it is already queued, and reports whether
-// it did.
-func (b *EventPollBuffer) enqueueLocked(jti string) bool {
-	if _, dup := b.queued[jti]; dup {
-		return false
-	}
-	b.queued[jti] = struct{}{}
-	b.events = append(b.events, jti)
-	return true
+	b.events = append(b.events, jtis...)
 }
 
 // AddEvents queues jtis before it returns, where SubmitEvents hands them to
@@ -180,19 +182,12 @@ func (b *EventPollBuffer) enqueueLocked(jti string) bool {
 func (b *EventPollBuffer) AddEvents(jtis []string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	if b.closed {
+	if b.closed || len(jtis) == 0 {
 		return
 	}
-	added := false
-	for _, jti := range jtis {
-		if b.enqueueLocked(jti) {
-			added = true
-		}
-	}
-	if added {
-		close(b.notifier)
-		b.notifier = make(chan struct{})
-	}
+	b.events = append(b.events, jtis...)
+	close(b.notifier)
+	b.notifier = make(chan struct{})
 }
 
 func (b *EventPollBuffer) SubmitEvent(jti string) {
@@ -250,30 +245,56 @@ func (b *EventPollBuffer) WakeupCh() <-chan struct{} {
 	return b.notifier
 }
 
-// AckEvents removes the JTIs from the buffer and releases any claim on them.
+// AckEvents removes every copy of the JTIs from the buffer and releases any
+// claim on them.
 func (b *EventPollBuffer) AckEvents(jtis []string) {
+	if len(jtis) == 0 {
+		return
+	}
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	for _, jti := range jtis {
 		delete(b.claims, jti)
-		if _, ok := b.queued[jti]; !ok {
+	}
+	// A poll acks the batch it was served, which sits at the head of events
+	// in the same order, so one merge walk removes it without a set.
+	kept := b.events[:0]
+	next := 0
+	for _, jti := range b.events {
+		if next < len(jtis) && jti == jtis[next] {
+			next++
 			continue
 		}
-		delete(b.queued, jti)
-		for i, e := range b.events {
-			if e == jti {
-				b.events = append(b.events[:i], b.events[i+1:]...)
-				break
+		kept = append(kept, jti)
+	}
+	// Whatever is left may hold another copy of an acked JTI, or an ack
+	// given out of order; one set-based pass settles both.
+	if len(kept) > 0 {
+		if b.ackScratch == nil {
+			b.ackScratch = make(map[string]struct{}, len(jtis))
+		}
+		acked := b.ackScratch
+		for _, jti := range jtis {
+			acked[jti] = struct{}{}
+		}
+		n := 0
+		for _, jti := range kept {
+			if _, ok := acked[jti]; !ok {
+				kept[n] = jti
+				n++
 			}
 		}
+		kept = kept[:n]
+		clear(acked)
 	}
+	clear(b.events[len(kept):])
+	b.events = kept
 }
 
 func (b *EventPollBuffer) Clear() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.events = []string{}
-	b.queued = map[string]struct{}{}
 	b.claims = map[string]pollClaim{}
 }
 
@@ -419,21 +440,36 @@ func (b *EventPollBuffer) collect(params model.PollParameters, ttl time.Duration
 	if len(available) == 0 {
 		return "", nil, false
 	}
-	n := len(available)
-	more := false
-	if params.MaxEvents > 0 && n > int(params.MaxEvents) {
-		more = true
-		n = int(params.MaxEvents)
+	limit := len(available)
+	if params.MaxEvents > 0 && limit > int(params.MaxEvents) {
+		limit = int(params.MaxEvents)
 	}
-	values := make([]string, n)
-	copy(values, available[:n])
+	values := make([]string, 0, limit)
+	if ttl <= 0 {
+		values = append(values, available[:limit]...)
+		return "", &values, limit < len(available)
+	}
 
-	token := ""
-	if ttl > 0 {
-		token = newClaimToken()
-		expires := time.Now().Add(ttl)
-		for _, jti := range values {
-			b.claims[jti] = pollClaim{token: token, expires: expires}
+	// A claiming poll serves a JTI once per batch: nothing in available is
+	// claimed on entry, so a JTI already in claims is this batch's own copy.
+	// The copies past the batch are hidden by the claim and removed by the
+	// ack, so they do not count as more.
+	token := newClaimToken()
+	expires := time.Now().Add(ttl)
+	i := 0
+	for ; i < len(available) && len(values) < limit; i++ {
+		jti := available[i]
+		if _, dup := b.claims[jti]; dup {
+			continue
+		}
+		b.claims[jti] = pollClaim{token: token, expires: expires}
+		values = append(values, jti)
+	}
+	more := false
+	for ; i < len(available); i++ {
+		if _, dup := b.claims[available[i]]; !dup {
+			more = true
+			break
 		}
 	}
 	return token, &values, more
