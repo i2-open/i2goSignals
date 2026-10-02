@@ -504,7 +504,7 @@ numbers are in `e2e-history.md` and the PR.
   *Status:* push delivers concurrently (ADR 0035) with a pool sized from
   available processors (#285, ADR 0037).
 
-### Poll and SSTP connection handling (SSTP mostly fixed)
+### Poll and SSTP connection handling (SSTP fixed)
 
 - **Poll receiver: already reuses connections.** `runPollLoop` resolves its
   `http.Client` once per stream loop and keeps it across poll cycles,
@@ -528,8 +528,11 @@ numbers are in `e2e-history.md` and the PR.
   handshake is amortised well enough that it does not show in the numbers
   above, so it stays a latency and idle-cost concern rather than a
   throughput one.
-  *Status:* the static-token, per-stream-TLS and default paths are fixed by
-  #289 — they share a pooled transport, and `clientHandshake` is absent from
-  the after-profiles. The SPIFFE path is not: the credential chain still
-  reaches `oauthClient.GetClientForServer`, which opens a new `X509Source`
-  and transport on each call (`pkg/oauthClient/spiffe_client.go:51`); tracked in #326.
+  *Status:* fixed. The static-token, per-stream-TLS and default paths are
+  fixed by #289 — they share a pooled transport, and `clientHandshake` is
+  absent from the after-profiles. The SPIFFE path is fixed by #326:
+  `oauthClient.GetSpiffeClient` pools one client and transport per peer
+  server (keyed on the server and its `SpiffeConfig`), all sharing one
+  process-wide `X509Source` that rotates SVIDs itself. Server update/delete
+  evicts the entry and shutdown closes the source. Not yet re-profiled on the
+  SPIRE compose stack.
