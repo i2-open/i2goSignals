@@ -49,7 +49,7 @@ goSignals_dao_op_duration_seconds_sum{op="AddPendingMany",outcome="ok"} 0.005
 goSignals_dao_op_duration_seconds_count{op="AddPendingMany",outcome="ok"} 10
 `
 
-func mustParseDao(t *testing.T, text string) daoHistograms {
+func mustParseDao(t *testing.T, text string) histograms {
 	t.Helper()
 	h, err := parseDaoHistograms(strings.NewReader(text))
 	if err != nil {
@@ -78,7 +78,7 @@ func TestParseDaoHistogramsSumsOutcomes(t *testing.T) {
 }
 
 func TestDiffAndSummarizeDao(t *testing.T) {
-	d := diffDaoHistograms(mustParseDao(t, daoBefore), mustParseDao(t, daoAfter))
+	d := diffHistograms(mustParseDao(t, daoBefore), mustParseDao(t, daoAfter))
 	if _, ok := d["FindByJTI"]; ok {
 		t.Error("FindByJTI had no calls during the run and should be dropped")
 	}

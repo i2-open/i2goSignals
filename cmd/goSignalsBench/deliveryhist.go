@@ -13,11 +13,11 @@ import (
 const metricEventAge = "goSignals_router_event_age_at_receipt_seconds"
 
 // scrapeEventAge fetches /metrics and parses the event-age histogram by tfr.
-func (n *node) scrapeEventAge() (daoHistograms, error) {
+func (n *node) scrapeEventAge() (histograms, error) {
 	return n.scrapeHistograms(metricEventAge, "tfr")
 }
 
-func parseEventAgeHistograms(r io.Reader) (daoHistograms, error) {
+func parseEventAgeHistograms(r io.Reader) (histograms, error) {
 	return parseHistograms(r, metricEventAge, "tfr")
 }
 
@@ -50,7 +50,7 @@ func (h *opHistogram) maxBound() float64 {
 
 // summarizeDeliveryLatency turns a diffed event-age histogram set into
 // per-tfr latency stats (milliseconds).
-func summarizeDeliveryLatency(d daoHistograms) map[string]latencyStats {
+func summarizeDeliveryLatency(d histograms) map[string]latencyStats {
 	out := make(map[string]latencyStats, len(d))
 	for tfr, h := range d {
 		out[tfr] = latencyStats{

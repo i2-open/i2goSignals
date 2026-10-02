@@ -268,7 +268,7 @@ func run(o *options) error {
 	}
 	daoBefore1, daoErr1 := gs1.scrapeDaoHistograms()
 	daoBefore2, daoErr2 := gs2.scrapeDaoHistograms()
-	var daoBefore1b daoHistograms
+	var daoBefore1b histograms
 	daoErr1b := errors.New("no gs1b")
 	if gs1b != nil {
 		daoBefore1b, daoErr1b = gs1b.scrapeDaoHistograms()
@@ -386,23 +386,23 @@ func run(o *options) error {
 	// ---- DAO histograms and journal counters -------------------------------
 	if daoErr1 == nil {
 		if after, err := gs1.scrapeDaoHistograms(); err == nil {
-			result.DaoGs1 = summarizeDao(diffDaoHistograms(daoBefore1, after))
+			result.DaoGs1 = summarizeDao(diffHistograms(daoBefore1, after))
 			result.DominantDaoOp = dominantDaoOp(result.DaoGs1)
 		}
 	}
 	if daoErr1b == nil {
 		if after, err := gs1b.scrapeDaoHistograms(); err == nil {
-			result.DaoGs1b = summarizeDao(diffDaoHistograms(daoBefore1b, after))
+			result.DaoGs1b = summarizeDao(diffHistograms(daoBefore1b, after))
 		}
 	}
 	if daoErr2 == nil {
 		if after, err := gs2.scrapeDaoHistograms(); err == nil {
-			result.DaoGs2 = summarizeDao(diffDaoHistograms(daoBefore2, after))
+			result.DaoGs2 = summarizeDao(diffHistograms(daoBefore2, after))
 		}
 	}
 	if ageErr2 == nil {
 		if after, err := gs2.scrapeEventAge(); err == nil {
-			byTfr := summarizeDeliveryLatency(diffDaoHistograms(ageBefore2, after))
+			byTfr := summarizeDeliveryLatency(diffHistograms(ageBefore2, after))
 			for _, leg := range []*legResult{&result.Push, &result.Poll, &result.Sstp} {
 				if s, ok := byTfr[leg.Transport]; ok {
 					leg.DeliveryLatency = &s

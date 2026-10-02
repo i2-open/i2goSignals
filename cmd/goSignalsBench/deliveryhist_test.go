@@ -43,7 +43,7 @@ goSignals_router_event_age_at_receipt_seconds_sum{tfr="SSTP"} 0.5
 goSignals_router_event_age_at_receipt_seconds_count{tfr="SSTP"} 10
 `
 
-func mustParseAge(t *testing.T, text string) daoHistograms {
+func mustParseAge(t *testing.T, text string) histograms {
 	t.Helper()
 	h, err := parseEventAgeHistograms(strings.NewReader(text))
 	if err != nil {
@@ -56,7 +56,7 @@ func mustParseAge(t *testing.T, text string) daoHistograms {
 // receiver's event-age histogram across the run and reports p50/p95/p99/max
 // per transfer type, covering only the SETs this run delivered (#325).
 func TestDeliveryLatency_PerLegFromHistogramDiff(t *testing.T) {
-	got := summarizeDeliveryLatency(diffDaoHistograms(mustParseAge(t, ageBefore), mustParseAge(t, ageAfter)))
+	got := summarizeDeliveryLatency(diffHistograms(mustParseAge(t, ageBefore), mustParseAge(t, ageAfter)))
 
 	if _, ok := got["POLL"]; ok {
 		t.Errorf("POLL delivered nothing during the run, want it absent: %+v", got["POLL"])
