@@ -27,6 +27,11 @@ type legResult struct {
 	EndToEndSeconds float64 `json:"end_to_end_seconds"`
 	EventsPerSecond float64 `json:"events_per_second"`
 	Complete        bool    `json:"complete"`
+	// DeliveryLatency is per-SET ingest-to-receiver latency: goSignals2's
+	// receipt time minus the toe the harness stamped just before the POST,
+	// from the event-age histogram diffed over the run (#325). Absent when
+	// the leg carried nothing or goSignals2 does not expose the histogram.
+	DeliveryLatency *latencyStats `json:"delivery_latency,omitempty"`
 }
 
 type latencyStats struct {
@@ -156,8 +161,8 @@ const historyHeader = `# End-to-end benchmark history
 Appended by ` + "`goSignalsBench --history`" + ` (see [e2e-benchmark.md](e2e-benchmark.md)).
 One row per run; compare like with like (same events, concurrency, mix and machine class).
 
-| Date (UTC) | Revision | Label | Events | Conc | Mix | Ingest ev/s | Ingest p50/p99 ms | Push ev/s | Push drain s | Poll ev/s | Poll drain s | SSTP role | SSTP ev/s | SSTP drain s | Total s | OK | Note |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Date (UTC) | Revision | Label | Events | Conc | Mix | Ingest ev/s | Ingest p50/p99 ms | Push ev/s | Push drain s | Poll ev/s | Poll drain s | SSTP role | SSTP ev/s | SSTP drain s | Push lat p50/p95/p99/max ms | Poll lat p50/p95/p99/max ms | SSTP lat p50/p95/p99/max ms | Total s | OK | Note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 `
 
 // appendHistory adds one Markdown table row to path, creating the file with
@@ -184,7 +189,7 @@ func appendHistory(path string, r *benchResult) error {
 	if !r.Success {
 		ok = "**no**"
 	}
-	row := fmt.Sprintf("| %s | %s | %s | %d | %d | %s | %.0f | %.1f / %.1f | %s | %s | %s | %s | %s | %s | %s | %.1f | %s | %s |\n",
+	row := fmt.Sprintf("| %s | %s | %s | %d | %d | %s | %.0f | %.1f / %.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %.1f | %s | %s |\n",
 		r.Timestamp.UTC().Format("2006-01-02 15:04"),
 		r.GitRevision, r.Label, r.Events, r.Concurrency, r.Mix,
 		r.IngestEventsPerSecond, r.IngestLatency.P50Ms, r.IngestLatency.P99Ms,
@@ -192,6 +197,7 @@ func appendHistory(path string, r *benchResult) error {
 		legCell(r.Poll, "%.0f", r.Poll.EventsPerSecond), legCell(r.Poll, "%.1f", r.Poll.DrainSeconds),
 		r.SstpRole,
 		legCell(r.Sstp, "%.0f", r.Sstp.EventsPerSecond), legCell(r.Sstp, "%.1f", r.Sstp.DrainSeconds),
+		latencyCell(r.Push), latencyCell(r.Poll), latencyCell(r.Sstp),
 		r.TotalSeconds, ok, strings.ReplaceAll(r.Note, "|", "\\|"))
 	_, err = f.WriteString(row)
 	return err
@@ -204,6 +210,16 @@ func legCell(leg legResult, format string, v float64) string {
 		return "-"
 	}
 	return fmt.Sprintf(format, v)
+}
+
+// latencyCell formats a leg's delivery latency as p50/p95/p99/max ms, or "-"
+// when it was not measured.
+func latencyCell(leg legResult) string {
+	l := leg.DeliveryLatency
+	if leg.Expected == 0 || l == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f / %.1f / %.1f / %.0f", l.P50Ms, l.P95Ms, l.P99Ms, l.MaxMs)
 }
 
 func (r *benchResult) printSummary() {
@@ -222,6 +238,10 @@ func (r *benchResult) printSummary() {
 	for _, leg := range []legResult{r.Push, r.Poll, r.Sstp} {
 		fmt.Printf("%-6s : %d/%d delivered  e2e=%.2fs  drain-after-ingest=%.2fs  %.0f ev/s  complete=%v\n",
 			leg.Transport, leg.Delivered, leg.Expected, leg.EndToEndSeconds, leg.DrainSeconds, leg.EventsPerSecond, leg.Complete)
+		if l := leg.DeliveryLatency; l != nil {
+			fmt.Printf("%-6s   delivery latency p50=%.1fms p95=%.1fms p99=%.1fms max<=%.0fms\n",
+				"", l.P50Ms, l.P95Ms, l.P99Ms, l.MaxMs)
+		}
 	}
 	fmt.Printf("total  : %.2fs  success=%v\n", r.TotalSeconds, r.Success)
 	if r.Notes != "" {

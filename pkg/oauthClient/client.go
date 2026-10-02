@@ -507,7 +507,8 @@ func GetClientCredentialsClient(ctx context.Context, cfg Config, server *model.S
 
 // GetClientForServer returns an http.Client configured for the given server based
 // on its auth mode, plus a close function the caller must invoke when done with
-// the client. For non-SPIFFE paths the close function is a no-op.
+// the client. The close function is currently a no-op on every path: SPIFFE
+// clients are pooled per server and torn down by the pool (see GetSpiffeClient).
 //
 // Priority order: SPIFFE mTLS > OAuth2 Client Credentials > Static Token > Base TLS client.
 // The returned client automatically handles the Authorization header for OAuth2 and Static Token modes.

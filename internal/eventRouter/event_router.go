@@ -232,6 +232,9 @@ type router struct {
 	subjectRelayService  *services.SubjectRelayService
 	pushDelivery         delivery.PushDelivery
 	eventsIn, eventsOut  *prometheus.CounterVec
+	// eventAge observes receipt time minus toe for inbound SETs, by tfr
+	// (#325). Optional; set alongside the counters, guarded by mu.
+	eventAge *prometheus.HistogramVec
 	// meteringObserver holds the optional subject-carrying metering observer
 	// (issue #218), read lock-free on the routing path. Distinct from the
 	// Prometheus counters above; nil unless an embedder registers one.
@@ -653,6 +656,7 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	r.mu.RLock()
 	eventsOut := r.eventsOut
 	eventsIn := r.eventsIn
+	eventAge := r.eventAge
 	r.mu.RUnlock()
 
 	if eventsOut == nil {
@@ -710,7 +714,20 @@ func (r *router) IncrementCounter(stream *model.StreamStateRecord, token *goSet.
 	} else {
 		m := eventsIn.With(label)
 		m.Inc()
+		if eventAge != nil && token != nil && token.TimeOfEvent != nil {
+			eventAge.WithLabelValues(tfr).Observe(max(0, time.Since(token.TimeOfEvent.Time).Seconds()))
+		}
 	}
+}
+
+// SetEventAgeHistogram installs the inbound event-age histogram (receipt
+// time minus the SET's toe, labelled by tfr). Not on the EventRouter
+// interface: the server wires it by type assertion, so other
+// implementations need not carry it.
+func (r *router) SetEventAgeHistogram(h *prometheus.HistogramVec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.eventAge = h
 }
 
 func (r *router) SetEventCounter(inCounter, outCounter *prometheus.CounterVec) {

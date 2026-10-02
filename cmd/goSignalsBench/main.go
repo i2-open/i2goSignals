@@ -242,11 +242,8 @@ func run(o *options) error {
 		logf("%s registered the outbound streams after %.1fs", gs1b.name, gs1bSync.Seconds())
 	}
 
-	logf("pre-signing %d SETs (issuer %s, mix %s)", o.events, o.issuer, mix)
-	events, err := buildEvents(o.events, o.issuer, o.pushAud, o.pollAud, o.sstpAud, mix, key)
-	if err != nil {
-		return err
-	}
+	logf("building %d SETs (issuer %s, mix %s); each is signed with a fresh toe just before its POST", o.events, o.issuer, mix)
+	events := buildEvents(o.events, o.issuer, o.pushAud, o.pollAud, o.sstpAud, mix)
 
 	_, ingressPath, err := splitEndpoint(topo.ingress.Delivery.PushReceiveMethod.EndpointUrl)
 	if err != nil {
@@ -271,11 +268,12 @@ func run(o *options) error {
 	}
 	daoBefore1, daoErr1 := gs1.scrapeDaoHistograms()
 	daoBefore2, daoErr2 := gs2.scrapeDaoHistograms()
-	var daoBefore1b daoHistograms
+	var daoBefore1b histograms
 	daoErr1b := errors.New("no gs1b")
 	if gs1b != nil {
 		daoBefore1b, daoErr1b = gs1b.scrapeDaoHistograms()
 	}
+	ageBefore2, ageErr2 := gs2.scrapeEventAge()
 	var journal *journalProbe
 	var journalBefore *journalCounters
 	if o.mongoURI != "" {
@@ -343,8 +341,11 @@ func run(o *options) error {
 			defer wg.Done()
 			n := ingressNodes[target]
 			for i := range next {
+				jws, err := events[i].signNow(key)
 				t0 := time.Now()
-				_, err := n.pushSET(ingressPath, ingressBearer, events[i].jws)
+				if err == nil {
+					_, err = n.pushSET(ingressPath, ingressBearer, jws)
+				}
 				latencies[i] = time.Since(t0)
 				if err != nil {
 					errCount.Add(1)
@@ -385,18 +386,28 @@ func run(o *options) error {
 	// ---- DAO histograms and journal counters -------------------------------
 	if daoErr1 == nil {
 		if after, err := gs1.scrapeDaoHistograms(); err == nil {
-			result.DaoGs1 = summarizeDao(diffDaoHistograms(daoBefore1, after))
+			result.DaoGs1 = summarizeDao(diffHistograms(daoBefore1, after))
 			result.DominantDaoOp = dominantDaoOp(result.DaoGs1)
 		}
 	}
 	if daoErr1b == nil {
 		if after, err := gs1b.scrapeDaoHistograms(); err == nil {
-			result.DaoGs1b = summarizeDao(diffDaoHistograms(daoBefore1b, after))
+			result.DaoGs1b = summarizeDao(diffHistograms(daoBefore1b, after))
 		}
 	}
 	if daoErr2 == nil {
 		if after, err := gs2.scrapeDaoHistograms(); err == nil {
-			result.DaoGs2 = summarizeDao(diffDaoHistograms(daoBefore2, after))
+			result.DaoGs2 = summarizeDao(diffHistograms(daoBefore2, after))
+		}
+	}
+	if ageErr2 == nil {
+		if after, err := gs2.scrapeEventAge(); err == nil {
+			byTfr := summarizeDeliveryLatency(diffHistograms(ageBefore2, after))
+			for _, leg := range []*legResult{&result.Push, &result.Poll, &result.Sstp} {
+				if s, ok := byTfr[leg.Transport]; ok {
+					leg.DeliveryLatency = &s
+				}
+			}
 		}
 	}
 	if journal != nil {

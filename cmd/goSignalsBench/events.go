@@ -3,8 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"fmt"
-	"runtime"
-	"sync"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -93,16 +92,24 @@ var benchEventTypes = []string{
 	model.EventScimDelete,
 }
 
-// signedEvent is one pre-built SET ready to POST.
-type signedEvent struct {
-	jti string
-	jws string
+// benchEvent is one pre-built SET, signed by the ingest worker just before
+// its POST so the toe it carries marks the start of delivery (#325).
+type benchEvent struct {
+	set goSet.SecurityEventToken
 }
 
-// buildEvent creates and signs the i-th SET. The payload shapes mirror the
+// signNow stamps toe with the current time and signs the SET. toe keeps its
+// sub-second part on the wire (goSet toe codec), so the receiver's
+// event-age histogram resolves milliseconds.
+func (e *benchEvent) signNow(key *rsa.PrivateKey) (string, error) {
+	e.set.TimeOfEvent = &jwt.NumericDate{Time: time.Now()}
+	return e.set.JWS(jwt.SigningMethodRS256, key)
+}
+
+// buildEvent creates the i-th SET, unsigned. The payload shapes mirror the
 // i2scim cluster demo (a SCIM User resource) so validators, when enabled, see
 // the same data the SCIM nodes send.
-func buildEvent(i int, issuer string, aud []string, key *rsa.PrivateKey) (signedEvent, error) {
+func buildEvent(i int, issuer string, aud []string) benchEvent {
 	subject := &goSet.EventSubject{
 		SubjectIdentifier: *goSet.NewScimSubjectIdentifier(fmt.Sprintf("/Users/bench-%08d", i)).AddExternalId(fmt.Sprintf("bench%d", i)),
 	}
@@ -133,43 +140,16 @@ func buildEvent(i int, issuer string, aud []string, key *rsa.PrivateKey) (signed
 		}
 	}
 	set.AddEventPayload(eventType, payload)
-	jws, err := set.JWS(jwt.SigningMethodRS256, key)
-	if err != nil {
-		return signedEvent{}, err
-	}
-	return signedEvent{jti: set.ID, jws: jws}, nil
+	return benchEvent{set: set}
 }
 
-// buildEvents pre-signs all n SETs in parallel so client-side RSA signing is
-// excluded from the measured ingest window.
-func buildEvents(n int, issuer, pushAud, pollAud, sstpAud string, mix audMix, key *rsa.PrivateKey) ([]signedEvent, error) {
-	events := make([]signedEvent, n)
-	workers := runtime.GOMAXPROCS(0)
-	var wg sync.WaitGroup
-	errs := make(chan error, workers)
-	next := make(chan int, n)
-	for i := 0; i < n; i++ {
-		next <- i
+// buildEvents builds all n SETs ahead of ingest. They are signed by the
+// ingest workers just before each POST (benchEvent.signNow), outside the
+// timed POST, so client-side signing stays out of the ingest latency samples.
+func buildEvents(n int, issuer, pushAud, pollAud, sstpAud string, mix audMix) []benchEvent {
+	events := make([]benchEvent, n)
+	for i := range events {
+		events[i] = buildEvent(i, issuer, mix.audiences(i, pushAud, pollAud, sstpAud))
 	}
-	close(next)
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range next {
-				ev, err := buildEvent(i, issuer, mix.audiences(i, pushAud, pollAud, sstpAud), key)
-				if err != nil {
-					errs <- fmt.Errorf("event %d: %w", i, err)
-					return
-				}
-				events[i] = ev
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	if err := <-errs; err != nil {
-		return nil, err
-	}
-	return events, nil
+	return events
 }

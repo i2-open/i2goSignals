@@ -26,8 +26,9 @@ type opHistogram struct {
 	Sum     float64
 }
 
-// daoHistograms maps an EventDAO op name to its histogram.
-type daoHistograms map[string]*opHistogram
+// histograms maps a label value (an EventDAO op, or a transmitter for the
+// event-age histograms) to its histogram.
+type histograms map[string]*opHistogram
 
 // daoOpStats is the per-op summary recorded in the result.
 type daoOpStats struct {
@@ -39,7 +40,13 @@ type daoOpStats struct {
 }
 
 // scrapeDaoHistograms fetches /metrics and parses the DAO op histograms.
-func (n *node) scrapeDaoHistograms() (daoHistograms, error) {
+func (n *node) scrapeDaoHistograms() (histograms, error) {
+	return n.scrapeHistograms(metricDaoOpDuration, "op")
+}
+
+// scrapeHistograms fetches /metrics and parses one histogram family, summed
+// per value of the key label.
+func (n *node) scrapeHistograms(metric, key string) (histograms, error) {
 	resp, err := n.http.Get(n.hostBase + "/metrics")
 	if err != nil {
 		return nil, fmt.Errorf("%s metrics: %w", n.name, err)
@@ -48,11 +55,17 @@ func (n *node) scrapeDaoHistograms() (daoHistograms, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s metrics: HTTP %d", n.name, resp.StatusCode)
 	}
-	return parseDaoHistograms(resp.Body)
+	return parseHistograms(resp.Body, metric, key)
 }
 
-func parseDaoHistograms(r io.Reader) (daoHistograms, error) {
-	h := daoHistograms{}
+func parseDaoHistograms(r io.Reader) (histograms, error) {
+	return parseHistograms(r, metricDaoOpDuration, "op")
+}
+
+// parseHistograms parses one histogram family from an exposition, summing the
+// series that share a value of the key label (e.g. DAO outcomes per op).
+func parseHistograms(r io.Reader, metric, key string) (histograms, error) {
+	h := histograms{}
 	get := func(op string) *opHistogram {
 		oh := h[op]
 		if oh == nil {
@@ -65,27 +78,27 @@ func parseDaoHistograms(r io.Reader) (daoHistograms, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, metricDaoOpDuration+"_") {
+		if !strings.HasPrefix(line, metric+"_") {
 			continue
 		}
 		labels, value, ok := parseLabelledSample(line)
 		if !ok {
 			continue
 		}
-		op := labels["op"]
+		op := labels[key]
 		if op == "" {
 			continue
 		}
 		switch {
-		case strings.HasPrefix(line, metricDaoOpDuration+"_bucket{"):
+		case strings.HasPrefix(line, metric+"_bucket{"):
 			le, err := strconv.ParseFloat(labels["le"], 64)
 			if err != nil {
 				continue
 			}
 			get(op).Buckets[le] += value
-		case strings.HasPrefix(line, metricDaoOpDuration+"_count{"):
+		case strings.HasPrefix(line, metric+"_count{"):
 			get(op).Count += value
-		case strings.HasPrefix(line, metricDaoOpDuration+"_sum{"):
+		case strings.HasPrefix(line, metric+"_sum{"):
 			get(op).Sum += value
 		}
 	}
@@ -119,10 +132,10 @@ func parseLabelledSample(line string) (map[string]string, float64, bool) {
 	return labels, v, true
 }
 
-// diffDaoHistograms returns after-before per op, dropping ops with no calls
+// diffHistograms returns after-before per op, dropping ops with no calls
 // in between.
-func diffDaoHistograms(before, after daoHistograms) daoHistograms {
-	out := daoHistograms{}
+func diffHistograms(before, after histograms) histograms {
+	out := histograms{}
 	for op, a := range after {
 		b := before[op]
 		d := &opHistogram{Buckets: map[float64]float64{}, Count: a.Count, Sum: a.Sum}
@@ -179,7 +192,7 @@ func (h *opHistogram) quantile(q float64) float64 {
 }
 
 // summarizeDao turns a diffed histogram set into per-op stats.
-func summarizeDao(d daoHistograms) map[string]daoOpStats {
+func summarizeDao(d histograms) map[string]daoOpStats {
 	if len(d) == 0 {
 		return nil
 	}

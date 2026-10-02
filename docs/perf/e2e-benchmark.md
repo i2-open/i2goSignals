@@ -69,6 +69,7 @@ instead of minting one, pass
 | Push leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=push-receiver}` |
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
 | SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
+| Delivery latency per leg, p50/p95/p99/max | goSignals2 `goSignals_router_event_age_at_receipt_seconds{tfr}`, diffed over the run |
 
 ### Ingest breakdown (DAO metrics)
 
@@ -94,8 +95,11 @@ incremented on a push acknowledgement, never on a poll, so it cannot be used for
 the poll leg. `/metrics` is unauthenticated on the dev stack, so no extra
 credentials are needed.
 
-Signing happens **before** the clock starts: all SETs are pre-built in parallel so
-client-side RSA work is not attributed to the server.
+SETs are built before the run starts. Each ingest worker signs its SET (RS256)
+immediately before the POST, stamping `toe` at the same moment, and starts the
+latency clock only after signing. Signing is therefore excluded from the ingest
+latency samples, but it is inside the ingest wall time, so ingest ev/s is
+slightly lower than in rows recorded before #325, when every SET was pre-signed.
 
 Timings reported per leg:
 
@@ -103,6 +107,51 @@ Timings reported per leg:
   expected event;
 * **drain-after-ingest** — how long goSignals2 kept receiving after the harness
   finished pushing (0 means the leg kept up with ingest).
+
+### Delivery latency
+
+Drain time shows whether a leg kept up; it does not show how long one event
+took. Per-event delivery latency fills that gap.
+
+**Method.** The harness stamps each SET's `toe` claim with the current time just
+before it POSTs the SET to goSignals1. When goSignals2 counts an inbound SET, it
+observes receipt time minus `toe` into
+`goSignals_router_event_age_at_receipt_seconds{tfr}` (`PUSH`, `POLL` or
+`SSTP`). The harness scrapes that histogram on goSignals2 before and after the
+run, takes the difference, and reports interpolated p50/p95/p99 (the same
+method as PromQL `histogram_quantile`) for each leg. The result goes in the
+`delivery latency` summary line, in `delivery_latency` in the JSON output, and
+in the `lat p50/p95/p99/max ms` history columns.
+
+**Why this method.** The alternative was a receipt log keyed by `jti`, joined
+against the harness's send times. That needs a new server endpoint or log
+format, and a per-event label would make the metric unbounded. The histogram
+needs one metric. It is scraped exactly like `events_in_total`, it is labelled
+only by `tfr` (three series, no `stream_id`), and it is useful outside the
+bench: for ordinary events it shows how old events are when they arrive.
+
+**toe precision.** `toe` is a JWT NumericDate, which goSet used to truncate to
+whole seconds. That would have made every sample a multiple of one second.
+goSet now keeps the fractional part of `toe` through JSON and BSON, so samples
+resolve to the microsecond. A `toe` without a fraction is encoded exactly as
+before, so only SETs that carry one, which in practice means bench SETs,
+change on the wire.
+
+**What the number covers.** The clock starts at the POST to goSignals1, before
+the 202, so the ingest latency is part of each delivery sample. It ends when
+goSignals2 counts the SET: for push and SSTP, on receipt; for poll, when the
+poll response is processed. Under local-WAL durability, inbound events are
+counted when the WAL drains, so WAL time is included too.
+
+**Clock assumption.** `toe` comes from the harness's clock and receipt time from
+goSignals2's. On the single-host dev and benchmark stacks they are the same
+clock. Across hosts, any clock skew adds directly to every sample, and
+negative ages are clamped to 0.
+
+**max.** A histogram cannot report an exact maximum. `max` is the upper bound of
+the highest bucket that holds a sample, so the true maximum is at or below it.
+If a sample exceeded the last finite bucket (30 s), `max` is 30000 ms and is
+then a lower bound.
 
 ## Running
 
@@ -504,7 +553,7 @@ numbers are in `e2e-history.md` and the PR.
   *Status:* push delivers concurrently (ADR 0035) with a pool sized from
   available processors (#285, ADR 0037).
 
-### Poll and SSTP connection handling (SSTP mostly fixed)
+### Poll and SSTP connection handling (SSTP fixed)
 
 - **Poll receiver: already reuses connections.** `runPollLoop` resolves its
   `http.Client` once per stream loop and keeps it across poll cycles,
@@ -528,8 +577,11 @@ numbers are in `e2e-history.md` and the PR.
   handshake is amortised well enough that it does not show in the numbers
   above, so it stays a latency and idle-cost concern rather than a
   throughput one.
-  *Status:* the static-token, per-stream-TLS and default paths are fixed by
-  #289 — they share a pooled transport, and `clientHandshake` is absent from
-  the after-profiles. The SPIFFE path is not: the credential chain still
-  reaches `oauthClient.GetClientForServer`, which opens a new `X509Source`
-  and transport on each call (`pkg/oauthClient/spiffe_client.go:51`); tracked in #326.
+  *Status:* fixed. The static-token, per-stream-TLS and default paths are
+  fixed by #289 — they share a pooled transport, and `clientHandshake` is
+  absent from the after-profiles. The SPIFFE path is fixed by #326:
+  `oauthClient.GetSpiffeClient` pools one client and transport per peer
+  server (keyed on the server and its `SpiffeConfig`), all sharing one
+  process-wide `X509Source` that rotates SVIDs itself. Server update/delete
+  evicts the entry and shutdown closes the source. Not yet re-profiled on the
+  SPIRE compose stack.
