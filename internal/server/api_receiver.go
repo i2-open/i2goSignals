@@ -308,6 +308,12 @@ func (sa *SignalsApplication) CascadeReceiverStreamDelete(ctx context.Context, s
 	}
 
 	delURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, *conf.RemoteStreamId)
+	// Business-stream TLS floor (#322, #324): never dial a plaintext
+	// management URL unless the stream carries the tx_allow_plaintext grant.
+	if !conf.TxAllowPlaintext && tlsSupport.IsPlaintextEndpoint(delURL) {
+		serverLog.Warn("RCV: delete cascade refused", "sid", conf.Id, "error", tlsSupport.ErrPlaintextNotAllowed, "remote", delURL)
+		return
+	}
 	client, auth, closeClient, err := sa.getHTTPClientForStream(ctx, state)
 	if err != nil {
 		serverLog.Warn("RCV: delete cascade skipped — client error", "sid", conf.Id, "error", err)
@@ -426,14 +432,14 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 
 	// 1. Read the stream configuration (SSF 1.0 §8.1.1.2 — stream_id as query param).
 	readURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, remoteId)
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodGet, readURL, nil, conf.Id, "read")
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodGet, readURL, nil, conf.Id, "read", conf.TxAllowPlaintext)
 
 	// 2. Update the stream configuration (SSF 1.0 §8.1.1.3 — PATCH, Receiver-Supplied only).
 	updateBody := map[string]any{
 		"stream_id":   remoteId,
 		"description": "i2goSignals receiver (management exercise: update)",
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPatch, configEndpoint, updateBody, conf.Id, "update")
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPatch, configEndpoint, updateBody, conf.Id, "update", conf.TxAllowPlaintext)
 
 	// 3. Replace the stream configuration (SSF 1.0 §8.1.1.4 — PUT, full Receiver-Supplied set).
 	replaceBody := map[string]any{
@@ -444,7 +450,7 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 	if len(conf.EventsRequested) > 0 {
 		replaceBody["events_requested"] = conf.EventsRequested
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPut, configEndpoint, replaceBody, conf.Id, "replace")
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPut, configEndpoint, replaceBody, conf.Id, "replace", conf.TxAllowPlaintext)
 
 	// 4. Update the stream status (SSF 1.0 §8.1.2.2 — POST status). enabled→enabled
 	// is a safe no-op transition that keeps the stream running.
@@ -458,7 +464,7 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 		"status":    string(model.StreamStateEnabled),
 		"reason":    "i2goSignals receiver (management exercise: status update)",
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPost, statusEndpoint, statusBody, conf.Id, "status-update")
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPost, statusEndpoint, statusBody, conf.Id, "status-update", conf.TxAllowPlaintext)
 }
 
 // receiverDeliveryBody builds the Receiver-Supplied delivery sub-object for a
@@ -478,7 +484,14 @@ func receiverDeliveryBody(state *model.StreamStateRecord) map[string]any {
 // transmitter and logs the outcome. A nil body sends no payload. The
 // Authorization header is set only when an explicit token is supplied; for
 // TxAlias/OAuth clients the returned http.Client injects credentials itself.
-func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, client *http.Client, auth, method, url string, body map[string]any, sid, op string) {
+// A non-https url is refused before any dial unless allowPlaintext (the
+// stream's tx_allow_plaintext grant) is set — the business-stream TLS floor
+// (#322, #324).
+func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, client *http.Client, auth, method, url string, body map[string]any, sid, op string, allowPlaintext bool) {
+	if !allowPlaintext && tlsSupport.IsPlaintextEndpoint(url) {
+		serverLog.Warn("RCV: management exercise refused", "sid", sid, "op", op, "error", tlsSupport.ErrPlaintextNotAllowed, "remote", url)
+		return
+	}
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
