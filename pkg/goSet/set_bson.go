@@ -295,7 +295,9 @@ type eventSubjectWire EventSubject
 // the top level under their wire names (iss, sub, aud, exp, nbf, iat, jti),
 // and no member the token does not carry.
 func (set SecurityEventToken) MarshalBSON() ([]byte, error) {
-	return wireBSON(securityEventTokenWire(set))
+	// The JSON leg goes through the SET's own codec (toe.go), which keeps a
+	// fractional toe; encoding/json never calls MarshalBSON, so no recursion.
+	return wireBSON(set)
 }
 
 // UnmarshalBSON reads a SET back from its stored wire shape, falling back to
@@ -309,7 +311,7 @@ func (set *SecurityEventToken) UnmarshalBSON(data []byte) error {
 	if legacy {
 		return bson.Unmarshal(data, (*securityEventTokenWire)(set))
 	}
-	return decodeWireBSON(data, (*securityEventTokenWire)(set))
+	return decodeWireBSON(data, set)
 }
 
 // securityEventTokenWire is SecurityEventToken stripped of its BSON methods.
