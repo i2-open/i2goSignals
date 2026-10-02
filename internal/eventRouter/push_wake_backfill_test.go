@@ -31,7 +31,14 @@ func TestBackfillOnWake_QueuesPendingPastABusyBuffer(t *testing.T) {
 
 	// The loop is busy: its buffer already holds the oldest pending SET.
 	eventBuf := buffer.CreateEventPushBuffer([]string{"jti-wake-1"})
-	t.Cleanup(eventBuf.Close)
+	// No runner reads Out here, so close and then drain the buffer the way
+	// drainPushBufferWhenFinished does for a stopped runner; its pump exits
+	// only once everything queued has been read.
+	t.Cleanup(func() {
+		eventBuf.Close()
+		for range eventBuf.Out {
+		}
+	})
 
 	r.backfillPushBufferOnWake(sid, eventBuf)
 
