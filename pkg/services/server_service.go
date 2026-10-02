@@ -20,6 +20,10 @@ var srvLog = logger.Sub("SERVICE")
 
 var ErrServerAlreadyExists = errors.New("server alias already exists")
 
+// evictSpiffeClient drops a server's pooled SPIFFE client (#326). A variable so
+// tests can observe eviction without a live SPIRE agent.
+var evictSpiffeClient = oauthClient.EvictSpiffeClient
+
 type ServerService struct {
 	serverDAO interfaces.ServerDAO
 }
@@ -158,7 +162,15 @@ func (s *ServerService) UpdateServer(ctx context.Context, server *model.Server) 
 		}
 	}
 
-	return s.serverDAO.Update(ctx, server)
+	if err := s.serverDAO.Update(ctx, server); err != nil {
+		return err
+	}
+	// A changed SpiffeConfig needs a new authorizer; drop the pooled client so
+	// its transport is closed rather than left idle.
+	if !reflect.DeepEqual(existing.SpiffeConfig, server.SpiffeConfig) {
+		evictSpiffeClient(server.Id.Hex())
+	}
+	return nil
 }
 
 func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *model.Server) error {
@@ -197,7 +209,11 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 }
 
 func (s *ServerService) DeleteServer(ctx context.Context, id string) error {
-	return s.serverDAO.Delete(ctx, id)
+	if err := s.serverDAO.Delete(ctx, id); err != nil {
+		return err
+	}
+	evictSpiffeClient(id)
+	return nil
 }
 
 func (s *ServerService) ListServers(ctx context.Context) ([]model.Server, error) {

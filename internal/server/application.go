@@ -22,6 +22,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/oauthClient"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -586,6 +587,9 @@ func (sa *SignalsApplication) Shutdown() {
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
+
+	// Release pooled peer SPIFFE clients and their shared X509Source (#326).
+	oauthClient.CloseSpiffeClients()
 
 	// Give some time to ensure all ops are finished.
 	if drain > 0 {
