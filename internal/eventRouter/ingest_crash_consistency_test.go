@@ -71,6 +71,7 @@ func TestOrphanPendingMarker_PollSkipsAndLeavesPending(t *testing.T) {
 
 	jtis := []string{orphan, healthy}
 	pollBuffer := buffer.CreateEventPollBuffer(jtis, h.router.pollDefaultTimeoutSecs, h.router.pollMaxTimeoutSecs)
+	t.Cleanup(pollBuffer.Close)
 	sets, err := h.router.assemblePollResponse(sid, stream, pollBuffer, jtis, true, nil, "")
 	require.NoError(t, err)
 
