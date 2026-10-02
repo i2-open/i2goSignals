@@ -52,7 +52,7 @@ services:
 
   gosignals:
     # Override with GOSIGNALS_IMAGE=... ; defaults to the published alpha image.
-    image: ${GOSIGNALS_IMAGE:-independentid/i2gosignals:0.12.0.alpha.2}
+    image: ${GOSIGNALS_IMAGE:-independentid/i2gosignals:0.12.0-alpha.20}
     container_name: ssfconf-gosignals
     command: /app/goSignalsServer
     hostname: gosignals
