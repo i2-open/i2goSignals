@@ -19,6 +19,7 @@ var pLog = logger.Sub("PROMTH")
 type PrometheusHandler struct {
 	App                    *SignalsApplication
 	EventsIn, EventsOut    *prometheus.CounterVec
+	EventAge               *prometheus.HistogramVec
 	PubPushCnt, PubPollCnt prometheus.GaugeFunc
 	RcvPushCnt, RcvPollCnt prometheus.GaugeFunc
 	ClusterLeasesHeld      prometheus.Gauge
@@ -296,6 +297,18 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 			},
 			[]string{"type", "iss", "tfr", "stream_id"},
 		),
+		// Receipt time minus the SET's toe, for inbound SETs that carry one
+		// (#325). Clock-skew-sensitive across hosts; no stream_id label.
+		EventAge: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "goSignals",
+				Subsystem: "router",
+				Name:      "event_age_at_receipt_seconds",
+				Help:      "Inbound SET age at receipt (receipt time minus toe), by receive transport",
+				Buckets:   prometheus.ExponentialBucketsRange(0.001, 30, 31),
+			},
+			[]string{"tfr"},
+		),
 		PubPollCnt: prometheus.NewGaugeFunc(
 			prometheus.GaugeOpts{
 				Namespace: "goSignals",
@@ -421,6 +434,12 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 
 	registerTo(reg, prometheusHandler.EventsIn)
 	registerTo(reg, prometheusHandler.EventsOut)
+	if r, ok := sa.EventRouter.(interface {
+		SetEventAgeHistogram(*prometheus.HistogramVec)
+	}); ok {
+		r.SetEventAgeHistogram(prometheusHandler.EventAge)
+		registerTo(reg, prometheusHandler.EventAge)
+	}
 
 	registerTo(reg, prometheusHandler.RcvPollCnt)
 	registerTo(reg, prometheusHandler.RcvPushCnt)
