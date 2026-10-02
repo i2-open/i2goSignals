@@ -59,10 +59,12 @@ func (set *SecurityEventToken) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	if bytes.ContainsAny(raw, ".eE") {
-		if f, err := strconv.ParseFloat(string(raw), 64); err == nil {
-			sec, frac := math.Modf(f)
-			toe.Time = time.Unix(int64(sec), int64(math.Round(frac*1e6))*1000)
+		f, err := strconv.ParseFloat(string(raw), 64)
+		if err != nil {
+			return fmt.Errorf("invalid toe %s: %w", raw, err)
 		}
+		sec, frac := math.Modf(f)
+		toe.Time = time.Unix(int64(sec), int64(math.Round(frac*1e6))*1000)
 	}
 	set.TimeOfEvent = &toe
 	return nil
