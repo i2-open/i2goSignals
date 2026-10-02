@@ -13,6 +13,7 @@ These metrics track the flow of Security Event Tokens (SETs) and the state of ev
 |-------------|------|--------|-------------|
 | `goSignals_router_events_in_total` | Counter | `type`, `iss`, `tfr`, `stream_id` | Total number of events received by the router. |
 | `goSignals_router_events_out_total` | Counter | `type`, `iss`, `tfr`, `stream_id` | Total number of events delivered by the router. |
+| `goSignals_router_event_age_at_receipt_seconds` | Histogram | `tfr` | Age of each inbound SET when this node counts it: receipt time minus the SET's `toe` claim. SETs without `toe` are not observed. Buckets: exponential, 1 ms to 30 s (31 buckets). |
 | `goSignals_router_stream_pub_polling_cnt` | Gauge | None | Number of active SET polling publisher streams. |
 | `goSignals_router_stream_pub_push_cnt` | Gauge | None | Number of active SET push publisher streams. |
 | `goSignals_router_stream_rcv_poll_cnt` | Gauge | None | Number of active SET polling receiver streams. |
@@ -32,6 +33,16 @@ For an SSTP pair both directions report `tfr=SSTP`: the inbound counter
 independently. The active-stream gauges above are not split by SSTP — an SSTP
 pair is counted via its underlying publisher/receiver activity. See
 [docs/SSTP.md](SSTP.md).
+
+`goSignals_router_event_age_at_receipt_seconds` uses the same `tfr` values for
+the receiving transfer method. It measures from the transmitter's clock (`toe`)
+to this node's clock, so it is only meaningful when the clocks agree. `toe` is
+set by the event's issuer, so for ordinary events it records how old the event
+was when it arrived, not delivery time alone. `cmd/goSignalsBench` stamps `toe`
+just before each POST, which turns it into ingest-to-receiver delivery latency
+(see [e2e benchmark — Delivery latency](perf/e2e-benchmark.md#delivery-latency)).
+With local-WAL durability, inbound events are counted when the WAL drains, so
+the age includes time spent in the WAL.
 
 ## Push Delivery Metrics
 
