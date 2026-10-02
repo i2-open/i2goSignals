@@ -19,10 +19,12 @@ func recordSpiffeEvictions(t *testing.T) func() []string {
 	var mu sync.Mutex
 	var evicted []string
 	prev := evictSpiffeClient
-	evictSpiffeClient = func(id string) {
+	evictSpiffeClient = func(server *model.Server) {
 		mu.Lock()
 		defer mu.Unlock()
-		evicted = append(evicted, id)
+		if server != nil {
+			evicted = append(evicted, server.Id.Hex())
+		}
 	}
 	t.Cleanup(func() { evictSpiffeClient = prev })
 	return func() []string {

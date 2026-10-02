@@ -588,13 +588,14 @@ func (sa *SignalsApplication) Shutdown() {
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
 
-	// Release pooled peer SPIFFE clients and their shared X509Source (#326).
-	oauthClient.CloseSpiffeClients()
-
 	// Give some time to ensure all ops are finished.
 	if drain > 0 {
 		time.Sleep(drain)
 	}
+
+	// Release pooled peer SPIFFE clients and their shared X509Source (#326)
+	// only after the drain, so in-flight deliveries keep a live source.
+	oauthClient.CloseSpiffeClients()
 
 	// Shutdown the storage
 	if sa.Storage != nil {

@@ -168,7 +168,7 @@ func (s *ServerService) UpdateServer(ctx context.Context, server *model.Server) 
 	// A changed SpiffeConfig needs a new authorizer; drop the pooled client so
 	// its transport is closed rather than left idle.
 	if !reflect.DeepEqual(existing.SpiffeConfig, server.SpiffeConfig) {
-		evictSpiffeClient(server.Id.Hex())
+		evictSpiffeClient(existing)
 	}
 	return nil
 }
@@ -209,10 +209,13 @@ func (s *ServerService) validateOAuthClientConfig(ctx context.Context, server *m
 }
 
 func (s *ServerService) DeleteServer(ctx context.Context, id string) error {
+	// Look the server up first so its pooled SPIFFE client can be evicted by
+	// the same key it was cached under.
+	existing, _ := s.serverDAO.FindByID(ctx, id)
 	if err := s.serverDAO.Delete(ctx, id); err != nil {
 		return err
 	}
-	evictSpiffeClient(id)
+	evictSpiffeClient(existing)
 	return nil
 }
 

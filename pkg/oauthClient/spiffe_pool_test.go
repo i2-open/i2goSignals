@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -65,7 +66,7 @@ func useFakeSpiffeSources(t *testing.T) *fakeSourceLog {
 	t.Helper()
 	t.Setenv(tlsSupport.EnvSpiffeSocket, "unix:///tmp/fake-agent.sock")
 	log := &fakeSourceLog{}
-	CloseSpiffeClients()
+	resetSpiffePool()
 	prev := spiffeSourceFactory
 	spiffeSourceFactory = func(context.Context) (spiffeSource, error) {
 		log.mu.Lock()
@@ -75,10 +76,19 @@ func useFakeSpiffeSources(t *testing.T) *fakeSourceLog {
 		return src, nil
 	}
 	t.Cleanup(func() {
-		CloseSpiffeClients()
+		resetSpiffePool()
 		spiffeSourceFactory = prev
 	})
 	return log
+}
+
+// resetSpiffePool closes the pool and then reopens it, so each test starts
+// from an empty, usable pool even though CloseSpiffeClients is final.
+func resetSpiffePool() {
+	CloseSpiffeClients()
+	spiffePool.mu.Lock()
+	spiffePool.closed = false
+	spiffePool.mu.Unlock()
 }
 
 func spiffeServer(id string, cfg model.SpiffeConfig) *model.Server {
@@ -147,7 +157,7 @@ func TestSpiffeClientPool_EvictDropsServerEntry(t *testing.T) {
 
 	c1, _, err := GetSpiffeClient(context.Background(), srv)
 	require.NoError(t, err)
-	EvictSpiffeClient(srv.Id.Hex())
+	EvictSpiffeClient(srv)
 	c2, _, err := GetSpiffeClient(context.Background(), srv)
 	require.NoError(t, err)
 
@@ -163,10 +173,112 @@ func TestSpiffeClientPool_CloseReleasesSource(t *testing.T) {
 	CloseSpiffeClients()
 	require.True(t, sources.get(0).closed.Load(), "shutdown must close the shared source")
 
-	// The pool is usable again after shutdown (tests run several apps per process).
+	// Shutdown is final: a late caller must not open (and leak) a new source.
 	_, _, err = GetSpiffeClient(context.Background(), srv)
+	require.ErrorIs(t, err, errSpiffePoolClosed)
+	assert.Equal(t, 1, sources.count())
+}
+
+func TestSpiffeClientPool_EvictAliasKeyedServer(t *testing.T) {
+	useFakeSpiffeSources(t)
+	// A server with no stored id is keyed by alias.
+	srv := &model.Server{Alias: "peer", Host: "https://peer.example.com",
+		SpiffeConfig: &model.SpiffeConfig{TrustDomain: "example.org"}}
+
+	c1, _, err := GetSpiffeClient(context.Background(), srv)
 	require.NoError(t, err)
-	assert.Equal(t, 2, sources.count())
+	EvictSpiffeClient(srv)
+	c2, _, err := GetSpiffeClient(context.Background(), srv)
+	require.NoError(t, err)
+
+	assert.NotSame(t, c1.Transport, c2.Transport, "an alias-keyed server must be evictable")
+}
+
+func TestSpiffeClientPool_TransportUsesNoProxy(t *testing.T) {
+	useFakeSpiffeSources(t)
+	c, _, err := GetSpiffeClient(context.Background(), spiffeServer(ids.NewObjectID(), model.SpiffeConfig{TrustDomain: "example.org"}))
+	require.NoError(t, err)
+
+	assert.Nil(t, c.Transport.(*http.Transport).Proxy, "SPIFFE mTLS must dial peers directly, not via an env proxy")
+}
+
+// blockSourceFactory makes the next source creation wait until release is
+// closed, and signals started once it is underway.
+func blockSourceFactory(sources *fakeSourceLog) (started, release chan struct{}) {
+	started, release = make(chan struct{}), make(chan struct{})
+	spiffeSourceFactory = func(context.Context) (spiffeSource, error) {
+		close(started)
+		<-release
+		sources.mu.Lock()
+		defer sources.mu.Unlock()
+		src := &fakeSpiffeSource{}
+		sources.sources = append(sources.sources, src)
+		return src, nil
+	}
+	return started, release
+}
+
+func TestSpiffeClientPool_SlowSourceDoesNotBlockCachedLookup(t *testing.T) {
+	sources := useFakeSpiffeSources(t)
+	cached := spiffeServer(ids.NewObjectID(), model.SpiffeConfig{TrustDomain: "a.org"})
+	c1, _, err := GetSpiffeClient(context.Background(), cached)
+	require.NoError(t, err)
+
+	// Simulate the shared source being (re)created while cached entries exist.
+	spiffePool.mu.Lock()
+	spiffePool.source = nil
+	spiffePool.mu.Unlock()
+	started, release := blockSourceFactory(sources)
+
+	slowDone := make(chan error, 1)
+	go func() {
+		_, _, err := GetSpiffeClient(context.Background(), spiffeServer(ids.NewObjectID(), model.SpiffeConfig{TrustDomain: "b.org"}))
+		slowDone <- err
+	}()
+	<-started
+
+	lookup := make(chan *http.Client, 1)
+	go func() {
+		c, _, _ := GetSpiffeClient(context.Background(), cached)
+		lookup <- c
+	}()
+	select {
+	case c2 := <-lookup:
+		assert.Same(t, c1, c2)
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cached lookup was blocked behind a slow source creation")
+	}
+
+	close(release)
+	require.NoError(t, <-slowDone)
+}
+
+func TestSpiffeClientPool_CloseDuringCreationClosesLateSource(t *testing.T) {
+	sources := useFakeSpiffeSources(t)
+	started, release := blockSourceFactory(sources)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := GetSpiffeClient(context.Background(), spiffeServer(ids.NewObjectID(), model.SpiffeConfig{TrustDomain: "example.org"}))
+		done <- err
+	}()
+	<-started
+
+	closed := make(chan struct{})
+	go func() {
+		CloseSpiffeClients()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown was blocked behind a slow source creation")
+	}
+
+	close(release)
+	require.ErrorIs(t, <-done, errSpiffePoolClosed)
+	require.Equal(t, 1, sources.count())
+	assert.True(t, sources.get(0).closed.Load(), "a source created after shutdown must be closed, not leaked")
 }
 
 func TestSpiffeClientPool_FailedSourceIsNotCached(t *testing.T) {
@@ -197,7 +309,7 @@ func TestSpiffeClientPool_ConcurrentResolution(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			if i%8 == 7 {
-				EvictSpiffeClient(srv.Id.Hex())
+				EvictSpiffeClient(srv)
 			}
 			_, closeFn, err := GetSpiffeClient(context.Background(), srv)
 			if assert.NoError(t, err) {
