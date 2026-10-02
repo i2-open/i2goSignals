@@ -196,7 +196,7 @@ at any time:
 ```bash
 docker inspect --format '{{.Config.Image}}' ssfconf-gosignals
 #  i2gosignals:conformance-dev          -> local build (what the runner uses)
-#  independentid/i2gosignals:0.12.0.…   -> a fixed published tag
+#  independentid/i2gosignals:0.12.0-…   -> a fixed published tag
 ```
 
 `make status` prints this. To deliberately test a **published** tag instead,
