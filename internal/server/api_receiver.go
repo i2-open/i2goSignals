@@ -308,10 +308,7 @@ func (sa *SignalsApplication) CascadeReceiverStreamDelete(ctx context.Context, s
 	}
 
 	delURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, *conf.RemoteStreamId)
-	// Business-stream TLS floor (#322, #324): never dial a plaintext
-	// management URL unless the stream carries the tx_allow_plaintext grant.
-	if !conf.TxAllowPlaintext && tlsSupport.IsPlaintextEndpoint(delURL) {
-		serverLog.Warn("RCV: delete cascade refused", "sid", conf.Id, "error", tlsSupport.ErrPlaintextNotAllowed, "remote", delURL)
+	if refusePlaintext(&conf, delURL, "delete-cascade") != nil {
 		return
 	}
 	client, auth, closeClient, err := sa.getHTTPClientForStream(ctx, state)
@@ -432,14 +429,14 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 
 	// 1. Read the stream configuration (SSF 1.0 §8.1.1.2 — stream_id as query param).
 	readURL := goSsfUtils.AddStreamIdToUrl(configEndpoint, remoteId)
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodGet, readURL, nil, conf.Id, "read", conf.TxAllowPlaintext)
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodGet, readURL, nil, &conf, "read")
 
 	// 2. Update the stream configuration (SSF 1.0 §8.1.1.3 — PATCH, Receiver-Supplied only).
 	updateBody := map[string]any{
 		"stream_id":   remoteId,
 		"description": "i2goSignals receiver (management exercise: update)",
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPatch, configEndpoint, updateBody, conf.Id, "update", conf.TxAllowPlaintext)
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPatch, configEndpoint, updateBody, &conf, "update")
 
 	// 3. Replace the stream configuration (SSF 1.0 §8.1.1.4 — PUT, full Receiver-Supplied set).
 	replaceBody := map[string]any{
@@ -450,7 +447,7 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 	if len(conf.EventsRequested) > 0 {
 		replaceBody["events_requested"] = conf.EventsRequested
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPut, configEndpoint, replaceBody, conf.Id, "replace", conf.TxAllowPlaintext)
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPut, configEndpoint, replaceBody, &conf, "replace")
 
 	// 4. Update the stream status (SSF 1.0 §8.1.2.2 — POST status). enabled→enabled
 	// is a safe no-op transition that keeps the stream running.
@@ -464,7 +461,7 @@ func (sa *SignalsApplication) ExerciseReceiverManagement(ctx context.Context, st
 		"status":    string(model.StreamStateEnabled),
 		"reason":    "i2goSignals receiver (management exercise: status update)",
 	}
-	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPost, statusEndpoint, statusBody, conf.Id, "status-update", conf.TxAllowPlaintext)
+	sa.doReceiverManagementRequest(ctx, client, auth, http.MethodPost, statusEndpoint, statusBody, &conf, "status-update")
 }
 
 // receiverDeliveryBody builds the Receiver-Supplied delivery sub-object for a
@@ -484,14 +481,13 @@ func receiverDeliveryBody(state *model.StreamStateRecord) map[string]any {
 // transmitter and logs the outcome. A nil body sends no payload. The
 // Authorization header is set only when an explicit token is supplied; for
 // TxAlias/OAuth clients the returned http.Client injects credentials itself.
-// A non-https url is refused before any dial unless allowPlaintext (the
-// stream's tx_allow_plaintext grant) is set — the business-stream TLS floor
-// (#322, #324).
-func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, client *http.Client, auth, method, url string, body map[string]any, sid, op string, allowPlaintext bool) {
-	if !allowPlaintext && tlsSupport.IsPlaintextEndpoint(url) {
-		serverLog.Warn("RCV: management exercise refused", "sid", sid, "op", op, "error", tlsSupport.ErrPlaintextNotAllowed, "remote", url)
+// A non-https url is refused before any dial unless the stream carries the
+// tx_allow_plaintext grant (see refusePlaintext).
+func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, client *http.Client, auth, method, url string, body map[string]any, conf *model.StreamConfiguration, op string) {
+	if refusePlaintext(conf, url, op) != nil {
 		return
 	}
+	sid := conf.Id
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -526,6 +522,19 @@ func (sa *SignalsApplication) doReceiverManagementRequest(ctx context.Context, c
 		return
 	}
 	serverLog.Info("RCV: management exercise step ok", "sid", sid, "op", op, "remote", url, "status", resp.StatusCode)
+}
+
+// refusePlaintext enforces the business-stream TLS floor (#322, #324) on a
+// receiver's dial to a transmitter management URL (stream management, status,
+// verification): a non-https url is refused, and logged, unless the stream
+// carries the tx_allow_plaintext grant. It returns
+// tlsSupport.ErrPlaintextNotAllowed when the dial must not happen, else nil.
+func refusePlaintext(conf *model.StreamConfiguration, url, op string) error {
+	if conf.TxAllowPlaintext || !tlsSupport.IsPlaintextEndpoint(url) {
+		return nil
+	}
+	serverLog.Warn("RCV: plaintext management request refused", "sid", conf.Id, "op", op, "error", tlsSupport.ErrPlaintextNotAllowed, "remote", url)
+	return tlsSupport.ErrPlaintextNotAllowed
 }
 
 /*
@@ -829,7 +838,10 @@ func (rps *ReceiverPushStream) initiateVerification() {
 	}
 	defer closeClient()
 
-	err = goSsfUtils.PostVerification(rps.ctx, client, verifyUrl, params)
+	err = refusePlaintext(&rps.stream.StreamConfiguration, verifyUrl, "verify")
+	if err == nil {
+		err = goSsfUtils.PostVerification(rps.ctx, client, verifyUrl, params)
+	}
 	if err != nil {
 		if err.Error() == "unauthorized" {
 			serverLog.Warn("PUSH-RCV: Verification request unauthorized", "sid", rps.stream.StreamConfiguration.Id)
@@ -985,16 +997,7 @@ func (rps *ReceiverPushStream) checkTransmitterStatus(ctx context.Context) (*mod
 	}
 	defer closeClient()
 
-	if server != nil {
-		return goSsfUtils.GetStreamStatus(ctx, client, server, rps.stream.StreamConfiguration.Id)
-	}
-
-	statusUrl := rps.getStatusEndpoint()
-	if statusUrl == "" {
-		return nil, errors.New("could not determine status endpoint")
-	}
-
-	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, rps.stream.StreamConfiguration.Id, "status check")
+	return transmitterStatus(ctx, client, server, &rps.stream.StreamConfiguration, rps.getStatusEndpoint)
 }
 
 func (rps *ReceiverPushStream) fallbackToStatusCheck() {
@@ -1286,6 +1289,9 @@ func (ps *ClientPollStream) initiateVerification() {
 		StreamId: remoteId,
 		State:    ids.NewSecret(),
 	}
+	if err := refusePlaintext(&stream.StreamConfiguration, verifyUrl, "verify"); err != nil {
+		return
+	}
 	if err := goSsfUtils.PostVerification(ps.ctx, client, verifyUrl, params); err != nil {
 		serverLog.Warn("POLL-RCV: Verification request failed", "sid", sid, "error", err)
 		return
@@ -1302,16 +1308,31 @@ func (ps *ClientPollStream) checkTransmitterStatus(ctx context.Context) (*model.
 	}
 	defer closeClient()
 
+	return transmitterStatus(ctx, client, server, &stream.StreamConfiguration, ps.getStatusEndpoint)
+}
+
+// transmitterStatus reads the stream's status from the transmitter, shared by
+// the push and poll receivers. With a registered server the status endpoint
+// comes from its SSF metadata; otherwise statusEndpoint resolves it. Either way
+// the URL is checked against the TLS floor before it is dialed.
+func transmitterStatus(ctx context.Context, client *http.Client, server *model.Server, conf *model.StreamConfiguration, statusEndpoint func() string) (*model.StreamStatus, error) {
+	var statusUrl string
 	if server != nil {
-		return goSsfUtils.GetStreamStatus(ctx, client, server, stream.StreamConfiguration.Id)
+		endpoint, err := goSsfUtils.GetStatusEndpoint(ctx, client, server)
+		if err != nil {
+			return nil, err
+		}
+		statusUrl = endpoint
+	} else {
+		statusUrl = statusEndpoint()
+		if statusUrl == "" {
+			return nil, errors.New("could not determine status endpoint")
+		}
 	}
-
-	statusUrl := ps.getStatusEndpoint()
-	if statusUrl == "" {
-		return nil, errors.New("could not determine status endpoint")
+	if err := refusePlaintext(conf, statusUrl, "status"); err != nil {
+		return nil, err
 	}
-
-	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, stream.StreamConfiguration.Id, "status check")
+	return goSsfUtils.GetResourceFromEndpoint[model.StreamStatus](ctx, client, statusUrl, conf.Id, "status check")
 }
 
 // pollHalted reports whether a poll receiver's status stops it polling and

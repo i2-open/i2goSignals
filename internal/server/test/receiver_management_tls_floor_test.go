@@ -23,6 +23,9 @@ import (
 //
 // "Dialed" is observed as a new TCP connection to the management server, so the
 // https case holds whether or not the client trusts the test certificate.
+//
+// The verification and status-check dials sit on unexported receiver types, so
+// their cases live in internal/server/receiver_verify_status_tls_floor_test.go.
 func TestReceiverManagementHonoursTLSFloor(t *testing.T) {
 	t.Setenv("I2SIG_RCV_MANAGEMENT_EXERCISE", "true")
 

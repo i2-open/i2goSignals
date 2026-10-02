@@ -65,6 +65,7 @@ func TestClientPushStream_Verification(t *testing.T) {
 		Id:                      "test-stream",
 		Iss:                     "mock-tx",
 		MinVerificationInterval: 1,
+		TxAllowPlaintext:        true, // the mock transmitter is plaintext httptest (#324 floor)
 		TxWellKnownUrl:          &wellKnownUrl,
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushReceiveMethod: &model.PushReceiveMethod{
@@ -147,7 +148,8 @@ func TestClientPushStream_FallbackToStatus(t *testing.T) {
 	defer mockTx.Close()
 
 	streamConfig := model.StreamConfiguration{
-		Id: "test-stream",
+		Id:               "test-stream",
+		TxAllowPlaintext: true, // the mock transmitter is plaintext httptest (#324 floor)
 		Delivery: &model.OneOfStreamConfigurationDelivery{
 			PushReceiveMethod: &model.PushReceiveMethod{
 				Method: model.ReceivePush,
