@@ -1,7 +1,7 @@
 
 This is a proposal to modify Dockerfile builds moving away from chainguard and towards an even smaller distribution.
 
-Instead of starting with FROM cgr.dev/chainguard/bash:latest@sha256:580c4beaeb19e77fbfbaf0a28752b7d47edb04fb939986b8b8d7c5cc01bc80e5
+Instead of starting with FROM cgr.dev/chainguard/bash:latest@sha256:091d379d65392063abcfdb381385728379d386c6f63ccea77c997ac6cabccfe8
 
 This is a generic idea. It will need to be adapted to cover all the execs:
 ```dockerfile

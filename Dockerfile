@@ -4,7 +4,7 @@
 # run shell scripts inside the container to drive the goSignals CLI. Digest pin keeps
 # builds reproducible; bump deliberately when refreshing the base image.
 # Refresh procedure: `crane digest cgr.dev/chainguard/bash:latest`.
-FROM cgr.dev/chainguard/bash:latest@sha256:580c4beaeb19e77fbfbaf0a28752b7d47edb04fb939986b8b8d7c5cc01bc80e5
+FROM cgr.dev/chainguard/bash:latest@sha256:091d379d65392063abcfdb381385728379d386c6f63ccea77c997ac6cabccfe8
 
 # Set automatically by buildx (amd64, arm64, ...) per --platform target.
 # Selects the per-arch binaries staged by the Makefile under bin/linux/<arch>/.
