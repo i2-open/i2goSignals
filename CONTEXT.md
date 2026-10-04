@@ -541,6 +541,24 @@ no delivery document in either state references it. `expireAt` is
 written at acknowledgement from the stream's retention policy (enterprise
 policy may vary it per stream).
 
+### Enqueue time / Queue time / Acknowledgement time / Backlog (planned, #352)
+
+The transmitter-side waiting vocabulary, per target stream:
+
+- **Enqueue time** — when the stream's delivery record for a SET was
+  created (or re-created by a re-queue or a stream reset). Distinct from
+  **receipt time**, when the server first accepted the SET: a replayed SET
+  has an old receipt time and a fresh enqueue time.
+- **Queue time** — enqueue time to the SET's *first* hand-out to the
+  receiver (push request sent, poll response written, SSTP frame sent).
+  The transmitter's own wait.
+- **Acknowledgement time** — first hand-out to acknowledgement. The
+  receiver's processing plus transport; retries and redeliveries count
+  here, not against queue time.
+- **Backlog** — the stream's pending events queue: every SET enqueued and
+  not yet acknowledged, whether or not it has been handed out. Reported as
+  a depth and as the age of the oldest.
+
 ### `originalJti` (field on `events`) (planned, spec successor to planning #111)
 
 Set on a re-signed outbound copy stored in `events`: the copy carries a
