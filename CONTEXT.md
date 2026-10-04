@@ -247,6 +247,8 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
   ADR 0017's jti-only dedup and SSTP crash-recovery idempotency intact across
   the hop. `txn` (RFC 8417 §2.2) is the cross-hop audit linkage and is
   likewise preserved; never `act` (an access-token claim, not a SET claim).
+  Planned change (spec successor to planning #111): the re-signed copy
+  gets a new `jti` and carries `originalJti` — see **`originalJti`** below.
 
 ### SET signing algorithm (`signing_alg`)
 
@@ -455,6 +457,43 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
+### DeliveryQueue (planned, spec successor to planning #111)
+
+The per-stream module the `EventRouter` owns for one target stream's
+in-memory work: the pending JTIs still to deliver, the in-memory poll
+claims, and the coalesced acknowledgement batch. The acknowledgement
+batch is one Mongo write — a conditional update of the stream's
+`deliveries` documents from `pending` to `delivered`, plus w:1 inserts of
+the re-signed outbound copies into `events`. It replaces today's
+pendingEvents `DeleteMany` + deliveredEvents `InsertOne` + retract
+`DeleteMany` sequence.
+
+### RoutingTable (planned, spec successor to planning #111)
+
+An immutable snapshot of stream routing — stream id, status, delivery
+mode, event-type and subject filters — rebuilt whenever a stream is
+added, removed or changes status, and read without taking the router
+lock. Lease ownership is deliberately not part of it; that stays in the
+**lease-owner cache** (see **Ingest read caches**).
+
+### PeerTransport (planned, spec successor to planning #111)
+
+The seam for inter-node wake signalling. One method:
+`Wake(ctx, owner node, WakeMessage{StreamID, Mode, Reason, JTIs})`. The
+production adapter is HTTP (HMAC-signed, its own routes, node address
+looked up in Mongo); the two-node test harness uses an in-process
+adapter. The JTI list is advisory and capped — the receiving node falls
+back to reading its pending `deliveries` from Mongo.
+
+### LeaseManager (planned, spec successor to planning #111)
+
+The node-level module that owns lease acquire / heartbeat / release for
+every stream on a node. It keeps the lease expiry each heartbeat returns
+and answers "do I still hold stream X" from local tenure minus a safety
+margin, so no Mongo read precedes an acknowledgement batch. Fencing
+tokens remain for operator-visible diagnostics; fence-on-write was
+rejected (no transactions, and delivery documents carry no owner).
+
 ### One-trip ingest write
 
 Ingest stores a batch's event bodies **and** every matching stream's pending
@@ -484,6 +523,30 @@ targets like an accepted SET (#331). A duplicate with its markers in place
 changes nothing; a failed repair is answered 503 again. The WAL drain runs the
 same repair. The only residual is a retry that arrives after retention purged
 the delivered record, which is re-queued (at-least-once).
+
+The pending-marker and delivered-record collections (pendingEvents /
+deliveredEvents) are being replaced by the single `deliveries` collection
+under the planned spec (successor to planning #111) — see below.
+
+### `deliveries` collection (planned, spec successor to planning #111)
+
+Replaces the pendingEvents and deliveredEvents collections with one
+document per `(sid, jti)`:
+`{sid, jti, state: pending|delivered, createdAt, ackDate, expireAt}` — a
+reference only, never the body. Indexes: unique `(sid, jti)`;
+`(sid, state, jti)` for the pending read; TTL on `expireAt`; `jti` for
+the body sweep. `state` is open to a later `claimed` value. Because a
+delivery document is a reference, a body in `events` is purged only when
+no delivery document in either state references it. `expireAt` is
+written at acknowledgement from the stream's retention policy (enterprise
+policy may vary it per stream).
+
+### `originalJti` (field on `events`) (planned, spec successor to planning #111)
+
+Set on a re-signed outbound copy stored in `events`: the copy carries a
+new `jti`, and `originalJti` points at the inbound SET it was derived
+from. Ingest dedup is on the inbound `jti` only (amends ADR 0017,
+follow-up pending). Ordering (ADR 0040) sorts on the original `jti`.
 
 ### Ingest read caches
 
