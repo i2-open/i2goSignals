@@ -241,3 +241,70 @@ a run (65, 144, 67, 27, 25, 149). Its mean was 3.0-4.7 ms, against
 14.4 ms). The extra `find ... sort({createdAt: 1}).limit(1)` over
 `deliveriesPendingCreatedAt` therefore adds about a millisecond to a read
 that is off the ingest path.
+
+## Spec #112 re-run at `0ef80a4` (i2-open/i2goSignals#366, #367)
+
+A second measurement of the spec branch, after the lock-audit gate:
+`I2SIG_ROUTER_LOCK_AUDIT` now turns the goroutine-ID router-lock audit on
+and off, and it is off by default (production). `docker-compose-benchmark.yml`
+sets it to `true` so that the bench's `properties:` line can count reads
+under the lock, so both settings were measured. Same host, same benchmark
+stack (`make build-docker`, fresh volumes), same load as the run above:
+5000 events, 16 clients, `--mix alternate`, one node. Measured 2026-10-05.
+
+| Build | Lock audit | Runs | Ingest ev/s median (range) | Ingest p50 ms | Per-leg ev/s | `InsertWithPending` mean ms |
+|---|---|---|---|---|---|---|
+| `release-0.12.0` `b38b9c2` (control, above) | n/a | 3 | 1536 mean (1477-1576) | 8.6 | 450 | 5.92 |
+| spec #112 at `2a54c40` (above) | on | 6 | 1389 mean (1306-1536) | 9.9 | 406 | 6.78 |
+| spec #112 at `0ef80a4` | **off** (production) | 6 | **1489** (1469-1523) | 8.8-9.2 | 426-439 | 5.93-6.19 |
+| spec #112 at `0ef80a4` | on (bench default) | 3 | 1455 (1449-1476) | 9.3-9.5 | 420-427 | - |
+
+Against the control's 1536 ev/s, the production setting is **3.1% lower** and
+the audit-on setting 5.3% lower. Both are inside the 10% noise band, and the
+production setting's range overlaps the control's. The `InsertWithPending`
+mean is back at the control's figure (5.9-6.2 ms against 5.92 ms). Every
+leg of every run drained to 100%. Ack writes were 1.000 per batch, and reads
+under the lock and before an ack were 0 with the audit on.
+`GetPendingForStreamBeyond` fired 31-125 times a run, with a mean of
+2.9-5.5 ms.
+
+**Profile** (separate run with mutex and block sampling on, so it is not in
+the table; goSignals1, 4 s window). RSA signing accounts for about half of
+the CPU (`goSet.JWS` 57% cumulative: push delivery, poll response and the SSTP
+ack). That cost predates #112. The #112 paths (`deliveryQueue`, `acker`,
+`walReadThrough`, group commit) account for about 3% of CPU, and most of
+that is Mongo driver I/O. Contention on `sync.Mutex` is 0.12 s over a 4 s
+window across all goroutines; the rest of the mutex delay is the runtime
+scheduler lock. Blocking is dominated by ingest waiting on the
+`InsertWithPending` round trip, which is the design. No #112 hotspot could
+give a gain larger than the noise band, so no optimisation was attempted.
+
+### Two-node drains at 128 clients (#367)
+
+Benchmark stack with `BENCH_CLUSTER=1` (goSignals1 + goSignals1b, ingest
+alternating between them, WAL local), 5000 events, 128 clients, lock audit
+on. The benchmark certificates have no SAN for `goSignals1b`, so a scratch
+compose override gave goSignals1b the network alias `goSsfServer` (which is in
+the SAN and not run in this stack), and the `--gs1b-internal` runs used
+`https://goSsfServer:8888`. The first `--gs1b-internal` poll run, made without
+the alias, failed TLS verification and did not drain (goSignals2 logged `tls: failed to verify certificate`).
+
+| Leg | Receiver points at | Ingest ev/s | Drained | Leg ev/s | Delivery p50 / p95 ms | Peer claims served |
+|---|---|---|---|---|---|---|
+| push | - | 3455 | 5000/5000 | 1682 | 1128 / 1714 | 0 |
+| POLL | goSignals1 | 3087 | 5000/5000 | 2343 | 569 / 919 | 0 |
+| POLL | goSignals1b | 3334 | 5000/5000 | 2492 | 570 / 892 | 0 |
+| POLL (repeat) | goSignals1 | 3167 | 5000/5000 | 2396 | 516 / 733 | 0 |
+| POLL (repeat) | goSignals1b | 3334 | 5000/5000 | 2490 | 552 / 860 | 0 |
+| SSTP, goSignals1 dials | - | 3891 | 5000/5000 | 1782 | 1120 / 1337 | 0 |
+| SSTP, goSignals1 accepts | goSignals1 | 3828 | 5000/5000 | 1763 | 1108 / 1336 | **50** |
+| SSTP, goSignals1 accepts | goSignals1b | 3852 | 5000/5000 | 1771 | 1125 / 1338 | 0 |
+
+Every leg drained. The responder leg shows peer claims served (50, all
+counted on goSignals1b as `mode="sstp-server"`), so a non-owner served
+through the owner. **The POLL leg showed no peer claims in any of its four
+runs**, on either node (`goSignals_router_peer_claims_total` has no
+`poll-transmitter` series on either node). The polled node appears to hold
+the poll-transmitter lease each time, so the non-owner poll path did not run.
+#367's acceptance criterion for the POLL leg is therefore not met by these
+runs.
