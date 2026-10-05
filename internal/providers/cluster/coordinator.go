@@ -129,14 +129,15 @@ type Reaper interface {
 
 // ResourceId splits a lease resource into its kind prefix and the stream or
 // pair id it guards. ok is false for a resource that is not one of the known
-// kinds (push-transmitter, poll-receiver, sstp-client).
+// kinds (push-transmitter, poll-receiver, sstp-client, poll-transmitter,
+// sstp-server).
 func ResourceId(resource string) (kind, id string, ok bool) {
 	kind, id, found := strings.Cut(resource, ":")
 	if !found || id == "" {
 		return "", "", false
 	}
 	switch kind {
-	case pushTransmitterKind, pollReceiverKind, sstpClientKind:
+	case pushTransmitterKind, pollReceiverKind, sstpClientKind, pollTransmitterKind, sstpServerKind:
 		return kind, id, true
 	}
 	return "", "", false

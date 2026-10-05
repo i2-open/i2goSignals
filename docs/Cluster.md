@@ -149,7 +149,7 @@ A periodic sync snapshots the streams the router serves **before** it reads the 
 
 ### Deleted streams
 
-When a reconcile finds that a stream is gone from the store, the router removes it: its transmitter runner stops, its lease is released at once (not left to expire), and later events write no pending marker for it.
+When a reconcile finds that a stream is gone from the store, the router removes it: its runner is told to stop, and each lease it holds (push-transmitter, poll-transmitter, sstp-server, sstp-client) is released when its holder stops, not left to expire; later events write no pending marker for it.
 
 On the deleting node, the stream delete holds the stream-table lock from the receiver teardown through the router's `RemoveStream` to the store's `DeleteStream`, so no reconcile can run between them and re-add the stream. An SSTP pair delete does not take the lock, because `DeleteSstpPair` may make a courtesy call to the peer. A reconcile that runs between its `RemoveStream` and the store delete can re-add the pair for one cycle, and the next reconcile removes it again.
 
@@ -162,7 +162,7 @@ On the deleting node, the stream delete holds the stream-table lock from the rec
 After each successful reconcile, a node purges cluster rows left behind by nodes and streams that no longer exist. The GC window is 90 seconds (three lease TTLs):
 
 *   **`cluster_nodes`** — a node row whose `lastSeenAt` is older than the window is deleted.
-*   **`cluster_leases`** — a lease row whose `leaseUntil` is older than the window is deleted **only** when its resource (`push-transmitter:<sid>`, `poll-receiver:<sid>`, `sstp-client:<PairId>`) names a stream or pair no longer in the store. Lease rows of unknown kinds are kept.
+*   **`cluster_leases`** — a lease row whose `leaseUntil` is older than the window is deleted **only** when its resource (`push-transmitter:<sid>`, `poll-receiver:<sid>`, `poll-transmitter:<sid>`, `sstp-server:<sid>`, `sstp-client:<PairId>`) names a stream or pair no longer in the store. Lease rows of unknown kinds are kept.
 
 A live stream's lease row is never deleted, however long it has been expired, so its fencing token keeps rising across holders; deleting the row would restart the token at 1 and make the diagnostic history misleading. Acknowledgements do not check the token: ownership before an ack is answered from the node's own lease tenure (LeaseManager). A stream that no longer exists has no holder left, so its row can go.
 
