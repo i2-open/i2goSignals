@@ -661,7 +661,10 @@ func buildTopology(gs1, gs2, gs1b *node, o *options, mix audMix) (*topology, err
 		}
 		pollEndpoints = append(pollEndpoints, pollEndpoint)
 	}
-	rxPoll := t.rxPoll
+	rxPollIds := t.rxPoll.Id
+	if t.rxPoll2 != nil {
+		rxPollIds += "," + t.rxPoll2.Id
+	}
 	pollEndpoint := strings.Join(pollEndpoints, ",")
 
 	// 5. SSTP pair, only when the mix sends events over it. Events travel
@@ -681,11 +684,11 @@ func buildTopology(gs1, gs2, gs1b *node, o *options, mix audMix) (*topology, err
 	}
 
 	logf("streams: ingress=%s txPush=%s rxPush=%s txPoll=%s rxPoll=%s %s",
-		ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPoll.Id, sstpDesc)
+		ingress.Id, txPush.Id, rxPush.Id, txPoll.Id, rxPollIds, sstpDesc)
 	if o.verbose {
 		logf("ingress endpoint %s", ingress.Delivery.PushReceiveMethod.EndpointUrl)
 		logf("push leg  %s -> %s", txPush.Id, pushEndpoint)
-		logf("poll leg  %s <- %s", pollEndpoint, rxPoll.Id)
+		logf("poll leg  %s <- %s", pollEndpoint, rxPollIds)
 		logf("issuer jwks %s", jwksURL)
 	}
 	return t, nil
