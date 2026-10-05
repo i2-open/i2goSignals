@@ -197,6 +197,7 @@ already negotiated it.
 | `I2SIG_CLUSTER_INTERNAL_PORT`     | Port for the internal cluster wake-up API. If unset, the main server port is reused.                                                                                                 | _none_                                        |
 | `I2SIG_CLUSTER_ADVERTISE_URL`     | Wake-up address this node advertises to its peers in `cluster_nodes` (e.g. `http://goSignals1b:8898`), stored verbatim. Set it when `BASE_URL` names a shared or load-balanced host, otherwise every node advertises the same address and wake-up calls reach only one of them; a node that sees a live peer advertising its own address logs a WARN naming both node ids. | `http://<BASE_URL host>:<I2SIG_CLUSTER_INTERNAL_PORT, else BASE_URL port>` |
 | `I2SIG_CLUSTER_NAME`              | Logical cluster identifier emitted as the `cluster_name` attribute on every log record. Observability metadata only — does not affect lease semantics. Omitted from logs when empty.| _none_                                        |
+| `I2SIG_LEASE_SAFETY_MARGIN`       | How long before a lease's recorded expiry a node stops acknowledging as its owner (Go duration, default `5s`). It covers clock drift and the time an acknowledgement batch takes to reach the store. A value over half the lease duration is capped at half (15s for the 30s production leases) and logged once at WARN; a negative value is treated as `0` and logged at WARN; an unparsable value falls back to the default. |
 
 ## Store_Mongo
 
