@@ -711,26 +711,21 @@ func (q *deliveryQueue) ensureForward(ctx context.Context) {
 }
 
 // AckJtiOf returns the acknowledgement JTI a SET with inboundJti carries on
-// this stream (AckJtisOf for one JTI).
+// this stream (AckJtisOf for one JTI), or "" when its stored row could not be
+// read.
 func (q *deliveryQueue) AckJtiOf(inboundJti string, stream *model.StreamStateRecord) string {
 	return q.AckJtisOf([]string{inboundJti}, stream)[0]
 }
 
 // AckJtisOf returns, in order, the acknowledgement JTI each inbound JTI
-// carries on this stream (ackJtisOf). A sign site cannot fail its hand-out,
-// so a failed store read falls back to the stream's row-writer value and is
-// logged; the receiver's acknowledgement of that SET then matches nothing and
-// it is delivered again under its stored JTI.
+// carries on this stream (ackJtisOf). A failed store read derives nothing
+// (#363, S2): the unresolved entries are left "" and logged, and every sign
+// site skips them, so those SETs stay pending and are handed out on a later
+// read under their stored JTI.
 func (q *deliveryQueue) AckJtisOf(inbound []string, stream *model.StreamStateRecord) []string {
 	out, err := q.ackJtisOf(q.ctx(), inbound, stream)
 	if err != nil {
-		eventLogger.Warn("QUEUE: Error reading stored acknowledgement JTIs; signing with the stream's value", "sid", q.sid, "count", len(inbound), "error", err)
-		stream = q.orStream(stream)
-		for i, jti := range inbound {
-			if out[i] == "" {
-				out[i] = rowWriterAckJti(stream, jti)
-			}
-		}
+		eventLogger.Warn("QUEUE: Error reading stored acknowledgement JTIs; leaving the SETs pending", "sid", q.sid, "count", len(inbound), "error", err)
 	}
 	return out
 }
@@ -801,7 +796,7 @@ func (q *deliveryQueue) ctx() context.Context {
 
 // RefOf returns the reference held for inboundJti, with its acknowledgement
 // JTI and enqueue time; a reference the queue does not hold carries
-// AckJtiOf's value and no enqueue time.
+// AckJtiOf's value ("" when its row could not be read) and no enqueue time.
 func (q *deliveryQueue) RefOf(inboundJti string, stream *model.StreamStateRecord) interfaces.PendingRef {
 	q.mu.Lock()
 	qr, ok := q.refs[inboundJti]
@@ -828,8 +823,14 @@ func (q *deliveryQueue) Served(rec *model.EventRecord, signed *goSet.SecurityEve
 	q.mu.Unlock()
 	ackJti := ""
 	if !held {
-		// Resolved outside q.mu: the stream lookup takes the router lock.
-		ackJti = q.AckJtiOf(rec.Jti, nil)
+		// The JTI the SET was signed with is its acknowledgement JTI; without
+		// a signed token it is resolved outside q.mu (the stream lookup takes
+		// the router lock).
+		if signed != nil && signed.ID != "" {
+			ackJti = signed.ID
+		} else if ackJti = q.AckJtiOf(rec.Jti, nil); ackJti == "" {
+			return
+		}
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -838,9 +839,13 @@ func (q *deliveryQueue) Served(rec *model.EventRecord, signed *goSet.SecurityEve
 		// A SET served from a buffer the queue did not seed (a wake or the
 		// poll buffer) is held now under the stream's acknowledgement JTI
 		// (what ingest wrote), so its acknowledgement drops it and stores
-		// its copy.
+		// its copy. One dropped since the check above takes the JTI it was
+		// signed with; with none it is not held (it stays pending).
 		if ackJti == "" {
-			ackJti = rec.Jti
+			if signed == nil || signed.ID == "" {
+				return
+			}
+			ackJti = signed.ID
 		}
 		q.holdLocked(interfaces.PendingRef{Jti: rec.Jti, AckJti: ackJti, EnqueuedAt: rec.SortTime}, false)
 		if qr, ok = q.refs[rec.Jti]; !ok {

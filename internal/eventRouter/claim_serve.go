@@ -390,11 +390,17 @@ func (r *router) claimLocal(ctx context.Context, req peer.ClaimRequest, forPeer 
 		}
 	}
 
-	refs := make([]interfaces.PendingRef, len(jtis))
-	ackJtis := make([]string, len(jtis))
-	for i, jti := range jtis {
-		ackJtis[i] = q.AckJtiOf(jti, state)
-		refs[i] = interfaces.PendingRef{Jti: jti, AckJti: ackJtis[i]}
+	refs := make([]interfaces.PendingRef, 0, len(jtis))
+	ackJtis := make([]string, 0, len(jtis))
+	for i, ackJti := range q.AckJtisOf(jtis, state) {
+		if ackJti == "" {
+			// Its stored row could not be read (#363, S2): nothing is derived;
+			// the SET is not handed out and is served again once its claim
+			// expires.
+			continue
+		}
+		ackJtis = append(ackJtis, ackJti)
+		refs = append(refs, interfaces.PendingRef{Jti: jtis[i], AckJti: ackJti})
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Jti < refs[j].Jti })
 	if forPeer && len(ackJtis) > 0 {

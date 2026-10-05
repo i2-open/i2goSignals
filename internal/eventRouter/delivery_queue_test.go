@@ -2,6 +2,9 @@ package eventRouter
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -317,4 +320,68 @@ func TestDeliveryQueue_BeyondWindowUsesStoredAckJti(t *testing.T) {
 	assert.Equal(t, int64(1), n, "the acknowledgement matches the stored row")
 	assert.Equal(t, map[string]string{"a": "a", "b": "b"}, pendingAckJtis(t, dao, sid))
 	assert.Nil(t, findCopy(t, dao, pub.AckJti("c")), "no copy under a re-derived JTI")
+}
+
+// failingAckReadDAO fails every StoredAckJtis read.
+type failingAckReadDAO struct {
+	interfaces.EventDAO
+}
+
+func (failingAckReadDAO) StoredAckJtis(context.Context, string, []string) (map[string]string, error) {
+	return nil, errors.New("store down")
+}
+
+// S2: rows keep the ackJti written at ingest; nothing is re-derived. A failed
+// stored-ackJti read leaves the unheld references unresolved (empty): no sign
+// site may hand them out under a derived JTI, so they stay pending and are
+// delivered on a later read. A held reference still resolves from memory.
+func TestDeliveryQueue_FailedStoredAckReadDerivesNothing(t *testing.T) {
+	r, dao, rec := queueRouter(t, model.RouteModeForward, "a", "b")
+	sid := rec.StreamConfiguration.Id
+	q := newDeliveryQueue(r, sid, 1)
+	r.queues.Store(sid, q)
+	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 1})
+	pub := rec
+	pub.StreamConfiguration.RouteMode = model.RouteModePublish
+	r.pushStreams[sid] = pub
+	r.eventService = services.NewEventService(failingAckReadDAO{EventDAO: dao})
+
+	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "b"}, &pub), "a failed read must not derive")
+	assert.Equal(t, "", q.AckJtiOf("b", &pub))
+	assert.Equal(t, "", q.RefOf("b", &pub).AckJti)
+
+	// Served records an unheld SET under the JTI it was signed with, without
+	// reading the store.
+	wide := newDeliveryQueue(r, sid, 5)
+	signed := goSet.SecurityEventToken{}
+	signed.ID = "b"
+	wide.Served(&model.EventRecord{Jti: "b"}, &signed, "jws-b")
+	wide.mu.Lock()
+	qr, ok := wide.refs["b"]
+	wide.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "b", qr.ref.AckJti)
+}
+
+// A poll response leaves out a SET whose stored ackJti could not be read: it
+// is not signed under a derived JTI, and stays pending (#363, S2).
+func TestAssemblePollResponse_FailedStoredAckReadLeavesSetPending(t *testing.T) {
+	r, dao, rec := queueRouter(t, model.RouteModePublish, "a", "b")
+	sid := rec.StreamConfiguration.Id
+	for _, jti := range []string{"a", "b"} {
+		require.NoError(t, dao.Insert(context.Background(), &model.EventRecord{Jti: jti, Sid: sid, Event: goSet.SecurityEventToken{}}))
+	}
+	q := newDeliveryQueue(r, sid, 1)
+	r.queues.Store(sid, q)
+	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 1})
+	r.eventService = services.NewEventService(failingAckReadDAO{EventDAO: dao})
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	sets, err := r.assemblePollResponse(sid, &rec, nil, []string{"a", "b"}, false, key, "kid")
+	require.NoError(t, err)
+	assert.Len(t, sets, 1, "only the held reference is handed out")
+	assert.Contains(t, sets, rec.AckJti("a"))
+	assert.NotContains(t, sets, rec.AckJti("b"), "signed under a derived JTI after a failed read")
+	assert.Contains(t, pendingAckJtis(t, dao, sid), "b", "the SET stays pending")
 }

@@ -327,17 +327,31 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []
 	// JTI, which is what the peer acks.
 	cfg := rec.StreamConfiguration
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	resolved := work[:0]
+	for _, eventRecord := range work {
+		ackJti := ackJtiOf[eventRecord]
+		if ackJti == "" {
+			// A reference claimed without its acknowledgement JTI (a bare
+			// buffer submit) takes its stored row's one. A failed read derives
+			// nothing (#363, S2): the SET is not sent and stays pending.
+			if ackJti = q.AckJtiOf(eventRecord.Jti, rec); ackJti == "" {
+				continue
+			}
+		}
+		ackJtiOf[eventRecord] = ackJti
+		resolved = append(resolved, eventRecord)
+	}
+	work = resolved
+	if len(work) == 0 {
+		q.MarkHandedOut(mapKeys(sets), time.Now())
+		return sets, nil
+	}
 	idx := make(map[*model.EventRecord]int, len(work))
 	tokens := make([]goSet.SecurityEventToken, len(work))
 	for i, eventRecord := range work {
 		idx[eventRecord] = i
 		tokens[i] = eventRecord.Event
 		tokens[i].ID = ackJtiOf[eventRecord]
-		if tokens[i].ID == "" {
-			// A reference claimed without its acknowledgement JTI (a bare
-			// buffer submit) takes its stored row's one.
-			tokens[i].ID = q.AckJtiOf(eventRecord.Jti, rec)
-		}
 	}
 	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
 		token := &tokens[idx[eventRecord]]

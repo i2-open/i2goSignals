@@ -2376,6 +2376,20 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 		inbound[i] = rec.Jti
 	}
 	ackJtis := q.AckJtisOf(inbound, state)
+	// A SET whose stored row could not be read is not handed out (#363, S2):
+	// nothing is derived, and it is served again once its claim expires.
+	kept := 0
+	for i, rec := range work {
+		if ackJtis[i] == "" {
+			continue
+		}
+		work[kept], ackJtis[kept] = rec, ackJtis[i]
+		kept++
+	}
+	work, ackJtis = work[:kept], ackJtis[:kept]
+	if len(work) == 0 {
+		return sets, nil
+	}
 	tokens := make([]goSet.SecurityEventToken, len(work))
 	idx := make(map[*model.EventRecord]int, len(work))
 	for i, rec := range work {
@@ -3505,6 +3519,18 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 			inbound[i] = work[i].jti
 		}
 		handed := q.AckJtisOf(inbound, config)
+		// A SET whose stored row could not be read is not pushed (#363, S2):
+		// nothing is derived; it stays pending and backfill re-pulls it.
+		kept := 0
+		for i := range work {
+			if handed[i] == "" {
+				continue
+			}
+			work[kept], handed[kept] = work[i], handed[i]
+			kept++
+		}
+		work, handed = work[:kept], handed[:kept]
+		outcomes = outcomes[:kept]
 		q.MarkHandedOut(handed, time.Now())
 		workers := r.pushConcurrency
 		if workers < 1 {
