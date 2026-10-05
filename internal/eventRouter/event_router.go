@@ -728,7 +728,7 @@ func (r *router) startGate() error {
 // DeliveryStarted reports whether delivery has started: false while it waits
 // for the legacy deliveries migration (#361), when a poll is answered 503.
 func (r *router) DeliveryStarted() bool {
-	return !r.startPending.Load()
+	return r.startGate() == nil
 }
 
 // deferredUntilStarted reports whether delivery still waits for the legacy
@@ -1450,9 +1450,9 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 	if len(eventTokens) == 0 {
 		return results
 	}
-	if r.startPending.Load() {
+	if err := r.startGate(); err != nil {
 		for i := range results {
-			results[i] = errDeliveryNotStarted
+			results[i] = err
 		}
 		return results
 	}
@@ -2096,8 +2096,8 @@ func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid s
 // point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.EventRecord, error) {
-	if r.startPending.Load() {
-		return nil, errDeliveryNotStarted
+	if err := r.startGate(); err != nil {
+		return nil, err
 	}
 	// SSTP-aware resolution: an operational event keyed on the rx-side SID of an
 	// SSTP pair must still find the (single) pair record, whose document _id is
@@ -2245,7 +2245,7 @@ func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
 }
 
 func (r *router) PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int) {
-	if r.startPending.Load() {
+	if r.startGate() != nil {
 		// Delivery waits for the legacy deliveries migration (#361).
 		eventLogger.Warn("POLL-SRV: delivery not started yet; poll refused", "sid", sid)
 		return nil, false, http.StatusServiceUnavailable
