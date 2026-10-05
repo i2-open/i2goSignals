@@ -69,7 +69,7 @@ A SET acknowledged into one node's WAL is not in the store until the drain moves
 Even in local mode, only streams whose per-stream `durability` is `local` use the WAL. All other streams keep the majority contract.
 
 ### Lease-Tenure Acks
-Acknowledgements are not fenced on write. The router's lease manager records, on every acquire or renewal, a tenure deadline of `min(leaseUntil, renewCallStart + leaseDuration) - margin` (margin `I2SIG_LEASE_SAFETY_MARGIN`, default 5s, clamped to half the lease duration) and answers "does this node still own the stream" from memory:
+Acknowledgements are not fenced on write. The router's lease manager records, on every acquire or renewal, a tenure deadline of `min(leaseUntil, renewCallStart + leaseDuration) - margin` (margin `I2SIG_LEASE_SAFETY_MARGIN`, default 5s, capped at half the lease duration with a one-time WARN) and answers "does this node still own the stream" from memory:
 *   Inside the tenure, an acknowledgement batch is written with no lease read or coordinator call before it.
 *   Past the tenure, the batch is skipped and nothing is written; the SETs stay pending. A heartbeat renewal resumes it, or the next owner redelivers them, so a takeover can duplicate a send but never lose one.
 *   Every stream kind is checked against its own lease: push and poll transmitters, SSTP pair clients and SSTP pair servers.

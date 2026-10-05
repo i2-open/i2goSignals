@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
@@ -20,7 +21,7 @@ const leaseSafetyMarginEnv = "I2SIG_LEASE_SAFETY_MARGIN"
 const defaultLeaseSafetyMargin = 5 * time.Second
 
 // leaseSafetyMargin reads leaseSafetyMarginEnv. A negative value is treated as
-// zero.
+// zero and reported at WARN.
 func leaseSafetyMargin() time.Duration {
 	v := os.Getenv(leaseSafetyMarginEnv)
 	if v == "" {
@@ -32,6 +33,7 @@ func leaseSafetyMargin() time.Duration {
 		return defaultLeaseSafetyMargin
 	}
 	if d < 0 {
+		eventLogger.Warn("Negative lease safety margin, using 0", "key", leaseSafetyMarginEnv, "value", v)
 		return 0
 	}
 	return d
@@ -68,6 +70,8 @@ type leaseManager struct {
 
 	mu        sync.Mutex
 	deadlines map[string]time.Time
+	// capWarned records that a capped margin has been reported.
+	capWarned atomic.Bool
 }
 
 // newLeaseManager returns a manager for coord, using the margin from the
@@ -120,6 +124,9 @@ func (m *leaseManager) note(resource string, start time.Time, held bool, leaseUn
 	margin := m.margin
 	if half := leaseDuration / 2; margin > half {
 		margin = half
+		if m.capWarned.CompareAndSwap(false, true) {
+			eventLogger.Warn("Lease safety margin capped at half the lease duration", "key", leaseSafetyMarginEnv, "configured", m.margin, "effective", margin, "leaseDuration", leaseDuration)
+		}
 	}
 	deadline = deadline.Add(-margin)
 

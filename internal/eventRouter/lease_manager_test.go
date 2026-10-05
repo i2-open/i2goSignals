@@ -2,6 +2,7 @@ package eventRouter
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -218,4 +219,36 @@ func TestDeliveryQueue_AckSkippedPastTenureResumesAfterRenewal(t *testing.T) {
 	r.locks.exitAck()
 	assert.Equal(t, int64(1), ackReads.Load())
 	assert.Equal(t, readsBefore+1, testutil.ToFloat64(readsBeforeAckTotal))
+}
+
+// A margin wider than half the lease is capped, and the cap is reported once
+// at WARN rather than applied silently. A negative margin is reported too.
+func TestLeaseSafetyMargin_CapAndNegativeWarn(t *testing.T) {
+	logs := captureLogs(t)
+	t.Setenv(leaseSafetyMarginEnv, "20s")
+	clock := &manualClock{t: time.Unix(1_000_000, 0)}
+	m := newLeaseManager(nil)
+	m.now = clock.now
+	start := clock.now()
+	m.note("push-transmitter:s1", start, true, time.Time{}, 30*time.Second)
+	m.note("push-transmitter:s2", start, true, time.Time{}, 30*time.Second)
+	m.mu.Lock()
+	deadline := m.deadlines["push-transmitter:s1"]
+	m.mu.Unlock()
+	assert.Equal(t, start.Add(15*time.Second), deadline, "the effective margin is 15s")
+
+	countWarn := func(substr string) int {
+		n := 0
+		for _, line := range logs.lines() {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, substr) {
+				n++
+			}
+		}
+		return n
+	}
+	assert.Equal(t, 1, countWarn("Lease safety margin capped"), "the cap is reported once")
+
+	t.Setenv(leaseSafetyMarginEnv, "-1s")
+	assert.Equal(t, time.Duration(0), leaseSafetyMargin())
+	assert.Equal(t, 1, countWarn("Negative lease safety margin"))
 }
