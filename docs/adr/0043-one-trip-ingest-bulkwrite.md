@@ -12,7 +12,7 @@ Accepted (community #330, #331; spec-111 Stage 1).
 This ADR supersedes ADR 0038's BeginAddEvents/RetractPending mechanism while
 preserving its contract.
 
-Amended 2026-10-05 by planning spec #112 (community #359): the one-trip bulkWrite now spans the `events` and `deliveries` namespaces. Each delivery intent is a `deliveries` reference (`state` `pending`, the stored wire `ackJti`) and an acknowledgement is one conditional update to `delivered`, not a move from `pendingEvents` to `deliveredEvents`. Retention on those references is recorded in planning ADR 0077 (independentid/i2gosignals-planning `docs/adr/0077-retention-window-fixed-at-acknowledgement-unreferenced-body-sweep.md`). The ordering and no-orphan argument below is unchanged with `deliveries` in place of `pendingEvents`.
+Amended 2026-10-05 by planning spec #112 (community #359): the one-trip bulkWrite now spans the `events` and `deliveries` namespaces. Each delivery intent is a `deliveries` reference (`state` `pending`, the stored wire `ackJti`) and an acknowledgement is one conditional update to `delivered`, not a move from `pendingEvents` to `deliveredEvents`. Retention on those references is recorded in planning ADR 0077 (independentid/i2gosignals-planning `docs/adr/0077-retention-window-fixed-at-acknowledgement-unreferenced-body-sweep.md`). The ordering and no-orphan argument below is unchanged with `deliveries` in place of `pendingEvents`. The layout change is carried by a one-shot, idempotent legacy migration that runs before the router reads or writes any delivery; delivery is refused or deferred until it completes (community #361).
 
 ## Context
 
@@ -119,7 +119,9 @@ not maintaining two mechanisms.
   instead of a delete from `pendingEvents`. The pending index that every
   delivery leg reads (`{sid:1,jti:1}`, ADR 0040) would move to an array field
   on a hot, growing collection. It also needs a schema migration of stored
-  data. The multi-namespace bulkWrite gets the one-trip saving without
+  data (a cost of its date: spec #112 later took on a stored-data migration
+  for the `deliveries` layout, community #361, though not this option's
+  folding of the marker into the event document). The multi-namespace bulkWrite gets the one-trip saving without
   changing the storage shape.
 - **Keep ADR 0038's concurrent writes and add group commit only.** Rejected as
   the end state. It keeps the speculative-marker window and `RetractPending`.
