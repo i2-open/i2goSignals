@@ -160,7 +160,7 @@ func (r *router) startPushRunnerIfReEnabled(sid string, runner *pushRunner) {
 // pendingPushJtis reads sid's pending JTIs from the store, to preload a new
 // runner's buffer. The caller does not hold r.mu.
 func (r *router) pendingPushJtis(sid string) []string {
-	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+	jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
 		MaxEvents:         0,
 		ReturnImmediately: true,
 		TimeoutSecs:       10,

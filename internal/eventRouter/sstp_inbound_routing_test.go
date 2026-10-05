@@ -7,6 +7,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/ids"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -193,7 +194,7 @@ func TestHandleEvent_SstpInboundForward_DoesNotEchoToOriginatingPair(t *testing.
 	require.NoError(t, h.router.HandleEvent(token, `{"raw":true}`, pair.SstpInbound.Id))
 
 	jtis, _ := h.router.eventService.GetEventIds(context.Background(), txSid, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
-	assert.NotContains(t, jtis, "sstp-echo-jti",
+	assert.NotContains(t, interfaces.RefJtis(jtis), "sstp-echo-jti",
 		"a SET must not be routed back out the pair it arrived on")
 }
 
@@ -255,11 +256,11 @@ func TestHandleEvent_SstpInboundForward_RoutesToOtherSstpPair(t *testing.T) {
 
 	params := model.PollParameters{MaxEvents: 100, ReturnImmediately: true}
 	otherJtis, _ := h.router.eventService.GetEventIds(context.Background(), otherTx, params)
-	assert.Contains(t, otherJtis, "sstp-fanout-jti",
+	assert.Contains(t, interfaces.RefJtis(otherJtis), "sstp-fanout-jti",
 		"a non-originating SSTP pair must still receive the forwarded SET")
 
 	originJtis, _ := h.router.eventService.GetEventIds(context.Background(), originTx, params)
-	assert.NotContains(t, originJtis, "sstp-fanout-jti",
+	assert.NotContains(t, interfaces.RefJtis(originJtis), "sstp-fanout-jti",
 		"the originating pair must still be excluded")
 }
 
@@ -281,6 +282,6 @@ func TestHandleEvent_SstpInboundForward_DoesNotEchoToInitiatorPair(t *testing.T)
 
 	jtis, _ := h.router.eventService.GetEventIds(context.Background(), txSid,
 		model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
-	assert.NotContains(t, jtis, "sstp-echo-client-jti",
+	assert.NotContains(t, interfaces.RefJtis(jtis), "sstp-echo-client-jti",
 		"an initiator pair must not be echoed either")
 }

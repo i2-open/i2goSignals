@@ -26,7 +26,7 @@ func TestBackfillOnWake_QueuesPendingPastABusyBuffer(t *testing.T) {
 
 	const sid = "push-wake-backfill"
 	for i := 1; i <= 5; i++ {
-		require.NoError(t, r.eventService.AddEventToStream(context.Background(), fmt.Sprintf("jti-wake-%d", i), sid))
+		require.NoError(t, r.eventService.AddEventToStream(context.Background(), refOf(fmt.Sprintf("jti-wake-%d", i)), sid))
 	}
 
 	// The loop is busy: its buffer already holds the oldest pending SET.

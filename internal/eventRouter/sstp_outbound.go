@@ -235,7 +235,7 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 	r.mu.RLock()
 	claimed := len(r.sstpInFlight[pairId])
 	r.mu.RUnlock()
-	pending, _ := r.eventService.GetEventIds(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
+	pending, _ := r.pendingJtis(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
 		MaxEvents:         int32(max + claimed),
 		ReturnImmediately: true,
 	})

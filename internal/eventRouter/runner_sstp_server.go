@@ -226,7 +226,7 @@ func (r *router) drainSstpOutbound(_ context.Context, rec *model.StreamStateReco
 	// Opportunistically prefetch pending JTIs when the buffer is empty (recovery
 	// after takeover relies on persisted outbound events, Q13).
 	if buf.Cnt() == 0 {
-		jtis, _ := r.eventService.GetEventIds(r.ctx, txSid, model.PollParameters{
+		jtis, _ := r.pendingJtis(r.ctx, txSid, model.PollParameters{
 			MaxEvents:         int32(r.backfillBatch),
 			ReturnImmediately: true,
 		})

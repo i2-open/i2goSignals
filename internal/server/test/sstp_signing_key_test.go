@@ -70,7 +70,7 @@ func TestSstpAcceptingEnd_KeyUnavailableRefusesThenResumes(t *testing.T) {
 	outbound.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
 	_, err = instance.eventSvc().AddEvent(ctx, &outbound, txSid, "")
 	require.NoError(t, err)
-	require.NoError(t, instance.eventSvc().AddEventToStream(ctx, outbound.ID, txSid))
+	require.NoError(t, instance.eventSvc().AddEventToStream(ctx, dao.PendingRef{Jti: outbound.ID, AckJti: outbound.ID}, txSid))
 	inbound := goSet.CreateSet(sstpVerifySubject(), "DEFAULT", []string{iss})
 	inbound.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
 	defaultKey, err := instance.GetPrivateKey("DEFAULT")

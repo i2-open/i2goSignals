@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -181,10 +182,10 @@ func TestHandleEvent_TwoHopSstp_ExtendedEventType(t *testing.T) {
 
 	params := model.PollParameters{MaxEvents: 100, ReturnImmediately: true}
 	hopBJtis, _ := h.router.eventService.GetEventIds(context.Background(), hopBTx, params)
-	assert.Contains(t, hopBJtis, "sstp-two-hop-jti",
+	assert.Contains(t, interfaces.RefJtis(hopBJtis), "sstp-two-hop-jti",
 		"hop 2 must carry the SET to the second pair's tx side")
 
 	hopAJtis, _ := h.router.eventService.GetEventIds(context.Background(), hopATx, params)
-	assert.NotContains(t, hopAJtis, "sstp-two-hop-jti",
+	assert.NotContains(t, interfaces.RefJtis(hopAJtis), "sstp-two-hop-jti",
 		"the ingesting pair must not be echoed back to its own peer")
 }

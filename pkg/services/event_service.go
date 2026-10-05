@@ -199,14 +199,14 @@ func NewIngestRecords(events []*goSet.SecurityEventToken, sid string, raws []str
 
 // AddEventsWithPending persists a batch of candidate records together with
 // their delivery intents in one DAO call (ADR 0043). pending maps an outbound
-// stream document ID to the JTIs queued on it. The returned records and errors
+// stream document ID to the references queued on it. The returned records and errors
 // are index-aligned with recs: nil error means the record and all of its
 // pending markers are durably stored; a JTI that already exists comes back as
 // the existing record paired with ErrDuplicateJTI, with no marker written for
 // it; any other error means the SET is not durably queued and must not be
 // acknowledged (ADR 0038). When the batch itself fails, every position carries
 // that error and every record is nil.
-func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]string) ([]*model.EventRecord, []error) {
+func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]interfaces.PendingRef) ([]*model.EventRecord, []error) {
 	out := make([]*model.EventRecord, len(recs))
 	errs := make([]error, len(recs))
 	if len(recs) == 0 {
@@ -243,12 +243,13 @@ func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.E
 // RequeueDuplicate closes the ADR 0043 residual (#331): a SET whose body
 // landed but whose marker write failed was answered 503, so its retry is a
 // duplicate for AddEventsWithPending and would otherwise be acked without ever
-// being queued. It queues jti on each of streamIDs that has neither a pending
-// nor a delivered record for it and returns the streams it queued on; a SET
-// that is still pending or already delivered everywhere is a no-op. An error
+// being queued. It queues jti on each stream of ackJtis (stream ID -> ackJti)
+// that has neither a pending nor a delivered record for it and returns the
+// streams it queued on; a SET that is still pending or already delivered
+// everywhere is a no-op. An existing record keeps its ackJti. An error
 // means the retry must again be answered 503, not acked.
-func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid string, streamIDs []string) ([]string, error) {
-	queued, err := s.eventDAO.EnsurePending(ctx, jti, streamIDs)
+func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid string, ackJtis map[string]string) ([]string, error) {
+	queued, err := s.eventDAO.EnsurePending(ctx, jti, ackJtis)
 	if err != nil {
 		// WARN: the DAO logged the failure at ERROR and the caller answers 503.
 		esLog.Warn("Error re-queuing duplicate SET", "jti", jti, "sid", sid, "error", err)
@@ -260,10 +261,10 @@ func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid str
 	return queued, nil
 }
 
-func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
-	err := s.eventDAO.AddPending(ctx, jti, streamID)
+func (s *EventService) AddEventToStream(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	err := s.eventDAO.AddPending(ctx, ref, streamID)
 	if err != nil {
-		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
+		esLog.Error("Error adding pending event to stream", "jti", ref.Jti, "streamID", streamID, "error", err)
 	}
 	return err
 }
@@ -319,18 +320,44 @@ func (s *EventService) GetEventRecord(ctx context.Context, jti string) *model.Ev
 	return rec
 }
 
-func (s *EventService) GetEventIds(ctx context.Context, streamID string, params model.PollParameters) ([]string, bool) {
-	jtis, total, err := s.eventDAO.GetPendingForStream(ctx, streamID, params.MaxEvents)
+// GetEventIds returns the stream's pending references (ascending inbound
+// JTI, each with its acknowledgement JTI) and whether more are pending.
+func (s *EventService) GetEventIds(ctx context.Context, streamID string, params model.PollParameters) ([]interfaces.PendingRef, bool) {
+	page, err := s.eventDAO.GetPendingForStream(ctx, streamID, params.MaxEvents)
 	if err != nil {
 		esLog.Error("Error getting event IDs", "error", err)
-		return []string{}, false
+		return []interfaces.PendingRef{}, false
 	}
+	return page.Refs, int64(len(page.Refs)) < page.Total
+}
 
-	more := false
-	if int64(len(jtis)) < total {
-		more = true
+// PendingPage returns the whole pending read for streamID: the references,
+// the pending total and the earliest enqueue time beyond the page.
+func (s *EventService) PendingPage(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
+	return s.eventDAO.GetPendingForStream(ctx, streamID, limit)
+}
+
+// AckBatch acknowledges batch.Jtis (acknowledgement JTIs) for batch.StreamID
+// in one DAO write and returns the number of references moved to delivered.
+func (s *EventService) AckBatch(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	n, err := s.eventDAO.Ack(ctx, batch)
+	if err != nil {
+		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.
+		esLog.Warn("Error acknowledging batch", "count", len(batch.Jtis), "streamID", batch.StreamID, "error", err)
 	}
-	return jtis, more
+	return n, err
+}
+
+// ResetPendingAckJti sets ackJti = jti on every pending reference of
+// streamID and returns the count changed. Delivered references are untouched.
+func (s *EventService) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
+	return s.eventDAO.ResetPendingAckJti(ctx, streamID)
+}
+
+// MigrateLegacyDeliveries carries the pre-#359 pending/delivered collections
+// into deliveries. expireAt computes a delivered row's expiry.
+func (s *EventService) MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	return s.eventDAO.MigrateLegacyDeliveries(ctx, expireAt)
 }
 
 // AckEvent acknowledges one JTI for streamID through the same one-trip DAO
@@ -339,7 +366,7 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-	if _, err := s.eventDAO.AckDelivered(ctx, []string{jtiString}, streamID, time.Now()); err != nil {
+	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jtiString}, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SET stays pending and is redelivered.
 		esLog.Warn("Error acknowledging event", "jti", jtiString, "streamID", streamID, "error", err)
 		return err
@@ -348,8 +375,8 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 }
 
 // AckEvents acknowledges jtis for streamID as one batch: the pending entries
-// are removed and recorded as delivered by EventDAO.AckDelivered — one
-// multi-namespace bulkWrite on MongoDB 8.0+ (#335). A JTI not pending for the
+// are moved to delivered by EventDAO.Ack in one conditional write (#359) —
+// one unordered bulkWrite on MongoDB 8.0+. A JTI not pending for the
 // stream is ignored, exactly as AckEvent ignores it. An empty jtis is a
 // no-op. The fencing token is checked once for the batch, as for AckEvent.
 func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
@@ -359,7 +386,7 @@ func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID st
 	if err := s.checkFence(streamID, fencingToken); err != nil {
 		return err
 	}
-	if _, err := s.eventDAO.AckDelivered(ctx, jtis, streamID, time.Now()); err != nil {
+	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: jtis, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.
 		esLog.Warn("Error acknowledging events", "count", len(jtis), "streamID", streamID, "error", err)
 		return err
@@ -367,7 +394,7 @@ func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID st
 	return nil
 }
 
-func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID string)) {
+func (s *EventService) WatchPending(ctx context.Context, callback func(ref interfaces.PendingRef, streamID string)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
@@ -488,7 +515,7 @@ func matchesEventType(stream *model.StreamStateRecord, event *model.EventRecord)
 	return false
 }
 
-func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool, ackJti func(inboundJti string) string) error {
 	// Validate the request
 	if jti == "" && resetDate == nil {
 		return errors.New("reset error: a date or jti must be provided")
@@ -537,7 +564,11 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	// (tagged source:reset downstream). A failed re-queue is not re-delivered and
 	// so is not metered.
 	for _, event := range events {
-		err = s.AddEventToStream(ctx, event.Jti, streamID)
+		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now()}
+		if ackJti != nil {
+			ref.AckJti = ackJti(event.Jti)
+		}
+		err = s.AddEventToStream(ctx, ref, streamID)
 		if err != nil {
 			esLog.Error("Error re-adding event to stream during reset", "jti", event.Jti, "streamID", streamID, "error", err)
 			continue

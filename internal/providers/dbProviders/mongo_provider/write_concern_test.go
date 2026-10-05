@@ -49,9 +49,10 @@ func TestCollectionWriteConcerns(t *testing.T) {
 	m.openCollections()
 
 	majority := map[string]*mongo.Collection{
-		CDbEvents:  m.eventCol,
-		CDbPending: m.pendingCol,
-		CDbLeases:  m.leaseCol,
+		CDbEvents:     m.eventCol,
+		CDbPending:    m.pendingCol,
+		CDbDeliveries: m.deliveriesCol,
+		CDbLeases:     m.leaseCol,
 	}
 	w1 := map[string]*mongo.Collection{
 		CDbDelivered:      m.deliveredCol,

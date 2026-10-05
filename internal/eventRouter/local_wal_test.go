@@ -34,7 +34,7 @@ type gatedEventDAO struct {
 
 var errInjectedStore = errors.New("injected store outage")
 
-func (g *gatedEventDAO) InsertWithPending(ctx context.Context, recs []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (g *gatedEventDAO) InsertWithPending(ctx context.Context, recs []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	g.calls.Add(1)
 	if g.gate != nil {
 		select {
@@ -144,7 +144,7 @@ func ensurePollStreamDurability(t *testing.T, p *dbProviders.Persistence, audien
 func (s *walSetup) pending(t *testing.T) []string {
 	t.Helper()
 	jtis, _ := s.p.EventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
-	return jtis
+	return interfaces.RefJtis(jtis)
 }
 
 func (s *walSetup) stored(jti string) bool {
@@ -219,7 +219,7 @@ func TestLocalWal_DuplicateInStoreCountsAsDrained(t *testing.T) {
 	tok := newRiscToken("wal-dup", dupTestIssuer, s.audience)
 	recs := services.NewIngestRecords([]*goSet.SecurityEventToken{tok}, s.streamID, []string{"first"})
 	pending := map[string][]string{s.stream.Id.Hex(): {"wal-dup"}}
-	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, pending)
+	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, pendingRefsOf(pending))
 	require.NoError(t, errs[0])
 
 	require.NoError(t, s.router.HandleEvent(tok, "second", s.streamID))

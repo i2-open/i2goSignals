@@ -34,9 +34,9 @@ func TestAck_StaleFencingTokenRejectedBeforeWrite(t *testing.T) {
 	if err := svc.AckEvent(context.Background(), "j-1", "s1", 6); !errors.Is(err, ErrStaleFencingToken) {
 		t.Fatalf("AckEvent err = %v, want ErrStaleFencingToken", err)
 	}
-	if fake.removePendingManyCalls != 0 || fake.removePendingCalls != 0 || fake.markDeliveredManyCalls != 0 {
-		t.Errorf("stale ack wrote: removePendingMany=%d removePending=%d markDeliveredMany=%d",
-			fake.removePendingManyCalls, fake.removePendingCalls, fake.markDeliveredManyCalls)
+	if fake.removePendingManyCalls != 0 || fake.ackCalls != 0 || fake.markDeliveredManyCalls != 0 {
+		t.Errorf("stale ack wrote: removePendingMany=%d ack=%d markDeliveredMany=%d",
+			fake.removePendingManyCalls, fake.ackCalls, fake.markDeliveredManyCalls)
 	}
 	if fence.calls != 2 {
 		t.Errorf("fence checked %d times, want once per ack call", fence.calls)

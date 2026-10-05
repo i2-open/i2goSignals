@@ -139,7 +139,7 @@ func (d *notifyingEventDAO) InsertMany(ctx context.Context, records []*model.Eve
 	return results, nil
 }
 
-func (d *notifyingEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (d *notifyingEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	results, err := d.inner.InsertWithPending(ctx, records, pending)
 	if err != nil {
 		return results, err
@@ -160,43 +160,34 @@ func (d *notifyingEventDAO) FindByTimeRange(ctx context.Context, from time.Time,
 	return d.inner.FindByTimeRange(ctx, from, to, filter)
 }
 
-func (d *notifyingEventDAO) AddPending(ctx context.Context, jti string, streamID string) error {
-	if err := d.inner.AddPending(ctx, jti, streamID); err != nil {
+func (d *notifyingEventDAO) AddPending(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	if err := d.inner.AddPending(ctx, ref, streamID); err != nil {
 		return err
 	}
 	d.notify()
 	return nil
 }
 
-func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
-	if err := d.inner.AddPendingMany(ctx, jtis, streamID); err != nil {
+func (d *notifyingEventDAO) AddPendingMany(ctx context.Context, refs []interfaces.PendingRef, streamID string) error {
+	if err := d.inner.AddPendingMany(ctx, refs, streamID); err != nil {
 		return err
 	}
-	if len(jtis) > 0 {
+	if len(refs) > 0 {
 		d.notify()
 	}
 	return nil
 }
 
-func (d *notifyingEventDAO) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
-	queued, err := d.inner.EnsurePending(ctx, jti, streamIDs)
+func (d *notifyingEventDAO) EnsurePending(ctx context.Context, jti string, ackJtis map[string]string) ([]string, error) {
+	queued, err := d.inner.EnsurePending(ctx, jti, ackJtis)
 	if err == nil && len(queued) > 0 {
 		d.notify()
 	}
 	return queued, err
 }
 
-func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
+func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
 	return d.inner.GetPendingForStream(ctx, streamID, limit)
-}
-
-func (d *notifyingEventDAO) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
-	ev, err := d.inner.RemovePending(ctx, jti, streamID)
-	if err != nil {
-		return ev, err
-	}
-	d.notify()
-	return ev, nil
 }
 
 func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
@@ -219,33 +210,39 @@ func (d *notifyingEventDAO) ClearPendingForStream(ctx context.Context, streamID 
 	return n, nil
 }
 
-func (d *notifyingEventDAO) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
-	if err := d.inner.MarkDelivered(ctx, event, ackDate); err != nil {
-		return err
-	}
-	d.notify()
-	return nil
-}
-
-func (d *notifyingEventDAO) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
-	if err := d.inner.MarkDeliveredMany(ctx, events, ackDate); err != nil {
-		return err
-	}
-	if len(events) > 0 {
-		d.notify()
-	}
-	return nil
-}
-
-func (d *notifyingEventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	acked, err := d.inner.AckDelivered(ctx, jtis, streamID, ackDate)
+func (d *notifyingEventDAO) Ack(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	acked, err := d.inner.Ack(ctx, batch)
 	if err != nil {
 		return acked, err
 	}
-	if len(jtis) > 0 {
+	if len(batch.Jtis) > 0 || len(batch.Copies) > 0 {
 		d.notify()
 	}
 	return acked, nil
+}
+
+func (d *notifyingEventDAO) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
+	n, err := d.inner.ResetPendingAckJti(ctx, streamID)
+	if err != nil {
+		return n, err
+	}
+	if n > 0 {
+		d.notify()
+	}
+	return n, nil
+}
+
+func (d *notifyingEventDAO) SweepExpired(ctx context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
+	res, err := d.inner.SweepExpired(ctx, now, bodyCutoff, maxBodies)
+	if err != nil {
+		return res, err
+	}
+	d.notify()
+	return res, nil
+}
+
+func (d *notifyingEventDAO) MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	return d.inner.MigrateLegacyDeliveries(ctx, expireAt)
 }
 
 func (d *notifyingEventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
@@ -275,7 +272,7 @@ func (d *notifyingEventDAO) CountRetainedForStream(ctx context.Context, streamID
 	return d.inner.CountRetainedForStream(ctx, streamID)
 }
 
-func (d *notifyingEventDAO) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
+func (d *notifyingEventDAO) WatchPending(ctx context.Context, callback func(ref interfaces.PendingRef, streamID string)) error {
 	return d.inner.WatchPending(ctx, callback)
 }
 

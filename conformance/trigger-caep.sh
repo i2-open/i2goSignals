@@ -80,11 +80,11 @@ mongo_eval() {
 
 # Number of pending (unacked) events queued for the stream. A verification-poll
 # test continuously enqueues events; caep-interop after the verification dance
-# enters a quiet wait state with pendingEvents == 0. This is the side-channel
+# enters a quiet wait state with no pending deliveries. This is the side-channel
 # that lets us distinguish "test is actively polling" from "test is waiting for
 # operator-driven events".
 stream_pending() {
-    mongo_eval "print(db.pendingEvents.countDocuments({sid: ObjectId(\"$1\")}))" | tr -d '\r\n '
+    mongo_eval "print(db.deliveries.countDocuments({sid: ObjectId(\"$1\"), state: \"pending\"}))" | tr -d '\r\n '
 }
 
 # Returns "sid|created_unix_seconds|event1,event2,..." for the newest stream
@@ -146,10 +146,10 @@ main() {
     log "using bootstrap bearer for /trigger-event (key scope)"
 
     # Module-active gate: previously the script's only gates were stream age
-    # (>=N seconds) and pendingEvents==0. Both fail when a NON-caep-interop
+    # (>=N seconds) and zero pending deliveries. Both fail when a NON-caep-interop
     # CAEP module (e.g. verification-error-push-no-auth) holds the newest
-    # CAEP-subscribed stream: its stream is plenty old, and pendingEvents
-    # drops to 0 between the SUT's push retries. trigger-caep.sh then fires
+    # CAEP-subscribed stream: its stream is plenty old, and its pending
+    # delivery count drops to 0 between the SUT's push retries. trigger-caep.sh then fires
     # device-compliance-change / credential-change / session-revoked events
     # with sub_id={format:"opaque",id:"valid"} into that stream — the SUT
     # dutifully pushes them to the suite's shared /ssf-push endpoint, and

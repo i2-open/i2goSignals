@@ -29,6 +29,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -194,7 +195,7 @@ func (h *clusterHarness) leaseOwner(resource string, timeout time.Duration) stri
 // pendingFor returns the stream's undelivered JTIs from the shared store.
 func (h *clusterHarness) pendingFor(sid string) []string {
 	ids, _ := h.admin.EventService.GetEventIds(context.Background(), sid, model.PollParameters{MaxEvents: 1000, ReturnImmediately: true})
-	return ids
+	return interfaces.RefJtis(ids)
 }
 
 // persistStream stores a stream and loads it into every running node's router.

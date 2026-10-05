@@ -94,7 +94,7 @@ func TestResetEventStream_EmitsEgressTaggedReset(t *testing.T) {
 				return false
 			}
 			return s.h.router.eventService.MatchesStream(state, e)
-		})
+		}, nil)
 	require.NoError(t, err)
 
 	reset := observer.bySource(SourceReset)
@@ -121,7 +121,7 @@ func TestResetEventStream_EmitsEgressTaggedReset(t *testing.T) {
 				return false
 			}
 			return s.h.router.eventService.MatchesStream(state, e)
-		})
+		}, nil)
 	require.NoError(t, err)
 	assert.Len(t, observer.bySource(SourceReset), 2*n,
 		"a JTI reset re-delivering n events adds n more reset-tagged egress observations")

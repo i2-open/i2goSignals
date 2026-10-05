@@ -127,7 +127,7 @@ func newDialKeyNode(t *testing.T, retryLimit int) *dialKeyNode {
 	token.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
 	_, err = persistence.EventService.AddEvent(ctx, &token, pairId, "")
 	require.NoError(t, err)
-	require.NoError(t, persistence.EventService.AddEventToStream(ctx, token.ID, pairId))
+	require.NoError(t, persistence.EventService.AddEventToStream(ctx, interfaces.PendingRef{Jti: token.ID, AckJti: token.ID}, pairId))
 
 	stored, err := persistence.StreamService.GetStreamStateByPairId(ctx, pairId)
 	require.NoError(t, err)
@@ -146,7 +146,7 @@ func (n *dialKeyNode) stored(t *testing.T) *model.StreamStateRecord {
 
 func (n *dialKeyNode) pending() []string {
 	jtis, _ := n.persistence.EventService.GetEventIds(context.Background(), n.txSid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-	return jtis
+	return interfaces.RefJtis(jtis)
 }
 
 func TestSstpDialingEnd_KeyUnavailablePausesThenResumesAndDelivers(t *testing.T) {

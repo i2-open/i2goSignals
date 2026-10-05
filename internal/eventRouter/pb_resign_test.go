@@ -108,7 +108,7 @@ func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, sids ...
 	rec, err := h.eventService.AddEvent(ctx, token, sids[0], "")
 	require.NoError(t, err)
 	for _, sid := range sids {
-		require.NoError(t, h.eventService.AddEventToStream(ctx, rec.Jti, sid))
+		require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(rec.Jti), sid))
 	}
 }
 

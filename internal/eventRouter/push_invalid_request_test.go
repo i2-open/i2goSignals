@@ -47,7 +47,7 @@ func persistPushEvent(t *testing.T, h *testHarness, sid string, token *goSet.Sec
 	t.Helper()
 	rec, err := h.router.eventService.AddEvent(context.Background(), token, sid, "")
 	require.NoError(t, err)
-	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), rec.Jti, sid))
+	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), refOf(rec.Jti), sid))
 	return rec.Jti
 }
 

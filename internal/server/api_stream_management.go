@@ -873,6 +873,10 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 			}
 			// Because reset goes through all events, this function confirms the stream should get the event
 			return sa.GetEventService().MatchesStream(streamState, eventRecord)
+		}, func(inboundJti string) string {
+			// Re-queued references are acknowledged with the inbound JTI
+			// until the copy-JTI slice (#363) derives it per stream.
+			return inboundJti
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

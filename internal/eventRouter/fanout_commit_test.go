@@ -26,7 +26,7 @@ func pendingJtis(t *testing.T, h *filterPushHarness, sid string) []string {
 		MaxEvents:         100,
 		ReturnImmediately: true,
 	})
-	return jtis
+	return interfaces.RefJtis(jtis)
 }
 
 // TestIngest_ResentPendingSetKeepsOneIntent: a SET re-sent while its first copy
@@ -37,7 +37,7 @@ func TestIngest_ResentPendingSetKeepsOneIntent(t *testing.T) {
 	token := newRiscToken("resent-pending", dupTestIssuer, s.audience)
 	ids := func() []string {
 		jtis, _ := s.h.router.eventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-		return jtis
+		return interfaces.RefJtis(jtis)
 	}
 
 	require.NoError(t, s.h.router.HandleEvent(token, `{"first":true}`, s.streamID))
@@ -81,7 +81,7 @@ func TestCommitFanout_RejectedJtiLeavesExistingIntent(t *testing.T) {
 	sid := stream.StreamConfiguration.Id
 
 	const jti = "jti-real-intent"
-	require.NoError(t, h.eventService.AddEventToStream(context.Background(), jti, stream.Id.Hex()))
+	require.NoError(t, h.eventService.AddEventToStream(context.Background(), refOf(jti), stream.Id.Hex()))
 	require.Equal(t, []string{jti}, pendingJtis(t, h, sid))
 
 	target := &fanoutTarget{mode: "PUSH", key: sid, docID: stream.Id.Hex(), sid: sid, jtis: []string{jti}}
@@ -144,7 +144,7 @@ func TestIngest_RetryAfterMarkerFailureDeliversOnce(t *testing.T) {
 	token := newRiscToken("retry-after-marker-loss", dupTestIssuer, s.audience)
 	ids := func() []string {
 		jtis, _ := s.h.router.eventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-		return jtis
+		return interfaces.RefJtis(jtis)
 	}
 	seedBodyWithoutMarker(t, s.h.router.eventService, token, s.streamID)
 	require.Empty(t, ids(), "precondition: body stored, no marker")
@@ -169,7 +169,7 @@ type failingEnsureDAO struct {
 
 var errEnsureDown = errors.New("injected EnsurePending outage")
 
-func (f failingEnsureDAO) EnsurePending(context.Context, string, []string) ([]string, error) {
+func (f failingEnsureDAO) EnsurePending(context.Context, string, map[string]string) ([]string, error) {
 	return nil, errEnsureDown
 }
 

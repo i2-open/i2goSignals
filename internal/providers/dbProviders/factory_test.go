@@ -167,7 +167,7 @@ func TestOpenPersistence_EventDAO_LiveInstance(t *testing.T) {
 	evt.ID = "retention-jti-1"
 	_, err = p.EventService.AddEvent(ctx, evt, streamID, "raw-1")
 	assert.NoError(t, err, "AddEvent through the router should succeed")
-	assert.NoError(t, p.EventService.AddEventToStream(ctx, evt.ID, streamID))
+	assert.NoError(t, p.EventService.AddEventToStream(ctx, refOf(evt.ID), streamID))
 	assert.NoError(t, p.EventService.AckEvent(ctx, evt.ID, streamID, 0))
 
 	// Same-instance visibility: a write performed through EventService is

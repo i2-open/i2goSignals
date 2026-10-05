@@ -246,9 +246,10 @@ no transactions.
 | Collection                                                          | Write concern         | Why                                                                                                                                  |
 |---------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `events`                                                            | `w:majority`, `j:true` | Ingest durability contract (ADR 0038). A SET is majority-acknowledged and journaled before it is acked.                             |
-| `pendingEvents`                                                     | `w:majority`, `j:true` | Same contract (ADR 0038). A pending marker is stored before the ack.                                                                 |
+| `deliveries`                                                        | `w:majority`, `j:true` | Same contract (ADR 0038). A pending delivery reference is stored before the ack. Acks run at `w:1` (see below). |
+| `pendingEvents`                                                     | `w:majority`, `j:true` | Same contract (ADR 0038). Pre-#359 collection, kept for the legacy-deliveries migration (#361).                                                                 |
 | `cluster_leases`                                                    | `w:majority`, `j:true` | A lease grant acknowledged at `w:1` can roll back on a primary failover, and then two nodes would own one stream. Fencing tokens rely on majority. |
-| `deliveredEvents`                                                   | `w:1`                 | Audit record and retention purge anchor (ADR 0055). A lost row only delays that event's purge. It never re-delivers or loses a SET. |
+| `deliveredEvents`                                                   | `w:1`                 | Pre-#359 collection, kept for the legacy-deliveries migration (#361). |
 | `cluster_nodes`                                                     | `w:1`                 | Heartbeat registry that is rewritten on every tick. A lost write is repaired by the next heartbeat.                                  |
 | `streams`, `keys`, `clients`, `servers`, `tokens`, `subject_filters` | `w:1`                 | Admin and configuration state. It is outside the ingest contract.                                                                    |
 
@@ -257,17 +258,16 @@ The one-trip ingest write (ADR 0043) is a client-level multi-namespace
 client's concern. The client sets none, so without an explicit concern the call
 would fall back to the server default. The call therefore sets `w:majority`,
 `j:true` itself (`EventStoreWriteConcern` in `internal/dao/mongo/event_dao.go`).
-The fallback path on Mongo older than 8.0 uses the `events` and `pendingEvents`
+The fallback path on Mongo older than 8.0 uses the `events` and `deliveries`
 handles, which are majority.
 
-The one-trip ack write (#335) is also a client-level `bulkWrite`: it deletes
-the acked `pendingEvents` rows and inserts their `deliveredEvents` rows in one
-round trip. It sets `w:1` for the whole call, so on Mongo 8.0+ the pending
-delete of an ack is `w:1` too. If a primary failover rolls that delete back,
-the SET is delivered again and the receiver discards it by JTI. Ingest
-durability (ADR 0038) is unchanged, because an ack happens after the SET is
-stored. The fallback on Mongo older than 8.0 uses the collection handles, so
-there the pending delete stays majority.
+An ack (#359) is one conditional `updateMany` on `deliveries` that flips the
+stream's pending references whose `ackJti` matches to `delivered`, plus the
+inserts of any outbound copies into `events`. On Mongo 8.0+ both go in one
+unordered client-level `bulkWrite`; below 8.0 they are two writes. Both paths
+run at `w:1`. If a primary failover rolls the state flip back, the SET is
+delivered again and the receiver discards it by JTI. Ingest durability (ADR
+0038) is unchanged, because an ack happens after the SET is stored.
 
 A `w=` or `journal=` option in `MONGO_URL` sets a client-level concern. That
 concern is still overridden by every handle above and by the one-trip call.

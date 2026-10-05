@@ -555,8 +555,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	// Start the background watcher if explicitly enabled
 	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
 		eventLogger.Info("Background watcher enabled via I2SIG_STORE_MONGO_WATCH_ENABLED")
-		go router.eventService.WatchPending(ctx, func(jti string, streamId string) {
-			sid := streamId
+		go router.eventService.WatchPending(ctx, func(ref interfaces.PendingRef, streamId string) {
+			sid, jti := streamId, ref.Jti
 			router.mu.RLock()
 			pollBuf, pollOk := router.pollBuffers[sid]
 			pushBuf, pushOk := router.pushBuffers[sid]
@@ -915,7 +915,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			return
 		}
 		r.mu.Unlock()
-		jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+		jtis, _ := r.pendingJtis(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
 			MaxEvents:         0,
 			ReturnImmediately: true,
 			TimeoutSecs:       10,
@@ -949,7 +949,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			// Preload any outstanding pending events (because we may be re-starting)
 			// We release the lock for provider call
 			r.mu.Unlock()
-			jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+			jtis, _ := r.pendingJtis(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
 				MaxEvents:         0,
 				ReturnImmediately: true,
 				Acks:              nil,
@@ -1032,7 +1032,7 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	// preload the buffer with any existing events
 	// We release the lock for provider call
 	r.mu.Unlock()
-	jtis, _ := r.eventService.GetEventIds(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
+	jtis, _ := r.pendingJtis(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
 		MaxEvents:         0,
 		ReturnImmediately: true,
 		Acks:              nil,
@@ -1204,9 +1204,10 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		targets = r.planFanoutLocked(dedupeCandidatesByJti(candidates), excludeSstpTxSid)
 		r.mu.RUnlock()
 	}
-	pending := make(map[string][]string, len(targets))
+	pending := make(map[string][]interfaces.PendingRef, len(targets))
+	now := time.Now()
 	for _, t := range targets {
-		pending[t.docID] = append(pending[t.docID], t.jtis...)
+		pending[t.docID] = append(pending[t.docID], t.refs(now)...)
 	}
 
 	// One write: bodies + markers. Only now is it known which were accepted.
@@ -1247,16 +1248,19 @@ func (r *router) requeueDuplicates(ctx context.Context, recs []*model.EventRecor
 		if acceptedInBatch(recs, errs, rec.Jti) {
 			continue
 		}
-		var docIDs []string
+		var ackJtis map[string]string
 		for _, t := range targets {
-			if slices.Contains(t.jtis, rec.Jti) {
-				docIDs = append(docIDs, t.docID)
+			if a := t.ackJtiOf(rec.Jti); a != "" {
+				if ackJtis == nil {
+					ackJtis = map[string]string{}
+				}
+				ackJtis[t.docID] = a
 			}
 		}
-		if len(docIDs) == 0 {
+		if len(ackJtis) == 0 {
 			continue
 		}
-		queued, err := r.eventService.RequeueDuplicate(ctx, rec.Jti, rec.Sid, docIDs)
+		queued, err := r.eventService.RequeueDuplicate(ctx, rec.Jti, rec.Sid, ackJtis)
 		if err != nil {
 			errs[i] = fmt.Errorf("re-queuing duplicate: %w", err)
 			continue
@@ -1341,6 +1345,43 @@ type fanoutTarget struct {
 	docID string // stream document id the pending markers are written under
 	sid   string // StreamConfiguration.Id — the stream identity logs and metering use
 	jtis  []string
+	// ackJtis is index-aligned with jtis: the JTI each SET is acknowledged
+	// with on this stream (#359). Nil means every ackJti equals its jti.
+	ackJtis []string
+}
+
+// pendingJtis returns the inbound JTIs of streamID's pending references and
+// whether more are pending. The delivery runners still key on inbound JTIs;
+// every reference written before the copy-JTI slice (#363) has ackJti == jti.
+func (r *router) pendingJtis(ctx context.Context, streamID string, params model.PollParameters) ([]string, bool) {
+	refs, more := r.eventService.GetEventIds(ctx, streamID, params)
+	return interfaces.RefJtis(refs), more
+}
+
+// ackJtiAt returns the acknowledgement JTI of t.jtis[i].
+func (t *fanoutTarget) ackJtiAt(i int) string {
+	if i < len(t.ackJtis) && t.ackJtis[i] != "" {
+		return t.ackJtis[i]
+	}
+	return t.jtis[i]
+}
+
+// ackJtiOf returns the acknowledgement JTI of jti on t, or "" when t does
+// not carry jti.
+func (t *fanoutTarget) ackJtiOf(jti string) string {
+	if i := slices.Index(t.jtis, jti); i >= 0 {
+		return t.ackJtiAt(i)
+	}
+	return ""
+}
+
+// refs returns t's delivery references, enqueued at enqueuedAt.
+func (t *fanoutTarget) refs(enqueuedAt time.Time) []interfaces.PendingRef {
+	out := make([]interfaces.PendingRef, len(t.jtis))
+	for i, jti := range t.jtis {
+		out[i] = interfaces.PendingRef{Jti: jti, AckJti: t.ackJtiAt(i), EnqueuedAt: enqueuedAt}
+	}
+	return out
 }
 
 // planFanoutLocked selects, for every outbound stream this router knows about,
@@ -1660,7 +1701,8 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	if err := r.eventService.AddEventToStream(r.ctx, rec.Jti, stream.Id.Hex()); err != nil {
+	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: rec.Jti, EnqueuedAt: time.Now()}
+	if err := r.eventService.AddEventToStream(r.ctx, opRef, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err
 	}
@@ -1781,7 +1823,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	// Opportunistically prefetch pending JTIs if the buffer is empty
 	if pollBuffer.Cnt() == 0 {
-		jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+		jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
 			MaxEvents:         int32(r.backfillBatch),
 			ReturnImmediately: true,
 		})
@@ -2722,7 +2764,7 @@ func (r *router) backfillPushBuffer(sid string, eventBuf *buffer.EventPushBuffer
 		return false
 	}
 
-	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+	jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
 		MaxEvents:         int32(r.backfillBatch),
 		ReturnImmediately: true,
 	})
@@ -2789,7 +2831,7 @@ func (r *router) backfillPushBufferOnWake(sid string, eventBuf *buffer.EventPush
 	submitted := 0
 	for submitted < batch*maxWakeBackfillBatches {
 		limit := len(known) + inFlight + batch
-		jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+		jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
 			MaxEvents:         int32(limit),
 			ReturnImmediately: true,
 		})

@@ -42,5 +42,5 @@ func (h *sstpRunnerHarness) persistOutboundEvent(t *testing.T, txSid, jti string
 	token := newRiscToken(jti, dupTestIssuer, "https://peer.example.com")
 	_, err := h.router.eventService.AddEvent(context.Background(), token, txSid, `{"raw":true}`)
 	require.NoError(t, err)
-	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), jti, txSid))
+	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), refOf(jti), txSid))
 }

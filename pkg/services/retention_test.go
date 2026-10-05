@@ -28,7 +28,11 @@ func seedBody(t *testing.T, dao *memory.EventDAOMemory, jti string) {
 
 func deliver(t *testing.T, dao *memory.EventDAOMemory, jti, streamID string, ack time.Time) {
 	t.Helper()
-	if err := dao.MarkDelivered(context.Background(), &interfaces.DeliverableEvent{Jti: jti, StreamId: streamID}, ack); err != nil {
+	ctx := context.Background()
+	if err := dao.AddPending(ctx, refOf(jti), streamID); err != nil {
+		t.Fatalf("queue %s/%s: %v", jti, streamID, err)
+	}
+	if _, err := dao.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jti}, AckDate: ack}); err != nil {
 		t.Fatalf("deliver %s/%s: %v", jti, streamID, err)
 	}
 }
@@ -75,7 +79,7 @@ func TestPurgeExpired_FinitePurgesPostAck(t *testing.T) {
 	seedBody(t, dao, "pend")  // pending -> never purged
 	deliver(t, dao, "old", sid, now.Add(-10*24*time.Hour))
 	deliver(t, dao, "fresh", sid, now.Add(-1*24*time.Hour))
-	if err := dao.AddPending(ctx, "pend", sid); err != nil {
+	if err := dao.AddPending(ctx, refOf("pend"), sid); err != nil {
 		t.Fatalf("add pending: %v", err)
 	}
 
@@ -96,7 +100,7 @@ func TestPurgeExpired_FinitePurgesPostAck(t *testing.T) {
 		t.Fatalf("pending body wrongly purged")
 	}
 	// Pending entry itself is untouched.
-	jtis, total, _ := dao.GetPendingForStream(ctx, sid, 10)
+	jtis, total, _ := pageJtis(dao.GetPendingForStream(ctx, sid, 10))
 	if total != 1 || len(jtis) != 1 || jtis[0] != "pend" {
 		t.Fatalf("pending entry disturbed: %v total=%d", jtis, total)
 	}
@@ -170,7 +174,7 @@ func TestSampleOccupancy_EmitsPerStreamRetained(t *testing.T) {
 	deliver(t, dao, "b", s1.Id.Hex(), now)
 	deliver(t, dao, "c", s2.Id.Hex(), now)
 	// A pending event must NOT count toward retained.
-	if err := dao.AddPending(ctx, "a", s2.Id.Hex()); err != nil {
+	if err := dao.AddPending(ctx, refOf("a"), s2.Id.Hex()); err != nil {
 		t.Fatalf("add pending: %v", err)
 	}
 

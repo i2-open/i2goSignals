@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
@@ -77,7 +78,7 @@ func (s *KeyChangeSigningSuite) SetupTest() {
 	token.ID = "key-change-jti"
 	event, err := persistence.EventService.AddEvent(ctx, token, s.sid, "")
 	s.Require().NoError(err)
-	s.Require().NoError(persistence.EventService.AddEventToStream(ctx, event.Jti, s.sid))
+	s.Require().NoError(persistence.EventService.AddEventToStream(ctx, interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti}, s.sid))
 }
 
 func (s *KeyChangeSigningSuite) TearDownTest() {

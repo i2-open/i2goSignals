@@ -41,13 +41,20 @@ const (
 	walReadEntries = 256
 )
 
-// walTarget is the durable form of a fanoutTarget.
+// walTarget is the durable form of a fanoutTarget. AckJtis is index-aligned
+// with Jtis (#359); an entry written without it drains with ackJti = jti.
 type walTarget struct {
-	Mode  string   `bson:"mode"`
-	Key   string   `bson:"key"`
-	DocID string   `bson:"docId"`
-	Sid   string   `bson:"sid"`
-	Jtis  []string `bson:"jtis"`
+	Mode    string   `bson:"mode"`
+	Key     string   `bson:"key"`
+	DocID   string   `bson:"docId"`
+	Sid     string   `bson:"sid"`
+	Jtis    []string `bson:"jtis"`
+	AckJtis []string `bson:"ackJtis,omitempty"`
+}
+
+// fanout returns the fanoutTarget t was written from.
+func (t walTarget) fanout() *fanoutTarget {
+	return &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis, ackJtis: t.AckJtis}
 }
 
 // walEntry is one acknowledged inbound batch: the candidate records to store
@@ -468,7 +475,7 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 	}
 	entry := &walEntry{Sid: sid, Records: fresh, Targets: make([]walTarget, 0, len(targets)), At: lw.now().UnixNano()}
 	for _, t := range targets {
-		entry.Targets = append(entry.Targets, walTarget{Mode: t.mode, Key: t.key, DocID: t.docID, Sid: t.sid, Jtis: t.jtis})
+		entry.Targets = append(entry.Targets, walTarget{Mode: t.mode, Key: t.key, DocID: t.docID, Sid: t.sid, Jtis: t.jtis, AckJtis: t.ackJtis})
 	}
 
 	data, err := encodeWalEntry(entry)
@@ -510,7 +517,7 @@ func (r *router) ringFeed(e *walEntry) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, t := range e.Targets {
-		r.wakeTargetScopedLocked(&fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}, t.Jtis, wakeLocalOnly)
+		r.wakeTargetScopedLocked(t.fanout(), t.Jtis, wakeLocalOnly)
 	}
 }
 
@@ -599,10 +606,13 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 		lastSeq = e.Seq
 	}
 
-	pending := map[string][]string{}
+	// A drained row's createdAt is the drain time: the delivery record is
+	// created now (#359).
+	pending := map[string][]interfaces.PendingRef{}
+	drainedAt := time.Now()
 	for _, d := range batch {
 		for _, t := range d.entry.Targets {
-			pending[t.DocID] = append(pending[t.DocID], t.Jtis...)
+			pending[t.DocID] = append(pending[t.DocID], t.fanout().refs(drainedAt)...)
 		}
 	}
 
@@ -704,7 +714,7 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 	}
 	targets := make([]*fanoutTarget, len(e.Targets))
 	for i, t := range e.Targets {
-		targets[i] = &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}
+		targets[i] = t.fanout()
 	}
 	// A duplicate whose marker is missing is re-queued exactly as on the
 	// majority path (#331); a failed repair rewrites errs[i] so the drain

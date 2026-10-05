@@ -27,7 +27,7 @@ import (
 func orphanPendingMarker(t *testing.T, h *filterPushHarness, sid string) string {
 	t.Helper()
 	const jti = "orphan-no-body"
-	require.NoError(t, h.eventService.AddEventToStream(context.Background(), jti, sid))
+	require.NoError(t, h.eventService.AddEventToStream(context.Background(), refOf(jti), sid))
 	require.Nil(t, h.eventService.GetEventRecord(context.Background(), jti),
 		"the orphan must have a pending marker and no body")
 	return jti
@@ -143,7 +143,7 @@ func TestIngest_PendingMarkerIsIndependentOfBody(t *testing.T) {
 
 	// Marker first, body second — the order the concurrent writes may produce.
 	const jti = "marker-before-body"
-	require.NoError(t, h.eventService.AddEventToStream(ctx, jti, sid))
+	require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(jti), sid))
 	require.Equal(t, 1, h.pendingCount(sid), "the marker stands on its own")
 
 	token := &goSet.SecurityEventToken{}

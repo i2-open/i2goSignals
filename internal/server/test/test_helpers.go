@@ -108,7 +108,8 @@ func (instance *ssfInstance) DeleteStream(streamId string) error {
 }
 
 func (instance *ssfInstance) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	return instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	refs, more := instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	return daoInterfaces.RefJtis(refs), more
 }
 
 func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {
@@ -125,7 +126,7 @@ func (instance *ssfInstance) ClearPending(streamId string) error {
 }
 
 func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
-	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
+	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent, func(inboundJti string) string { return inboundJti })
 }
 
 // GetPrivateKey returns the issuer's signing key as the concrete RSA type the

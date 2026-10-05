@@ -47,20 +47,22 @@ func TestNotifyingDAOs_TriggerOnEverySuccessfulMutation(t *testing.T) {
 	assert.NoError(t, streamDAO.Delete(ctx, "s1"))
 	expected++
 
-	// EventDAO: Insert, AddPending, RemovePending, MarkDelivered, ClearPendingForStream
+	// EventDAO: Insert, AddPending, Ack, RemovePendingMany, ClearPendingForStream
 	rec := &model.EventRecord{Jti: "j1"}
 	assert.NoError(t, eventDAO.Insert(ctx, rec))
 	expected++
-	assert.NoError(t, eventDAO.AddPending(ctx, "j1", "s1"))
+	assert.NoError(t, eventDAO.AddPending(ctx, refOf("j1"), "s1"))
 	expected++
-	delivered, err := eventDAO.RemovePending(ctx, "j1", "s1")
+	acked, err := eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: "s1", Jtis: []string{"j1"}, AckDate: time.Now()})
 	assert.NoError(t, err)
-	assert.NotNil(t, delivered)
+	assert.Equal(t, int64(1), acked)
 	expected++
-	if delivered != nil {
-		assert.NoError(t, eventDAO.MarkDelivered(ctx, delivered, time.Now()))
-		expected++
-	}
+	assert.NoError(t, eventDAO.AddPending(ctx, refOf("j1"), "s1"))
+	expected++
+	removed, err := eventDAO.RemovePendingMany(ctx, []string{"j1"}, "s1")
+	assert.NoError(t, err)
+	assert.Len(t, removed, 1)
+	expected++
 	_, err = eventDAO.ClearPendingForStream(ctx, "s1")
 	assert.NoError(t, err)
 	expected++

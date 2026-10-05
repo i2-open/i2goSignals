@@ -26,11 +26,14 @@ import (
 // filter held acks out, so a SET acked from the overlay is never offered
 // again, whether the store already has its marker or not.
 
-// overlayMark is one undrained SET queued on one stream.
+// overlayMark is one undrained SET queued on one stream. ackJti is the JTI
+// the receiver acknowledges it with (#359); held acks match on it.
 type overlayMark struct {
-	acked   bool
-	ackDate time.Time
-	removed bool // cleared by ClearPendingForStream before the drain
+	ackJti   string
+	acked    bool
+	ackDate  time.Time
+	expireAt *time.Time
+	removed  bool // cleared by ClearPendingForStream before the drain
 }
 
 func (m *overlayMark) live() bool { return !m.acked && !m.removed }
@@ -62,9 +65,10 @@ func (o *walOverlay) add(e *walEntry) {
 			marks = map[string]*overlayMark{}
 			o.pending[t.DocID] = marks
 		}
-		for _, jti := range t.Jtis {
+		ft := t.fanout()
+		for i, jti := range t.Jtis {
 			if _, ok := marks[jti]; !ok {
-				marks[jti] = &overlayMark{}
+				marks[jti] = &overlayMark{ackJti: ft.ackJtiAt(i)}
 			}
 		}
 	}
@@ -88,16 +92,22 @@ func (o *walOverlay) remove(e *walEntry) {
 	}
 }
 
+// heldAckKey groups held acks that share one store acknowledgement.
+type heldAckKey struct {
+	ackDate  time.Time
+	expireAt time.Time // zero: no expiry
+}
+
 // heldOps are the acks and clears taken against an entry's SETs before it
 // was drained, which the drain applies to the store after writing them.
 type heldOps struct {
-	acks    map[string]map[time.Time][]string // stream -> ackDate -> jtis
-	removes map[string][]string               // stream -> jtis
+	acks    map[string]map[heldAckKey][]string // stream -> (ackDate, expireAt) -> ackJtis
+	removes map[string][]string                // stream -> jtis
 }
 
 // held collects the held acks and clears for entries.
 func (o *walOverlay) held(entries []*walEntry) heldOps {
-	ops := heldOps{acks: map[string]map[time.Time][]string{}, removes: map[string][]string{}}
+	ops := heldOps{acks: map[string]map[heldAckKey][]string{}, removes: map[string][]string{}}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	for _, e := range entries {
@@ -108,12 +118,16 @@ func (o *walOverlay) held(entries []*walEntry) heldOps {
 				switch {
 				case m == nil:
 				case m.acked:
-					byDate := ops.acks[t.DocID]
-					if byDate == nil {
-						byDate = map[time.Time][]string{}
-						ops.acks[t.DocID] = byDate
+					byKey := ops.acks[t.DocID]
+					if byKey == nil {
+						byKey = map[heldAckKey][]string{}
+						ops.acks[t.DocID] = byKey
 					}
-					byDate[m.ackDate] = append(byDate[m.ackDate], jti)
+					k := heldAckKey{ackDate: m.ackDate}
+					if m.expireAt != nil {
+						k.expireAt = *m.expireAt
+					}
+					byKey[k] = append(byKey[k], m.ackJti)
 				case m.removed:
 					ops.removes[t.DocID] = append(ops.removes[t.DocID], jti)
 				}
@@ -136,16 +150,18 @@ func newWalReadThrough(base interfaces.EventDAO, metrics *walMetrics) *walReadTh
 }
 
 // GetPendingForStream merges the stream's undrained SETs with the store's
-// pending markers, ascending by jti (the store's delivery order, ADR 0040),
-// without duplicates and without SETs whose ack or clear is held.
-func (d *walReadThrough) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
+// pending references, ascending by jti (the store's delivery order, ADR
+// 0040), without duplicates and without SETs whose ack or clear is held. A
+// reference served from the overlay has a zero EnqueuedAt (#359): its row is
+// created when the entry drains. OldestBeyond is the store's.
+func (d *walReadThrough) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
 	d.overlay.mu.RLock()
 	marks := d.overlay.pending[streamID]
-	live := make([]string, 0, len(marks))
+	live := make([]interfaces.PendingRef, 0, len(marks))
 	hidden := map[string]struct{}{}
 	for jti, m := range marks {
 		if m.live() {
-			live = append(live, jti)
+			live = append(live, interfaces.PendingRef{Jti: jti, AckJti: m.ackJti})
 		} else {
 			hidden[jti] = struct{}{}
 		}
@@ -157,36 +173,39 @@ func (d *walReadThrough) GetPendingForStream(ctx context.Context, streamID strin
 		// Over-read by the SETs the filter may drop, so a full page stays full.
 		baseLimit = limit + int32(len(hidden))
 	}
-	jtis, total, err := d.EventDAO.GetPendingForStream(ctx, streamID, baseLimit)
+	page, err := d.EventDAO.GetPendingForStream(ctx, streamID, baseLimit)
 	if err != nil {
-		return nil, 0, err
+		return interfaces.PendingPage{}, err
 	}
 	if len(marks) == 0 {
-		return jtis, total, nil
+		return page, nil
 	}
 
-	seen := make(map[string]struct{}, len(jtis)+len(live))
-	merged := make([]string, 0, len(jtis)+len(live))
-	for _, jti := range jtis {
-		if _, skip := hidden[jti]; skip {
+	total := page.Total
+	seen := make(map[string]struct{}, len(page.Refs)+len(live))
+	merged := make([]interfaces.PendingRef, 0, len(page.Refs)+len(live))
+	for _, ref := range page.Refs {
+		if _, skip := hidden[ref.Jti]; skip {
 			total--
 			continue
 		}
-		seen[jti] = struct{}{}
-		merged = append(merged, jti)
+		seen[ref.Jti] = struct{}{}
+		merged = append(merged, ref)
 	}
-	for _, jti := range live {
-		if _, dup := seen[jti]; dup {
+	for _, ref := range live {
+		if _, dup := seen[ref.Jti]; dup {
 			continue
 		}
-		merged = append(merged, jti)
+		merged = append(merged, ref)
 		total++
 	}
-	sort.Strings(merged)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Jti < merged[j].Jti })
 	if limit > 0 && int32(len(merged)) > limit {
 		merged = merged[:limit]
 	}
-	return merged, max(total, int64(len(merged))), nil
+	page.Refs = merged
+	page.Total = max(total, int64(len(merged)))
+	return page, nil
 }
 
 // FindByJTI serves an undrained SET from the overlay, else the store.
@@ -242,41 +261,32 @@ func (d *walReadThrough) FindByJTIs(ctx context.Context, jtis []string) ([]*mode
 	return out, nil
 }
 
-// AckDelivered holds the ack of every undrained SET queued on the stream —
-// recorded before the store call, so a drain that writes the SET after this
-// point still applies it — and acks the rest in the store. The result is the
-// union of both.
-func (d *walReadThrough) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	var held []string
-	d.overlay.mu.Lock()
-	if marks := d.overlay.pending[streamID]; marks != nil {
-		for _, jti := range jtis {
-			if m := marks[jti]; m != nil && m.live() {
+// Ack holds the ack of every undrained SET queued on the stream whose ackJti
+// is in batch.Jtis — recorded before the store call, so a drain that writes
+// the SET after this point still applies it — and acks the rest in the store.
+// The count is the store's plus the held ones; a SET drained but not yet
+// truncated can be counted twice.
+func (d *walReadThrough) Ack(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	var held int64
+	if len(batch.Jtis) > 0 {
+		want := make(map[string]struct{}, len(batch.Jtis))
+		for _, a := range batch.Jtis {
+			want[a] = struct{}{}
+		}
+		d.overlay.mu.Lock()
+		for _, m := range d.overlay.pending[batch.StreamID] {
+			if _, ok := want[m.ackJti]; ok && m.live() {
 				m.acked = true
-				m.ackDate = ackDate
-				held = append(held, jti)
+				m.ackDate = batch.AckDate
+				m.expireAt = batch.ExpireAt
+				held++
 			}
 		}
+		d.overlay.mu.Unlock()
 	}
-	d.overlay.mu.Unlock()
 
-	acked, err := d.EventDAO.AckDelivered(ctx, jtis, streamID, ackDate)
-	if err != nil {
-		return held, err
-	}
-	if len(held) == 0 {
-		return acked, nil
-	}
-	seen := make(map[string]struct{}, len(acked))
-	for _, jti := range acked {
-		seen[jti] = struct{}{}
-	}
-	for _, jti := range held {
-		if _, dup := seen[jti]; !dup {
-			acked = append(acked, jti)
-		}
-	}
-	return acked, nil
+	acked, err := d.EventDAO.Ack(ctx, batch)
+	return acked + held, err
 }
 
 // ClearPendingForStream clears the store's markers and holds a clear for the
@@ -301,9 +311,14 @@ func (d *walReadThrough) ClearPendingForStream(ctx context.Context, streamID str
 // pass.
 func (d *walReadThrough) applyHeld(ctx context.Context, entries []*walEntry) error {
 	ops := d.overlay.held(entries)
-	for streamID, byDate := range ops.acks {
-		for ackDate, jtis := range byDate {
-			if _, err := d.EventDAO.AckDelivered(ctx, jtis, streamID, ackDate); err != nil {
+	for streamID, byKey := range ops.acks {
+		for k, ackJtis := range byKey {
+			batch := interfaces.AckBatch{StreamID: streamID, Jtis: ackJtis, AckDate: k.ackDate}
+			if !k.expireAt.IsZero() {
+				expireAt := k.expireAt
+				batch.ExpireAt = &expireAt
+			}
+			if _, err := d.EventDAO.Ack(ctx, batch); err != nil {
 				return err
 			}
 		}

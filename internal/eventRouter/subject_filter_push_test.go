@@ -115,7 +115,7 @@ func (h *filterPushHarness) addPendingEvent(t *testing.T, sid string, subject *g
 		rec, err = h.eventService.AddEvent(ctx, token, sid, "")
 	}
 	require.NoError(t, err)
-	require.NoError(t, h.eventService.AddEventToStream(ctx, rec.Jti, sid))
+	require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(rec.Jti), sid))
 	return rec.Jti
 }
 

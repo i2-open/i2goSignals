@@ -29,7 +29,7 @@ func TestClaimOutbound_StoreFallbackSkipsJtisAlreadyClaimed(t *testing.T) {
 	r.mu.Unlock()
 
 	for i := 1; i <= 3; i++ {
-		require.NoError(t, r.eventService.AddEventToStream(context.Background(), fmt.Sprintf("jti-claim-%d", i), txSid))
+		require.NoError(t, r.eventService.AddEventToStream(context.Background(), refOf(fmt.Sprintf("jti-claim-%d", i)), txSid))
 	}
 
 	first := r.ClaimOutbound(pairId, 2)

@@ -1,30 +1,87 @@
 package dao
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
-// StreamsByJti inverts an InsertWithPending pending map (stream ID -> JTIs)
-// into JTI -> the distinct stream IDs it must be queued on, sorted so every
-// implementation writes a JTI's markers in the same order. A (stream, JTI)
-// pair listed more than once yields one stream entry, so a coalesced write
-// never creates two markers for the same intent.
-func StreamsByJti(pending map[string][]string) map[string][]string {
+// StreamPending is one (stream, reference) target of an InsertWithPending
+// pending map, as inverted by StreamsByJti.
+type StreamPending struct {
+	StreamID string
+	Ref      PendingRef
+}
+
+// StreamsByJti inverts an InsertWithPending pending map (stream ID ->
+// references) into inbound JTI -> the distinct streams it must be queued on,
+// each with its reference, sorted by stream ID so every implementation writes
+// a JTI's references in the same order. A (stream, JTI) pair listed more than
+// once yields one entry (the first listed reference wins), so a coalesced
+// write never creates two references for the same intent. A reference with an
+// empty AckJti is returned with AckJti = Jti.
+func StreamsByJti(pending map[string][]PendingRef) map[string][]StreamPending {
 	if len(pending) == 0 {
 		return nil
 	}
-	out := make(map[string][]string)
+	out := make(map[string][]StreamPending)
 	seen := make(map[[2]string]struct{})
-	for streamID, jtis := range pending {
-		for _, jti := range jtis {
-			k := [2]string{streamID, jti}
+	for streamID, refs := range pending {
+		for _, ref := range refs {
+			k := [2]string{streamID, ref.Jti}
 			if _, dup := seen[k]; dup {
 				continue
 			}
 			seen[k] = struct{}{}
-			out[jti] = append(out[jti], streamID)
+			if ref.AckJti == "" {
+				ref.AckJti = ref.Jti
+			}
+			out[ref.Jti] = append(out[ref.Jti], StreamPending{StreamID: streamID, Ref: ref})
 		}
 	}
-	for _, streams := range out {
-		sort.Strings(streams)
+	for _, targets := range out {
+		sort.Slice(targets, func(i, j int) bool { return targets[i].StreamID < targets[j].StreamID })
+	}
+	return out
+}
+
+// RefsFromJtis builds references with AckJti = Jti and the given enqueue time
+// for every jti, in order.
+func RefsFromJtis(jtis []string, enqueuedAt time.Time) []PendingRef {
+	if len(jtis) == 0 {
+		return nil
+	}
+	refs := make([]PendingRef, len(jtis))
+	for i, jti := range jtis {
+		refs[i] = PendingRef{Jti: jti, AckJti: jti, EnqueuedAt: enqueuedAt}
+	}
+	return refs
+}
+
+// RefJtis returns the inbound JTIs of refs, in order.
+func RefJtis(refs []PendingRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Jti
+	}
+	return out
+}
+
+// RefAckJtis returns the acknowledgement JTIs of refs, in order (Jti when a
+// reference's AckJti is empty).
+func RefAckJtis(refs []PendingRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		if r.AckJti == "" {
+			out[i] = r.Jti
+		} else {
+			out[i] = r.AckJti
+		}
 	}
 	return out
 }
