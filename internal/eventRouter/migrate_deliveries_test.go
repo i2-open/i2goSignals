@@ -191,20 +191,48 @@ func TestMigrateLegacyDeliveries_StoreNotReady(t *testing.T) {
 	assert.EqualValues(t, 0, dao.calls.Load())
 }
 
-// NewRouter waits for a store that is not connected yet and runs the
-// migration once it is, before any delivery goroutine starts (#361): it does
-// not start without the migration.
-func TestNewRouter_WaitsForTheStoreBeforeTheMigration(t *testing.T) {
+// NewRouter does not wait for a store that is not connected yet (the
+// provider reconnects in the background and the application must start): it
+// returns at once and runs the migration in the background once the store is
+// ready, starting delivery only after it (#361).
+func TestNewRouter_StoreNotReadyMigratesInTheBackgroundBeforeDelivery(t *testing.T) {
 	prev := migrationLeaseRetry
 	migrationLeaseRetry = 5 * time.Millisecond
 	t.Cleanup(func() { migrationLeaseRetry = prev })
 
 	p := openMemPersistence(t)
 	dao := &migrateDAO{EventDAO: p.EventDAO, notReadyFor: 3}
-	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig")
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig").(*router)
 	t.Cleanup(r.Shutdown)
-	assert.EqualValues(t, 4, dao.calls.Load(), "NewRouter returned before the migration ran on a ready store")
+	assert.Less(t, dao.calls.Load(), int32(4), "NewRouter waited for the store")
+	assert.False(t, routerEnabled(r), "delivery started before the migration")
+
+	require.Eventually(t, func() bool { return routerEnabled(r) }, 5*time.Second, time.Millisecond, "delivery never started")
+	assert.EqualValues(t, 4, dao.calls.Load(), "delivery started before the migration ran on a ready store")
 	assert.True(t, leaseFree(t, p.Coordinator), "lease held after the migration")
+}
+
+// Shutdown while the store is still not connected stops the background
+// migration and never starts delivery.
+func TestNewRouter_ShutdownBeforeTheStoreIsReadyStartsNothing(t *testing.T) {
+	prev := migrationLeaseRetry
+	migrationLeaseRetry = 5 * time.Millisecond
+	t.Cleanup(func() { migrationLeaseRetry = prev })
+
+	p := openMemPersistence(t)
+	dao := &migrateDAO{EventDAO: p.EventDAO, notReadyFor: 1 << 30}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig").(*router)
+	r.Shutdown()
+	settled := dao.calls.Load()
+	time.Sleep(10 * migrationLeaseRetry)
+	assert.LessOrEqual(t, dao.calls.Load(), settled+1, "the migration retried after Shutdown")
+	assert.False(t, routerEnabled(r), "delivery started after Shutdown")
+}
+
+func routerEnabled(r *router) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.enabled
 }
 
 // notReadyCoordinator is a coordinator whose store is not connected.

@@ -40,9 +40,10 @@ func migrationExpireAt(window services.EffectiveWindowFunc, states map[string]mo
 
 // migrateUntilStoreReady runs migrateLegacyDeliveries and, while the store is
 // not connected yet (background reconnect), retries every
-// migrationLeaseRetry, logging at WARN every migrationWaitLogEvery. NewRouter
-// therefore starts no delivery goroutine until the migration has run on a
-// connected store (#361). Any other error, or ctx ending, is returned.
+// migrationLeaseRetry, logging at WARN every migrationWaitLogEvery. The
+// router's background start (migrateThenStartDelivery) therefore starts no
+// delivery goroutine until the migration has run on a connected store (#361).
+// Any other error, or ctx ending, is returned.
 func migrateUntilStoreReady(ctx context.Context, es *services.EventService, coord cluster.ClusterCoordinator, nodeId string, expireAt func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
 	var lastLog time.Time
 	for {

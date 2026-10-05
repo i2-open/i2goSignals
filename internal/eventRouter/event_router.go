@@ -138,6 +138,14 @@ type router struct {
 	cancel      context.CancelFunc
 	enabled     bool
 	nodeId      string
+	// startMu orders a deferred delivery start (store not connected at
+	// NewRouter, #361) against Shutdown; stopping is set by Shutdown so a
+	// migration that completes afterwards starts nothing.
+	startMu  sync.Mutex
+	stopping bool
+	// startDone is closed when a deferred delivery start goroutine exits;
+	// nil when delivery started in NewRouter.
+	startDone chan struct{}
 	// signingKeys is the key cache: each issuer's active signing key per
 	// signature algorithm, re-read from the key store 2s after it was loaded
 	// (#313).
@@ -463,21 +471,24 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	// Startup order (#361, seam S2): (1) load the stream state map once;
 	// (2) carry the legacy pendingEvents / deliveredEvents rows into
-	// deliveries; only then (3) wrap the DAO and drain the WAL, (4) initialise
-	// the streams from the map of step 1, and (5) start WatchPending. Nothing
-	// that reads or writes deliveries starts before step 2 completes.
+	// deliveries; only then (3) drain the WAL, (4) initialise the streams from
+	// the map of step 1, and (5) start WatchPending (startDelivery). Nothing
+	// that reads or writes deliveries starts before step 2 completes. A store
+	// that is not connected yet (the provider reconnects in the background)
+	// does not hold NewRouter: the migration is retried in the background and
+	// delivery starts after it, with the state map reloaded from the store.
 	states := router.streamService.GetStateMap(ctx)
+	deferStart := false
 	if deps.EventService != nil {
-		res, err := migrateUntilStoreReady(ctx, deps.EventService, deps.Coordinator, nodeId, migrationExpireAt(deps.RetentionWindow, states))
+		res, err := migrateLegacyDeliveries(ctx, deps.EventService, deps.Coordinator, nodeId, migrationExpireAt(deps.RetentionWindow, states))
 		switch {
+		case errors.Is(err, interfaces.ErrStoreNotReady):
+			deferStart = true
+			eventLogger.Warn("ROUTER: store not connected; delivery starts after the legacy deliveries migration runs", "node", nodeId, "error", err)
 		case err != nil:
-			// Refuse to start: new SETs would otherwise be delivered ahead of
-			// stranded older ones. The migration is idempotent, so the
-			// operator fixes the store and restarts. The lease is released.
-			eventLogger.Error("ROUTER: legacy deliveries migration failed; refusing to start", "error", err)
-			panic(fmt.Sprintf("legacy deliveries migration failed: %v", err))
-		case res.Pending > 0 || res.Delivered > 0:
-			eventLogger.Info("ROUTER: legacy deliveries migrated", "pending", res.Pending, "delivered", res.Delivered, "dropped", res.Dropped)
+			failMigration(err)
+		default:
+			logMigration(res)
 		}
 	}
 
@@ -608,36 +619,98 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.pollClaimTTL = pollClaimTTL()
 	eventLogger.Info("Poll claim TTL resolved (#337)", "I2SIG_POLL_CLAIM_TTL", router.pollClaimTTL)
 
+	if deferStart {
+		router.startDone = make(chan struct{})
+		go router.migrateThenStartDelivery(deps)
+	} else {
+		router.startDelivery(deps, states)
+	}
+
+	return router
+}
+
+// failMigration refuses to start: new SETs would otherwise be delivered ahead
+// of stranded older ones. The migration is idempotent, so the operator fixes
+// the store and restarts. The lease is released.
+func failMigration(err error) {
+	eventLogger.Error("ROUTER: legacy deliveries migration failed; refusing to start", "error", err)
+	panic(fmt.Sprintf("legacy deliveries migration failed: %v", err))
+}
+
+func logMigration(res interfaces.MigrationResult) {
+	if res.Pending > 0 || res.Delivered > 0 {
+		eventLogger.Info("ROUTER: legacy deliveries migrated", "pending", res.Pending, "delivered", res.Delivered, "dropped", res.Dropped)
+	}
+}
+
+// migrateThenStartDelivery waits for the store, runs the legacy deliveries
+// migration, and only then starts delivery (#361). The state map is read once
+// the store is connected, for the migration's expireAt and the stream
+// initialisation. Shutdown (r.ctx ending, or stopping) ends it quietly.
+func (r *router) migrateThenStartDelivery(deps RouterDeps) {
+	defer close(r.startDone)
+	var states map[string]model.StreamStateRecord
+	var load sync.Once
+	loadStates := func() map[string]model.StreamStateRecord {
+		load.Do(func() { states = r.streamService.GetStateMap(r.ctx) })
+		return states
+	}
+	expireAt := func(sid string, ackDate time.Time) *time.Time {
+		return migrationExpireAt(deps.RetentionWindow, loadStates())(sid, ackDate)
+	}
+	res, err := migrateUntilStoreReady(r.ctx, deps.EventService, deps.Coordinator, r.nodeId, expireAt)
+	if err != nil {
+		if r.ctx.Err() != nil {
+			return
+		}
+		failMigration(err)
+	}
+	logMigration(res)
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if r.stopping {
+		return
+	}
+	r.startDelivery(deps, r.streamService.GetStateMap(r.ctx))
+}
+
+// startDelivery runs startup steps 3-5 (#361, seam S2) once the legacy
+// deliveries migration has run: it initialises the streams of states, enables
+// the router, starts the key-unavailable check, drains the WAL, and starts
+// WatchPending when it is enabled.
+func (r *router) startDelivery(deps RouterDeps, states map[string]model.StreamStateRecord) {
 	for k, state := range states {
 		eventLogger.Info("Initializing", "streamKey", k, "configId", state.StreamConfiguration.Id)
-		router.UpdateStreamState(&state)
+		r.UpdateStreamState(&state)
 	}
-	router.enabled = true
+	r.mu.Lock()
+	r.enabled = true
+	r.mu.Unlock()
 
 	// Every node retries the key for the stored poll transmitters and SSTP pairs
 	// in a key-unavailable pause, resuming or disabling them (#312).
-	go router.runKeyUnavailableCheck(LoadRecoveryConfig())
+	go r.runKeyUnavailableCheck(LoadRecoveryConfig())
 
 	// The WAL drain starts after the streams exist so a ring-fed replay
 	// reaches their buffers, and before WatchPending.
 	if deps.WAL != nil {
-		router.startLocalWal(deps.WAL)
+		r.startLocalWal(deps.WAL)
 	}
 
 	// Start the background watcher if explicitly enabled
 	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
 		eventLogger.Info("Background watcher enabled via I2SIG_STORE_MONGO_WATCH_ENABLED")
-		go router.eventService.WatchPending(ctx, func(ref interfaces.PendingRef, streamId string) {
+		go r.eventService.WatchPending(r.ctx, func(ref interfaces.PendingRef, streamId string) {
 			sid, jti := streamId, ref.Jti
 			// Offered only to a queue this node holds (#365); otherwise the
 			// owner gets the reference from its wake or its next pending read.
-			router.mu.RLock()
-			pollBuf, pollOk := router.pollBuffers[sid]
-			pushBuf, pushOk := router.pushBuffers[sid]
-			router.mu.RUnlock()
+			r.mu.RLock()
+			pollBuf, pollOk := r.pollBuffers[sid]
+			pushBuf, pushOk := r.pushBuffers[sid]
+			r.mu.RUnlock()
 
 			if pollOk || pushOk {
-				router.queueFor(sid).accept(ctx, []interfaces.PendingRef{ref})
+				r.queueFor(sid).accept(r.ctx, []interfaces.PendingRef{ref})
 			}
 			if pollOk {
 				eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
@@ -652,7 +725,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		eventLogger.Info("Background watcher disabled (using wake-up calls and backfill)")
 	}
 
-	return router
 }
 
 const (
@@ -3625,6 +3697,11 @@ func (r *router) Shutdown() {
 	// while SETs this node acked are still only on its disk (#341, ADR 0038).
 	// Runs outside r.mu, which the drain takes to wake targets. On drain
 	// timeout the residue stays in the log for the next start (ADR 0045).
+	// A delivery start still waiting for the store starts nothing from here
+	// on; one in progress finishes first (#361).
+	r.startMu.Lock()
+	r.stopping = true
+	r.startMu.Unlock()
 	r.shutdownLocalWal()
 	// Release the poll-transmitter and sstp-server leases this node holds
 	// (#365) once the WAL is drained, for the same reason, and outside r.mu.
@@ -3635,6 +3712,11 @@ func (r *router) Shutdown() {
 	r.enabled = false
 	if r.cancel != nil {
 		r.cancel()
+	}
+	// The deferred start takes neither r.mu nor, with stopping set, starts
+	// anything, so it ends promptly once r.ctx is cancelled.
+	if r.startDone != nil {
+		<-r.startDone
 	}
 	for _, pushBuffer := range r.pushBuffers {
 		pushBuffer.Close()
