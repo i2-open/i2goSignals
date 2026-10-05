@@ -249,6 +249,39 @@ func (q *deliveryQueue) AckJtisOf(inbound []string) []string {
 	return out
 }
 
+// Resolve returns, in order, the reference for each inbound JTI that has an
+// acknowledgement JTI (AckJtisOf; a held reference keeps its enqueue time),
+// and the JTIs that have none. It is the one filter every serve point (poll,
+// peer claim, push, SSTP acceptor and dialer) applies before signing. Nothing
+// is derived (#363, S2): an unresolved JTI is not handed out, and its queue
+// claim, if it has one, is released so the next read serves it again rather
+// than after the claim expires. A caller that holds its own claim on a JTI
+// (an SSTP dialer pair's in-flight set) releases that one for the returned
+// unresolved JTIs.
+func (q *deliveryQueue) Resolve(inbound []string) ([]interfaces.PendingRef, []string) {
+	if len(inbound) == 0 {
+		return nil, nil
+	}
+	ackJtis := q.AckJtisOf(inbound)
+	refs := make([]interfaces.PendingRef, 0, len(inbound))
+	var unresolved []string
+	q.mu.Lock()
+	for i, jti := range inbound {
+		if ackJtis[i] == "" {
+			unresolved = append(unresolved, jti)
+			continue
+		}
+		ref := interfaces.PendingRef{Jti: jti, AckJti: ackJtis[i]}
+		if qr, ok := q.refs[jti]; ok && qr.ref.AckJti == ackJtis[i] {
+			ref = qr.ref
+		}
+		refs = append(refs, ref)
+	}
+	q.mu.Unlock()
+	q.releaseClaims(unresolved)
+	return refs, unresolved
+}
+
 // ackJtisOf is the one place the queue resolves acknowledgement JTIs (#363,
 // S2: rows keep the ackJti written at ingest; nothing is re-derived). A held
 // reference answers from memory; the rest come from their stored rows (or
@@ -288,23 +321,6 @@ func (q *deliveryQueue) ctx() context.Context {
 		return q.r.ctx
 	}
 	return context.Background()
-}
-
-// RefOf returns the reference held for inboundJti, with its acknowledgement
-// JTI and enqueue time; a reference the queue does not hold carries
-// AckJtiOf's value ("" when its row could not be read) and no enqueue time.
-func (q *deliveryQueue) RefOf(inboundJti string) interfaces.PendingRef {
-	q.mu.Lock()
-	qr, ok := q.refs[inboundJti]
-	var ref interfaces.PendingRef
-	if ok {
-		ref = qr.ref
-	}
-	q.mu.Unlock()
-	if ok {
-		return ref
-	}
-	return interfaces.PendingRef{Jti: inboundJti, AckJti: q.AckJtiOf(inboundJti)}
 }
 
 // Served records the JWS this node signed for inboundJti and is about to hand

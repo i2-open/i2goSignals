@@ -2455,18 +2455,23 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 	for i, rec := range work {
 		inbound[i] = rec.Jti
 	}
-	ackJtis := q.AckJtisOf(inbound)
-	// A SET whose stored row could not be read is not handed out (#363, S2):
-	// nothing is derived, and it is served again once its claim expires.
-	kept := 0
-	for i, rec := range work {
-		if ackJtis[i] == "" {
-			continue
+	// A SET with no acknowledgement JTI is not handed out (Resolve releases
+	// its claim, so the next poll serves it).
+	refs, unresolved := q.Resolve(inbound)
+	if len(unresolved) > 0 {
+		recByJti := make(map[string]*model.EventRecord, len(work))
+		for _, rec := range work {
+			recByJti[rec.Jti] = rec
 		}
-		work[kept], ackJtis[kept] = rec, ackJtis[i]
-		kept++
+		work = work[:0]
+		for _, ref := range refs {
+			work = append(work, recByJti[ref.Jti])
+		}
 	}
-	work, ackJtis = work[:kept], ackJtis[:kept]
+	ackJtis := make([]string, len(refs))
+	for i, ref := range refs {
+		ackJtis[i] = ref.AckJti
+	}
 	if len(work) == 0 {
 		return sets, nil
 	}
@@ -3598,18 +3603,21 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 		for i := range work {
 			inbound[i] = work[i].jti
 		}
-		handed := q.AckJtisOf(inbound)
-		// A SET whose stored row could not be read is not pushed (#363, S2):
-		// nothing is derived; it stays pending and backfill re-pulls it.
-		kept := 0
-		for i := range work {
-			if handed[i] == "" {
-				continue
+		// A SET with no acknowledgement JTI is not pushed: it stays pending
+		// and backfill re-pulls it.
+		refs, _ := q.Resolve(inbound)
+		handed := make([]string, len(refs))
+		kept, at := 0, 0
+		for _, ref := range refs {
+			// refs keeps inbound's order, so each one is at or after at.
+			for work[at].jti != ref.Jti {
+				at++
 			}
-			work[kept], handed[kept] = work[i], handed[i]
+			work[kept], handed[kept] = work[at], ref.AckJti
 			kept++
+			at++
 		}
-		work, handed = work[:kept], handed[:kept]
+		work = work[:kept]
 		outcomes = outcomes[:kept]
 		q.MarkHandedOut(handed, time.Now())
 		workers := r.pushConcurrency

@@ -147,6 +147,19 @@ func (q *deliveryQueue) ReleaseClaim(token string) {
 	}
 }
 
+// releaseClaims drops the claims held on jtis without acknowledging them, so
+// the next claim serves them.
+func (q *deliveryQueue) releaseClaims(jtis []string) {
+	if len(jtis) == 0 {
+		return
+	}
+	q.claims.mu.Lock()
+	defer q.claims.mu.Unlock()
+	for _, jti := range jtis {
+		delete(q.claims.claims, jti)
+	}
+}
+
 // ClaimedCnt is the number of JTIs held by an unexpired claim.
 func (q *deliveryQueue) ClaimedCnt() int {
 	q.claims.mu.Lock()

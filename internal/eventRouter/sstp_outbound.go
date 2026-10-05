@@ -245,19 +245,9 @@ func (r *router) outboundRefs(pairId string, jtis []string) []interfaces.Pending
 	if !ok {
 		return pendingref.RefsFromJtis(jtis, time.Time{})
 	}
-	q := r.queueFor(pair.StreamConfiguration.Id)
-	refs := make([]interfaces.PendingRef, 0, len(jtis))
-	var unresolved []string
-	for _, jti := range jtis {
-		ref := q.RefOf(jti)
-		if ref.AckJti == "" {
-			// Its stored row could not be read (#363, S2): nothing is
-			// derived; the claim is released and the SET stays pending.
-			unresolved = append(unresolved, jti)
-			continue
-		}
-		refs = append(refs, ref)
-	}
+	// A JTI with no acknowledgement JTI is not sent: its in-flight claim is
+	// released and the SET stays pending.
+	refs, unresolved := r.queueFor(pair.StreamConfiguration.Id).Resolve(jtis)
 	r.releaseSstpClaims(pairId, unresolved)
 	return refs
 }

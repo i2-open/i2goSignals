@@ -334,21 +334,34 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []
 	// JTI, which is what the peer acks.
 	cfg := rec.StreamConfiguration
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
-	resolved := work[:0]
+	// A reference claimed without its acknowledgement JTI (a bare buffer
+	// submit) takes its stored row's one, all in one Resolve; one with none
+	// is not sent and its claim is released.
+	var bare []string
 	for _, eventRecord := range work {
-		ackJti := ackJtiOf[eventRecord]
-		if ackJti == "" {
-			// A reference claimed without its acknowledgement JTI (a bare
-			// buffer submit) takes its stored row's one. A failed read derives
-			// nothing (#363, S2): the SET is not sent and stays pending.
-			if ackJti = q.AckJtiOf(eventRecord.Jti); ackJti == "" {
-				continue
-			}
+		if ackJtiOf[eventRecord] == "" {
+			bare = append(bare, eventRecord.Jti)
 		}
-		ackJtiOf[eventRecord] = ackJti
-		resolved = append(resolved, eventRecord)
 	}
-	work = resolved
+	if len(bare) > 0 {
+		refs, _ := q.Resolve(bare)
+		found := make(map[string]string, len(refs))
+		for _, ref := range refs {
+			found[ref.Jti] = ref.AckJti
+		}
+		resolved := work[:0]
+		for _, eventRecord := range work {
+			if ackJtiOf[eventRecord] == "" {
+				ackJti, ok := found[eventRecord.Jti]
+				if !ok {
+					continue
+				}
+				ackJtiOf[eventRecord] = ackJti
+			}
+			resolved = append(resolved, eventRecord)
+		}
+		work = resolved
+	}
 	if len(work) == 0 {
 		q.MarkHandedOut(mapKeys(sets), time.Now())
 		return sets, nil

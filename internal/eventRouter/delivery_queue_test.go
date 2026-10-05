@@ -308,7 +308,7 @@ func TestDeliveryQueue_BeyondWindowUsesStoredAckJti(t *testing.T) {
 
 	assert.Equal(t, "c", q.AckJtiOf("c"), "a reference the queue does not hold takes its stored ackJti")
 	assert.Equal(t, []string{"b", "c"}, q.AckJtisOf([]string{"b", "c"}))
-	assert.Equal(t, "c", q.RefOf("c").AckJti)
+	assert.Equal(t, "c", q.AckJtiOf("c"))
 
 	n, err := q.AckInbound(context.Background(), []string{"c"}, true)
 	require.NoError(t, err)
@@ -343,7 +343,7 @@ func TestDeliveryQueue_FailedStoredAckReadDerivesNothing(t *testing.T) {
 
 	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "b"}), "a failed read must not derive")
 	assert.Equal(t, "", q.AckJtiOf("b"))
-	assert.Equal(t, "", q.RefOf("b").AckJti)
+	assert.Equal(t, "", q.AckJtiOf("b"))
 
 	// Served records an unheld SET under the JTI it was signed with, without
 	// reading the store.
@@ -397,11 +397,32 @@ func TestDeliveryQueue_NoRowDerivesNothing(t *testing.T) {
 	r.pushStreams[sid] = pub
 	q.routeModeChanged(context.Background())
 	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "ghost"}), "the stored row answers; the missing one stays unresolved")
-	assert.Equal(t, "", q.RefOf("ghost").AckJti)
+	assert.Equal(t, "", q.AckJtiOf("ghost"))
 
 	n, err := q.AckInbound(context.Background(), []string{"ghost"}, true)
 	require.NoError(t, err)
 	assert.Zero(t, n, "nothing is acknowledged for a JTI with no row")
 	assert.Nil(t, findCopy(t, dao, pub.AckJti("ghost")), "no copy under a derived JTI")
 	assert.Equal(t, map[string]string{"a": "a"}, pendingAckJtis(t, dao, sid))
+}
+
+// Resolve is the one filter every serve point applies: a JTI with an
+// acknowledgement JTI comes back as a reference in inbound's order; one with
+// none is returned unresolved and its claim is released at once, so the next
+// read serves it rather than after the claim expires.
+func TestDeliveryQueue_ResolveReleasesUnresolvedClaims(t *testing.T) {
+	r, _, rec := queueRouter(t, model.RouteModeForward, "a")
+	sid := rec.StreamConfiguration.Id
+	q := newDeliveryQueue(r, sid, 10)
+	r.queues.Store(sid, q)
+	_, taken, _ := claimTake{c: &q.claims, ttl: time.Minute}.Take(time.Now(), []string{"ghost", "a"}, 2)
+	require.Equal(t, []string{"ghost", "a"}, taken)
+	require.Equal(t, 2, q.ClaimedCnt())
+
+	refs, unresolved := q.Resolve([]string{"ghost", "a"})
+	require.Len(t, refs, 1)
+	assert.Equal(t, "a", refs[0].Jti)
+	assert.Equal(t, "a", refs[0].AckJti)
+	assert.Equal(t, []string{"ghost"}, unresolved)
+	assert.Equal(t, 1, q.ClaimedCnt(), "the unresolved JTI's claim is released; the resolved one keeps its claim")
 }
