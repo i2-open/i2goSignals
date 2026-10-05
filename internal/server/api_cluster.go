@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -13,16 +14,23 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
-// WakeRequest is the body of a cluster wake-up call from a peer node. An empty
-// Reason is an ordinary buffer wake-up; Reason "filter-change" instead
-// invalidates the stream's subject-filter match-result cache (issue #94).
+// WakeRequest is the body of a cluster wake-up call from a peer node, the
+// wire form of peer.WakeMessage. An empty Reason is an ordinary buffer
+// wake-up; Reason "filter-change" instead invalidates the stream's
+// subject-filter match-result cache (issue #94). Jtis, AckJtis and EnqueuedAt
+// are index-aligned reference lists; senders leave them empty until #363, so
+// every wake is a reload.
 type WakeRequest struct {
-	Sid    string `json:"sid"`
-	Mode   string `json:"mode"`
-	Reason string `json:"reason,omitempty"`
+	Sid        string   `json:"sid"`
+	Mode       string   `json:"mode"`
+	Reason     string   `json:"reason,omitempty"`
+	Jtis       []string `json:"jtis,omitempty"`
+	AckJtis    []string `json:"ackJtis,omitempty"`
+	EnqueuedAt []int64  `json:"enqueuedAt,omitempty"`
 }
 
 // clusterWakes coalesces inbound cluster wake-ups per target, on both edges
@@ -77,6 +85,40 @@ func (sa *SignalsApplication) applyWake(req WakeRequest) {
 	sa.EventRouter.WakeTransmitter(req.Sid, req.Mode)
 }
 
+// ClaimStream handles POST /_cluster/claim from a peer node (#358): the
+// caller asks this node, as the stream's lease owner, to apply
+// acknowledgements and claim the next references. It decodes the body,
+// authenticates it like the wake endpoints (SPIFFE peer certificate, else
+// the HMAC token over sid and mode), and writes the router's answer with
+// status 200. The router's HandleClaim runs under the request's context, so a
+// caller that gives up ends it.
+func (sa *SignalsApplication) ClaimStream(w http.ResponseWriter, r *http.Request) {
+	var req peer.ClaimRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Sid == "" || !peer.ValidClaimMode(req.Mode) {
+		http.Error(w, "invalid sid or mode", http.StatusBadRequest)
+		return
+	}
+	if !authenticateCluster(w, r, req.Sid, req.Mode) {
+		return
+	}
+	resp := peer.ClaimResponse{NotOwner: true}
+	if h, ok := sa.EventRouter.(peer.ClaimHandler); ok {
+		resp = h.HandleClaim(r.Context(), req)
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 // isPeerSpiffeAuthenticated returns true if the TLS connection's peer
 // certificate carries a SPIFFE ID that belongs to the cluster trust
 // domain configured via I2SIG_SPIFFE_TRUST_DOMAIN (default:
@@ -116,6 +158,7 @@ func (sa *SignalsApplication) startInternalServer() {
 	mux.HandleFunc("/_cluster/wake-sstp-client", sa.WakeSstpClient)
 	mux.HandleFunc("/_cluster/wake-sstp-server", sa.WakeSstpServer)
 	mux.HandleFunc(eventRouter.StreamChangedPath, sa.StreamChanged)
+	mux.HandleFunc("POST "+peer.ClaimPath, sa.ClaimStream)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

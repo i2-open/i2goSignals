@@ -184,6 +184,19 @@ type EventDAO interface {
 	WatchPending(ctx context.Context, callback func(jti string, streamID string)) error
 }
 
+// PendingRef names one delivery reference. Jti is the inbound JTI (the events
+// key). AckJti is the JTI the SET carries on the wire for that stream and the
+// JTI the receiver acknowledges with. An empty AckJti is stored as Jti; every
+// read returns it non-empty. EnqueuedAt is the enqueue time (deliveries.createdAt):
+// a writer sets it from its own clock when it builds the reference; a zero
+// value is stored as the adapter's clock at the write; every read returns the
+// stored value.
+type PendingRef struct {
+	Jti        string
+	AckJti     string
+	EnqueuedAt time.Time
+}
+
 // SubjectFilterDAO handles per-stream SSF §8.1.3 subject filter entries. The
 // store is keyed by (stream_id, canonical_key) so simple-subject membership is
 // an indexed point lookup, never a collection scan (ADR-0003).

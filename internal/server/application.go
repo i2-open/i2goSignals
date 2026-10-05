@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
@@ -187,6 +188,26 @@ func (sa *SignalsApplication) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// testPeerTransportFor and testPeerRegister are the two-node test harness's
+// seam (#358, cluster_harness_test.go): when set, the router is built on the
+// harness's in-process PeerTransport and registered with it. Both are nil in
+// production, which leaves RouterDeps.PeerTransport nil so the router builds
+// peer.NewHTTP.
+var (
+	testPeerTransportFor func(nodeID string) peer.PeerTransport
+	testPeerRegister     func(nodeID string, router eventRouter.EventRouter)
+	// testSstpDialerConfig lets the harness shrink the SSTP dialer's lease
+	// timing so a takeover runs in seconds. Nil in production.
+	testSstpDialerConfig func(cfg *SstpDialerConfig)
+)
+
+func testPeerTransport(nodeID string) peer.PeerTransport {
+	if testPeerTransportFor == nil {
+		return nil
+	}
+	return testPeerTransportFor(nodeID)
+}
+
 func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
 	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
 	tlsSupport.CheckCaInstalled(http.DefaultClient)
@@ -251,6 +272,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	if persistence.StreamService != nil {
 		sstpDialerCfg.EventValidationDefault = persistence.StreamService.EventValidationDefault()
 	}
+	if testSstpDialerConfig != nil {
+		testSstpDialerConfig(&sstpDialerCfg)
+	}
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 	sa.SstpDialer = sstpDialer
 
@@ -270,7 +294,12 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		WAL: persistence.WAL,
 		// I2SIG_STORE_WAL_RING_FED (#342); only meaningful with a WAL.
 		WALRingFed: persistence.WALRingFed,
+		// Nil in production, so the router builds the HTTP adapter (#358).
+		PeerTransport: testPeerTransport(nodeID),
 	}, nodeID)
+	if testPeerRegister != nil {
+		testPeerRegister(nodeID, sa.EventRouter)
+	}
 
 	// Late-bind the router as the dialer's narrow outbound surface. The
 	// router satisfies eventRouter.SstpOutbound (see internal/eventRouter/

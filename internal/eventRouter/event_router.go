@@ -1,7 +1,6 @@
 package eventRouter
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"encoding/json"
@@ -12,22 +11,20 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/wal"
-	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/events"
@@ -241,7 +238,10 @@ type router struct {
 	meteringObserver atomic.Pointer[meteringObserverHolder]
 	stats            statsTracker
 
-	httpClient       *http.Client
+	httpClient *http.Client
+	// peers carries every inter-node wake and claim (#358). RouterDeps
+	// selects the adapter; nil there builds the HTTP adapter on httpClient.
+	peers            peer.PeerTransport
 	clusterSecret    string
 	outboundWakes    *WakeCoalescer
 	backfillInterval time.Duration
@@ -360,6 +360,10 @@ type RouterDeps struct {
 	// acknowledged SETs from the WAL before the drain stores them
 	// (I2SIG_STORE_WAL_RING_FED, #342). Ignored without a WAL.
 	WALRingFed bool
+	// PeerTransport carries inter-node wakes and claims (#358). Nil (the
+	// production default) builds peer.NewHTTP on the router's HTTP client;
+	// the two-node test harness injects the in-process adapter.
+	PeerTransport peer.PeerTransport
 }
 
 // The router is the reset-egress sink EventService reports re-queued events to
@@ -466,6 +470,14 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		} else {
 			eventLogger.Warn("ROUTER: SPIFFE configured but X509Source failed; using HMAC-only", "err", err)
 		}
+	}
+
+	// Built after the SPIFFE client so the HTTP adapter inherits its mTLS
+	// transport.
+	if deps.PeerTransport != nil {
+		router.peers = deps.PeerTransport
+	} else {
+		router.peers = peer.NewHTTP(deps.Coordinator, router.httpClient, router.clusterSecret, nodeId)
 	}
 
 	backfillInterval := 1 * time.Second
@@ -1707,62 +1719,18 @@ func (r *router) sendWakeup(sid, mode, ownerNodeId, reason string) {
 	// filter-change notification is never coalesced away by a buffer wake-up
 	// (or vice versa) that happens to target the same stream.
 	key := sid + ":" + mode + ":" + reason
-	if !r.outboundWakes.Admit(key, func() { r.callWakeupNode(sid, mode, ownerNodeId, reason) }) {
+	if !r.outboundWakes.Admit(key, func() { r.wakeNode(sid, mode, ownerNodeId, reason) }) {
 		return
 	}
-	r.callWakeupNode(sid, mode, ownerNodeId, reason)
+	r.wakeNode(sid, mode, ownerNodeId, reason)
 }
 
-// callWakeupNode resolves the owner node's address and sends it the wake.
-func (r *router) callWakeupNode(sid, mode, ownerNodeId, reason string) {
-	node, err := r.coordinator.GetNode(ownerNodeId)
-	if err != nil || node == nil {
-		eventLogger.Error("ROUTER: Error getting node info for wake-up", "nodeId", ownerNodeId, "error", err)
-		return
-	}
-
-	if node.Address == "" {
-		eventLogger.Warn("ROUTER: Node address empty, cannot send wake-up", "nodeId", ownerNodeId)
-		return
-	}
-
-	r.callWakeupAPI(node.Address, sid, mode, reason)
-}
-
-func (r *router) callWakeupAPI(address, sid, mode, reason string) {
-	url := strings.TrimSuffix(address, "/") + "/_cluster/wake-transmitter"
-
-	body := map[string]string{
-		"sid":  sid,
-		"mode": mode,
-	}
-	if reason != "" {
-		body["reason"] = reason
-	}
-	reqBody, _ := json.Marshal(body)
-
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
-	if err != nil {
-		eventLogger.Error("ROUTER: Error creating wake-up request", "url", url, "error", err)
-		return
-	}
-
-	token := authSupport.GenerateClusterToken(r.clusterSecret, sid, mode)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		eventLogger.Error("ROUTER: Wake-up call failed", "url", url, "error", err)
-		return
-	}
-
-	defer httpSupport.HandleRespClose(resp)
-
-	if resp.StatusCode != http.StatusAccepted {
-		eventLogger.Warn("ROUTER: Wake-up call rejected", "url", url, "status", resp.Status)
-	} else {
-		eventLogger.Debug("ROUTER: Wake-up call successful", "url", url, "sid", sid)
+// wakeNode sends one wake to the owner node through the PeerTransport. The
+// reference lists stay empty until #363, so every wake is a reload.
+func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
+	msg := peer.WakeMessage{Sid: sid, Mode: mode, Reason: reason}
+	if err := r.peers.Wake(r.ctx, ownerNodeId, msg); err != nil {
+		eventLogger.Warn("ROUTER: Wake-up call failed", "nodeId", ownerNodeId, "sid", sid, "mode", mode, "error", err)
 	}
 }
 
