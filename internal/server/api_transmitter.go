@@ -134,6 +134,14 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 
 	sets, more, status := sa.GetEventRouter().PollStreamHandler(r.Context(), authCtx.StreamId, request)
 
+	if status == http.StatusServiceUnavailable {
+		// Delivery waits for the legacy deliveries migration at startup (#361):
+		// nothing was read or acknowledged; the receiver retries.
+		if ds, ok := sa.GetEventRouter().(interface{ DeliveryStarted() bool }); ok && !ds.DeliveryStarted() {
+			http.Error(w, "Delivery has not started yet; retry later", status)
+			return
+		}
+	}
 	if status == eventRouter.PollKeyUnavailableStatus {
 		// The stream has no active signing key: nothing was sent, its events
 		// stay queued and it is now paused (#312). Say which key is missing,

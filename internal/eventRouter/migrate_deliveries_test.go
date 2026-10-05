@@ -243,3 +243,121 @@ type notReadyCoordinator struct {
 func (notReadyCoordinator) TryAcquireOrRenewLease(string, string, time.Duration) (bool, int64, time.Time, error) {
 	return false, 0, time.Time{}, fmt.Errorf("coordinator not initialized: %w", interfaces.ErrStoreNotReady)
 }
+
+// probeDAO answers ErrStoreNotReady to MigrateLegacyDeliveries until ready is
+// set, and counts every deliveries read or write that arrives before the
+// migration has completed (#361).
+type probeDAO struct {
+	interfaces.EventDAO
+	ready    atomic.Bool
+	migrated atomic.Bool
+	early    atomic.Int32
+	clears   atomic.Int32
+}
+
+func (d *probeDAO) touch() {
+	if !d.migrated.Load() {
+		d.early.Add(1)
+	}
+}
+
+func (d *probeDAO) MigrateLegacyDeliveries(ctx context.Context, f func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	if !d.ready.Load() {
+		return interfaces.MigrationResult{}, fmt.Errorf("%w: unbound", interfaces.ErrStoreNotReady)
+	}
+	res, err := d.EventDAO.MigrateLegacyDeliveries(ctx, f)
+	d.migrated.Store(err == nil)
+	return res, err
+}
+
+func (d *probeDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
+	d.touch()
+	return d.EventDAO.InsertWithPending(ctx, records, pending)
+}
+
+func (d *probeDAO) AddPending(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	d.touch()
+	return d.EventDAO.AddPending(ctx, ref, streamID)
+}
+
+func (d *probeDAO) AddPendingMany(ctx context.Context, refs []interfaces.PendingRef, streamID string) error {
+	d.touch()
+	return d.EventDAO.AddPendingMany(ctx, refs, streamID)
+}
+
+func (d *probeDAO) EnsurePending(ctx context.Context, jti string, ackJtis map[string]string) ([]string, error) {
+	d.touch()
+	return d.EventDAO.EnsurePending(ctx, jti, ackJtis)
+}
+
+func (d *probeDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
+	d.touch()
+	return d.EventDAO.GetPendingForStream(ctx, streamID, limit)
+}
+
+func (d *probeDAO) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	d.touch()
+	return d.EventDAO.StoredAckJtis(ctx, streamID, jtis)
+}
+
+func (d *probeDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
+	d.touch()
+	return d.EventDAO.RemovePendingMany(ctx, jtis, streamID)
+}
+
+func (d *probeDAO) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
+	d.touch()
+	d.clears.Add(1)
+	return d.EventDAO.ClearPendingForStream(ctx, streamID)
+}
+
+func (d *probeDAO) Ack(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	d.touch()
+	return d.EventDAO.Ack(ctx, batch)
+}
+
+func (d *probeDAO) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
+	d.touch()
+	return d.EventDAO.ResetPendingAckJti(ctx, streamID)
+}
+
+// A stream created through the API while delivery waits for the store starts
+// nothing that reads or writes deliveries until the legacy migration has
+// completed (#361, seam S2); ingest is refused as a retryable store failure,
+// a reset is carried out after the start, and the stream starts from the
+// state map read once the migration is done.
+func TestNewRouter_APIStreamWaitsForTheMigration(t *testing.T) {
+	prev := migrationLeaseRetry
+	migrationLeaseRetry = 5 * time.Millisecond
+	t.Cleanup(func() { migrationLeaseRetry = prev })
+
+	p := openMemPersistence(t)
+	dao := &probeDAO{EventDAO: p.EventDAO}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator, ServesClaims: true}, "node-mig").(*router)
+	t.Cleanup(r.Shutdown)
+
+	audience := "https://receiver.example.com"
+	stream := ensureWalPollStream(t, p, audience)
+	sid := stream.StreamConfiguration.Id
+	r.UpdateStreamState(stream)
+	r.ResetStream(sid)
+	err := r.HandleEvent(newRiscToken("jti-early", dupTestIssuer, audience), "raw", sid)
+	assert.ErrorIs(t, err, ErrStoreUnavailable, "ingest before the migration must be a retryable store failure")
+	_, _, status := r.PollStreamHandler(t.Context(), sid, model.PollParameters{MaxEvents: 1, ReturnImmediately: true})
+	assert.Equal(t, 503, status, "a poll before the migration must be told to retry")
+	assert.False(t, r.DeliveryStarted())
+
+	assert.Never(t, func() bool { return dao.early.Load() > 0 }, 100*time.Millisecond, time.Millisecond, "deliveries accessed before the migration")
+
+	dao.ready.Store(true)
+	require.Eventually(t, func() bool { return routerEnabled(r) }, 5*time.Second, time.Millisecond, "delivery never started")
+	require.Eventually(t, func() bool {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		_, ok := r.pollStreams[sid]
+		return ok
+	}, 5*time.Second, time.Millisecond, "the API-created stream never started")
+	assert.True(t, r.DeliveryStarted())
+	require.Eventually(t, func() bool { return dao.clears.Load() == 1 }, 5*time.Second, time.Millisecond, "the deferred reset never ran")
+	assert.Zero(t, dao.early.Load(), "deliveries accessed before the migration")
+}

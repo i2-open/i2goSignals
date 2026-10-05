@@ -146,6 +146,14 @@ type router struct {
 	// startDone is closed when a deferred delivery start goroutine exits;
 	// nil when delivery started in NewRouter.
 	startDone chan struct{}
+	// startPending is set while a deferred delivery start waits for the
+	// legacy deliveries migration: nothing may read or write deliveries
+	// until it clears (#361, seam S2). Written under startMu; ingest reads it
+	// without the lock.
+	startPending atomic.Bool
+	// pendingResets holds the streams whose reset (ResetStream) arrived while
+	// startPending was set; they are reset once delivery starts. Under startMu.
+	pendingResets map[string]struct{}
 	// signingKeys is the key cache: each issuer's active signing key per
 	// signature algorithm, re-read from the key store 2s after it was loaded
 	// (#313).
@@ -621,6 +629,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 
 	if deferStart {
 		router.startDone = make(chan struct{})
+		router.startPending.Store(true)
 		go router.migrateThenStartDelivery(deps)
 	} else {
 		router.startDelivery(deps, states)
@@ -671,7 +680,38 @@ func (r *router) migrateThenStartDelivery(deps RouterDeps) {
 	if r.stopping {
 		return
 	}
+	// The state map is read under startMu: a stream created through the API
+	// is either in it, or its UpdateStreamState waits for startMu and applies
+	// once delivery has started.
 	r.startDelivery(deps, r.streamService.GetStateMap(r.ctx))
+	r.startPending.Store(false)
+	for sid := range r.pendingResets {
+		r.resetStream(sid)
+	}
+	r.pendingResets = nil
+}
+
+// errDeliveryNotStarted refuses ingest while delivery waits for the legacy
+// deliveries migration (#361): the SET is not acknowledged, so the
+// transmitter retries it (503 + Retry-After, as for a store outage).
+var errDeliveryNotStarted = fmt.Errorf("%w: delivery starts after the legacy deliveries migration", ErrStoreUnavailable)
+
+// DeliveryStarted reports whether delivery has started: false while it waits
+// for the legacy deliveries migration (#361), when a poll is answered 503.
+func (r *router) DeliveryStarted() bool {
+	return !r.startPending.Load()
+}
+
+// deferredUntilStarted reports whether delivery still waits for the legacy
+// deliveries migration (#361). It holds startMu while it checks, so a caller
+// that finds delivery started runs after the start has completed.
+func (r *router) deferredUntilStarted() bool {
+	if !r.startPending.Load() {
+		return false
+	}
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	return r.startPending.Load()
 }
 
 // startDelivery runs startup steps 3-5 (#361, seam S2) once the legacy
@@ -681,7 +721,7 @@ func (r *router) migrateThenStartDelivery(deps RouterDeps) {
 func (r *router) startDelivery(deps RouterDeps, states map[string]model.StreamStateRecord) {
 	for k, state := range states {
 		eventLogger.Info("Initializing", "streamKey", k, "configId", state.StreamConfiguration.Id)
-		r.UpdateStreamState(&state)
+		r.updateStreamState(&state)
 	}
 	r.mu.Lock()
 	r.enabled = true
@@ -777,6 +817,25 @@ func parsePollTimeoutEnv(newName, oldName string, fallback int) int {
 }
 
 func (r *router) ResetStream(sid string) {
+	if r.startPending.Load() {
+		r.startMu.Lock()
+		if r.startPending.Load() {
+			// Delivery waits for the legacy deliveries migration (#361): the
+			// reset runs once it has started.
+			if r.pendingResets == nil {
+				r.pendingResets = make(map[string]struct{})
+			}
+			r.pendingResets[sid] = struct{}{}
+			r.startMu.Unlock()
+			eventLogger.Info("ROUTER: stream reset deferred until delivery starts", "sid", sid)
+			return
+		}
+		r.startMu.Unlock()
+	}
+	r.resetStream(sid)
+}
+
+func (r *router) resetStream(sid string) {
 	r.mu.RLock()
 	buf, ok := r.pollBuffers[sid]
 	r.mu.RUnlock()
@@ -1005,6 +1064,16 @@ func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (cr
 }
 
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
+	if stream != nil && stream.StreamConfiguration.Id != "" && r.deferredUntilStarted() {
+		// Delivery waits for the legacy deliveries migration (#361): the
+		// stream starts from the state map read once it has run.
+		eventLogger.Info("ROUTER: stream starts after the legacy deliveries migration", "sid", stream.StreamConfiguration.Id)
+		return
+	}
+	r.updateStreamState(stream)
+}
+
+func (r *router) updateStreamState(stream *model.StreamStateRecord) {
 	if stream == nil {
 		return
 	}
@@ -1301,6 +1370,12 @@ func (r *router) HandleEvents(eventTokens []*goSet.SecurityEventToken, rawEvents
 func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.SecurityEventToken, rawEvents []string, sid string) []error {
 	results := make([]error, len(eventTokens))
 	if len(eventTokens) == 0 {
+		return results
+	}
+	if r.startPending.Load() {
+		for i := range results {
+			results[i] = errDeliveryNotStarted
+		}
 		return results
 	}
 
@@ -1943,6 +2018,9 @@ func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid s
 // point-to-point), and is used for SSF protocol events such as verify and stream-updated. If the target stream's transmitter lease
 // is held by a remote node, a wake-up is dispatched so the owner picks up the new JTI.
 func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEventToken, rawEvent string) (*model.EventRecord, error) {
+	if r.startPending.Load() {
+		return nil, errDeliveryNotStarted
+	}
 	// SSTP-aware resolution: an operational event keyed on the rx-side SID of an
 	// SSTP pair must still find the (single) pair record, whose document _id is
 	// the tx-side SID, not the rx-side SID (Q40).
@@ -2087,6 +2165,11 @@ func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
 }
 
 func (r *router) PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int) {
+	if r.startPending.Load() {
+		// Delivery waits for the legacy deliveries migration (#361).
+		eventLogger.Warn("POLL-SRV: delivery not started yet; poll refused", "sid", sid)
+		return nil, false, http.StatusServiceUnavailable
+	}
 	r.mu.RLock()
 	state, exist := r.pollStreams[sid]
 	r.mu.RUnlock()
