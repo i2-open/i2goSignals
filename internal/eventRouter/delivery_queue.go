@@ -400,7 +400,7 @@ var (
 		Namespace: "goSignals",
 		Subsystem: "router",
 		Name:      "ack_batches_total",
-		Help:      "Acknowledgement batches handed to the delivery queues: one per push batch, poll request or SSTP frame that acknowledged anything.",
+		Help:      "Acknowledgement batches the delivery queues accepted for writing while holding the stream's lease: one per push batch, poll request or SSTP frame that acknowledged anything. A batch skipped for lease tenure is not counted; its retry is.",
 	})
 	// readsBeforeAckTotal counts coordinator calls made on the acknowledgement
 	// path before its AckBatch (#364). The design value is zero: the
@@ -1053,13 +1053,15 @@ func (q *deliveryQueue) write(ctx context.Context, ackJtis []string, copies []*m
 	if len(ackJtis) == 0 {
 		return 0, nil
 	}
-	ackBatchesTotal.Inc()
 	q.r.locks.enterAck()
 	if !q.r.stillOwnsAck(q.sid) {
 		q.r.locks.exitAck()
 		eventLogger.Debug("ROUTER: lease tenure ended, acknowledgement batch skipped", "sid", q.sid, "count", len(ackJtis))
 		return 0, errNotLeaseOwner
 	}
+	// Counted once ownership is confirmed: a skipped batch is retried, and
+	// counting both attempts would report one batch as two.
+	ackBatchesTotal.Inc()
 	ackDate := time.Now()
 	var expireAt *time.Time
 	if q.r.retentionWindow != nil {

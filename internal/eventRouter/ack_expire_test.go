@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"context"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,4 +172,23 @@ func TestAckEvents_ExpireAtPathRequiresTenure(t *testing.T) {
 	expireAt, ok := deliveredExpireAt(t, dao, sid)
 	require.True(t, ok)
 	assert.NotNil(t, expireAt)
+}
+
+// A batch skipped for lease tenure is not counted: it is retried after the
+// next renewal, and counting both attempts would report one batch as two
+// against a single write.
+func TestAckEvents_SkippedBatchIsNotCounted(t *testing.T) {
+	r, _, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
+	r.coordinator = fixedFence{token: 7}
+	r.leases = newLeaseManager(r.coordinator)
+
+	batches := testutil.ToFloat64(ackBatchesTotal)
+	writes := testutil.ToFloat64(ackWritesTotal)
+	require.ErrorIs(t, r.ackEvents(context.Background(), []string{"j1"}, sid), errNotLeaseOwner)
+	assert.Equal(t, batches, testutil.ToFloat64(ackBatchesTotal), "a skipped batch is not counted")
+
+	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
+	assert.Equal(t, batches+1, testutil.ToFloat64(ackBatchesTotal), "the retried batch counts once")
+	assert.Equal(t, writes+1, testutil.ToFloat64(ackWritesTotal))
 }
