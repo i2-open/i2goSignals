@@ -2101,12 +2101,14 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 
 	r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
 
+	// Copy the buffer out under the lock; the owner read (cached, else a
+	// cluster_leases round trip) and the submission run outside it.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	pushBuf, ok := r.pushBuffers[sid]
+	r.mu.RUnlock()
 
-	if pushBuf, ok := r.pushBuffers[sid]; ok {
-		resource := cluster.PushTransmitterResource(sid)
-		ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
+	if ok {
+		ownerNodeId := r.pushLeaseOwner(sid)
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			pushBuf.SubmitEvent(rec.Jti)
 		} else {
