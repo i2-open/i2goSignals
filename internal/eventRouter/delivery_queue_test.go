@@ -28,7 +28,7 @@ func wireAcks(r *router, sid string, inbound ...string) []string {
 	q := r.queueFor(sid)
 	out := make([]string, len(inbound))
 	for i, jti := range inbound {
-		out[i] = q.AckJtiOf(jti, nil)
+		out[i] = q.AckJtiOf(jti)
 	}
 	return out
 }
@@ -137,7 +137,7 @@ func TestDeliveryQueue_CopiesWithOriginalJti(t *testing.T) {
 	q := r.queueFor(sid)
 	for _, jti := range []string{"a", "b"} {
 		signed := goSet.SecurityEventToken{}
-		signed.ID = q.AckJtiOf(jti, nil)
+		signed.ID = q.AckJtiOf(jti)
 		q.Served(&model.EventRecord{Jti: jti, Types: []string{"t"}}, &signed, "jws-"+jti)
 	}
 	_, _, err := q.AckWire(context.Background(), []string{rec.AckJti("a")}, []string{rec.AckJti("b")})
@@ -239,12 +239,12 @@ func TestDeliveryQueue_RouteModeChange(t *testing.T) {
 	r.pushStreams[sid] = fw
 	r.queueFor(sid).routeModeChanged(context.Background())
 	assert.Equal(t, map[string]string{"a": "a", "b": "b"}, pendingAckJtis(t, dao, sid))
-	assert.Equal(t, "a", r.queueFor(sid).AckJtiOf("a", nil))
+	assert.Equal(t, "a", r.queueFor(sid).AckJtiOf("a"))
 
 	r.pushStreams[sid] = rec
 	r.queueFor(sid).routeModeChanged(context.Background())
 	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 10})
-	assert.Equal(t, "a", r.queueFor(sid).AckJtiOf("a", nil), "a row written under Forward keeps its acknowledgement JTI")
+	assert.Equal(t, "a", r.queueFor(sid).AckJtiOf("a"), "a row written under Forward keeps its acknowledgement JTI")
 	_, err := r.queueFor(sid).AckInbound(context.Background(), []string{"a", "b"}, true)
 	require.NoError(t, err)
 	assert.Empty(t, pendingAckJtis(t, dao, sid))
@@ -286,7 +286,7 @@ func TestDeliveryQueue_AcceptLockedNoNestedRLock(t *testing.T) {
 	}
 	r.mu.RUnlock()
 	<-writerDone
-	assert.Equal(t, "a", q.AckJtiOf("a", nil))
+	assert.Equal(t, "a", q.AckJtiOf("a"))
 }
 
 // S2: rows keep the ackJti written at ingest and nothing is re-derived. After a
@@ -306,9 +306,9 @@ func TestDeliveryQueue_BeyondWindowUsesStoredAckJti(t *testing.T) {
 	q.routeModeChanged(context.Background())
 	require.NotEqual(t, "c", pub.AckJti("c"), "the derived value differs from the stored one")
 
-	assert.Equal(t, "c", q.AckJtiOf("c", &pub), "a reference the queue does not hold takes its stored ackJti")
-	assert.Equal(t, []string{"b", "c"}, q.AckJtisOf([]string{"b", "c"}, &pub))
-	assert.Equal(t, "c", q.RefOf("c", &pub).AckJti)
+	assert.Equal(t, "c", q.AckJtiOf("c"), "a reference the queue does not hold takes its stored ackJti")
+	assert.Equal(t, []string{"b", "c"}, q.AckJtisOf([]string{"b", "c"}))
+	assert.Equal(t, "c", q.RefOf("c").AckJti)
 
 	n, err := q.AckInbound(context.Background(), []string{"c"}, true)
 	require.NoError(t, err)
@@ -341,9 +341,9 @@ func TestDeliveryQueue_FailedStoredAckReadDerivesNothing(t *testing.T) {
 	r.pushStreams[sid] = pub
 	r.eventService = services.NewEventService(failingAckReadDAO{EventDAO: dao})
 
-	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "b"}, &pub), "a failed read must not derive")
-	assert.Equal(t, "", q.AckJtiOf("b", &pub))
-	assert.Equal(t, "", q.RefOf("b", &pub).AckJti)
+	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "b"}), "a failed read must not derive")
+	assert.Equal(t, "", q.AckJtiOf("b"))
+	assert.Equal(t, "", q.RefOf("b").AckJti)
 
 	// Served records an unheld SET under the JTI it was signed with, without
 	// reading the store.
@@ -379,4 +379,29 @@ func TestAssemblePollResponse_FailedStoredAckReadLeavesSetPending(t *testing.T) 
 	assert.Contains(t, sets, rec.AckJti("a"))
 	assert.NotContains(t, sets, rec.AckJti("b"), "signed under a derived JTI after a failed read")
 	assert.Contains(t, pendingAckJtis(t, dao, sid), "b", "the SET stays pending")
+}
+
+// S2: nothing is re-derived. A JTI with no stored row (and no WAL entry) has
+// no acknowledgement JTI, before and after a route-mode change: it is left
+// unresolved and not acknowledged, rather than taking a value derived from
+// the stream's current route mode.
+func TestDeliveryQueue_NoRowDerivesNothing(t *testing.T) {
+	r, dao, rec := queueRouter(t, model.RouteModeForward, "a")
+	sid := rec.StreamConfiguration.Id
+	q := newDeliveryQueue(r, sid, 10)
+	r.queues.Store(sid, q)
+	assert.Equal(t, "", q.AckJtiOf("ghost"), "a JTI with no row has no acknowledgement JTI")
+
+	pub := rec
+	pub.StreamConfiguration.RouteMode = model.RouteModePublish
+	r.pushStreams[sid] = pub
+	q.routeModeChanged(context.Background())
+	assert.Equal(t, []string{"a", ""}, q.AckJtisOf([]string{"a", "ghost"}), "the stored row answers; the missing one stays unresolved")
+	assert.Equal(t, "", q.RefOf("ghost").AckJti)
+
+	n, err := q.AckInbound(context.Background(), []string{"ghost"}, true)
+	require.NoError(t, err)
+	assert.Zero(t, n, "nothing is acknowledged for a JTI with no row")
+	assert.Nil(t, findCopy(t, dao, pub.AckJti("ghost")), "no copy under a derived JTI")
+	assert.Equal(t, map[string]string{"a": "a"}, pendingAckJtis(t, dao, sid))
 }

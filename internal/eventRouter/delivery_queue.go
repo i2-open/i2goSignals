@@ -230,19 +230,19 @@ func (q *deliveryQueue) ensureForward(ctx context.Context) {
 }
 
 // AckJtiOf returns the acknowledgement JTI a SET with inboundJti carries on
-// this stream (AckJtisOf for one JTI), or "" when its stored row could not be
-// read.
-func (q *deliveryQueue) AckJtiOf(inboundJti string, stream *model.StreamStateRecord) string {
-	return q.AckJtisOf([]string{inboundJti}, stream)[0]
+// this stream (AckJtisOf for one JTI), or "" when it has no row or its row
+// could not be read.
+func (q *deliveryQueue) AckJtiOf(inboundJti string) string {
+	return q.AckJtisOf([]string{inboundJti})[0]
 }
 
 // AckJtisOf returns, in order, the acknowledgement JTI each inbound JTI
-// carries on this stream (ackJtisOf). A failed store read derives nothing
-// (#363, S2): the unresolved entries are left "" and logged, and every sign
-// site skips them, so those SETs stay pending and are handed out on a later
-// read under their stored JTI.
-func (q *deliveryQueue) AckJtisOf(inbound []string, stream *model.StreamStateRecord) []string {
-	out, err := q.ackJtisOf(q.ctx(), inbound, stream)
+// carries on this stream (ackJtisOf). Nothing is derived (#363, S2): an
+// entry with no row, or whose row could not be read (logged), is left "",
+// and every sign site skips it, so that SET stays unacknowledged and is
+// handed out on a later read under its stored JTI.
+func (q *deliveryQueue) AckJtisOf(inbound []string) []string {
+	out, err := q.ackJtisOf(q.ctx(), inbound)
 	if err != nil {
 		eventLogger.Warn("QUEUE: Error reading stored acknowledgement JTIs; leaving the SETs pending", "sid", q.sid, "count", len(inbound), "error", err)
 	}
@@ -251,11 +251,11 @@ func (q *deliveryQueue) AckJtisOf(inbound []string, stream *model.StreamStateRec
 
 // ackJtisOf is the one place the queue resolves acknowledgement JTIs (#363,
 // S2: rows keep the ackJti written at ingest; nothing is re-derived). A held
-// reference answers from memory; the rest come from their stored rows in one
-// read. Only a JTI with no row at all takes the row writer's value for the
-// stream's route mode, which is what a row written for it would carry. On a
-// read error the unresolved entries are left empty and the error returned.
-func (q *deliveryQueue) ackJtisOf(ctx context.Context, inbound []string, stream *model.StreamStateRecord) ([]string, error) {
+// reference answers from memory; the rest come from their stored rows (or
+// undrained WAL entries, through the read-through) in one read. A JTI with
+// neither is left empty: it is not acknowledged. On a read error the
+// unresolved entries are left empty and the error returned.
+func (q *deliveryQueue) ackJtisOf(ctx context.Context, inbound []string) ([]string, error) {
 	out := make([]string, len(inbound))
 	var missing []string
 	q.mu.Lock()
@@ -274,35 +274,12 @@ func (q *deliveryQueue) ackJtisOf(ctx context.Context, inbound []string, stream 
 	if err != nil {
 		return out, err
 	}
-	stream = q.orStream(stream)
 	for i, jti := range inbound {
-		if out[i] != "" {
-			continue
+		if out[i] == "" {
+			out[i] = stored[jti]
 		}
-		if a, ok := stored[jti]; ok {
-			out[i] = a
-			continue
-		}
-		out[i] = rowWriterAckJti(stream, jti)
 	}
 	return out, nil
-}
-
-// orStream returns stream, or the router's copy of the queue's stream when
-// stream is nil (taken outside q.mu: the lookup takes the router lock).
-func (q *deliveryQueue) orStream(stream *model.StreamStateRecord) *model.StreamStateRecord {
-	if stream == nil {
-		return q.stream()
-	}
-	return stream
-}
-
-// rowWriterAckJti is the value a row writer stores for inboundJti on stream.
-func rowWriterAckJti(stream *model.StreamStateRecord, inboundJti string) string {
-	if stream == nil {
-		return inboundJti
-	}
-	return stream.AckJti(inboundJti)
 }
 
 // ctx is the router's context, or Background for a bare test router.
@@ -316,7 +293,7 @@ func (q *deliveryQueue) ctx() context.Context {
 // RefOf returns the reference held for inboundJti, with its acknowledgement
 // JTI and enqueue time; a reference the queue does not hold carries
 // AckJtiOf's value ("" when its row could not be read) and no enqueue time.
-func (q *deliveryQueue) RefOf(inboundJti string, stream *model.StreamStateRecord) interfaces.PendingRef {
+func (q *deliveryQueue) RefOf(inboundJti string) interfaces.PendingRef {
 	q.mu.Lock()
 	qr, ok := q.refs[inboundJti]
 	var ref interfaces.PendingRef
@@ -327,7 +304,7 @@ func (q *deliveryQueue) RefOf(inboundJti string, stream *model.StreamStateRecord
 	if ok {
 		return ref
 	}
-	return interfaces.PendingRef{Jti: inboundJti, AckJti: q.AckJtiOf(inboundJti, stream)}
+	return interfaces.PendingRef{Jti: inboundJti, AckJti: q.AckJtiOf(inboundJti)}
 }
 
 // Served records the JWS this node signed for inboundJti and is about to hand
@@ -347,7 +324,7 @@ func (q *deliveryQueue) Served(rec *model.EventRecord, signed *goSet.SecurityEve
 		// the router lock).
 		if signed != nil && signed.ID != "" {
 			ackJti = signed.ID
-		} else if ackJti = q.AckJtiOf(rec.Jti, nil); ackJti == "" {
+		} else if ackJti = q.AckJtiOf(rec.Jti); ackJti == "" {
 			return
 		}
 	}
@@ -494,11 +471,16 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 	if len(unheld) > 0 {
 		// Beyond the window: the stored rows' ackJti, in one read. A failed
 		// read leaves the references pending; they are delivered again.
-		stored, err := q.ackJtisOf(ctx, unheld, nil)
+		stored, err := q.ackJtisOf(ctx, unheld)
 		if err != nil {
 			return 0, err
 		}
-		ackJtis = append(ackJtis, stored...)
+		for _, a := range stored {
+			// A JTI with no row has nothing to acknowledge (#363, S2).
+			if a != "" {
+				ackJtis = append(ackJtis, a)
+			}
+		}
 	}
 	n, err := q.write(ctx, ackJtis, copies)
 	if err != nil {

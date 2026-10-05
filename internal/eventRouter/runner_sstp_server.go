@@ -341,7 +341,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []
 			// A reference claimed without its acknowledgement JTI (a bare
 			// buffer submit) takes its stored row's one. A failed read derives
 			// nothing (#363, S2): the SET is not sent and stays pending.
-			if ackJti = q.AckJtiOf(eventRecord.Jti, rec); ackJti == "" {
+			if ackJti = q.AckJtiOf(eventRecord.Jti); ackJti == "" {
 				continue
 			}
 		}

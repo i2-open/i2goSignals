@@ -2456,7 +2456,7 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 	for i, rec := range work {
 		inbound[i] = rec.Jti
 	}
-	ackJtis := q.AckJtisOf(inbound, state)
+	ackJtis := q.AckJtisOf(inbound)
 	// A SET whose stored row could not be read is not handed out (#363, S2):
 	// nothing is derived, and it is served again once its claim expires.
 	kept := 0
@@ -3599,7 +3599,7 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 		for i := range work {
 			inbound[i] = work[i].jti
 		}
-		handed := q.AckJtisOf(inbound, config)
+		handed := q.AckJtisOf(inbound)
 		// A SET whose stored row could not be read is not pushed (#363, S2):
 		// nothing is derived; it stays pending and backfill re-pulls it.
 		kept := 0

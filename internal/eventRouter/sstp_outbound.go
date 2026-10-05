@@ -249,7 +249,7 @@ func (r *router) outboundRefs(pairId string, jtis []string) []interfaces.Pending
 	refs := make([]interfaces.PendingRef, 0, len(jtis))
 	var unresolved []string
 	for _, jti := range jtis {
-		ref := q.RefOf(jti, &pair)
+		ref := q.RefOf(jti)
 		if ref.AckJti == "" {
 			// Its stored row could not be read (#363, S2): nothing is
 			// derived; the claim is released and the SET stays pending.
