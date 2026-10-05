@@ -208,11 +208,14 @@ goSignals> create key gs1 cluster.scim.example.com --file=issuer.pem
 goSignals> create iat gs1
 ```
 
-`create key --alg` picks the signature algorithm of the key: `RS256` (the
-server's default when omitted), `ES256` or `ML-DSA-65`. It is sent as `?alg=` and
-applies to `--force=rotate` and `--force=replace` too, which act on that
-algorithm's keys only — a plain `--force=replace` replaces the RS256 keys and
-leaves the issuer's ES256 and ML-DSA-65 keys in place. A stream with
+`create key --alg` picks the signature algorithm of the key: `RS256`, `ES256`
+or `ML-DSA-65`; when omitted the server uses its `I2SIG_KEY_ALG` default
+(`ES256`). It is sent as `?alg=` and applies to `--force=rotate` and
+`--force=replace` too, which act on that algorithm's keys only — a plain
+`--force=replace` replaces the default type's keys and leaves the issuer's
+other keys in place. `create key` saves the new key's kid (the server's
+`Key-Id` response header) to `<file>.kid` next to the PEM, and `generate event`
+signs with the created key's type and the kid the server reports for it. A stream with
 `signing_alg` set never creates its key, so create it first:
 
 ```shell
@@ -230,7 +233,7 @@ add server gosignals1 https://goSignals1:8888
 add server gosignals2 https://goSignals2:8889
 create iat gosignals1 --output=/scim/iat-gosignals1.jwt
 create bundle --output=/scim/spire-bundle.pem
-create key gosignals1 cluster.scim.example.com --file=/scim/cluster-scim-issuer.pem
+create key gosignals1 cluster.scim.example.com --alg=RS256 --file=/scim/cluster-scim-issuer.pem
 exit
 ```
 

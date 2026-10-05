@@ -22,7 +22,6 @@ package main
 
 import (
 	"context"
-	"crypto/rsa"
 	"errors"
 	"flag"
 	"fmt"
@@ -95,7 +94,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.pollAud, "poll-aud", "https://bench.poll.example.com", "audience routed over the RFC 8936 poll leg")
 	flag.StringVar(&o.sstpAud, "sstp-aud", "https://bench.sstp.example.com", "audience routed over the SSTP leg")
 	flag.StringVar(&o.sstpRole, "sstp-role", model.SstpRoleInitiator, "SSTP HTTP role goSignals1 plays: initiator (goSignals1 dials goSignals2) or responder (goSignals2 dials goSignals1)")
-	flag.StringVar(&o.signingAlg, "signing-alg", "", "signing_alg for the push and poll transmitter streams: \"\" or RS256 (default), ES256, ML-DSA-65")
+	flag.StringVar(&o.signingAlg, "signing-alg", "", "signing_alg for the push and poll transmitter streams: \"\" (default: the issuer's newest key), RS256, ES256, ML-DSA-65")
 	flag.StringVar(&o.durability, "durability", "", "durability of the ingress stream on goSignals1: \"\" or majority (default), local (needs I2SIG_STORE_WAL=local on goSignals1, #343)")
 	flag.IntVar(&o.events, "events", 1000, "number of SETs to push into goSignals1")
 	flag.IntVar(&o.concurrency, "concurrency", 8, "parallel ingest connections")
@@ -468,41 +467,67 @@ func run(o *options) error {
 }
 
 // ensureIssuerKey makes sure goSignals1 holds a signing key named after the
-// issuer and that the harness holds the matching private key. The first run
-// mints the key and saves the PEM; later runs load it. After a `make
-// dev-clean` (or on a memory-provider restart) the server forgets the key and
-// a new one is minted; a PEM already at the path is first kept as a
-// timestamped .bak so a key another stack still holds is not lost.
-func ensureIssuerKey(gs1 *node, o *options) (*rsa.PrivateKey, error) {
+// issuer and that the harness holds the matching private key and its kid. The
+// first run mints the key (of the server's default type) and saves the PEM and
+// <issuer-key-file>.kid; later runs load them. An existing RSA PEM with no
+// sidecar still signs RS256 with kid = issuer. After a `make dev-clean` (or on
+// a memory-provider restart) the server forgets the key and a new one is
+// minted; a PEM already at the path is first kept as a timestamped .bak so a
+// key another stack still holds is not lost.
+func ensureIssuerKey(gs1 *node, o *options) (signingKey, error) {
+	kidFile := o.issuerKeyFile + ".kid"
 	if gs1.hasIssuerKey(o.issuer) {
 		pemBytes, readErr := os.ReadFile(o.issuerKeyFile)
 		if readErr != nil {
-			return nil, fmt.Errorf("goSignals1 already has a key for issuer %q but %s is missing: pick a new --issuer, point --issuer-key at the matching PEM (e.g. config/scim/cluster-scim-issuer.pem for cluster.scim.example.com), or reset the stack", o.issuer, o.issuerKeyFile)
+			return signingKey{}, fmt.Errorf("goSignals1 already has a key for issuer %q but %s is missing: pick a new --issuer, point --issuer-key at the matching PEM (e.g. config/scim/cluster-scim-issuer.pem for cluster.scim.example.com), or reset the stack", o.issuer, o.issuerKeyFile)
 		}
-		k, parseErr := parseRSAPrivateKeyPEM(pemBytes)
+		k, parseErr := parsePrivateKeyPEM(pemBytes)
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse %s: %w", o.issuerKeyFile, parseErr)
+			return signingKey{}, fmt.Errorf("parse %s: %w", o.issuerKeyFile, parseErr)
 		}
-		logf("using existing issuer key %s from %s", o.issuer, o.issuerKeyFile)
-		return k, nil
+		kid := ""
+		if kidBytes, kidErr := os.ReadFile(kidFile); kidErr == nil {
+			kid = strings.TrimSpace(string(kidBytes))
+		} else if !os.IsNotExist(kidErr) {
+			return signingKey{}, kidErr
+		}
+		key, keyErr := newSigningKey(k, kid, o.issuer)
+		if keyErr != nil {
+			return signingKey{}, fmt.Errorf("%s: %w", o.issuerKeyFile, keyErr)
+		}
+		logf("using existing issuer key %s (kid %s) from %s", o.issuer, key.kid, o.issuerKeyFile)
+		return key, nil
 	}
-	k, pemBytes, createErr := gs1.createIssuerKey(o.bootstrapToken, o.issuer)
+	k, pemBytes, kid, createErr := gs1.createIssuerKey(o.bootstrapToken, o.issuer)
 	if createErr != nil {
-		return nil, fmt.Errorf("create issuer key %s: %w", o.issuer, createErr)
+		return signingKey{}, fmt.Errorf("create issuer key %s: %w", o.issuer, createErr)
+	}
+	key, keyErr := newSigningKey(k, kid, o.issuer)
+	if keyErr != nil {
+		return signingKey{}, fmt.Errorf("create issuer key %s: %w", o.issuer, keyErr)
 	}
 	if mkErr := os.MkdirAll(filepath.Dir(o.issuerKeyFile), 0o755); mkErr != nil {
-		return nil, mkErr
+		return signingKey{}, mkErr
 	}
 	if backup, bakErr := backupExisting(o.issuerKeyFile, time.Now()); bakErr != nil {
-		return nil, bakErr
+		return signingKey{}, bakErr
 	} else if backup != "" {
 		logf("kept the previous issuer key PEM as %s", backup)
 	}
 	if writeErr := os.WriteFile(o.issuerKeyFile, pemBytes, 0o600); writeErr != nil {
-		return nil, writeErr
+		return signingKey{}, writeErr
 	}
-	logf("minted issuer key %s on goSignals1, saved to %s", o.issuer, o.issuerKeyFile)
-	return k, nil
+	// The sidecar holds the kid the server returned; with none, a stale one is
+	// removed so the next run falls back to kid = issuer.
+	if kid != "" {
+		if writeErr := os.WriteFile(kidFile, []byte(kid+"\n"), 0o600); writeErr != nil {
+			return signingKey{}, writeErr
+		}
+	} else if rmErr := os.Remove(kidFile); rmErr != nil && !os.IsNotExist(rmErr) {
+		return signingKey{}, rmErr
+	}
+	logf("minted issuer key %s (kid %s) on goSignals1, saved to %s", o.issuer, key.kid, o.issuerKeyFile)
+	return key, nil
 }
 
 // backupExisting renames path to path.<UTC stamp>.bak when it exists and
@@ -524,10 +549,12 @@ func backupExisting(path string, now time.Time) (string, error) {
 // ensureSigningAlgKey makes sure goSignals1 holds the issuer key for
 // --signing-alg before the transmitter streams that sign with it are created:
 // a stream never creates its own signing key (i2goSignals#314), and one with no
-// active key for its algorithm is refused. RS256 is ensureIssuerKey's key; the
-// harness never signs with the ES256 or ML-DSA-65 key, so it is not saved.
+// active key for its algorithm is refused. ensureIssuerKey's key is of the
+// server's default type (I2SIG_KEY_ALG), so any pinned alg, RS256 included,
+// is asked for (a 409 means one already exists); the harness signs with
+// ensureIssuerKey's key, so this one is not saved.
 func ensureSigningAlgKey(gs1 *node, o *options) error {
-	if o.signingAlg == "" || o.signingAlg == "RS256" {
+	if o.signingAlg == "" {
 		return nil
 	}
 	created, err := gs1.createSigningAlgKey(o.bootstrapToken, o.issuer, o.signingAlg)

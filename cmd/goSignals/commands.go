@@ -13,9 +13,11 @@ import (
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	"github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
@@ -1439,7 +1441,7 @@ type CreateKeyCmd struct {
 	IssuerId string `arg:"" required:"" help:"The issuer value associated with the key (e.g. example.com)"`
 	File     string `optional:"" default:"issuer.pem" help:"Specify the file where the issued PEM is to be stored (default is issuer.pem)"`
 	Force    string `optional:"" help:"Force creation of the key even if it already exists (replace or rotate)."`
-	Alg      string `optional:"" help:"The signature algorithm of the key to create, rotate or replace: RS256 (the server default), ES256 or ML-DSA-65. Keys of other algorithms are left alone."`
+	Alg      string `optional:"" help:"The signature algorithm of the key to create, rotate or replace: RS256, ES256 or ML-DSA-65; default is the server's I2SIG_KEY_ALG (ES256). Keys of other algorithms are left alone."`
 }
 
 func (c *CreateKeyCmd) Run(g *Globals) error {
@@ -1487,14 +1489,14 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 		return fmt.Errorf("unexpected status response: %s (body: %s)", resp.Status, string(body))
 	}
 
-	// The stored PEM is the issuer key `generate event` signs RS256 with, so an
-	// ES256 or ML-DSA-65 key is written to the file but does not replace it.
-	if c.Alg == "" || c.Alg == "RS256" {
-		if g.Data.Pems == nil {
-			g.Data.Pems = map[string][]byte{}
-		}
-		g.Data.Pems[c.IssuerId] = body
+	// The stored PEM is the issuer key `generate event` signs with: the newest
+	// created key of any type (spec #114). generate event signs with the key's
+	// own type and asks the server for its kid, so no kid is kept here.
+	if g.Data.Pems == nil {
+		g.Data.Pems = map[string][]byte{}
 	}
+	g.Data.Pems[c.IssuerId] = body
+	delete(g.Data.keys, c.IssuerId) // drop the parsed key cached for the old PEM
 
 	outputPath := "issuer.pem"
 	if c.File != "" {
@@ -1504,6 +1506,9 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	// file, err := os.OpenFile(cli.Output, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	err = os.WriteFile(outputPath, body, 0640)
 	if err != nil {
+		fmt.Println(err.Error())
+	}
+	if err = writeKidSidecar(outputPath, resp.Header.Get(keyIdHeader)); err != nil {
 		fmt.Println(err.Error())
 	}
 	fmt.Println("Certificate received (PEM):\n" + string(body))
@@ -2638,6 +2643,95 @@ func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint s
 
 }
 
+// keyIdHeader is the response header carrying the kid of the key a minting
+// POST /key/{keyName} created (spec #114 S-KID).
+const keyIdHeader = "Key-Id"
+
+// writeKidSidecar saves kid to <pemPath>.kid (kid only, trailing newline) next
+// to the PEM, so a consumer of the PEM file knows the key's kid. A server that
+// sent no Key-Id (older server) leaves no sidecar: a stale one from an earlier
+// key is removed, and the consumer falls back to kid = issuer.
+func writeKidSidecar(pemPath, kid string) error {
+	sidecar := pemPath + ".kid"
+	if kid == "" {
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(sidecar, []byte(kid+"\n"), 0640)
+}
+
+// newestActiveKid picks the kid generate event signs with: in the issuer's key
+// summary, the last active keyStates[] entry whose alg is alg. Summaries list
+// keys oldest-first (spec #114 S-ALG), so the last match is that type's newest
+// key. It returns "" when nothing matches, e.g. an older server that reports
+// no alg.
+func newestActiveKid(summaries []dao.KeySummary, issuer, alg string) string {
+	kid := ""
+	for _, summary := range summaries {
+		if summary.KeyName != issuer {
+			continue
+		}
+		for _, state := range summary.KeyStates {
+			if state.Status == "active" && state.Alg == alg {
+				kid = state.Kid
+			}
+		}
+	}
+	return kid
+}
+
+// signingKid asks server (GET /keys) for the kid of issuer's newest active key
+// of type alg. When the server reports none (an older server without alg) or
+// cannot be asked, it falls back to the issuer name, the kid of a legacy first
+// RSA key.
+func signingKid(g *Globals, server *SsfServer, issuer, alg string) string {
+	kid, err := fetchSigningKid(g, server, issuer, alg)
+	if err != nil {
+		fmt.Println(fmt.Sprintf("Could not read the key summary from %s (%s); signing with kid %q.", server.Alias, err.Error(), issuer))
+	}
+	if kid == "" {
+		return issuer
+	}
+	return kid
+}
+
+func fetchSigningKid(g *Globals, server *SsfServer, issuer, alg string) (string, error) {
+	keysUrl, err := url.JoinPath(server.Host, "keys")
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodGet, keysUrl, nil)
+	if err != nil {
+		return "", err
+	}
+	bearer, err := serverBearer(g, server)
+	if err != nil {
+		return "", err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("Accept", "application/json")
+	client := getHttpClient(0)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	defer httpSupport.HandleRespClose(resp)
+	if err != nil {
+		return "", err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status response: %s", resp.Status)
+	}
+	var summaries []dao.KeySummary
+	if err = json.Unmarshal(body, &summaries); err != nil {
+		return "", err
+	}
+	return newestActiveKid(summaries, issuer, alg), nil
+}
+
 type GenerateCmd struct {
 	Alias string `arg:"" optional:"" help:"The stream alias of a Push Receiver Stream to submit the event to, otherwise event is displayed to console"`
 	Event string `help:"An event type URI (or the last portion of it) of the event to create"`
@@ -2707,8 +2801,18 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 
 	event.IssuedAt = jwt.NewNumericDate(time.Now())
 
-	// Now we sign and deliver the event
-	signString, err := event.JWS(jwt.SigningMethodRS256, key)
+	// Now we sign and deliver the event, with the key's own type and the kid
+	// the server holds for it (spec #114).
+	alg, err := services.SigningAlgOf(key)
+	if err != nil {
+		return err
+	}
+	method, err := goSet.SigningMethodFor(alg)
+	if err != nil {
+		return err
+	}
+	event.Kid = signingKid(&c.Globals, server, config.Iss, alg)
+	signString, err := event.JWS(method, key)
 	if err != nil {
 		return err
 	}
