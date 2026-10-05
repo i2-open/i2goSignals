@@ -90,10 +90,6 @@ func ackBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
 
 var errEventNotInit = errors.New("mongo collection not initialized")
 
-// errMigrateNotImplemented marks the S2 method whose body lands in a later
-// slice of spec #112.
-var errMigrateNotImplemented = errors.New("MigrateLegacyDeliveries is not implemented yet (i2goSignals #361)")
-
 type EventDAOMongo struct {
 	events     collectionRef
 	deliveries collectionRef
@@ -111,6 +107,12 @@ type EventDAOMongo struct {
 	// second precision, so many bodies share one sortTime).
 	sweepMu sync.Mutex
 	sweep   sweepWatermark
+
+	// legacyPending / legacyDelivered override the legacy collection names
+	// MigrateLegacyDeliveries reads (#361); empty means pendingEvents /
+	// deliveredEvents. Only tests sharing one database set them.
+	legacyPending   string
+	legacyDelivered string
 }
 
 type sweepWatermark struct {
@@ -1029,11 +1031,6 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 	}
 	d.sweep = next
 	return result, nil
-}
-
-// MigrateLegacyDeliveries is implemented by #361.
-func (d *EventDAOMongo) MigrateLegacyDeliveries(_ context.Context, _ func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
-	return interfaces.MigrationResult{}, errMigrateNotImplemented
 }
 
 // ListDeliveredForStream returns streamID's delivered (post-ack) references

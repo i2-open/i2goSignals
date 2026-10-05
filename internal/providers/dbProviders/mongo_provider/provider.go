@@ -33,13 +33,12 @@ const CDbName = "ssef"
 const CDbStreamCfg = "streams"
 const CDbKeys = "keys"
 const CDbEvents = "events"
-const CDbPending = "pendingEvents"
-const CDbDelivered = "deliveredEvents"
 
 // CDbDeliveries is the single delivery-reference collection (#359): one
 // document per (stream, inbound JTI) carrying its pending/delivered state and
-// the ackJti the receiver acknowledges with. CDbPending and CDbDelivered are
-// the legacy collections it replaces; #361 migrates and drops them.
+// the ackJti the receiver acknowledges with. It replaced pendingEvents and
+// deliveredEvents, which the router's startup MigrateLegacyDeliveries carries
+// across and drops (#361).
 const CDbDeliveries = "deliveries"
 const CDbClients = "clients"
 const CDbLeases = "cluster_leases"
@@ -145,8 +144,6 @@ type MongoProvider struct {
 	streamCol        *mongo.Collection
 	keyCol           *mongo.Collection
 	eventCol         *mongo.Collection
-	pendingCol       *mongo.Collection
-	deliveredCol     *mongo.Collection
 	deliveriesCol    *mongo.Collection
 	clientCol        *mongo.Collection
 	leaseCol         *mongo.Collection
@@ -289,12 +286,10 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 //
 //	collection        concern            why
 //	events            majority, j:true   ADR 0038: stored before ack
-//	pendingEvents     majority, j:true   ADR 0038: stored before ack
+//	deliveries        majority, j:true   ADR 0038: stored before ack
 //	cluster_leases    majority, j:true   a w:1 lease grant can roll back on
 //	                                     failover, letting two nodes own one
 //	                                     stream; fencing needs majority
-//	deliveredEvents   w:1                audit / ADR 0055 purge anchor: a lost
-//	                                     row only delays purge
 //	cluster_nodes     w:1                heartbeat registry, rewritten each tick
 //	streams, keys, clients, servers,
 //	tokens, subject_filters
@@ -309,10 +304,8 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 // already dedups by JTI (ADR 0017).
 var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
 	CDbEvents:         mongodao.EventStoreWriteConcern(),
-	CDbPending:        mongodao.EventStoreWriteConcern(),
 	CDbDeliveries:     mongodao.EventStoreWriteConcern(),
 	CDbLeases:         mongodao.EventStoreWriteConcern(),
-	CDbDelivered:      writeconcern.W1(),
 	CDbNodes:          writeconcern.W1(),
 	CDbStreamCfg:      writeconcern.W1(),
 	CDbKeys:           writeconcern.W1(),
@@ -337,8 +330,6 @@ func (m *MongoProvider) collection(name string) *mongo.Collection {
 func (m *MongoProvider) openCollections() {
 	m.streamCol = m.collection(CDbStreamCfg)
 	m.keyCol = m.collection(CDbKeys)
-	m.deliveredCol = m.collection(CDbDelivered)
-	m.pendingCol = m.collection(CDbPending)
 	m.deliveriesCol = m.collection(CDbDeliveries)
 	m.eventCol = m.collection(CDbEvents)
 	m.clientCol = m.collection(CDbClients)
@@ -459,67 +450,23 @@ const eventJtiIndexName = "eventJtiUnique"
 
 // Index names on the deliveries collection (#359) and the events
 // originalJti (#359) and sortTime (#360) indexes. Named explicitly so they can
-// be asserted on.
+// be asserted on. The deliveries names and models live with the adapter, which
+// also ensures them before MigrateLegacyDeliveries (#361).
 const (
-	deliveriesSidJtiIndexName           = "deliveriesSidJti"
-	deliveriesSidAckJtiIndexName        = "deliveriesSidAckJti"
-	deliveriesSidStateJtiIndexName      = "deliveriesSidStateJti"
-	deliveriesExpireAtIndexName         = "deliveriesExpireAt"
-	deliveriesJtiIndexName              = "deliveriesJti"
-	deliveriesPendingCreatedAtIndexName = "deliveriesPendingCreatedAt"
+	deliveriesSidJtiIndexName           = mongodao.DeliveriesSidJtiIndexName
+	deliveriesSidAckJtiIndexName        = mongodao.DeliveriesSidAckJtiIndexName
+	deliveriesSidStateJtiIndexName      = mongodao.DeliveriesSidStateJtiIndexName
+	deliveriesExpireAtIndexName         = mongodao.DeliveriesExpireAtIndexName
+	deliveriesJtiIndexName              = mongodao.DeliveriesJtiIndexName
+	deliveriesPendingCreatedAtIndexName = mongodao.DeliveriesPendingCreatedAtIndexName
 	eventOriginalJtiIndexName           = "eventOriginalJti"
 	eventSortTimeIndexName              = "eventSortTime"
 )
 
-// deliveriesIndexModels are the access-path indexes of the deliveries
-// collection:
-//
-//   - unique {sid, jti} — one reference per (stream, inbound JTI); the ingest
-//     duplicate guard the old pendingSidJti index gave, and the AddPending /
-//     EnsurePending upsert key.
-//   - {sid, ackJti} — the Ack filter {sid, ackJti:{$in}, state:"pending"}.
-//   - {sid, state, jti} — the pending read (sorted by jti), its count, and the
-//     state-scoped deletes and counts.
-//   - {expireAt} with expireAfterSeconds 0 — Mongo's TTL monitor removes a
-//     delivered reference once its expireAt passes; rows without expireAt
-//     are kept forever.
-//   - {jti} — DeleteBodyIfUnreferenced counts references by jti alone.
-//   - {sid, createdAt} partial on state pending — the OldestBeyond read.
-func deliveriesIndexModels() []mongo.IndexModel {
-	return []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
-			Options: options.Index().SetName(deliveriesSidJtiIndexName).SetUnique(true),
-		},
-		{
-			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "ackJti", Value: 1}},
-			Options: options.Index().SetName(deliveriesSidAckJtiIndexName),
-		},
-		{
-			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "state", Value: 1}, {Key: "jti", Value: 1}},
-			Options: options.Index().SetName(deliveriesSidStateJtiIndexName),
-		},
-		{
-			Keys:    bson.D{{Key: "expireAt", Value: 1}},
-			Options: options.Index().SetName(deliveriesExpireAtIndexName).SetExpireAfterSeconds(0),
-		},
-		{
-			Keys:    bson.D{{Key: "jti", Value: 1}},
-			Options: options.Index().SetName(deliveriesJtiIndexName),
-		},
-		{
-			Keys: bson.D{{Key: "sid", Value: 1}, {Key: "createdAt", Value: 1}},
-			Options: options.Index().SetName(deliveriesPendingCreatedAtIndexName).
-				SetPartialFilterExpression(bson.D{{Key: "state", Value: "pending"}}),
-		},
-	}
-}
-
 func (m *MongoProvider) createIndexes(ctx context.Context) error {
 	// CreateMany is idempotent for already-present identical specs, so this
-	// is additive on an existing deployment. The legacy pendingEvents /
-	// deliveredEvents collections get no new indexes; #361 migrates them.
-	if _, err := m.deliveriesCol.Indexes().CreateMany(ctx, deliveriesIndexModels()); err != nil {
+	// is additive on an existing deployment.
+	if _, err := m.deliveriesCol.Indexes().CreateMany(ctx, mongodao.DeliveriesIndexModels()); err != nil {
 		pLog.Error("Error creating indexes for deliveries", "error", err)
 		return err
 	}
@@ -745,13 +692,11 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	m.dbInit = false
 
 	if initialize {
-		m.pendingCol = nil
 		m.ssefDb = nil
 		m.eventCol = nil
 		m.streamCol = nil
 		m.serverCol = nil
 		m.keyCol = nil
-		m.deliveredCol = nil
 		m.deliveriesCol = nil
 		m.resumeTokens.Reset()
 		err = m.initialize(m.DbName, context.TODO())

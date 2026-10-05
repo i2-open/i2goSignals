@@ -168,7 +168,8 @@ func TestLocalWal_ShutdownDrainsBeforeLeaseRelease(t *testing.T) {
 		return ctx.Err() == nil
 	})
 	s = newWalPushSetup(t, dao, func(resource string) {
-		if resource == s.resource {
+		// s is nil for the startup migration lease, released inside NewRouter.
+		if s != nil && resource == s.resource {
 			released.Store(true)
 			storedAtRelease.Store(s.stored("wal-stop"))
 		}

@@ -247,9 +247,7 @@ no transactions.
 |---------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `events`                                                            | `w:majority`, `j:true` | Ingest durability contract (ADR 0038). A SET is majority-acknowledged and journaled before it is acked.                             |
 | `deliveries`                                                        | `w:majority`, `j:true` | Same contract (ADR 0038). A pending delivery reference is stored before the ack. Acks run at `w:1` (see below). |
-| `pendingEvents`                                                     | `w:majority`, `j:true` | Same contract (ADR 0038). Pre-#359 collection, kept for the legacy-deliveries migration (#361).                                                                 |
 | `cluster_leases`                                                    | `w:majority`, `j:true` | A lease grant acknowledged at `w:1` can roll back on a primary failover, and then two nodes would own one stream. Fencing tokens rely on majority. |
-| `deliveredEvents`                                                   | `w:1`                 | Pre-#359 collection, kept for the legacy-deliveries migration (#361). |
 | `cluster_nodes`                                                     | `w:1`                 | Heartbeat registry that is rewritten on every tick. A lost write is repaired by the next heartbeat.                                  |
 | `streams`, `keys`, `clients`, `servers`, `tokens`, `subject_filters` | `w:1`                 | Admin and configuration state. It is outside the ingest contract.                                                                    |
 

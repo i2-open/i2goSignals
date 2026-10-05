@@ -424,6 +424,31 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	if deps.EventService != nil && deps.Coordinator != nil {
 		deps.EventService.SetFenceChecker(router)
 	}
+	// Startup order (#361, seam S2): (1) load the stream state map once;
+	// (2) carry the legacy pendingEvents / deliveredEvents rows into
+	// deliveries; only then (3) wrap the DAO and drain the WAL, (4) initialise
+	// the streams from the map of step 1, and (5) start WatchPending. Nothing
+	// that reads or writes deliveries starts before step 2 completes.
+	states := router.streamService.GetStateMap(ctx)
+	if deps.EventService != nil {
+		res, err := migrateLegacyDeliveries(ctx, deps.EventService, deps.Coordinator, nodeId, migrationExpireAt(deps.RetentionWindow, states))
+		switch {
+		case errors.Is(err, interfaces.ErrStoreNotReady):
+			// The store is not connected yet (background reconnect): the node
+			// starts as it did before the migration existed, and the next
+			// start with the store up runs the idempotent migration.
+			eventLogger.Warn("ROUTER: store not connected at startup; legacy deliveries migration deferred to the next start", "error", err)
+		case err != nil:
+			// Refuse to start: new SETs would otherwise be delivered ahead of
+			// stranded older ones. The migration is idempotent, so the
+			// operator fixes the store and restarts. The lease is released.
+			eventLogger.Error("ROUTER: legacy deliveries migration failed; refusing to start", "error", err)
+			panic(fmt.Sprintf("legacy deliveries migration failed: %v", err))
+		case res.Pending > 0 || res.Delivered > 0:
+			eventLogger.Info("ROUTER: legacy deliveries migrated", "pending", res.Pending, "delivered", res.Delivered, "dropped", res.Dropped)
+		}
+	}
+
 	// Ring-fed delivery (#342): runners read undrained WAL entries through a
 	// read-through in front of the store. Wired before any runner starts.
 	if deps.WAL != nil && deps.WALRingFed && deps.EventService != nil {
@@ -548,8 +573,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	router.pollClaimTTL = pollClaimTTL()
 	eventLogger.Info("Poll claim TTL resolved (#337)", "I2SIG_POLL_CLAIM_TTL", router.pollClaimTTL)
 
-	states := router.streamService.GetStateMap(ctx)
-
 	for k, state := range states {
 		eventLogger.Info("Initializing", "streamKey", k, "configId", state.StreamConfiguration.Id)
 		router.UpdateStreamState(&state)
@@ -559,6 +582,12 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	// Every node retries the key for the stored poll transmitters and SSTP pairs
 	// in a key-unavailable pause, resuming or disabling them (#312).
 	go router.runKeyUnavailableCheck(LoadRecoveryConfig())
+
+	// The WAL drain starts after the streams exist so a ring-fed replay
+	// reaches their buffers, and before WatchPending.
+	if deps.WAL != nil {
+		router.startLocalWal(deps.WAL)
+	}
 
 	// Start the background watcher if explicitly enabled
 	if envcompat.Lookup("I2SIG_STORE_MONGO_WATCH_ENABLED", "I2SIG_MONGO_WATCH_ENABLED") == "true" {
@@ -581,10 +610,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		})
 	} else {
 		eventLogger.Info("Background watcher disabled (using wake-up calls and backfill)")
-	}
-
-	if deps.WAL != nil {
-		router.startLocalWal(deps.WAL)
 	}
 
 	return router

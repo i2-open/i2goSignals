@@ -80,20 +80,10 @@ func (s *EventDAOMongoSuite) SetupTest() {
 	s.Require().NoError(err)
 }
 
-// testDeliveriesIndexes mirrors mongo_provider.deliveriesIndexModels; the
-// provider package imports this one, so it cannot be imported here.
+// testDeliveriesIndexes is the production deliveries index set that
+// mongo_provider.createIndexes and MigrateLegacyDeliveries install.
 func testDeliveriesIndexes() []mongo.IndexModel {
-	return []mongo.IndexModel{
-		{Keys: bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}}, Options: options.Index().SetUnique(true)},
-		{Keys: bson.D{{Key: "sid", Value: 1}, {Key: "ackJti", Value: 1}}},
-		{Keys: bson.D{{Key: "sid", Value: 1}, {Key: "state", Value: 1}, {Key: "jti", Value: 1}}},
-		{Keys: bson.D{{Key: "expireAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)},
-		{Keys: bson.D{{Key: "jti", Value: 1}}},
-		{
-			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "createdAt", Value: 1}},
-			Options: options.Index().SetPartialFilterExpression(bson.D{{Key: "state", Value: "pending"}}),
-		},
-	}
+	return DeliveriesIndexModels()
 }
 
 func TestEventDAOMongoSuite(t *testing.T) {

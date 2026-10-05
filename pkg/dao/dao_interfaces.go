@@ -19,6 +19,11 @@ var (
 	// dedup key (RFC 8417 §2.2 globally unique). Callers MUST handle this
 	// sentinel; the existing record is retrievable via EventDAO.FindByJTI(jti).
 	ErrDuplicateJTI = errors.New("duplicate jti")
+	// ErrStoreNotReady wraps an error from a store that is not connected yet
+	// (a Mongo provider still in its background reconnect). Startup work that
+	// needs the store, such as the legacy deliveries migration (#361), defers
+	// on it rather than failing the process.
+	ErrStoreNotReady = errors.New("store not connected")
 )
 
 // StreamDAO handles stream configuration data access
