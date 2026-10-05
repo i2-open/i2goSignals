@@ -72,6 +72,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// GetEvents only COPIES; only AckEvents removes — so without this, every
 	// delivered SET would be re-sent forever.
 	txSid := rec.StreamConfiguration.Id
+	var wireAcks, wireClears []string
 	if len(inbound.Ack) > 0 {
 		// Ack unconditionally, mirroring the RFC8936 poll transmitter
 		// (PollStreamHandler): the per-pair buffer's AckEvents is a no-op for any JTI
@@ -81,9 +82,10 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// (any node serves it), so the ack MUST be honored regardless of which node
 		// delivered the SET; per-node delivery tracking would silently drop a legitimate
 		// cross-node ack and redeliver forever.
-		buf := r.sstpServerBufferFor(txSid)
-		buf.AckEvents(inbound.Ack)
-		_ = r.ackEvents(r.ctx, inbound.Ack, txSid, services.NoFencingToken)
+		//
+		// The peer acks the acknowledgement JTIs it received (#363): they go to the
+		// store as received, in one Ack with any cleared setErrs below.
+		wireAcks = inbound.Ack
 	}
 
 	// Outbound setErr consumption: the peer's request also carries, in
@@ -118,11 +120,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET, clearing it",
 				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
 		}
-		if len(disposition.Clear) > 0 {
-			buf := r.sstpServerBufferFor(txSid)
-			buf.AckEvents(disposition.Clear)
-			_ = r.ackEvents(r.ctx, disposition.Clear, txSid, services.NoFencingToken)
-		}
+		wireClears = disposition.Clear
 		if len(disposition.Fatal) > 0 {
 			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing pair",
 				"sid", txSid, "jti", disposition.Fatal[0],
@@ -130,6 +128,22 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			r.pauseSstpPair(rec, fmt.Sprintf("SSTP-SRV: peer reports stream dead on pair=%s: %s: %s",
 				rec.PairId, disposition.FatalErr.Err, disposition.FatalErr.Description))
 		}
+	}
+
+	// One acknowledgement write for the request's acks and cleared setErrs,
+	// through the pair's DeliveryQueue (#363). The buffer still keys on inbound
+	// JTIs: drop the matched references' inbound JTIs and the wire JTIs (a
+	// Forward stream's acknowledgement JTI is its inbound JTI).
+	if len(wireAcks) > 0 || len(wireClears) > 0 {
+		matched, _, err := r.queueFor(txSid).AckWire(r.ctx, wireAcks, wireClears, services.NoFencingToken)
+		if err != nil {
+			eventLogger.Warn("SSTP-SRV: Error acknowledging outbound SETs", "sid", txSid, "error", err)
+		}
+		drop := make([]string, 0, len(matched)+len(wireAcks)+len(wireClears))
+		drop = append(drop, matched...)
+		drop = append(drop, wireAcks...)
+		drop = append(drop, wireClears...)
+		r.sstpServerBufferFor(txSid).AckEvents(drop)
 	}
 
 	// Inbound ingest: persist-then-process the parsed SETs as one batch via
@@ -288,6 +302,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		byJti[eventRecord.Jti] = eventRecord
 	}
 
+	q := r.queueFor(rec.StreamConfiguration.Id)
 	sets := make(map[string]string, len(jtis))
 	work := make([]*model.EventRecord, 0, len(jtis))
 	for _, jti := range jtis {
@@ -302,13 +317,24 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		work = append(work, eventRecord)
 	}
 	if len(work) == 0 {
+		q.MarkHandedOut(mapKeys(sets), time.Now())
 		return sets, nil
 	}
 
+	// Each re-signed SET is a value copy of the stored token carrying the
+	// stream's acknowledgement JTI (#363); the message keys it by that JTI,
+	// which is what the peer acks.
 	cfg := rec.StreamConfiguration
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	idx := make(map[*model.EventRecord]int, len(work))
+	tokens := make([]goSet.SecurityEventToken, len(work))
+	for i, eventRecord := range work {
+		idx[eventRecord] = i
+		tokens[i] = eventRecord.Event
+		tokens[i].ID = q.AckJtiOf(eventRecord.Jti, rec)
+	}
 	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
-		token := &eventRecord.Event
+		token := &tokens[idx[eventRecord]]
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
@@ -319,9 +345,22 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		if signed[i].Err != nil {
 			return nil, fmt.Errorf("signing outbound JTI %s: %w", eventRecord.Jti, signed[i].Err)
 		}
-		sets[eventRecord.Jti] = signed[i].JWS
 	}
+	for i, eventRecord := range work {
+		sets[tokens[i].ID] = signed[i].JWS
+		q.Served(eventRecord, &tokens[i], signed[i].JWS)
+	}
+	q.MarkHandedOut(mapKeys(sets), time.Now())
 	return sets, nil
+}
+
+// mapKeys returns m's keys in no particular order.
+func mapKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // sstpInboundCounterRecord returns a view of the SSTP pair record whose

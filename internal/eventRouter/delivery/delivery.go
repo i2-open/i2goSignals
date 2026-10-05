@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto"
 
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -35,11 +36,15 @@ type PushDelivery interface {
 // algorithm; the algorithm travels with the jwt.SigningMethod the adapter names
 // when it calls JWS. A nil Key means "no signing material available" and must be
 // an untyped nil.
+//
+// AckJti is the acknowledgement JTI the re-signed SET carries (#363): the
+// signed copy's jti. Empty keeps Event.Jti.
 type PushRequest struct {
 	Stream *model.StreamStateRecord
 	Event  *model.EventRecord
 	Key    crypto.Signer
 	Kid    string
+	AckJti string
 }
 
 // PushOutcome is the result of a single delivery attempt. Classification reports the
@@ -53,12 +58,17 @@ type PushRequest struct {
 // was sent, so Classification says nothing about the receiver: the caller must check
 // SignErr first and treat it as the transmitter's own key problem, never as a receiver
 // fault (#308).
+//
+// Signed and JWS are the SET the adapter sent (#363): the re-signed token
+// copy and its compact JWS. Signed is nil for a forwarded SET.
 type PushOutcome struct {
 	Classification goSetPush.Classification
 	RemoteAddress  string
 	Key            crypto.Signer
 	Kid            string
 	SignErr        error
+	Signed         *goSet.SecurityEventToken
+	JWS            string
 }
 
 // KeyReloader is the seam the HTTP adapter uses on the jws_signature_failed retry path.

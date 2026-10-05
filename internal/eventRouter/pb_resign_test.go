@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -185,7 +186,9 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 		assert.Equal(t, "https://issuer-A.example.com", parsed.Issuer, "stream A receiver must only see stream A's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-A.example.com"}, parsed.Audience, "stream A receiver must only see stream A's aud")
 		assert.NotEmpty(t, parsed.ID, "jti must be present and preserved")
-		assert.Equal(t, "txn-"+parsed.ID, parsed.TransactionId, "txn must be preserved verbatim alongside jti")
+		// txn is preserved verbatim; the re-signed SET carries the stream's
+		// derived acknowledgement JTI (#363).
+		assert.Equal(t, streamA.AckJti(strings.TrimPrefix(parsed.TransactionId, "txn-")), parsed.ID, "txn must be preserved verbatim alongside jti")
 	}
 	for _, body := range bodiesB {
 		parsed, err := goSet.Peek(body)
@@ -193,7 +196,9 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 		assert.Equal(t, "https://issuer-B.example.com", parsed.Issuer, "stream B receiver must only see stream B's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-B.example.com"}, parsed.Audience, "stream B receiver must only see stream B's aud")
 		assert.NotEmpty(t, parsed.ID, "jti must be present and preserved")
-		assert.Equal(t, "txn-"+parsed.ID, parsed.TransactionId, "txn must be preserved verbatim alongside jti")
+		// txn is preserved verbatim; the re-signed SET carries the stream's
+		// derived acknowledgement JTI (#363).
+		assert.Equal(t, streamB.AckJti(strings.TrimPrefix(parsed.TransactionId, "txn-")), parsed.ID, "txn must be preserved verbatim alongside jti")
 	}
 }
 

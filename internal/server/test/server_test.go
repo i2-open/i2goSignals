@@ -380,11 +380,13 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	// time.Sleep(2 * time.Second)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.EventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 500)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -546,11 +548,13 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.EventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 250)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 

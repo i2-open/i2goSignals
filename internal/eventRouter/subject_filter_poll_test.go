@@ -61,7 +61,7 @@ func (h *filterPushHarness) loadPollBuffer(t *testing.T, sid string, jtis ...str
 
 // pollImmediate serves a single non-blocking poll request for the stream.
 func (h *filterPushHarness) pollImmediate(sid string) (map[string]string, int) {
-	sets, _, status := h.router.PollStreamHandler(sid, model.PollParameters{
+	sets, _, status := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents:         100,
 		ReturnImmediately: true,
 	})

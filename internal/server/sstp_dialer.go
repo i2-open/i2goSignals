@@ -1498,9 +1498,16 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	// AC 5: egress signing is the SINGLE consolidated site. Sign FIRST so a
 	// failure short-circuits before any HTTP work happens; the caller then
 	// halts the dial cycle rather than sending an unsigned SET.
-	sets, signErr := buildSstpSets(stream, events, key, kid, d.outbound.SignConcurrency())
+	sets, signErr := buildSstpSetsAck(stream, events, key, kid, d.outbound.SignConcurrency(), d.outbound)
 	if signErr != nil {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, signErr
+	}
+	if len(sets) > 0 {
+		handed := make([]string, 0, len(sets))
+		for ackJti := range sets {
+			handed = append(handed, ackJti)
+		}
+		d.outbound.OutboundHandedOut(stream, handed)
 	}
 
 	msg := goSetSstp.Message{
@@ -1578,6 +1585,21 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
 func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int) (map[string]string, error) {
+	return buildSstpSetsAck(stream, events, key, kid, workers, nil)
+}
+
+// sstpAckJtis is the part of eventRouter.SstpOutbound buildSstpSetsAck uses
+// to sign each copy under its acknowledgement JTI and record it (#363).
+type sstpAckJtis interface {
+	OutboundAckJti(stream *model.StreamStateRecord, inboundJti string) string
+	OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string)
+}
+
+// buildSstpSetsAck is buildSstpSets with the stream's acknowledgement JTIs
+// (#363): each re-signed SET is a value copy of the stored token whose jti is
+// acks.OutboundAckJti, keyed by that JTI in the returned map, and recorded
+// with acks.OutboundServed. A nil acks keeps the inbound JTI.
+func buildSstpSetsAck(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int, acks sstpAckJtis) (map[string]string, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -1594,6 +1616,9 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		}
 		if forward {
 			sets[ev.Jti] = ev.Original
+			if acks != nil {
+				acks.OutboundServed(stream, ev, nil, ev.Original)
+			}
 			continue
 		}
 		work = append(work, ev)
@@ -1602,8 +1627,19 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 		return sets, nil
 	}
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	idx := make(map[*model.EventRecord]int, len(work))
+	tokens := make([]goSet.SecurityEventToken, len(work))
+	for i, ev := range work {
+		idx[ev] = i
+		tokens[i] = ev.Event
+		if acks != nil {
+			tokens[i].ID = acks.OutboundAckJti(stream, ev.Jti)
+		} else {
+			tokens[i].ID = ev.Jti
+		}
+	}
 	signed := eventRouter.SignSets(work, workers, func(ev *model.EventRecord) (string, error) {
-		token := &ev.Event
+		token := &tokens[idx[ev]]
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
@@ -1616,7 +1652,12 @@ func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord,
 			// rather than send an unsigned SET (or drop it silently).
 			return nil, fmt.Errorf("sstp: sign JTI %s: %w", ev.Jti, signed[i].Err)
 		}
-		sets[ev.Jti] = signed[i].JWS
+	}
+	for i, ev := range work {
+		sets[tokens[i].ID] = signed[i].JWS
+		if acks != nil {
+			acks.OutboundServed(stream, ev, &tokens[i], signed[i].JWS)
+		}
 	}
 	return sets, nil
 }

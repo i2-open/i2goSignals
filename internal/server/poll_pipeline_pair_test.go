@@ -224,7 +224,7 @@ func runPipelinePair(t *testing.T, depth int) time.Duration {
 	require.Equal(t, float64(pairPipelineSets), counterSum(t, a.app.Stats.EventsOut, txSid), "every SET acked exactly once")
 	jtis := make([]string, len(tokens))
 	for i, tok := range tokens {
-		jtis[i] = tok.ID
+		jtis[i] = tx.AckJti(tok.ID) // B stores the re-signed SET under its derived jti (#363)
 	}
 	require.Len(t, b.persistence.EventService.GetEvents(context.Background(), jtis), pairPipelineSets)
 	return elapsed

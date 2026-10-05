@@ -115,7 +115,12 @@ func (h *filterPushHarness) addPendingEvent(t *testing.T, sid string, subject *g
 		rec, err = h.eventService.AddEvent(ctx, token, sid, "")
 	}
 	require.NoError(t, err)
-	require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(rec.Jti), sid))
+	// Written as ingest writes it: the stream's acknowledgement JTI (#363).
+	ref := refOf(rec.Jti)
+	if st := h.router.streamRecord(sid); st != nil {
+		ref.AckJti = st.AckJti(rec.Jti)
+	}
+	require.NoError(t, h.eventService.AddEventToStream(ctx, ref, sid))
 	return rec.Jti
 }
 

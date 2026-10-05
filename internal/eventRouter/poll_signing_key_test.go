@@ -108,12 +108,12 @@ func (h *filterPushHarness) queuePollEvents(t *testing.T, sid string, n int) []s
 }
 
 func (h *filterPushHarness) poll(sid string, acks ...string) (map[string]string, int) {
-	sets, _, status := h.router.PollStreamHandler(sid, model.PollParameters{
+	sets, _, status := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents:         100,
 		ReturnImmediately: true,
-		Acks:              acks,
+		Acks:              wireAcks(h.router, sid, acks...),
 	})
-	return sets, status
+	return inboundSets(h.router, sid, sets), status
 }
 
 func (h *filterPushHarness) stored(t *testing.T, sid string) *model.StreamStateRecord {

@@ -111,7 +111,7 @@ func (s *KeyChangeSigningSuite) post(query string, body []byte, contentType stri
 // polled polls the transmitter and returns the one SET's kid and whether it
 // verifies with pub.
 func (s *KeyChangeSigningSuite) polled(pub crypto.PublicKey) (string, bool) {
-	sets, _, status := s.app.EventRouter.PollStreamHandler(s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s.app.EventRouter.PollStreamHandler(context.Background(), s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	s.Require().Equal(http.StatusOK, status)
 	s.Require().Len(sets, 1)
 	for _, set := range sets {
@@ -135,7 +135,7 @@ func (s *KeyChangeSigningSuite) selected() (crypto.Signer, string) {
 // current key cached and the event in its poll buffer, and returns the key.
 func (s *KeyChangeSigningSuite) warm() (crypto.Signer, string) {
 	s.Require().Eventually(func() bool {
-		sets, _, status := s.app.EventRouter.PollStreamHandler(s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+		sets, _, status := s.app.EventRouter.PollStreamHandler(context.Background(), s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 		return status == http.StatusOK && len(sets) == 1
 	}, 5*time.Second, 10*time.Millisecond, "the queued event reaches the poll buffer")
 	key, kid := s.selected()

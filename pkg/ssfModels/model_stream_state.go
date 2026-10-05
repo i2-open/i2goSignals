@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -582,3 +583,14 @@ const (
 	EventSourceAudience = "AUDIENCE" // Events routed in by audience matching
 	EventSourceExplicit = "EXPLICIT" // Events sourced from explicitly named stream SID(s)
 )
+
+// AckJti returns the JTI a SET with inboundJti carries on this stream: the
+// inbound JTI for a Forward stream, which sends the SET as received, and the
+// derived copy JTI (goSet.DeriveCopyJti) for every other route mode, which
+// re-signs (an empty route mode re-signs). Only row writers call it (#363).
+func (ss *StreamStateRecord) AckJti(inboundJti string) string {
+	if ss.GetRouteMode() == RouteModeForward {
+		return inboundJti
+	}
+	return goSet.DeriveCopyJti(ss.Id.Hex(), inboundJti)
+}

@@ -1,6 +1,7 @@
 package eventRouter
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -13,13 +14,13 @@ import (
 // longPoll is one RFC 8936 long poll (returnImmediately=false) for up to max
 // SETs, acking acks.
 func (h *filterPushHarness) longPoll(sid string, max int32, acks ...string) map[string]string {
-	sets, _, _ := h.router.PollStreamHandler(sid, model.PollParameters{
+	sets, _, _ := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents:         max,
 		ReturnImmediately: false,
 		TimeoutSecs:       2,
-		Acks:              acks,
+		Acks:              wireAcks(h.router, sid, acks...),
 	})
-	return sets
+	return inboundSets(h.router, sid, sets)
 }
 
 func keysOf(sets map[string]string) []string {

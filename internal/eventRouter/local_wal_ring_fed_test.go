@@ -157,13 +157,14 @@ func TestLocalWal_RingFedPollServesBeforeDrain(t *testing.T) {
 	require.NoError(t, s.router.HandleEvent(newRiscToken("rf-poll-1", dupTestIssuer, s.audience), "x", s.streamID))
 	assert.False(t, s.stored("rf-poll-1"))
 
-	sets, _, status := s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	require.Equal(t, 200, status)
+	sets = inboundSets(s.router, s.streamID, sets)
 	assert.Equal(t, []string{"rf-poll-1"}, keysOf(sets), "served from the WAL before the drain")
 	assert.False(t, s.stored("rf-poll-1"), "still not in the store")
 	assert.GreaterOrEqual(t, testutil.ToFloat64(m.ringFedServed), 1.0)
 
-	sets, _, status = s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: []string{"rf-poll-1"}})
+	sets, _, status = s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: wireAcks(s.router, s.streamID, "rf-poll-1")})
 	require.Equal(t, 200, status)
 	assert.Empty(t, sets)
 
@@ -176,7 +177,7 @@ func TestLocalWal_RingFedPollServesBeforeDrain(t *testing.T) {
 	require.Len(t, delivered, 1)
 	assert.Equal(t, "rf-poll-1", delivered[0].Jti)
 
-	sets, _, _ = s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, _ = s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	assert.Empty(t, sets, "an acked SET is not redelivered after the drain")
 }
 
@@ -229,8 +230,9 @@ func TestLocalWal_RingFedServesReplayedEntries(t *testing.T) {
 	s2 := newWalRouterWith(t, p, dir, &gatedEventDAO{EventDAO: p.EventDAO, gate: gate}, ringFed)
 	// The replayed entries target s1's stream (s2's setup made another one).
 	s2.router.UpdateStreamState(s1.stream)
-	sets, _, status := s2.router.PollStreamHandler(s1.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s2.router.PollStreamHandler(context.Background(), s1.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	require.Equal(t, 200, status)
+	sets = inboundSets(s2.router, s1.streamID, sets)
 	assert.ElementsMatch(t, jtis, keysOf(sets), "replayed SETs are served before the replay stores them")
 	for _, jti := range jtis {
 		assert.False(t, s2.stored(jti))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -75,7 +76,7 @@ type EventRouter interface {
 	// signing transmitter with no active signing key, or whose key failed to
 	// sign, gets PollKeyUnavailableStatus (503) with no SETs: its events stay
 	// queued and the stream has taken the key-unavailable pause (#312).
-	PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int)
+	PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int)
 	// CheckSstpSigningKey is the SSTP accepting end's signing-key check (#312).
 	// The HTTP handler runs it on the resolved pair before an exchange applies
 	// anything. For an enabled pair whose transmit direction signs (any route
@@ -267,6 +268,9 @@ type router struct {
 	// pushAckers holds each running push runner's acker by stream id, so
 	// backfill does not read back a JTI whose ack is still queued (#336).
 	pushAckers sync.Map
+	// queues holds each target stream's delivery queue by stream document
+	// id (#363); see delivery_queue.go.
+	queues sync.Map
 	// sstpAckers holds each SSTP-client pair's acker by PairId (#336).
 	sstpAckers map[string]*sstpPairAcker
 	// signConcurrency is the resolved I2SIG_SIGN_CONCURRENCY: how many SETs
@@ -610,6 +614,9 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 			pushBuf, pushOk := router.pushBuffers[sid]
 			router.mu.RUnlock()
 
+			if pollOk || pushOk {
+				router.queueFor(sid).accept(ctx, []interfaces.PendingRef{ref})
+			}
 			if pollOk {
 				eventLogger.Debug("Background watcher: submitting event to poll buffer", "sid", sid, "jti", jti)
 				pollBuf.SubmitEvent(jti)
@@ -683,6 +690,7 @@ func (r *router) ResetStream(sid string) {
 		buf.Clear()
 	}
 	_, _ = r.eventService.ClearPendingForStream(r.ctx, sid)
+	r.queueFor(sid).reset()
 }
 
 func (r *router) WakeTransmitter(sid string, mode string) {
@@ -918,6 +926,15 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 	if stream.StreamConfiguration.Id == "" {
 		// This might be a partial update (e.g. from rotateIssuer)
 		return
+	}
+
+	// A route-mode change re-seeds the stream's DeliveryQueue (#363): the held
+	// references are dropped, and a change to Forward rewrites every pending
+	// row's acknowledgement JTI to its inbound JTI once. Runs after r.mu is
+	// released, with the new record in place.
+	if prev := r.streamRecord(stream.StreamConfiguration.Id); prev != nil && prev.GetRouteMode() != stream.GetRouteMode() {
+		sid := stream.StreamConfiguration.Id
+		defer r.queueFor(sid).routeModeChanged(r.ctx)
 	}
 
 	r.mu.Lock()
@@ -1252,6 +1269,7 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 	pending := make(map[string][]interfaces.PendingRef, len(targets))
 	now := time.Now()
 	for _, t := range targets {
+		t.enqueuedAt = now
 		pending[t.docID] = append(pending[t.docID], t.refs(now)...)
 	}
 
@@ -1396,6 +1414,9 @@ type fanoutTarget struct {
 	ackJtis []string
 	// resource is the stream's lease resource, named by its routing entry.
 	resource string
+	// enqueuedAt is the enqueue time the ingest write stamped on t's
+	// references; zero before the write (a WAL append-time wake).
+	enqueuedAt time.Time
 	// owner is the node holding a push or SSTP-client target's lease, ""
 	// when none is known. resolveOwners fills it with r.mu released, after
 	// the plan and before the wake; the wake step reads only this field
@@ -1404,11 +1425,17 @@ type fanoutTarget struct {
 }
 
 // pendingJtis returns the inbound JTIs of streamID's pending references and
-// whether more are pending. The delivery runners still key on inbound JTIs;
-// every reference written before the copy-JTI slice (#363) has ackJti == jti.
+// whether more are pending. It is the router's pending read: the page seeds
+// streamID's delivery queue (#363) with each reference's acknowledgement JTI
+// and enqueue time and re-seeds its backlog. The buffers key on inbound JTIs.
 func (r *router) pendingJtis(ctx context.Context, streamID string, params model.PollParameters) ([]string, bool) {
-	refs, more := r.eventService.GetEventIds(ctx, streamID, params)
-	return interfaces.RefJtis(refs), more
+	page, err := r.eventService.PendingPage(ctx, streamID, params.MaxEvents)
+	if err != nil {
+		eventLogger.Error("Error getting event IDs", "sid", streamID, "error", err)
+		return []string{}, false
+	}
+	r.queueFor(streamID).load(ctx, page)
+	return interfaces.RefJtis(page.Refs), int64(len(page.Refs)) < page.Total
 }
 
 // ackJtiAt returns the acknowledgement JTI of t.jtis[i].
@@ -1426,6 +1453,24 @@ func (t *fanoutTarget) ackJtiOf(jti string) string {
 		return t.ackJtiAt(i)
 	}
 	return ""
+}
+
+// refsOf returns t's delivery references for jtis (a subset of t.jtis),
+// enqueued at t.enqueuedAt, or now when the write has not stamped one.
+func (t *fanoutTarget) refsOf(jtis []string) []interfaces.PendingRef {
+	at := t.enqueuedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	out := make([]interfaces.PendingRef, 0, len(jtis))
+	for _, jti := range jtis {
+		a := t.ackJtiOf(jti)
+		if a == "" {
+			a = jti
+		}
+		out = append(out, interfaces.PendingRef{Jti: jti, AckJti: a, EnqueuedAt: at})
+	}
+	return out
 }
 
 // refs returns t's delivery references, enqueued at enqueuedAt.
@@ -1465,19 +1510,23 @@ func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid s
 // rejected must not be counted as outbound.
 func (r *router) selectMatchingLocked(e *routeEntry, batch []*model.EventRecord) *fanoutTarget {
 	stream := &e.stream
-	var jtis []string
+	var jtis, ackJtis []string
 	for _, event := range batch {
 		if !r.eventService.MatchesStream(stream, event) {
 			continue
 		}
 		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", e.mode, "types", event.Types)
 		jtis = append(jtis, event.Jti)
+		// The row carries the JTI the SET is sent and acknowledged with on
+		// this stream (#363): the inbound JTI when forwarded, the derived copy
+		// JTI when re-signed.
+		ackJtis = append(ackJtis, stream.AckJti(event.Jti))
 	}
 	if len(jtis) == 0 {
 		return nil
 	}
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-	return &fanoutTarget{mode: e.mode, key: e.key, docID: stream.Id.Hex(), sid: stream.StreamConfiguration.Id, jtis: jtis, resource: e.resource}
+	return &fanoutTarget{mode: e.mode, key: e.key, docID: stream.Id.Hex(), sid: stream.StreamConfiguration.Id, jtis: jtis, ackJtis: ackJtis, resource: e.resource}
 }
 
 // resolveOwners reads the lease owner of each push and SSTP-client target and
@@ -1579,6 +1628,7 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 			// buffer in that window. The markers are already durable, so backfill
 			// still delivers them; only the wake-up is lost.
 			if buf, ok := r.pushBuffers[t.key]; ok {
+				r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
 				}
@@ -1595,6 +1645,7 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		// Comma-ok for the same reason as the push arm above: the stream may have
 		// been removed while r.mu was released across the body-write join.
 		if buf, ok := r.pollBuffers[t.key]; ok {
+			r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
 			for _, jti := range jtis {
 				buf.SubmitEvent(jti)
 			}
@@ -1605,6 +1656,7 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		ownerNodeId := t.owner
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[t.key]; ok {
+				r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
 				for _, jti := range jtis {
 					buf.SubmitEvent(jti)
 				}
@@ -1616,6 +1668,7 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 
 	case "SSTP-SERVER":
 		if buf, ok := r.sstpServerBuffers[t.key]; ok {
+			r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
 			for _, jti := range jtis {
 				buf.SubmitEvent(jti)
 			}
@@ -1769,11 +1822,12 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	}
 	r.IncrementCounter(stream, eventToken, true)
 
-	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: rec.Jti, EnqueuedAt: time.Now()}
+	opRef := interfaces.PendingRef{Jti: rec.Jti, AckJti: stream.AckJti(rec.Jti), EnqueuedAt: time.Now()}
 	if err := r.eventService.AddEventToStream(r.ctx, opRef, stream.Id.Hex()); err != nil {
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err
 	}
+	r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1844,7 +1898,7 @@ func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
 	}
 }
 
-func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map[string]string, bool, int) {
+func (r *router) PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int) {
 	r.mu.RLock()
 	state, exist := r.pollStreams[sid]
 	pollBuffer, bufExist := r.pollBuffers[sid]
@@ -1855,18 +1909,8 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 		return nil, false, http.StatusNotFound
 	}
 
-	if len(params.Acks) > 0 {
-		pollBuffer.AckEvents(params.Acks)
-		_ = r.ackEvents(r.ctx, params.Acks, sid, services.NoFencingToken)
-	}
-
-	if len(params.SetErrs) > 0 {
-		jtis := make([]string, 0, len(params.SetErrs))
-		for jti := range params.SetErrs {
-			jtis = append(jtis, jti)
-		}
-		pollBuffer.AckEvents(jtis)
-		_ = r.ackEvents(r.ctx, jtis, sid, services.NoFencingToken)
+	if len(params.Acks) > 0 || len(params.SetErrs) > 0 {
+		r.ackPolled(ctx, sid, &state, pollBuffer, params)
 	}
 
 	if state.Status != model.StreamStateEnabled {
@@ -1941,9 +1985,44 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
 			return nil, false, PollKeyUnavailableStatus
 		}
+		if len(sets) > 0 {
+			handed := make([]string, 0, len(sets))
+			for a := range sets {
+				handed = append(handed, a)
+			}
+			r.queueFor(sid).MarkHandedOut(handed, time.Now())
+		}
 		return sets, more, http.StatusOK
 	}
 	return map[string]string{}, false, http.StatusOK
+}
+
+// ackPolled applies a poll request's acknowledgements and setErrs through the
+// stream's delivery queue in one write (#363): the receiver's JTIs go to the
+// store as received, the queue drops the held references they name, and each
+// row the write reports newly delivered is counted on the outbound metric
+// (with a nil token: no record is read). The acknowledged references leave
+// the poll buffer.
+func (r *router) ackPolled(ctx context.Context, sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, params model.PollParameters) {
+	setErrs := make([]string, 0, len(params.SetErrs))
+	for jti := range params.SetErrs {
+		setErrs = append(setErrs, jti)
+	}
+	sort.Strings(setErrs)
+	inbound, n, err := r.queueFor(sid).AckWire(ctx, params.Acks, setErrs, services.NoFencingToken)
+	if err != nil {
+		eventLogger.Warn("POLL-SRV: Error acknowledging events", "sid", sid, "count", len(params.Acks)+len(setErrs), "error", err)
+	}
+	// A wire JTI equals its inbound JTI on a Forward stream and for a
+	// reference the queue does not hold.
+	drop := make([]string, 0, len(params.Acks)+len(setErrs)+len(inbound))
+	drop = append(drop, params.Acks...)
+	drop = append(drop, setErrs...)
+	drop = append(drop, inbound...)
+	pollBuffer.AckEvents(drop)
+	for i := int64(0); i < n; i++ {
+		r.IncrementCounter(state, nil, false)
+	}
 }
 
 // defaultPollClaimTTL is the I2SIG_POLL_CLAIM_TTL default.
@@ -2017,19 +2096,35 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 
 	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
 	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
+	q := r.queueFor(sid)
+	ackJtis := make([]string, len(work))
+	tokens := make([]goSet.SecurityEventToken, len(work))
+	for i, rec := range work {
+		ackJtis[i] = q.AckJtiOf(rec.Jti, state)
+	}
+	idx := make(map[*model.EventRecord]int, len(work))
+	for i, rec := range work {
+		idx[rec] = i
+	}
 	signed := SignSets(work, r.signConcurrency, func(rec *model.EventRecord) (string, error) {
-		token := &rec.Event
+		// A value copy carrying the reference's acknowledgement JTI (#363):
+		// the stored record is never mutated, and a re-send signs the same JTI.
+		i := idx[rec]
+		token := rec.Event
+		token.ID = ackJtis[i]
 		token.Issuer = iss
 		token.Audience = aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
 		token.Kid = kid
+		tokens[i] = token
 		return token.JWS(method, key)
 	})
 	for i, rec := range work {
 		if signed[i].Err != nil {
 			return nil, fmt.Errorf("signing JTI %s: %w", rec.Jti, signed[i].Err)
 		}
-		sets[rec.Jti] = signed[i].JWS
+		sets[ackJtis[i]] = signed[i].JWS
+		q.Served(rec, &tokens[i], signed[i].JWS)
 	}
 	return sets, nil
 }
@@ -2082,7 +2177,7 @@ func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventReco
 // returned now nor on a later poll, keeping the pending buffer bounded.
 func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
 	pollBuffer.AckEvents(jtis)
-	if err := r.ackEvents(r.ctx, jtis, sid, services.NoFencingToken); err != nil {
+	if _, err := r.queueFor(sid).AckInbound(r.ctx, jtis, false, services.NoFencingToken); err != nil {
 		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }
@@ -2730,7 +2825,8 @@ func (r *router) dispatchPushFailure(
 					"sid", sid, "jti", jti,
 					"rfc8935ErrCode", cls.RFC8935ErrCode,
 					"description", cls.RFC8935Description)
-				if err := r.ackEvents(r.ctx, []string{jti}, sid, fencingToken); err != nil {
+				// A clear, not a receiver acceptance: no outbound copy (#363).
+				if _, err := r.queueFor(sid).AckInbound(r.ctx, []string{jti}, false, fencingToken); err != nil {
 					if errors.Is(err, services.ErrStaleFencingToken) {
 						// This node no longer holds the lease: re-acquire (#334).
 						return RecoveryOutcomeContextDone, true
@@ -3147,8 +3243,14 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 		work = append(work, item{jti: jti, rec: rec})
 	}
 
+	q := r.queueFor(sid)
 	outcomes := make([]*delivery.PushOutcome, len(work))
 	if len(work) > 0 {
+		handed := make([]string, len(work))
+		for i := range work {
+			handed[i] = q.AckJtiOf(work[i].jti, config)
+		}
+		q.MarkHandedOut(handed, time.Now())
 		workers := r.pushConcurrency
 		if workers < 1 {
 			workers = 1
@@ -3173,7 +3275,11 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 						Event:  work[idx].rec,
 						Key:    signingKey,
 						Kid:    kid,
+						AckJti: handed[idx],
 					})
+					if out.SignErr == nil {
+						q.Served(work[idx].rec, out.Signed, out.JWS)
+					}
 					outcomes[idx] = &out
 					if out.SignErr != nil || out.Classification.Class != goSetPush.ClassAccepted {
 						stopped.Store(true)
@@ -3316,6 +3422,7 @@ func (r *router) InvalidateAndReload(streamID, issuer, alg string) (crypto.Signe
 }
 
 func (r *router) RemoveStream(sid string) {
+	defer r.dropQueue(sid)
 	// Perform all map/buffer teardown under r.mu, then release the write lock
 	// BEFORE calling UnregisterPair. UnregisterPair waits (up to 2s) for the
 	// per-pair goroutine to exit, and that goroutine re-enters the router via

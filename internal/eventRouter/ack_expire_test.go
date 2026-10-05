@@ -42,6 +42,9 @@ func ackRouter(t *testing.T, window services.EffectiveWindowFunc, days *int) (*r
 		sstpServerStreams: map[string]model.StreamStateRecord{},
 		retentionWindow:   window,
 	}
+	// The stream's DeliveryQueue holds j1 as ingest would (#363): the queue
+	// acks it under the acknowledgement JTI written with the row.
+	r.queueFor(sid).accept(context.Background(), []interfaces.PendingRef{{Jti: "j1", AckJti: "j1"}})
 	return r, dao, sid
 }
 

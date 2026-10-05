@@ -263,3 +263,13 @@ func createServerWithHook(t *testing.T, dbName string, resetDb bool, beforeApp f
 
 	return &instance, nil
 }
+
+// deliveredJti is the jti a receiver of stream sees for inboundJti (#363): a
+// re-signed SET carries the stream's derived acknowledgement JTI, a forwarded
+// SET its inbound JTI.
+func deliveredJti(stream model.StreamConfiguration, inboundJti string) string {
+	if stream.RouteMode == model.RouteModeForward {
+		return inboundJti
+	}
+	return goSet.DeriveCopyJti(stream.Id, inboundJti)
+}

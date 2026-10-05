@@ -184,6 +184,16 @@ func (f *fakeSstpOutbound) ResolveEvents(pairId string, claimed []string) []*mod
 	return out
 }
 
+// The fake signs each SET under its inbound JTI (a Forward-style ack JTI).
+func (f *fakeSstpOutbound) OutboundAckJti(_ *model.StreamStateRecord, inboundJti string) string {
+	return inboundJti
+}
+
+func (f *fakeSstpOutbound) OutboundServed(*model.StreamStateRecord, *model.EventRecord, *goSet.SecurityEventToken, string) {
+}
+
+func (f *fakeSstpOutbound) OutboundHandedOut(*model.StreamStateRecord, []string) {}
+
 // AckOutbound mirrors the router's AC 3 semantics after PRD #49 slice 2c:
 // only the JTIs explicitly listed in `acked` are removed from the buffer.
 // An empty ack list confirms NOTHING — every sent SET has its in-flight

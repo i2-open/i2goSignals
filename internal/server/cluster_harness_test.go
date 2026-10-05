@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -342,7 +343,8 @@ func TestClusterHarness_LostWakeRecoveredBySweep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ev)
 
-	require.Eventually(t, func() bool { return rcv.has(ev.Jti) }, 20*time.Second, 100*time.Millisecond,
+	// The receiver sees the re-signed SET under its derived jti (#363).
+	require.Eventually(t, func() bool { return rcv.has(goSet.DeriveCopyJti(sid, ev.Jti)) }, 20*time.Second, 100*time.Millisecond,
 		"the SET ingested on %s never reached the receiver through owner %s's sweep", ingest.id, owner)
 	assert.Positive(t, h.dropped.Load(), "the owner was sent a wake, and it was lost")
 	require.Eventually(t, func() bool { return len(h.pendingFor(sid)) == 0 }, 10*time.Second, 100*time.Millisecond,
@@ -374,14 +376,14 @@ func TestClusterHarness_PollIngestOnAReceiverOnB(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ev, err := a.app.EventRouter.GenerateVerifyEvent(sid, fmt.Sprintf("poll-%d", i))
 		require.NoError(t, err)
-		want[ev.Jti] = true
+		want[goSet.DeriveCopyJti(sid, ev.Jti)] = true // the re-signed SET's jti (#363)
 	}
 
 	seen := map[string]bool{}
 	var acks []string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		sets, _, status := b.app.EventRouter.PollStreamHandler(sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: acks})
+		sets, _, status := b.app.EventRouter.PollStreamHandler(context.Background(), sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: acks})
 		require.Equal(t, http.StatusOK, status)
 		acks = acks[:0]
 		for jti := range sets {
@@ -430,7 +432,7 @@ func TestClusterHarness_SstpIngestOnAPeerOnB(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ev, err := a.app.EventRouter.GenerateVerifyEvent(txSid, fmt.Sprintf("sstp-%d", i))
 		require.NoError(t, err)
-		want[ev.Jti] = true
+		want[rec.AckJti(ev.Jti)] = true // the jti the peer sees (#363)
 	}
 
 	seen := map[string]bool{}
@@ -526,14 +528,16 @@ func runLeaseTakeoverOnHarness(t *testing.T) {
 	deliver := func(state string) string {
 		ev, err := rApp.EventRouter.GenerateVerifyEvent(rec.StreamConfiguration.Id, state)
 		require.NoError(t, err)
+		// The cluster stores the responder's re-signed SET under its derived jti (#363).
+		rcvJti := rec.AckJti(ev.Jti)
 		require.Eventually(t, func() bool {
-			return h.admin.EventService.GetEventRecord(ctx, ev.Jti) != nil
+			return h.admin.EventService.GetEventRecord(ctx, rcvJti) != nil
 		}, 20*time.Second, 100*time.Millisecond, "SET %s reached the cluster", state)
 		require.Eventually(t, func() bool {
 			ids, _ := rp.EventService.GetEventIds(ctx, rec.StreamConfiguration.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
 			return len(ids) == 0
 		}, 20*time.Second, 100*time.Millisecond, "SET %s acknowledged at the responder", state)
-		return ev.Jti
+		return rcvJti
 	}
 
 	first := deliver("before-takeover")

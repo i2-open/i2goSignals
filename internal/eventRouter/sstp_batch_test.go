@@ -47,13 +47,14 @@ func TestSstpServer_PublishModeSignsWholeBatch(t *testing.T) {
 	require.Len(t, resp.Sets, 12, "every real SET is served in one response; the ghost is skipped")
 	require.NotContains(t, resp.Sets, "ghost-jti")
 	for _, jti := range jtis {
-		raw, ok := resp.Sets[jti]
+		ackJti := rec.AckJti(jti) // a re-signed SET carries its derived jti (#363)
+		raw, ok := resp.Sets[ackJti]
 		require.True(t, ok, "jti %s missing from the response", jti)
 		require.Equal(t, 3, len(strings.Split(raw, ".")), "each SET is a compact JWS")
 		claims := jwt.MapClaims{}
 		_, _, err := jwt.NewParser().ParseUnverified(raw, claims)
 		require.NoError(t, err)
-		require.Equal(t, jti, claims["jti"])
+		require.Equal(t, ackJti, claims["jti"])
 		require.Equal(t, rec.StreamConfiguration.Iss, claims["iss"])
 	}
 }

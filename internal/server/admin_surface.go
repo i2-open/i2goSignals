@@ -159,7 +159,7 @@ func (a *adminRouterAdapter) GenerateVerifyEvent(string, string) (*model.EventRe
 	return nil, nil
 }
 
-func (a *adminRouterAdapter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
+func (a *adminRouterAdapter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
 	a.unsupported("PollStreamHandler")
 	return nil, false, 0
 }

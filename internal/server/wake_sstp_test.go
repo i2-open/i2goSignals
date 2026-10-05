@@ -81,7 +81,7 @@ func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventTo
 func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.EventRecord, error) {
 	return nil, nil
 }
-func (rr *recordingRouter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
+func (rr *recordingRouter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
 	return nil, false, http.StatusOK
 }
 func (rr *recordingRouter) CheckSstpSigningKey(*model.StreamStateRecord) error { return nil }

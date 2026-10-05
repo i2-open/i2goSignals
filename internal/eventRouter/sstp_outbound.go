@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -71,6 +72,20 @@ type SstpOutbound interface {
 	// the entire sent set is treated as accepted (§2.3 success-without-
 	// detail). Returns the number of acked (and counted) events.
 	AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int
+
+	// OutboundAckJti returns the acknowledgement JTI the SET with inboundJti
+	// carries on stream (#363): the jti the dialer signs into its copy and
+	// keys the message by, and what the peer acks.
+	OutboundAckJti(stream *model.StreamStateRecord, inboundJti string) string
+
+	// OutboundServed records the SET the dialer signed for rec (signed is
+	// nil for a forwarded SET), so its acknowledgement stores the outbound
+	// copy (#363).
+	OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string)
+
+	// OutboundHandedOut stamps handedOut on the stream's held references
+	// when the dialer sends its frame (#363).
+	OutboundHandedOut(stream *model.StreamStateRecord, ackJtis []string)
 
 	// ReleaseOutbound releases the in-flight claim on every JTI in events
 	// WITHOUT removing them from the buffer, so a failed-delivery SET is
@@ -253,6 +268,18 @@ func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, se
 	buf := r.sstpBuffers[stream.PairId]
 	r.mu.RUnlock()
 	return r.handleSstpAcks(stream, buf, acked, sent, fencingToken)
+}
+
+func (r *router) OutboundAckJti(stream *model.StreamStateRecord, inboundJti string) string {
+	return r.queueFor(stream.StreamConfiguration.Id).AckJtiOf(inboundJti, stream)
+}
+
+func (r *router) OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string) {
+	r.queueFor(stream.StreamConfiguration.Id).Served(rec, signed, jws)
+}
+
+func (r *router) OutboundHandedOut(stream *model.StreamStateRecord, ackJtis []string) {
+	r.queueFor(stream.StreamConfiguration.Id).MarkHandedOut(ackJtis, time.Now())
 }
 
 func (r *router) ReleaseOutbound(pairId string, events []*model.EventRecord) {
@@ -520,9 +547,14 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 		return 0
 	}
 
+	// The peer acks the acknowledgement JTIs the dialer signed (#363); map
+	// each back to the inbound JTI the buffer, claims and queue key on.
+	q := r.queueFor(stream.StreamConfiguration.Id)
 	sentByJti := make(map[string]*model.EventRecord, len(sent))
+	inboundOf := make(map[string]string, len(sent))
 	for _, ev := range sent {
 		sentByJti[ev.Jti] = ev
+		inboundOf[q.AckJtiOf(ev.Jti, stream)] = ev.Jti
 	}
 
 	// AC 3: literal ack semantics — no ack-all-sent fallback. An empty ack
@@ -534,8 +566,9 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 
 	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
-	for _, jti := range ackSet {
-		if sentByJti[jti] == nil {
+	for _, wire := range ackSet {
+		jti, ok := inboundOf[wire]
+		if !ok || sentByJti[jti] == nil {
 			continue // ack for a JTI we did not send this cycle — ignore.
 		}
 		ackedJtis = append(ackedJtis, jti)

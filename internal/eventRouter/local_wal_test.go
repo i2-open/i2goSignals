@@ -346,7 +346,7 @@ func assertWalRetention(t *testing.T, p *dbProviders.Persistence) {
 	window := 1
 	ackDate := time.Now()
 	expireAt := ackDate.Add(time.Duration(window) * 24 * time.Hour)
-	_, err := p.EventService.AckBatch(ctx, interfaces.AckBatch{StreamID: s.streamID, Jtis: []string{jti}, AckDate: ackDate, ExpireAt: &expireAt})
+	_, err := p.EventService.AckBatch(ctx, interfaces.AckBatch{StreamID: s.streamID, Jtis: []string{s.stream.AckJti(jti)}, AckDate: ackDate, ExpireAt: &expireAt})
 	require.NoError(t, err)
 
 	count, err := p.EventDAO.CountRetainedForStream(ctx, s.streamID)

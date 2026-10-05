@@ -5,33 +5,17 @@ import (
 	"fmt"
 	"time"
 
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
-// ackEvents acknowledges jtis for stream sid, stamping the delivered
-// references with expireAt = ackDate + the stream's retention window (#360,
-// seam S1). The window is resolved through RouterDeps.RetentionWindow from the
-// stream record the router already holds, so no store read is added. With no
-// resolver, or a keep-forever window, the ack takes the EventService path
-// unchanged and writes no expireAt. An empty jtis is a no-op.
+// ackEvents acknowledges SETs the receiver accepted, by inbound JTI, for
+// stream sid. It goes through the stream's DeliveryQueue (#363), the one
+// caller of AckBatch: one Ack per batch, under each reference's
+// acknowledgement JTI, with the outbound copies this node served and the
+// retention expiry of #360. An empty jtis is a no-op.
 func (r *router) ackEvents(ctx context.Context, jtis []string, sid string, fencingToken int64) error {
-	if len(jtis) == 0 {
-		return nil
-	}
-	if r.retentionWindow == nil {
-		return r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
-	}
-	ackDate := time.Now()
-	expireAt := ackExpireAt(r.retentionWindow, r.streamRecord(sid), ackDate)
-	if expireAt == nil {
-		return r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
-	}
-	if err := r.checkAckFence(sid, fencingToken); err != nil {
-		return err
-	}
-	_, err := r.eventService.AckBatch(ctx, interfaces.AckBatch{StreamID: sid, Jtis: jtis, AckDate: ackDate, ExpireAt: expireAt})
+	_, err := r.queueFor(sid).AckInbound(ctx, jtis, true, fencingToken)
 	return err
 }
 
@@ -55,6 +39,13 @@ func ackExpireAt(window services.EffectiveWindowFunc, rec *model.StreamStateReco
 func (r *router) streamRecord(sid string) *model.StreamStateRecord {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.streamRecordLocked(sid)
+}
+
+// streamRecordLocked is streamRecord for a caller that holds r.mu (at least
+// RLock): r.mu is a sync.RWMutex, so a nested RLock deadlocks once a writer
+// is waiting.
+func (r *router) streamRecordLocked(sid string) *model.StreamStateRecord {
 	for _, m := range []map[string]model.StreamStateRecord{r.pushStreams, r.pollStreams, r.sstpServerStreams, r.sstpClientStreams} {
 		if rec, ok := m[sid]; ok {
 			return &rec
