@@ -335,10 +335,10 @@ each run. Measured 2026-10-05.
 | pinned owner, 2 | goSignals1b | 3432 | 5000/5000 | 2012 | 718 / 942 | **51** | 51 / 51 (1.000) | 0 / 0 | 0 |
 
 Every run drained, and every run shows peer claims served, so the
-non-owner poll path ran under load. With both nodes polled, about a third of
-the poll batches went through the owner (gs1b's 33-36 claims against gs1's
-71-80 ack batches). With the owner pinned, every poll batch was a peer claim
-(claims = ack batches). The peer counter is on the owner and carries the
+non-owner poll path ran under load. With both nodes polled, a little under
+half of the poll batches (33-36 of 71-80 ack batches) were served to
+goSignals1b, the non-owner, through a peer claim. With the owner pinned, every
+poll batch was a peer claim (claims = ack batches). The peer counter is on the owner and carries the
 label `mode="poll"`, not `poll-transmitter`, so the earlier note that "no
 poll-transmitter series" exists was looking for the wrong label. The claim
 budget was never exhausted. Throughput stays in the range of the
