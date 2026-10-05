@@ -154,8 +154,8 @@ func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.E
 	}
 	perRec, batchErr := s.eventDAO.InsertWithPending(ctx, recs, pending)
 	if batchErr != nil {
-		// WARN: the DAO already logged the failure at ERROR and the caller
-		// turns it into a retryable 503 (CONTEXT.md log-level policy).
+		// WARN: the caller turns the failure into a retryable 503 and the
+		// sender retries (CONTEXT.md log-level policy).
 		esLog.Warn("Error inserting event batch", "sid", sid, "count", len(recs), "error", batchErr)
 		for i := range errs {
 			errs[i] = batchErr

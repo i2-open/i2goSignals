@@ -1452,7 +1452,9 @@ type fanoutTarget struct {
 func (r *router) pendingJtis(ctx context.Context, streamID string, params model.PollParameters) ([]string, bool) {
 	page, err := r.eventService.PendingPage(ctx, streamID, params.MaxEvents)
 	if err != nil {
-		eventLogger.Error("Error getting event IDs", "sid", streamID, "error", err)
+		// WARN, not ERROR: the next poll, wake or refill reads again
+		// (CONTEXT.md log-level policy).
+		eventLogger.Warn("Error getting event IDs", "sid", streamID, "error", err)
 		return []string{}, false
 	}
 	r.queueFor(streamID).load(ctx, page)

@@ -332,7 +332,8 @@ func insertWithPendingOneTrip(ctx context.Context, ec, dc *mongo.Collection, rec
 		}
 		var cbe mongo.ClientBulkWriteException
 		if !errors.As(err, &cbe) || cbe.WriteError != nil || len(cbe.WriteConcernErrors) > 0 || len(cbe.WriteErrors) != 1 {
-			eLog.Error("Error bulk writing events with pending references", "error", err)
+			// WARN, not ERROR: the ingest caller answers a retryable 503 and the sender retries (CONTEXT.md log-level policy).
+			eLog.Warn("Error bulk writing events with pending references", "error", err)
 			return nil, err
 		}
 		failed, we := -1, mongo.WriteError{}
@@ -394,7 +395,8 @@ func (d *EventDAOMongo) insertWithPendingTwoWrite(ctx context.Context, dc *mongo
 	}
 	var bwe mongo.BulkWriteException
 	if !errors.As(err, &bwe) || bwe.WriteConcernError != nil {
-		eLog.Error("Error bulk inserting pending references", "error", err)
+		// WARN, not ERROR: the ingest caller answers a retryable 503 and the sender retries (CONTEXT.md log-level policy).
+		eLog.Warn("Error bulk inserting pending references", "error", err)
 		return nil, err
 	}
 	// Ordered insert: every doc before the first failure is stored; the
@@ -605,7 +607,8 @@ func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, ackJtis m
 	if err != nil {
 		var bwe mongo.BulkWriteException
 		if !errors.As(err, &bwe) || bwe.WriteConcernError != nil || !allDuplicateKey(bwe.WriteErrors) {
-			eLog.Error("Error re-queuing pending references", "jti", jti, "error", err)
+			// WARN, not ERROR: the duplicate SET is refused and its sender retries (CONTEXT.md log-level policy).
+			eLog.Warn("Error re-queuing pending references", "jti", jti, "error", err)
 			return nil, err
 		}
 		// A duplicate key is a concurrent upsert that won the race: that
@@ -654,7 +657,8 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 
 	page.Total, err = c.CountDocuments(ctx, filter)
 	if err != nil {
-		eLog.Error("Error counting pending references", "error", err)
+		// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+		eLog.Warn("Error counting pending references", "error", err)
 		return page, err
 	}
 	if page.Total == 0 {
@@ -667,7 +671,8 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 	}
 	cursor, err := c.Find(ctx, filter, opts)
 	if err != nil {
-		eLog.Error("Error getting pending references", "error", err)
+		// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+		eLog.Warn("Error getting pending references", "error", err)
 		return page, err
 	}
 	var docs []deliveryDoc
@@ -694,7 +699,8 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 		case errors.Is(err, mongo.ErrNoDocuments):
 			// Drained between the count and this read.
 		default:
-			eLog.Error("Error reading oldest pending reference beyond the page", "error", err)
+			// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+			eLog.Warn("Error reading oldest pending reference beyond the page", "error", err)
 			return page, err
 		}
 	}
@@ -723,7 +729,8 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 	}
 	cursor, err := c.Find(ctx, filter)
 	if err != nil {
-		eLog.Error("Error finding pending references", "error", err)
+		// WARN, not ERROR: the WAL drain keeps the entries and retries on its next pass (CONTEXT.md log-level policy).
+		eLog.Warn("Error finding pending references", "error", err)
 		return nil, err
 	}
 	var docs []deliveryDoc
@@ -746,7 +753,8 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 		{Key: "jti", Value: bson.D{{Key: "$in", Value: found}}},
 	}
 	if _, err = c.DeleteMany(ctx, del); err != nil {
-		eLog.Error("Error deleting pending references", "error", err)
+		// WARN, not ERROR: the WAL drain keeps the entries and retries on its next pass (CONTEXT.md log-level policy).
+		eLog.Warn("Error deleting pending references", "error", err)
 		return nil, err
 	}
 	return removed, nil
@@ -841,12 +849,14 @@ func ackOneTrip(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectID
 	}
 	var cbe mongo.ClientBulkWriteException
 	if !errors.As(err, &cbe) || cbe.WriteError != nil || len(cbe.WriteConcernErrors) > 0 {
-		eLog.Error("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
+		// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+		eLog.Warn("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
 		return 0, err
 	}
 	for _, we := range cbe.WriteErrors {
 		if !mongo.IsDuplicateKeyError(we) {
-			eLog.Error("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
+			// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+			eLog.Warn("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
 			return 0, err
 		}
 	}
@@ -867,7 +877,8 @@ func ackTwoWrite(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectI
 		if err != nil {
 			var bwe mongo.BulkWriteException
 			if !errors.As(err, &bwe) || bwe.WriteConcernError != nil || !allDuplicateKey(bwe.WriteErrors) {
-				eLog.Error("Error storing ack copies", "streamID", batch.StreamID, "error", err)
+				// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+				eLog.Warn("Error storing ack copies", "streamID", batch.StreamID, "error", err)
 				return 0, err
 			}
 		}
@@ -878,7 +889,8 @@ func ackTwoWrite(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectI
 	filter, update := ackFilterUpdate(sid, batch)
 	res, err := dc.Clone(w1).UpdateMany(ctx, filter, update)
 	if err != nil {
-		eLog.Error("Error acking pending references", "streamID", batch.StreamID, "error", err)
+		// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+		eLog.Warn("Error acking pending references", "streamID", batch.StreamID, "error", err)
 		return 0, err
 	}
 	return res.ModifiedCount, nil
@@ -904,7 +916,8 @@ func (d *EventDAOMongo) ResetPendingAckJti(ctx context.Context, streamID string)
 	update := mongo.Pipeline{{{Key: "$set", Value: bson.D{{Key: "ackJti", Value: "$jti"}}}}}
 	res, err := c.UpdateMany(ctx, filter, update)
 	if err != nil {
-		eLog.Error("Error resetting pending ackJti", "streamID", streamID, "error", err)
+		// WARN, not ERROR: the queue retries the reset on its next load or wake (CONTEXT.md log-level policy).
+		eLog.Warn("Error resetting pending ackJti", "streamID", streamID, "error", err)
 		return 0, err
 	}
 	return res.ModifiedCount, nil
@@ -936,7 +949,8 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 
 	res, err := dc.DeleteMany(ctx, bson.D{{Key: "expireAt", Value: bson.D{{Key: "$lte", Value: now}}}})
 	if err != nil {
-		eLog.Error("Error removing expired delivery references", "error", err)
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error removing expired delivery references", "error", err)
 		return result, err
 	}
 	result.References = res.DeletedCount
@@ -962,7 +976,8 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 		SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "originalJti", Value: 1}, {Key: "sortTime", Value: 1}})
 	cursor, err := ec.Find(ctx, filter, opts)
 	if err != nil {
-		eLog.Error("Error reading event bodies for sweep", "error", err)
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading event bodies for sweep", "error", err)
 		return result, err
 	}
 	var bodies []sweepBody
@@ -987,7 +1002,8 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 	}
 	var refs []string
 	if err = dc.Distinct(ctx, "jti", bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: keys}}}}).Decode(&refs); err != nil {
-		eLog.Error("Error reading delivery references for sweep", "error", err)
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading delivery references for sweep", "error", err)
 		return result, err
 	}
 	referenced := make(map[string]struct{}, len(refs))
@@ -1004,7 +1020,8 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 	if len(doomed) > 0 {
 		del, err := ec.DeleteMany(ctx, bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: doomed}}}})
 		if err != nil {
-			eLog.Error("Error deleting swept event bodies", "error", err)
+			// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+			eLog.Warn("Error deleting swept event bodies", "error", err)
 			return result, err
 		}
 		result.Bodies = del.DeletedCount
