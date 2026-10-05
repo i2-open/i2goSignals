@@ -261,7 +261,11 @@ stack (`make build-docker`, fresh volumes), same load as the run above:
 
 Against the control's 1536 ev/s, the production setting is **3.1% lower** and
 the audit-on setting 5.3% lower. Both are inside the 10% noise band, and the
-production setting's range overlaps the control's. The `InsertWithPending`
+production setting's range overlaps the control's. The audit's cost (about 2%
+between the two settings) is inside the noise, and #362 AC4 needs the
+reads-under-lock counter live in production, so the gate was later removed:
+the audit is always on and `I2SIG_ROUTER_LOCK_AUDIT` no longer exists. The
+"on" rows are the production figures from then on. The `InsertWithPending`
 mean is back at the control's figure (5.9-6.2 ms against 5.92 ms). Every
 leg of every run drained to 100%. Ack writes were 1.000 per batch, and reads
 under the lock and before an ack were 0 with the audit on.

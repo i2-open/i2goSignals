@@ -70,7 +70,7 @@ instead of minting one, pass
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
 | SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
 | Delivery latency per leg, p50/p95/p99/max | goSignals2 `goSignals_router_event_age_at_receipt_seconds{tfr}`, diffed over the run |
-| Verified properties (`properties:` line, `properties` in the JSON) | goSignals1 (+ `--gs1b`) `goSignals_router_ack_writes_total` / `goSignals_router_ack_batches_total` (ack writes per batch), `goSignals_router_reads_under_lock_total`, `goSignals_router_reads_before_ack_total` (design value 0 for both; counted only with `I2SIG_ROUTER_LOCK_AUDIT=true`, which the dev and benchmark stacks set) and `goSignals_router_peer_claims_total{result="served"}`, diffed over the run and summed over the cluster members |
+| Verified properties (`properties:` line, `properties` in the JSON) | goSignals1 (+ `--gs1b`) `goSignals_router_ack_writes_total` / `goSignals_router_ack_batches_total` (ack writes per batch), `goSignals_router_reads_under_lock_total`, `goSignals_router_reads_before_ack_total` (design value 0 for both) and `goSignals_router_peer_claims_total{result="served"}`, diffed over the run and summed over the cluster members |
 | `OldestBeyond` query cost (`oldest-beyond` line, `oldest_beyond_gs1` in the JSON) | `goSignals_dao_op_duration_seconds{op="GetPendingForStreamBeyond"}` count and mean against `{op="GetPendingForStream"}`: a pending page shorter than the stream's backlog also reads `PendingPage.OldestBeyond`, so the count is non-zero only when a backlog exceeds the queue window |
 
 ### Ingest breakdown (DAO metrics)

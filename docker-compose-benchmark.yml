@@ -62,10 +62,6 @@ x-gosignals-env: &gosignals-env
     LOG_LEVEL: ${BENCH_LOG_LEVEL:-WARN}
     LOG_FORMAT: text
     I2SIG_CLUSTER_NAME: bench
-    # The bench's `properties:` line reads goSignals_router_reads_under_lock_total
-    # and goSignals_router_reads_before_ack_total, which count only with the
-    # router lock audit on (off by default in production).
-    I2SIG_ROUTER_LOCK_AUDIT: "true"
     # Intra-cluster wake-up calls (one node telling the stream's delivery
     # owner that new SETs arrived) are authenticated with this shared secret
     # and sent to the plain-HTTP internal listener on this port. Without

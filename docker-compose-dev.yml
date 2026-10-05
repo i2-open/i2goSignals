@@ -287,9 +287,6 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
-      # Count store/coordinator reads under the router lock and in the ack
-      # region (dev-bench `properties:` line); off by default in production.
-      - I2SIG_ROUTER_LOCK_AUDIT=true
       # Mutex/block profiling: off unless the shell exports these. e.g.
       # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
       - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
@@ -347,9 +344,6 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
-      # Count store/coordinator reads under the router lock and in the ack
-      # region (dev-bench `properties:` line); off by default in production.
-      - I2SIG_ROUTER_LOCK_AUDIT=true
       # Mutex/block profiling: off unless the shell exports these. e.g.
       # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
       - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
@@ -399,9 +393,6 @@ services:
       # Host ports: goSignals1 6060, goSignals2 6061, goSsfServer 6062.
       # See `make dev-pprof` / docs/perf/pprof.md.
       - I2SIG_PPROF_ADDR=:6060
-      # Count store/coordinator reads under the router lock and in the ack
-      # region (dev-bench `properties:` line); off by default in production.
-      - I2SIG_ROUTER_LOCK_AUDIT=true
       # Mutex/block profiling: off unless the shell exports these. e.g.
       # I2SIG_PPROF_MUTEX_FRACTION=1 I2SIG_PPROF_BLOCK_RATE=1 make dev-up
       - I2SIG_PPROF_MUTEX_FRACTION=${I2SIG_PPROF_MUTEX_FRACTION:-}
