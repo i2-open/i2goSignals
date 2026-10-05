@@ -2214,11 +2214,12 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
 	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
 	q := r.queueFor(sid)
-	ackJtis := make([]string, len(work))
-	tokens := make([]goSet.SecurityEventToken, len(work))
+	inbound := make([]string, len(work))
 	for i, rec := range work {
-		ackJtis[i] = q.AckJtiOf(rec.Jti, state)
+		inbound[i] = rec.Jti
 	}
+	ackJtis := q.AckJtisOf(inbound, state)
+	tokens := make([]goSet.SecurityEventToken, len(work))
 	idx := make(map[*model.EventRecord]int, len(work))
 	for i, rec := range work {
 		idx[rec] = i
@@ -3341,10 +3342,11 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 	q := r.queueFor(sid)
 	outcomes := make([]*delivery.PushOutcome, len(work))
 	if len(work) > 0 {
-		handed := make([]string, len(work))
+		inbound := make([]string, len(work))
 		for i := range work {
-			handed[i] = q.AckJtiOf(work[i].jti, config)
+			inbound[i] = work[i].jti
 		}
+		handed := q.AckJtisOf(inbound, config)
 		q.MarkHandedOut(handed, time.Now())
 		workers := r.pushConcurrency
 		if workers < 1 {

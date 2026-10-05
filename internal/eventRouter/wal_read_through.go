@@ -289,6 +289,34 @@ func (d *walReadThrough) Ack(ctx context.Context, batch interfaces.AckBatch) (in
 	return acked + held, err
 }
 
+// StoredAckJtis answers an undrained SET's acknowledgement JTI from the
+// overlay (what ingest wrote to the log) and the rest from the store.
+func (d *walReadThrough) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	out := make(map[string]string, len(jtis))
+	rest := make([]string, 0, len(jtis))
+	d.overlay.mu.Lock()
+	marks := d.overlay.pending[streamID]
+	for _, jti := range jtis {
+		if m, ok := marks[jti]; ok && m.live() && m.ackJti != "" {
+			out[jti] = m.ackJti
+			continue
+		}
+		rest = append(rest, jti)
+	}
+	d.overlay.mu.Unlock()
+	if len(rest) == 0 {
+		return out, nil
+	}
+	stored, err := d.EventDAO.StoredAckJtis(ctx, streamID, rest)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range stored {
+		out[k] = v
+	}
+	return out, nil
+}
+
 // ClearPendingForStream clears the store's markers and holds a clear for the
 // stream's undrained SETs, which the drain applies after writing them.
 func (d *walReadThrough) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {

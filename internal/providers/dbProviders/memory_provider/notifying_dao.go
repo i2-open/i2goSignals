@@ -190,6 +190,10 @@ func (d *notifyingEventDAO) GetPendingForStream(ctx context.Context, streamID st
 	return d.inner.GetPendingForStream(ctx, streamID, limit)
 }
 
+func (d *notifyingEventDAO) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	return d.inner.StoredAckJtis(ctx, streamID, jtis)
+}
+
 func (d *notifyingEventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
 	evs, err := d.inner.RemovePendingMany(ctx, jtis, streamID)
 	if err != nil {

@@ -73,6 +73,10 @@ func (f *fakeEventDAO) FindByJTI(_ context.Context, jti string) (*model.EventRec
 	return nil, nil
 }
 
+func (f *fakeEventDAO) StoredAckJtis(_ context.Context, _ string, _ []string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (f *fakeEventDAO) FindByJTIs(_ context.Context, _ []string) ([]*model.EventRecord, error) {
 	return nil, nil
 }

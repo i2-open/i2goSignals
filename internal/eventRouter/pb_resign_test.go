@@ -14,6 +14,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -92,7 +93,7 @@ func (h *pbResignHarness) createPBStream(t *testing.T, projectId, iss string, au
 
 // addSharedEvent persists one event carrying jti+txn and a source iss/aud, then
 // makes it pending on every supplied stream so a single stored event fans out.
-func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, sids ...string) {
+func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, streams ...*model.StreamStateRecord) {
 	t.Helper()
 	token := &goSet.SecurityEventToken{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -106,10 +107,13 @@ func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, sids ...
 		},
 	}
 	ctx := context.Background()
-	rec, err := h.eventService.AddEvent(ctx, token, sids[0], "")
+	rec, err := h.eventService.AddEvent(ctx, token, streams[0].StreamConfiguration.Id, "")
 	require.NoError(t, err)
-	for _, sid := range sids {
-		require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(rec.Jti), sid))
+	for _, st := range streams {
+		// Each row carries the stream's derived acknowledgement JTI, as the
+		// ingest row writer stores it (#363 S2).
+		ref := interfaces.PendingRef{Jti: rec.Jti, AckJti: st.AckJti(rec.Jti)}
+		require.NoError(t, h.eventService.AddEventToStream(ctx, ref, st.StreamConfiguration.Id))
 	}
 }
 
@@ -150,7 +154,7 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		jti := goSet.GenerateJti()
 		jtis[i] = jti
-		h.addSharedEvent(t, jti, "txn-"+jti, streamA.StreamConfiguration.Id, streamB.StreamConfiguration.Id)
+		h.addSharedEvent(t, jti, "txn-"+jti, streamA, streamB)
 	}
 
 	var wg sync.WaitGroup

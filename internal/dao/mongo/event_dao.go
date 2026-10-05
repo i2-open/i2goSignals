@@ -707,6 +707,40 @@ func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string
 	return page, nil
 }
 
+// StoredAckJtis returns the stored ackJti of each of jtis that has a
+// deliveries row on streamID, in either state, in one read on the {sid, jti}
+// key.
+func (d *EventDAOMongo) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	out := make(map[string]string, len(jtis))
+	if len(jtis) == 0 {
+		return out, nil
+	}
+	c, err := d.deliveriesColLoad()
+	if err != nil {
+		return nil, err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return nil, err
+	}
+	cursor, err := c.Find(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "jti", Value: bson.D{{Key: "$in", Value: jtis}}}},
+		options.Find().SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "ackJti", Value: 1}}))
+	if err != nil {
+		// WARN, not ERROR: the caller retries or redelivers (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading stored acknowledgement JTIs", "streamID", streamID, "error", err)
+		return nil, err
+	}
+	var docs []deliveryDoc
+	if err = cursor.All(ctx, &docs); err != nil {
+		eLog.Error("Error decoding stored acknowledgement JTIs", "streamID", streamID, "error", err)
+		return nil, err
+	}
+	for i := range docs {
+		out[docs[i].Jti] = docs[i].ref().AckJti
+	}
+	return out, nil
+}
+
 // RemovePendingMany finds streamID's pending references for jtis in one query,
 // deletes exactly those in one DeleteMany, and returns them. Delivered
 // references are never touched.

@@ -277,6 +277,12 @@ func (s *EventService) PendingPage(ctx context.Context, streamID string, limit i
 	return s.eventDAO.GetPendingForStream(ctx, streamID, limit)
 }
 
+// StoredAckJtis returns the ackJti stored on streamID's row for each of jtis
+// (inbound JTIs) that has one.
+func (s *EventService) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	return s.eventDAO.StoredAckJtis(ctx, streamID, jtis)
+}
+
 // AckBatch acknowledges batch.Jtis (acknowledgement JTIs) for batch.StreamID
 // in one DAO write and returns the number of references moved to delivered.
 func (s *EventService) AckBatch(ctx context.Context, batch interfaces.AckBatch) (int64, error) {

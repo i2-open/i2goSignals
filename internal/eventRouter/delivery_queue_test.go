@@ -241,3 +241,31 @@ func TestDeliveryQueue_AcceptLockedNoNestedRLock(t *testing.T) {
 	<-writerDone
 	assert.Equal(t, "a", q.AckJtiOf("a", nil))
 }
+
+// S2: rows keep the ackJti written at ingest and nothing is re-derived. After a
+// change from Forward to a re-signing mode, a reference beyond the queue's
+// window is signed and acknowledged under its stored ackJti (the inbound JTI),
+// not the stream's derived one.
+func TestDeliveryQueue_BeyondWindowUsesStoredAckJti(t *testing.T) {
+	r, dao, rec := queueRouter(t, model.RouteModeForward, "a", "b", "c")
+	sid := rec.StreamConfiguration.Id
+	q := newDeliveryQueue(r, sid, 1)
+	r.queues.Store(sid, q)
+	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 1})
+
+	pub := rec
+	pub.StreamConfiguration.RouteMode = model.RouteModePublish
+	r.pushStreams[sid] = pub
+	q.routeModeChanged(context.Background())
+	require.NotEqual(t, "c", pub.AckJti("c"), "the derived value differs from the stored one")
+
+	assert.Equal(t, "c", q.AckJtiOf("c", &pub), "a reference the queue does not hold takes its stored ackJti")
+	assert.Equal(t, []string{"b", "c"}, q.AckJtisOf([]string{"b", "c"}, &pub))
+	assert.Equal(t, "c", q.RefOf("c", &pub).AckJti)
+
+	n, err := q.AckInbound(context.Background(), []string{"c"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n, "the acknowledgement matches the stored row")
+	assert.Equal(t, map[string]string{"a": "a", "b": "b"}, pendingAckJtis(t, dao, sid))
+	assert.Nil(t, findCopy(t, dao, pub.AckJti("c")), "no copy under a re-derived JTI")
+}

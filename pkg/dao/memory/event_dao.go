@@ -429,6 +429,25 @@ func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string,
 	return page, nil
 }
 
+// StoredAckJtis returns the stored ackJti of each of jtis that has a row on
+// streamID, in either state.
+func (d *EventDAOMemory) StoredAckJtis(_ context.Context, streamID string, jtis []string) (map[string]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make(map[string]string, len(jtis))
+	rows := d.deliveries[streamID]
+	for _, jti := range jtis {
+		if row, ok := rows[jti]; ok {
+			ackJti := row.AckJti
+			if ackJti == "" {
+				ackJti = row.Jti
+			}
+			out[jti] = ackJti
+		}
+	}
+	return out, nil
+}
+
 // RemovePendingMany deletes every pending row of streamID whose JTI is in
 // jtis under a single lock acquisition and returns the removed entries.
 func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {

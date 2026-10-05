@@ -178,6 +178,13 @@ func (d *eventDAO) GetPendingForStream(ctx context.Context, streamID string, lim
 	return page, err
 }
 
+func (d *eventDAO) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	start := time.Now()
+	out, err := d.inner.StoredAckJtis(ctx, streamID, jtis)
+	d.observe("StoredAckJtis", start, err)
+	return out, err
+}
+
 // pendingPageOp labels a GetPendingForStream call. A page with more pending
 // rows than it returns (Total > len(Refs)) also paid for the OldestBeyond read,
 // so it is recorded under GetPendingForStreamBeyond instead; the difference of

@@ -706,22 +706,92 @@ func (q *deliveryQueue) ensureForward(ctx context.Context) {
 }
 
 // AckJtiOf returns the acknowledgement JTI a SET with inboundJti carries on
-// this stream: the held reference's (the value written with the row). A
-// reference the queue does not hold (beyond the window) takes the row
-// writer's value for the stream's route mode.
+// this stream (AckJtisOf for one JTI).
 func (q *deliveryQueue) AckJtiOf(inboundJti string, stream *model.StreamStateRecord) string {
-	q.mu.Lock()
-	qr, ok := q.refs[inboundJti]
-	q.mu.Unlock()
-	if ok {
-		return qr.ref.AckJti
-	}
-	if stream == nil {
-		if stream = q.stream(); stream == nil {
-			return inboundJti
+	return q.AckJtisOf([]string{inboundJti}, stream)[0]
+}
+
+// AckJtisOf returns, in order, the acknowledgement JTI each inbound JTI
+// carries on this stream (ackJtisOf). A sign site cannot fail its hand-out,
+// so a failed store read falls back to the stream's row-writer value and is
+// logged; the receiver's acknowledgement of that SET then matches nothing and
+// it is delivered again under its stored JTI.
+func (q *deliveryQueue) AckJtisOf(inbound []string, stream *model.StreamStateRecord) []string {
+	out, err := q.ackJtisOf(q.ctx(), inbound, stream)
+	if err != nil {
+		eventLogger.Warn("QUEUE: Error reading stored acknowledgement JTIs; signing with the stream's value", "sid", q.sid, "count", len(inbound), "error", err)
+		stream = q.orStream(stream)
+		for i, jti := range inbound {
+			if out[i] == "" {
+				out[i] = rowWriterAckJti(stream, jti)
+			}
 		}
 	}
+	return out
+}
+
+// ackJtisOf is the one place the queue resolves acknowledgement JTIs (#363,
+// S2: rows keep the ackJti written at ingest; nothing is re-derived). A held
+// reference answers from memory; the rest come from their stored rows in one
+// read. Only a JTI with no row at all takes the row writer's value for the
+// stream's route mode, which is what a row written for it would carry. On a
+// read error the unresolved entries are left empty and the error returned.
+func (q *deliveryQueue) ackJtisOf(ctx context.Context, inbound []string, stream *model.StreamStateRecord) ([]string, error) {
+	out := make([]string, len(inbound))
+	var missing []string
+	q.mu.Lock()
+	for i, jti := range inbound {
+		if qr, ok := q.refs[jti]; ok {
+			out[i] = qr.ref.AckJti
+			continue
+		}
+		missing = append(missing, jti)
+	}
+	q.mu.Unlock()
+	if len(missing) == 0 {
+		return out, nil
+	}
+	stored, err := q.r.eventService.StoredAckJtis(ctx, q.sid, missing)
+	if err != nil {
+		return out, err
+	}
+	stream = q.orStream(stream)
+	for i, jti := range inbound {
+		if out[i] != "" {
+			continue
+		}
+		if a, ok := stored[jti]; ok {
+			out[i] = a
+			continue
+		}
+		out[i] = rowWriterAckJti(stream, jti)
+	}
+	return out, nil
+}
+
+// orStream returns stream, or the router's copy of the queue's stream when
+// stream is nil (taken outside q.mu: the lookup takes the router lock).
+func (q *deliveryQueue) orStream(stream *model.StreamStateRecord) *model.StreamStateRecord {
+	if stream == nil {
+		return q.stream()
+	}
+	return stream
+}
+
+// rowWriterAckJti is the value a row writer stores for inboundJti on stream.
+func rowWriterAckJti(stream *model.StreamStateRecord, inboundJti string) string {
+	if stream == nil {
+		return inboundJti
+	}
 	return stream.AckJti(inboundJti)
+}
+
+// ctx is the router's context, or Background for a bare test router.
+func (q *deliveryQueue) ctx() context.Context {
+	if q.r.ctx != nil {
+		return q.r.ctx
+	}
+	return context.Background()
 }
 
 // RefOf returns the reference held for inboundJti, with its acknowledgement
@@ -875,23 +945,14 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 	if len(inbound) == 0 {
 		return 0, nil
 	}
-	var stream *model.StreamStateRecord
 	ackJtis := make([]string, 0, len(inbound))
 	var copies []*model.EventRecord
+	var unheld []string
 	q.mu.Lock()
 	for _, jti := range inbound {
 		qr, ok := q.refs[jti]
 		if !ok {
-			q.mu.Unlock()
-			if stream == nil {
-				stream = q.stream()
-			}
-			a := jti
-			if stream != nil {
-				a = stream.AckJti(jti)
-			}
-			q.mu.Lock()
-			ackJtis = append(ackJtis, a)
+			unheld = append(unheld, jti)
 			continue
 		}
 		ackJtis = append(ackJtis, qr.ref.AckJti)
@@ -900,6 +961,15 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 		}
 	}
 	q.mu.Unlock()
+	if len(unheld) > 0 {
+		// Beyond the window: the stored rows' ackJti, in one read. A failed
+		// read leaves the references pending; they are delivered again.
+		stored, err := q.ackJtisOf(ctx, unheld, nil)
+		if err != nil {
+			return 0, err
+		}
+		ackJtis = append(ackJtis, stored...)
+	}
 	n, err := q.write(ctx, ackJtis, copies)
 	if err != nil {
 		return n, err

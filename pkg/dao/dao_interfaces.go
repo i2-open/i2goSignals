@@ -141,6 +141,11 @@ type EventDAO interface {
 	// GetPendingForStream returns one page of streamID's pending references
 	// in ascending Jti order (see PendingPage).
 	GetPendingForStream(ctx context.Context, streamID string, limit int32) (PendingPage, error)
+	// StoredAckJtis returns the ackJti stored on streamID's deliveries row for
+	// each of jtis (inbound JTIs), in either state, keyed by inbound JTI. A JTI
+	// with no row is absent. It is the read a delivery queue makes for a
+	// reference it does not hold: rows keep the ackJti written at ingest.
+	StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error)
 	// RemovePendingMany deletes every entry of jtis (inbound JTIs) that is
 	// pending for streamID and returns the removed entries (order
 	// unspecified). A JTI not pending for the stream is skipped. An empty

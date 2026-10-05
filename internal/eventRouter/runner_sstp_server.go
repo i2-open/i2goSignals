@@ -335,7 +335,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []
 		tokens[i].ID = ackJtiOf[eventRecord]
 		if tokens[i].ID == "" {
 			// A reference claimed without its acknowledgement JTI (a bare
-			// buffer submit) takes the stream's derived one.
+			// buffer submit) takes its stored row's one.
 			tokens[i].ID = q.AckJtiOf(eventRecord.Jti, rec)
 		}
 	}
