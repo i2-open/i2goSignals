@@ -350,6 +350,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		Coordinator:          persistence.Coordinator,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PushDelivery:         delivery.NewHTTPAdapter(persistence.StreamService, nil),
+		// goSsfServer serves its own POST /poll/{id}, one node per store, so it
+		// is always the poll-transmitter lease owner (#365).
+		ServesClaims: true,
 	}, nodeID)
 
 	var baseUrl *url.URL

@@ -90,6 +90,7 @@ func newMongoRouterBenchWith(b *testing.B, log wal.Log) *mongoRouterBench {
 		KeyService:    p.KeyService,
 		EventService:  p.EventService,
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 		WAL:           log,
 	}, "node-bench").(*router)
 	b.Cleanup(r.Shutdown)

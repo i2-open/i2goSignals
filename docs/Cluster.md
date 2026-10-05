@@ -12,7 +12,9 @@ The clustering mechanism ensures that specific tasks are owned by a single node 
 The following features are owned by a single node per stream:
 *   **Event Stream Poll Receivers**: Only one node polls an upstream SSF Events endpoint.
 *   **Event Stream Push Transmitters**: Only one node pushes events to a downstream receiver endpoint.
-*   **SSTP Pair Clients (initiators)**: Only one node opens the outbound SSTP connection cycle for a pair. The SSTP **server (responder)** side takes **no** lease — every node can answer `POST /sstp/{id}`, so the receiver side scales horizontally.
+*   **SSTP Pair Clients (initiators)**: Only one node opens the outbound SSTP connection cycle for a pair.
+*   **Poll Transmitters** (`poll-transmitter:<streamId>`): Only one node holds a poll stream's queue; every node still answers `POST /poll/{id}` (see [Serving non-owner requests](#serving-non-owner-requests-claim)).
+*   **SSTP Pair Servers (acceptors)** (`sstp-server:<txSid>`): Only one node holds an accepting pair's outbound queue; every node still answers `POST /sstp/{id}` and ingests its inbound SETs.
 
 ## Node Identity
 
@@ -70,7 +72,7 @@ Even in local mode, only streams whose per-stream `durability` is `local` use th
 Acknowledgements are not fenced on write. The router's lease manager records, on every acquire or renewal, a tenure deadline of `min(leaseUntil, renewCallStart + leaseDuration) - margin` (margin `I2SIG_LEASE_SAFETY_MARGIN`, default 5s, clamped to half the lease duration) and answers "does this node still own the stream" from memory:
 *   Inside the tenure, an acknowledgement batch is written with no lease read or coordinator call before it.
 *   Past the tenure, the batch is skipped and nothing is written; the SETs stay pending. A heartbeat renewal resumes it, or the next owner redelivers them, so a takeover can duplicate a send but never lose one.
-*   Modes that hold no lease (poll transmitter, SSTP server) are not checked.
+*   Every stream kind is checked against its own lease: push and poll transmitters, SSTP pair clients and SSTP pair servers.
 
 ### Parameters
 *   **Lease Duration**: 30 seconds.
@@ -95,7 +97,20 @@ For the **client (initiator)** side of an SSTP pair, the node attempts to acquir
 *   Only the lease holder runs the SSTP-client connection loop, opening and re-opening the single bidirectional HTTP cycle for that pair.
 *   The lease uses the same 30 s duration / 10 s heartbeat as push/poll. A new owner waits a short randomized takeover jitter before opening its first connection, spreading the thundering-herd after a cluster-wide blip.
 *   If the lease is lost, the heartbeat cancels the cycle context, aborting any in-flight request; another node takes over after the lease expires.
-*   The SSTP **server (responder)** side takes no lease and is not listed here — see the overview above.
+
+### Poll Transmitters and SSTP Pair Servers
+A poll transmitter is leased as `poll-transmitter:<streamId>` and the accepting (server) side of an SSTP pair as `sstp-server:<txSid>`, with the same 30 s duration / 10 s heartbeat (#365).
+*   The lease is taken on first use, not at startup: when a node routes an event to the stream or answers a request for it and no live lease exists. The new owner builds the stream's queue with one read of the stored pending events.
+*   Only a node whose router serves claims (the server application) takes these leases. A node that does not serve claims routes events to the owner through a wake-up and never builds the queue.
+*   Without a cluster coordinator every stream is the local node's: no lease is taken and no Claim is sent.
+
+### Serving Non-Owner Requests (Claim)
+A `POST /poll/{id}` or `POST /sstp/{id}` that reaches a node which does not own the stream is answered by the owner through one `POST /_cluster/claim` call. The call carries the request's acknowledgements and asks for up to `maxEvents` references; the owner applies the acknowledgements in its one write, claims the references from its queue and returns them, and the receiving node signs and sends them. Only a stream no node knows answers `404`.
+*   The Claim's wait is the receiver's resolved long-poll time (`I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT`) less one second, so the owner answers before the receiver's own deadline; `returnImmediately` sends no wait.
+*   `I2SIG_CLUSTER_CLAIM_INFLIGHT` (default 256) caps the waiting Claims one node holds open to one owner. Past the cap a request is sent with `returnImmediately`, and an empty answer is held on the receiving node for the wait plus one second so a client cannot spin. The budget-exhausted count is `goSignals_router_peer_claim_budget_exhausted_total`; the claims an owner answers are counted in `goSignals_router_peer_claims_total{mode,result}`.
+*   A `NotOwner` answer or a failed call forgets the cached owner and resolves once more; a second failure returns an empty answer with the acknowledgements unapplied, so the client resends them.
+*   An SSTP request that neither acknowledges nor asks for events (`returnEvents=false`) makes no Claim.
+*   The `/_cluster/claim` route uses the wake-up authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer).
 
 ## Intra-Cluster Coordination (Wake-up Mechanism)
 
@@ -118,7 +133,7 @@ On a push stream the owner's wake backfill reads the store past what is already 
 SSTP adds two wake-up routes that mirror `/_cluster/wake-transmitter` but are kept separate for telemetry. Both reuse the wake-transmitter authentication (SPIFFE mTLS peer certificate, else the `I2SIG_CLUSTER_INTERNAL_TOKEN` shared-HMAC bearer) and the same two-edge coalescing window, so duplicate wake-ups inside the window collapse into one trailing wake:
 
 *   **`POST /_cluster/wake-sstp-client`** — the request body's `sid` field carries the pair's **`PairId`**. Broadcast to all cluster nodes when a node receives an inbound event whose target SSTP-client pair is owned (via the `sstp-client:<PairId>` lease) by a different node, so the lease owner drains the pending event into the next outbound cycle.
-*   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Broadcast when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the receiver side returns the event immediately.
+*   **`POST /_cluster/wake-sstp-server`** — the request body's `sid` field carries the pair's **tx-side SID**. Sent to the `sstp-server:<txSid>` lease owner, with the new event references, when a node receives an outbound event matching an SSTP-server pair, so a long-poll held open on the owner, or a Claim waiting there for a peer, returns the event immediately.
 
 ## Stream-table reconciliation
 

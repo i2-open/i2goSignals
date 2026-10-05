@@ -243,6 +243,7 @@ func newTrackedRouter(t *testing.T) (*testHarness, *atomic.Int64) {
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		ServesClaims:  true,
 	}, "node-test").(*router)
 	t.Cleanup(r.Shutdown)
 	reads := &atomic.Int64{}

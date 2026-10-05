@@ -35,6 +35,7 @@ func newTestRouter(t *testing.T) *testHarness {
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		ServesClaims:  true,
 	}, "node-test").(*router)
 	t.Cleanup(r.Shutdown)
 	return &testHarness{

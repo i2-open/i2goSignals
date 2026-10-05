@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -294,6 +295,18 @@ type router struct {
 	// poll holds the JTIs it returned before an unacked one is served again
 	// (#337). 0 takes no claims, so overlapping polls share a batch.
 	pollClaimTTL time.Duration
+	// servesClaims is RouterDeps.ServesClaims (#365): false never acquires a
+	// poll-transmitter or sstp-server lease.
+	servesClaims bool
+	// claimInflightMax is the resolved I2SIG_CLUSTER_CLAIM_INFLIGHT: per owner
+	// node, how many waiting Claim calls this node keeps in flight (#365).
+	// claimInflight holds each owner's count (*atomic.Int64).
+	claimInflightMax int
+	claimInflight    sync.Map
+	// streamLeases holds the heartbeat cancel of each poll-transmitter and
+	// sstp-server lease this node holds, by resource (#365).
+	streamLeasesMu sync.Mutex
+	streamLeases   map[string]*streamLease
 	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
 	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
 	x509Source *workloadapi.X509Source
@@ -387,6 +400,12 @@ type RouterDeps struct {
 	// acknowledgement time. nil, a nil result, or a result <= 0 means keep
 	// forever: no expireAt is written. Community binds nothing here.
 	RetentionWindow services.EffectiveWindowFunc
+	// ServesClaims says this process serves poll requests and accepted SSTP
+	// requests and mounts /_cluster/claim (#365). The community server and
+	// goSsfServer set it. False (business routers) never acquires a
+	// poll-transmitter or sstp-server lease: such a router wakes a known
+	// owner at ingest and otherwise leaves the rows pending.
+	ServesClaims bool
 }
 
 // The router is the reset-egress sink EventService reports re-queued events to
@@ -565,6 +584,9 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		"ackDeferralWindow", router.pushBatchMax())
 
 	router.deliveryInFlightMax = deliveryInFlightMax()
+	router.servesClaims = deps.ServesClaims
+	router.claimInflightMax = claimInflightMax()
+	router.streamLeases = make(map[string]*streamLease)
 	router.ackCoalesceWindow = ackCoalesceWindow()
 	eventLogger.Info("Delivery ack coalescing resolved (#336)",
 		"inFlightMax", router.inFlightMax(),
@@ -612,6 +634,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		eventLogger.Info("Background watcher enabled via I2SIG_STORE_MONGO_WATCH_ENABLED")
 		go router.eventService.WatchPending(ctx, func(ref interfaces.PendingRef, streamId string) {
 			sid, jti := streamId, ref.Jti
+			// Offered only to a queue this node holds (#365); otherwise the
+			// owner gets the reference from its wake or its next pending read.
 			router.mu.RLock()
 			pollBuf, pollOk := router.pollBuffers[sid]
 			pushBuf, pushOk := router.pushBuffers[sid]
@@ -693,7 +717,11 @@ func (r *router) ResetStream(sid string) {
 		buf.Clear()
 	}
 	_, _ = r.eventService.ClearPendingForStream(r.ctx, sid)
-	r.queueFor(sid).reset()
+	// Only the lease owner holds a queue (#365): a node with none has nothing
+	// to reset and must not create one.
+	if q, ok := r.queues.Load(sid); ok {
+		q.(*deliveryQueue).reset()
+	}
 }
 
 func (r *router) WakeTransmitter(sid string, mode string) {
@@ -1011,22 +1039,9 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 			eventLogger.Info("Adding stream to Pollers", "sid", stream.StreamConfiguration.Id)
 			r.pollStreams[stream.StreamConfiguration.Id] = *stream
 		}
-		_, ok = r.pollBuffers[stream.StreamConfiguration.Id]
-		if !ok {
-			// Preload any outstanding pending events (because we may be re-starting)
-			// We release the lock for provider call
-			r.mu.Unlock()
-			jtis, _ := r.pendingJtis(r.ctx, stream.StreamConfiguration.Id, model.PollParameters{
-				MaxEvents:         0,
-				ReturnImmediately: true,
-				Acks:              nil,
-				SetErrs:           nil,
-				TimeoutSecs:       10,
-			})
-			r.mu.Lock()
-			// TODO:  might have to check for existing events!
-			r.pollBuffers[stream.StreamConfiguration.Id] = buffer.CreateEventPollBuffer(jtis, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
-		}
+		// No poll buffer is preloaded here (#365): a poll stream's queue
+		// exists only on the poll-transmitter lease owner, which builds it
+		// with one pending read when it acquires the lease (resolveOwner).
 		return
 	}
 	// The stream is delivery PUSH
@@ -1420,11 +1435,14 @@ type fanoutTarget struct {
 	// enqueuedAt is the enqueue time the ingest write stamped on t's
 	// references; zero before the write (a WAL append-time wake).
 	enqueuedAt time.Time
-	// owner is the node holding a push or SSTP-client target's lease, ""
-	// when none is known. resolveOwners fills it with r.mu released, after
-	// the plan and before the wake; the wake step reads only this field
-	// (#362). Poll and SSTP-server targets leave it empty until #365.
+	// owner is the node holding the target's lease, "" when none is known.
+	// resolveOwners fills it with r.mu released, after the plan and before
+	// the wake; the wake step reads only this field (#362, #365).
 	owner string
+	// seeded is set when resolveOwners built this node's poll or
+	// sstp-server queue from a pending read, which may already hold t's
+	// references; the wake then queues only the ones the read missed.
+	seeded bool
 }
 
 // pendingJtis returns the inbound JTIs of streamID's pending references and
@@ -1546,11 +1564,19 @@ func (r *router) selectMatchingLocked(e *routeEntry, batch []*model.EventRecord)
 //     with no invalidation story, which issue #287 rules out. The owner read is
 //     noted in leaseOwners only so the ring-fed commit wake (wakeTargetRemote)
 //     can skip a broadcast to itself.
+//   - POLL and SSTP-SERVER: resolveOwner (#365), the ingest acquire point. A
+//     claim-serving node with no live lease on the stream takes it here and
+//     builds the stream's queue with one pending read; a router with
+//     ServesClaims false only reads the owner.
 func (r *router) resolveOwners(targets []*fanoutTarget) {
 	for _, t := range targets {
 		switch t.mode {
 		case routeModePush:
 			t.owner = r.pushLeaseOwner(t.key)
+		case routeModePoll:
+			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.PollTransmitterResource(t.key))
+		case routeModeSstpServer:
+			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.SstpServerResource(t.key))
 		case routeModeSstpClient:
 			resource := cluster.SstpClientResource(t.key)
 			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
@@ -1642,16 +1668,22 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		}
 
 	case "POLL":
-		// For poll streams, every node serving a long poll should be woken up.
-		// Since we don't have a transmitter lease for poll, we just submit locally.
-		// Ideally we'd broadcast to all nodes, but let's start with local.
-		// Comma-ok for the same reason as the push arm above: the stream may have
-		// been removed while r.mu was released across the body-write join.
-		if buf, ok := r.pollBuffers[t.key]; ok {
-			r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
+		// The poll-transmitter lease owner holds the stream's one queue
+		// (#365). Only the owner's buffer is fed; another owner gets a direct
+		// wake with the batch's references, and with no owner the rows wait
+		// for the pending read of the node that acquires the lease. Comma-ok
+		// for the same reason as the push arm above.
+		if t.owner == r.nodeId {
+			if buf, ok := r.pollBuffers[t.key]; ok {
+				r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
+				queue := jtis
+				if t.seeded {
+					queue = buf.Absent(jtis)
+				}
+				buf.SubmitEvents(queue)
 			}
+		} else if remote && t.owner != "" {
+			go r.sendRefWake(t.key, peer.ModePoll, t.owner, t.refsOf(jtis))
 		}
 
 	case "SSTP-CLIENT":
@@ -1670,15 +1702,20 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		}
 
 	case "SSTP-SERVER":
-		if buf, ok := r.sstpServerBuffers[t.key]; ok {
-			r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
-			for _, jti := range jtis {
-				buf.SubmitEvent(jti)
+		// The sstp-server lease owner holds the pair's one outbound queue
+		// (#365), fed like the poll arm above.
+		if t.owner == r.nodeId {
+			if buf, ok := r.sstpServerBuffers[t.key]; ok {
+				r.queueFor(t.docID).acceptLocked(r.ctx, t.refsOf(jtis))
+				queue := jtis
+				if t.seeded {
+					queue = buf.Absent(jtis)
+				}
+				buf.SubmitEvents(queue)
+				buf.Wakeup()
 			}
-			buf.Wakeup()
-		}
-		if remote {
-			go r.broadcastSstpServerWake(t.key)
+		} else if remote && t.owner != "" {
+			go r.sendRefWake(t.key, peer.ModeSstpServer, t.owner, t.refsOf(jtis))
 		}
 	}
 }
@@ -1689,7 +1726,9 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 // which wakeCommittedRemote fills from leaseOwners. An SSTP-client target is
 // woken by the coalesced broadcast (at most one per pair per 250ms, which
 // every node but the lease owner ignores) unless the owner noted at append is
-// this node, whose buffer the append-time wake already fed.
+// this node, whose buffer the append-time wake already fed. Poll and
+// SSTP-server targets wake their lease owner only, with the references
+// (#365).
 func (r *router) wakeTargetRemote(t *fanoutTarget) {
 	switch t.mode {
 	case "PUSH":
@@ -1701,8 +1740,41 @@ func (r *router) wakeTargetRemote(t *fanoutTarget) {
 			return
 		}
 		go r.broadcastSstpClientWake(t.key)
+	case "POLL":
+		if t.owner != "" && t.owner != r.nodeId {
+			go r.sendRefWake(t.key, peer.ModePoll, t.owner, t.refsOf(t.jtis))
+		}
 	case "SSTP-SERVER":
-		go r.broadcastSstpServerWake(t.key)
+		if t.owner != "" && t.owner != r.nodeId {
+			go r.sendRefWake(t.key, peer.ModeSstpServer, t.owner, t.refsOf(t.jtis))
+		}
+	}
+}
+
+// sendRefWake sends the lease owner of a poll or sstp-server stream one wake
+// per MaxWakeJtis references, ascending by inbound JTI (#365). It is not
+// coalesced: the lists are the owner's only copy of the batch until its next
+// pending read, and a coalesced wake would drop them.
+func (r *router) sendRefWake(sid, mode, ownerNodeId string, refs []interfaces.PendingRef) {
+	sorted := slices.Clone(refs)
+	slices.SortFunc(sorted, func(a, b interfaces.PendingRef) int { return strings.Compare(a.Jti, b.Jti) })
+	for start := 0; start < len(sorted); start += peer.MaxWakeJtis {
+		chunk := sorted[start:min(start+peer.MaxWakeJtis, len(sorted))]
+		msg := peer.WakeMessage{Sid: sid, Mode: mode,
+			Jtis:       make([]string, len(chunk)),
+			AckJtis:    make([]string, len(chunk)),
+			EnqueuedAt: make([]int64, len(chunk)),
+		}
+		for i, ref := range chunk {
+			msg.Jtis[i] = ref.Jti
+			msg.AckJtis[i] = ref.AckJti
+			if !ref.EnqueuedAt.IsZero() {
+				msg.EnqueuedAt[i] = ref.EnqueuedAt.UnixMilli()
+			}
+		}
+		if err := r.peers.Wake(r.ctx, ownerNodeId, msg); err != nil {
+			eventLogger.Warn("ROUTER: Wake-up call failed", "nodeId", ownerNodeId, "sid", sid, "mode", mode, "error", err)
+		}
 	}
 }
 
@@ -1830,6 +1902,55 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 		eventLogger.Error("ROUTER: Error adding operational event to stream", "sid", sid, "jti", rec.Jti, "error", err)
 		return rec, err
 	}
+	r.mu.RLock()
+	_, isPoll := r.pollStreams[sid]
+	r.mu.RUnlock()
+	if isPoll {
+		// The poll-transmitter lease owner holds the stream's one queue
+		// (#365): feed it here, or wake the owner with the reference.
+		owner, self, seeded := r.resolveOwnerSeeded(cluster.PollTransmitterResource(sid))
+		switch {
+		case self:
+			r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
+			if buf, _ := r.heldBuffer(peer.ModePoll, sid); buf != nil {
+				queue := []string{rec.Jti}
+				if seeded {
+					queue = buf.Absent(queue)
+				}
+				buf.SubmitEvents(queue)
+			}
+		case owner != "":
+			go r.sendRefWake(sid, peer.ModePoll, owner, []interfaces.PendingRef{opRef})
+		}
+		eventLogger.Info("ROUTER: Operational event submitted (poll)", "sid", sid, "jti", rec.Jti, "types", rec.Types, "owner", owner)
+		return rec, nil
+	}
+	txSid := stream.StreamConfiguration.Id
+	r.mu.RLock()
+	_, isSstpServer := r.sstpServerStreams[txSid]
+	r.mu.RUnlock()
+	if isSstpServer {
+		// The sstp-server lease owner holds the pair's one outbound queue
+		// (#365), fed like the poll branch above.
+		owner, self, seeded := r.resolveOwnerSeeded(cluster.SstpServerResource(txSid))
+		switch {
+		case self:
+			r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
+			if buf, _ := r.heldBuffer(peer.ModeSstpServer, txSid); buf != nil {
+				queue := []string{rec.Jti}
+				if seeded {
+					queue = buf.Absent(queue)
+				}
+				buf.SubmitEvents(queue)
+				buf.Wakeup()
+			}
+		case owner != "":
+			go r.sendRefWake(txSid, peer.ModeSstpServer, owner, []interfaces.PendingRef{opRef})
+		}
+		eventLogger.Info("ROUTER: Operational event submitted (sstp-server)", "sid", sid, "jti", rec.Jti, "types", rec.Types, "owner", owner)
+		return rec, nil
+	}
+
 	r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
 
 	r.mu.RLock()
@@ -1844,12 +1965,6 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 			go r.sendWakeup(sid, "push", ownerNodeId, "")
 		}
 		eventLogger.Info("ROUTER: Operational event submitted (push)", "sid", sid, "jti", rec.Jti, "types", rec.Types)
-		return rec, nil
-	}
-
-	if pollBuf, ok := r.pollBuffers[sid]; ok {
-		pollBuf.SubmitEvent(rec.Jti)
-		eventLogger.Info("ROUTER: Operational event submitted (poll)", "sid", sid, "jti", rec.Jti, "types", rec.Types)
 		return rec, nil
 	}
 
@@ -1904,16 +2019,31 @@ func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
 func (r *router) PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int) {
 	r.mu.RLock()
 	state, exist := r.pollStreams[sid]
-	pollBuffer, bufExist := r.pollBuffers[sid]
 	r.mu.RUnlock()
 
-	if !exist || !bufExist {
+	// 404 only for an unknown stream (#365). A known stream with no queue on
+	// this node is the normal non-owner case: resolveOwner names the owner,
+	// which serves the request through one Claim.
+	if !exist {
 		eventLogger.Error("POLL-SRV: Error Poll Transmitter not found", "sid", sid)
 		return nil, false, http.StatusNotFound
 	}
+	resource := cluster.PollTransmitterResource(sid)
+	owner, self := r.resolveOwner(resource)
 
-	if len(params.Acks) > 0 || len(params.SetErrs) > 0 {
-		r.ackPolled(ctx, sid, &state, pollBuffer, params)
+	setErrs := make([]string, 0, len(params.SetErrs))
+	for jti := range params.SetErrs {
+		setErrs = append(setErrs, jti)
+	}
+	sort.Strings(setErrs)
+	hasAcks := len(params.Acks) > 0 || len(setErrs) > 0
+	req := peer.ClaimRequest{Sid: sid, Mode: peer.ModePoll, AckJtis: params.Acks, SetErrJtis: setErrs}
+	// applyAcksOnly sends the acknowledgements with a request that claims
+	// nothing (MaxEvents 0): on the owner in its one write.
+	applyAcksOnly := func() {
+		if hasAcks {
+			r.claimFor(ctx, resource, owner, self, req)
+		}
 	}
 
 	if state.Status != model.StreamStateEnabled {
@@ -1927,25 +2057,14 @@ func (r *router) PollStreamHandler(ctx context.Context, sid string, params model
 	}
 
 	if state.Status != model.StreamStateEnabled {
-		if (state.Status == model.StreamStatePause || state.Status == model.StreamStateDisable) && (len(params.Acks) > 0 || len(params.SetErrs) > 0) {
+		applyAcksOnly()
+		if (state.Status == model.StreamStatePause || state.Status == model.StreamStateDisable) && hasAcks {
 			return map[string]string{}, false, http.StatusOK
 		}
 		stateString, _ := json.MarshalIndent(&state, "", "  ")
 		eventLogger.Debug("Stream State", "state", string(stateString))
 		eventLogger.Error("POLL-SRV: Error Poll request but stream is not active", "sid", sid)
 		return nil, false, http.StatusConflict
-	}
-
-	// Opportunistically prefetch pending JTIs if the buffer is empty
-	if pollBuffer.Cnt() == 0 {
-		jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
-			MaxEvents:         int32(r.backfillBatch),
-			ReturnImmediately: true,
-		})
-		if len(jtis) > 0 {
-			eventLogger.Debug("POLL-SRV: Prefetched events", "sid", sid, "count", len(jtis))
-			pollBuffer.AddEvents(jtis)
-		}
 	}
 
 	// A signing transmitter (every route mode but Forward) needs an active key
@@ -1959,73 +2078,64 @@ func (r *router) PollStreamHandler(ctx context.Context, sid string, params model
 	} else {
 		key, kid = r.checkAndLoadKey(sid, state.StreamConfiguration.Iss, state.StreamConfiguration.SigningAlg)
 		if key == nil {
+			applyAcksOnly()
 			r.takeKeyUnavailablePause(&state, "POLL-SRV", nil)
 			return nil, false, PollKeyUnavailableStatus
 		}
 	}
 
-	// The batch is claimed (#337): an overlapping poll on this stream skips
-	// these JTIs and gets the next disjoint slice, and an unacked one is
-	// served again once the claim expires. The claims live in this node's
-	// in-memory poll buffer, beside the JTIs it already holds; the pending
-	// list stays the durable record, so there is no schema change and a
-	// restarted node serves the whole pending set again.
-	claimToken, jtiSlice, more := pollBuffer.ClaimEvents(params, r.pollClaimTTL)
-	defer pollClaimedGauge.WithLabelValues(sid).Set(float64(pollBuffer.ClaimedCnt()))
-
-	jtiSize := 0
-	if jtiSlice != nil {
-		jtiSize = len(*jtiSlice)
+	// The batch is claimed (#337) by the owner, here or through one Claim
+	// (#365): an overlapping poll on this stream, on any node, skips these
+	// JTIs and gets the next disjoint slice, and an unacked one is served
+	// again once the claim expires.
+	req.MaxEvents = r.claimMaxEvents(params.MaxEvents)
+	req.ReturnImmediately = params.ReturnImmediately
+	req.WaitMs = r.claimWaitMs(params.TimeoutSecs, params.ReturnImmediately)
+	if self {
+		// The owner waits the receiver's full resolved time itself.
+		if pollBuffer, _ := r.heldBuffer(peer.ModePoll, sid); pollBuffer != nil && !params.ReturnImmediately {
+			req.WaitMs = pollBuffer.ResolveWait(params.TimeoutSecs).Milliseconds()
+		}
+	}
+	resp, claimToken, local := r.claimFor(ctx, resource, owner, self, req)
+	if len(resp.Refs) == 0 {
+		return map[string]string{}, false, http.StatusOK
 	}
 
-	if jtiSize > 0 {
-		sets, signErr := r.assemblePollResponse(sid, &state, pollBuffer, *jtiSlice, forwardMode, key, kid)
+	if !local {
+		// Non-owner: read, sign with each reference's AckJti, write. No store
+		// write, no queue, no claim here.
+		sets, signErr := r.signClaimedRefs(&state, resp.Refs, forwardMode, key, kid)
 		if signErr != nil {
-			// The key could not sign a SET: nothing is sent rather than a
-			// response that silently leaves it out, and the pause applies.
-			// Nothing was sent, so the batch is released for the next poll.
-			pollBuffer.ReleaseClaim(claimToken)
 			r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
 			return nil, false, PollKeyUnavailableStatus
 		}
-		if len(sets) > 0 {
-			handed := make([]string, 0, len(sets))
-			for a := range sets {
-				handed = append(handed, a)
-			}
-			r.queueFor(sid).MarkHandedOut(handed, time.Now())
-		}
-		return sets, more, http.StatusOK
+		return sets, resp.MoreAvailable, http.StatusOK
 	}
-	return map[string]string{}, false, http.StatusOK
-}
 
-// ackPolled applies a poll request's acknowledgements and setErrs through the
-// stream's delivery queue in one write (#363): the receiver's JTIs go to the
-// store as received, the queue drops the held references they name, and each
-// row the write reports newly delivered is counted on the outbound metric
-// (with a nil token: no record is read). The acknowledged references leave
-// the poll buffer.
-func (r *router) ackPolled(ctx context.Context, sid string, state *model.StreamStateRecord, pollBuffer *buffer.EventPollBuffer, params model.PollParameters) {
-	setErrs := make([]string, 0, len(params.SetErrs))
-	for jti := range params.SetErrs {
-		setErrs = append(setErrs, jti)
+	pollBuffer, _ := r.heldBuffer(peer.ModePoll, sid)
+	if pollBuffer == nil {
+		// The lease was lost while the claim waited; its claims went with it.
+		return map[string]string{}, false, http.StatusOK
 	}
-	sort.Strings(setErrs)
-	inbound, n, err := r.queueFor(sid).AckWire(ctx, params.Acks, setErrs)
-	if err != nil {
-		eventLogger.Warn("POLL-SRV: Error acknowledging events", "sid", sid, "count", len(params.Acks)+len(setErrs), "error", err)
+	defer pollClaimedGauge.WithLabelValues(sid).Set(float64(pollBuffer.ClaimedCnt()))
+	sets, signErr := r.assemblePollResponse(sid, &state, pollBuffer, refJtis(resp.Refs), forwardMode, key, kid)
+	if signErr != nil {
+		// The key could not sign a SET: nothing is sent rather than a
+		// response that silently leaves it out, and the pause applies.
+		// Nothing was sent, so the batch is released for the next poll.
+		pollBuffer.ReleaseClaim(claimToken)
+		r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
+		return nil, false, PollKeyUnavailableStatus
 	}
-	// A wire JTI equals its inbound JTI on a Forward stream and for a
-	// reference the queue does not hold.
-	drop := make([]string, 0, len(params.Acks)+len(setErrs)+len(inbound))
-	drop = append(drop, params.Acks...)
-	drop = append(drop, setErrs...)
-	drop = append(drop, inbound...)
-	pollBuffer.AckEvents(drop)
-	for i := int64(0); i < n; i++ {
-		r.IncrementCounter(state, nil, false)
+	if len(sets) > 0 {
+		handed := make([]string, 0, len(sets))
+		for a := range sets {
+			handed = append(handed, a)
+		}
+		r.queueFor(sid).MarkHandedOut(handed, time.Now())
 	}
+	return sets, resp.MoreAvailable, http.StatusOK
 }
 
 // defaultPollClaimTTL is the I2SIG_POLL_CLAIM_TTL default.
@@ -3481,6 +3591,10 @@ func (r *router) RemoveStream(sid string) {
 	if unregisterPair {
 		r.sstpDialer.UnregisterPair(sid)
 	}
+	// Give up a poll-transmitter or sstp-server lease this node holds for the
+	// stream (#365), outside r.mu: the release is a coordinator call.
+	r.releaseStreamLease(cluster.PollTransmitterResource(sid))
+	r.releaseStreamLease(cluster.SstpServerResource(sid))
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }
@@ -3503,6 +3617,9 @@ func (r *router) Shutdown() {
 	// Runs outside r.mu, which the drain takes to wake targets. On drain
 	// timeout the residue stays in the log for the next start (ADR 0045).
 	r.shutdownLocalWal()
+	// Release the poll-transmitter and sstp-server leases this node holds
+	// (#365) once the WAL is drained, for the same reason, and outside r.mu.
+	r.releaseAllStreamLeases()
 	// This will shut down the threads that are pushing events.
 	r.mu.Lock()
 	defer r.mu.Unlock()

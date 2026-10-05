@@ -785,6 +785,10 @@ func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
 			t.owner = r.pushLeaseOwner(t.key)
 		case routeModeSstpClient:
 			t.owner = r.leaseOwners.peek(cluster.SstpClientResource(t.key))
+		case routeModePoll:
+			t.owner = r.leaseOwners.peek(cluster.PollTransmitterResource(t.key))
+		case routeModeSstpServer:
+			t.owner = r.leaseOwners.peek(cluster.SstpServerResource(t.key))
 		}
 		r.wakeTargetRemote(t)
 	}

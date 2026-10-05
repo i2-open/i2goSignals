@@ -55,6 +55,7 @@ func (s *KeyChangeSigningSuite) SetupTest() {
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		ServesClaims:  true,
 	}, "key-change-node")
 
 	// A poll transmitter signing as keyChangeIssuer with one event queued.

@@ -80,6 +80,9 @@ func TestPollClaims_RestartedNodeServesClaimedEventsAgain(t *testing.T) {
 	none, _ := h.poll(sid)
 	require.Empty(t, none, "claimed SETs are not served again on the same node")
 
+	// The first node stops (giving back its poll-transmitter lease, #365)
+	// and a fresh one takes the stream over.
+	h.router.Shutdown()
 	restarted := routerOn(t, persistence, "node-poll-key-restarted")
 	var sets map[string]string
 	require.Eventually(t, func() bool {

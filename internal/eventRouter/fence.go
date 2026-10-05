@@ -15,16 +15,26 @@ import (
 var errNotLeaseOwner = errors.New("not the lease owner")
 
 // ackResource names the lease that guards acknowledgements for stream sid:
-// the push-transmitter lease of a push stream, or the sstp-client lease of an
-// SSTP pair whose client side this node runs. Any other stream (a poll
-// transmitter, or the SSTP server side) returns "" and its acknowledgements
-// are not checked in this slice; #365 leases those kinds too. It reads only
-// the router's own maps, never the store or the coordinator.
+// the push-transmitter lease of a push stream, the poll-transmitter lease of a
+// poll stream, the sstp-server lease of an SSTP pair whose accepting side this
+// node serves, or the sstp-client lease of a pair whose client side it runs
+// (#365: every stream kind is leased). A stream this router does not know
+// returns "". It reads only the router's own maps, never the store or the
+// coordinator.
 func (r *router) ackResource(sid string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if _, ok := r.pushStreams[sid]; ok {
 		return cluster.PushTransmitterResource(sid)
+	}
+	if _, ok := r.pollStreams[sid]; ok {
+		return cluster.PollTransmitterResource(sid)
+	}
+	if _, ok := r.sstpServerStreams[sid]; ok {
+		return cluster.SstpServerResource(sid)
+	}
+	if _, ok := r.sstpServerBuffers[sid]; ok {
+		return cluster.SstpServerResource(sid)
 	}
 	if _, ok := r.sstpClientStreams[sid]; ok {
 		return cluster.SstpClientResource(sid)
@@ -39,7 +49,9 @@ func (r *router) ackResource(sid string) string {
 
 // stillOwnsAck reports whether this node may write an acknowledgement for
 // stream sid, answered from the leaseManager's memory: no store or
-// coordinator call is made.
+// coordinator call is made. Every stream kind is leased (#365); "" is only
+// a stream this router's maps no longer hold (removed mid-flight), whose
+// write is left to the store's conditional acknowledgement.
 func (r *router) stillOwnsAck(sid string) bool {
 	resource := r.ackResource(sid)
 	if resource == "" {

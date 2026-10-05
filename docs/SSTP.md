@@ -282,8 +282,12 @@ support"); a `WARN` is logged at create.
 
 ### Server (responder) side
 
-- Takes **no lease** — every node can answer `POST /sstp/{id}`, so the receiver
-  side scales horizontally.
+- Leased as `sstp-server:<txSid>` (#365): the owner holds the pair's one
+  outbound queue. Every node can still answer `POST /sstp/{id}` and ingest its
+  inbound SETs; a non-owner sends the request's acknowledgements and its ask
+  for events to the owner in one `/_cluster/claim` call (see
+  [Cluster.md](Cluster.md#serving-non-owner-requests-claim)). A request that
+  neither acks nor asks for events makes no Claim.
 - Inbound ingest (governed by `InboundStatus`): each SET is byte-identical to an
   RFC 8935 SET and parsed with `goSetPush.ParseReceivedSET`, then persisted via
   `HandleEvent` keyed on rxSid (so the inbound counter carries
@@ -299,9 +303,8 @@ support"); a `WARN` is logged at create.
 - Outbound long-poll drain (governed by `Status`): waits on the pair's outbound
   `EventPollBuffer` for the request duration, reusing
   `I2SIG_POLL_DEFAULT_TIMEOUT` / `I2SIG_POLL_MAX_TIMEOUT` (no SSTP-specific
-  knob). The wait does **not** honor request-context cancellation — it waits the
-  full buffer timeout even if the client aborts, symmetric with the RFC 8936
-  poll-transmitter handler.
+  knob). The wait ends when the request context is cancelled (the client
+  aborts), as the RFC 8936 poll-transmitter handler's does (#365).
 - A **paused or disabled pair returns 200 with `returnEvents=false`**, so the
   cycle keeps running and resumes on unpause or re-enable. A 4xx is reserved for
   the **deleted/unknown pair** case — HTTP status is the primary error signal.

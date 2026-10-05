@@ -51,6 +51,7 @@ func newFilterPushRouter(t *testing.T) *filterPushHarness {
 		KeyService:           persistence.KeyService,
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
+		ServesClaims:         true,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PushDelivery:         adapter,
 	}, "node-filter-push").(*router)

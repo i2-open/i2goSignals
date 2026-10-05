@@ -587,9 +587,10 @@ the right one by what it answers, not by name:
   read cannot be straddled; `putIfCurrent` is the only writer, and callers sample
   the generation BEFORE the store read they intend to cache.
 - **Lease-owner cache** (`internal/eventRouter/lease_owner_cache.go`) — "who owns
-  this push transmitter lease?", 2 s TTL. A backstop behind this node's own
-  acquire / renew / lose / exit transitions, which keep it honest. It steers a
-  wake-up and **never authorises a delivery**. The SSTP-client lease is
+  this push-transmitter, poll-transmitter or sstp-server lease?", 2 s TTL. A
+  backstop behind this node's own acquire / renew / lose / exit transitions,
+  which keep it honest. It steers a wake-up or a Claim and **never authorises a
+  delivery**; a Claim answered `NotOwner` forgets the entry (#365). The SSTP-client lease is
   deliberately not cached: it is owned by the dialer in `internal/server`, so a
   cache here would be a bare TTL with no invalidation hook.
 

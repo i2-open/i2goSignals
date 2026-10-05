@@ -208,20 +208,18 @@ func TestSstpServer_PreInitializeCounter_RxSide(t *testing.T) {
 	assert.Equal(t, 0.0, rxV, "rx-side eventsIn series must be primed at zero with tfr=SSTP")
 }
 
-// TestSstpServer_LongPollIgnoresContextCancel: the outbound long-poll wait does
-// NOT honor request-context cancellation — an aborted client does not make the
-// handler return early; it waits out the buffer timeout (PRD #154 Q15, distinct
-// from the SSTP-client side which DOES cancel on lease loss).
-func TestSstpServer_LongPollIgnoresContextCancel(t *testing.T) {
+// TestSstpServer_LongPollEndsOnContextCancel: the outbound long-poll wait
+// honours request-context cancellation (#365, superseding PRD #154 Q15): an
+// aborted peer makes the handler return at once instead of holding the claim
+// for the buffer timeout.
+func TestSstpServer_LongPollEndsOnContextCancel(t *testing.T) {
 	h := newSstpRunnerHarness(t)
-	// Shrink the buffer long-poll timeout so the test waits ~1s, not 30s.
-	h.router.pollDefaultTimeoutSecs = 1
+	h.router.pollDefaultTimeoutSecs = 5
 
 	txSid, rxSid, pairId := "sstp-tx-ctx", "sstp-rx-ctx", "pair-ctx"
 	rec := sstpServerPairState(txSid, rxSid, pairId)
 	require.NoError(t, h.router.streamService.PersistStreamStateRecord(context.Background(), rec))
 
-	// Pre-cancelled context: a non-SSTP-aware wait would return immediately.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -234,6 +232,5 @@ func TestSstpServer_LongPollIgnoresContextCancel(t *testing.T) {
 	elapsed := time.Since(start)
 
 	assert.Empty(t, resp.Sets, "no outbound events were queued")
-	assert.GreaterOrEqual(t, elapsed, 800*time.Millisecond,
-		"long-poll must wait out the buffer timeout despite the cancelled context (Q15)")
+	assert.Less(t, elapsed, time.Second, "a cancelled request must not wait out the buffer timeout")
 }

@@ -25,14 +25,6 @@ func (r *router) broadcastSstpClientWake(pairId string) {
 	r.broadcastSstpWake(sstpWakeClientPath, sstpWakeClientMode, pairId)
 }
 
-// broadcastSstpServerWake sends POST /_cluster/wake-sstp-server to every active
-// cluster node (except this one) so a long-poll held on the receiver side returns
-// the outbound event immediately (Q11.1). The SSTP-server side takes no lease, so
-// any node may hold the long-poll — hence the broadcast.
-func (r *router) broadcastSstpServerWake(txSid string) {
-	r.broadcastSstpWake(sstpWakeServerPath, sstpWakeServerMode, txSid)
-}
-
 // broadcastSstpWake fans a wake-up to all active cluster nodes other than the
 // local node. The id is the pair's PairId (client) or tx-side SID (server); mode
 // distinguishes the two routes for the cluster auth token and for coalescing on

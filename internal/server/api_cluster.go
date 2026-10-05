@@ -22,8 +22,9 @@ import (
 // wire form of peer.WakeMessage. An empty Reason is an ordinary buffer
 // wake-up; Reason "filter-change" instead invalidates the stream's
 // subject-filter match-result cache (issue #94). Jtis, AckJtis and EnqueuedAt
-// are index-aligned reference lists; senders leave them empty until #363, so
-// every wake is a reload.
+// are index-aligned reference lists: a poll or sstp-server wake carries the
+// batch's references to the lease owner (#365); push and sstp-client wakes
+// leave them empty, so those are a reload.
 type WakeRequest struct {
 	Sid        string   `json:"sid"`
 	Mode       string   `json:"mode"`
@@ -62,6 +63,12 @@ func (sa *SignalsApplication) WakeTransmitter(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A wake that carries references is applied at once: coalescing would
+	// drop the lists of every wake but the first of a burst (#365).
+	if sa.applyRefWake(req) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	// The reason is part of the coalescing key so a filter-change invalidation
 	// is never coalesced away by an ordinary buffer wake-up for the same stream.
 	key := req.Sid + ":" + req.Mode + ":" + req.Reason
@@ -83,6 +90,22 @@ func (sa *SignalsApplication) applyWake(req WakeRequest) {
 		return
 	}
 	sa.EventRouter.WakeTransmitter(req.Sid, req.Mode)
+}
+
+// applyRefWake hands a wake that carries references to the router's
+// peer.WakeHandler, which holds them in the owner's queue and wakes its
+// buffer. It reports false, doing nothing, for a wake with no references or
+// a router that is not a WakeHandler.
+func (sa *SignalsApplication) applyRefWake(req WakeRequest) bool {
+	if len(req.Jtis) == 0 || req.Reason != "" {
+		return false
+	}
+	h, ok := sa.EventRouter.(peer.WakeHandler)
+	if !ok {
+		return false
+	}
+	h.HandleWake(peer.WakeMessage{Sid: req.Sid, Mode: req.Mode, Jtis: req.Jtis, AckJtis: req.AckJtis, EnqueuedAt: req.EnqueuedAt})
+	return true
 }
 
 // ClaimStream handles POST /_cluster/claim from a peer node (#358): the

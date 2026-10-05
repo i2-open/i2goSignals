@@ -352,7 +352,8 @@ func TestClusterHarness_LostWakeRecoveredBySweep(t *testing.T) {
 }
 
 // A poll transmitter with ingest on node A and the poll receiver on node B:
-// every SET is delivered and acknowledged. Duplicates are allowed until #365.
+// every SET is delivered exactly once and acknowledged: node-b serves the poll
+// through the poll-transmitter lease owner's one queue (#365).
 func TestClusterHarness_PollIngestOnAReceiverOnB(t *testing.T) {
 	h := newClusterHarness(t)
 	a := h.start("node-a")
@@ -380,6 +381,7 @@ func TestClusterHarness_PollIngestOnAReceiverOnB(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
+	dups := map[string]int{}
 	var acks []string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -387,6 +389,9 @@ func TestClusterHarness_PollIngestOnAReceiverOnB(t *testing.T) {
 		require.Equal(t, http.StatusOK, status)
 		acks = acks[:0]
 		for jti := range sets {
+			if seen[jti] {
+				dups[jti]++
+			}
 			seen[jti] = true
 			acks = append(acks, jti)
 		}
@@ -401,11 +406,12 @@ func TestClusterHarness_PollIngestOnAReceiverOnB(t *testing.T) {
 		assert.Truef(t, seen[jti], "SET %s ingested on node-a was polled from node-b", jti)
 	}
 	assert.Empty(t, h.pendingFor(sid), "every SET polled from node-b is acknowledged")
+	assert.Empty(t, dups, "no SET is delivered twice")
 }
 
 // An SSTP responder pair with ingest on node A and the dialing peer connected
-// to node B: every SET is delivered and acknowledged. Duplicates are allowed
-// until #365.
+// to node B: every SET is delivered exactly once and acknowledged, through the
+// acceptor lease owner's one queue (#365).
 func TestClusterHarness_SstpIngestOnAPeerOnB(t *testing.T) {
 	t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "2")
 	h := newClusterHarness(t)
@@ -436,6 +442,7 @@ func TestClusterHarness_SstpIngestOnAPeerOnB(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
+	dups := map[string]int{}
 	var acks []string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -449,6 +456,9 @@ func TestClusterHarness_SstpIngestOnAPeerOnB(t *testing.T) {
 		require.NoError(t, json.Unmarshal(out, &resp))
 		acks = nil
 		for jti := range resp.Sets {
+			if seen[jti] {
+				dups[jti]++
+			}
 			seen[jti] = true
 			acks = append(acks, jti)
 		}
@@ -463,6 +473,7 @@ func TestClusterHarness_SstpIngestOnAPeerOnB(t *testing.T) {
 		assert.Truef(t, seen[jti], "SET %s ingested on node-a was returned to the peer on node-b", jti)
 	}
 	assert.Empty(t, h.pendingFor(txSid), "every SET returned on node-b is acknowledged")
+	assert.Empty(t, dups, "no SET is delivered twice")
 }
 
 func allSeen(want, seen map[string]bool) bool {
@@ -483,6 +494,10 @@ func allSeen(want, seen map[string]bool) bool {
 func runLeaseTakeoverOnHarness(t *testing.T) {
 	// The responder holds each SSTP long-poll this long; shutdown waits on it.
 	t.Setenv("I2SIG_POLL_DEFAULT_TIMEOUT", "2")
+	// The responder's leased queue claims each SET it sends (#365); one the
+	// initiator drops unacked comes back after the claim TTL, not on the
+	// next request.
+	t.Setenv("I2SIG_POLL_CLAIM_TTL", "1s")
 	h := newClusterHarness(t)
 	a := h.start("node-a")
 

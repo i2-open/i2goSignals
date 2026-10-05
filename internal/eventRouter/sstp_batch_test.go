@@ -9,6 +9,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -30,13 +31,22 @@ func TestSstpServer_PublishModeSignsWholeBatch(t *testing.T) {
 	jtis := make([]string, 0, 12)
 	for i := 0; i < 12; i++ {
 		jti := "sstp-batch-" + strings.Repeat("x", i+1)
-		h.persistOutboundEvent(t, txSid, jti)
+		// The pending reference carries the stream's derived ack JTI, as the
+		// ingest write stamps it: the owner seeds its queue from it (#365).
+		token := newRiscToken(jti, dupTestIssuer, "https://peer.example.com")
+		_, err := h.router.eventService.AddEvent(context.Background(), token, txSid, `{"raw":true}`)
+		require.NoError(t, err)
+		require.NoError(t, h.router.eventService.AddEventToStream(context.Background(),
+			interfaces.PendingRef{Jti: jti, AckJti: rec.AckJti(jti)}, txSid))
 		jtis = append(jtis, jti)
 	}
 	// Load the outbound buffer directly (like a live wake would) so the drain
 	// serves this exact batch, ghost included, without the pending prefetch.
+	// The owner builds the buffer from a pending read on first use (#365),
+	// so only the JTIs that read missed are submitted.
 	buf := h.router.sstpServerBufferFor(txSid)
-	buf.SubmitEvents(append(append([]string{}, jtis...), "ghost-jti"))
+	require.NotNil(t, buf)
+	buf.SubmitEvents(buf.Absent(append(append([]string{}, jtis...), "ghost-jti")))
 	require.Eventually(t, func() bool { return buf.Cnt() == len(jtis)+1 }, 2*time.Second, 5*time.Millisecond,
 		"submitted JTIs must drain into the outbound buffer")
 

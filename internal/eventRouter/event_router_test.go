@@ -136,6 +136,7 @@ func TestNewRouter_PollBufferUsesEnvTimeoutValues(t *testing.T) {
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		ServesClaims:  true,
 	}, "node-poll-env-test").(*router)
 	t.Cleanup(r.Shutdown)
 
@@ -164,10 +165,8 @@ func TestNewRouter_PollBufferUsesEnvTimeoutValues(t *testing.T) {
 	require.NoError(t, err)
 	r.UpdateStreamState(state)
 
-	r.mu.RLock()
-	pollBuf, ok := r.pollBuffers[created.Id]
-	r.mu.RUnlock()
-	require.True(t, ok, "expected poll buffer for stream %s", created.Id)
+	pollBuf := r.pollBufferFor(created.Id)
+	require.NotNil(t, pollBuf, "expected poll buffer for stream %s", created.Id)
 
 	start := time.Now()
 	jtis, _ := pollBuf.GetEvents(model.PollParameters{

@@ -1,6 +1,7 @@
 package buffer
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -190,6 +191,25 @@ func (b *EventPollBuffer) AddEvents(jtis []string) {
 	b.notifier = make(chan struct{})
 }
 
+// Absent returns the jtis this buffer does not queue. It walks the whole
+// queue, so it is for the rare path that seeds a buffer from a pending read
+// and then needs to know which of a batch the read already covered.
+func (b *EventPollBuffer) Absent(jtis []string) []string {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	queued := make(map[string]struct{}, len(b.events))
+	for _, jti := range b.events {
+		queued[jti] = struct{}{}
+	}
+	out := make([]string, 0, len(jtis))
+	for _, jti := range jtis {
+		if _, ok := queued[jti]; !ok {
+			out = append(out, jti)
+		}
+	}
+	return out
+}
+
 func (b *EventPollBuffer) SubmitEvent(jti string) {
 	b.SubmitEvents([]string{jti})
 }
@@ -370,12 +390,14 @@ func newClaimToken() string {
 // Under Go 1.27 timer channels are unbuffered and there is no asynctimerchan
 // escape hatch, so the only correct discipline is to own the timer and stop it
 // on every exit path — which the deferred Stop here does.
-func awaitNotify(notifier <-chan struct{}, deadline *time.Timer) bool {
+func awaitNotify(ctx context.Context, notifier <-chan struct{}, deadline *time.Timer) bool {
 	defer deadline.Stop()
 	select {
 	case <-notifier:
 		return true
 	case <-deadline.C:
+		return false
+	case <-ctx.Done():
 		return false
 	}
 }
@@ -399,16 +421,39 @@ func (b *EventPollBuffer) ClaimEvents(params model.PollParameters, ttl time.Dura
 	return b.collect(params, ttl)
 }
 
+// ResolveWait returns the long-poll wait a request asking for timeoutSecs
+// gets from this buffer: the buffer's default when timeoutSecs is 0, capped
+// by its maximum.
+func (b *EventPollBuffer) ResolveWait(timeoutSecs int) time.Duration {
+	return time.Duration(b.resolveTimeoutSecs(timeoutSecs)) * time.Second
+}
+
+// ClaimEventsCtx is ClaimEvents with the wait given explicitly and bounded by
+// ctx (#365): it waits at most wait for a first unclaimed JTI, returns as
+// soon as ctx is done, and claims nothing once ctx is done. A wait <= 0
+// returns at once with what is ready. maxEvents <= 0 takes every unclaimed
+// JTI.
+func (b *EventPollBuffer) ClaimEventsCtx(ctx context.Context, maxEvents int32, wait time.Duration, ttl time.Duration) (string, *[]string, bool) {
+	return b.collectWait(ctx, maxEvents, wait, ttl)
+}
+
 func (b *EventPollBuffer) collect(params model.PollParameters, ttl time.Duration) (string, *[]string, bool) {
+	var wait time.Duration
+	if !params.ReturnImmediately {
+		wait = b.ResolveWait(params.TimeoutSecs)
+	}
+	return b.collectWait(context.Background(), params.MaxEvents, wait, ttl)
+}
+
+func (b *EventPollBuffer) collectWait(ctx context.Context, maxEvents int32, maxWait time.Duration, ttl time.Duration) (string, *[]string, bool) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	nextExpiry := b.expireClaimsLocked(time.Now())
 	available := b.unclaimedLocked()
-	if len(available) == 0 && !params.ReturnImmediately && !b.closed {
-		timeoutSecs := b.resolveTimeoutSecs(params.TimeoutSecs)
-		if timeoutSecs > 0 {
-			deadline := time.Now().Add(time.Duration(timeoutSecs) * time.Second)
+	if len(available) == 0 && !b.closed && ctx.Err() == nil {
+		if maxWait > 0 {
+			deadline := time.Now().Add(maxWait)
 			for {
 				wait := time.Until(deadline)
 				if wait <= 0 {
@@ -423,26 +468,26 @@ func (b *EventPollBuffer) collect(params model.PollParameters, ttl time.Duration
 				}
 				notifier := b.notifier
 				b.mutex.Unlock()
-				notified := awaitNotify(notifier, time.NewTimer(wait))
+				notified := awaitNotify(ctx, notifier, time.NewTimer(wait))
 				b.mutex.Lock()
 				nextExpiry = b.expireClaimsLocked(time.Now())
 				available = b.unclaimedLocked()
 				// A notification (new events, a stream-state wakeup, Close)
 				// ends the long poll whatever the buffer holds, as before; an
 				// expiry wake-up only ends it once something is unclaimed.
-				if notified || len(available) > 0 || b.closed {
+				if notified || len(available) > 0 || b.closed || ctx.Err() != nil {
 					break
 				}
 			}
 		}
 	}
 
-	if len(available) == 0 {
+	if len(available) == 0 || ctx.Err() != nil {
 		return "", nil, false
 	}
 	limit := len(available)
-	if params.MaxEvents > 0 && limit > int(params.MaxEvents) {
-		limit = int(params.MaxEvents)
+	if maxEvents > 0 && limit > int(maxEvents) {
+		limit = int(maxEvents)
 	}
 	values := make([]string, 0, limit)
 	if ttl <= 0 {

@@ -47,9 +47,8 @@ type routingTable struct {
 // stream of the given kind. Every kind a stream can be has one:
 // push-transmitter, poll-transmitter, sstp-client and sstp-server for the
 // routed (outbound) kinds, and poll-receiver for a poll receiver, which is
-// inbound and never appears in a routingTable. Only the push-transmitter,
-// poll-receiver and sstp-client leases are taken today; the poll-transmitter
-// and sstp-server leases follow in #365.
+// inbound and never appears in a routingTable. Every one of them is taken
+// (the poll-transmitter and sstp-server leases since #365).
 func streamLeaseResource(mode, key string) string {
 	switch mode {
 	case routeModePush:

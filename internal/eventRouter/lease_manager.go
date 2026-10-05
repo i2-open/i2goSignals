@@ -154,3 +154,69 @@ func (m *leaseManager) StillOwner(resource string) bool {
 	}
 	return m.clock().Before(deadline)
 }
+
+// resolveOwner returns the node that holds resource and whether it is this
+// node. When nobody holds it, this node acquires it, unless ServesClaims is
+// false for the two claim-served kinds, in which case ownerNode is empty.
+// Never called with r.mu held (#365).
+//
+// Steps, in order: (1) StillOwner: this node. (2) the owner leaseOwners names
+// (a live lease read from the coordinator, cached 2 seconds); another node:
+// that node. (3) no live lease: one acquire. Acquired, the resource joins the
+// renewal loop and this node builds the stream's queue with one pending read;
+// refused, the cache entry is forgotten and step 2 runs once more. With no
+// coordinator every resource is this node's and no lease is taken.
+func (r *router) resolveOwner(resource string) (ownerNode string, self bool) {
+	ownerNode, self, _ = r.resolveOwnerSeeded(resource)
+	return ownerNode, self
+}
+
+// resolveOwnerSeeded is resolveOwner that also reports whether the call
+// built this node's queue from a pending read (see ensureOwnerQueueSeeded).
+func (r *router) resolveOwnerSeeded(resource string) (ownerNode string, self, seeded bool) {
+	if r.leaseRenewer() == nil {
+		known, seeded := r.ensureOwnerQueueSeeded(resource)
+		if !known {
+			return "", false, false
+		}
+		return r.nodeId, true, seeded
+	}
+	if r.leases.StillOwner(resource) {
+		if known, seeded := r.ensureOwnerQueueSeeded(resource); known {
+			return r.nodeId, true, seeded
+		}
+		return "", false, false
+	}
+	load := func() (string, error) {
+		owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+		return owner, err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		owner := r.leaseOwners.owner(resource, load)
+		if owner != "" && owner != r.nodeId {
+			return owner, false, false
+		}
+		if !r.servesClaims && isClaimServedResource(resource) {
+			return "", false, false
+		}
+		if attempt > 0 {
+			break
+		}
+		held, _, err := r.tryLease(resource, leaseTTL)
+		if err == nil && held {
+			r.leaseOwners.note(resource, r.nodeId)
+			r.adoptStreamLease(resource)
+			if known, seeded := r.ensureOwnerQueueSeeded(resource); known {
+				return r.nodeId, true, seeded
+			}
+			// The stream went away under the acquire: give the lease back.
+			r.releaseStreamLease(resource)
+			return "", false, false
+		}
+		if err != nil {
+			eventLogger.Warn("ROUTER: stream lease acquire failed", "resource", resource, "error", err)
+		}
+		r.leaseOwners.forget(resource)
+	}
+	return "", false, false
+}

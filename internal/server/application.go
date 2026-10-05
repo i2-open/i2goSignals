@@ -290,6 +290,10 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.
 		PushDelivery:    delivery.NewHTTPAdapter(persistence.StreamService, nil),
 		SstpDialerHooks: sstpDialer,
+		// This server serves poll and accepted SSTP requests and mounts
+		// /_cluster/claim, so it takes the poll-transmitter and sstp-server
+		// leases (#365).
+		ServesClaims: true,
 		// Non-nil only when I2SIG_STORE_WAL=local (ADR 0045).
 		WAL: persistence.WAL,
 		// I2SIG_STORE_WAL_RING_FED (#342); only meaningful with a WAL.

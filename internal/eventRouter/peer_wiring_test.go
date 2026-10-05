@@ -34,6 +34,7 @@ func newPeerWiringRouter(t *testing.T, name string, transport peer.PeerTransport
 		KeyService:           persistence.KeyService,
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
+		ServesClaims:         true,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PeerTransport:        transport,
 	}, "node-a").(*router)

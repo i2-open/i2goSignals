@@ -92,6 +92,7 @@ func newWalRouterWith(t *testing.T, p *dbProviders.Persistence, walDir string, d
 		KeyService:    p.KeyService,
 		EventService:  services.NewEventService(dao),
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 		WAL:           log,
 	}
 	if adjust != nil {
@@ -398,6 +399,7 @@ func TestLocalWal_LocalStreamOnMajorityDeploymentUsesStore(t *testing.T) {
 		KeyService:    p.KeyService,
 		EventService:  p.EventService,
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 	}, "node-majority-test").(*router)
 	t.Cleanup(r.Shutdown)
 	aud := "https://receiver.example.com"
