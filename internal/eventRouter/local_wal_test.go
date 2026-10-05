@@ -341,13 +341,18 @@ func assertWalRetention(t *testing.T, p *dbProviders.Persistence) {
 	require.NoError(t, s.router.HandleEvent(newRiscToken(jti, dupTestIssuer, s.audience), "raw", s.streamID))
 	s.waitDrained(t)
 	require.True(t, s.stored(jti))
-	require.NoError(t, p.EventService.AckEvent(ctx, jti, s.streamID, 0))
+	// Acknowledge as the router does with a 1-day window: expireAt is fixed
+	// at acknowledgement (#360).
+	window := 1
+	ackDate := time.Now()
+	expireAt := ackDate.Add(time.Duration(window) * 24 * time.Hour)
+	_, err := p.EventService.AckBatch(ctx, interfaces.AckBatch{StreamID: s.streamID, Jtis: []string{jti}, AckDate: ackDate, ExpireAt: &expireAt})
+	require.NoError(t, err)
 
 	count, err := p.EventDAO.CountRetainedForStream(ctx, s.streamID)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), count)
 
-	window := 1
 	streams := []model.StreamStateRecord{{Id: s.stream.Id, RetentionWindowDays: &window}}
 	purged, err := services.NewRetentionEngine(p.EventDAO).PurgeExpired(ctx, time.Now().Add(48*time.Hour), streams, nil)
 	require.NoError(t, err)

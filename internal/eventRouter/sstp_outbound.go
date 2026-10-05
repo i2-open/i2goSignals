@@ -728,7 +728,7 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 		window:    r.ackCoalesceWindow,
 		max:       r.inFlightMax(),
 		apply: func(ctx context.Context, jtis []string) error {
-			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
+			err := r.ackEvents(ctx, jtis, sid, fencingToken)
 			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
 				// Not acked: the SETs stay pending and are redelivered, so WARN
 				// (the DAO logs the store failure itself).

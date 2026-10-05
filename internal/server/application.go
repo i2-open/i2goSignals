@@ -364,7 +364,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 // decision 3), it is merely silent. Two independent things keep it silent — the
 // default resolver returns a window only when a per-stream override was set, and
 // community binds no RetentionEngine to the live store — so an operator reading
-// `keep_forever` here should size `events` and `deliveredEvents` for unbounded
+// `keep_forever` here should size `events` and `deliveries` for unbounded
 // growth. See docs/operations.md#event-retention.
 //
 // Cost is one extra StreamDAO.List at startup — the same query InitializeReceivers

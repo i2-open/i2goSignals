@@ -43,6 +43,9 @@ func (s *EventDAOMongoSuite) freshDAO(t *testing.T, oneTrip bool) interfaces.Eve
 	if err != nil {
 		t.Fatalf("events index: %v", err)
 	}
+	if _, err = ev.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "sortTime", Value: 1}}}); err != nil {
+		t.Fatalf("events sortTime index: %v", err)
+	}
 	if _, err = dc.Indexes().CreateMany(ctx, testDeliveriesIndexes()); err != nil {
 		t.Fatalf("deliveries indexes: %v", err)
 	}

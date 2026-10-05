@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +34,12 @@ type EventDAOMemory struct {
 	// now is the adapter clock (createdAt for a reference written with a
 	// zero EnqueuedAt).
 	now func() time.Time
+
+	// sweepAfterTime / sweepAfterJti are the SweepExpired body-scan
+	// watermark: the next pass resumes after (sortTime, jti). Zero values
+	// start from the oldest body. In-process only, guarded by mu.
+	sweepAfterTime time.Time
+	sweepAfterJti  string
 
 	// Persistence
 	persistDir string
@@ -222,10 +227,6 @@ func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *
 
 	return sortedEvents, nil
 }
-
-// errSweepNotImplemented marks the interface method whose body lands in a
-// later #112 slice.
-var errSweepNotImplemented = errors.New("SweepExpired: not implemented until i2-open/i2goSignals#360")
 
 // rowLocked returns the (streamID, jti) row or nil; d.mu must be held.
 func (d *EventDAOMemory) rowLocked(streamID, jti string) *delivery {
@@ -518,9 +519,87 @@ func (d *EventDAOMemory) ResetPendingAckJti(_ context.Context, streamID string) 
 	return modified, nil
 }
 
-// SweepExpired is implemented by i2-open/i2goSignals#360.
-func (d *EventDAOMemory) SweepExpired(_ context.Context, _ time.Time, _ time.Time, _ int) (interfaces.SweepResult, error) {
-	return interfaces.SweepResult{}, errSweepNotImplemented
+// SweepExpired removes every reference with expireAt <= now, then examines at
+// most maxBodies event bodies with sortTime < bodyCutoff, in ascending
+// (sortTime, jti) order from the in-process watermark, and deletes each one
+// whose reference key (OriginalJti when set, else Jti) has no deliveries row in
+// either state. The scan wraps to the oldest body once it reaches the end.
+func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var result interfaces.SweepResult
+	for streamID, rows := range d.deliveries {
+		for _, row := range rows {
+			if row.ExpireAt != nil && !row.ExpireAt.After(now) {
+				d.deleteRowLocked(streamID, row)
+				result.References++
+			}
+		}
+	}
+	if maxBodies <= 0 {
+		return result, nil
+	}
+
+	referenced := make(map[string]struct{})
+	for _, rows := range d.deliveries {
+		for jti := range rows {
+			referenced[jti] = struct{}{}
+		}
+	}
+
+	var candidates []*model.EventRecord
+	for _, rec := range d.events {
+		if rec.SortTime.Before(bodyCutoff) {
+			candidates = append(candidates, rec)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if !candidates[i].SortTime.Equal(candidates[j].SortTime) {
+			return candidates[i].SortTime.Before(candidates[j].SortTime)
+		}
+		return candidates[i].Jti < candidates[j].Jti
+	})
+
+	// Resume strictly after the watermark; wrap with the remaining budget.
+	start := sort.Search(len(candidates), func(i int) bool {
+		c := candidates[i]
+		if !c.SortTime.Equal(d.sweepAfterTime) {
+			return c.SortTime.After(d.sweepAfterTime)
+		}
+		return c.Jti > d.sweepAfterJti
+	})
+	n := maxBodies
+	if n > len(candidates) {
+		n = len(candidates)
+	}
+	examined := make([]*model.EventRecord, 0, n)
+	for i := 0; i < n; i++ {
+		examined = append(examined, candidates[(start+i)%len(candidates)])
+	}
+	if n == 0 || start+n == len(candidates) {
+		// Reached the end of the eligible range: start over next pass.
+		d.sweepAfterTime, d.sweepAfterJti = time.Time{}, ""
+	} else {
+		last := examined[n-1]
+		d.sweepAfterTime, d.sweepAfterJti = last.SortTime, last.Jti
+	}
+
+	for _, rec := range examined {
+		key := rec.Jti
+		if rec.OriginalJti != "" {
+			key = rec.OriginalJti
+		}
+		if _, ok := referenced[key]; ok {
+			continue
+		}
+		delete(d.events, rec.Jti)
+		if d.useDisk {
+			d.deleteEventFromDiskLocked(rec.Jti)
+		}
+		result.Bodies++
+	}
+	return result, nil
 }
 
 // MigrateLegacyDeliveries has nothing to carry in memory: the persisted files

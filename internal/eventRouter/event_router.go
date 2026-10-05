@@ -281,6 +281,9 @@ type router struct {
 	// x509Source is the SPIFFE X509Source used to build the SPIFFE mTLS transport
 	// for inter-cluster calls. Non-nil only when SPIFFE_ENDPOINT_SOCKET is set.
 	x509Source *workloadapi.X509Source
+	// retentionWindow resolves expireAt at acknowledgement (#360); nil keeps
+	// every acknowledged reference forever.
+	retentionWindow services.EffectiveWindowFunc
 }
 
 type statsTracker interface {
@@ -364,6 +367,10 @@ type RouterDeps struct {
 	// production default) builds peer.NewHTTP on the router's HTTP client;
 	// the two-node test harness injects the in-process adapter.
 	PeerTransport peer.PeerTransport
+	// RetentionWindow resolves a stream's finite retention window in days at
+	// acknowledgement time. nil, a nil result, or a result <= 0 means keep
+	// forever: no expireAt is written. Community binds nothing here.
+	RetentionWindow services.EffectiveWindowFunc
 }
 
 // The router is the reset-egress sink EventService reports re-queued events to
@@ -379,6 +386,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		eventService:           deps.EventService,
 		subjectFilterService:   deps.SubjectFilterService,
 		subjectRelayService:    deps.SubjectRelayService,
+		retentionWindow:        deps.RetentionWindow,
 		nodeId:                 nodeId,
 		pushStreams:            map[string]model.StreamStateRecord{},
 		pollStreams:            map[string]model.StreamStateRecord{},
@@ -1789,7 +1797,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 
 	if len(params.Acks) > 0 {
 		pollBuffer.AckEvents(params.Acks)
-		_ = r.eventService.AckEvents(r.ctx, params.Acks, sid, services.NoFencingToken)
+		_ = r.ackEvents(r.ctx, params.Acks, sid, services.NoFencingToken)
 	}
 
 	if len(params.SetErrs) > 0 {
@@ -1798,7 +1806,7 @@ func (r *router) PollStreamHandler(sid string, params model.PollParameters) (map
 			jtis = append(jtis, jti)
 		}
 		pollBuffer.AckEvents(jtis)
-		_ = r.eventService.AckEvents(r.ctx, jtis, sid, services.NoFencingToken)
+		_ = r.ackEvents(r.ctx, jtis, sid, services.NoFencingToken)
 	}
 
 	if state.Status != model.StreamStateEnabled {
@@ -2014,7 +2022,7 @@ func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventReco
 // returned now nor on a later poll, keeping the pending buffer bounded.
 func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
 	pollBuffer.AckEvents(jtis)
-	if err := r.eventService.AckEvents(r.ctx, jtis, sid, services.NoFencingToken); err != nil {
+	if err := r.ackEvents(r.ctx, jtis, sid, services.NoFencingToken); err != nil {
 		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }
@@ -2662,7 +2670,7 @@ func (r *router) dispatchPushFailure(
 					"sid", sid, "jti", jti,
 					"rfc8935ErrCode", cls.RFC8935ErrCode,
 					"description", cls.RFC8935Description)
-				if err := r.eventService.AckEvent(r.ctx, jti, sid, fencingToken); err != nil {
+				if err := r.ackEvents(r.ctx, []string{jti}, sid, fencingToken); err != nil {
 					if errors.Is(err, services.ErrStaleFencingToken) {
 						// This node no longer holds the lease: re-acquire (#334).
 						return RecoveryOutcomeContextDone, true
@@ -2993,7 +3001,7 @@ func (r *router) newPushAcker(sid string, fencingToken int64) *acker {
 		window:    r.ackCoalesceWindow,
 		max:       r.inFlightMax(),
 		apply: func(ctx context.Context, jtis []string) error {
-			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
+			err := r.ackEvents(ctx, jtis, sid, fencingToken)
 			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
 				// Not acked: the SETs stay pending and are redelivered, so WARN
 				// (the DAO logs the store failure itself).
@@ -3180,7 +3188,7 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 		return res
 	}
 	if len(ackJtis) > 0 {
-		if err := r.eventService.AckEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
+		if err := r.ackEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
 			if errors.Is(err, services.ErrStaleFencingToken) {
 				res.staleFence = true
 				return res

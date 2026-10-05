@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -89,12 +90,9 @@ func ackBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
 
 var errEventNotInit = errors.New("mongo collection not initialized")
 
-// errSweepNotImplemented and errMigrateNotImplemented mark the S2 methods
-// whose bodies land in later slices of spec #112.
-var (
-	errSweepNotImplemented   = errors.New("SweepExpired is not implemented yet (i2goSignals #360)")
-	errMigrateNotImplemented = errors.New("MigrateLegacyDeliveries is not implemented yet (i2goSignals #361)")
-)
+// errMigrateNotImplemented marks the S2 method whose body lands in a later
+// slice of spec #112.
+var errMigrateNotImplemented = errors.New("MigrateLegacyDeliveries is not implemented yet (i2goSignals #361)")
 
 type EventDAOMongo struct {
 	events     collectionRef
@@ -106,6 +104,18 @@ type EventDAOMongo struct {
 	// provider sets it from the server version at connect; the zero value is
 	// the fallback, which works on every supported server.
 	oneTrip atomic.Bool
+
+	// sweep is the SweepExpired body-scan watermark (in-process only): the
+	// next pass reads bodies with sortTime >= sweep.after, skipping the
+	// still-referenced JTIs already examined at exactly that sortTime (iat has
+	// second precision, so many bodies share one sortTime).
+	sweepMu sync.Mutex
+	sweep   sweepWatermark
+}
+
+type sweepWatermark struct {
+	after time.Time
+	seen  []string
 }
 
 // SetOneTripIngest selects the InsertWithPending / Ack strategy: true for the
@@ -898,9 +908,127 @@ func (d *EventDAOMongo) ResetPendingAckJti(ctx context.Context, streamID string)
 	return res.ModifiedCount, nil
 }
 
-// SweepExpired is implemented by #360.
-func (d *EventDAOMongo) SweepExpired(_ context.Context, _ time.Time, _ time.Time, _ int) (interfaces.SweepResult, error) {
-	return interfaces.SweepResult{}, errSweepNotImplemented
+// sweepBody is the projection of an events document SweepExpired reads.
+type sweepBody struct {
+	Jti         string    `bson:"jti"`
+	OriginalJti string    `bson:"originalJti,omitempty"`
+	SortTime    time.Time `bson:"sortTime"`
+}
+
+// SweepExpired removes every reference with expireAt <= now (one deleteMany),
+// then reads at most maxBodies event bodies with sortTime < bodyCutoff in
+// ascending sortTime from the in-process watermark (eventSortTime index) and
+// deletes each one whose reference key (originalJti when set, else jti) has no
+// deliveries document in either state. A short read means the scan reached the
+// cutoff, so the watermark wraps to the oldest body.
+func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
+	var result interfaces.SweepResult
+	dc, err := d.deliveriesColLoad()
+	if err != nil {
+		return result, err
+	}
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return result, err
+	}
+
+	res, err := dc.DeleteMany(ctx, bson.D{{Key: "expireAt", Value: bson.D{{Key: "$lte", Value: now}}}})
+	if err != nil {
+		eLog.Error("Error removing expired delivery references", "error", err)
+		return result, err
+	}
+	result.References = res.DeletedCount
+	if maxBodies <= 0 {
+		return result, nil
+	}
+
+	d.sweepMu.Lock()
+	defer d.sweepMu.Unlock()
+	wm := d.sweep
+
+	timeRange := bson.D{{Key: "$lt", Value: bodyCutoff}}
+	if !wm.after.IsZero() {
+		timeRange = append(timeRange, bson.E{Key: "$gte", Value: wm.after})
+	}
+	filter := bson.D{{Key: "sortTime", Value: timeRange}}
+	if len(wm.seen) > 0 {
+		filter = append(filter, bson.E{Key: "jti", Value: bson.D{{Key: "$nin", Value: wm.seen}}})
+	}
+	opts := options.Find().
+		SetSort(bson.D{{Key: "sortTime", Value: 1}}).
+		SetLimit(int64(maxBodies)).
+		SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "originalJti", Value: 1}, {Key: "sortTime", Value: 1}})
+	cursor, err := ec.Find(ctx, filter, opts)
+	if err != nil {
+		eLog.Error("Error reading event bodies for sweep", "error", err)
+		return result, err
+	}
+	var bodies []sweepBody
+	if err = cursor.All(ctx, &bodies); err != nil {
+		eLog.Error("Error parsing event bodies for sweep", "error", err)
+		return result, err
+	}
+	if len(bodies) == 0 {
+		d.sweep = sweepWatermark{}
+		return result, nil
+	}
+
+	keyOf := func(b sweepBody) string {
+		if b.OriginalJti != "" {
+			return b.OriginalJti
+		}
+		return b.Jti
+	}
+	keys := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		keys = append(keys, keyOf(b))
+	}
+	var refs []string
+	if err = dc.Distinct(ctx, "jti", bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: keys}}}}).Decode(&refs); err != nil {
+		eLog.Error("Error reading delivery references for sweep", "error", err)
+		return result, err
+	}
+	referenced := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		referenced[r] = struct{}{}
+	}
+
+	var doomed []string
+	for _, b := range bodies {
+		if _, ok := referenced[keyOf(b)]; !ok {
+			doomed = append(doomed, b.Jti)
+		}
+	}
+	if len(doomed) > 0 {
+		del, err := ec.DeleteMany(ctx, bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: doomed}}}})
+		if err != nil {
+			eLog.Error("Error deleting swept event bodies", "error", err)
+			return result, err
+		}
+		result.Bodies = del.DeletedCount
+	}
+
+	if len(bodies) < maxBodies {
+		d.sweep = sweepWatermark{}
+		return result, nil
+	}
+	// Advance: survivors at the last sortTime are skipped next pass; deleted
+	// bodies no longer match, so they need no entry.
+	last := bodies[len(bodies)-1].SortTime
+	next := sweepWatermark{after: last}
+	if last.Equal(wm.after) {
+		next.seen = append(next.seen, wm.seen...)
+	}
+	for _, b := range bodies {
+		if !b.SortTime.Equal(last) {
+			continue
+		}
+		if _, ok := referenced[keyOf(b)]; ok {
+			next.seen = append(next.seen, b.Jti)
+		}
+	}
+	d.sweep = next
+	return result, nil
 }
 
 // MigrateLegacyDeliveries is implemented by #361.

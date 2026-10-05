@@ -12,8 +12,9 @@ import (
 var retLog = logger.Sub("RETENTION")
 
 // EffectiveWindowFunc resolves the effective retention window (in days) for a
-// stream. A nil result — or a non-positive value — means keep-forever, so the
-// purge engine skips the stream entirely. The community default resolver
+// stream. A nil result — or a non-positive value — means keep-forever: the
+// router writes no expireAt at acknowledgement and the stream does not widen the
+// body sweep. The community default resolver
 // (DefaultEffectiveWindow) returns the per-stream RetentionWindowDays override
 // only, which is nil unless an operator set it: that is why the engine ships
 // DORMANT (ADR 0055 decision 3). The enterprise superset supplies its own
@@ -31,7 +32,7 @@ func DefaultEffectiveWindow(stream *model.StreamStateRecord) *int {
 // RetentionPosture is the startup-visible summary of whether a server's streams
 // would ever expire an event. It exists because keep-forever is community's
 // SILENT default (ADR 0055 decision 3): an operator who never set a window has
-// no signal that `events` and `deliveredEvents` grow without bound. Counts are
+// no signal that `events` and `deliveries` grow without bound. Counts are
 // resolver-driven, so an enterprise superset that folds in a bundle default
 // reports its own posture from the same summary.
 type RetentionPosture struct {
@@ -88,7 +89,7 @@ type OccupancySink interface {
 	ObserveOccupancy(sample OccupancySample)
 }
 
-// RetentionEngine owns the ack-anchored refcount purge and the daily occupancy
+// RetentionEngine owns the bounded retention sweep and the daily occupancy
 // sampler. It holds no scheduler of its own: PurgeExpired and SampleOccupancy
 // are driven by the server's periodic tick (or a test clock), each handed the
 // current stream set so the engine stays decoupled from the StreamDAO.
@@ -101,64 +102,49 @@ func NewRetentionEngine(eventDAO interfaces.EventDAO) *RetentionEngine {
 	return &RetentionEngine{eventDAO: eventDAO}
 }
 
-// PurgeExpired runs one ack-anchored purge pass over streams at time now,
-// resolving each stream's effective window via window. The clock is per (stream,
-// JTI): a delivered entry expires when AckDate + window <= now. On expiry the
-// stream's delivered entry is dropped; the global body is deleted ONLY when no
-// stream (pending or delivered) still references the JTI — so a body referenced
-// by two streams survives until BOTH windows expire (refcount → 0). Pending is
-// never touched. Streams whose effective window is keep-forever (nil or
-// non-positive) are skipped, which is why the engine is inert until a finite
-// window is set. It returns the number of global bodies deleted.
+// sweepMaxBodies bounds the number of event bodies one PurgeExpired pass
+// examines, so a large backlog is drained across ticks instead of one long
+// store scan (#360).
+const sweepMaxBodies = 5000
+
+// PurgeExpired runs one bounded retention sweep at time now. Expiry is fixed at
+// acknowledgement: the router stamps each delivered reference with expireAt =
+// ackDate + window (RouterDeps.RetentionWindow), and the store drops references
+// whose expireAt has passed. PurgeExpired then sweeps event bodies older than
+// the longest finite window over streams (by sortTime), deleting each body no
+// reference — pending or delivered, on any stream — still points at. A body
+// shared by two streams therefore survives until the last reference is gone.
+// When no stream has a finite window (nil or non-positive) the pass is a no-op,
+// which is why the engine is inert until a finite window is set. It returns the
+// number of event bodies deleted.
 func (e *RetentionEngine) PurgeExpired(ctx context.Context, now time.Time, streams []model.StreamStateRecord, window EffectiveWindowFunc) (int, error) {
 	if window == nil {
 		window = DefaultEffectiveWindow
 	}
 
-	// Candidate JTIs whose per-stream entry expired this pass; each is re-checked
-	// for refcount 0 after all per-stream removals so a body shared across streams
-	// with different windows is only deleted once the last reference is gone.
-	candidates := make(map[string]struct{})
-
+	longest := 0
 	for i := range streams {
-		stream := &streams[i]
-		days := window(stream)
+		days := window(&streams[i])
 		if days == nil || *days <= 0 {
-			continue // keep-forever — engine stays dormant for this stream
+			continue // keep-forever
 		}
-		streamID := stream.Id.Hex()
-		cutoff := now.Add(-time.Duration(*days) * 24 * time.Hour)
-
-		delivered, err := e.eventDAO.ListDeliveredForStream(ctx, streamID)
-		if err != nil {
-			return 0, err
+		if *days > longest {
+			longest = *days
 		}
-		for _, evt := range delivered {
-			// Not yet expired when AckDate is at/after the cutoff.
-			if evt.AckDate.After(cutoff) || evt.AckDate.Equal(cutoff) {
-				continue
-			}
-			if err := e.eventDAO.RemoveDelivered(ctx, evt.Jti, streamID); err != nil {
-				return 0, err
-			}
-			candidates[evt.Jti] = struct{}{}
-		}
+	}
+	if longest == 0 {
+		return 0, nil
 	}
 
-	purged := 0
-	for jti := range candidates {
-		deleted, err := e.eventDAO.DeleteBodyIfUnreferenced(ctx, jti)
-		if err != nil {
-			return purged, err
-		}
-		if deleted {
-			purged++
-		}
+	bodyCutoff := now.Add(-time.Duration(longest) * 24 * time.Hour)
+	result, err := e.eventDAO.SweepExpired(ctx, now, bodyCutoff, sweepMaxBodies)
+	if err != nil {
+		return 0, err
 	}
-	if purged > 0 {
-		retLog.Debug("Retention purge deleted event bodies", "count", purged)
+	if result.Bodies > 0 {
+		retLog.Debug("Retention sweep deleted event bodies", "count", result.Bodies, "references", result.References)
 	}
-	return purged, nil
+	return int(result.Bodies), nil
 }
 
 // SampleOccupancy emits one OccupancySample per stream to sink at time now,

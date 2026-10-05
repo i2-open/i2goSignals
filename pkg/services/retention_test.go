@@ -17,22 +17,30 @@ func streamWithWindow(win *int) model.StreamStateRecord {
 	return model.StreamStateRecord{Id: model.NewRecordId(), RetentionWindowDays: win}
 }
 
-func seedBody(t *testing.T, dao *memory.EventDAOMemory, jti string) {
+func seedBody(t *testing.T, dao *memory.EventDAOMemory, jti string, sortTime time.Time) {
 	t.Helper()
 	ev := &goSet.SecurityEventToken{Events: map[string]interface{}{"t": "e"}}
 	ev.ID = jti
-	if err := dao.Insert(context.Background(), &model.EventRecord{Jti: jti, Event: *ev, SortTime: time.Now()}); err != nil {
+	if err := dao.Insert(context.Background(), &model.EventRecord{Jti: jti, Event: *ev, SortTime: sortTime}); err != nil {
 		t.Fatalf("seed %s: %v", jti, err)
 	}
 }
 
-func deliver(t *testing.T, dao *memory.EventDAOMemory, jti, streamID string, ack time.Time) {
+// deliver queues jti for streamID and acknowledges it at ack, stamping
+// expireAt = ack + win days as the router does at acknowledgement (#360). A nil
+// win writes no expireAt (keep forever).
+func deliver(t *testing.T, dao *memory.EventDAOMemory, jti, streamID string, ack time.Time, win *int) {
 	t.Helper()
 	ctx := context.Background()
 	if err := dao.AddPending(ctx, refOf(jti), streamID); err != nil {
 		t.Fatalf("queue %s/%s: %v", jti, streamID, err)
 	}
-	if _, err := dao.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jti}, AckDate: ack}); err != nil {
+	batch := interfaces.AckBatch{StreamID: streamID, Jtis: []string{jti}, AckDate: ack}
+	if win != nil {
+		expireAt := ack.Add(time.Duration(*win) * 24 * time.Hour)
+		batch.ExpireAt = &expireAt
+	}
+	if _, err := dao.Ack(ctx, batch); err != nil {
 		t.Fatalf("deliver %s/%s: %v", jti, streamID, err)
 	}
 }
@@ -45,8 +53,9 @@ func TestPurgeExpired_Dormant(t *testing.T) {
 	eng := NewRetentionEngine(dao)
 
 	stream := streamWithWindow(nil) // keep-forever
-	seedBody(t, dao, "j1")
-	deliver(t, dao, "j1", stream.Id.Hex(), time.Now().Add(-365*24*time.Hour))
+	old := time.Now().Add(-365 * 24 * time.Hour)
+	seedBody(t, dao, "j1", old)
+	deliver(t, dao, "j1", stream.Id.Hex(), old, nil)
 
 	purged, err := eng.PurgeExpired(ctx, time.Now(), []model.StreamStateRecord{stream}, DefaultEffectiveWindow)
 	if err != nil {
@@ -63,22 +72,24 @@ func TestPurgeExpired_Dormant(t *testing.T) {
 	}
 }
 
-// TestPurgeExpired_FinitePurgesPostAck asserts a post-ack event older than the
-// finite window is purged, while a fresh one and a pending one survive.
+// TestPurgeExpired_FinitePurgesPostAck asserts a reference whose expireAt has
+// passed is dropped and its body (older than the window) purged, while a fresh
+// one and a pending one survive.
 func TestPurgeExpired_FinitePurgesPostAck(t *testing.T) {
 	ctx := context.Background()
 	dao := memory.NewEventDAO()
 	eng := NewRetentionEngine(dao)
 
-	stream := streamWithWindow(days(7))
+	win := days(7)
+	stream := streamWithWindow(win)
 	sid := stream.Id.Hex()
 	now := time.Now()
 
-	seedBody(t, dao, "old")   // acked 10 days ago -> expired
-	seedBody(t, dao, "fresh") // acked 1 day ago -> retained
-	seedBody(t, dao, "pend")  // pending -> never purged
-	deliver(t, dao, "old", sid, now.Add(-10*24*time.Hour))
-	deliver(t, dao, "fresh", sid, now.Add(-1*24*time.Hour))
+	seedBody(t, dao, "old", now.Add(-11*24*time.Hour))  // acked 10 days ago -> expired
+	seedBody(t, dao, "fresh", now.Add(-2*24*time.Hour)) // acked 1 day ago -> retained
+	seedBody(t, dao, "pend", now.Add(-11*24*time.Hour)) // pending -> never purged
+	deliver(t, dao, "old", sid, now.Add(-10*24*time.Hour), win)
+	deliver(t, dao, "fresh", sid, now.Add(-1*24*time.Hour), win)
 	if err := dao.AddPending(ctx, refOf("pend"), sid); err != nil {
 		t.Fatalf("add pending: %v", err)
 	}
@@ -99,6 +110,9 @@ func TestPurgeExpired_FinitePurgesPostAck(t *testing.T) {
 	if rec, _ := dao.FindByJTI(ctx, "pend"); rec == nil {
 		t.Fatalf("pending body wrongly purged")
 	}
+	if n, _ := dao.CountRetainedForStream(ctx, sid); n != 1 {
+		t.Fatalf("expected only the fresh delivered entry to remain, count=%d", n)
+	}
 	// Pending entry itself is untouched.
 	jtis, total, _ := pageJtis(dao.GetPendingForStream(ctx, sid, 10))
 	if total != 1 || len(jtis) != 1 || jtis[0] != "pend" {
@@ -107,7 +121,7 @@ func TestPurgeExpired_FinitePurgesPostAck(t *testing.T) {
 }
 
 // TestPurgeExpired_RefcountAcrossStreams asserts a body fanned out to two streams
-// with different windows survives to the MAX window (refcount 0 gate).
+// with different windows survives until the last reference expires.
 func TestPurgeExpired_RefcountAcrossStreams(t *testing.T) {
 	ctx := context.Background()
 	dao := memory.NewEventDAO()
@@ -118,9 +132,9 @@ func TestPurgeExpired_RefcountAcrossStreams(t *testing.T) {
 	streams := []model.StreamStateRecord{short, long}
 
 	t0 := time.Now().Add(-100 * 24 * time.Hour) // fixed ack anchor in the past
-	seedBody(t, dao, "shared")
-	deliver(t, dao, "shared", short.Id.Hex(), t0)
-	deliver(t, dao, "shared", long.Id.Hex(), t0)
+	seedBody(t, dao, "shared", t0.Add(-time.Hour))
+	deliver(t, dao, "shared", short.Id.Hex(), t0, short.RetentionWindowDays)
+	deliver(t, dao, "shared", long.Id.Hex(), t0, long.RetentionWindowDays)
 
 	// Pass 1 at t0+2d: only the short window has elapsed. Body must survive.
 	purged, err := eng.PurgeExpired(ctx, t0.Add(2*24*time.Hour), streams, DefaultEffectiveWindow)
@@ -153,6 +167,32 @@ func TestPurgeExpired_RefcountAcrossStreams(t *testing.T) {
 	}
 }
 
+// TestPurgeExpired_WindowFixedAtAck asserts a reference acknowledged while the
+// stream was keep-forever carries no expireAt and is never expired by a later
+// finite window (#360: the window is fixed at acknowledgement).
+func TestPurgeExpired_WindowFixedAtAck(t *testing.T) {
+	ctx := context.Background()
+	dao := memory.NewEventDAO()
+	eng := NewRetentionEngine(dao)
+
+	stream := streamWithWindow(nil)
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	seedBody(t, dao, "kept", old)
+	deliver(t, dao, "kept", stream.Id.Hex(), old, nil)
+
+	stream.RetentionWindowDays = days(1) // policy turns finite after the ack
+	purged, err := eng.PurgeExpired(ctx, time.Now(), []model.StreamStateRecord{stream}, DefaultEffectiveWindow)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("a keep-forever ack was purged by a later policy, purged=%d", purged)
+	}
+	if n, _ := dao.CountRetainedForStream(ctx, stream.Id.Hex()); n != 1 {
+		t.Fatalf("keep-forever reference dropped, count=%d", n)
+	}
+}
+
 type captureSink struct{ samples []OccupancySample }
 
 func (c *captureSink) ObserveOccupancy(s OccupancySample) { c.samples = append(c.samples, s) }
@@ -167,12 +207,12 @@ func TestSampleOccupancy_EmitsPerStreamRetained(t *testing.T) {
 	s1 := streamWithWindow(nil)
 	s2 := streamWithWindow(nil)
 	now := time.Now()
-	seedBody(t, dao, "a")
-	seedBody(t, dao, "b")
-	seedBody(t, dao, "c")
-	deliver(t, dao, "a", s1.Id.Hex(), now)
-	deliver(t, dao, "b", s1.Id.Hex(), now)
-	deliver(t, dao, "c", s2.Id.Hex(), now)
+	seedBody(t, dao, "a", now)
+	seedBody(t, dao, "b", now)
+	seedBody(t, dao, "c", now)
+	deliver(t, dao, "a", s1.Id.Hex(), now, nil)
+	deliver(t, dao, "b", s1.Id.Hex(), now, nil)
+	deliver(t, dao, "c", s2.Id.Hex(), now, nil)
 	// A pending event must NOT count toward retained.
 	if err := dao.AddPending(ctx, refOf("a"), s2.Id.Hex()); err != nil {
 		t.Fatalf("add pending: %v", err)

@@ -31,6 +31,10 @@ func Deliveries(t *testing.T, newDAO func(t *testing.T) interfaces.EventDAO) {
 		{"EnsurePendingKeepsAckJti", ensurePendingKeepsAckJti},
 		{"ResetPendingAckJtiTouchesPendingOnly", resetPendingAckJtiPendingOnly},
 		{"CreatedAtRules", createdAtRules},
+		{"SweepRemovesExpiredReferences", sweepRemovesExpiredReferences},
+		{"SweepDeletesOnlyUnreferencedBodies", sweepDeletesOnlyUnreferencedBodies},
+		{"SweepCopyFollowsInboundReference", sweepCopyFollowsInboundReference},
+		{"SweepBoundedAndResumesAcrossTies", sweepBoundedAndResumesAcrossTies},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newDAO(t)) })

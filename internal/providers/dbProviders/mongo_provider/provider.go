@@ -458,7 +458,8 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 const eventJtiIndexName = "eventJtiUnique"
 
 // Index names on the deliveries collection (#359) and the events
-// originalJti index. Named explicitly so they can be asserted on.
+// originalJti (#359) and sortTime (#360) indexes. Named explicitly so they can
+// be asserted on.
 const (
 	deliveriesSidJtiIndexName           = "deliveriesSidJti"
 	deliveriesSidAckJtiIndexName        = "deliveriesSidAckJti"
@@ -467,6 +468,7 @@ const (
 	deliveriesJtiIndexName              = "deliveriesJti"
 	deliveriesPendingCreatedAtIndexName = "deliveriesPendingCreatedAt"
 	eventOriginalJtiIndexName           = "eventOriginalJti"
+	eventSortTimeIndexName              = "eventSortTime"
 )
 
 // deliveriesIndexModels are the access-path indexes of the deliveries
@@ -528,6 +530,15 @@ func (m *MongoProvider) createIndexes(ctx context.Context) error {
 		Options: options.Index().SetName(eventOriginalJtiIndexName).SetSparse(true),
 	}); err != nil {
 		pLog.Error("Error creating originalJti index for eventCol", "error", err)
+		return err
+	}
+	// {sortTime} on events: the retention sweep reads bodies older than the
+	// body cutoff in ascending sortTime (#360).
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sortTime", Value: 1}},
+		Options: options.Index().SetName(eventSortTimeIndexName),
+	}); err != nil {
+		pLog.Error("Error creating sortTime index for eventCol", "error", err)
 		return err
 	}
 

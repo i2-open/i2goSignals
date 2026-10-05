@@ -160,7 +160,7 @@ var allDeliveriesIndexNames = []string{
 }
 
 // assertDeliveriesIndexes fails t for every deliveries index or the events
-// originalJti index that p lacks.
+// originalJti / sortTime index that p lacks.
 func assertDeliveriesIndexes(t *testing.T, p *MongoProvider, when string) {
 	t.Helper()
 	names := indexNames(t, p.deliveriesCol)
@@ -169,8 +169,11 @@ func assertDeliveriesIndexes(t *testing.T, p *MongoProvider, when string) {
 			t.Errorf("%s: deliveries index %q missing (have %v)", when, n, keysOf(names))
 		}
 	}
-	if ev := indexNames(t, p.eventCol); !ev[eventOriginalJtiIndexName] {
-		t.Errorf("%s: events index %q missing (have %v)", when, eventOriginalJtiIndexName, keysOf(ev))
+	ev := indexNames(t, p.eventCol)
+	for _, n := range []string{eventOriginalJtiIndexName, eventSortTimeIndexName} {
+		if !ev[n] {
+			t.Errorf("%s: events index %q missing (have %v)", when, n, keysOf(ev))
+		}
 	}
 }
 
