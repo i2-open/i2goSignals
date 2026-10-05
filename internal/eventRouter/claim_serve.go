@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -31,11 +30,6 @@ const defaultClaimInflight = 256
 // claimWaitSlack is taken off the receiver's resolved wait for the WaitMs a
 // non-owner sends, so the owner answers before the receiver's own deadline.
 const claimWaitSlack = time.Second
-
-const (
-	pollTransmitterKind = "poll-transmitter"
-	sstpServerKind      = "sstp-server"
-)
 
 var (
 	peerClaimsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -70,8 +64,8 @@ func claimInflightMax() int {
 }
 
 // splitStreamResource returns a lease resource's kind and stream id.
-func splitStreamResource(resource string) (kind, id string) {
-	kind, id, _ = strings.Cut(resource, ":")
+func splitStreamResource(resource string) (cluster.LeaseKind, string) {
+	kind, id, _ := cluster.ParseResource(resource)
 	return kind, id
 }
 
@@ -79,7 +73,7 @@ func splitStreamResource(resource string) (kind, id string) {
 // router with ServesClaims false never acquires.
 func isClaimServedResource(resource string) bool {
 	kind, _ := splitStreamResource(resource)
-	return kind == pollTransmitterKind || kind == sstpServerKind
+	return kind == cluster.PollTransmitter || kind == cluster.SstpServer
 }
 
 // claimResource returns the lease resource for a claim mode.
@@ -150,10 +144,10 @@ func (r *router) dropOwnerQueue(resource string) {
 	var buf *buffer.EventPollBuffer
 	r.mu.Lock()
 	switch kind {
-	case pollTransmitterKind:
+	case cluster.PollTransmitter:
 		buf = r.pollBuffers[id]
 		delete(r.pollBuffers, id)
-	case sstpServerKind:
+	case cluster.SstpServer:
 		buf = r.sstpServerBuffers[id]
 		delete(r.sstpServerBuffers, id)
 	}
@@ -214,13 +208,13 @@ func (r *router) ensureOwnerQueueSeeded(resource string) (known, seeded bool) {
 	var bufs map[string]*buffer.EventPollBuffer
 	r.mu.RLock()
 	switch kind {
-	case pollTransmitterKind:
+	case cluster.PollTransmitter:
 		if _, known := r.pollStreams[id]; !known {
 			r.mu.RUnlock()
 			return false, false
 		}
 		bufs = r.pollBuffers
-	case sstpServerKind:
+	case cluster.SstpServer:
 		bufs = r.sstpServerBuffers
 	default:
 		r.mu.RUnlock()
@@ -239,7 +233,7 @@ func (r *router) ensureOwnerQueueSeeded(resource string) (known, seeded bool) {
 	})
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if kind == pollTransmitterKind {
+	if kind == cluster.PollTransmitter {
 		if _, known := r.pollStreams[id]; !known {
 			return false, false
 		}
