@@ -96,8 +96,11 @@ func (rr *recordingRouter) GetPushStreamCnt() float64                           
 func (rr *recordingRouter) GetPollStreamCnt() float64                                      { return 0 }
 func (rr *recordingRouter) IncrementCounter(*model.StreamStateRecord, *goSet.SecurityEventToken, bool) {
 }
-func (rr *recordingRouter) SetStatsHandler(interface{})      {}
-func (rr *recordingRouter) ResetStream(string)               {}
+func (rr *recordingRouter) SetStatsHandler(interface{}) {}
+func (rr *recordingRouter) ResetStream(string)          {}
+func (rr *recordingRouter) ReplayStream(context.Context, string, string, *time.Time) error {
+	return nil
+}
 func (rr *recordingRouter) WakeTransmitter(string, string)   {}
 func (rr *recordingRouter) NotifySubjectFilterChange(string) {}
 

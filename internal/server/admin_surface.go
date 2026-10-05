@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/url"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -205,6 +206,11 @@ func (a *adminRouterAdapter) IncrementCounter(*model.StreamStateRecord, *goSet.S
 func (a *adminRouterAdapter) SetStatsHandler(interface{}) { a.unsupported("SetStatsHandler") }
 
 func (a *adminRouterAdapter) ResetStream(string) { a.unsupported("ResetStream") }
+
+func (a *adminRouterAdapter) ReplayStream(context.Context, string, string, *time.Time) error {
+	a.unsupported("ReplayStream")
+	return nil
+}
 
 func (a *adminRouterAdapter) WakeTransmitter(string, string) { a.unsupported("WakeTransmitter") }
 

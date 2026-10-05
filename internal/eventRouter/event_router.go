@@ -115,6 +115,11 @@ type EventRouter interface {
 	IncrementCounter(stream *model.StreamStateRecord, token *goSet.SecurityEventToken, inBound bool)
 	SetStatsHandler(stats interface{})
 	ResetStream(sid string)
+	// ReplayStream is the stream-update reset: it clears stream sid's pending
+	// SETs and re-queues its events from resetJti (inclusive) or resetDate.
+	// While delivery waits for the legacy deliveries migration (#361) it is
+	// queued, runs once delivery has started, and returns nil.
+	ReplayStream(ctx context.Context, sid, resetJti string, resetDate *time.Time) error
 	WakeTransmitter(sid string, mode string)
 	// WakeSstpClient wakes the SSTP-client outbound buffer for pairId so the
 	// lease owner drains a pending outbound event into the next outbound cycle.
@@ -152,9 +157,12 @@ type router struct {
 	// until it clears (#361, seam S2). Written under startMu; ingest reads it
 	// without the lock.
 	startPending atomic.Bool
-	// pendingResets holds the streams whose reset (ResetStream) arrived while
-	// startPending was set; they are reset once delivery starts. Under startMu.
-	pendingResets map[string]struct{}
+	// pendingResets holds the streams whose reset (ResetStream, or
+	// ReplayStream with its replay point) arrived while startPending was set;
+	// they are reset once delivery starts. A nil replay is a plain reset; the
+	// last request for a stream wins, as each one clears the stream first.
+	// Under startMu.
+	pendingResets map[string]*streamReplay
 	// signingKeys is the key cache: each issuer's active signing key per
 	// signature algorithm, re-read from the key store 2s after it was loaded
 	// (#313).
@@ -690,8 +698,14 @@ func (r *router) migrateThenStartDelivery(deps RouterDeps) {
 	// once delivery has started.
 	r.startDelivery(deps, r.streamService.GetStateMap(r.ctx))
 	r.startPending.Store(false)
-	for sid := range r.pendingResets {
-		r.resetStream(sid)
+	for sid, replay := range r.pendingResets {
+		if replay == nil {
+			r.resetStream(sid)
+			continue
+		}
+		if err := r.replayStream(r.ctx, sid, replay); err != nil {
+			eventLogger.Warn("ROUTER: deferred stream reset failed", "sid", sid, "error", err)
+		}
 	}
 	r.pendingResets = nil
 }
@@ -720,14 +734,30 @@ func (r *router) DeliveryStarted() bool {
 
 // deferredUntilStarted reports whether delivery still waits for the legacy
 // deliveries migration (#361). It holds startMu while it checks, so a caller
-// that finds delivery started runs after the start has completed.
-func (r *router) deferredUntilStarted() bool {
+// that finds delivery started runs after the start has completed. When
+// delivery still waits, defer (if not nil) runs under startMu, so what it
+// records is seen by the start.
+func (r *router) deferredUntilStarted(deferFn func()) bool {
 	if !r.startPending.Load() {
 		return false
 	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
-	return r.startPending.Load()
+	if !r.startPending.Load() {
+		return false
+	}
+	if deferFn != nil {
+		deferFn()
+	}
+	return true
+}
+
+// deferReset records sid's reset for the start; under startMu.
+func (r *router) deferReset(sid string, replay *streamReplay) {
+	if r.pendingResets == nil {
+		r.pendingResets = make(map[string]*streamReplay)
+	}
+	r.pendingResets[sid] = replay
 }
 
 // startDelivery runs startup steps 3-5 (#361, seam S2) once the legacy
@@ -833,22 +863,55 @@ func parsePollTimeoutEnv(newName, oldName string, fallback int) int {
 }
 
 func (r *router) ResetStream(sid string) {
-	if r.startPending.Load() {
-		r.startMu.Lock()
-		if r.startPending.Load() {
-			// Delivery waits for the legacy deliveries migration (#361): the
-			// reset runs once it has started.
-			if r.pendingResets == nil {
-				r.pendingResets = make(map[string]struct{})
-			}
-			r.pendingResets[sid] = struct{}{}
-			r.startMu.Unlock()
-			eventLogger.Info("ROUTER: stream reset deferred until delivery starts", "sid", sid)
-			return
-		}
-		r.startMu.Unlock()
+	if r.deferredUntilStarted(func() { r.deferReset(sid, nil) }) {
+		// Delivery waits for the legacy deliveries migration (#361): the
+		// reset runs once it has started.
+		eventLogger.Info("ROUTER: stream reset deferred until delivery starts", "sid", sid)
+		return
 	}
 	r.resetStream(sid)
+}
+
+// streamReplay is a stream-update reset's replay point: a JTI, or a date.
+type streamReplay struct {
+	jti  string
+	date *time.Time
+}
+
+func (r *router) ReplayStream(ctx context.Context, sid, resetJti string, resetDate *time.Time) error {
+	if resetJti == "" && resetDate == nil {
+		return errors.New("reset error: a date or jti must be provided")
+	}
+	replay := &streamReplay{jti: resetJti, date: resetDate}
+	if r.deferredUntilStarted(func() { r.deferReset(sid, replay) }) {
+		// Delivery waits for the legacy deliveries migration (#361): the
+		// reset runs once it has started.
+		eventLogger.Info("ROUTER: stream reset deferred until delivery starts", "sid", sid)
+		return nil
+	}
+	return r.replayStream(ctx, sid, replay)
+}
+
+// replayStream clears sid's pending SETs and re-queues its events from the
+// replay point. Operational events (verify, stream-updated) are
+// point-to-point and are not replayed; each re-queued reference carries the
+// JTI the SET is sent and acknowledged with on this stream (#363).
+func (r *router) replayStream(ctx context.Context, sid string, replay *streamReplay) error {
+	streamState, err := r.streamService.GetStreamStateBySID(ctx, sid)
+	if err != nil {
+		eventLogger.Warn("ROUTER: stream state not read before reset", "sid", sid, "error", err)
+	}
+	return r.eventService.ResetEventStream(ctx, sid, replay.jti, replay.date, func(eventRecord *model.EventRecord) bool {
+		if eventRecord.Operational {
+			return false
+		}
+		return r.eventService.MatchesStream(streamState, eventRecord)
+	}, func(inboundJti string) string {
+		if streamState == nil {
+			return inboundJti
+		}
+		return streamState.AckJti(inboundJti)
+	})
 }
 
 func (r *router) resetStream(sid string) {
@@ -1080,7 +1143,7 @@ func (r *router) checkAndLoadKey(streamID string, issuer string, alg string) (cr
 }
 
 func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
-	if stream != nil && stream.StreamConfiguration.Id != "" && r.deferredUntilStarted() {
+	if stream != nil && stream.StreamConfiguration.Id != "" && r.deferredUntilStarted(nil) {
 		// Delivery waits for the legacy deliveries migration (#361): the
 		// stream starts from the state map read once it has run.
 		eventLogger.Info("ROUTER: stream starts after the legacy deliveries migration", "sid", stream.StreamConfiguration.Id)

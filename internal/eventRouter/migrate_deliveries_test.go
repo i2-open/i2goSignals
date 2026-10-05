@@ -398,3 +398,31 @@ func leaseHolderCount(t *testing.T, coord cluster.ClusterCoordinator, resource s
 	}
 	return 1
 }
+
+// A stream-update reset (ReplayStream) that arrives while delivery waits for
+// the legacy migration is queued, touches no deliveries, and runs once
+// delivery has started (#361).
+func TestNewRouter_ReplayStreamWaitsForTheMigration(t *testing.T) {
+	prev := migrationLeaseRetry
+	migrationLeaseRetry = 5 * time.Millisecond
+	t.Cleanup(func() { migrationLeaseRetry = prev })
+
+	p := openMemPersistence(t)
+	dao := &probeDAO{EventDAO: p.EventDAO}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator, ServesClaims: true}, "node-mig").(*router)
+	t.Cleanup(r.Shutdown)
+
+	stream := ensureWalPollStream(t, p, "https://receiver.example.com")
+	sid := stream.StreamConfiguration.Id
+	from := time.Now().Add(-time.Hour)
+	require.NoError(t, r.ReplayStream(t.Context(), sid, "", &from), "a deferred reset is accepted")
+	assert.Error(t, r.ReplayStream(t.Context(), sid, "", nil), "a reset needs a date or a JTI")
+	assert.Never(t, func() bool { return dao.early.Load() > 0 || dao.clears.Load() > 0 }, 50*time.Millisecond, time.Millisecond, "deliveries accessed before the migration")
+
+	dao.ready.Store(true)
+	require.Eventually(t, func() bool { return dao.clears.Load() == 1 }, 5*time.Second, time.Millisecond, "the deferred replay never ran")
+	assert.Zero(t, dao.early.Load(), "deliveries accessed before the migration")
+
+	require.NoError(t, r.ReplayStream(t.Context(), sid, "", &from))
+	assert.EqualValues(t, 2, dao.clears.Load(), "a reset after the start runs at once")
+}
