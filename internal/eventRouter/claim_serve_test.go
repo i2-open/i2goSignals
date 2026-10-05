@@ -274,3 +274,47 @@ func TestClaimServe_SstpReturnEventsFalseWithoutAcksMakesNoClaim(t *testing.T) {
 	assert.Equal(t, "node-a", leaseHolder(t, persistence, resource), "asking for events takes the acceptor lease")
 	assert.Zero(t, transport.claims.Load(), "the owner serves itself")
 }
+
+// releaseCounter is a coordinator that only counts lease releases.
+type releaseCounter struct {
+	cluster.ClusterCoordinator
+	released atomic.Int64
+}
+
+func (c *releaseCounter) ReleaseLeaseIfOwned(string, string) error {
+	c.released.Add(1)
+	return nil
+}
+
+// The request path gives a stream lease back through releaseStreamLease (a
+// stream that went away under the acquire). A renewal loop that does not stop
+// must not hold that request: the wait is bounded, and the release follows
+// once the loop has stopped, so a late renewal cannot re-take the lease.
+func TestReleaseStreamLease_BoundsTheRenewalWait(t *testing.T) {
+	prev := streamLeaseReleaseWait
+	streamLeaseReleaseWait = 20 * time.Millisecond
+	t.Cleanup(func() { streamLeaseReleaseWait = prev })
+
+	coord := &releaseCounter{}
+	r := newBareRouter(RouterDeps{Coordinator: coord})
+	r.streamLeases = map[string]*streamLease{}
+	resource := cluster.PollTransmitter.Resource("s1")
+	sl := &streamLease{cancel: func() {}, done: make(chan struct{})}
+	r.streamLeases[resource] = sl
+
+	returned := make(chan struct{})
+	go func() {
+		r.releaseStreamLease(resource)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("releaseStreamLease waited on a renewal loop that never stopped")
+	}
+	assert.Zero(t, coord.released.Load(), "the lease is not given back while its renewal may still re-take it")
+
+	close(sl.done)
+	require.Eventually(t, func() bool { return coord.released.Load() == 1 }, 2*time.Second, time.Millisecond,
+		"the lease is given back once the renewal loop has stopped")
+}

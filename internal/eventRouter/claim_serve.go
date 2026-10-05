@@ -170,12 +170,32 @@ func (r *router) releaseStreamLease(resource string) {
 		return
 	}
 	sl.cancel()
-	// A renewal in flight would re-take the lease after the release below.
-	<-sl.done
-	r.leaseOwners.forget(resource)
-	_, id := splitStreamResource(resource)
-	r.releaseLease(resource, id)
+	// A renewal in flight would re-take the lease after the release below, so
+	// the release waits for the loop to stop. The request path reaches here
+	// (a stream gone under the acquire), so the wait is bounded: past it the
+	// release is left to run once the loop has stopped.
+	release := func() {
+		r.leaseOwners.forget(resource)
+		_, id := splitStreamResource(resource)
+		r.releaseLease(resource, id)
+	}
+	timer := time.NewTimer(streamLeaseReleaseWait)
+	defer timer.Stop()
+	select {
+	case <-sl.done:
+		release()
+	case <-timer.C:
+		eventLogger.Warn("ROUTER: stream lease renewal did not stop in time; releasing when it does", "resource", resource, "wait", streamLeaseReleaseWait)
+		go func() {
+			<-sl.done
+			release()
+		}()
+	}
 }
+
+// streamLeaseReleaseWait bounds how long releaseStreamLease waits for the
+// lease's renewal loop to stop; a var so tests can shorten it.
+var streamLeaseReleaseWait = 5 * time.Second
 
 // releaseAllStreamLeases gives back every poll-transmitter and sstp-server
 // lease this node holds.
