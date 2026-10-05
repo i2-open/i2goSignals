@@ -40,7 +40,8 @@ import (
 
 type options struct {
 	gs1, gs2                 string
-	gs1b                     string // second member of goSignals1's cluster (ingest only)
+	gs1b                     string // second member of goSignals1's cluster
+	gs1bInternal             string // base URL goSignals2 uses to reach gs1b (moves the POLL/SSTP-responder legs there)
 	gs1bSyncTimeout          time.Duration
 	gs1Internal, gs2Internal string
 	caFile                   string
@@ -78,6 +79,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.gs1, "gs1", "https://localhost:8888", "host-side base URL of goSignals1 (ingress + transmitters)")
 	flag.StringVar(&o.gs2, "gs2", "https://localhost:8889", "host-side base URL of goSignals2 (receivers)")
 	flag.StringVar(&o.gs1b, "gs1b", "", "host-side base URL of a second node in goSignals1's cluster (e.g. https://localhost:8887); ingest workers alternate between --gs1 and it")
+	flag.StringVar(&o.gs1bInternal, "gs1b-internal", "", "base URL goSignals2 uses to reach the --gs1b node; when set, goSignals2 polls it and, with --sstp-role responder, dials it for SSTP")
 	flag.StringVar(&o.gs1Internal, "gs1-internal", "", "base URL goSignals2 uses to reach goSignals1 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.gs2Internal, "gs2-internal", "", "base URL goSignals1 uses to reach goSignals2 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.caFile, "ca", "config/certs/ca-cert.pem", "CA certificate used to verify both servers")
@@ -114,6 +116,10 @@ func parseFlags() *options {
 	flag.Parse()
 	if o.issuerKeyFile == "" {
 		o.issuerKeyFile = filepath.Join(o.outDir, keyFileName(o.issuer)+".pem")
+	}
+	if err := validateGs1bInternal(o); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
 	}
 	if o.events <= 0 || o.concurrency <= 0 {
 		fmt.Fprintln(os.Stderr, "--events and --concurrency must be positive")
@@ -266,6 +272,7 @@ func run(o *options) error {
 			return err
 		}
 	}
+	propsBefore, propsErr := scrapeAllProperties(ingressNodes)
 	daoBefore1, daoErr1 := gs1.scrapeDaoHistograms()
 	daoBefore2, daoErr2 := gs2.scrapeDaoHistograms()
 	var daoBefore1b histograms
@@ -305,6 +312,7 @@ func run(o *options) error {
 	}
 	if gs1b != nil {
 		result.Gs1b = gs1b.hostBase
+		result.Gs1bInternal = o.gs1bInternal
 		result.Gs1bSyncSeconds = gs1bSync.Seconds()
 	}
 	expectPush, expectPoll, expectSstp := mix.expected(o.events)
@@ -383,16 +391,25 @@ func run(o *options) error {
 
 	result.Profiles = profiles.wait()
 
+	// ---- verified-property counters (#366) --------------------------------
+	if propsErr == nil {
+		if after, err := scrapeAllProperties(ingressNodes); err == nil {
+			result.Properties = summarizeProperties(propsBefore, after)
+		}
+	}
+
 	// ---- DAO histograms and journal counters -------------------------------
 	if daoErr1 == nil {
 		if after, err := gs1.scrapeDaoHistograms(); err == nil {
 			result.DaoGs1 = summarizeDao(diffHistograms(daoBefore1, after))
 			result.DominantDaoOp = dominantDaoOp(result.DaoGs1)
+			result.BeyondGs1 = beyondQueryCost(result.DaoGs1)
 		}
 	}
 	if daoErr1b == nil {
 		if after, err := gs1b.scrapeDaoHistograms(); err == nil {
 			result.DaoGs1b = summarizeDao(diffHistograms(daoBefore1b, after))
+			result.BeyondGs1b = beyondQueryCost(result.DaoGs1b)
 		}
 	}
 	if daoErr2 == nil {
@@ -592,7 +609,7 @@ func buildTopology(gs1, gs2 *node, o *options, mix audMix) (*topology, error) {
 		return nil, fmt.Errorf("goSignals1 poll transmitter: %w", err)
 	}
 	t.txPoll = txPoll
-	pollEndpoint, err := rebase(txPoll.Delivery.PollTransmitMethod.EndpointUrl, gs1.internalBase)
+	pollEndpoint, err := rebase(txPoll.Delivery.PollTransmitMethod.EndpointUrl, receiverLegBase(gs1.internalBase, o.gs1bInternal))
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +710,7 @@ func buildSstpPair(gs1, gs2 *node, o *options, jwksURL string, events []string) 
 		_ = responder.deleteStream(respRec.PairId)
 		return nil, nil, "", fmt.Errorf("%s SSTP responder: create response carries no endpoint/bearer", responder.name)
 	}
-	endpoint, err = rebase(respRec.SstpMethod.EndpointUrl, responder.internalBase)
+	endpoint, err = rebase(respRec.SstpMethod.EndpointUrl, sstpResponderBase(responder, gs1, o))
 	if err != nil {
 		_ = responder.deleteStream(respRec.PairId)
 		return nil, nil, "", err

@@ -247,8 +247,8 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
   ADR 0017's jti-only dedup and SSTP crash-recovery idempotency intact across
   the hop. `txn` (RFC 8417 §2.2) is the cross-hop audit linkage and is
   likewise preserved; never `act` (an access-token claim, not a SET claim).
-  Planned change (spec successor to planning #111): the re-signed copy
-  gets a new `jti` and carries `originalJti` — see **`originalJti`** below.
+  Since planning #112 the re-signed copy stored in `events` gets a new
+  `jti` and carries `originalJti` — see **`originalJti`** below.
 
 ### SET signing algorithm (`signing_alg`)
 
@@ -457,18 +457,18 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
-### DeliveryQueue (planned, spec successor to planning #111)
+### DeliveryQueue
 
 The per-stream module the `EventRouter` owns for one target stream's
 in-memory work: the pending JTIs still to deliver, the in-memory poll
 claims, and the coalesced acknowledgement batch. The acknowledgement
 batch is one Mongo write — a conditional update of the stream's
 `deliveries` documents from `pending` to `delivered`, plus w:1 inserts of
-the re-signed outbound copies into `events`. It replaces today's
+the re-signed outbound copies into `events`. It replaced the old
 pendingEvents `DeleteMany` + deliveredEvents `InsertOne` + retract
 `DeleteMany` sequence.
 
-### RoutingTable (planned, spec successor to planning #111)
+### RoutingTable
 
 An immutable snapshot of stream routing — stream id, status, delivery
 mode, event-type and subject filters — rebuilt whenever a stream is
@@ -476,7 +476,7 @@ added, removed or changes status, and read without taking the router
 lock. Lease ownership is deliberately not part of it; that stays in the
 **lease-owner cache** (see **Ingest read caches**).
 
-### PeerTransport (planned, spec successor to planning #111)
+### PeerTransport
 
 The seam for inter-node wake signalling. One method:
 `Wake(ctx, owner node, WakeMessage{StreamID, Mode, Reason, JTIs})`. The
@@ -485,7 +485,7 @@ looked up in Mongo); the two-node test harness uses an in-process
 adapter. The JTI list is advisory and capped — the receiving node falls
 back to reading its pending `deliveries` from Mongo.
 
-### LeaseManager (planned, spec successor to planning #111)
+### LeaseManager
 
 The node-level module that owns lease acquire / heartbeat / release for
 every stream on a node. It keeps the lease expiry each heartbeat returns
@@ -525,10 +525,10 @@ same repair. The only residual is a retry that arrives after retention purged
 the delivered record, which is re-queued (at-least-once).
 
 The pending-marker and delivered-record collections (pendingEvents /
-deliveredEvents) are being replaced by the single `deliveries` collection
-under the planned spec (successor to planning #111) — see below.
+deliveredEvents) were replaced by the single `deliveries` collection under
+planning #112 — see below. Legacy documents are migrated once at startup.
 
-### `deliveries` collection (planned, spec successor to planning #111)
+### `deliveries` collection
 
 Replaces the pendingEvents and deliveredEvents collections with one
 document per `(sid, jti)`:
@@ -559,7 +559,7 @@ The transmitter-side waiting vocabulary, per target stream:
   not yet acknowledged, whether or not it has been handed out. Reported as
   a depth and as the age of the oldest.
 
-### `originalJti` (field on `events`) (planned, spec successor to planning #111)
+### `originalJti` (field on `events`)
 
 Set on a re-signed outbound copy stored in `events`: the copy carries a
 new `jti`, and `originalJti` points at the inbound SET it was derived

@@ -185,3 +185,59 @@ workers.
   from both nodes.
 - Profiles were taken on Mongo only. Block sampling lowers throughput at 64
   clients.
+
+## Spec #112 single-node run (i2-open/i2goSignals#366)
+
+The run that closes the spec's single-node clause: 5000 events, 16
+clients, `--mix alternate`, one node, on the spec branch
+`spec-112-cluster-delivery` at `2a54c40` plus this slice. The branch already
+includes the `deliveries` collection (#359/#360), the per-stream delivery
+queue and coalesced ack, and #352's two observations per SET. Measured
+2026-10-05 on the same host as above.
+
+**Stack difference.** These runs used the benchmark stack
+(`make bench-stack-up`, `docker-compose-benchmark.yml`): a release image,
+majority durability, not Delve. The baseline above ran on the dev stack under
+Delve, so its absolute numbers are lower and the two rows are not
+like-for-like. To get a like-for-like comparison, `release-0.12.0` at
+`b38b9c2` (the spec branch's base) was built into the same benchmark image
+and run on the same stack between the spec runs.
+
+| Build | Stack | Runs | Ingest ev/s (mean, range) | Ingest p50 ms | Per-leg ev/s push / poll / SSTP | `InsertWithPending` mean ms |
+|---|---|---|---|---|---|---|
+| alpha.20 baseline (Mongo, default workers) | dev, Delve | 1 | 681 | - | 212 / 212 / 212 | (`InsertMany` + `AddPendingMany`) |
+| `release-0.12.0` `b38b9c2` (control) | bench | 3 | 1536 (1477-1576) | 8.6 | 450 / 450 / 450 (2 runs) | 5.92 |
+| spec #112 branch | bench | 6 | 1389 (1306-1536) | 9.9 | 406 / 406 / 405 | 6.78 |
+
+Every spec run drained all three legs to 100%. The third control run's SSTP
+leg stalled at 4 of 1666 events and timed out; that is an existing
+`release-0.12.0` flake, not counted in the control's per-leg mean, and its
+ingest figure (1477) is included.
+
+**Reading.** Against the alpha.20 table the spec branch ingests about 2x
+faster at 16 clients, but most of that is the stack (release image, no
+Delve). Against the like-for-like control the spec branch is about 9-10%
+lower (1389 against 1536 ev/s), at the edge of the 10% noise band; the spread
+of the six spec runs (1306-1536) overlaps the control's range. The visible
+cost is in the ingest write: `InsertWithPending` mean rises from 5.9 to
+6.8 ms, consistent with the `deliveries` collection carrying more indexes
+than the old pendingEvents collection (unique `(sid, jti)`, `(sid, state,
+jti)`, the partial `(sid, createdAt)` for `OldestBeyond`, `jti`, TTL). That
+is the spec's design, not something this slice changes.
+
+**Verified properties** (spec runs; the control build has no such counters):
+
+| Counter | Per run |
+|---|---|
+| Ack writes / ack batches | 1199-1756 / 1199-1756, so 1.000 writes per batch |
+| Reads under the router lock | 0 |
+| Reads before an ack batch | 0 |
+| Peer claims served / budget exhausted | 0 / 0 (single node, no peer) |
+
+**`OldestBeyond` query cost.** The queue window was smaller than the
+backlog in every spec run, so `GetPendingForStreamBeyond` fired 25-149 times
+a run (65, 144, 67, 27, 25, 149). Its mean was 3.0-4.7 ms, against
+2.0-4.6 ms for a plain `GetPendingForStream` page (one outlier run at
+14.4 ms). The extra `find ... sort({createdAt: 1}).limit(1)` over
+`deliveriesPendingCreatedAt` therefore adds about a millisecond to a read
+that is off the ingest path.

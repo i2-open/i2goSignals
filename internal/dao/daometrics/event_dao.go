@@ -174,8 +174,19 @@ func (d *eventDAO) EnsurePending(ctx context.Context, jti string, ackJtis map[st
 func (d *eventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
 	start := time.Now()
 	page, err := d.inner.GetPendingForStream(ctx, streamID, limit)
-	d.observe("GetPendingForStream", start, err)
+	d.observe(pendingPageOp(page), start, err)
 	return page, err
+}
+
+// pendingPageOp labels a GetPendingForStream call. A page with more pending
+// rows than it returns (Total > len(Refs)) also paid for the OldestBeyond read,
+// so it is recorded under GetPendingForStreamBeyond instead; the difference of
+// the two labels' means is the cost of that query (#366, planning #112 S2).
+func pendingPageOp(page interfaces.PendingPage) string {
+	if page.Total > int64(len(page.Refs)) {
+		return "GetPendingForStreamBeyond"
+	}
+	return "GetPendingForStream"
 }
 
 func (d *eventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {

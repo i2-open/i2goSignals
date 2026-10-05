@@ -217,3 +217,37 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 		assert.Equal(t, float64(1), sum, "%s batch size", op)
 	}
 }
+
+// TestGetPendingForStream_BeyondLabel asserts a page with more pending rows
+// than it returns (Total > len(Refs), so the store also read OldestBeyond) is
+// observed under op GetPendingForStreamBeyond, and a page that holds every
+// pending row stays under GetPendingForStream (#366). The bench compares the
+// two labels' means to measure the cost of the OldestBeyond query.
+func TestGetPendingForStream_BeyondLabel(t *testing.T) {
+	ctx := context.Background()
+	m := daometrics.NewMetrics()
+	reg := privateRegistry(t, m)
+	d := daometrics.Wrap(memory.NewEventDAO(), m)
+
+	_, err := d.InsertMany(ctx, []*model.EventRecord{{Jti: "b1"}, {Jti: "b2"}, {Jti: "b3"}})
+	require.NoError(t, err)
+	require.NoError(t, d.AddPendingMany(ctx, refsFrom([]string{"b1", "b2", "b3"}), "s"))
+
+	page, err := d.GetPendingForStream(ctx, "s", 2)
+	require.NoError(t, err)
+	require.Greater(t, page.Total, int64(len(page.Refs)))
+
+	beyond, _ := histo(t, reg, durName, map[string]string{"op": "GetPendingForStreamBeyond", "outcome": "ok"})
+	plain, _ := histo(t, reg, durName, map[string]string{"op": "GetPendingForStream", "outcome": "ok"})
+	assert.Equal(t, uint64(1), beyond, "short page observed under the Beyond label")
+	assert.Equal(t, uint64(0), plain, "short page not double-counted")
+
+	page, err = d.GetPendingForStream(ctx, "s", 10)
+	require.NoError(t, err)
+	require.Equal(t, page.Total, int64(len(page.Refs)))
+
+	beyond, _ = histo(t, reg, durName, map[string]string{"op": "GetPendingForStreamBeyond", "outcome": "ok"})
+	plain, _ = histo(t, reg, durName, map[string]string{"op": "GetPendingForStream", "outcome": "ok"})
+	assert.Equal(t, uint64(1), beyond)
+	assert.Equal(t, uint64(1), plain, "full page observed under GetPendingForStream")
+}

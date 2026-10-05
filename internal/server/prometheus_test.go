@@ -145,3 +145,41 @@ func TestDeliveryWaitAndBacklogMetrics(t *testing.T) {
 	var dup prometheus.AlreadyRegisteredError
 	require.ErrorAs(t, registry.Register(bc.BacklogCollector()), &dup)
 }
+
+// TestVerifiedPropertyCountersExported: the four counters the bench reads for
+// #112's verified properties (ack writes per batch, reads under the router
+// lock, reads before an ack batch) are served on /metrics (#366).
+func TestVerifiedPropertyCountersExported(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	provider, err := memory_provider.Open("memorydb://localhost", "test_property_counters")
+	require.NoError(t, err)
+	persistence := &dbProviders.Persistence{
+		StreamService: provider.GetStreamService(),
+		KeyService:    provider.GetKeyService(),
+		EventService:  provider.GetEventService(),
+		ClientService: provider.GetClientService(),
+		ServerService: provider.GetServerService(),
+		TokenService:  provider.GetTokenService(),
+		Coordinator:   provider.Coordinator(),
+		Storage:       memory_provider.NewMemoryStorage(provider),
+	}
+	sa := NewApplication(persistence, "http://localhost:8080")
+	defer sa.Shutdown()
+
+	registry := prometheus.NewRegistry()
+	sa.InitializePrometheusWithRegisterer(registry)
+
+	rr := httptest.NewRecorder()
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	body, err := io.ReadAll(rr.Body)
+	require.NoError(t, err)
+	for _, name := range []string{
+		"goSignals_router_ack_writes_total",
+		"goSignals_router_ack_batches_total",
+		"goSignals_router_reads_under_lock_total",
+		"goSignals_router_reads_before_ack_total",
+	} {
+		assert.Contains(t, string(body), "\n"+name+" ", "%s exported", name)
+	}
+}
