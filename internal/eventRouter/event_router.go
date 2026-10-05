@@ -716,6 +716,7 @@ func (r *router) ResetStream(sid string) {
 	// to reset and must not create one.
 	if q, ok := r.queues.Load(sid); ok {
 		q.(*deliveryQueue).reset()
+		q.(*deliveryQueue).clearClaims()
 	}
 }
 
@@ -2122,13 +2123,14 @@ func (r *router) PollStreamHandler(ctx context.Context, sid string, params model
 		// The lease was lost while the claim waited; its claims went with it.
 		return map[string]string{}, false, http.StatusOK
 	}
-	defer pollClaimedGauge.WithLabelValues(sid).Set(float64(pollBuffer.ClaimedCnt()))
+	q := r.queueFor(sid)
+	defer func() { pollClaimedGauge.WithLabelValues(sid).Set(float64(q.ClaimedCnt())) }()
 	sets, signErr := r.assemblePollResponse(sid, &state, pollBuffer, refJtis(resp.Refs), forwardMode, key, kid)
 	if signErr != nil {
 		// The key could not sign a SET: nothing is sent rather than a
 		// response that silently leaves it out, and the pause applies.
 		// Nothing was sent, so the batch is released for the next poll.
-		pollBuffer.ReleaseClaim(claimToken)
+		q.ReleaseClaim(claimToken)
 		r.takeKeyUnavailablePause(&state, "POLL-SRV", signErr)
 		return nil, false, PollKeyUnavailableStatus
 	}
@@ -2294,8 +2296,9 @@ func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventReco
 // acked in the poll buffer and the provider as one batch so they are neither
 // returned now nor on a later poll, keeping the pending buffer bounded.
 func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
-	pollBuffer.AckEvents(jtis)
-	if _, err := r.queueFor(sid).AckInbound(r.ctx, jtis, false); err != nil {
+	q := r.queueFor(sid)
+	q.ackBuffered(pollBuffer, jtis)
+	if _, err := q.AckInbound(r.ctx, jtis, false); err != nil {
 		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }

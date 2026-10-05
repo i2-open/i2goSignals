@@ -44,21 +44,21 @@ func TestPollAckOnly_ExplicitZeroAppliesAcksAndClaimsNothing(t *testing.T) {
 	h, _ := newPollKeyHarness(t, "1h")
 	sid := h.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish).StreamConfiguration.Id
 	h.queuePollEvents(t, sid, 4)
-	buf := h.router.pollBufferFor(sid)
-	require.NotNil(t, buf)
+	require.NotNil(t, h.router.pollBufferFor(sid))
+	claims := h.router.queueFor(sid)
 
 	first, _, status := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents: 1, ReturnImmediately: true,
 	})
 	require.Equal(t, 200, status)
 	require.Len(t, first, 1)
-	require.Equal(t, 1, buf.ClaimedCnt())
+	require.Equal(t, 1, claims.ClaimedCnt())
 
 	sets, more, status := ackOnlyPoll(h.router, sid, keysOf(first))
 	assert.Equal(t, 200, status)
 	assert.Empty(t, sets, "an acknowledgement-only poll returns no SETs")
 	assert.False(t, more)
-	assert.Equal(t, 0, buf.ClaimedCnt(), "an acknowledgement-only poll claims nothing")
+	assert.Equal(t, 0, claims.ClaimedCnt(), "an acknowledgement-only poll claims nothing")
 	assert.Equal(t, 3, h.pendingCount(sid), "the acks are applied")
 
 	// An absent maxEvents still returns up to the server default.
@@ -76,7 +76,7 @@ func TestPollAckOnly_WithoutAcksReturnsEmpty(t *testing.T) {
 	sets, _, status := ackOnlyPoll(h.router, sid, nil)
 	assert.Equal(t, 200, status)
 	assert.Empty(t, sets)
-	assert.Equal(t, 0, h.router.pollBufferFor(sid).ClaimedCnt())
+	assert.Equal(t, 0, h.router.queueFor(sid).ClaimedCnt())
 }
 
 // A receiver acking on a separate request alongside its long poll: the long
@@ -136,7 +136,8 @@ func TestPollAckOnly_ParallelLongPollThroughClaimGetsBatch(t *testing.T) {
 	other.router.UpdateStreamState(rec)
 	owner.queuePollEvents(t, sid, 2)
 	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.PollTransmitterResource(sid)))
-	buf := owner.router.pollBufferFor(sid)
+	require.NotNil(t, owner.router.pollBufferFor(sid))
+	claims := owner.router.queueFor(sid)
 
 	handed, _, _ := other.router.PollStreamHandler(context.Background(), sid, model.PollParameters{MaxEvents: 2, ReturnImmediately: true})
 	require.Len(t, handed, 2)
@@ -145,7 +146,7 @@ func TestPollAckOnly_ParallelLongPollThroughClaimGetsBatch(t *testing.T) {
 	ackSets, _, status := ackOnlyPoll(other.router, sid, keysOf(handed))
 	require.Equal(t, 200, status)
 	assert.Empty(t, ackSets)
-	assert.Equal(t, 0, buf.ClaimedCnt(), "the ack-only Claim claims nothing on the owner")
+	assert.Equal(t, 0, claims.ClaimedCnt(), "the ack-only Claim claims nothing on the owner")
 	viaB.mu.Lock()
 	ackClaim := viaB.sent[len(viaB.sent)-1]
 	viaB.mu.Unlock()
@@ -189,9 +190,9 @@ func TestSstpServer_AckOnlyExchangeClaimsNothing(t *testing.T) {
 	drained, err := h.router.SstpServerHandler(context.Background(), rec, goSetSstp.Message{ReturnImmediately: goSetSstp.BoolPtr(true)}, nil)
 	require.NoError(t, err)
 	require.Len(t, drained.Sets, 2)
-	buf := h.router.sstpServerBufferFor(txSid)
-	require.NotNil(t, buf)
-	require.Equal(t, 2, buf.ClaimedCnt())
+	require.NotNil(t, h.router.sstpServerBufferFor(txSid))
+	claims := h.router.queueFor(txSid)
+	require.Equal(t, 2, claims.ClaimedCnt())
 
 	acked := keysOf(drained.Sets)[0]
 	resp, err := h.router.SstpServerHandler(context.Background(), rec, goSetSstp.Message{
@@ -200,7 +201,7 @@ func TestSstpServer_AckOnlyExchangeClaimsNothing(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, resp.Sets)
-	assert.Equal(t, 1, buf.ClaimedCnt(), "the ack frees its claim and nothing new is claimed")
+	assert.Equal(t, 1, claims.ClaimedCnt(), "the ack frees its claim and nothing new is claimed")
 	assert.Len(t, pendingOutbound(t, h, txSid), 1, "the ack is applied")
 }
 

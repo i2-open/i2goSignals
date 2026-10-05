@@ -277,7 +277,7 @@ func (r *router) drainSstpOutbound(ctx context.Context, rec *model.StreamStateRe
 	sets, err := r.buildSstpOutboundSets(rec, r.resolveOutboundSets(resp.Refs))
 	if err != nil {
 		if buf, _ := r.heldBuffer(peer.ModeSstpServer, rec.StreamConfiguration.Id); buf != nil {
-			buf.ReleaseClaim(token)
+			r.queueFor(rec.StreamConfiguration.Id).ReleaseClaim(token)
 		}
 	}
 	return sets, err

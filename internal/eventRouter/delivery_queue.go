@@ -525,6 +525,9 @@ type deliveryQueue struct {
 	// samples are the wait timings of references removed on a receiver
 	// acknowledgement and not yet observed (#352).
 	samples []waitSample
+
+	// claims are the stream's poll and SSTP-acceptor claims (#337, #363).
+	claims queueClaims
 }
 
 func newDeliveryQueue(r *router, sid string, window int) *deliveryQueue {

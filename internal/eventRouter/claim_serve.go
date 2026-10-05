@@ -299,8 +299,9 @@ func (r *router) claimLocal(ctx context.Context, req peer.ClaimRequest, forPeer 
 		return peer.ClaimResponse{NotOwner: true}, ""
 	}
 	sid := req.Sid
+	q := r.queueFor(sid)
 	if len(req.AckJtis) > 0 || len(req.SetErrJtis) > 0 {
-		inbound, n, err := r.queueFor(sid).AckWire(ctx, req.AckJtis, req.SetErrJtis)
+		inbound, n, err := q.AckWire(ctx, req.AckJtis, req.SetErrJtis)
 		if err != nil {
 			eventLogger.Warn("ROUTER: Error acknowledging claimed events", "sid", sid, "mode", req.Mode, "count", len(req.AckJtis)+len(req.SetErrJtis), "error", err)
 		}
@@ -310,7 +311,7 @@ func (r *router) claimLocal(ctx context.Context, req peer.ClaimRequest, forPeer 
 		drop = append(drop, req.AckJtis...)
 		drop = append(drop, req.SetErrJtis...)
 		drop = append(drop, inbound...)
-		buf.AckEvents(drop)
+		q.ackBuffered(buf, drop)
 		if req.Mode == peer.ModePoll {
 			for i := int64(0); i < n; i++ {
 				r.IncrementCounter(state, nil, false)
@@ -344,14 +345,13 @@ func (r *router) claimLocal(ctx context.Context, req peer.ClaimRequest, forPeer 
 	// The batch is claimed (#337): an overlapping request on this stream,
 	// local or through Claim, skips these JTIs and gets the next disjoint
 	// slice, and an unacked one is served again once the claim expires.
-	token, jtiSlice, more := buf.ClaimEventsCtx(ctx, maxEvents, wait, r.pollClaimTTL)
+	token, jtis, more := q.ClaimEvents(ctx, buf, maxEvents, wait, r.pollClaimTTL)
 	if req.Mode == peer.ModePoll {
-		pollClaimedGauge.WithLabelValues(sid).Set(float64(buf.ClaimedCnt()))
+		pollClaimedGauge.WithLabelValues(sid).Set(float64(q.ClaimedCnt()))
 	}
-	if jtiSlice == nil || len(*jtiSlice) == 0 {
+	if len(jtis) == 0 {
 		return peer.ClaimResponse{MoreAvailable: more}, token
 	}
-	jtis := *jtiSlice
 
 	if forPeer && req.Mode == peer.ModePoll && r.subjectFilterService != nil && state != nil {
 		// SSF §8.1.3 delivery-time subject filtering: the owner discards a
@@ -378,7 +378,6 @@ func (r *router) claimLocal(ctx context.Context, req peer.ClaimRequest, forPeer 
 		}
 	}
 
-	q := r.queueFor(sid)
 	refs := make([]interfaces.PendingRef, len(jtis))
 	ackJtis := make([]string, len(jtis))
 	for i, jti := range jtis {
