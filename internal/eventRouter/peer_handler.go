@@ -15,8 +15,10 @@ var _ peer.Handler = (*router)(nil)
 // stream's subject-filter match-result cache (issue #94); every other wake
 // wakes the local buffer for its mode. A poll or sstp-server wake goes to
 // the lease owner only and carries the batch's references (#365), which the
-// owner holds in its queue and buffer; the push and sstp-client lists are
-// still ignored, so those wakes are a reload. Waking a stream with no
+// owner holds in its queue and buffer; a wake whose AckJtis, or present
+// EnqueuedAt, list is not the length of Jtis carries no usable references and
+// is a reload (#363). The push and sstp-client lists are still ignored, so
+// those wakes are a reload. Waking a stream with no
 // resident buffer is a silent no-op, so a duplicate, stale or lost wake is
 // harmless: the owner finds the rows on its next pending read.
 func (r *router) HandleWake(msg peer.WakeMessage) {
@@ -55,9 +57,19 @@ func (r *router) HandleWake(msg peer.WakeMessage) {
 
 // acceptWakeRefs holds a poll or sstp-server wake's references in the queue
 // and buffer this node holds for the stream; a node that holds none drops
-// them.
+// them. AckJtis must be index-aligned with Jtis, as must EnqueuedAt when it is
+// present: a re-signed copy's acknowledgement JTI is derived (#363) and cannot
+// be guessed, so a wake whose lists differ in length accepts nothing and is
+// left to HandleWake's mode wake, a reload from the owner's pending read. An
+// empty AckJti entry or a zero EnqueuedAt entry is the PendingRef convention
+// for Jti and for the store's clock.
 func (r *router) acceptWakeRefs(msg peer.WakeMessage) {
 	if len(msg.Jtis) == 0 {
+		return
+	}
+	if len(msg.AckJtis) != len(msg.Jtis) || (len(msg.EnqueuedAt) != 0 && len(msg.EnqueuedAt) != len(msg.Jtis)) {
+		eventLogger.Warn("ROUTER: wake reference lists differ in length; reloading from pending",
+			"sid", msg.Sid, "mode", msg.Mode, "jtis", len(msg.Jtis), "ackJtis", len(msg.AckJtis), "enqueuedAt", len(msg.EnqueuedAt))
 		return
 	}
 	buf, _ := r.heldBuffer(msg.Mode, msg.Sid)
@@ -66,10 +78,7 @@ func (r *router) acceptWakeRefs(msg peer.WakeMessage) {
 	}
 	refs := make([]interfaces.PendingRef, len(msg.Jtis))
 	for i, jti := range msg.Jtis {
-		ref := interfaces.PendingRef{Jti: jti, AckJti: jti}
-		if i < len(msg.AckJtis) && msg.AckJtis[i] != "" {
-			ref.AckJti = msg.AckJtis[i]
-		}
+		ref := interfaces.PendingRef{Jti: jti, AckJti: msg.AckJtis[i]}
 		if i < len(msg.EnqueuedAt) && msg.EnqueuedAt[i] > 0 {
 			ref.EnqueuedAt = time.UnixMilli(msg.EnqueuedAt[i])
 		}
