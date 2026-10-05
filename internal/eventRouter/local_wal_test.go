@@ -3,7 +3,6 @@ package eventRouter
 import (
 	"context"
 	"errors"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/wal"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"

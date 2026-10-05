@@ -3,13 +3,13 @@ package eventRouter
 import (
 	"context"
 	"fmt"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )

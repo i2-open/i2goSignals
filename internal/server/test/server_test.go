@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"

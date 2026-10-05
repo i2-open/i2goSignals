@@ -20,12 +20,12 @@ import (
 	"context"
 	"crypto"
 	"errors"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"

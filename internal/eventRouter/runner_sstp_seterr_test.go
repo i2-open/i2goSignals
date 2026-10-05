@@ -2,9 +2,9 @@ package eventRouter
 
 import (
 	"context"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"

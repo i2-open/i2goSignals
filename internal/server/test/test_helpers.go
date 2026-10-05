@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"

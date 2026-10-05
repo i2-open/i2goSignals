@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"net/http"
 	"os"
 	"runtime"
@@ -22,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"

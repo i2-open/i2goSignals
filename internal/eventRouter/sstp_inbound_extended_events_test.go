@@ -2,12 +2,12 @@ package eventRouter
 
 import (
 	"context"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"

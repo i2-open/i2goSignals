@@ -1,9 +1,9 @@
 package memory_provider
 
 import (
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 )
 

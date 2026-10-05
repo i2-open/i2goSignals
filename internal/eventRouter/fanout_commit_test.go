@@ -3,12 +3,12 @@ package eventRouter
 import (
 	"context"
 	"errors"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/services"

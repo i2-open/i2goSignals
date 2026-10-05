@@ -13,7 +13,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"net"
 	"net/http"
@@ -27,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
