@@ -620,6 +620,11 @@ func (sa *SignalsApplication) Shutdown() {
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
+	// The router's shutdown cancels the SSTP pair loops; wait for them to
+	// release their leases before storage closes.
+	if sa.SstpDialer != nil {
+		sa.SstpDialer.Shutdown()
+	}
 
 	// Give some time to ensure all ops are finished.
 	if drain > 0 {

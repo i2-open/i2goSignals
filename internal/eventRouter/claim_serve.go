@@ -93,6 +93,8 @@ func claimResource(mode, sid string) string {
 // streamLease is one held poll-transmitter or sstp-server lease.
 type streamLease struct {
 	cancel context.CancelFunc
+	// done closes when the renewal loop has returned.
+	done chan struct{}
 }
 
 // adoptStreamLease starts the renewal loop for a lease just acquired. It is a
@@ -107,7 +109,7 @@ func (r *router) adoptStreamLease(resource string) {
 		return
 	}
 	ctx, cancel := context.WithCancel(r.ctx)
-	sl := &streamLease{cancel: cancel}
+	sl := &streamLease{cancel: cancel, done: make(chan struct{})}
 	r.streamLeases[resource] = sl
 	r.streamLeasesMu.Unlock()
 
@@ -120,7 +122,10 @@ func (r *router) adoptStreamLease(resource string) {
 		LeaseDuration: leaseTTL,
 		OnLost:        func() { r.loseStreamLease(resource, sl) },
 	}
-	go hb.run(ctx)
+	go func() {
+		defer close(sl.done)
+		hb.run(ctx)
+	}()
 }
 
 // loseStreamLease is the renewal loop's answer to a refused renewal: the node
@@ -171,6 +176,8 @@ func (r *router) releaseStreamLease(resource string) {
 		return
 	}
 	sl.cancel()
+	// A renewal in flight would re-take the lease after the release below.
+	<-sl.done
 	r.leaseOwners.forget(resource)
 	_, id := splitStreamResource(resource)
 	r.releaseLease(resource, id)

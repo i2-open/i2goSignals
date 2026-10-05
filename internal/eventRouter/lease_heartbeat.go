@@ -84,6 +84,9 @@ func (h leaseHeartbeat) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			held, err := h.renew(ttl)
 			renewed := held && err == nil
 			if h.OnRenew != nil {

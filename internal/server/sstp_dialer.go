@@ -640,6 +640,35 @@ func (d *SstpDialer) spawnPair(ctx context.Context, pairId string, loop *sstpPai
 	}()
 }
 
+// Shutdown stops every pair loop and waits for each to exit and release its
+// lease, so the caller can close storage behind it. A loop that has not
+// exited within sstpShutdownWait is logged and abandoned.
+func (d *SstpDialer) Shutdown() {
+	d.mu.Lock()
+	loops := make(map[string]*sstpPairLoop, len(d.running))
+	for pairId, loop := range d.running {
+		loops[pairId] = loop
+	}
+	d.pending = nil
+	d.mu.Unlock()
+	for _, loop := range loops {
+		loop.cancel()
+	}
+	deadline := time.NewTimer(sstpShutdownWait)
+	defer deadline.Stop()
+	for pairId, loop := range loops {
+		select {
+		case <-loop.done:
+		case <-deadline.C:
+			sstpDialerLog.Warn("Shutdown: pair loop did not exit in time", "pairId", pairId, "wait", sstpShutdownWait)
+			return
+		}
+	}
+}
+
+// sstpShutdownWait bounds how long Shutdown waits for the pair loops.
+const sstpShutdownWait = 5 * time.Second
+
 // UnregisterPair signals the per-pair goroutine to exit and drops the
 // registry entry. Waits briefly for the goroutine to acknowledge so a
 // subsequent RegisterPair sees a clean slate. Also drops any pre-Bind
@@ -787,11 +816,20 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string) bool
 	// cycleCtx parents every outbound HTTP cycle. Cancelled on lease loss
 	// (heartbeat) or shutdown (parent ctx) so in-flight requests abort.
 	cycleCtx, cycleCancel := context.WithCancel(parentCtx)
-	defer cycleCancel()
 
 	// Each renewal is reported to the router's lease manager (tryLease), which
-	// answers the pair's acknowledgement ownership from memory (#364).
-	go d.heartbeat(cycleCtx, cycleCancel, resource, pairId)
+	// answers the pair's acknowledgement ownership from memory (#364). The
+	// heartbeat is joined before returning, so a renewal in flight cannot
+	// land after the caller releases the lease and re-take it.
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		d.heartbeat(cycleCtx, cycleCancel, resource, pairId)
+	}()
+	defer func() {
+		cycleCancel()
+		<-hbDone
+	}()
 
 	delay := d.cfg.BaseDelay
 
@@ -1259,6 +1297,9 @@ func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFu
 	for {
 		select {
 		case <-ticker.C:
+			if cycleCtx.Err() != nil {
+				return
+			}
 			if d.renewLeaseWithRetry(cycleCtx, resource, pairId) {
 				continue
 			}
@@ -1289,6 +1330,9 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 	select {
 	case <-t.C:
 	case <-ctx.Done():
+		return false
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 
