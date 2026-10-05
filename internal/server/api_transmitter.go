@@ -137,7 +137,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	if status == http.StatusServiceUnavailable {
 		// Delivery waits for the legacy deliveries migration at startup (#361):
 		// nothing was read or acknowledged; the receiver retries.
-		if ds, ok := sa.GetEventRouter().(interface{ DeliveryStarted() bool }); ok && !ds.DeliveryStarted() {
+		if !sa.GetEventRouter().DeliveryStarted() {
 			http.Error(w, "Delivery has not started yet; retry later", status)
 			return
 		}

@@ -120,6 +120,10 @@ type EventRouter interface {
 	// While delivery waits for the legacy deliveries migration (#361) it is
 	// queued, runs once delivery has started, and returns nil.
 	ReplayStream(ctx context.Context, sid, resetJti string, resetDate *time.Time) error
+	// DeliveryStarted reports whether delivery has started: false while it
+	// waits for the legacy deliveries migration (#361), when a poll is
+	// answered 503.
+	DeliveryStarted() bool
 	WakeTransmitter(sid string, mode string)
 	// WakeSstpClient wakes the SSTP-client outbound buffer for pairId so the
 	// lease owner drains a pending outbound event into the next outbound cycle.

@@ -101,6 +101,7 @@ func (rr *recordingRouter) ResetStream(string)          {}
 func (rr *recordingRouter) ReplayStream(context.Context, string, string, *time.Time) error {
 	return nil
 }
+func (rr *recordingRouter) DeliveryStarted() bool            { return true }
 func (rr *recordingRouter) WakeTransmitter(string, string)   {}
 func (rr *recordingRouter) NotifySubjectFilterChange(string) {}
 
