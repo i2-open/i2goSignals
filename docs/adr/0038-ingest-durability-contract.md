@@ -7,7 +7,7 @@ Date: 2026-09-08
 
 ## Status
 
-Accepted (community #286); mechanism superseded by 0043, contract retained.
+Accepted (community #286); mechanism superseded by 0043, contract retained. Amended 2026-10-05 by planning spec #112: the delivery intents written beside the body are `deliveries` references (community #359), not `pendingEvents` entries; read `pendingEvents` below as the delivery-intent store of its date. See planning ADR 0077 (independentid/i2gosignals-planning `docs/adr/0077-retention-window-fixed-at-acknowledgement-unreferenced-body-sweep.md`).
 
 ## Context
 

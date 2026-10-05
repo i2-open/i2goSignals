@@ -12,6 +12,8 @@ Accepted (community #330, #331; spec-111 Stage 1).
 This ADR supersedes ADR 0038's BeginAddEvents/RetractPending mechanism while
 preserving its contract.
 
+Amended 2026-10-05 by planning spec #112 (community #359): the one-trip bulkWrite now spans the `events` and `deliveries` namespaces. Each delivery intent is a `deliveries` reference (`state` `pending`, the stored wire `ackJti`) and an acknowledgement is one conditional update to `delivered`, not a move from `pendingEvents` to `deliveredEvents`. Retention on those references is recorded in planning ADR 0077 (independentid/i2gosignals-planning `docs/adr/0077-retention-window-fixed-at-acknowledgement-unreferenced-body-sweep.md`). The ordering and no-orphan argument below is unchanged with `deliveries` in place of `pendingEvents`.
+
 ## Context
 
 ADR 0038 fixed the ingest durability contract: a SET is acknowledged only

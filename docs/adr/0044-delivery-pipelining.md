@@ -7,7 +7,7 @@ Date: 2026-09-28
 
 ## Status
 
-Accepted (community #336, #337, #338, #339; spec-111 Stage 2).
+Accepted (community #336, #337, #338, #339; spec-111 Stage 2). Amended 2026-10-05 by planning spec #112 (community #364): acknowledgement ownership is the leaseManager's in-memory tenure, not a fencing-token check at write time.
 
 This ADR amends ADR 0036 (parallel polls) and restates ADR 0040's ordering
 knob under pipelining.
@@ -99,7 +99,7 @@ ride the next poll.
 | Knob | Default | Range | Exposure it bounds |
 |------|---------|-------|--------------------|
 | `I2SIG_DELIVERY_INFLIGHT_MAX` | `256` | floored at one push batch | JTIs sent but not yet acked, per push stream or SSTP pair. A crash or lost lease redelivers up to this many SETs per stream that the receiver may already hold, which it drops on `jti` dedup. A clean stop flushes queued acks and redelivers nothing already accepted. |
-| `I2SIG_ACK_COALESCE_WINDOW` | `5ms` | `0` = ack each batch inline | How long a completed batch's ack may wait. It is written early at half the in-flight bound. A stale fencing token refuses the write and the SETs stay pending for the new owner. |
+| `I2SIG_ACK_COALESCE_WINDOW` | `5ms` | `0` = ack each batch inline | How long a completed batch's ack may wait. It is written early at half the in-flight bound. A write after this node's lease tenure has ended (leaseManager, #364) is refused; the batch is retried after the next renewal, else the SETs stay pending for the new owner. |
 | Push K | derived, see above | 1..pc | K x pushBatch outstanding POSTs' worth of JTIs, never more than the in-flight bound. |
 | `I2SIG_SSTP_PUSH_INFLIGHT` (SSTP K) | in-flight / backfill batch, clamped 1..4 (2) | positive integer; an invalid value warns and uses the default | Concurrent second pushes per pair, each at most one claim. `1` is the Q7.2 single slot. |
 | `I2SIG_POLL_CLAIM_TTL` | `30s` | `0` disables claims (ADR 0036 behaviour) | How long an unacked poll response hides its SETs from other pollers. It also sets the redelivery delay after a poller dies. |
