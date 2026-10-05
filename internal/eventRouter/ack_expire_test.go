@@ -47,14 +47,8 @@ func ackRouterOn(t *testing.T, dao interfaces.EventDAO, window services.Effectiv
 	t.Helper()
 	sid := model.NewRecordId().Hex()
 	require.NoError(t, dao.AddPending(context.Background(), interfaces.PendingRef{Jti: "j1", AckJti: "j1"}, sid))
-	r := &router{
-		eventService:      services.NewEventService(dao),
-		pushStreams:       map[string]model.StreamStateRecord{sid: {RetentionWindowDays: days}},
-		pollStreams:       map[string]model.StreamStateRecord{},
-		sstpClientStreams: map[string]model.StreamStateRecord{},
-		sstpServerStreams: map[string]model.StreamStateRecord{},
-		retentionWindow:   window,
-	}
+	r := newBareRouter(RouterDeps{EventService: services.NewEventService(dao), RetentionWindow: window})
+	r.pushStreams[sid] = model.StreamStateRecord{RetentionWindowDays: days}
 	// The stream's DeliveryQueue holds j1 as ingest would (#363): the queue
 	// acks it under the acknowledgement JTI written with the row.
 	r.queueFor(sid).accept(context.Background(), []interfaces.PendingRef{{Jti: "j1", AckJti: "j1"}})
@@ -159,7 +153,7 @@ func TestAckEvents_UnknownStreamWritesNoExpireAt(t *testing.T) {
 func TestAckEvents_ExpireAtPathRequiresTenure(t *testing.T) {
 	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	r.coordinator = fixedFence{token: 7}
-	r.leases = newLeaseManager(r.coordinator)
+	r.leases = newLeaseManager(r.coordinator, nil)
 
 	err := r.ackEvents(context.Background(), []string{"j1"}, sid)
 	require.Error(t, err)
@@ -180,7 +174,7 @@ func TestAckEvents_ExpireAtPathRequiresTenure(t *testing.T) {
 func TestAckEvents_SkippedBatchIsNotCounted(t *testing.T) {
 	r, _, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	r.coordinator = fixedFence{token: 7}
-	r.leases = newLeaseManager(r.coordinator)
+	r.leases = newLeaseManager(r.coordinator, nil)
 
 	batches := testutil.ToFloat64(ackBatchesTotal)
 	writes := testutil.ToFloat64(ackWritesTotal)

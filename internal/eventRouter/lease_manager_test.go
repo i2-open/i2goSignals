@@ -2,6 +2,7 @@ package eventRouter
 
 import (
 	"context"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,9 +85,8 @@ func TestLeaseSafetyMargin_Env(t *testing.T) {
 func TestLeaseManager_StillOwnerFollowsTenure(t *testing.T) {
 	clock := &manualClock{t: time.Now()}
 	store := &countingLeaseStore{lease: 30 * time.Second, held: true, now: clock.now}
-	m := newLeaseManager(store)
+	m := newLeaseManager(store, clock.now)
 	m.margin = 5 * time.Second
-	m.now = clock.now
 	resource := cluster.PushTransmitterResource("s1")
 
 	assert.False(t, m.StillOwner(resource), "never acquired")
@@ -121,9 +121,8 @@ func TestLeaseManager_StillOwnerFollowsTenure(t *testing.T) {
 // half the lease is clamped so a short lease keeps some tenure.
 func TestLeaseManager_DeadlineBounds(t *testing.T) {
 	clock := &manualClock{t: time.Now()}
-	m := newLeaseManager(&countingLeaseStore{now: clock.now})
+	m := newLeaseManager(&countingLeaseStore{now: clock.now}, clock.now)
 	m.margin = 5 * time.Second
-	m.now = clock.now
 	start := clock.now()
 
 	m.note("a", start, true, start.Add(20*time.Second), 30*time.Second)
@@ -151,14 +150,14 @@ func TestLeaseManager_DeadlineBounds(t *testing.T) {
 // With no coordinator a node is always the owner and makes no lease call; a
 // nil manager (a router test literal) answers the same.
 func TestLeaseManager_NoCoordinatorAlwaysOwner(t *testing.T) {
-	assert.True(t, newLeaseManager(nil).StillOwner("anything"))
+	assert.True(t, newLeaseManager(nil, nil).StillOwner("anything"))
 	var m *leaseManager
 	assert.True(t, m.StillOwner("anything"))
 	m.note("anything", time.Now(), true, time.Now(), time.Second)
 	m.forget("anything")
 
 	r, dao, sid := ackRouter(t, nil, nil)
-	r.leases = newLeaseManager(nil)
+	r.leases = newLeaseManager(nil, nil)
 	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	list, err := dao.ListDeliveredForStream(context.Background(), sid)
 	require.NoError(t, err)
@@ -177,7 +176,7 @@ func TestDeliveryQueue_AckSkippedPastTenureResumesAfterRenewal(t *testing.T) {
 	var ackReads atomic.Int64
 	r.locks.onAckRead = func() { ackReads.Add(1) }
 	r.coordinator = &trackedCoordinator{ClusterCoordinator: store, locks: &r.locks}
-	r.leases = newLeaseManager(r.coordinator)
+	r.leases = newLeaseManager(r.coordinator, nil)
 	r.leases.margin = 5 * time.Second
 	r.leases.now = clock.now
 	resource := cluster.PushTransmitterResource(sid)
@@ -227,7 +226,7 @@ func TestLeaseSafetyMargin_CapAndNegativeWarn(t *testing.T) {
 	logs := captureLogs(t)
 	t.Setenv(leaseSafetyMarginEnv, "20s")
 	clock := &manualClock{t: time.Unix(1_000_000, 0)}
-	m := newLeaseManager(nil)
+	m := newLeaseManager(nil, nil)
 	m.now = clock.now
 	start := clock.now()
 	m.note("push-transmitter:s1", start, true, time.Time{}, 30*time.Second)
@@ -251,4 +250,24 @@ func TestLeaseSafetyMargin_CapAndNegativeWarn(t *testing.T) {
 	t.Setenv(leaseSafetyMarginEnv, "-1s")
 	assert.Equal(t, time.Duration(0), leaseSafetyMargin())
 	assert.Equal(t, 1, countWarn("Negative lease safety margin"))
+}
+
+// NewRouter records lease tenure on RouterDeps.Clock: the router's lease
+// manager reads the injected clock, not the wall clock.
+func TestNewRouter_LeaseTenureUsesDepsClock(t *testing.T) {
+	persistence, err := dbProviders.OpenPersistence("memorydb:", "lease_clock_test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = persistence.Storage.Close() })
+	clock := &manualClock{t: time.Now().Add(-time.Hour)}
+	r := NewRouter(RouterDeps{
+		StreamService: persistence.StreamService,
+		KeyService:    persistence.KeyService,
+		EventService:  persistence.EventService,
+		Clock:         clock.now,
+	}, "node-a").(*router)
+	t.Cleanup(r.Shutdown)
+
+	assert.Equal(t, clock.now(), r.leases.now())
+	clock.advance(26 * time.Second)
+	assert.Equal(t, clock.now(), r.leases.now(), "tenure is measured on the injected clock")
 }

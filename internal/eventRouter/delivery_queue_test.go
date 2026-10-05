@@ -72,13 +72,8 @@ func queueRouter(t *testing.T, routeMode string, jtis ...string) (*router, *memo
 	for i, jti := range jtis {
 		require.NoError(t, dao.AddPending(context.Background(), interfaces.PendingRef{Jti: jti, AckJti: rec.AckJti(jti), EnqueuedAt: now.Add(time.Duration(i) * time.Millisecond)}, sid))
 	}
-	r := &router{
-		eventService:      services.NewEventService(dao),
-		pushStreams:       map[string]model.StreamStateRecord{sid: rec},
-		pollStreams:       map[string]model.StreamStateRecord{},
-		sstpClientStreams: map[string]model.StreamStateRecord{},
-		sstpServerStreams: map[string]model.StreamStateRecord{},
-	}
+	r := newBareRouter(RouterDeps{EventService: services.NewEventService(dao)})
+	r.pushStreams[sid] = rec
 	return r, dao, rec
 }
 

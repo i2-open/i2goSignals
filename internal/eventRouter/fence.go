@@ -61,15 +61,9 @@ func (r *router) stillOwnsAck(sid string) bool {
 }
 
 // tryLease makes one acquire-or-renew call for resource, through the router's
-// leaseManager so the tenure it records is what StillOwner answers from. A
-// router built without a manager (a test literal) calls the coordinator
-// directly.
+// leaseManager so the tenure it records is what StillOwner answers from.
 func (r *router) tryLease(resource string, leaseDuration time.Duration) (bool, int64, error) {
-	if r.leases != nil && r.leases.coord != nil {
-		return r.leases.acquire(resource, r.nodeId, leaseDuration)
-	}
-	held, token, _, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, leaseDuration)
-	return held, token, err
+	return r.leases.acquire(resource, r.nodeId, leaseDuration)
 }
 
 // leaseRenewer returns the manager a lease heartbeat renews through, or nil

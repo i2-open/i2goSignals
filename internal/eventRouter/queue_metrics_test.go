@@ -216,13 +216,8 @@ func TestQueueMetrics_FailoverSkipsUnseenHandOut(t *testing.T) {
 	_, _ = oldOwner.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	oldOwner.queueFor(sid).MarkHandedOut([]string{"a", "b"}, time.Now())
 
-	newOwner := &router{
-		eventService:      services.NewEventService(dao),
-		pushStreams:       map[string]model.StreamStateRecord{sid: rec},
-		pollStreams:       map[string]model.StreamStateRecord{},
-		sstpClientStreams: map[string]model.StreamStateRecord{},
-		sstpServerStreams: map[string]model.StreamStateRecord{},
-	}
+	newOwner := newBareRouter(RouterDeps{EventService: services.NewEventService(dao)})
+	newOwner.pushStreams[sid] = rec
 	_, _ = newOwner.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	newOwner.queueFor(sid).MarkHandedOut([]string{"b"}, time.Now())
 
@@ -299,7 +294,7 @@ func TestBacklogCollector_ReadsOwnedQueuesWithoutStore(t *testing.T) {
 	r.pushStreams[otherSid] = otherRec
 	r.queueFor(otherSid)
 
-	r.leases = newLeaseManager(&countingLeaseStore{})
+	r.leases = newLeaseManager(&countingLeaseStore{}, nil)
 	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
 
 	c := &backlogCollector{r: r, now: func() time.Time { return oldest.Add(3 * time.Second) }}

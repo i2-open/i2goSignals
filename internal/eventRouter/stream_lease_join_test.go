@@ -55,7 +55,9 @@ func TestReleaseStreamLease_WaitsForInFlightRenewal(t *testing.T) {
 		store := &orderedLeaseStore{gate: make(chan struct{})}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		r := &router{ctx: ctx, coordinator: store, nodeId: "node-a"}
+		r := newBareRouter(RouterDeps{Coordinator: store})
+		r.ctx = ctx
+		r.nodeId = "node-a"
 		resource := cluster.PollTransmitterResource("sid-join")
 
 		store.mu.Lock()

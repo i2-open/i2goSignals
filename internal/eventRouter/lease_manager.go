@@ -75,29 +75,24 @@ type leaseManager struct {
 }
 
 // newLeaseManager returns a manager for coord, using the margin from the
-// environment and the wall clock.
-func newLeaseManager(coord cluster.ClusterCoordinator) *leaseManager {
+// environment and now as its clock; a nil now is the wall clock.
+func newLeaseManager(coord cluster.ClusterCoordinator, now func() time.Time) *leaseManager {
+	if now == nil {
+		now = time.Now
+	}
 	return &leaseManager{
 		coord:     coord,
 		margin:    leaseSafetyMargin(),
-		now:       time.Now,
+		now:       now,
 		deadlines: make(map[string]time.Time),
 	}
-}
-
-// clock returns the manager's clock, defaulting to the wall clock.
-func (m *leaseManager) clock() time.Time {
-	if m.now == nil {
-		return time.Now()
-	}
-	return m.now()
 }
 
 // acquire calls the coordinator's acquire-or-renew for resource and records
 // the outcome. Its results are the coordinator's. A failed call or a lease
 // held elsewhere forgets the resource, so StillOwner turns false at once.
 func (m *leaseManager) acquire(resource, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
-	start := m.clock()
+	start := m.now()
 	held, token, leaseUntil, err := m.coord.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 	m.note(resource, start, held && err == nil, leaseUntil, leaseDuration)
 	return held, token, err
@@ -159,7 +154,7 @@ func (m *leaseManager) StillOwner(resource string) bool {
 	if !ok {
 		return false
 	}
-	return m.clock().Before(deadline)
+	return m.now().Before(deadline)
 }
 
 // resolveOwner returns the node that holds resource and whether it is this

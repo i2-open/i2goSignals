@@ -116,20 +116,6 @@ func newClusterHarness(t *testing.T) *clusterHarness {
 	_, err = h.admin.KeyService.CreateKeyPair(ctx, "https://e2e.example.com", "sig", "")
 	require.NoError(t, err)
 
-	testPeerTransportFor = func(nodeID string) peer.PeerTransport {
-		return &droppingTransport{inner: h.inproc.For(nodeID), h: h, self: nodeID}
-	}
-	testPeerRegister = func(nodeID string, r eventRouter.EventRouter) {
-		if handler, ok := r.(peer.Handler); ok {
-			h.inproc.Register(nodeID, handler)
-		}
-	}
-	// A takeover in seconds, not the production 25 second re-acquire spin.
-	testSstpDialerConfig = func(cfg *SstpDialerConfig) {
-		cfg.LeaseDuration = 3 * time.Second
-		cfg.HeartbeatInterval = 500 * time.Millisecond
-		cfg.HeartbeatRetryDelay = 100 * time.Millisecond
-	}
 	t.Cleanup(func() {
 		h.mu.Lock()
 		ids := make([]string, 0, len(h.nodes))
@@ -140,13 +126,31 @@ func newClusterHarness(t *testing.T) *clusterHarness {
 		for _, id := range ids {
 			h.stop(id)
 		}
-		testPeerTransportFor = nil
-		testPeerRegister = nil
-		testSstpDialerConfig = nil
 		_ = h.admin.Storage.ResetDb(false)
 		_ = h.admin.Storage.Close()
 	})
 	return h
+}
+
+// appOptions wires a node into the harness: the router runs on the
+// in-process PeerTransport and registers with it, and the SSTP dialer takes
+// over a lease in seconds, not the production 25 second re-acquire spin.
+func (h *clusterHarness) appOptions() []AppOption {
+	return []AppOption{
+		WithPeerTransport(func(nodeID string) peer.PeerTransport {
+			return &droppingTransport{inner: h.inproc.For(nodeID), h: h, self: nodeID}
+		}),
+		WithRouterHook(func(nodeID string, r eventRouter.EventRouter) {
+			if handler, ok := r.(peer.Handler); ok {
+				h.inproc.Register(nodeID, handler)
+			}
+		}),
+		WithSstpDialerTuning(func(cfg *SstpDialerConfig) {
+			cfg.LeaseDuration = 3 * time.Second
+			cfg.HeartbeatInterval = 500 * time.Millisecond
+			cfg.HeartbeatRetryDelay = 100 * time.Millisecond
+		}),
+	}
 }
 
 // open opens a persistence on the shared database with its own change-stream
@@ -171,7 +175,7 @@ func (h *clusterHarness) start(id string) *harnessNode {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(h.t, err)
 	baseURL := "http://" + listener.Addr().String()
-	app := StartServer(listener.Addr().String(), p, baseURL+"/")
+	app := StartServer(listener.Addr().String(), p, baseURL+"/", h.appOptions()...)
 	go func() { _ = app.Server.Serve(listener) }()
 	waitServing(h.t, baseURL)
 
@@ -674,7 +678,7 @@ func runLeaseTakeoverOnHarness(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	rURL := "http://" + listener.Addr().String()
-	rApp := StartServer(listener.Addr().String(), rp, rURL+"/")
+	rApp := StartServer(listener.Addr().String(), rp, rURL+"/", h.appOptions()...)
 	go func() { _ = rApp.Server.Serve(listener) }()
 	t.Cleanup(rApp.Shutdown)
 	waitServing(t, rURL)

@@ -413,6 +413,9 @@ type RouterDeps struct {
 	// production default) builds peer.NewHTTP on the router's HTTP client;
 	// the two-node test harness injects the in-process adapter.
 	PeerTransport peer.PeerTransport
+	// Clock is the clock lease tenure is recorded and checked on. Nil (the
+	// production default) is the wall clock; tests inject a settable one.
+	Clock func() time.Time
 	// RetentionWindow resolves a stream's finite retention window in days at
 	// acknowledgement time. nil, a nil result, or a result <= 0 means keep
 	// forever: no expireAt is written. Community binds nothing here.
@@ -465,9 +468,9 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	if deps.Coordinator != nil {
 		router.coordinator = &trackedCoordinator{ClusterCoordinator: deps.Coordinator, locks: &router.locks}
-		router.leases = newLeaseManager(router.coordinator)
+		router.leases = newLeaseManager(router.coordinator, deps.Clock)
 	} else {
-		router.leases = newLeaseManager(nil)
+		router.leases = newLeaseManager(nil, deps.Clock)
 	}
 	router.routes.Store(&routingTable{})
 

@@ -188,27 +188,47 @@ func (sa *SignalsApplication) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// testPeerTransportFor and testPeerRegister are the two-node test harness's
-// seam (#358, cluster_harness_test.go): when set, the router is built on the
-// harness's in-process PeerTransport and registered with it. Both are nil in
-// production, which leaves RouterDeps.PeerTransport nil so the router builds
-// peer.NewHTTP.
-var (
-	testPeerTransportFor func(nodeID string) peer.PeerTransport
-	testPeerRegister     func(nodeID string, router eventRouter.EventRouter)
-	// testSstpDialerConfig lets the harness shrink the SSTP dialer's lease
-	// timing so a takeover runs in seconds. Nil in production.
-	testSstpDialerConfig func(cfg *SstpDialerConfig)
-)
+// AppOption adjusts how NewApplication wires the application. Production
+// passes none; the two-node test harness (#358, cluster_harness_test.go)
+// uses them to put the router on an in-process PeerTransport and shrink the
+// SSTP dialer's lease timing.
+type AppOption func(*appOptions)
 
-func testPeerTransport(nodeID string) peer.PeerTransport {
-	if testPeerTransportFor == nil {
-		return nil
-	}
-	return testPeerTransportFor(nodeID)
+type appOptions struct {
+	peerTransportFor func(nodeID string) peer.PeerTransport
+	routerHook       func(nodeID string, router eventRouter.EventRouter)
+	sstpDialerTuning func(cfg *SstpDialerConfig)
 }
 
-func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
+// WithPeerTransport builds the router on the PeerTransport f returns for the
+// node, instead of the HTTP adapter.
+func WithPeerTransport(f func(nodeID string) peer.PeerTransport) AppOption {
+	return func(o *appOptions) { o.peerTransportFor = f }
+}
+
+// WithRouterHook calls f with the node's router once it is built.
+func WithRouterHook(f func(nodeID string, router eventRouter.EventRouter)) AppOption {
+	return func(o *appOptions) { o.routerHook = f }
+}
+
+// WithSstpDialerTuning lets f adjust the SSTP dialer's configuration before
+// the dialer is built.
+func WithSstpDialerTuning(f func(cfg *SstpDialerConfig)) AppOption {
+	return func(o *appOptions) { o.sstpDialerTuning = f }
+}
+
+func (o *appOptions) peerTransport(nodeID string) peer.PeerTransport {
+	if o.peerTransportFor == nil {
+		return nil
+	}
+	return o.peerTransportFor(nodeID)
+}
+
+func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, opts ...AppOption) *SignalsApplication {
+	var o appOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
 	tlsSupport.CheckCaInstalled(http.DefaultClient)
 
@@ -272,8 +292,8 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	if persistence.StreamService != nil {
 		sstpDialerCfg.EventValidationDefault = persistence.StreamService.EventValidationDefault()
 	}
-	if testSstpDialerConfig != nil {
-		testSstpDialerConfig(&sstpDialerCfg)
+	if o.sstpDialerTuning != nil {
+		o.sstpDialerTuning(&sstpDialerCfg)
 	}
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 	sa.SstpDialer = sstpDialer
@@ -299,10 +319,10 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		// I2SIG_STORE_WAL_RING_FED (#342); only meaningful with a WAL.
 		WALRingFed: persistence.WALRingFed,
 		// Nil in production, so the router builds the HTTP adapter (#358).
-		PeerTransport: testPeerTransport(nodeID),
+		PeerTransport: o.peerTransport(nodeID),
 	}, nodeID)
-	if testPeerRegister != nil {
-		testPeerRegister(nodeID, sa.EventRouter)
+	if o.routerHook != nil {
+		o.routerHook(nodeID, sa.EventRouter)
 	}
 
 	// Late-bind the router as the dialer's narrow outbound surface. The
@@ -550,8 +570,8 @@ func (sa *SignalsApplication) advertisedAddress() string {
 
 // StartServer creates a real net/http server wrapping the application handler.
 // This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
-func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
-	sa := NewApplication(persistence, baseUrlString)
+func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string, opts ...AppOption) *SignalsApplication {
+	sa := NewApplication(persistence, baseUrlString, opts...)
 	server := http.Server{
 		Addr:     addr,
 		Handler:  sa.Handler,

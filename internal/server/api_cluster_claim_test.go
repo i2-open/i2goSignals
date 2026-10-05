@@ -167,7 +167,6 @@ func TestApplicationRouter_WakeReachesPeerOverHTTP(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_NODE_ID", "node-a")
 	t.Setenv("I2SIG_SUBJECT_FILTERING", "ENABLED")
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
-	require.Nil(t, testPeerTransportFor, "production wiring: no injected transport")
 
 	type hit struct {
 		path string
