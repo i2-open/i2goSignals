@@ -247,6 +247,7 @@ func newTrackedRouter(t *testing.T) (*testHarness, *atomic.Int64) {
 	}, "node-test").(*router)
 	t.Cleanup(r.Shutdown)
 	reads := &atomic.Int64{}
+	r.locks.audit = true
 	r.locks.fanout.onRead = func() { reads.Add(1) }
 	dao.locks.Store(&r.locks)
 	return &testHarness{router: r, streamService: persistence.StreamService, keyService: persistence.KeyService}, reads
@@ -324,4 +325,48 @@ func TestResolveOwners_PushAndSstpClientOwnersOnTarget(t *testing.T) {
 	assert.Empty(t, poll.owner, "poll targets have no owner to resolve")
 	assert.Equal(t, "node-sstp", r.leaseOwners.peek(cluster.SstpClientResource("pair-o")),
 		"the sstp-client owner is noted for the post-commit remote wake")
+}
+
+// The lock audit is off unless I2SIG_ROUTER_LOCK_AUDIT turns it on: with it
+// off, a coordinator read inside a fan-out or acknowledgement region is not
+// counted (and no goroutine id is read); with it on, it is.
+func TestLockAudit_OffByDefaultOnByEnv(t *testing.T) {
+	newRouter := func() *router {
+		persistence, err := dbProviders.OpenPersistence("memorydb:", "lock_audit_test")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = persistence.Storage.Close() })
+		r := NewRouter(RouterDeps{
+			StreamService: persistence.StreamService,
+			KeyService:    persistence.KeyService,
+			EventService:  persistence.EventService,
+			Coordinator:   persistence.Coordinator,
+		}, "node-audit").(*router)
+		t.Cleanup(r.Shutdown)
+		return r
+	}
+	readInBothRegions := func(r *router) (fanout, ack int64) {
+		var f, a atomic.Int64
+		r.locks.fanout.onRead = func() { f.Add(1) }
+		r.locks.ack.onRead = func() { a.Add(1) }
+		r.fanoutRLock()
+		r.locks.enterAck()
+		_, _, _, _ = r.coordinator.GetLeaseOwner(cluster.PollTransmitterResource("s"))
+		r.locks.exitAck()
+		r.fanoutRUnlock()
+		return f.Load(), a.Load()
+	}
+
+	t.Setenv("I2SIG_ROUTER_LOCK_AUDIT", "")
+	off := newRouter()
+	assert.False(t, off.locks.audit)
+	f, a := readInBothRegions(off)
+	assert.Zero(t, f, "audit off: fan-out read not counted")
+	assert.Zero(t, a, "audit off: ack-region read not counted")
+
+	t.Setenv("I2SIG_ROUTER_LOCK_AUDIT", "true")
+	on := newRouter()
+	assert.True(t, on.locks.audit)
+	f, a = readInBothRegions(on)
+	assert.Equal(t, int64(1), f)
+	assert.Equal(t, int64(1), a)
 }

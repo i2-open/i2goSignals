@@ -174,6 +174,7 @@ func TestDeliveryQueue_AckSkippedPastTenureResumesAfterRenewal(t *testing.T) {
 	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	r.nodeId = "node-a"
 	var ackReads atomic.Int64
+	r.locks.audit = true
 	r.locks.ack.onRead = func() { ackReads.Add(1) }
 	r.coordinator = &trackedCoordinator{ClusterCoordinator: store, locks: &r.locks}
 	r.leases = newLeaseManager(r.coordinator, nil)

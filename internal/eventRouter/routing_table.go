@@ -2,6 +2,7 @@ package eventRouter
 
 import (
 	"bytes"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -163,9 +164,30 @@ func (t *regionTracker) noteRead(counter prometheus.Counter) {
 // AckBatch call) is counted in goSignals_router_reads_before_ack_total; the
 // design value of both is zero, since ownership is answered by the
 // leaseManager from memory.
+//
+// Tracking reads the goroutine id from runtime.Stack on every region entry,
+// so it runs only with audit on (I2SIG_ROUTER_LOCK_AUDIT, set at NewRouter;
+// the benchmark stack and the tests that check the counters turn it on).
+// With audit off every method is a no-op and both counters stay at zero.
 type lockTracker struct {
+	audit  bool
 	fanout regionTracker
 	ack    regionTracker
+}
+
+// lockAuditEnabled resolves I2SIG_ROUTER_LOCK_AUDIT. Unset, empty or invalid
+// is off.
+func lockAuditEnabled() bool {
+	val := os.Getenv("I2SIG_ROUTER_LOCK_AUDIT")
+	if val == "" {
+		return false
+	}
+	on, err := strconv.ParseBool(val)
+	if err != nil {
+		eventLogger.Warn("Ignoring invalid I2SIG_ROUTER_LOCK_AUDIT (want true or false)", "value", val)
+		return false
+	}
+	return on
 }
 
 // fanoutRLock takes r.mu for reading and records the caller as a holder.
@@ -180,29 +202,48 @@ func (r *router) fanoutRUnlock() {
 	r.mu.RUnlock()
 }
 
-func (l *lockTracker) enter() { l.fanout.enter() }
+func (l *lockTracker) enter() {
+	if l.audit {
+		l.fanout.enter()
+	}
+}
 
-func (l *lockTracker) exit() { l.fanout.exit() }
+func (l *lockTracker) exit() {
+	if l.audit {
+		l.fanout.exit()
+	}
+}
 
 // heldByCaller reports whether the calling goroutine holds a fan-out region.
-func (l *lockTracker) heldByCaller() bool { return l.fanout.heldByCaller() }
+func (l *lockTracker) heldByCaller() bool { return l.audit && l.fanout.heldByCaller() }
 
 // noteRead counts a store or coordinator call if the caller is inside an
 // acknowledgement region, and separately if it holds the fan-out lock.
 func (l *lockTracker) noteRead() {
+	if !l.audit {
+		return
+	}
 	l.ack.noteRead(readsBeforeAckTotal)
 	l.fanout.noteRead(readsUnderLockCounter)
 }
 
 // enterAck records the caller as inside an acknowledgement region.
-func (l *lockTracker) enterAck() { l.ack.enter() }
+func (l *lockTracker) enterAck() {
+	if l.audit {
+		l.ack.enter()
+	}
+}
 
 // exitAck ends an enterAck.
-func (l *lockTracker) exitAck() { l.ack.exit() }
+func (l *lockTracker) exitAck() {
+	if l.audit {
+		l.ack.exit()
+	}
+}
 
 // inAckByCaller reports whether the calling goroutine is inside an
 // acknowledgement region. With none open it costs one atomic load.
-func (l *lockTracker) inAckByCaller() bool { return l.ack.heldByCaller() }
+func (l *lockTracker) inAckByCaller() bool { return l.audit && l.ack.heldByCaller() }
 
 // goroutineID returns the calling goroutine's id, parsed from the header line
 // of its stack ("goroutine 123 [...").

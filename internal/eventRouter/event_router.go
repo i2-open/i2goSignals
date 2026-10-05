@@ -472,6 +472,7 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	} else {
 		router.leases = newLeaseManager(nil, deps.Clock)
 	}
+	router.locks.audit = lockAuditEnabled()
 	router.routes.Store(&routingTable{})
 
 	// Route reset re-deliveries through this router's metering observer. A stream
