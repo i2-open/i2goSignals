@@ -274,7 +274,7 @@ func (r *router) drainSstpOutbound(ctx context.Context, rec *model.StreamStateRe
 		}
 		return r.signClaimedRefs(rec, resp.Refs, forward, key, kid)
 	}
-	sets, err := r.buildSstpOutboundSets(rec, refJtis(resp.Refs))
+	sets, err := r.buildSstpOutboundSets(rec, r.resolveOutboundSets(resp.Refs))
 	if err != nil {
 		if buf, _ := r.heldBuffer(peer.ModeSstpServer, rec.StreamConfiguration.Id); buf != nil {
 			buf.ReleaseClaim(token)
@@ -283,15 +283,15 @@ func (r *router) drainSstpOutbound(ctx context.Context, rec *model.StreamStateRe
 	return sets, err
 }
 
-// buildSstpOutboundSets renders each outbound JTI to its on-wire SET string:
+// buildSstpOutboundSets renders each outbound set to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer key
-// otherwise. Same shape as the poll transmitter's assemblePollResponse: one
-// read for the batch's records, then the re-signing fans out across the
-// signConcurrency pool (ADR 0036). A JTI whose record is gone is skipped and
-// stays in the buffer. With no active key, or when any SET fails to sign, it
+// under the set's Ref.AckJti otherwise. The records come resolved in one read
+// (resolveOutboundSets), then the re-signing fans out across the
+// signConcurrency pool (ADR 0036). A reference whose record is gone was
+// dropped by that read and stays in the buffer. With no active key, or when any SET fails to sign, it
 // returns no sets and the error, so the caller sends none of them rather than
 // a message that leaves one out (#312); every SET stays pending.
-func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) (map[string]string, error) {
+func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []OutboundSet) (map[string]string, error) {
 	forward := rec.GetRouteMode() == model.RouteModeForward
 	var key crypto.Signer
 	var kid string
@@ -302,24 +302,20 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		}
 	}
 
-	byJti := make(map[string]*model.EventRecord, len(jtis))
-	for _, eventRecord := range r.eventService.GetEventRecords(r.ctx, jtis) {
-		byJti[eventRecord.Jti] = eventRecord
-	}
-
 	q := r.queueFor(rec.StreamConfiguration.Id)
-	sets := make(map[string]string, len(jtis))
-	work := make([]*model.EventRecord, 0, len(jtis))
-	for _, jti := range jtis {
-		eventRecord := byJti[jti]
-		if eventRecord == nil {
+	sets := make(map[string]string, len(outbound))
+	work := make([]*model.EventRecord, 0, len(outbound))
+	ackJtiOf := make(map[*model.EventRecord]string, len(outbound))
+	for _, set := range outbound {
+		if set.Record == nil {
 			continue
 		}
 		if forward {
-			sets[jti] = eventRecord.Original
+			sets[set.Ref.Jti] = set.Record.Original
 			continue
 		}
-		work = append(work, eventRecord)
+		work = append(work, set.Record)
+		ackJtiOf[set.Record] = set.Ref.AckJti
 	}
 	if len(work) == 0 {
 		q.MarkHandedOut(mapKeys(sets), time.Now())
@@ -327,8 +323,8 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 	}
 
 	// Each re-signed SET is a value copy of the stored token carrying the
-	// stream's acknowledgement JTI (#363); the message keys it by that JTI,
-	// which is what the peer acks.
+	// reference's acknowledgement JTI (#363); the message keys it by that
+	// JTI, which is what the peer acks.
 	cfg := rec.StreamConfiguration
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
 	idx := make(map[*model.EventRecord]int, len(work))
@@ -336,7 +332,12 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 	for i, eventRecord := range work {
 		idx[eventRecord] = i
 		tokens[i] = eventRecord.Event
-		tokens[i].ID = q.AckJtiOf(eventRecord.Jti, rec)
+		tokens[i].ID = ackJtiOf[eventRecord]
+		if tokens[i].ID == "" {
+			// A reference claimed without its acknowledgement JTI (a bare
+			// buffer submit) takes the stream's derived one.
+			tokens[i].ID = q.AckJtiOf(eventRecord.Jti, rec)
+		}
 	}
 	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
 		token := &tokens[idx[eventRecord]]

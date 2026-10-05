@@ -1020,9 +1020,9 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 	// Gather the outbound JTIs to flush this cycle. Drain the buffer first
 	// (claim in-flight); the ClaimOutbound surface method already falls
 	// back to the pending list when the buffer is empty (Q13).
-	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
+	outRefs := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
 
-	events := d.outbound.ResolveEvents(pairId, outJtis)
+	events := d.outbound.ResolveEvents(pairId, outRefs)
 
 	// No idle guard: the initiator ALWAYS opens the cycle, even with nothing
 	// to send and nothing owed. An empty-Sets request with returnEvents=true
@@ -1380,14 +1380,14 @@ func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStat
 func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord) (cls goSetSstp.Classification, outcome secondPushOutcome, more bool) {
 	pairId := stream.PairId
 
-	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
-	if len(outJtis) == 0 {
+	outRefs := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
+	if len(outRefs) == 0 {
 		// Nothing to push (or everything already in flight in the primary
 		// cycle): do not open a second POST.
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, secondPushDrained, false
 	}
 
-	events := d.outbound.ResolveEvents(pairId, outJtis)
+	events := d.outbound.ResolveEvents(pairId, outRefs)
 	if len(events) == 0 {
 		return goSetSstp.Classification{Class: goSetSstp.ClassOK}, secondPushDrained, false
 	}
@@ -1494,7 +1494,7 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 // posture and the per-pair bearer wins the Authorization header (AC 3
 // precedence). When ResolveClient is unset (tests) or errors, the dialer
 // falls back to d.cfg.HTTPClient + the raw per-pair bearer.
-func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
+func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecord, events []eventRouter.OutboundSet, key crypto.Signer, kid string, returnEvents *bool, feedback sstpPendingFeedback) (goSetSstp.Classification, []string, map[string]string, error) {
 	method := stream.SstpMethod
 	if method == nil || method.EndpointUrl == "" {
 		return goSetSstp.Classification{Class: goSetSstp.ClassRequestError}, nil, nil, nil
@@ -1577,7 +1577,7 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 	return cls, acked, received, nil
 }
 
-// buildSstpSets renders each outbound event to its on-wire SET string:
+// buildSstpSets renders each outbound set to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer
 // key otherwise (AC 5 — consolidated egress-signing site). Signing fans out
 // across up to workers goroutines (eventRouter.SignSets, ADR 0036).
@@ -1589,23 +1589,22 @@ func (d *SstpDialer) deliver(ctx context.Context, stream *model.StreamStateRecor
 // rather than dropping SETs onto the wire with no signature. Forward-mode
 // pairs bypass signing entirely (Event.Original is on-wire verbatim), so
 // they can never trip this error.
-func buildSstpSets(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int) (map[string]string, error) {
+func buildSstpSets(stream *model.StreamStateRecord, events []eventRouter.OutboundSet, key crypto.Signer, kid string, workers int) (map[string]string, error) {
 	return buildSstpSetsAck(stream, events, key, kid, workers, nil)
 }
 
-// sstpAckJtis is the part of eventRouter.SstpOutbound buildSstpSetsAck uses
-// to sign each copy under its acknowledgement JTI and record it (#363).
-type sstpAckJtis interface {
-	OutboundAckJti(stream *model.StreamStateRecord, inboundJti string) string
+// sstpServed is the part of eventRouter.SstpOutbound buildSstpSetsAck uses
+// to record each signed copy (#363).
+type sstpServed interface {
 	OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string)
 }
 
-// buildSstpSetsAck is buildSstpSets with the stream's acknowledgement JTIs
-// (#363): each re-signed SET is a value copy of the stored token whose jti is
-// acks.OutboundAckJti, keyed by that JTI in the returned map, and recorded
-// with acks.OutboundServed. A nil acks keeps the inbound JTI.
-func buildSstpSetsAck(stream *model.StreamStateRecord, events []*model.EventRecord, key crypto.Signer, kid string, workers int, acks sstpAckJtis) (map[string]string, error) {
-	if len(events) == 0 {
+// buildSstpSetsAck is buildSstpSets that also records each copy (#363): each
+// re-signed SET is a value copy of the stored token whose jti is the set's
+// Ref.AckJti (captured at claim time), keyed by that JTI in the returned map,
+// and recorded with acks.OutboundServed when acks is non-nil.
+func buildSstpSetsAck(stream *model.StreamStateRecord, outbound []eventRouter.OutboundSet, key crypto.Signer, kid string, workers int, acks sstpServed) (map[string]string, error) {
+	if len(outbound) == 0 {
 		return nil, nil
 	}
 	cfg := stream.StreamConfiguration
@@ -1613,12 +1612,15 @@ func buildSstpSetsAck(stream *model.StreamStateRecord, events []*model.EventReco
 	if !forward && key == nil {
 		return nil, fmt.Errorf("sstp: no signing key for stream %s (issuer %s)", cfg.Id, cfg.Iss)
 	}
-	sets := make(map[string]string, len(events))
-	work := make([]*model.EventRecord, 0, len(events))
-	for _, ev := range events {
+	sets := make(map[string]string, len(outbound))
+	work := make([]*model.EventRecord, 0, len(outbound))
+	ackJtiOf := make(map[*model.EventRecord]string, len(outbound))
+	for _, set := range outbound {
+		ev := set.Record
 		if ev == nil {
 			continue
 		}
+		ackJtiOf[ev] = set.Ref.AckJti
 		if forward {
 			sets[ev.Jti] = ev.Original
 			if acks != nil {
@@ -1637,9 +1639,8 @@ func buildSstpSetsAck(stream *model.StreamStateRecord, events []*model.EventReco
 	for i, ev := range work {
 		idx[ev] = i
 		tokens[i] = ev.Event
-		if acks != nil {
-			tokens[i].ID = acks.OutboundAckJti(stream, ev.Jti)
-		} else {
+		tokens[i].ID = ackJtiOf[ev]
+		if tokens[i].ID == "" {
 			tokens[i].ID = ev.Jti
 		}
 	}

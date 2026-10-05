@@ -171,10 +171,11 @@ func TestQueueMetrics_SstpDialer(t *testing.T) {
 
 	before := readWaits(t)
 	claimed := r.ClaimOutbound(pairId, 1)
-	require.Equal(t, []string{jti}, claimed)
+	require.Len(t, claimed, 1)
+	require.Equal(t, jti, claimed[0].Jti)
 	events := r.ResolveEvents(pairId, claimed)
 	require.Len(t, events, 1)
-	wire := r.OutboundAckJti(pair, jti)
+	wire := claimed[0].AckJti
 	r.OutboundHandedOut(pair, []string{wire})
 	require.Equal(t, 1, r.AckOutbound(pair, []string{wire}, events))
 	if ack := r.sstpAcker(pairId); ack != nil {

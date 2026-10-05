@@ -23,6 +23,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -155,16 +156,17 @@ func (f *fakeSstpOutbound) RefreshPair(pairId string) (model.StreamStateRecord, 
 	return f.pair, f.present
 }
 
-func (f *fakeSstpOutbound) ClaimOutbound(pairId string, max int) []string {
+func (f *fakeSstpOutbound) ClaimOutbound(pairId string, max int) []interfaces.PendingRef {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]string, 0)
+	out := make([]interfaces.PendingRef, 0)
 	for jti := range f.events {
 		if f.claimed[jti] {
 			continue
 		}
 		f.claimed[jti] = true
-		out = append(out, jti)
+		// The fake acks each SET under its inbound JTI (Forward-style).
+		out = append(out, interfaces.PendingRef{Jti: jti, AckJti: jti})
 		if len(out) >= max {
 			break
 		}
@@ -172,21 +174,16 @@ func (f *fakeSstpOutbound) ClaimOutbound(pairId string, max int) []string {
 	return out
 }
 
-func (f *fakeSstpOutbound) ResolveEvents(pairId string, claimed []string) []*model.EventRecord {
+func (f *fakeSstpOutbound) ResolveEvents(pairId string, claimed []interfaces.PendingRef) []eventRouter.OutboundSet {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]*model.EventRecord, 0, len(claimed))
-	for _, jti := range claimed {
-		if ev, ok := f.events[jti]; ok {
-			out = append(out, ev)
+	out := make([]eventRouter.OutboundSet, 0, len(claimed))
+	for _, ref := range claimed {
+		if ev, ok := f.events[ref.Jti]; ok {
+			out = append(out, eventRouter.OutboundSet{Ref: ref, Record: ev})
 		}
 	}
 	return out
-}
-
-// The fake signs each SET under its inbound JTI (a Forward-style ack JTI).
-func (f *fakeSstpOutbound) OutboundAckJti(_ *model.StreamStateRecord, inboundJti string) string {
-	return inboundJti
 }
 
 func (f *fakeSstpOutbound) OutboundServed(*model.StreamStateRecord, *model.EventRecord, *goSet.SecurityEventToken, string) {
@@ -202,12 +199,12 @@ func (f *fakeSstpOutbound) NoteLease(string, time.Time, bool, time.Time, time.Du
 // An empty ack list confirms NOTHING — every sent SET has its in-flight
 // claim released so it is re-drained and retried on a later cycle (US 5
 // literal-ack semantics; the historical ack-all-sent fallback is gone).
-func (f *fakeSstpOutbound) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord) int {
+func (f *fakeSstpOutbound) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []eventRouter.OutboundSet) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	sentSet := map[string]bool{}
-	for _, ev := range sent {
-		sentSet[ev.Jti] = true
+	for _, set := range sent {
+		sentSet[set.Ref.Jti] = true
 	}
 	// AC 3: literal ack semantics — no ack-all-sent fallback.
 	count := 0
@@ -224,20 +221,20 @@ func (f *fakeSstpOutbound) AckOutbound(stream *model.StreamStateRecord, acked []
 	}
 	// Sent-but-unacked: release the claim so a later cycle re-drains
 	// (matches handleSstpAcks tail behavior after the ack-all removal).
-	for _, ev := range sent {
-		if !acknowledged[ev.Jti] {
-			delete(f.claimed, ev.Jti)
+	for _, set := range sent {
+		if !acknowledged[set.Ref.Jti] {
+			delete(f.claimed, set.Ref.Jti)
 		}
 	}
 	return count
 }
 
-func (f *fakeSstpOutbound) ReleaseOutbound(pairId string, events []*model.EventRecord) {
+func (f *fakeSstpOutbound) ReleaseOutbound(pairId string, events []eventRouter.OutboundSet) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, ev := range events {
-		f.released = append(f.released, ev.Jti)
-		delete(f.claimed, ev.Jti)
+	for _, set := range events {
+		f.released = append(f.released, set.Ref.Jti)
+		delete(f.claimed, set.Ref.Jti)
 	}
 }
 

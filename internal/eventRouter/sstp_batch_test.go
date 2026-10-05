@@ -27,6 +27,11 @@ func TestSstpServer_PublishModeSignsWholeBatch(t *testing.T) {
 	rec.StreamConfiguration.RouteMode = model.RouteModePublish
 	rec.StreamConfiguration.Iss = "DEFAULT" // the memory provider's pre-provisioned signing issuer
 	require.NoError(t, h.router.streamService.PersistStreamStateRecord(context.Background(), rec))
+	// The claim derives each acknowledgement JTI from the router's own view
+	// of the stream (#363), so that view must carry the publish route mode.
+	h.router.mu.Lock()
+	h.router.sstpServerStreams[txSid] = *rec
+	h.router.mu.Unlock()
 
 	jtis := make([]string, 0, 12)
 	for i := 0; i < 12; i++ {

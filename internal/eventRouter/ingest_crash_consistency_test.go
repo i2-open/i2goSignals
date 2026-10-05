@@ -8,6 +8,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -100,7 +101,8 @@ func TestOrphanPendingMarker_SstpServerSkips(t *testing.T) {
 	pair := *stream
 	pair.StreamConfiguration.RouteMode = model.RouteModeForward
 
-	sets, err := h.router.buildSstpOutboundSets(&pair, []string{orphan, healthy})
+	refs := []interfaces.PendingRef{{Jti: orphan, AckJti: orphan}, {Jti: healthy, AckJti: healthy}}
+	sets, err := h.router.buildSstpOutboundSets(&pair, h.router.resolveOutboundSets(refs))
 	require.NoError(t, err)
 
 	require.NotContains(t, sets, orphan, "an orphan must not be rendered onto an SSTP message")

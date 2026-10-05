@@ -340,7 +340,7 @@ func TestSstpAckCoalescing_ClaimHeldUntilAckWritten(t *testing.T) {
 	}
 	claimed := r.claimSstpJtis(pairId, jtis, len(jtis))
 	require.Len(t, claimed, 3)
-	sent := r.eventService.GetEventRecords(context.Background(), claimed)
+	sent := r.resolveOutboundSets(r.outboundRefs(pairId, claimed))
 	require.Len(t, sent, 3)
 
 	pending := func() int {

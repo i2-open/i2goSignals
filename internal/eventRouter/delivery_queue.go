@@ -724,6 +724,23 @@ func (q *deliveryQueue) AckJtiOf(inboundJti string, stream *model.StreamStateRec
 	return stream.AckJti(inboundJti)
 }
 
+// RefOf returns the reference held for inboundJti, with its acknowledgement
+// JTI and enqueue time; a reference the queue does not hold carries
+// AckJtiOf's value and no enqueue time.
+func (q *deliveryQueue) RefOf(inboundJti string, stream *model.StreamStateRecord) interfaces.PendingRef {
+	q.mu.Lock()
+	qr, ok := q.refs[inboundJti]
+	var ref interfaces.PendingRef
+	if ok {
+		ref = qr.ref
+	}
+	q.mu.Unlock()
+	if ok {
+		return ref
+	}
+	return interfaces.PendingRef{Jti: inboundJti, AckJti: q.AckJtiOf(inboundJti, stream)}
+}
+
 // Served records the JWS this node signed for inboundJti and is about to hand
 // out, and builds the outbound copy stored with its acknowledgement. A
 // forwarded SET (AckJti == Jti) stores no copy.

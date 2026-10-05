@@ -38,7 +38,7 @@ func TestClaimOutbound_StoreFallbackSkipsJtisAlreadyClaimed(t *testing.T) {
 
 	second := r.ClaimOutbound(pairId, 2)
 	require.Len(t, second, 1, "the pending JTI past the claimed ones is claimed")
-	assert.NotContains(t, first, second[0])
+	assert.NotContains(t, refJtis(first), second[0].Jti)
 
 	assert.Empty(t, r.ClaimOutbound(pairId, 2), "nothing is left once every pending JTI is claimed")
 }
