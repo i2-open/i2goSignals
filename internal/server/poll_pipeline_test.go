@@ -87,6 +87,7 @@ type pollRecord struct {
 	acks     []string
 	setErrs  []string
 	returned []string
+	ackOnly  bool
 }
 
 // fakePollTx is an RFC 8936 transmitter. In claim mode a SET handed out is not
@@ -109,6 +110,9 @@ type fakePollTx struct {
 	records  []pollRecord
 	// onAck observes each ack as it arrives.
 	onAck func(jti string)
+	// pollConfig, when set, is the receiver's stored poll config in place of
+	// the default built from maxEvents.
+	pollConfig *model.PollParameters
 }
 
 func (tx *fakePollTx) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +133,7 @@ func (tx *fakePollTx) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	tx.mu.Lock()
-	rec := pollRecord{acks: append([]string(nil), req.Acks...)}
+	rec := pollRecord{acks: append([]string(nil), req.Acks...), ackOnly: req.AckOnly}
 	for jti := range req.SetErrs {
 		rec.setErrs = append(rec.setErrs, jti)
 	}
@@ -246,6 +250,14 @@ func newPipelineHarness(t *testing.T, depth string, nSets int, tx *fakePollTx) *
 	ts := httptest.NewServer(tx)
 	t.Cleanup(ts.Close)
 
+	pollConfig := tx.pollConfig
+	if pollConfig == nil {
+		pollConfig = &model.PollParameters{
+			ReturnImmediately: true,
+			MaxEvents:         int32(tx.maxEvents),
+		}
+	}
+
 	atx := authSupport.ConvertProject("test-project")
 	createCtx := context.WithValue(ctx, authSupport.AuthContextKey, atx)
 	created, err := persistence.StreamService.CreateStream(createCtx, model.StreamStateRecord{StreamConfiguration: model.StreamConfiguration{
@@ -256,10 +268,7 @@ func newPipelineHarness(t *testing.T, depth string, nSets int, tx *fakePollTx) *
 			PollReceiveMethod: &model.PollReceiveMethod{
 				Method:      model.ReceivePoll,
 				EndpointUrl: ts.URL + "/poll",
-				PollConfig: &model.PollParameters{
-					ReturnImmediately: true,
-					MaxEvents:         int32(tx.maxEvents),
-				},
+				PollConfig:  pollConfig,
 			},
 		},
 	}}, atx.ProjectId, nil)
@@ -301,6 +310,27 @@ func (h *pipelineHarness) stop() {
 	case <-time.After(5 * time.Second):
 		h.t.Fatal("poll loop did not stop")
 	}
+}
+
+// A stored poll config with "maxEvents": 0 is an unset maxEvents, never an
+// acknowledgement-only request: the receiver's polls stay ordinary and its
+// SETs are delivered (#369).
+func TestPollPipeline_StoredMaxEventsZeroIsNotAckOnly(t *testing.T) {
+	var cfg model.PollParameters
+	require.NoError(t, json.Unmarshal([]byte(`{"maxEvents":0,"returnImmediately":true}`), &cfg))
+	require.False(t, cfg.AckOnly, "a stored poll config never decodes as ack-only")
+
+	tx := &fakePollTx{claimMode: true, maxEvents: 10, pollConfig: &cfg}
+	h := newPipelineHarness(t, "1", 5, tx)
+	h.start()
+
+	require.Eventually(t, tx.allAcked, 10*time.Second, 10*time.Millisecond)
+	h.stop()
+
+	for i, rec := range tx.snapshot() {
+		assert.Falsef(t, rec.ackOnly, "poll %d must not be ack-only", i)
+	}
+	assert.Equal(t, 5, h.router.storedCount())
 }
 
 // Depth 1 is the one-poll-at-a-time loop: one request outstanding, and the
