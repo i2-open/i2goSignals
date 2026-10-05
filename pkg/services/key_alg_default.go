@@ -3,11 +3,14 @@ package services
 import (
 	"crypto"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
 
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSet/mldsa"
 )
@@ -19,8 +22,14 @@ import (
 // RS256.
 const KeyAlgEnvVar = "I2SIG_KEY_ALG"
 
-// DefaultKeyAlg is the key type used when KeyAlgEnvVar is unset or blank.
-const DefaultKeyAlg = jwtES256
+// FallbackKeyAlg is the key type used when KeyAlgEnvVar is unset or blank.
+// KeyService.DefaultKeyAlg is the configured type a service actually mints.
+const FallbackKeyAlg = jwtES256
+
+// KeyIdHeader is the response header every minting POST /key/{name} carries
+// the new key's kid in (spec #114). The server sets it; the CLI and the bench
+// harness read it.
+const KeyIdHeader = "Key-Id"
 
 // DefaultKeyAlgFromEnv returns the key type KeyAlgEnvVar selects: ES256 when it
 // is unset or blank, or one of RS256, ES256 and ML-DSA-65. Any other value is an
@@ -30,7 +39,7 @@ func DefaultKeyAlgFromEnv() (string, error) {
 	raw := strings.TrimSpace(os.Getenv(KeyAlgEnvVar))
 	switch raw {
 	case "":
-		return DefaultKeyAlg, nil
+		return FallbackKeyAlg, nil
 	case jwtRS256, jwtES256, mldsa.Alg:
 		return raw, nil
 	default:
@@ -46,8 +55,22 @@ func defaultKeyAlgOrES256() string {
 	alg, err := DefaultKeyAlgFromEnv()
 	if err != nil {
 		ksLog.Warn("Invalid default key type; using ES256", "error", err)
-		return DefaultKeyAlg
+		return FallbackKeyAlg
 	}
+	return alg
+}
+
+// LogDefaultKeyAlgOrExit is the startup check every server binary runs: it
+// resolves KeyAlgEnvVar and logs the default key type, or logs the error and
+// exits non-zero when the value names no supported type, rather than falling
+// back silently (spec #114).
+func LogDefaultKeyAlgOrExit(log *slog.Logger) string {
+	alg, err := DefaultKeyAlgFromEnv()
+	if err != nil {
+		log.Error("Fatal: invalid default key type", "error", err)
+		os.Exit(-1)
+	}
+	log.Info("Default key type", "alg", alg)
 	return alg
 }
 
@@ -55,24 +78,54 @@ func defaultKeyAlgOrES256() string {
 // request names no algorithm (KeyAlgEnvVar).
 func (s *KeyService) DefaultKeyAlg() string {
 	if s.defaultKeyAlg == "" {
-		return DefaultKeyAlg
+		return FallbackKeyAlg
 	}
 	return s.defaultKeyAlg
 }
 
-// anyStoredAlg is the selection algorithm of a stream with an empty
-// signing_alg: the issuer's newest active key of any type signs (spec #114).
-// It is never stored; JwkKeyRec.Alg "" is RSA.
-const anyStoredAlg = "\x00any"
+// keySelector is which signing keys selection considers: those of one stored
+// algorithm (JwkKeyRec.Alg, "" for RSA), or, for a stream with an empty
+// signing_alg, the issuer's keys of any type, so its newest active key of any
+// type signs (spec #114).
+type keySelector struct {
+	storedAlg string // the JwkKeyRec.Alg to match; ignored when anyType
+	anyType   bool
+}
 
-// selectionAlgFor maps a stream's signing_alg to the stored algorithm signing
-// selection filters on. Empty means any key type (anyStoredAlg); RS256, ES256
-// and ML-DSA-65 pin that type, RS256 matching the stored "".
-func selectionAlgFor(signingAlg string) (string, error) {
-	if signingAlg == "" {
-		return anyStoredAlg, nil
+// anyKeyType selects a signing key of any type.
+var anyKeyType = keySelector{anyType: true}
+
+// pinnedAlg selects signing keys of the stored algorithm storedAlg only.
+func pinnedAlg(storedAlg string) keySelector {
+	return keySelector{storedAlg: storedAlg}
+}
+
+// matches reports whether rec's key type is one sel selects.
+func (sel keySelector) matches(rec *interfaces.JwkKeyRec) bool {
+	return sel.anyType || rec.Alg == sel.storedAlg
+}
+
+// label names sel for a log line: "any key type", or the JWS name of the
+// pinned algorithm ("RS256" for the stored "").
+func (sel keySelector) label() string {
+	if sel.anyType {
+		return SigningAlgLabel("")
 	}
-	return storedAlgFor(signingAlg)
+	return algLabel(sel.storedAlg)
+}
+
+// selectionFor maps a stream's signing_alg to the keys signing selection
+// considers. Empty means any key type; RS256, ES256 and ML-DSA-65 pin that
+// type, RS256 matching the stored "".
+func selectionFor(signingAlg string) (keySelector, error) {
+	if signingAlg == "" {
+		return anyKeyType, nil
+	}
+	storedAlg, err := storedAlgFor(signingAlg)
+	if err != nil {
+		return keySelector{}, err
+	}
+	return pinnedAlg(storedAlg), nil
 }
 
 // SigningAlgLabel names a stream's signing_alg for an operator message: the JWS
@@ -94,8 +147,34 @@ func StreamSigningMethod(signingAlg string, key crypto.Signer) jwt.SigningMethod
 	}
 	alg, err := SigningAlgOf(key)
 	if err != nil {
-		ksLog.Error("Signing key of an unsupported type reached a signing site", "error", err)
+		// This runs on every SET, so the invariant violation is an ERROR once
+		// per key type and DEBUG after that (CONTEXT.md log-level policy); the
+		// RS256 fallback itself is unchanged.
+		if _, seen := unsupportedSignerLogged.LoadOrStore(fmt.Sprintf("%T", key), true); seen {
+			ksLog.Debug("Signing key of an unsupported type reached a signing site", "error", err)
+		} else {
+			ksLog.Error("Signing key of an unsupported type reached a signing site", "error", err)
+		}
 		return goSet.SigningMethodOrRS256("")
 	}
 	return goSet.SigningMethodOrRS256(alg)
+}
+
+// unsupportedSignerLogged records the key types StreamSigningMethod has already
+// logged its ERROR for.
+var unsupportedSignerLogged sync.Map
+
+// SigningMethodOf is the JWS method a key of this type signs with, and its JWS
+// name: the CLI and the bench harness sign with whatever key type the server
+// minted (spec #114).
+func SigningMethodOf(key crypto.Signer) (jwt.SigningMethod, string, error) {
+	alg, err := SigningAlgOf(key)
+	if err != nil {
+		return nil, "", err
+	}
+	method, err := goSet.SigningMethodFor(alg)
+	if err != nil {
+		return nil, "", err
+	}
+	return method, alg, nil
 }

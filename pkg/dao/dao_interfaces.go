@@ -573,10 +573,14 @@ func (key *JwkKeyRec) keyAlg() string {
 		return ""
 	}
 	if key.Alg == "" {
-		return "RS256"
+		return RSAKeyAlg
 	}
 	return key.Alg
 }
+
+// RSAKeyAlg is the JWS name of the key type an empty JwkKeyRec.Alg stores:
+// RSA, signing RS256, as every record before the discriminator existed.
+const RSAKeyAlg = "RS256"
 
 // SortOldestFirst returns recs ordered oldest-first by JwkKeyRec.NewerThan,
 // the order signing selection ranks keys in, so the last active entry of an

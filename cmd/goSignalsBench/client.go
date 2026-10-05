@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -177,7 +178,7 @@ func (n *node) createIssuerKey(bootstrapToken, issuer string) (crypto.Signer, []
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return key, body, header.Get("Key-Id"), nil
+	return key, body, header.Get(services.KeyIdHeader), nil
 }
 
 // createSigningAlgKey asks the server to create the issuer's signing key for

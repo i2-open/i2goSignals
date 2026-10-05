@@ -112,11 +112,7 @@ type signingKey struct {
 // (no <issuer-key-file>.kid sidecar, or a server that sent no Key-Id) falls
 // back to the issuer name, the kid of a legacy first RSA key.
 func newSigningKey(signer crypto.Signer, kid, issuer string) (signingKey, error) {
-	alg, err := services.SigningAlgOf(signer)
-	if err != nil {
-		return signingKey{}, err
-	}
-	method, err := goSet.SigningMethodFor(alg)
+	method, _, err := services.SigningMethodOf(signer)
 	if err != nil {
 		return signingKey{}, err
 	}

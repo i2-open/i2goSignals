@@ -293,8 +293,8 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.S
 // Handing this list to jwt.WithValidMethods closes that by construction: the
 // header alg is checked before the key is ever resolved.
 //
-// RS256 is the default a stream signs with and ES256 the per-stream opt-in for
-// transmitter throughput (i2goSignals#284).
+// ES256 is the default key type (spec #114; i2goSignals#284 for the
+// throughput case) and RS256 remains accepted for legacy RSA-keyed issuers.
 // ML-DSA-65 (RFC 9964, FIPS 204) is accepted for streams that opt into
 // post-quantum signatures via StreamConfiguration.signing_alg; it is listed
 // unconditionally because the allow-list gates the *header*, and a receiver

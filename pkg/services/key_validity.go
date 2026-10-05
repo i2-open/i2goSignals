@@ -196,17 +196,17 @@ func (s *KeyService) UploadedKeySignsNow(keyName string, cert *x509.Certificate)
 	return s.uploadedValidity(keyName, cert, nil).ValidAt(s.clock())
 }
 
-// holdsSigningKeyOf reports whether rec carries private key material of the
-// stored algorithm storedAlg ("" for RSA), or of any type for anyStoredAlg.
-func holdsSigningKeyOf(rec *interfaces.JwkKeyRec, storedAlg string) bool {
-	return len(rec.KeyBytes) > 0 && (storedAlg == anyStoredAlg || rec.Alg == storedAlg)
+// holdsSigningKeyOf reports whether rec carries private key material of a key
+// type sel selects.
+func holdsSigningKeyOf(rec *interfaces.JwkKeyRec, sel keySelector) bool {
+	return len(rec.KeyBytes) > 0 && sel.matches(rec)
 }
 
-// isSigningCandidate reports whether rec could sign storedAlg as far as its
+// isSigningCandidate reports whether rec could sign for sel as far as its
 // lifecycle status goes: it holds the key and is neither suspended nor
 // revoked. Its validity period is left to the caller.
-func isSigningCandidate(rec *interfaces.JwkKeyRec, storedAlg string) bool {
-	return holdsSigningKeyOf(rec, storedAlg) && rec.IsActive()
+func isSigningCandidate(rec *interfaces.JwkKeyRec, sel keySelector) bool {
+	return holdsSigningKeyOf(rec, sel) && rec.IsActive()
 }
 
 // SigningKeyValidityError is the ErrKeyNotFound of an issuer whose newest
@@ -232,12 +232,12 @@ func (e *SigningKeyValidityError) Error() string {
 func (e *SigningKeyValidityError) Unwrap() error { return interfaces.ErrKeyNotFound }
 
 // validityCause is the error of an issuer with no active signing key of
-// storedAlg at now: a SigningKeyValidityError naming the newest candidate
+// sel at now: a SigningKeyValidityError naming the newest candidate
 // outside its validity period, else ErrKeyNotFound.
-func validityCause(recs []*interfaces.JwkKeyRec, storedAlg string, now time.Time) error {
+func validityCause(recs []*interfaces.JwkKeyRec, sel keySelector, now time.Time) error {
 	var newest *interfaces.JwkKeyRec
 	for _, rec := range recs {
-		if isSigningCandidate(rec, storedAlg) && !rec.ValidAt(now) && rec.NewerThan(newest) {
+		if isSigningCandidate(rec, sel) && !rec.ValidAt(now) && rec.NewerThan(newest) {
 			newest = rec
 		}
 	}
@@ -289,7 +289,7 @@ func (s *KeyService) GetSignerUntil(ctx context.Context, issuer string, alg stri
 // alg at the service clock, with the instant the selection stops holding. With
 // no active record the error is validityCause's.
 func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg string) (*interfaces.JwkKeyRec, time.Time, error) {
-	storedAlg, err := selectionAlgFor(alg)
+	sel, err := selectionFor(alg)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -298,7 +298,7 @@ func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg strin
 		return nil, time.Time{}, err
 	}
 	now := s.clock()
-	latest, sawInactive := latestActiveSigningRec(recs, storedAlg, now)
+	latest, sawInactive := latestActiveSigningRec(recs, sel, now)
 	if latest == nil {
 		if sawInactive {
 			// WARN, not ERROR (deliberately demoted): this runs on every key read,
@@ -306,25 +306,25 @@ func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg strin
 			// the key once per retry. The router logs the one ERROR per
 			// key-unavailable pause (#312) and again when the stream is disabled.
 			ksLog.Warn("No active signing key for issuer; all signing keys are suspended, revoked, expired or not yet valid",
-				"issuer", issuer, "alg", algLabel(storedAlg),
+				"issuer", issuer, "alg", sel.label(),
 				"remedy", "rotate a new key or reactivate a suspended key")
 		}
-		return nil, time.Time{}, validityCause(recs, storedAlg, now)
+		return nil, time.Time{}, validityCause(recs, sel, now)
 	}
-	return latest, selectionUntil(recs, latest, storedAlg, now), nil
+	return latest, selectionUntil(recs, latest, sel, now), nil
 }
 
 // selectionUntil is the first instant after now at which a validity bound
-// changes which record of storedAlg is selected: just past the selected
+// changes which record sel selects: just past the selected
 // record's NotAfter (which is inclusive), or the NotBefore of a record that
 // would then be newer and active.
-func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec, storedAlg string, now time.Time) time.Time {
+func selectionUntil(recs []*interfaces.JwkKeyRec, selected *interfaces.JwkKeyRec, sel keySelector, now time.Time) time.Time {
 	var until time.Time
 	if !selected.NotAfter.IsZero() {
 		until = selected.NotAfter.Add(time.Nanosecond)
 	}
 	for _, rec := range recs {
-		if !isSigningCandidate(rec, storedAlg) {
+		if !isSigningCandidate(rec, sel) {
 			continue
 		}
 		if rec.NotBefore.After(now) && rec.NewerThan(selected) && (until.IsZero() || rec.NotBefore.Before(until)) {
@@ -398,7 +398,7 @@ func (s *KeyService) WarnExpiringSigningKeys(ctx context.Context) {
 			continue
 		}
 		for _, storedAlg := range signingAlgsOf(recs) {
-			rec, _ := latestActiveSigningRec(recs, storedAlg, now)
+			rec, _ := latestActiveSigningRec(recs, pinnedAlg(storedAlg), now)
 			if _, soon := s.expiresSoon(rec, now); !soon {
 				continue
 			}

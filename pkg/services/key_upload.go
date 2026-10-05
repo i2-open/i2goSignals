@@ -25,7 +25,7 @@ const supportedSigningKeys = "a signing key must be RSA (RS256), ECDSA P-256 (ES
 func SigningAlgOf(key crypto.Signer) (string, error) {
 	switch k := key.(type) {
 	case *rsa.PrivateKey:
-		return "RS256", nil
+		return jwtRS256, nil
 	case *ecdsa.PrivateKey:
 		if k.Curve == elliptic.P256() {
 			return jwtES256, nil

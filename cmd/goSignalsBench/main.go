@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -475,7 +476,6 @@ func run(o *options) error {
 // minted; a PEM already at the path is first kept as a timestamped .bak so a
 // key another stack still holds is not lost.
 func ensureIssuerKey(gs1 *node, o *options) (signingKey, error) {
-	kidFile := o.issuerKeyFile + ".kid"
 	if gs1.hasIssuerKey(o.issuer) {
 		pemBytes, readErr := os.ReadFile(o.issuerKeyFile)
 		if readErr != nil {
@@ -485,10 +485,8 @@ func ensureIssuerKey(gs1 *node, o *options) (signingKey, error) {
 		if parseErr != nil {
 			return signingKey{}, fmt.Errorf("parse %s: %w", o.issuerKeyFile, parseErr)
 		}
-		kid := ""
-		if kidBytes, kidErr := os.ReadFile(kidFile); kidErr == nil {
-			kid = strings.TrimSpace(string(kidBytes))
-		} else if !os.IsNotExist(kidErr) {
+		kid, kidErr := services.ReadKidSidecar(o.issuerKeyFile)
+		if kidErr != nil {
 			return signingKey{}, kidErr
 		}
 		key, keyErr := newSigningKey(k, kid, o.issuer)
@@ -519,12 +517,8 @@ func ensureIssuerKey(gs1 *node, o *options) (signingKey, error) {
 	}
 	// The sidecar holds the kid the server returned; with none, a stale one is
 	// removed so the next run falls back to kid = issuer.
-	if kid != "" {
-		if writeErr := os.WriteFile(kidFile, []byte(kid+"\n"), 0o600); writeErr != nil {
-			return signingKey{}, writeErr
-		}
-	} else if rmErr := os.Remove(kidFile); rmErr != nil && !os.IsNotExist(rmErr) {
-		return signingKey{}, rmErr
+	if writeErr := services.WriteKidSidecar(o.issuerKeyFile, kid, 0o600); writeErr != nil {
+		return signingKey{}, writeErr
 	}
 	logf("minted issuer key %s (kid %s) on goSignals1, saved to %s", o.issuer, key.kid, o.issuerKeyFile)
 	return key, nil

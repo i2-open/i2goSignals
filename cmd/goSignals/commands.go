@@ -1508,7 +1508,7 @@ func (c *CreateKeyCmd) Run(g *Globals) error {
 	if err != nil {
 		fmt.Println(err.Error())
 	}
-	if err = writeKidSidecar(outputPath, resp.Header.Get(keyIdHeader)); err != nil {
+	if err = services.WriteKidSidecar(outputPath, resp.Header.Get(services.KeyIdHeader), 0640); err != nil {
 		fmt.Println(err.Error())
 	}
 	fmt.Println("Certificate received (PEM):\n" + string(body))
@@ -2643,25 +2643,6 @@ func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint s
 
 }
 
-// keyIdHeader is the response header carrying the kid of the key a minting
-// POST /key/{keyName} created (spec #114 S-KID).
-const keyIdHeader = "Key-Id"
-
-// writeKidSidecar saves kid to <pemPath>.kid (kid only, trailing newline) next
-// to the PEM, so a consumer of the PEM file knows the key's kid. A server that
-// sent no Key-Id (older server) leaves no sidecar: a stale one from an earlier
-// key is removed, and the consumer falls back to kid = issuer.
-func writeKidSidecar(pemPath, kid string) error {
-	sidecar := pemPath + ".kid"
-	if kid == "" {
-		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	return os.WriteFile(sidecar, []byte(kid+"\n"), 0640)
-}
-
 // newestActiveKid picks the kid generate event signs with: in the issuer's key
 // summary, the last active keyStates[] entry whose alg is alg. Summaries list
 // keys oldest-first (spec #114 S-ALG), so the last match is that type's newest
@@ -2803,11 +2784,7 @@ func (gen *GenerateCmd) Run(c *CLI) error {
 
 	// Now we sign and deliver the event, with the key's own type and the kid
 	// the server holds for it (spec #114).
-	alg, err := services.SigningAlgOf(key)
-	if err != nil {
-		return err
-	}
-	method, err := goSet.SigningMethodFor(alg)
+	method, alg, err := services.SigningMethodOf(key)
 	if err != nil {
 		return err
 	}

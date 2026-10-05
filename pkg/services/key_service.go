@@ -210,7 +210,7 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 	if ferr != nil {
 		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, ferr)
 	}
-	if _, sawInactive := latestActiveSigningRec(recs, anyStoredAlg, s.clock()); sawInactive {
+	if _, sawInactive := latestActiveSigningRec(recs, anyKeyType, s.clock()); sawInactive {
 		ksLog.Warn("Signing key exists but is suspended or revoked; not creating a replacement",
 			"keyName", keyName,
 			"remedy", "rotate a new key or reactivate the suspended key")
@@ -531,7 +531,7 @@ func ValidateKeyAlg(alg string) error {
 // the discriminator existed decodes, so every algorithm added since carries its
 // name explicitly.
 const (
-	jwtRS256 = "RS256"
+	jwtRS256 = interfaces.RSAKeyAlg
 	jwtES256 = "ES256"
 )
 
@@ -554,7 +554,7 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		return false, fmt.Errorf("failed to check %s signing key %q: %w", alg, keyName, err)
 	}
-	latest, sawInactive := latestActiveSigningRec(recs, storedAlg, s.clock())
+	latest, sawInactive := latestActiveSigningRec(recs, pinnedAlg(storedAlg), s.clock())
 	if latest != nil {
 		return false, nil
 	}
@@ -722,17 +722,14 @@ func recKid(rec *interfaces.JwkKeyRec) string {
 // algLabel renders a stored Alg for a log line, where "" would read as a
 // missing value rather than "the RSA default".
 func algLabel(alg string) string {
-	switch alg {
-	case "":
-		return "RS256"
-	case anyStoredAlg:
-		return SigningAlgLabel("")
+	if alg == "" {
+		return jwtRS256
 	}
 	return alg
 }
 
 // latestActiveSigningRec picks the newest active record carrying private-key
-// material for algorithm alg, newest by JwkKeyRec.NewerThan: creation time,
+// material of a key type sel selects, newest by JwkKeyRec.NewerThan: creation time,
 // with id order only for records that have none (i2goSignals#316). sawInactive
 // reports whether at least one signing-capable record of that algorithm was
 // skipped solely because it is suspended or revoked — this distinguishes "this
@@ -744,13 +741,13 @@ func algLabel(alg string) string {
 // A record outside its validity period at now (i2goSignals#318) is inactive
 // like a suspended one: skipped, and counted in sawInactive.
 //
-// alg is "" for RSA and "ML-DSA-65" for RFC 9964, matching JwkKeyRec.Alg
-// exactly. The filter is what makes one issuer able to hold both: without it an
+// A pinned sel matches JwkKeyRec.Alg exactly ("" for RSA, "ML-DSA-65" for
+// RFC 9964); anyKeyType matches every type (spec #114). The filter is what makes one issuer able to hold both: without it an
 // RSA signing request on an issuer that has opted a stream into ML-DSA would
 // pick up the newer ML-DSA record and sign RS256 with an ML-DSA key.
-func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, alg string, now time.Time) (latest *interfaces.JwkKeyRec, sawInactive bool) {
+func latestActiveSigningRec(recs []*interfaces.JwkKeyRec, sel keySelector, now time.Time) (latest *interfaces.JwkKeyRec, sawInactive bool) {
 	for _, rec := range recs {
-		if !holdsSigningKeyOf(rec, alg) {
+		if !holdsSigningKeyOf(rec, sel) {
 			continue // no private material, or another algorithm's key
 		}
 		if !rec.IsActive() || !rec.ValidAt(now) {
@@ -859,7 +856,7 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 	// signs, so a "signing will fail" warning there would be misleading (ADR 0028).
 	warning := ""
 	if recs, ferr := s.keyDAO.FindByKeyName(ctx, keyName); ferr == nil {
-		if latest, sawInactive := latestActiveSigningRec(recs, anyStoredAlg, s.clock()); latest == nil && sawInactive {
+		if latest, sawInactive := latestActiveSigningRec(recs, anyKeyType, s.clock()); latest == nil && sawInactive {
 			warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
 			ksLog.Warn(warning, "issuer", keyName)
 		}
@@ -890,7 +887,7 @@ func (s *KeyService) refreshTokenIssuerKey(ctx context.Context) {
 		return
 	}
 
-	signingRec, _ := latestActiveSigningRec(recs, "", s.clock())
+	signingRec, _ := latestActiveSigningRec(recs, pinnedAlg(""), s.clock())
 	var signingKey crypto.Signer
 	signingKid := ""
 	if signingRec != nil {
