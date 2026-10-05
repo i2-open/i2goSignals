@@ -131,6 +131,7 @@ func TestHandleEvent_BroadcastsWakeSstpClientToRemoteOwner(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
@@ -166,6 +167,7 @@ func TestHandleEvent_BroadcastsWakeSstpServerToActiveNodes(t *testing.T) {
 
 	r.mu.Lock()
 	r.sstpServerStreams[txSid] = *pair
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)

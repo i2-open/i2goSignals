@@ -26,6 +26,7 @@ func TestClaimOutbound_StoreFallbackSkipsJtisAlreadyClaimed(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	for i := 1; i <= 3; i++ {

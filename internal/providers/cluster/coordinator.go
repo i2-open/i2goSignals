@@ -66,6 +66,8 @@ const (
 	pushTransmitterKind = "push-transmitter"
 	pollReceiverKind    = "poll-receiver"
 	sstpClientKind      = "sstp-client"
+	pollTransmitterKind = "poll-transmitter"
+	sstpServerKind      = "sstp-server"
 )
 
 // PushTransmitterResource is the lease resource a push transmitter's runner
@@ -84,6 +86,20 @@ func PollReceiverResource(sid string) string {
 // pair pairId.
 func SstpClientResource(pairId string) string {
 	return sstpClientKind + ":" + pairId
+}
+
+// PollTransmitterResource is the lease resource a poll transmitter holds for
+// sid. It names the resource only: no lease is taken on it yet (#365).
+func PollTransmitterResource(sid string) string {
+	return pollTransmitterKind + ":" + sid
+}
+
+// SstpServerResource is the lease resource the accepting (responder) side of
+// an SSTP pair holds for the pair. It is called with the pair's tx stream id,
+// the key the router tracks responder pairs by. It names the resource only: no
+// lease is taken on it yet (#365).
+func SstpServerResource(pairId string) string {
+	return sstpServerKind + ":" + pairId
 }
 
 // Reaper is the optional garbage-collection half of a coordinator (#350).

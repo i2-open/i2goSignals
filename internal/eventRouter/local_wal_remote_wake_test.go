@@ -30,6 +30,7 @@ func TestLocalWal_RingFedRemoteOwnerWokenAfterDrain(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
@@ -84,6 +85,7 @@ func TestLocalWal_RingFedCommitWakeReadsNoLease(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
@@ -121,6 +123,7 @@ func TestLocalWal_RingFedCommitWakeSkipsBroadcastWhenSelfOwns(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)

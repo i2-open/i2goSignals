@@ -52,7 +52,7 @@ func waitLeaseOwner(t *testing.T, coord cluster.ClusterCoordinator, resource, ow
 func TestPushFence_StaleTokenAckRejectedAfterTakeover(t *testing.T) {
 	rx := newHoldingReceiver()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 	setter, ok := coord.(clockSetter)
 	require.True(t, ok, "memory coordinator exposes SetClock")
 	clock := &leaseClock{t: time.Now().UTC()}
@@ -107,7 +107,7 @@ func TestPushFence_StaleTokenAckRejectedAfterTakeover(t *testing.T) {
 func TestPushFence_RunnerReleasesLeaseOnStop(t *testing.T) {
 	rx := newHoldingReceiver()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id

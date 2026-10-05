@@ -130,6 +130,7 @@ func TestPauseSstpPair_PausesBothHalvesInMemoryAndClientMap(t *testing.T) {
 	require.NoError(t, r.streamService.PersistStreamStateRecord(context.Background(), rec))
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *rec
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	reason := "SSTP-CLIENT: 4xx request error on pair=" + pairId

@@ -204,6 +204,13 @@ type router struct {
 	// tests that do not need the dialer skip the callback).
 	sstpDialer  SstpDialerHooks
 	coordinator cluster.ClusterCoordinator
+	// routes is the immutable routing snapshot the fan-out match step reads
+	// with no lock (#362); rebuildRoutingLocked republishes it on every
+	// stream-map write.
+	routes atomic.Pointer[routingTable]
+	// locks tracks the goroutines holding r.mu on the fan-out path, for
+	// goSignals_router_reads_under_lock_total.
+	locks lockTracker
 	// leaseOwners memoises push-transmitter lease ownership for the fan-out
 	// wake-up decision (issue #287). This node's own push lifecycle keeps it
 	// honest on every transition it drives; leaseOwnerCacheTTL is the backstop
@@ -411,6 +418,10 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 		outboundWakes:          NewWakeCoalescer(WakeCoalesceWindow),
 		leaseOwners:            newLeaseOwnerCache(),
 	}
+	if deps.Coordinator != nil {
+		router.coordinator = &trackedCoordinator{ClusterCoordinator: deps.Coordinator, locks: &router.locks}
+	}
+	router.routes.Store(&routingTable{})
 
 	// Route reset re-deliveries through this router's metering observer. A stream
 	// reset re-queues stored events directly (bypassing fan-out), so EventService
@@ -911,6 +922,9 @@ func (r *router) UpdateStreamState(stream *model.StreamStateRecord) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Every path below returns holding r.mu; the routing snapshot follows
+	// whatever it wrote to the stream maps.
+	defer r.rebuildRoutingLocked()
 
 	// SSTP bidirectional pair: the initiator side runs the SSTP-client runner
 	// keyed on PairId. The responder side answers POST /sstp/{id} (server-side
@@ -1233,9 +1247,7 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 	// written yet: the markers travel in the same store call as the bodies.
 	var targets []*fanoutTarget
 	if !importOnly {
-		r.mu.RLock()
 		targets = r.planFanoutLocked(dedupeCandidatesByJti(candidates), excludeSstpTxSid)
-		r.mu.RUnlock()
 	}
 	pending := make(map[string][]interfaces.PendingRef, len(targets))
 	now := time.Now()
@@ -1251,8 +1263,9 @@ func (r *router) handleEvents(lookupCtx context.Context, eventTokens []*goSet.Se
 		return results
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.resolveOwners(targets)
+	r.fanoutRLock()
+	defer r.fanoutRUnlock()
 	r.commitFanoutLocked(targets, accepted, requeued)
 	return results
 }
@@ -1381,6 +1394,13 @@ type fanoutTarget struct {
 	// ackJtis is index-aligned with jtis: the JTI each SET is acknowledged
 	// with on this stream (#359). Nil means every ackJti equals its jti.
 	ackJtis []string
+	// resource is the stream's lease resource, named by its routing entry.
+	resource string
+	// owner is the node holding a push or SSTP-client target's lease, ""
+	// when none is known. resolveOwners fills it with r.mu released, after
+	// the plan and before the wake; the wake step reads only this field
+	// (#362). Poll and SSTP-server targets leave it empty until #365.
+	owner string
 }
 
 // pendingJtis returns the inbound JTIs of streamID's pending references and
@@ -1418,49 +1438,81 @@ func (t *fanoutTarget) refs(enqueuedAt time.Time) []interfaces.PendingRef {
 }
 
 // planFanoutLocked selects, for every outbound stream this router knows about,
-// the events of the batch that match it. It writes and wakes nothing. The
-// caller must hold r.mu (at least RLock).
+// the events of the batch that match it. It writes and wakes nothing. It reads
+// the routing snapshot (#362), so it needs no router lock and makes no store
+// or coordinator read; the name is kept from when it scanned the stream maps
+// under r.mu.
 func (r *router) planFanoutLocked(batch []*model.EventRecord, excludeSstpTxSid string) []*fanoutTarget {
 	var targets []*fanoutTarget
-
-	// Check to see if the events should be routed to outbound push streams
-	for _, stream := range r.pushStreams {
-		if t := r.selectMatchingLocked(&stream, batch, "PUSH", stream.StreamConfiguration.Id); t != nil {
+	rt := r.routing()
+	for i := range rt.entries {
+		e := &rt.entries[i]
+		if e.mode != routeModePush && e.mode != routeModePoll {
+			continue
+		}
+		if t := r.selectMatchingLocked(e, batch); t != nil {
 			targets = append(targets, t)
 		}
 	}
-
-	// Check to see if the events should be routed to outbound polling streams
-	for k, pollStream := range r.pollStreams {
-		eventLogger.Debug("ROUTER: Checking stream", "sid", k)
-		if t := r.selectMatchingLocked(&pollStream, batch, "POLL", pollStream.StreamConfiguration.Id); t != nil {
-			targets = append(targets, t)
-		}
-	}
-
 	return append(targets, r.planSstpFanoutLocked(batch, excludeSstpTxSid)...)
 }
 
-// selectMatchingLocked selects the events of a batch that match an outbound
-// stream, returning the target the ingest write and the commit phase need (nil
-// when nothing matched). The caller must hold r.mu (at least RLock).
+// selectMatchingLocked selects the events of a batch that match one routing
+// entry, returning the target the ingest write and the commit phase need (nil
+// when nothing matched). It reads only the entry, so it needs no lock.
 //
 // Egress metering is deliberately NOT done here: a SET whose ingest write is
 // rejected must not be counted as outbound.
-func (r *router) selectMatchingLocked(stream *model.StreamStateRecord, batch []*model.EventRecord, mode string, key string) *fanoutTarget {
+func (r *router) selectMatchingLocked(e *routeEntry, batch []*model.EventRecord) *fanoutTarget {
+	stream := &e.stream
 	var jtis []string
 	for _, event := range batch {
 		if !r.eventService.MatchesStream(stream, event) {
 			continue
 		}
-		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", mode, "types", event.Types)
+		eventLogger.Info("ROUTER: Selected", "sid", stream.StreamConfiguration.Id, "jti", event.Jti, "mode", e.mode, "types", event.Types)
 		jtis = append(jtis, event.Jti)
 	}
 	if len(jtis) == 0 {
 		return nil
 	}
 	// The transmitter API will forward or sign/encrypt the event based on route mode at delivery time!
-	return &fanoutTarget{mode: mode, key: key, docID: stream.Id.Hex(), sid: stream.StreamConfiguration.Id, jtis: jtis}
+	return &fanoutTarget{mode: e.mode, key: e.key, docID: stream.Id.Hex(), sid: stream.StreamConfiguration.Id, jtis: jtis, resource: e.resource}
+}
+
+// resolveOwners reads the lease owner of each push and SSTP-client target and
+// stores it on fanoutTarget.owner. It runs after the plan and before the wake,
+// with r.mu released, so no coordinator read happens under the router lock
+// (#362).
+//
+//   - PUSH: through leaseOwners (issue #287), which may load the owner from
+//     the coordinator on a miss.
+//   - SSTP-CLIENT: straight from the coordinator, deliberately not cached for
+//     the decision. The sstp-client lease is acquired, renewed and released by
+//     the dialer in internal/server, not by this router, so there is no
+//     first-hand transition for a cache here to hook — it would be a bare TTL
+//     with no invalidation story, which issue #287 rules out. The owner read is
+//     noted in leaseOwners only so the ring-fed commit wake (wakeTargetRemote)
+//     can skip a broadcast to itself.
+func (r *router) resolveOwners(targets []*fanoutTarget) {
+	for _, t := range targets {
+		switch t.mode {
+		case routeModePush:
+			t.owner = r.pushLeaseOwner(t.key)
+		case routeModeSstpClient:
+			resource := cluster.SstpClientResource(t.key)
+			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
+			if err != nil {
+				// A coordinator read failure otherwise reads as "no owner", which
+				// silently makes every node deliver. Say so; the push arm reports
+				// its equivalent through leaseOwners.
+				eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", err)
+			} else {
+				r.leaseOwners.note(resource, owner)
+			}
+			t.owner = owner
+		}
+	}
 }
 
 // commitFanoutLocked finishes the fan-out once the ingest write has returned:
@@ -1511,12 +1563,14 @@ func (r *router) wakeTargetLocked(t *fanoutTarget, jtis []string) {
 // serves the SET before the drain stores it, and defers the cross-node wake to
 // commit (wakeTargetRemote): a remote owner reads only the store, and a wake
 // sent before the store write would find nothing (and coalescing would swallow
-// a second one). The caller must hold r.mu (at least RLock).
+// a second one). The caller must hold r.mu (at least RLock) and must have run
+// resolveOwners on t first: the PUSH and SSTP-CLIENT arms read t.owner and make
+// no cache load or coordinator call (#362).
 func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wakeScope) {
 	remote := scope != wakeLocalOnly
 	switch t.mode {
 	case "PUSH":
-		ownerNodeId := r.pushLeaseOwner(t.key)
+		ownerNodeId := t.owner
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			// Local owner or no owner (we'll try to take it or backfill will find it).
 			// The comma-ok is load-bearing since the fan-out was split in two: the
@@ -1547,24 +1601,8 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 		}
 
 	case "SSTP-CLIENT":
-		// Deliberately NOT cached for this decision. The sstp-client lease is
-		// acquired, renewed and released by the dialer in internal/server, not
-		// by this router, so there is no first-hand transition for a cache here
-		// to hook — it would be a bare TTL with no invalidation story, which
-		// issue #287 rules out. The per-event cluster_leases cost the profiler
-		// measured was on the push leg; this read happens once per SSTP fan-out
-		// batch. The owner read is noted in leaseOwners only so the ring-fed
-		// commit wake (wakeTargetRemote) can skip a broadcast to itself.
-		resource := cluster.SstpClientResource(t.key)
-		ownerNodeId, _, _, leaseErr := r.coordinator.GetLeaseOwner(resource)
-		if leaseErr != nil {
-			// A coordinator read failure otherwise reads as "no owner", which
-			// silently makes every node deliver. Say so; the push arm reports
-			// its equivalent through leaseOwners.
-			eventLogger.Warn("ROUTER: Error reading sstp-client lease owner", "sid", t.sid, "resource", resource, "error", leaseErr)
-		} else {
-			r.leaseOwners.note(resource, ownerNodeId)
-		}
+		// The owner was read by resolveOwners before the lock was taken.
+		ownerNodeId := t.owner
 		if ownerNodeId == "" || ownerNodeId == r.nodeId {
 			if buf, ok := r.sstpBuffers[t.key]; ok {
 				for _, jti := range jtis {
@@ -1591,18 +1629,19 @@ func (r *router) wakeTargetScopedLocked(t *fanoutTarget, jtis []string, scope wa
 
 // wakeTargetRemote is the cross-node half of a target's wake alone, for the
 // ring-fed commit (#347). It reads no router map, so it needs no router lock,
-// and no uncached lease: the PUSH owner comes from leaseOwners, and an
-// SSTP-client target is woken by the coalesced broadcast (at most one per pair
-// per 250ms, which every node but the lease owner ignores) unless the owner
-// noted at append is this node, whose buffer the append-time wake already fed.
+// and makes no cache load or coordinator call: it reads fanoutTarget.owner,
+// which wakeCommittedRemote fills from leaseOwners. An SSTP-client target is
+// woken by the coalesced broadcast (at most one per pair per 250ms, which
+// every node but the lease owner ignores) unless the owner noted at append is
+// this node, whose buffer the append-time wake already fed.
 func (r *router) wakeTargetRemote(t *fanoutTarget) {
 	switch t.mode {
 	case "PUSH":
-		if ownerNodeId := r.pushLeaseOwner(t.key); ownerNodeId != "" && ownerNodeId != r.nodeId {
+		if ownerNodeId := t.owner; ownerNodeId != "" && ownerNodeId != r.nodeId {
 			go r.sendWakeup(t.key, "push", ownerNodeId, "")
 		}
 	case "SSTP-CLIENT":
-		if r.leaseOwners.peek(cluster.SstpClientResource(t.key)) == r.nodeId {
+		if t.owner == r.nodeId {
 			return
 		}
 		go r.broadcastSstpClientWake(t.key)
@@ -1652,8 +1691,8 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 
 // planSstpFanoutLocked selects the batch's events for the SSTP pairs this
 // router knows about (PRD #154 Q11.1, Q11.2, #167) and writes their pending
-// markers; wakeTargetLocked does the waking once the bodies have landed. The
-// caller must hold r.mu (at least RLock).
+// markers; wakeTargetLocked does the waking once the bodies have landed. It
+// reads the routing snapshot (#362), so it needs no router lock.
 //
 //   - SSTP-client (initiator) pairs: when an event matches and the
 //     sstp-client:<PairId> lease is held by a different node, broadcast
@@ -1677,28 +1716,24 @@ func sstpInboundRouteMode(pair *model.StreamStateRecord) string {
 // side would return them to the peer that sent them (#261, ADR-0031 D5). Empty
 // for locally-originated events.
 //
-// The tx SID identifies the pair in both maps below — initiator pairs are
+// The tx SID identifies the pair in both SSTP snapshot modes — initiator pairs are
 // keyed by PairId, which the aliasing invariant makes equal to the tx SID, and
 // responder pairs are keyed by the tx SID directly — so one key works for both
 // and stays correct on a record whose PairId was never populated.
 func (r *router) planSstpFanoutLocked(batch []*model.EventRecord, excludeTxSid string) []*fanoutTarget {
 	var targets []*fanoutTarget
-	for pairId, pair := range r.sstpClientStreams {
-		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
+	rt := r.routing()
+	for i := range rt.entries {
+		e := &rt.entries[i]
+		if e.mode != routeModeSstpClient && e.mode != routeModeSstpServer {
 			continue
 		}
-		if t := r.selectMatchingLocked(&pair, batch, "SSTP-CLIENT", pairId); t != nil {
-			targets = append(targets, t)
-		}
-	}
-
-	for txSid, pair := range r.sstpServerStreams {
-		if excludeTxSid != "" && pair.StreamConfiguration.Id == excludeTxSid {
+		if excludeTxSid != "" && e.stream.StreamConfiguration.Id == excludeTxSid {
 			continue
 		}
 		// The server takes no client lease — every node may serve the
-		// long-poll — so the wake is not gated on lease ownership.
-		if t := r.selectMatchingLocked(&pair, batch, "SSTP-SERVER", txSid); t != nil {
+		// long-poll — so an SSTP-server wake is not gated on lease ownership.
+		if t := r.selectMatchingLocked(e, batch); t != nil {
 			targets = append(targets, t)
 		}
 	}
@@ -3348,6 +3383,7 @@ func (r *router) RemoveStream(sid string) {
 	if _, ok := r.sstpServerStreams[sid]; ok {
 		delete(r.sstpServerStreams, sid)
 	}
+	r.rebuildRoutingLocked()
 
 	r.mu.Unlock()
 

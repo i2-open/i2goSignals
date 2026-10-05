@@ -303,6 +303,7 @@ func (r *router) completePushHandoff(sid string, old *pushRunner, handoff *pushH
 	if ownPause != "" && state.Status == model.StreamStatePause && state.ErrorMsg == ownPause {
 		state.SetStatus(model.StreamStateEnabled, "")
 		r.pushStreams[sid] = state
+		r.rebuildRoutingLocked()
 	}
 	r.initPushStreamLocked(sid, state.DeepCopy(), jtis)
 }
@@ -393,6 +394,7 @@ func (r *router) pushStreamHeldOff(sid string) bool {
 	if cur, ok := r.pushStreams[sid]; ok && cur.Status == state.Status && cur.ErrorMsg == state.ErrorMsg {
 		cur.SetStatus(stored.Status, stored.ErrorMsg)
 		r.pushStreams[sid] = cur
+		r.rebuildRoutingLocked()
 	}
 	r.mu.Unlock()
 	return false

@@ -112,6 +112,7 @@ func TestPushStatusHold_StaleCopyDoesNotHoldOff(t *testing.T) {
 	stale := h.router.pushStreams[sid]
 	stale.SetStatus(model.StreamStatePause, "runner's own pause, since ended")
 	h.router.pushStreams[sid] = stale
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	sent := len(rx.snapshot())

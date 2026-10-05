@@ -125,6 +125,7 @@ func (r *router) mirrorKeyUnavailablePause(stream *model.StreamStateRecord, comp
 			pollBuffer = pb
 		}
 	}
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	from := stream.Status

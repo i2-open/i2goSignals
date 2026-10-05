@@ -167,6 +167,7 @@ func TestHandleEvent_TwoHopSstp_ExtendedEventType(t *testing.T) {
 	h.router.mu.Lock()
 	h.router.sstpServerStreams[hopATx] = *hopA
 	h.router.sstpServerStreams[hopBTx] = *hopB
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	token := &goSet.SecurityEventToken{

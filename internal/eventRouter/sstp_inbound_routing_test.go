@@ -186,6 +186,7 @@ func TestHandleEvent_SstpInboundForward_DoesNotEchoToOriginatingPair(t *testing.
 	txSid := pair.StreamConfiguration.Id
 	h.router.mu.Lock()
 	h.router.sstpServerStreams[txSid] = *pair
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	token := sstpInboundTestToken("sstp-echo-jti")
@@ -248,6 +249,7 @@ func TestHandleEvent_SstpInboundForward_RoutesToOtherSstpPair(t *testing.T) {
 	h.router.mu.Lock()
 	h.router.sstpServerStreams[originTx] = *origin
 	h.router.sstpServerStreams[otherTx] = *other
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	token := sstpInboundTestToken("sstp-fanout-jti")
@@ -274,6 +276,7 @@ func TestHandleEvent_SstpInboundForward_DoesNotEchoToInitiatorPair(t *testing.T)
 
 	h.router.mu.Lock()
 	h.router.sstpClientStreams[pair.PairId] = *pair
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	token := sstpInboundTestToken("sstp-echo-client-jti")

@@ -285,7 +285,7 @@ func TestPushAckCoalescing_StaleFenceLeavesSentSetsPending(t *testing.T) {
 	rx := newHoldingReceiver()
 	rx.release()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 	setter, ok := coord.(clockSetter)
 	require.True(t, ok)
 	clock := &leaseClock{t: time.Now().UTC()}

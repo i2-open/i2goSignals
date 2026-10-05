@@ -348,6 +348,7 @@ var _ SstpOutbound = (*router)(nil)
 func (r *router) initSstpClientStreamLocked(state *model.StreamStateRecord, jtis []string) {
 	pairId := state.PairId
 	r.sstpClientStreams[pairId] = *state
+	r.rebuildRoutingLocked()
 	buf := buffer.CreateEventPollBuffer(jtis, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
 	r.sstpBuffers[pairId] = buf
 	if r.sstpDialer != nil {
@@ -588,6 +589,7 @@ func (r *router) pauseSstpPair(stream *model.StreamStateRecord, reason string) {
 	if rec, ok := r.sstpClientStreams[stream.PairId]; ok {
 		rec.SetStatus(stream.Status, stream.ErrorMsg)
 		r.sstpClientStreams[stream.PairId] = rec
+		r.rebuildRoutingLocked()
 	}
 	r.mu.Unlock()
 }

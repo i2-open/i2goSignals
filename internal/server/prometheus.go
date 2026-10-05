@@ -460,6 +460,10 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	for _, c := range eventRouter.DeliveryCollectors() {
 		registerTo(reg, c)
 	}
+	// Store/coordinator reads made under the router lock on fan-out (#362).
+	for _, c := range eventRouter.RoutingCollectors() {
+		registerTo(reg, c)
+	}
 	// Local WAL depth, drain lag, drained/replayed counts, drain duration (#341).
 	for _, c := range eventRouter.WALCollectors() {
 		registerTo(reg, c)

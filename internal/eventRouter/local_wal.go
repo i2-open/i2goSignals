@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/wal"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -469,9 +470,7 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 
 	var targets []*fanoutTarget
 	if !importOnly {
-		r.mu.RLock()
 		targets = r.planFanoutLocked(fresh, excludeSstpTxSid)
-		r.mu.RUnlock()
 	}
 	entry := &walEntry{Sid: sid, Records: fresh, Targets: make([]walTarget, 0, len(targets)), At: lw.now().UnixNano()}
 	for _, t := range targets {
@@ -514,10 +513,15 @@ func (r *router) ringFeed(e *walEntry) {
 	if len(e.Targets) == 0 {
 		return
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, t := range e.Targets {
-		r.wakeTargetScopedLocked(t.fanout(), t.Jtis, wakeLocalOnly)
+	targets := make([]*fanoutTarget, len(e.Targets))
+	for i, t := range e.Targets {
+		targets[i] = t.fanout()
+	}
+	r.resolveOwners(targets)
+	r.fanoutRLock()
+	defer r.fanoutRUnlock()
+	for _, t := range targets {
+		r.wakeTargetScopedLocked(t, t.jtis, wakeLocalOnly)
 	}
 }
 
@@ -741,7 +745,7 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		// A re-queued duplicate was fed then too, and its held ack (if it
 		// has already been delivered) removes the marker written above.
 		committed := make([]*fanoutTarget, 0, len(targets))
-		r.mu.RLock()
+		r.fanoutRLock()
 		for _, t := range targets {
 			hit := false
 			for _, jti := range t.jtis {
@@ -758,22 +762,30 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 				committed = append(committed, t)
 			}
 		}
-		r.mu.RUnlock()
+		r.fanoutRUnlock()
 		r.wakeCommittedRemote(committed)
 		return
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.resolveOwners(targets)
+	r.fanoutRLock()
+	defer r.fanoutRUnlock()
 	r.commitFanoutLocked(targets, accepted, requeued)
 }
 
 // wakeCommittedRemote sends the cross-node wake for ring-fed targets whose
 // SETs the drain has just stored (#347). It runs on the drain path once per
-// committed entry, so it holds no router lock and reads no uncached lease (see
-// wakeTargetRemote). The append-time local wake has already served a locally
-// owned target.
+// committed entry, so it holds no router lock and reads no uncached lease: the
+// PUSH owner comes from leaseOwners, and the SSTP-client owner is the one
+// resolveOwners noted at append, peeked without a load. The append-time local
+// wake has already served a locally owned target.
 func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
 	for _, t := range targets {
+		switch t.mode {
+		case routeModePush:
+			t.owner = r.pushLeaseOwner(t.key)
+		case routeModeSstpClient:
+			t.owner = r.leaseOwners.peek(cluster.SstpClientResource(t.key))
+		}
 		r.wakeTargetRemote(t)
 	}
 }
