@@ -197,7 +197,7 @@ func TestLocalWal_RingFedPushServesBeforeDrain(t *testing.T) {
 	push := h.createPushStream(t, "NONE")
 	pushID := push.StreamConfiguration.Id
 	s.router.UpdateStreamState(push.DeepCopy())
-	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitterResource(pushID), "node-wal-test")
+	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitter.Resource(pushID), "node-wal-test")
 
 	require.NoError(t, s.router.HandleEvent(newRiscToken("rf-push-1", dupTestIssuer, s.audience), "x", s.streamID))
 	rx.waitEntered(t)
@@ -261,7 +261,7 @@ func ringFedLatency(t *testing.T, ringFedOn bool, storeDelay time.Duration) time
 	h := &filterPushHarness{router: s.router, streamService: p.StreamService, keyService: p.KeyService, eventService: p.EventService}
 	push := h.createPushStream(t, "NONE")
 	s.router.UpdateStreamState(push.DeepCopy())
-	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitterResource(push.StreamConfiguration.Id), "node-wal-test")
+	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitter.Resource(push.StreamConfiguration.Id), "node-wal-test")
 
 	go func() { time.Sleep(storeDelay); close(gate) }()
 	start := time.Now()

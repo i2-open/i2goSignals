@@ -54,7 +54,7 @@ func TestSubmitOperationalEvent_PushOwnerReadHoldsNoRouterLock(t *testing.T) {
 	sid := stream.StreamConfiguration.Id
 	r.UpdateStreamState(stream)
 	require.NotNil(t, h.pushBufferFor(sid))
-	r.leaseOwners.forget(cluster.PushTransmitterResource(sid))
+	r.leaseOwners.forget(cluster.PushTransmitter.Resource(sid))
 
 	gated.armed.Store(true)
 	done := make(chan struct{})

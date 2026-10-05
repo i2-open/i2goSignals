@@ -52,15 +52,15 @@ type routingTable struct {
 func streamLeaseResource(mode, key string) string {
 	switch mode {
 	case routeModePush:
-		return cluster.PushTransmitterResource(key)
+		return cluster.PushTransmitter.Resource(key)
 	case routeModePoll:
-		return cluster.PollTransmitterResource(key)
+		return cluster.PollTransmitter.Resource(key)
 	case routeModeSstpClient:
-		return cluster.SstpClientResource(key)
+		return cluster.SstpClient.Resource(key)
 	case routeModeSstpServer:
-		return cluster.SstpServerResource(key)
+		return cluster.SstpServer.Resource(key)
 	case model.ReceivePoll:
-		return cluster.PollReceiverResource(key)
+		return cluster.PollReceiver.Resource(key)
 	}
 	return ""
 }

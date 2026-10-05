@@ -44,7 +44,7 @@ func TestSyncStreamTable_DropsStreamDeletedElsewhere(t *testing.T) {
 	survivor := h.createPushStream(t, "ALL")
 	victim := h.createPushStream(t, "ALL")
 	sid := victim.StreamConfiguration.Id
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	h.router.UpdateStreamState(survivor.DeepCopy())
 	h.router.UpdateStreamState(victim.DeepCopy())
 
@@ -93,7 +93,7 @@ func countingPeer(t *testing.T, status func(call int32) int) (*httptest.Server, 
 // holdLease makes node the stream's push-transmitter lease holder.
 func holdLease(t *testing.T, r *router, sid, node string) {
 	t.Helper()
-	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), node, 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.PushTransmitter.Resource(sid), node, 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 }

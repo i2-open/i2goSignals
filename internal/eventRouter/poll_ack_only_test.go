@@ -135,7 +135,7 @@ func TestPollAckOnly_ParallelLongPollThroughClaimGetsBatch(t *testing.T) {
 	sid := rec.StreamConfiguration.Id
 	other.router.UpdateStreamState(rec)
 	owner.queuePollEvents(t, sid, 2)
-	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.PollTransmitterResource(sid)))
+	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.PollTransmitter.Resource(sid)))
 	require.NotNil(t, owner.router.pollBufferFor(sid))
 	claims := owner.router.queueFor(sid)
 
@@ -217,7 +217,7 @@ func TestSstpServer_AckOnlyClaimFromNonOwnerAsksForNoEvents(t *testing.T) {
 	require.NoError(t, err)
 	_, err = owner.router.SstpServerHandler(context.Background(), rec, goSetSstp.Message{ReturnImmediately: goSetSstp.BoolPtr(true)}, nil)
 	require.NoError(t, err)
-	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.SstpServerResource(txSid)))
+	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.SstpServer.Resource(txSid)))
 
 	_, err = other.router.SstpServerHandler(context.Background(), rec, goSetSstp.Message{
 		ReturnEvents: goSetSstp.BoolPtr(false),

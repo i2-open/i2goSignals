@@ -8,6 +8,7 @@
 package cluster
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -68,7 +69,12 @@ type ClusterCoordinator interface {
 // "<kind>:<stream or pair id>".
 type LeaseKind string
 
-// The lease kinds.
+// The lease kinds. A push transmitter's runner holds PushTransmitter and a
+// poll receiver PollReceiver for their stream; an SSTP client (dialer) holds
+// SstpClient for its pair. The PollTransmitter holder keeps a poll stream's
+// one queue and serves every poll request for it, others through a peer
+// Claim; the SstpServer holder (the accepting side, keyed by the pair's tx
+// stream id) keeps the pair's one outbound queue (#365).
 const (
 	PushTransmitter LeaseKind = "push-transmitter"
 	PollReceiver    LeaseKind = "poll-receiver"
@@ -77,18 +83,17 @@ const (
 	SstpServer      LeaseKind = "sstp-server"
 )
 
+// leaseKinds lists every lease kind; known checks against it.
+var leaseKinds = []LeaseKind{PushTransmitter, PollReceiver, SstpClient, PollTransmitter, SstpServer}
+
 // Resource is the lease resource of kind k for stream or pair id.
 func (k LeaseKind) Resource(id string) string {
 	return string(k) + ":" + id
 }
 
-// known reports whether k is one of the lease kinds above.
+// known reports whether k is one of leaseKinds.
 func (k LeaseKind) known() bool {
-	switch k {
-	case PushTransmitter, PollReceiver, SstpClient, PollTransmitter, SstpServer:
-		return true
-	}
-	return false
+	return slices.Contains(leaseKinds, k)
 }
 
 // ParseResource splits resource at its first ':' into its kind and id. ok
@@ -98,39 +103,6 @@ func ParseResource(resource string) (kind LeaseKind, id string, ok bool) {
 	k, id, found := strings.Cut(resource, ":")
 	kind = LeaseKind(k)
 	return kind, id, found && id != "" && kind.known()
-}
-
-// PushTransmitterResource is the lease resource a push transmitter's runner
-// holds for stream sid.
-func PushTransmitterResource(sid string) string {
-	return PushTransmitter.Resource(sid)
-}
-
-// PollReceiverResource is the lease resource a poll receiver holds for
-// stream sid.
-func PollReceiverResource(sid string) string {
-	return PollReceiver.Resource(sid)
-}
-
-// SstpClientResource is the lease resource an SSTP client (dialer) holds for
-// pair pairId.
-func SstpClientResource(pairId string) string {
-	return SstpClient.Resource(pairId)
-}
-
-// PollTransmitterResource is the lease resource a poll transmitter holds for
-// sid. Its holder keeps the stream's one queue and serves every poll request
-// for it, others through a peer Claim (#365).
-func PollTransmitterResource(sid string) string {
-	return PollTransmitter.Resource(sid)
-}
-
-// SstpServerResource is the lease resource the accepting (responder) side of
-// an SSTP pair holds for the pair. It is called with the pair's tx stream id,
-// the key the router tracks responder pairs by. Its holder keeps the pair's one
-// outbound queue and serves every accepted request for it (#365).
-func SstpServerResource(pairId string) string {
-	return SstpServer.Resource(pairId)
 }
 
 // Reaper is the optional garbage-collection half of a coordinator (#350).
@@ -151,16 +123,4 @@ type Reaper interface {
 	// and whose resource keep rejects, and returns how many it deleted. A
 	// lease renewed between the scan and the delete is not deleted.
 	PurgeExpiredLeases(before time.Time, keep func(resource string) bool) (int, error)
-}
-
-// ResourceId splits a lease resource into its kind prefix and the stream or
-// pair id it guards. ok is false for a resource that is not one of the known
-// kinds (push-transmitter, poll-receiver, sstp-client, poll-transmitter,
-// sstp-server).
-func ResourceId(resource string) (kind, id string, ok bool) {
-	k, id, ok := ParseResource(resource)
-	if !ok {
-		return "", "", false
-	}
-	return string(k), id, true
 }

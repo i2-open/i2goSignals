@@ -178,7 +178,7 @@ func TestHandleEvent_WakesSstpServerLeaseOwnerWithRefs(t *testing.T) {
 	other := stubWakePeer(t, otherWakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: owner.URL, LastSeenAt: time.Now().UTC()}))
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-C", Address: other.URL, LastSeenAt: time.Now().UTC()}))
-	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.SstpServerResource(txSid), "node-B", 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.SstpServer.Resource(txSid), "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 

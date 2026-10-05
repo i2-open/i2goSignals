@@ -161,7 +161,7 @@ func TestAckEvents_ExpireAtPathRequiresTenure(t *testing.T) {
 	_, ok := deliveredExpireAt(t, dao, sid)
 	assert.False(t, ok, "an ack without tenure must not write")
 
-	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	r.leases.note(cluster.PushTransmitter.Resource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
 	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	expireAt, ok := deliveredExpireAt(t, dao, sid)
 	require.True(t, ok)
@@ -181,7 +181,7 @@ func TestAckEvents_SkippedBatchIsNotCounted(t *testing.T) {
 	require.ErrorIs(t, r.ackEvents(context.Background(), []string{"j1"}, sid), errNotLeaseOwner)
 	assert.Equal(t, batches, testutil.ToFloat64(ackBatchesTotal), "a skipped batch is not counted")
 
-	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	r.leases.note(cluster.PushTransmitter.Resource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
 	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	assert.Equal(t, batches+1, testutil.ToFloat64(ackBatchesTotal), "the retried batch counts once")
 	assert.Equal(t, writes+1, testutil.ToFloat64(ackWritesTotal))

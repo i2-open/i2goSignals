@@ -64,7 +64,7 @@ func TestPushFence_AckRefusedAfterTakeover(t *testing.T) {
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 3)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
@@ -105,7 +105,7 @@ func TestPushFence_RunnerReleasesLeaseOnStop(t *testing.T) {
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	h.addPendingEvents(t, sid, 2)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
@@ -137,9 +137,9 @@ func TestPushFence_AckResourceAndTenure(t *testing.T) {
 	h.addPendingEvents(t, sid, 1)
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
-	waitLeaseOwner(t, h.router.coordinator, cluster.PushTransmitterResource(sid), "node-restart")
+	waitLeaseOwner(t, h.router.coordinator, cluster.PushTransmitter.Resource(sid), "node-restart")
 
-	assert.Equal(t, cluster.PushTransmitterResource(sid), h.router.ackResource(sid))
+	assert.Equal(t, cluster.PushTransmitter.Resource(sid), h.router.ackResource(sid))
 	assert.True(t, h.router.stillOwnsAck(sid))
 	rx.release()
 }

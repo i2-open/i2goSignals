@@ -305,7 +305,7 @@ func TestPushAckCoalescing_TenureEndLeavesSentSetsPending(t *testing.T) {
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 3)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	h.router.UpdateStreamState(stream.DeepCopy())
 	require.Eventually(t, func() bool { return len(rx.snapshot()) >= len(jtis) }, 10*time.Second, 5*time.Millisecond)
 	waitLeaseOwner(t, coord, resource, "node-restart")

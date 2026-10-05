@@ -205,7 +205,7 @@ func (r *router) announceStreamChanged(sid string) {
 // pair's id is its sid). It is "" when neither lease is held, or the owner
 // cannot be read.
 func (r *router) streamHolder(sid string) string {
-	for _, resource := range []string{cluster.PushTransmitterResource(sid), cluster.SstpClientResource(sid)} {
+	for _, resource := range []string{cluster.PushTransmitter.Resource(sid), cluster.SstpClient.Resource(sid)} {
 		owner, until, _, err := r.coordinator.GetLeaseOwner(resource)
 		if err != nil {
 			eventLogger.Debug("ROUTER: cannot read the stream's lease owner", "sid", sid, "resource", resource, "error", err)

@@ -79,9 +79,9 @@ func isClaimServedResource(resource string) bool {
 // claimResource returns the lease resource for a claim mode.
 func claimResource(mode, sid string) string {
 	if mode == peer.ModeSstpServer {
-		return cluster.SstpServerResource(sid)
+		return cluster.SstpServer.Resource(sid)
 	}
-	return cluster.PollTransmitterResource(sid)
+	return cluster.PollTransmitter.Resource(sid)
 }
 
 // streamLease is one held poll-transmitter or sstp-server lease.
@@ -280,7 +280,7 @@ func (r *router) HoldsQueue(sid string) bool {
 // pollBufferFor resolves sid's poll-transmitter owner and returns the buffer
 // this node holds for it, or nil when another node (or no node) owns it.
 func (r *router) pollBufferFor(sid string) *buffer.EventPollBuffer {
-	if _, self := r.resolveOwner(cluster.PollTransmitterResource(sid)); !self {
+	if _, self := r.resolveOwner(cluster.PollTransmitter.Resource(sid)); !self {
 		return nil
 	}
 	buf, _ := r.heldBuffer(peer.ModePoll, sid)
@@ -291,7 +291,7 @@ func (r *router) pollBufferFor(sid string) *buffer.EventPollBuffer {
 // is txSid and returns the outbound buffer this node holds for it, or nil when
 // another node (or no node) owns it.
 func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
-	if _, self := r.resolveOwner(cluster.SstpServerResource(txSid)); !self {
+	if _, self := r.resolveOwner(cluster.SstpServer.Resource(txSid)); !self {
 		return nil
 	}
 	buf, _ := r.heldBuffer(peer.ModeSstpServer, txSid)

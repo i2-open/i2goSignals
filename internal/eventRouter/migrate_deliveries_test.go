@@ -384,7 +384,7 @@ func TestNewRouter_SstpExchangeWaitsForTheMigration(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStoreUnavailable, "an SSTP exchange before the migration must be told to retry")
 	assert.Empty(t, resp.Ack, "nothing may be acked before the migration")
 	assert.Zero(t, dao.early.Load(), "deliveries accessed before the migration")
-	assert.Zero(t, leaseHolderCount(t, p.Coordinator, cluster.SstpServerResource("sstp-tx-mig")), "acceptor owner resolved before the migration")
+	assert.Zero(t, leaseHolderCount(t, p.Coordinator, cluster.SstpServer.Resource("sstp-tx-mig")), "acceptor owner resolved before the migration")
 }
 
 // leaseHolderCount is 1 when some node holds resource, else 0.

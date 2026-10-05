@@ -727,7 +727,7 @@ func (d *SstpDialer) UnregisterPair(pairId string) {
 // old SstpClientStreamHandler / runSstpClientLoop verbatim, differing only
 // in where per-pair state comes from (the SstpOutbound facade).
 func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
-	resource := cluster.SstpClientResource(pairId)
+	resource := cluster.SstpClient.Resource(pairId)
 
 	for {
 		// Finding #9 / #8: re-read the live record from the source-of-truth
@@ -811,7 +811,7 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string) bool
 		defer s.DecLeasesHeld()
 	}
 
-	resource := cluster.SstpClientResource(pairId)
+	resource := cluster.SstpClient.Resource(pairId)
 
 	// cycleCtx parents every outbound HTTP cycle. Cancelled on lease loss
 	// (heartbeat) or shutdown (parent ctx) so in-flight requests abort.

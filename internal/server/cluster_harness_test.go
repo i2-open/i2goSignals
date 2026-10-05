@@ -496,7 +496,7 @@ func TestClusterHarness_LostWakeRecoveredBySweep(t *testing.T) {
 		Status: model.StreamStateEnabled,
 	})
 
-	owner := h.leaseOwner(cluster.PushTransmitterResource(sid), 20*time.Second)
+	owner := h.leaseOwner(cluster.PushTransmitter.Resource(sid), 20*time.Second)
 	ingest := a
 	if owner == a.id {
 		ingest = b
@@ -699,7 +699,7 @@ func runLeaseTakeoverOnHarness(t *testing.T) {
 	_, err = rp.KeyService.CreateKeyPair(ctx, rec.StreamConfiguration.Iss, "sig", responder.projectId)
 	require.NoError(t, err)
 	require.NotEmpty(t, rec.SstpMethod.PeerPairId, "the cascade names the initiator pair")
-	resource := cluster.SstpClientResource(rec.SstpMethod.PeerPairId)
+	resource := cluster.SstpClient.Resource(rec.SstpMethod.PeerPairId)
 
 	require.Equal(t, "node-a", h.leaseOwner(resource, 20*time.Second), "node-a, the only node, dials")
 	// node-b joins after the pair exists and waits for the lease.
@@ -756,7 +756,7 @@ func (h *clusterHarness) pollOwner(first, second *harnessNode, sid string) (owne
 	h.t.Helper()
 	_, _, status := first.app.EventRouter.PollStreamHandler(context.Background(), sid, model.PollParameters{MaxEvents: 1, ReturnImmediately: true})
 	require.Equal(h.t, http.StatusOK, status)
-	if h.leaseOwner(cluster.PollTransmitterResource(sid), 20*time.Second) == first.id {
+	if h.leaseOwner(cluster.PollTransmitter.Resource(sid), 20*time.Second) == first.id {
 		return first, second
 	}
 	return second, first
@@ -888,7 +888,7 @@ func TestClusterHarness_StoppedOwnerFailover(t *testing.T) {
 	for jti := range want {
 		assert.Equalf(t, 1, again[jti], "SET %s is served once more with the same JTI", jti)
 	}
-	o, _, _, err := other.persistence.Coordinator.GetLeaseOwner(cluster.PollTransmitterResource(sid))
+	o, _, _, err := other.persistence.Coordinator.GetLeaseOwner(cluster.PollTransmitter.Resource(sid))
 	require.NoError(t, err)
 	assert.Equal(t, other.id, o, "the survivor holds the poll-transmitter lease")
 
@@ -981,7 +981,7 @@ func TestClusterHarness_NonOwnerSstpOneClaimNoWrite(t *testing.T) {
 	// node-a's first request takes the acceptor lease when no node holds it.
 	_ = cycle(a, nil)
 	owner, other := a, b
-	if h.leaseOwner(cluster.SstpServerResource(txSid), 20*time.Second) == b.id {
+	if h.leaseOwner(cluster.SstpServer.Resource(txSid), 20*time.Second) == b.id {
 		owner, other = b, a
 	}
 

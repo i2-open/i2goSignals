@@ -97,7 +97,7 @@ func TestClaimServe_NonServingNodeTakesNoPollLease(t *testing.T) {
 
 	sid := owner.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish).StreamConfiguration.Id
 	owner.addPendingEvents(t, sid, 3)
-	resource := cluster.PollTransmitterResource(sid)
+	resource := cluster.PollTransmitter.Resource(sid)
 
 	node, self := ingest.router.resolveOwner(resource)
 	assert.False(t, self)
@@ -123,7 +123,7 @@ func TestClaimServe_NonServingNodeTakesNoPollLease(t *testing.T) {
 func TestClaimServe_NonServingNodeTakesNoSstpServerLease(t *testing.T) {
 	persistence := claimPersistence(t)
 	ingest := claimNode(t, persistence, "node-ingest", false, persistence.Coordinator, nil)
-	resource := cluster.SstpServerResource("pair-no-lease")
+	resource := cluster.SstpServer.Resource("pair-no-lease")
 
 	node, self := ingest.router.resolveOwner(resource)
 	assert.False(t, self)
@@ -139,7 +139,7 @@ func TestClaimServe_NoCoordinatorServesLocally(t *testing.T) {
 
 	sid := h.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish).StreamConfiguration.Id
 	h.addPendingEvents(t, sid, 2)
-	resource := cluster.PollTransmitterResource(sid)
+	resource := cluster.PollTransmitter.Resource(sid)
 
 	node, self := h.router.resolveOwner(resource)
 	assert.True(t, self)
@@ -166,7 +166,7 @@ func TestClaimServe_NonOwnerPollServedThroughOneClaim(t *testing.T) {
 	sid := rec.StreamConfiguration.Id
 	other.router.UpdateStreamState(rec) // node-b knows the stream, as every node does
 	owner.queuePollEvents(t, sid, 4)
-	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.PollTransmitterResource(sid)))
+	require.Equal(t, "node-a", leaseHolder(t, persistence, cluster.PollTransmitter.Resource(sid)))
 
 	sets, _, status := other.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents: 100, ReturnImmediately: true,
@@ -262,7 +262,7 @@ func TestClaimServe_SstpReturnEventsFalseWithoutAcksMakesNoClaim(t *testing.T) {
 	require.NoError(t, persistence.StreamService.PersistStreamStateRecord(context.Background(), sstpServerPairState(txSid, rxSid, pairId)))
 	rec, err := persistence.StreamService.GetStreamStateByPairId(context.Background(), pairId)
 	require.NoError(t, err)
-	resource := cluster.SstpServerResource(txSid)
+	resource := cluster.SstpServer.Resource(txSid)
 
 	_, err = h.router.SstpServerHandler(context.Background(), rec, goSetSstp.Message{ReturnEvents: goSetSstp.BoolPtr(false)}, nil)
 	require.NoError(t, err)

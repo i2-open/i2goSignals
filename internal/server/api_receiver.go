@@ -1473,7 +1473,7 @@ func (ps *ClientPollStream) setTransmitterCausedStatus(stored *model.StreamState
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.currentStream().StreamConfiguration.Id
-	resource := cluster.PollReceiverResource(sid)
+	resource := cluster.PollReceiver.Resource(sid)
 
 	defer func() {
 		ps.mu.Lock()

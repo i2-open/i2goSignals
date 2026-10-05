@@ -1802,11 +1802,11 @@ func (r *router) resolveOwners(targets []*fanoutTarget) {
 		case routeModePush:
 			t.owner = r.pushLeaseOwner(t.key)
 		case routeModePoll:
-			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.PollTransmitterResource(t.key))
+			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.PollTransmitter.Resource(t.key))
 		case routeModeSstpServer:
-			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.SstpServerResource(t.key))
+			t.owner, _, t.seeded = r.resolveOwnerSeeded(cluster.SstpServer.Resource(t.key))
 		case routeModeSstpClient:
-			resource := cluster.SstpClientResource(t.key)
+			resource := cluster.SstpClient.Resource(t.key)
 			owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
 			if err != nil {
 				// A coordinator read failure otherwise reads as "no owner", which
@@ -2014,7 +2014,7 @@ func (r *router) sendRefWake(sid, mode, ownerNodeId string, refs []interfaces.Pe
 // leaseOwnerCacheTTL otherwise; it steers a wake-up and never authorises a
 // delivery.
 func (r *router) pushLeaseOwner(sid string) string {
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	return r.leaseOwners.owner(resource, func() (string, error) {
 		owner, _, _, err := r.coordinator.GetLeaseOwner(resource)
 		return owner, err
@@ -2139,7 +2139,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	if isPoll {
 		// The poll-transmitter lease owner holds the stream's one queue
 		// (#365): feed it here, or wake the owner with the reference.
-		owner, self, seeded := r.resolveOwnerSeeded(cluster.PollTransmitterResource(sid))
+		owner, self, seeded := r.resolveOwnerSeeded(cluster.PollTransmitter.Resource(sid))
 		switch {
 		case self:
 			r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
@@ -2163,7 +2163,7 @@ func (r *router) SubmitOperationalEvent(sid string, eventToken *goSet.SecurityEv
 	if isSstpServer {
 		// The sstp-server lease owner holds the pair's one outbound queue
 		// (#365), fed like the poll branch above.
-		owner, self, seeded := r.resolveOwnerSeeded(cluster.SstpServerResource(txSid))
+		owner, self, seeded := r.resolveOwnerSeeded(cluster.SstpServer.Resource(txSid))
 		switch {
 		case self:
 			r.queueFor(stream.Id.Hex()).accept(r.ctx, []interfaces.PendingRef{opRef})
@@ -2219,7 +2219,7 @@ func (r *router) NotifySubjectFilterChange(sid string) {
 	if r.subjectFilterService == nil {
 		return
 	}
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	ownerNodeId, _, _, _ := r.coordinator.GetLeaseOwner(resource)
 	if ownerNodeId == "" || ownerNodeId == r.nodeId {
 		r.subjectFilterService.InvalidateCache(sid)
@@ -2266,7 +2266,7 @@ func (r *router) PollStreamHandler(ctx context.Context, sid string, params model
 		eventLogger.Error("POLL-SRV: Error Poll Transmitter not found", "sid", sid)
 		return nil, false, http.StatusNotFound
 	}
-	resource := cluster.PollTransmitterResource(sid)
+	resource := cluster.PollTransmitter.Resource(sid)
 	owner, self := r.resolveOwner(resource)
 
 	setErrs := make([]string, 0, len(params.SetErrs))
@@ -2567,7 +2567,7 @@ func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buff
 // was waiting on at the time.
 func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *pushRunner) {
 	sid := stream.StreamConfiguration.Id
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	// However the runner ends — stopped, disabled, shutdown — it gives up the
 	// lease at once rather than leaving it to expire, so a peer can take the
 	// stream over without waiting out the lease (#334). It runs after
@@ -3876,8 +3876,8 @@ func (r *router) RemoveStream(sid string) {
 	}
 	// Give up a poll-transmitter or sstp-server lease this node holds for the
 	// stream (#365), outside r.mu: the release is a coordinator call.
-	r.releaseStreamLease(cluster.PollTransmitterResource(sid))
-	r.releaseStreamLease(cluster.SstpServerResource(sid))
+	r.releaseStreamLease(cluster.PollTransmitter.Resource(sid))
+	r.releaseStreamLease(cluster.SstpServer.Resource(sid))
 
 	eventLogger.Info("STREAM Removed from router", "sid", sid)
 }

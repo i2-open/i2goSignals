@@ -310,7 +310,7 @@ func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, se
 }
 
 func (r *router) NoteLease(pairId string, start time.Time, held bool, leaseUntil time.Time, leaseDuration time.Duration) {
-	r.leases.note(cluster.SstpClientResource(pairId), start, held, leaseUntil, leaseDuration)
+	r.leases.note(cluster.SstpClient.Resource(pairId), start, held, leaseUntil, leaseDuration)
 }
 
 func (r *router) OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string) {

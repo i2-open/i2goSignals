@@ -74,7 +74,7 @@ func TestRoutingTable_RebuiltOnStreamAddStatusChangeAndRemove(t *testing.T) {
 	h.router.UpdateStreamState(state)
 	e := routeFor(h.router, routeModePush, sid)
 	require.NotNil(t, e, "adding a push stream publishes a snapshot entry")
-	assert.Equal(t, cluster.PushTransmitterResource(sid), e.resource)
+	assert.Equal(t, cluster.PushTransmitter.Resource(sid), e.resource)
 	assert.Equal(t, model.StreamStateEnabled, e.stream.Status)
 	assert.NotSame(t, before, h.router.routing(), "a write publishes a new snapshot")
 
@@ -114,13 +114,13 @@ func TestRoutingTable_EntriesNameEachKindsLeaseResource(t *testing.T) {
 		assert.Equal(t, c.want, e.resource, c.mode)
 	}
 
-	assert.Equal(t, cluster.PushTransmitterResource("s"), streamLeaseResource(routeModePush, "s"))
-	assert.Equal(t, cluster.PollTransmitterResource("s"), streamLeaseResource(routeModePoll, "s"))
-	assert.Equal(t, cluster.SstpClientResource("s"), streamLeaseResource(routeModeSstpClient, "s"))
-	assert.Equal(t, cluster.SstpServerResource("s"), streamLeaseResource(routeModeSstpServer, "s"))
-	assert.Equal(t, cluster.PollReceiverResource("s"), streamLeaseResource(model.ReceivePoll, "s"))
-	assert.Equal(t, "poll-transmitter:s", cluster.PollTransmitterResource("s"))
-	assert.Equal(t, "sstp-server:s", cluster.SstpServerResource("s"))
+	assert.Equal(t, cluster.PushTransmitter.Resource("s"), streamLeaseResource(routeModePush, "s"))
+	assert.Equal(t, cluster.PollTransmitter.Resource("s"), streamLeaseResource(routeModePoll, "s"))
+	assert.Equal(t, cluster.SstpClient.Resource("s"), streamLeaseResource(routeModeSstpClient, "s"))
+	assert.Equal(t, cluster.SstpServer.Resource("s"), streamLeaseResource(routeModeSstpServer, "s"))
+	assert.Equal(t, cluster.PollReceiver.Resource("s"), streamLeaseResource(model.ReceivePoll, "s"))
+	assert.Equal(t, "poll-transmitter:s", cluster.PollTransmitter.Resource("s"))
+	assert.Equal(t, "sstp-server:s", cluster.SstpServer.Resource("s"))
 }
 
 // trackingEventDAO counts every EventDAO call made while the caller holds a
@@ -281,7 +281,7 @@ func TestHandleEvent_NoStoreOrCoordinatorReadUnderRouterLock(t *testing.T) {
 
 	// Negative control: the same coordinator read inside a fan-out region counts.
 	r.fanoutRLock()
-	_, _, _, _ = r.coordinator.GetLeaseOwner(cluster.SstpClientResource(pairId))
+	_, _, _, _ = r.coordinator.GetLeaseOwner(cluster.SstpClient.Resource(pairId))
 	r.fanoutRUnlock()
 	assert.Equal(t, int64(1), reads.Load(), "a read under the fan-out lock is counted")
 	assert.Equal(t, counterBefore+1, testutil.ToFloat64(readsUnderLockCounter))
@@ -307,10 +307,10 @@ func TestHandleEvent_SetMatchingTwoPollStreamsReachesEachOnce(t *testing.T) {
 func TestResolveOwners_PushAndSstpClientOwnersOnTarget(t *testing.T) {
 	r := newTestRouter(t).router
 	coord := unwrapCoordinator(r.coordinator)
-	ok, _, _, err := coord.TryAcquireOrRenewLease(cluster.PushTransmitterResource("push-o"), "node-push", time.Minute)
+	ok, _, _, err := coord.TryAcquireOrRenewLease(cluster.PushTransmitter.Resource("push-o"), "node-push", time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	ok, _, _, err = coord.TryAcquireOrRenewLease(cluster.SstpClientResource("pair-o"), "node-sstp", time.Minute)
+	ok, _, _, err = coord.TryAcquireOrRenewLease(cluster.SstpClient.Resource("pair-o"), "node-sstp", time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
 
@@ -322,7 +322,7 @@ func TestResolveOwners_PushAndSstpClientOwnersOnTarget(t *testing.T) {
 	assert.Equal(t, "node-push", push.owner)
 	assert.Equal(t, "node-sstp", sstp.owner)
 	assert.Empty(t, poll.owner, "poll targets have no owner to resolve")
-	assert.Equal(t, "node-sstp", r.leaseOwners.peek(cluster.SstpClientResource("pair-o")),
+	assert.Equal(t, "node-sstp", r.leaseOwners.peek(cluster.SstpClient.Resource("pair-o")),
 		"the sstp-client owner is noted for the post-commit remote wake")
 }
 
@@ -346,7 +346,7 @@ func TestLockAudit_AlwaysOn(t *testing.T) {
 	r.locks.ack.onRead = func() { a.Add(1) }
 	r.fanoutRLock()
 	r.locks.enterAck()
-	_, _, _, _ = r.coordinator.GetLeaseOwner(cluster.PollTransmitterResource("s"))
+	_, _, _, _ = r.coordinator.GetLeaseOwner(cluster.PollTransmitter.Resource("s"))
 	r.locks.exitAck()
 	r.fanoutRUnlock()
 	assert.Equal(t, int64(1), f.Load(), "fan-out read counted")

@@ -87,7 +87,7 @@ func TestLeaseManager_StillOwnerFollowsTenure(t *testing.T) {
 	store := &countingLeaseStore{lease: 30 * time.Second, held: true, now: clock.now}
 	m := newLeaseManager(store, clock.now)
 	m.margin = 5 * time.Second
-	resource := cluster.PushTransmitterResource("s1")
+	resource := cluster.PushTransmitter.Resource("s1")
 
 	assert.False(t, m.StillOwner(resource), "never acquired")
 	held, token, err := m.acquire(resource, "node-a", 30*time.Second)
@@ -179,7 +179,7 @@ func TestDeliveryQueue_AckSkippedPastTenureResumesAfterRenewal(t *testing.T) {
 	r.leases = newLeaseManager(r.coordinator, nil)
 	r.leases.margin = 5 * time.Second
 	r.leases.now = clock.now
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 
 	held, _, err := r.tryLease(resource, 30*time.Second)
 	require.NoError(t, err)

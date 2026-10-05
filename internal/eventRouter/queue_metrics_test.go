@@ -96,7 +96,7 @@ func registerPush(r *router, stream *model.StreamStateRecord) {
 	r.mu.Lock()
 	r.pushStreams[sid] = *stream
 	r.mu.Unlock()
-	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	r.leases.note(cluster.PushTransmitter.Resource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
 }
 
 // Poll: one SET returned by a poll and acknowledged on the next.
@@ -295,7 +295,7 @@ func TestBacklogCollector_ReadsOwnedQueuesWithoutStore(t *testing.T) {
 	r.queueFor(otherSid)
 
 	r.leases = newLeaseManager(&countingLeaseStore{}, nil)
-	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	r.leases.note(cluster.PushTransmitter.Resource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
 
 	c := &backlogCollector{r: r, now: func() time.Time { return oldest.Add(3 * time.Second) }}
 	callsBefore := daoOps(t, m)

@@ -25,23 +25,23 @@ func (r *router) ackResource(sid string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if _, ok := r.pushStreams[sid]; ok {
-		return cluster.PushTransmitterResource(sid)
+		return cluster.PushTransmitter.Resource(sid)
 	}
 	if _, ok := r.pollStreams[sid]; ok {
-		return cluster.PollTransmitterResource(sid)
+		return cluster.PollTransmitter.Resource(sid)
 	}
 	if _, ok := r.sstpServerStreams[sid]; ok {
-		return cluster.SstpServerResource(sid)
+		return cluster.SstpServer.Resource(sid)
 	}
 	if _, ok := r.sstpServerBuffers[sid]; ok {
-		return cluster.SstpServerResource(sid)
+		return cluster.SstpServer.Resource(sid)
 	}
 	if _, ok := r.sstpClientStreams[sid]; ok {
-		return cluster.SstpClientResource(sid)
+		return cluster.SstpClient.Resource(sid)
 	}
 	for pairId, rec := range r.sstpClientStreams {
 		if rec.StreamConfiguration.Id == sid {
-			return cluster.SstpClientResource(pairId)
+			return cluster.SstpClient.Resource(pairId)
 		}
 	}
 	return ""

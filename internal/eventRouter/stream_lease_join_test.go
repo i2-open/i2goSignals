@@ -58,7 +58,7 @@ func TestReleaseStreamLease_WaitsForInFlightRenewal(t *testing.T) {
 		r := newBareRouter(RouterDeps{Coordinator: store})
 		r.ctx = ctx
 		r.nodeId = "node-a"
-		resource := cluster.PollTransmitterResource("sid-join")
+		resource := cluster.PollTransmitter.Resource("sid-join")
 
 		store.mu.Lock()
 		store.armed = true

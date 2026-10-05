@@ -172,7 +172,7 @@ func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
 
 	past := time.Now().UTC().Add(-10 * time.Minute)
 	coord.SetClock(func() time.Time { return past })
-	gone, live := cluster.PushTransmitterResource("deleted-sid"), cluster.PushTransmitterResource(statusPlainSid)
+	gone, live := cluster.PushTransmitter.Resource("deleted-sid"), cluster.PushTransmitter.Resource(statusPlainSid)
 	for _, res := range []string{gone, live} {
 		ok, _, _, err := coord.TryAcquireOrRenewLease(res, "node-old", time.Second)
 		require.NoError(t, err)

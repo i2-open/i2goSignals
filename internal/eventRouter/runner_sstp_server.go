@@ -147,7 +147,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// non-owner sends all of it to the owner in one Claim after the inbound
 	// ingest below. A request with none of these (the second-push cycles of a
 	// dialing peer) makes no Claim.
-	resource := cluster.SstpServerResource(txSid)
+	resource := cluster.SstpServer.Resource(txSid)
 	hasAcks := len(wireAcks) > 0 || len(wireClears) > 0
 	wantsEvents := rec.Status == model.StreamStateEnabled && inbound.ReturnEventsResolved()
 	var owner string
