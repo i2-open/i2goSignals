@@ -420,6 +420,9 @@ type SstpDialer struct {
 	// Bind drains this queue.
 	pending []string
 	running map[string]*sstpPairLoop
+	// closed is set by Shutdown: no pair loop starts after it, so a
+	// RegisterPair racing the shutdown cannot leak a loop nothing stops.
+	closed bool
 
 	// deferredMu guards deferred.
 	deferredMu sync.Mutex
@@ -534,7 +537,7 @@ func (d *SstpDialer) statsSink() SstpDialerStats {
 // never opens a peer connection for a pair the caller already removed.
 func (d *SstpDialer) Bind(outbound eventRouter.SstpOutbound) {
 	d.mu.Lock()
-	if d.bound {
+	if d.bound || d.closed {
 		d.mu.Unlock()
 		return
 	}
@@ -578,6 +581,11 @@ var _ eventRouter.SstpDialerHooks = (*SstpDialer)(nil)
 // already has a running loop is a silent no-op.
 func (d *SstpDialer) RegisterPair(pairId string) {
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		sstpDialerLog.Debug("RegisterPair after Shutdown; not started", "pairId", pairId)
+		return
+	}
 	if !d.bound {
 		d.pending = append(d.pending, pairId)
 		d.mu.Unlock()
@@ -596,7 +604,7 @@ func (d *SstpDialer) RegisterPair(pairId string) {
 // hands off to spawnPair to launch the goroutine outside the lock.
 func (d *SstpDialer) startPair(pairId string) {
 	d.mu.Lock()
-	if _, ok := d.running[pairId]; ok {
+	if _, ok := d.running[pairId]; ok || d.closed {
 		d.mu.Unlock()
 		return
 	}
@@ -641,10 +649,12 @@ func (d *SstpDialer) spawnPair(ctx context.Context, pairId string, loop *sstpPai
 }
 
 // Shutdown stops every pair loop and waits for each to exit and release its
-// lease, so the caller can close storage behind it. A loop that has not
-// exited within sstpShutdownWait is logged and abandoned.
+// lease, so the caller can close storage behind it; no loop starts after it.
+// Each loop that has not exited within sstpShutdownWait is logged and
+// abandoned.
 func (d *SstpDialer) Shutdown() {
 	d.mu.Lock()
+	d.closed = true
 	loops := make(map[string]*sstpPairLoop, len(d.running))
 	for pairId, loop := range d.running {
 		loops[pairId] = loop
@@ -656,11 +666,17 @@ func (d *SstpDialer) Shutdown() {
 	}
 	deadline := time.NewTimer(sstpShutdownWait)
 	defer deadline.Stop()
-	for pairId, loop := range loops {
+	for _, loop := range loops {
 		select {
 		case <-loop.done:
 		case <-deadline.C:
-			sstpDialerLog.Warn("Shutdown: pair loop did not exit in time", "pairId", pairId, "wait", sstpShutdownWait)
+			for pairId, stuck := range loops {
+				select {
+				case <-stuck.done:
+				default:
+					sstpDialerLog.Warn("Shutdown: pair loop did not exit in time", "pairId", pairId, "wait", sstpShutdownWait)
+				}
+			}
 			return
 		}
 	}

@@ -160,3 +160,26 @@ func TestSstpDialer_ShutdownWaitsForPairLoops(t *testing.T) {
 	dialer.Shutdown()
 	assert.Equal(t, 1, coord.releases(), "the loop released its lease before Shutdown returned")
 }
+
+// After Shutdown no pair loop starts: a RegisterPair that arrives later (a
+// stream update racing the shutdown) is refused rather than leaking a loop
+// nothing will stop.
+func TestSstpDialer_RegisterPairAfterShutdownIsRefused(t *testing.T) {
+	const pairId = "pair-after-shutdown"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := newFakeSstpOutbound(ctx, joinTestPair(pairId, idleSstpPeer(t).URL))
+	coord := &gatedRenewCoordinator{gate: make(chan struct{})}
+
+	dialer := NewSstpDialer(coord, "node-after-shutdown", nil, joinTestConfig())
+	dialer.Bind(fake)
+	dialer.Shutdown()
+	dialer.RegisterPair(pairId)
+
+	dialer.mu.Lock()
+	running := len(dialer.running)
+	dialer.mu.Unlock()
+	assert.Zero(t, running, "no pair loop starts after Shutdown")
+	time.Sleep(50 * time.Millisecond)
+	assert.Empty(t, coord.opsCopy(), "nothing acquires a lease after Shutdown")
+}
