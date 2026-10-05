@@ -91,3 +91,39 @@ func TestPollClaims_RestartedNodeServesClaimedEventsAgain(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "a restarted node must serve every pending SET")
 	assert.ElementsMatch(t, all, keysOf(sets))
 }
+
+// A long poll whose request context is cancelled (the receiver
+// disconnected) returns at once and claims nothing, so SETs that arrive
+// after the cancel go to the next poll rather than waiting out a claim
+// (#363).
+func TestPollClaims_CancelledLongPollClaimsNothing(t *testing.T) {
+	t.Setenv("I2SIG_POLL_CLAIM_TTL", "30s")
+	h, _ := newPollKeyHarness(t, "50ms")
+	sid := h.createSigningPollStream(t, pollKeyIssuer, model.RouteModePublish).StreamConfiguration.Id
+	h.queuePollEvents(t, sid, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan map[string]string, 1)
+	start := time.Now()
+	go func() {
+		sets, _, _ := h.router.PollStreamHandler(ctx, sid, model.PollParameters{
+			MaxEvents: 100, ReturnImmediately: false, TimeoutSecs: 30,
+		})
+		done <- sets
+	}()
+	time.AfterFunc(100*time.Millisecond, cancel)
+	var got map[string]string
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a cancelled long poll did not return")
+	}
+	assert.Empty(t, got)
+	assert.Less(t, time.Since(start), 10*time.Second, "the cancel ends the 30s wait")
+
+	all := h.queuePollEvents(t, sid, 3)
+	assert.Zero(t, h.router.queueFor(sid).ClaimedCnt(), "nothing is claimed after the cancel")
+	sets, status := h.poll(sid)
+	assert.Equal(t, 200, status)
+	assert.ElementsMatch(t, all, keysOf(sets), "the next poll gets every SET")
+}

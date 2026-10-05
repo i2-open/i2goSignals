@@ -3,10 +3,13 @@ package eventRouter
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -34,6 +37,13 @@ func windowDays(n int) *int { return &n }
 func ackRouter(t *testing.T, window services.EffectiveWindowFunc, days *int) (*router, *memory.EventDAOMemory, string) {
 	t.Helper()
 	dao := memory.NewEventDAO()
+	r, sid := ackRouterOn(t, dao, window, days)
+	return r, dao, sid
+}
+
+// ackRouterOn is ackRouter over the given store.
+func ackRouterOn(t *testing.T, dao interfaces.EventDAO, window services.EffectiveWindowFunc, days *int) (*router, string) {
+	t.Helper()
 	sid := model.NewRecordId().Hex()
 	require.NoError(t, dao.AddPending(context.Background(), interfaces.PendingRef{Jti: "j1", AckJti: "j1"}, sid))
 	r := &router{
@@ -47,10 +57,10 @@ func ackRouter(t *testing.T, window services.EffectiveWindowFunc, days *int) (*r
 	// The stream's DeliveryQueue holds j1 as ingest would (#363): the queue
 	// acks it under the acknowledgement JTI written with the row.
 	r.queueFor(sid).accept(context.Background(), []interfaces.PendingRef{{Jti: "j1", AckJti: "j1"}})
-	return r, dao, sid
+	return r, sid
 }
 
-func deliveredExpireAt(t *testing.T, dao *memory.EventDAOMemory, sid string) (*time.Time, bool) {
+func deliveredExpireAt(t *testing.T, dao interfaces.EventDAO, sid string) (*time.Time, bool) {
 	t.Helper()
 	list, err := dao.ListDeliveredForStream(context.Background(), sid)
 	require.NoError(t, err)
@@ -65,7 +75,36 @@ func deliveredExpireAt(t *testing.T, dao *memory.EventDAOMemory, sid string) (*t
 // A finite window resolved from the stream record the router holds is written
 // as expireAt = ackDate + window at acknowledgement (#360, seam S1).
 func TestAckEvents_FiniteWindowWritesExpireAt(t *testing.T) {
-	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
+	assertFiniteWindowWritesExpireAt(t, memory.NewEventDAO())
+}
+
+// Parity: the Mongo store writes the same expireAt, resolved from the stream
+// setting by the router, as the memory store (#360).
+func TestAckEvents_FiniteWindowWritesExpireAt_Mongo(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MONGO_RESUME_FILE", filepath.Join(t.TempDir(), "mongo_token.json"))
+	t.Setenv("I2SIG_STORE_MONGO_FALLBACK_MEM", "FALSE")
+	url := os.Getenv("MONGO_URL")
+	if url == "" {
+		url = benchMongoURL()
+	}
+	p, err := dbProviders.OpenPersistence(url, "ack_expire_parity_test")
+	if err != nil {
+		t.Skipf("mongo unreachable (%v); set MONGO_URL or start the dev stack", err)
+	}
+	if err := p.Storage.Check(); err != nil {
+		_ = p.Storage.Close()
+		t.Skipf("mongo unreachable (%v); set MONGO_URL or start the dev stack", err)
+	}
+	t.Cleanup(func() {
+		_ = p.Storage.ResetDb(false)
+		_ = p.Storage.Close()
+	})
+	assertFiniteWindowWritesExpireAt(t, p.EventDAO)
+}
+
+func assertFiniteWindowWritesExpireAt(t *testing.T, dao interfaces.EventDAO) {
+	t.Helper()
+	r, sid := ackRouterOn(t, dao, services.DefaultEffectiveWindow, windowDays(3))
 	before := time.Now()
 	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	after := time.Now()

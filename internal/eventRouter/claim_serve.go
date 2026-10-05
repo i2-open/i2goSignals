@@ -264,6 +264,18 @@ func (r *router) heldBuffer(mode, sid string) (*buffer.EventPollBuffer, *model.S
 	return buf, &rec
 }
 
+// HoldsQueue reports whether this node holds a delivery queue or a poll or
+// SSTP-acceptor buffer for sid. It resolves no owner and takes no lease. Only
+// the lease owner of a claim-served stream should hold one (#365).
+func (r *router) HoldsQueue(sid string) bool {
+	if _, ok := r.queues.Load(sid); ok {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pollBuffers[sid] != nil || r.sstpServerBuffers[sid] != nil
+}
+
 // pollBufferFor resolves sid's poll-transmitter owner and returns the buffer
 // this node holds for it, or nil when another node (or no node) owns it.
 func (r *router) pollBufferFor(sid string) *buffer.EventPollBuffer {

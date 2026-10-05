@@ -2,6 +2,7 @@ package eventRouter
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,14 +162,40 @@ func TestDeliveryQueue_CopiesWithOriginalJti(t *testing.T) {
 	assert.Empty(t, pendingAckJtis(t, fdao, fsid), "a Forward SET is acked by its inbound JTI")
 }
 
+// readCountingDAO counts the store reads the delivery queue can make.
+type readCountingDAO struct {
+	interfaces.EventDAO
+	reads atomic.Int64
+}
+
+func (d *readCountingDAO) GetPendingForStream(ctx context.Context, sid string, limit int32) (interfaces.PendingPage, error) {
+	d.reads.Add(1)
+	return d.EventDAO.GetPendingForStream(ctx, sid, limit)
+}
+
+func (d *readCountingDAO) StoredAckJtis(ctx context.Context, sid string, jtis []string) (map[string]string, error) {
+	d.reads.Add(1)
+	return d.EventDAO.StoredAckJtis(ctx, sid, jtis)
+}
+
+func (d *readCountingDAO) FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error) {
+	d.reads.Add(1)
+	return d.EventDAO.FindByJTIs(ctx, jtis)
+}
+
 // A backlog larger than the window is counted from the pending read, not
-// held; the oldest enqueue time beyond the window is reported.
+// held. Acknowledging the held window and refilling leaves the queue's depth
+// and oldest enqueue time equal to the store's, and Backlog reads nothing
+// from the store (#363).
 func TestDeliveryQueue_BacklogOverWindow(t *testing.T) {
-	r, _, rec := queueRouter(t, model.RouteModePublish, "a", "b", "c", "d", "e")
+	r, dao, rec := queueRouter(t, model.RouteModePublish, "a", "b", "c", "d", "e")
+	counting := &readCountingDAO{EventDAO: dao}
+	r.eventService = services.NewEventService(counting)
 	sid := rec.StreamConfiguration.Id
+	ctx := context.Background()
 	q := newDeliveryQueue(r, sid, 2)
 	r.queues.Store(sid, q)
-	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 10})
+	_, _ = r.pendingJtis(ctx, sid, model.PollParameters{MaxEvents: 10})
 	q.mu.Lock()
 	held := len(q.refs)
 	q.mu.Unlock()
@@ -176,6 +203,28 @@ func TestDeliveryQueue_BacklogOverWindow(t *testing.T) {
 	depth, oldest := q.Backlog()
 	assert.Equal(t, int64(5), depth)
 	assert.False(t, oldest.IsZero())
+
+	n, err := q.AckInbound(ctx, []string{"a", "b"}, true)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n)
+	_, _ = r.pendingJtis(ctx, sid, model.PollParameters{MaxEvents: 10})
+
+	store, err := dao.GetPendingForStream(ctx, sid, 10)
+	require.NoError(t, err)
+	storeOldest := time.Time{}
+	for _, ref := range store.Refs {
+		if storeOldest.IsZero() || ref.EnqueuedAt.Before(storeOldest) {
+			storeOldest = ref.EnqueuedAt
+		}
+	}
+	require.Equal(t, int64(3), store.Total)
+	require.Len(t, store.Refs, 3)
+
+	before := counting.reads.Load()
+	depth, oldest = q.Backlog()
+	assert.Equal(t, before, counting.reads.Load(), "Backlog reads nothing from the store")
+	assert.Equal(t, store.Total, depth, "depth matches the store after the refill")
+	assert.True(t, storeOldest.Equal(oldest), "oldest matches the store after the refill: want %v, got %v", storeOldest, oldest)
 }
 
 // Route-mode change, both directions: to Forward rewrites every pending row's
