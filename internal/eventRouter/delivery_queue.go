@@ -473,7 +473,9 @@ type waitSample struct {
 	enqueued, handedOut, acked time.Time
 }
 
-// queuedRef is one held reference (hook 2 of community #352).
+// queuedRef is one held reference. It records when this node first handed
+// the SET out, so the acknowledgement can report queue time and
+// acknowledgement time (the per-reference timing community #352 needs).
 type queuedRef struct {
 	ref       interfaces.PendingRef // Jti, AckJti, EnqueuedAt
 	handedOut time.Time             // first hand-out by this node; zero until then
@@ -882,8 +884,9 @@ func (q *deliveryQueue) MarkHandedOut(ackJtis []string, at time.Time) {
 	}
 }
 
-// Backlog reports the stream's whole backlog from memory (hook 3). oldest is
-// the zero time when depth is 0.
+// Backlog reports the stream's whole backlog, its depth and oldest enqueue
+// time, from memory with no store read: this is what the community #352
+// backlog gauges read. oldest is the zero time when depth is 0.
 func (q *deliveryQueue) Backlog() (depth int64, oldest time.Time) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

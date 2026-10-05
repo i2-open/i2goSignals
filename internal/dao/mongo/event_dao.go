@@ -859,6 +859,12 @@ func (d *EventDAOMongo) Ack(ctx context.Context, batch interfaces.AckBatch) (int
 	return ackTwoWrite(ctx, ec, dc, sid, batch)
 }
 
+// ackOneTrip and ackTwoWrite list the reference update and the copy inserts
+// in opposite orders. Neither order matters: the one-trip bulk write is
+// unordered, so the server may apply its operations in any order and one
+// failing does not stop the rest, and both paths tolerate a duplicate-key
+// error on a copy that is already stored. Either way the references move to
+// delivered and every copy ends up stored once.
 func ackOneTrip(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectID, batch interfaces.AckBatch) (int64, error) {
 	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
 	dNS := mongo.ClientBulkWrite{Database: dc.Database().Name(), Collection: dc.Name()}

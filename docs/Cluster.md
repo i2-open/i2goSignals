@@ -164,7 +164,7 @@ After each successful reconcile, a node purges cluster rows left behind by nodes
 *   **`cluster_nodes`** — a node row whose `lastSeenAt` is older than the window is deleted.
 *   **`cluster_leases`** — a lease row whose `leaseUntil` is older than the window is deleted **only** when its resource (`push-transmitter:<sid>`, `poll-receiver:<sid>`, `sstp-client:<PairId>`) names a stream or pair no longer in the store. Lease rows of unknown kinds are kept.
 
-A live stream's lease row is never deleted, however long it has been expired. Deleting a lease row restarts its fencing token at 1, which would let a stale holder's acks validate again; a stream that no longer exists has no holder left to fence.
+A live stream's lease row is never deleted, however long it has been expired, so its fencing token keeps rising across holders; deleting the row would restart the token at 1 and make the diagnostic history misleading. Acknowledgements do not check the token: ownership before an ack is answered from the node's own lease tenure (LeaseManager). A stream that no longer exists has no holder left, so its row can go.
 
 ## Periodic Backfill
 

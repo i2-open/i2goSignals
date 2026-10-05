@@ -532,14 +532,49 @@ planning #112 — see below. Legacy documents are migrated once at startup.
 
 Replaces the pendingEvents and deliveredEvents collections with one
 document per `(sid, jti)`:
-`{sid, jti, state: pending|delivered, createdAt, ackDate, expireAt}` — a
-reference only, never the body. Indexes: unique `(sid, jti)`;
-`(sid, state, jti)` for the pending read; TTL on `expireAt`; `jti` for
-the body sweep. `state` is open to a later `claimed` value. Because a
+`{sid, jti, ackJti, state: pending|delivered, createdAt, ackDate, expireAt}`
+— a reference only, never the body. `ackJti` is the row's
+**Acknowledgement JTI** (see below). Indexes: unique `(sid, jti)`;
+`(sid, ackJti)` for the acknowledgement match; `(sid, state, jti)` for the
+pending read; TTL on `expireAt`; `jti` for the body sweep; and a partial
+`(sid, createdAt)` index over `state: pending` rows only, for the
+backlog's oldest enqueue time. `state` is open to a later `claimed` value. Because a
 delivery document is a reference, a body in `events` is purged only when
 no delivery document in either state references it. `expireAt` is
 written at acknowledgement from the stream's retention policy (enterprise
 policy may vary it per stream).
+
+### Acknowledgement JTI (`AckJti`)
+
+The JTI a receiver acknowledges a delivered SET by, stored on the
+`deliveries` row as `ackJti` when the row is written. For a Forward
+stream it is the inbound JTI; for a re-signing route mode it is the JTI
+of the re-signed outbound copy. An acknowledgement is matched against
+`ackJti`, never re-derived from the stream's current route mode, so a
+route-mode change does not orphan rows already written (#363).
+
+### Claim
+
+Two related meanings, both owned by the stream's lease owner:
+
+- **Poll claim** — a short in-memory hold the owner's **DeliveryQueue**
+  takes on the JTIs it hands to one RFC 8936 poll or SSTP-acceptor
+  request (`I2SIG_POLL_CLAIM_TTL`), so overlapping requests get disjoint
+  batches. An ack or release frees it; an expired claim makes its JTIs
+  servable again (at-least-once). A restart or lease takeover drops all
+  claims.
+- **Claim call** — `PeerTransport.Claim`: a node that receives a poll or
+  SSTP request for a stream it does not own forwards it to the lease
+  owner, which answers from its queue. The non-owner writes nothing and
+  builds no queue (#365).
+
+### ServesClaims
+
+`RouterDeps.ServesClaims`: true when the process serves poll and
+accepted-SSTP requests and mounts `/_cluster/claim` (the community
+server and goSsfServer). A router with it false (business routers) never
+takes a poll-transmitter or sstp-server lease; it wakes a known owner at
+ingest and otherwise leaves the rows pending (#365).
 
 ### Enqueue time / Queue time / Acknowledgement time / Backlog (#352)
 
