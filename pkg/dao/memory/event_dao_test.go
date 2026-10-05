@@ -243,13 +243,13 @@ func TestEventDAOMemory_AddPending(t *testing.T) {
 
 	// Add to pending
 	streamID := ids.NewObjectID()
-	err := dao.AddPending(ctx, "test-jti", streamID)
+	err := dao.AddPending(ctx, refOf("test-jti"), streamID)
 	if err != nil {
 		t.Fatalf("AddPending failed: %v", err)
 	}
 
 	// Verify pending
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 10)
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
 	if err != nil {
 		t.Fatalf("GetPendingForStream failed: %v", err)
 	}
@@ -283,46 +283,27 @@ func TestEventDAOMemory_RemovePending(t *testing.T) {
 	_ = dao.Insert(ctx, record)
 
 	streamID := ids.NewObjectID()
-	_ = dao.AddPending(ctx, "test-jti", streamID)
+	_ = dao.AddPending(ctx, refOf("test-jti"), streamID)
 
 	// Remove from pending
-	removed, err := dao.RemovePending(ctx, "test-jti", streamID)
+	removed, err := dao.RemovePendingMany(ctx, []string{"test-jti"}, streamID)
 	if err != nil {
-		t.Fatalf("RemovePending failed: %v", err)
+		t.Fatalf("RemovePendingMany failed: %v", err)
 	}
 
-	if removed == nil {
-		t.Fatal("Expected removed event, got nil")
+	if len(removed) != 1 {
+		t.Fatalf("Expected one removed event, got %d", len(removed))
 	}
 
-	if removed.Jti != "test-jti" {
-		t.Errorf("Expected JTI test-jti, got %s", removed.Jti)
+	if removed[0].Jti != "test-jti" {
+		t.Errorf("Expected JTI test-jti, got %s", removed[0].Jti)
 	}
 
 	// Verify removal
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamID, 10)
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
 	if len(jtis) != 0 {
 		t.Errorf("Expected 0 pending events after removal, got %d", len(jtis))
 	}
-}
-
-func TestEventDAOMemory_MarkDelivered(t *testing.T) {
-	dao := NewEventDAO()
-	ctx := context.Background()
-
-	streamID := ids.NewObjectID()
-	deliverable := &interfaces.DeliverableEvent{
-		Jti:      "test-jti",
-		StreamId: streamID,
-	}
-
-	err := dao.MarkDelivered(ctx, deliverable, time.Now())
-	if err != nil {
-		t.Fatalf("MarkDelivered failed: %v", err)
-	}
-
-	// Note: We can't verify delivered events without exposing internal state
-	// This is acceptable for a unit test
 }
 
 // TestEventDAOMemory_RemovePendingMany asserts one batched ack removes exactly
@@ -336,8 +317,8 @@ func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
 	for _, jti := range []string{"a-1", "a-2", "a-3", "b-1"} {
 		_ = dao.Insert(ctx, &model.EventRecord{Jti: jti, SortTime: time.Now()})
 	}
-	_ = dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA)
-	_ = dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "a-2", "a-3"}), streamA)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "b-1"}), streamB)
 
 	removed, err := dao.RemovePendingMany(ctx, []string{"a-1", "a-3", "missing"}, streamA)
 	if err != nil {
@@ -354,11 +335,11 @@ func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
 		t.Fatalf("removed = %v, want exactly a-1 and a-3", removed)
 	}
 
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
 	if len(jtis) != 1 || jtis[0] != "a-2" {
 		t.Errorf("stream A pending = %v, want [a-2]", jtis)
 	}
-	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
 	if len(jtis) != 2 {
 		t.Errorf("stream B pending = %v, must be untouched", jtis)
 	}
@@ -370,39 +351,6 @@ func TestEventDAOMemory_RemovePendingMany(t *testing.T) {
 	removed, err = dao.RemovePendingMany(ctx, []string{"a-2"}, ids.NewObjectID())
 	if err != nil || removed != nil {
 		t.Errorf("unknown stream: got (%v, %v), want (nil, nil)", removed, err)
-	}
-}
-
-// TestEventDAOMemory_MarkDeliveredMany asserts a bulk delivered write is
-// visible through ListDeliveredForStream with the shared ackDate.
-func TestEventDAOMemory_MarkDeliveredMany(t *testing.T) {
-	dao := NewEventDAO()
-	ctx := context.Background()
-	streamID := ids.NewObjectID()
-	ackDate := time.Now()
-
-	if err := dao.MarkDeliveredMany(ctx, nil, ackDate); err != nil {
-		t.Fatalf("empty MarkDeliveredMany failed: %v", err)
-	}
-	err := dao.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{
-		{Jti: "d-1", StreamId: streamID},
-		{Jti: "d-2", StreamId: streamID},
-	}, ackDate)
-	if err != nil {
-		t.Fatalf("MarkDeliveredMany failed: %v", err)
-	}
-
-	delivered, err := dao.ListDeliveredForStream(ctx, streamID)
-	if err != nil {
-		t.Fatalf("ListDeliveredForStream failed: %v", err)
-	}
-	if len(delivered) != 2 {
-		t.Fatalf("delivered count = %d, want 2", len(delivered))
-	}
-	for _, d := range delivered {
-		if !d.AckDate.Equal(ackDate) {
-			t.Errorf("jti %s ackDate = %v, want %v", d.Jti, d.AckDate, ackDate)
-		}
 	}
 }
 
@@ -423,7 +371,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 			SortTime: time.Now(),
 		}
 		_ = dao.Insert(ctx, record)
-		_ = dao.AddPending(ctx, jti, streamID)
+		_ = dao.AddPending(ctx, refOf(jti), streamID)
 	}
 
 	// Clear pending
@@ -437,7 +385,7 @@ func TestEventDAOMemory_ClearPendingForStream(t *testing.T) {
 	}
 
 	// Verify clearing
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamID, 10)
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
 	if len(jtis) != 0 {
 		t.Errorf("Expected 0 pending events after clear, got %d", len(jtis))
 	}
@@ -513,11 +461,11 @@ func TestEventDAOMemory_GetPendingForStream_Limit(t *testing.T) {
 			SortTime: time.Now(),
 		}
 		_ = dao.Insert(ctx, record)
-		_ = dao.AddPending(ctx, jti, streamID)
+		_ = dao.AddPending(ctx, refOf(jti), streamID)
 	}
 
 	// Get with limit
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 3)
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 3))
 	if err != nil {
 		t.Fatalf("GetPendingForStream with limit failed: %v", err)
 	}
@@ -612,12 +560,12 @@ func TestEventDAOMemory_AddPendingMany(t *testing.T) {
 	// Deliberately added out of jti order: GetPendingForStream publishes
 	// ascending jti order (ADR 0040), the same sort the Mongo DAO states
 	// explicitly, so the read must not echo insertion order back.
-	err := dao.AddPendingMany(ctx, []string{"jti-3", "jti-missing", "jti-1", "jti-2"}, streamID)
+	err := dao.AddPendingMany(ctx, refsFrom([]string{"jti-3", "jti-missing", "jti-1", "jti-2"}), streamID)
 	if err != nil {
 		t.Fatalf("AddPendingMany failed: %v", err)
 	}
 
-	jtis, total, err := dao.GetPendingForStream(ctx, streamID, 10)
+	jtis, total, err := pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
 	if err != nil {
 		t.Fatalf("GetPendingForStream failed: %v", err)
 	}
@@ -638,7 +586,7 @@ func TestEventDAOMemory_AddPendingMany(t *testing.T) {
 	if err := dao.AddPendingMany(ctx, nil, streamID); err != nil {
 		t.Errorf("AddPendingMany(nil) failed: %v", err)
 	}
-	_, total, _ = dao.GetPendingForStream(ctx, streamID, 10)
+	_, total, _ = pageJtis(dao.GetPendingForStream(ctx, streamID, 10))
 	if total != int64(len(want)) {
 		t.Errorf("Empty AddPendingMany must not change pending count: got %d", total)
 	}
@@ -663,7 +611,7 @@ func TestEventDAOMemory_InsertWithPending(t *testing.T) {
 		streamA: {"new", "old", "solo", "no-record"},
 		streamB: {"new", "old"},
 	}
-	results, err := dao.InsertWithPending(ctx, recs, pending)
+	results, err := dao.InsertWithPending(ctx, recs, pendingRefsOf(pending))
 	if err != nil {
 		t.Fatalf("InsertWithPending failed: %v", err)
 	}
@@ -674,16 +622,16 @@ func TestEventDAOMemory_InsertWithPending(t *testing.T) {
 		}
 	}
 
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
 	if want := []string{"new", "solo"}; !equalStrings(jtis, want) {
 		t.Errorf("stream A pending = %v, want %v", jtis, want)
 	}
-	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
 	if want := []string{"new"}; !equalStrings(jtis, want) {
 		t.Errorf("stream B pending = %v, want %v", jtis, want)
 	}
 
-	if results, err = dao.InsertWithPending(ctx, nil, pending); results != nil || err != nil {
+	if results, err = dao.InsertWithPending(ctx, nil, pendingRefsOf(pending)); results != nil || err != nil {
 		t.Errorf("empty batch = (%v, %v), want (nil, nil)", results, err)
 	}
 }
@@ -700,32 +648,32 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestEventDAOMemory_AckDelivered asserts the one-call ack: only JTIs pending
-// for the stream are acked and returned (each once), each acked JTI gets one
-// delivered record carrying ackDate, unknown JTIs get none, other streams are
-// untouched, and re-acking is a no-op.
-func TestEventDAOMemory_AckDelivered(t *testing.T) {
+// TestEventDAOMemory_Ack asserts the one-call ack: only references pending
+// for the stream are acked and counted (each once), each acked reference
+// becomes delivered carrying ackDate, unknown JTIs change nothing, other
+// streams are untouched, and re-acking is a no-op.
+func TestEventDAOMemory_Ack(t *testing.T) {
 	dao := NewEventDAO()
 	ctx := context.Background()
 	streamA := ids.NewObjectID()
 	streamB := ids.NewObjectID()
 	ackDate := time.Now().Truncate(time.Millisecond)
-	_ = dao.AddPendingMany(ctx, []string{"a-1", "a-2", "a-3"}, streamA)
-	_ = dao.AddPendingMany(ctx, []string{"a-1", "b-1"}, streamB)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "a-2", "a-3"}), streamA)
+	_ = dao.AddPendingMany(ctx, refsFrom([]string{"a-1", "b-1"}), streamB)
 
-	acked, err := dao.AckDelivered(ctx, []string{"a-1", "a-3", "missing", "a-1"}, streamA, ackDate)
+	acked, err := dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, Jtis: []string{"a-1", "a-3", "missing", "a-1"}, AckDate: ackDate})
 	if err != nil {
-		t.Fatalf("AckDelivered failed: %v", err)
+		t.Fatalf("Ack failed: %v", err)
 	}
-	if got := sortedCopy(acked); len(got) != 2 || got[0] != "a-1" || got[1] != "a-3" {
-		t.Fatalf("acked = %v, want exactly [a-1 a-3]", acked)
+	if acked != 2 {
+		t.Fatalf("acked = %d, want 2 (a-1, a-3)", acked)
 	}
 
-	jtis, _, _ := dao.GetPendingForStream(ctx, streamA, 10)
+	jtis, _, _ := pageJtis(dao.GetPendingForStream(ctx, streamA, 10))
 	if len(jtis) != 1 || jtis[0] != "a-2" {
 		t.Errorf("stream A pending = %v, want [a-2]", jtis)
 	}
-	jtis, _, _ = dao.GetPendingForStream(ctx, streamB, 10)
+	jtis, _, _ = pageJtis(dao.GetPendingForStream(ctx, streamB, 10))
 	if len(jtis) != 2 {
 		t.Errorf("stream B pending = %v, must be untouched", jtis)
 	}
@@ -742,15 +690,15 @@ func TestEventDAOMemory_AckDelivered(t *testing.T) {
 		t.Fatalf("delivered = %v, want exactly [a-1 a-3]", dj)
 	}
 
-	acked, err = dao.AckDelivered(ctx, []string{"a-1", "a-3"}, streamA, time.Now())
-	if err != nil || len(acked) != 0 {
-		t.Errorf("re-ack: got (%v, %v), want no JTIs and no error", acked, err)
+	acked, err = dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, Jtis: []string{"a-1", "a-3"}, AckDate: time.Now()})
+	if err != nil || acked != 0 {
+		t.Errorf("re-ack: got (%d, %v), want 0 and no error", acked, err)
 	}
 	if delivered, _ = dao.ListDeliveredForStream(ctx, streamA); len(delivered) != 2 {
 		t.Errorf("re-ack must not add delivered records, got %d", len(delivered))
 	}
-	if acked, err = dao.AckDelivered(ctx, nil, streamA, ackDate); err != nil || acked != nil {
-		t.Errorf("empty batch: got (%v, %v), want (nil, nil)", acked, err)
+	if acked, err = dao.Ack(ctx, interfaces.AckBatch{StreamID: streamA, AckDate: ackDate}); err != nil || acked != 0 {
+		t.Errorf("empty batch: got (%d, %v), want (0, nil)", acked, err)
 	}
 }
 
@@ -770,19 +718,17 @@ func TestEventDAOMemory_EnsurePending(t *testing.T) {
 	if err := dao.Insert(ctx, &model.EventRecord{Jti: "ens", Original: `{"jti":"ens"}`, SortTime: time.Now()}); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if err := dao.AddPending(ctx, "ens", "has-pending"); err != nil {
+	if err := dao.AddPending(ctx, refOf("ens"), "has-pending"); err != nil {
 		t.Fatalf("AddPending: %v", err)
 	}
-	if err := dao.MarkDelivered(ctx, &interfaces.DeliverableEvent{Jti: "ens", StreamId: "was-delivered"}, time.Now()); err != nil {
-		t.Fatalf("MarkDelivered: %v", err)
-	}
+	markDelivered(t, dao, "ens", "was-delivered", time.Now())
 
 	queued, err := dao.EnsurePending(ctx, "ens", nil)
 	if err != nil || queued != nil {
 		t.Fatalf("empty streamIDs: got (%v, %v), want (nil, nil)", queued, err)
 	}
 
-	queued, err = dao.EnsurePending(ctx, "ens", []string{"has-pending", "was-delivered", "missing"})
+	queued, err = dao.EnsurePending(ctx, "ens", selfAck([]string{"has-pending", "was-delivered", "missing"}))
 	if err != nil {
 		t.Fatalf("EnsurePending: %v", err)
 	}
@@ -790,7 +736,7 @@ func TestEventDAOMemory_EnsurePending(t *testing.T) {
 		t.Fatalf("queued = %v, want [missing]", queued)
 	}
 	for stream, want := range map[string]int{"has-pending": 1, "was-delivered": 0, "missing": 1} {
-		evs, _, err := dao.GetPendingForStream(ctx, stream, 10)
+		evs, _, err := pageJtis(dao.GetPendingForStream(ctx, stream, 10))
 		if err != nil {
 			t.Fatalf("GetPendingForStream(%s): %v", stream, err)
 		}
@@ -799,7 +745,7 @@ func TestEventDAOMemory_EnsurePending(t *testing.T) {
 		}
 	}
 
-	queued, err = dao.EnsurePending(ctx, "ens", []string{"has-pending", "was-delivered", "missing"})
+	queued, err = dao.EnsurePending(ctx, "ens", selfAck([]string{"has-pending", "was-delivered", "missing"}))
 	if err != nil || len(queued) != 0 {
 		t.Fatalf("repeat call: got (%v, %v), want nothing queued", queued, err)
 	}

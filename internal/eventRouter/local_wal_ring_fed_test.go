@@ -11,6 +11,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/wal"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -31,7 +32,7 @@ func storeWithPending(t *testing.T, s *walSetup, stream string, jtis ...string) 
 	for _, jti := range jtis {
 		recs = append(recs, &model.EventRecord{Jti: jti, Sid: "in", Original: "stored-" + jti})
 	}
-	_, err := s.p.EventDAO.InsertWithPending(context.Background(), recs, map[string][]string{stream: jtis})
+	_, err := s.p.EventDAO.InsertWithPending(context.Background(), recs, pendingRefsOf(map[string][]string{stream: jtis}))
 	require.NoError(t, err)
 }
 
@@ -48,25 +49,25 @@ func TestWalReadThrough_PendingMergeAckAndClear(t *testing.T) {
 	e := overlayEntry("s1", "a", "c", "d")
 	rt.overlay.add(e)
 
-	jtis, total, err := rt.GetPendingForStream(ctx, "s1", 0)
+	jtis, total, err := pageJtis(rt.GetPendingForStream(ctx, "s1", 0))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b", "c", "d"}, jtis)
 	assert.EqualValues(t, 4, total)
-	jtis, _, err = rt.GetPendingForStream(ctx, "s1", 2)
+	jtis, _, err = pageJtis(rt.GetPendingForStream(ctx, "s1", 2))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b"}, jtis)
 
-	acked, err := rt.AckDelivered(ctx, []string{"a", "b"}, "s1", time.Now())
+	acked, err := rt.Ack(ctx, interfaces.AckBatch{StreamID: "s1", Jtis: []string{"a", "b"}, AckDate: time.Now()})
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"a", "b"}, acked, "held and stored acks are both reported")
-	jtis, _, err = rt.GetPendingForStream(ctx, "s1", 2)
+	assert.EqualValues(t, 2, acked, "held and stored acks are both counted")
+	jtis, _, err = pageJtis(rt.GetPendingForStream(ctx, "s1", 2))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"c", "d"}, jtis, "a held ack hides the SET and a full page stays full")
 
 	n, err := rt.ClearPendingForStream(ctx, "s1")
 	require.NoError(t, err)
 	assert.EqualValues(t, 3, n, "the stored d plus the undrained c and d")
-	jtis, _, err = rt.GetPendingForStream(ctx, "s1", 0)
+	jtis, _, err = pageJtis(rt.GetPendingForStream(ctx, "s1", 0))
 	require.NoError(t, err)
 	assert.Empty(t, jtis)
 
@@ -74,7 +75,7 @@ func TestWalReadThrough_PendingMergeAckAndClear(t *testing.T) {
 	storeWithPending(t, s, "s1", "a", "c", "d")
 	require.NoError(t, rt.applyHeld(ctx, []*walEntry{e}))
 	rt.overlay.remove(e)
-	base, _, err := p.EventDAO.GetPendingForStream(ctx, "s1", 0)
+	base, _, err := pageJtis(p.EventDAO.GetPendingForStream(ctx, "s1", 0))
 	require.NoError(t, err)
 	assert.Empty(t, base, "held acks and clears reached the store")
 	delivered, err := p.EventDAO.ListDeliveredForStream(ctx, "s1")
@@ -156,13 +157,14 @@ func TestLocalWal_RingFedPollServesBeforeDrain(t *testing.T) {
 	require.NoError(t, s.router.HandleEvent(newRiscToken("rf-poll-1", dupTestIssuer, s.audience), "x", s.streamID))
 	assert.False(t, s.stored("rf-poll-1"))
 
-	sets, _, status := s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	require.Equal(t, 200, status)
+	sets = inboundSets(s.router, s.streamID, sets)
 	assert.Equal(t, []string{"rf-poll-1"}, keysOf(sets), "served from the WAL before the drain")
 	assert.False(t, s.stored("rf-poll-1"), "still not in the store")
 	assert.GreaterOrEqual(t, testutil.ToFloat64(m.ringFedServed), 1.0)
 
-	sets, _, status = s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: []string{"rf-poll-1"}})
+	sets, _, status = s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true, Acks: wireAcks(s.router, s.streamID, "rf-poll-1")})
 	require.Equal(t, 200, status)
 	assert.Empty(t, sets)
 
@@ -175,7 +177,7 @@ func TestLocalWal_RingFedPollServesBeforeDrain(t *testing.T) {
 	require.Len(t, delivered, 1)
 	assert.Equal(t, "rf-poll-1", delivered[0].Jti)
 
-	sets, _, _ = s.router.PollStreamHandler(s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, _ = s.router.PollStreamHandler(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	assert.Empty(t, sets, "an acked SET is not redelivered after the drain")
 }
 
@@ -195,7 +197,7 @@ func TestLocalWal_RingFedPushServesBeforeDrain(t *testing.T) {
 	push := h.createPushStream(t, "NONE")
 	pushID := push.StreamConfiguration.Id
 	s.router.UpdateStreamState(push.DeepCopy())
-	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitterResource(pushID), "node-wal-test")
+	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitter.Resource(pushID), "node-wal-test")
 
 	require.NoError(t, s.router.HandleEvent(newRiscToken("rf-push-1", dupTestIssuer, s.audience), "x", s.streamID))
 	rx.waitEntered(t)
@@ -205,7 +207,7 @@ func TestLocalWal_RingFedPushServesBeforeDrain(t *testing.T) {
 	s.waitDrained(t)
 	assert.True(t, s.stored("rf-push-1"))
 	require.Eventually(t, func() bool {
-		jtis, _, _ := p.EventDAO.GetPendingForStream(context.Background(), pushID, 0)
+		jtis, _, _ := pageJtis(p.EventDAO.GetPendingForStream(context.Background(), pushID, 0))
 		return len(jtis) == 0
 	}, 5*time.Second, 5*time.Millisecond, "the held push ack reached the store")
 	pushes := rx.settle(t)
@@ -228,8 +230,9 @@ func TestLocalWal_RingFedServesReplayedEntries(t *testing.T) {
 	s2 := newWalRouterWith(t, p, dir, &gatedEventDAO{EventDAO: p.EventDAO, gate: gate}, ringFed)
 	// The replayed entries target s1's stream (s2's setup made another one).
 	s2.router.UpdateStreamState(s1.stream)
-	sets, _, status := s2.router.PollStreamHandler(s1.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s2.router.PollStreamHandler(context.Background(), s1.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	require.Equal(t, 200, status)
+	sets = inboundSets(s2.router, s1.streamID, sets)
 	assert.ElementsMatch(t, jtis, keysOf(sets), "replayed SETs are served before the replay stores them")
 	for _, jti := range jtis {
 		assert.False(t, s2.stored(jti))
@@ -258,7 +261,7 @@ func ringFedLatency(t *testing.T, ringFedOn bool, storeDelay time.Duration) time
 	h := &filterPushHarness{router: s.router, streamService: p.StreamService, keyService: p.KeyService, eventService: p.EventService}
 	push := h.createPushStream(t, "NONE")
 	s.router.UpdateStreamState(push.DeepCopy())
-	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitterResource(push.StreamConfiguration.Id), "node-wal-test")
+	waitLeaseOwner(t, p.Coordinator, cluster.PushTransmitter.Resource(push.StreamConfiguration.Id), "node-wal-test")
 
 	go func() { time.Sleep(storeDelay); close(gate) }()
 	start := time.Now()

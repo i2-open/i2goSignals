@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
@@ -54,6 +55,7 @@ func (s *KeyChangeSigningSuite) SetupTest() {
 		KeyService:    persistence.KeyService,
 		EventService:  persistence.EventService,
 		Coordinator:   persistence.Coordinator,
+		ServesClaims:  true,
 	}, "key-change-node")
 
 	// A poll transmitter signing as keyChangeIssuer with one event queued.
@@ -77,7 +79,7 @@ func (s *KeyChangeSigningSuite) SetupTest() {
 	token.ID = "key-change-jti"
 	event, err := persistence.EventService.AddEvent(ctx, token, s.sid, "")
 	s.Require().NoError(err)
-	s.Require().NoError(persistence.EventService.AddEventToStream(ctx, event.Jti, s.sid))
+	s.Require().NoError(persistence.EventService.AddEventToStream(ctx, interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti}, s.sid))
 }
 
 func (s *KeyChangeSigningSuite) TearDownTest() {
@@ -110,7 +112,7 @@ func (s *KeyChangeSigningSuite) post(query string, body []byte, contentType stri
 // polled polls the transmitter and returns the one SET's kid and whether it
 // verifies with pub.
 func (s *KeyChangeSigningSuite) polled(pub crypto.PublicKey) (string, bool) {
-	sets, _, status := s.app.EventRouter.PollStreamHandler(s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+	sets, _, status := s.app.EventRouter.PollStreamHandler(context.Background(), s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	s.Require().Equal(http.StatusOK, status)
 	s.Require().Len(sets, 1)
 	for _, set := range sets {
@@ -134,7 +136,7 @@ func (s *KeyChangeSigningSuite) selected() (crypto.Signer, string) {
 // current key cached and the event in its poll buffer, and returns the key.
 func (s *KeyChangeSigningSuite) warm() (crypto.Signer, string) {
 	s.Require().Eventually(func() bool {
-		sets, _, status := s.app.EventRouter.PollStreamHandler(s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
+		sets, _, status := s.app.EventRouter.PollStreamHandler(context.Background(), s.sid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 		return status == http.StatusOK && len(sets) == 1
 	}, 5*time.Second, 10*time.Millisecond, "the queued event reaches the poll buffer")
 	key, kid := s.selected()

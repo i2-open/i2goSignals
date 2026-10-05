@@ -3,10 +3,12 @@ package mongo_provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -98,13 +100,17 @@ func (c *MongoCoordinator) SetCollections(leaseCol, nodeCol *mongo.Collection) {
 	c.nodeCol.Store(nodeCol)
 }
 
+// errCoordinatorNotInit is returned before the coordinator's collection is
+// bound (the provider has not connected yet); it wraps ErrStoreNotReady.
+var errCoordinatorNotInit = fmt.Errorf("mongo coordinator not initialized: %w", interfaces.ErrStoreNotReady)
+
 // Compile-time check.
 var _ cluster.ClusterCoordinator = (*MongoCoordinator)(nil)
 
-func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	col := c.leaseCol.Load()
 	if col == nil {
-		return false, 0, errors.New("mongo coordinator not initialized")
+		return false, 0, time.Time{}, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -150,18 +156,22 @@ func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string
 	err := col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return false, 0, nil
+			return false, 0, time.Time{}, nil
 		}
-		return false, 0, err
+		return false, 0, time.Time{}, err
 	}
 
-	return lease.OwnerNodeId == nodeId, lease.FencingToken, nil
+	// The After-document holds the expiry this call stored (#364).
+	if lease.OwnerNodeId != nodeId {
+		return false, lease.FencingToken, time.Time{}, nil
+	}
+	return true, lease.FencingToken, lease.LeaseUntil, nil
 }
 
 func (c *MongoCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) error {
 	col := c.leaseCol.Load()
 	if col == nil {
-		return errors.New("mongo coordinator not initialized")
+		return errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -186,7 +196,7 @@ func (c *MongoCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) e
 func (c *MongoCoordinator) GetLeaseOwner(resource string) (string, time.Time, int64, error) {
 	col := c.leaseCol.Load()
 	if col == nil {
-		return "", time.Time{}, 0, errors.New("mongo coordinator not initialized")
+		return "", time.Time{}, 0, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -211,7 +221,7 @@ func (c *MongoCoordinator) GetLeaseOwner(resource string) (string, time.Time, in
 func (c *MongoCoordinator) RegisterNode(node model.ClusterNode) error {
 	col := c.nodeCol.Load()
 	if col == nil {
-		return errors.New("mongo coordinator not initialized")
+		return errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -237,7 +247,7 @@ func (c *MongoCoordinator) RegisterNode(node model.ClusterNode) error {
 func (c *MongoCoordinator) GetActiveNodeCount() (int64, error) {
 	col := c.nodeCol.Load()
 	if col == nil {
-		return 0, errors.New("mongo coordinator not initialized")
+		return 0, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -254,7 +264,7 @@ func (c *MongoCoordinator) GetActiveNodeCount() (int64, error) {
 func (c *MongoCoordinator) GetActiveNodes() ([]model.ClusterNode, error) {
 	col := c.nodeCol.Load()
 	if col == nil {
-		return nil, errors.New("mongo coordinator not initialized")
+		return nil, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -284,7 +294,7 @@ func (c *MongoCoordinator) GetActiveNodes() ([]model.ClusterNode, error) {
 func (c *MongoCoordinator) GetNode(nodeId string) (*model.ClusterNode, error) {
 	col := c.nodeCol.Load()
 	if col == nil {
-		return nil, errors.New("mongo coordinator not initialized")
+		return nil, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -307,7 +317,7 @@ var _ cluster.Reaper = (*MongoCoordinator)(nil)
 func (c *MongoCoordinator) PurgeStaleNodes(before time.Time) (int, error) {
 	col := c.nodeCol.Load()
 	if col == nil {
-		return 0, errors.New("mongo coordinator not initialized")
+		return 0, errCoordinatorNotInit
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
@@ -321,7 +331,7 @@ func (c *MongoCoordinator) PurgeStaleNodes(before time.Time) (int, error) {
 func (c *MongoCoordinator) PurgeExpiredLeases(before time.Time, keep func(resource string) bool) (int, error) {
 	col := c.leaseCol.Load()
 	if col == nil {
-		return 0, errors.New("mongo coordinator not initialized")
+		return 0, errCoordinatorNotInit
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()

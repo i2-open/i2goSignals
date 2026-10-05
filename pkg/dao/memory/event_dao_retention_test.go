@@ -22,9 +22,12 @@ func insertBody(t *testing.T, dao *EventDAOMemory, jti string) {
 
 func markDelivered(t *testing.T, dao *EventDAOMemory, jti, streamID string, ack time.Time) {
 	t.Helper()
-	err := dao.MarkDelivered(context.Background(), &interfaces.DeliverableEvent{Jti: jti, StreamId: streamID}, ack)
-	if err != nil {
-		t.Fatalf("mark delivered %s/%s: %v", jti, streamID, err)
+	ctx := context.Background()
+	if err := dao.AddPending(ctx, refOf(jti), streamID); err != nil {
+		t.Fatalf("add pending %s/%s: %v", jti, streamID, err)
+	}
+	if _, err := dao.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jti}, AckDate: ack}); err != nil {
+		t.Fatalf("ack %s/%s: %v", jti, streamID, err)
 	}
 }
 
@@ -129,7 +132,7 @@ func TestEventDAOMemory_DeleteBodyIfUnreferenced_PendingHolds(t *testing.T) {
 	ctx := context.Background()
 	dao := NewEventDAO()
 	insertBody(t, dao, "j1")
-	if err := dao.AddPending(ctx, "j1", "s1"); err != nil {
+	if err := dao.AddPending(ctx, refOf("j1"), "s1"); err != nil {
 		t.Fatalf("add pending: %v", err)
 	}
 

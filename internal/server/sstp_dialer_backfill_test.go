@@ -93,7 +93,7 @@ func TestSstpDialer_DroppedWakeWhileSlotsHeldIsBackfilled(t *testing.T) {
 	go func() {
 		defer close(cycleDone)
 		delay := 5 * time.Millisecond
-		dialer.runPrimaryCycleWithSecondPush(ctx, &pair, 1, &delay, sstpPendingFeedback{})
+		dialer.runPrimaryCycleWithSecondPush(ctx, &pair, &delay, sstpPendingFeedback{})
 	}()
 	defer func() {
 		close(releasePrimary)
@@ -200,7 +200,7 @@ func TestSstpDialer_LostWakeAfterDrainIsBackfilled(t *testing.T) {
 	go func() {
 		defer close(cycleDone)
 		delay := 5 * time.Millisecond
-		dialer.runPrimaryCycleWithSecondPush(ctx, &pair, 1, &delay, sstpPendingFeedback{})
+		dialer.runPrimaryCycleWithSecondPush(ctx, &pair, &delay, sstpPendingFeedback{})
 	}()
 	defer func() {
 		close(releasePrimary)

@@ -3,13 +3,8 @@ package eventRouter
 import (
 	"context"
 	"errors"
-	"os"
-	"strconv"
 	"sync"
 	"time"
-
-	"github.com/i2-open/i2goSignals/pkg/services"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Send/ack decoupling (#336, spec-111 Stage 2).
@@ -30,74 +25,13 @@ import (
 // existing recovery path. Stop flushes the queue first, so a clean stop
 // redelivers nothing it already had acked by the receiver.
 
-const (
-	// defaultDeliveryInFlightMax is the I2SIG_DELIVERY_INFLIGHT_MAX default:
-	// twice the largest push batch the ADR 0037 ceiling allows (4 x 32), so
-	// one full batch can be on the wire while the previous one's ack is
-	// written. It is also the most SETs a crash can redeliver per stream.
-	defaultDeliveryInFlightMax = 256
-	// defaultAckCoalesceWindow is the I2SIG_ACK_COALESCE_WINDOW default.
-	defaultAckCoalesceWindow = 5 * time.Millisecond
-)
-
-// deliveryInFlightMax resolves I2SIG_DELIVERY_INFLIGHT_MAX. An unset or
-// invalid value gives the default.
-func deliveryInFlightMax() int {
-	if val := os.Getenv("I2SIG_DELIVERY_INFLIGHT_MAX"); val != "" {
-		if i, err := strconv.Atoi(val); err == nil && i > 0 {
-			return i
-		}
-		eventLogger.Warn("Ignoring invalid I2SIG_DELIVERY_INFLIGHT_MAX (want a positive integer)", "value", val)
-	}
-	return defaultDeliveryInFlightMax
-}
-
-// ackCoalesceWindow resolves I2SIG_ACK_COALESCE_WINDOW. 0 acks inline, as
-// before #336. An unset or invalid value gives the default.
-func ackCoalesceWindow() time.Duration {
-	if val := os.Getenv("I2SIG_ACK_COALESCE_WINDOW"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil && d >= 0 {
-			return d
-		}
-		eventLogger.Warn("Ignoring invalid I2SIG_ACK_COALESCE_WINDOW (want a non-negative duration)", "value", val)
-	}
-	return defaultAckCoalesceWindow
-}
-
-var (
-	deliveryInFlightGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "goSignals",
-		Subsystem: "router",
-		Name:      "delivery_inflight",
-		Help:      "JTIs a delivery runner has taken for sending and not yet acked or handed back.",
-	}, []string{"stream_id", "transport"})
-	ackBatchSizeHist = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "goSignals",
-		Subsystem: "router",
-		Name:      "delivery_ack_batch_size",
-		Help:      "JTIs applied per coalesced delivery ack write.",
-		Buckets:   []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512},
-	}, []string{"transport"})
-	pollClaimedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "goSignals",
-		Subsystem: "router",
-		Name:      "poll_claimed_inflight",
-		Help:      "JTIs an RFC 8936 poll stream has returned under an unexpired claim and not yet had acked (#337).",
-	}, []string{"stream_id"})
-)
-
-// DeliveryCollectors returns the acker's Prometheus collectors for the
-// server's registry.
-func DeliveryCollectors() []prometheus.Collector {
-	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge}
-}
-
 // ackerConfig configures one acker.
 type ackerConfig struct {
 	sid       string
 	transport string // metric label: "push" or "sstp"
-	// apply writes one coalesced ack. An error wrapping
-	// services.ErrStaleFencingToken fences the acker.
+	// apply writes one coalesced ack. An error wrapping errNotLeaseOwner
+	// means this node's lease tenure ran out before the write: nothing was
+	// written, and the batch is kept for the next drain (#364).
 	apply func(ctx context.Context, jtis []string) error
 	// onApplied, when set, runs after each apply with its JTIs and outcome,
 	// before they leave the in-flight set.
@@ -121,10 +55,8 @@ type acker struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
 	queue    []string
-	fenceErr error
 	// space is closed, and replaced, whenever the in-flight set shrinks.
 	space  chan struct{}
-	fenced chan struct{}
 	closed bool
 
 	// applyMu serialises applies, so a flush and a drain never write the same
@@ -153,7 +85,6 @@ func newAcker(ctx context.Context, cfg ackerConfig) *acker {
 		ctx:      ctx,
 		inflight: map[string]struct{}{},
 		space:    make(chan struct{}),
-		fenced:   make(chan struct{}),
 		kick:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -196,15 +127,10 @@ func (a *acker) run() {
 // reserve adds jtis to the in-flight set before they are sent and returns
 // the ones it added: a JTI already in flight is dropped, since it is being
 // sent or acked already. It waits while the set is full, and returns ctx's
-// error if ctx ends first, or the fence error once the acker is fenced.
+// error if ctx ends first.
 func (a *acker) reserve(ctx context.Context, jtis []string) ([]string, error) {
 	for {
 		a.mu.Lock()
-		if a.fenceErr != nil {
-			err := a.fenceErr
-			a.mu.Unlock()
-			return nil, err
-		}
 		fresh := make([]string, 0, len(jtis))
 		seen := make(map[string]struct{}, len(jtis))
 		for _, jti := range jtis {
@@ -235,7 +161,6 @@ func (a *acker) reserve(ctx context.Context, jtis []string) ([]string, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-a.fenced:
 		case <-space:
 		}
 	}
@@ -261,24 +186,11 @@ func (a *acker) size() int {
 // in-flight set, if they were not reserved) and stay in flight until their
 // ack is applied; released JTIs were not acked and leave the set at once,
 // still pending in the store. With a zero window the ack is applied here and
-// its error returned. Otherwise the error is the fence error, once an earlier
-// drain was fenced.
+// its error returned.
 func (a *acker) complete(acked, released []string) error {
 	a.mu.Lock()
 	for _, jti := range released {
 		delete(a.inflight, jti)
-	}
-	if a.fenceErr != nil {
-		for _, jti := range acked {
-			delete(a.inflight, jti)
-		}
-		err := a.fenceErr
-		a.shrankLocked()
-		a.mu.Unlock()
-		if len(acked) > 0 && a.cfg.onApplied != nil {
-			a.cfg.onApplied(acked, err)
-		}
-		return err
 	}
 	for _, jti := range acked {
 		a.inflight[jti] = struct{}{}
@@ -324,11 +236,6 @@ func (a *acker) close() error {
 	return err
 }
 
-// fencedCh is closed once an apply is refused on a stale fencing token.
-func (a *acker) fencedCh() <-chan struct{} {
-	return a.fenced
-}
-
 // drain applies the queued acks in one write.
 func (a *acker) drain() error {
 	a.applyMu.Lock()
@@ -341,6 +248,31 @@ func (a *acker) drain() error {
 		return nil
 	}
 	err := a.cfg.apply(a.ctx, batch)
+	if errors.Is(err, errNotLeaseOwner) {
+		// The lease manager refused the write: this node's tenure ran out
+		// before a renewal confirmed it (#364). Nothing was written. While
+		// the drain loop runs, the batch goes back to the front of the queue
+		// and stays in flight, so it is written by the first drain after the
+		// next successful heartbeat; a full in-flight set holds the sender
+		// back meanwhile. With no drain loop (a zero window, or a closed
+		// acker) the JTIs leave the set instead and stay pending in the
+		// store, to be redelivered: a duplicate at most, never a loss.
+		a.mu.Lock()
+		if a.cfg.window > 0 && !a.closed {
+			a.queue = append(batch, a.queue...)
+			a.mu.Unlock()
+			return err
+		}
+		for _, jti := range batch {
+			delete(a.inflight, jti)
+		}
+		a.shrankLocked()
+		a.mu.Unlock()
+		if a.cfg.onApplied != nil {
+			a.cfg.onApplied(batch, err)
+		}
+		return err
+	}
 	ackBatchSizeHist.WithLabelValues(a.cfg.transport).Observe(float64(len(batch)))
 	if a.cfg.onApplied != nil {
 		a.cfg.onApplied(batch, err)
@@ -348,10 +280,6 @@ func (a *acker) drain() error {
 	a.mu.Lock()
 	for _, jti := range batch {
 		delete(a.inflight, jti)
-	}
-	if err != nil && errors.Is(err, services.ErrStaleFencingToken) && a.fenceErr == nil {
-		a.fenceErr = err
-		close(a.fenced)
 	}
 	a.shrankLocked()
 	a.mu.Unlock()

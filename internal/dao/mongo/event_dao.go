@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,26 +19,49 @@ import (
 
 var eLog = logger.Sub("EVENT_DAO")
 
-// pendingDoc is the on-disk shape of a DeliverableEvent inside Mongo. It keeps
-// `sid` as bson.ObjectID for backward compatibility with existing data; the
-// public DAO interface exposes only string IDs and converts at the boundary.
-type pendingDoc struct {
-	Jti string        `bson:"jti"`
-	Sid bson.ObjectID `bson:"sid"`
+// deliveryDoc is the on-disk shape of one delivery reference in the
+// deliveries collection (#359): one document per (stream, inbound JTI),
+// pending until acknowledged by ackJti, then delivered. `sid` stays
+// bson.ObjectID like the old pending/delivered documents; the public DAO
+// interface exposes only string IDs and converts at the boundary.
+type deliveryDoc struct {
+	Sid       bson.ObjectID `bson:"sid"`
+	Jti       string        `bson:"jti"`
+	AckJti    string        `bson:"ackJti"`
+	State     string        `bson:"state"`
+	CreatedAt time.Time     `bson:"createdAt"`
+	AckDate   *time.Time    `bson:"ackDate,omitempty"`
+	ExpireAt  *time.Time    `bson:"expireAt,omitempty"`
 }
 
-// deliveredDoc is the on-disk shape of a DeliveredEvent. The fields are spelled
-// out rather than embedding pendingDoc: the driver's struct codec ignores an
-// unexported embedded struct even with `bson:",inline"`, which silently wrote
-// documents carrying only ackDate.
-type deliveredDoc struct {
-	Jti     string        `bson:"jti"`
-	Sid     bson.ObjectID `bson:"sid"`
-	AckDate time.Time     `bson:"ackDate"`
+func (doc *deliveryDoc) ref() interfaces.PendingRef {
+	ackJti := doc.AckJti
+	if ackJti == "" {
+		ackJti = doc.Jti
+	}
+	return interfaces.PendingRef{Jti: doc.Jti, AckJti: ackJti, EnqueuedAt: doc.CreatedAt}
+}
+
+func (doc *deliveryDoc) deliverable() interfaces.DeliverableEvent {
+	r := doc.ref()
+	return interfaces.DeliverableEvent{Jti: r.Jti, StreamId: doc.Sid.Hex(), AckJti: r.AckJti, CreatedAt: r.EnqueuedAt}
+}
+
+// pendingDeliveryDoc builds the pending document of ref for sid. An empty
+// AckJti is stored as Jti and a zero EnqueuedAt as now.
+func pendingDeliveryDoc(sid bson.ObjectID, ref interfaces.PendingRef, now time.Time) *deliveryDoc {
+	doc := &deliveryDoc{Sid: sid, Jti: ref.Jti, AckJti: ref.AckJti, State: interfaces.DeliveryStatePending, CreatedAt: ref.EnqueuedAt}
+	if doc.AckJti == "" {
+		doc.AckJti = doc.Jti
+	}
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = now
+	}
+	return doc
 }
 
 // EventStoreWriteConcern is the write concern of the ingest durability
-// contract (ADR 0038): events and pending markers are majority-acknowledged
+// contract (ADR 0038): events and pending references are majority-acknowledged
 // and journaled before a SET is acked. It returns a fresh value so no caller
 // can mutate a shared one.
 func EventStoreWriteConcern() *writeconcern.WriteConcern {
@@ -45,7 +69,7 @@ func EventStoreWriteConcern() *writeconcern.WriteConcern {
 	return &writeconcern.WriteConcern{W: "majority", Journal: &journal}
 }
 
-// oneTripBulkWriteOptions are the options of the one-trip events+pending
+// oneTripBulkWriteOptions are the options of the one-trip events+deliveries
 // bulkWrite. A client-level bulkWrite ignores the collection handles' write
 // concern and uses the client's, and the client carries none (#332), so the
 // call must request majority+journal itself or it would fall to the server
@@ -54,22 +78,49 @@ func oneTripBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
 	return options.ClientBulkWrite().SetOrdered(true).SetWriteConcern(EventStoreWriteConcern())
 }
 
+// ackBulkWriteOptions are the options of the one-trip ack bulkWrite (#359):
+// one conditional updateMany on deliveries plus the copy inserts, unordered so
+// a duplicate copy never stops the state update. It runs at w:1: an ack is
+// post-persistence (ADR 0038 governs ingest only), so a state flip rolled back
+// on failover costs a redelivery, which the receiver dedups by JTI, never a
+// lost SET.
+func ackBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
+	return options.ClientBulkWrite().SetOrdered(false).SetWriteConcern(writeconcern.W1())
+}
+
 var errEventNotInit = errors.New("mongo collection not initialized")
 
 type EventDAOMongo struct {
-	events    collectionRef
-	pending   collectionRef
-	delivered collectionRef
+	events     collectionRef
+	deliveries collectionRef
 
-	// oneTrip selects the InsertWithPending strategy (ADR 0043): true issues
-	// one client-level bulkWrite across the events and pending namespaces
-	// (MongoDB >= 8.0); false uses the two-write fallback. The provider sets
-	// it from the server version at connect; the zero value is the fallback,
-	// which works on every supported server.
+	// oneTrip selects the InsertWithPending and Ack strategy (ADR 0043): true
+	// issues one client-level bulkWrite across the events and deliveries
+	// namespaces (MongoDB >= 8.0); false uses the two-write fallback. The
+	// provider sets it from the server version at connect; the zero value is
+	// the fallback, which works on every supported server.
 	oneTrip atomic.Bool
+
+	// sweep is the SweepExpired body-scan watermark (in-process only): the
+	// next pass reads bodies with sortTime >= sweep.after, skipping the
+	// still-referenced JTIs already examined at exactly that sortTime (iat has
+	// second precision, so many bodies share one sortTime).
+	sweepMu sync.Mutex
+	sweep   sweepWatermark
+
+	// legacyPending / legacyDelivered override the legacy collection names
+	// MigrateLegacyDeliveries reads (#361); empty means pendingEvents /
+	// deliveredEvents. Only tests sharing one database set them.
+	legacyPending   string
+	legacyDelivered string
 }
 
-// SetOneTripIngest selects the InsertWithPending strategy: true for the
+type sweepWatermark struct {
+	after time.Time
+	seen  []string
+}
+
+// SetOneTripIngest selects the InsertWithPending / Ack strategy: true for the
 // single multi-namespace bulkWrite (MongoDB >= 8.0 only), false for the
 // two-write fallback.
 func (d *EventDAOMongo) SetOneTripIngest(enabled bool) {
@@ -81,21 +132,19 @@ func (d *EventDAOMongo) OneTripIngest() bool {
 	return d.oneTrip.Load()
 }
 
-func NewEventDAO(eventCol, pendingCol, deliveredCol *mongo.Collection) interfaces.EventDAO {
+func NewEventDAO(eventCol, deliveriesCol *mongo.Collection) interfaces.EventDAO {
 	d := &EventDAOMongo{}
 	d.events.set(eventCol)
-	d.pending.set(pendingCol)
-	d.delivered.set(deliveredCol)
+	d.deliveries.set(deliveriesCol)
 	return d
 }
 
-// SetCollections rebinds all three collections used by EventDAOMongo. The
-// rebind is atomic per-collection; in-flight callers see consistent values
-// for the collection they originally loaded.
-func (d *EventDAOMongo) SetCollections(eventCol, pendingCol, deliveredCol *mongo.Collection) {
+// SetCollections rebinds the collections used by EventDAOMongo. The rebind is
+// atomic per-collection; in-flight callers see consistent values for the
+// collection they originally loaded.
+func (d *EventDAOMongo) SetCollections(eventCol, deliveriesCol *mongo.Collection) {
 	d.events.set(eventCol)
-	d.pending.set(pendingCol)
-	d.delivered.set(deliveredCol)
+	d.deliveries.set(deliveriesCol)
 }
 
 func (d *EventDAOMongo) eventColLoad() (*mongo.Collection, error) {
@@ -106,16 +155,8 @@ func (d *EventDAOMongo) eventColLoad() (*mongo.Collection, error) {
 	return c, nil
 }
 
-func (d *EventDAOMongo) pendingColLoad() (*mongo.Collection, error) {
-	c := d.pending.load()
-	if c == nil {
-		return nil, errEventNotInit
-	}
-	return c, nil
-}
-
-func (d *EventDAOMongo) deliveredColLoad() (*mongo.Collection, error) {
-	c := d.delivered.load()
+func (d *EventDAOMongo) deliveriesColLoad() (*mongo.Collection, error) {
+	c := d.deliveries.load()
 	if c == nil {
 		return nil, errEventNotInit
 	}
@@ -186,11 +227,13 @@ func (d *EventDAOMongo) InsertMany(ctx context.Context, records []*model.EventRe
 	return results, nil
 }
 
-// InsertWithPending persists records and their pending markers (ADR 0043).
-// On MongoDB >= 8.0 it is one ordered client-level bulkWrite spanning the
-// events and pending namespaces; below 8.0 it is the two-write fallback. Both
-// strategies store the same documents and report the same per-record outcomes.
-func (d *EventDAOMongo) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+// InsertWithPending persists records and their pending delivery references
+// (ADR 0043). On MongoDB >= 8.0 it is one ordered client-level bulkWrite
+// spanning the events and deliveries namespaces; below 8.0 it is the two-write
+// fallback. Both strategies store the same documents and report the same
+// per-record outcomes. The unique (sid, jti) index rejects a second reference
+// for the same stream exactly as the old pendingSidJti index did.
+func (d *EventDAOMongo) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
@@ -198,70 +241,70 @@ func (d *EventDAOMongo) InsertWithPending(ctx context.Context, records []*model.
 	if err != nil {
 		return nil, err
 	}
-	pc, err := d.pendingColLoad()
+	dc, err := d.deliveriesColLoad()
 	if err != nil {
 		return nil, err
 	}
-	streams, err := pendingSids(interfaces.StreamsByJti(pending))
+	streams, err := pendingDocs(interfaces.StreamsByJti(pending), time.Now())
 	if err != nil {
 		return nil, err
 	}
 	if d.oneTrip.Load() {
-		return insertWithPendingOneTrip(ctx, ec, pc, records, streams)
+		return insertWithPendingOneTrip(ctx, ec, dc, records, streams)
 	}
-	return d.insertWithPendingTwoWrite(ctx, records, streams)
+	return d.insertWithPendingTwoWrite(ctx, dc, records, streams)
 }
 
-// pendingSids converts the JTI -> stream-ID map to JTI -> ObjectID, the
-// on-disk sid type, failing the batch on a malformed stream ID before anything
-// is written.
-func pendingSids(byJti map[string][]string) (map[string][]bson.ObjectID, error) {
-	out := make(map[string][]bson.ObjectID, len(byJti))
-	for jti, streamIDs := range byJti {
-		sids := make([]bson.ObjectID, len(streamIDs))
-		for i, streamID := range streamIDs {
-			sid, err := ParseObjectID(streamID)
+// pendingDocs converts the JTI -> stream references map to JTI -> pending
+// delivery documents, failing the batch on a malformed stream ID before
+// anything is written.
+func pendingDocs(byJti map[string][]interfaces.StreamPending, now time.Time) (map[string][]*deliveryDoc, error) {
+	out := make(map[string][]*deliveryDoc, len(byJti))
+	for jti, targets := range byJti {
+		docs := make([]*deliveryDoc, len(targets))
+		for i, t := range targets {
+			sid, err := ParseObjectID(t.StreamID)
 			if err != nil {
 				return nil, err
 			}
-			sids[i] = sid
+			docs[i] = pendingDeliveryDoc(sid, t.Ref, now)
 		}
-		out[jti] = sids
+		out[jti] = docs
 	}
 	return out, nil
 }
 
 // oneTripOp is one insert of insertWithPendingOneTrip: the events-collection
-// body (marker == false) or one pending marker of records[rec].
+// body (marker == false) or one pending delivery reference of records[rec].
 type oneTripOp struct {
 	rec    int
 	marker bool
 	w      mongo.ClientBulkWrite
 }
 
-// insertWithPendingOneTrip writes every body, then every pending marker, as
+// insertWithPendingOneTrip writes every body, then every pending reference, as
 // ONE ordered multi-namespace bulkWrite (ADR 0043). Grouping the ops by
 // namespace lets mongod batch consecutive same-namespace inserts into one
-// storage write unit per namespace; interleaving body and markers per record
-// alternates namespaces on every op and defeats that batching.
+// storage write unit per namespace; interleaving body and references per
+// record alternates namespaces on every op and defeats that batching.
 //
-// Ordering is what keeps a duplicate from leaving an orphan marker (ADR 0017):
-// an ordered bulkWrite stops at the first failed op, and every marker follows
-// every body, so a rejected body is never followed by a written marker. On a
-// failure at op k, every op before k is stored; op k's record gets its error
-// and its remaining ops are dropped; every other op after k, including the
-// markers of records whose bodies already landed, is resubmitted in the same
-// order. A record is reported successful only once its body and all its
-// markers are durable (ADR 0038). A batch with k per-record failures costs k+1
-// round trips and the common case costs one.
-func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, records []*model.EventRecord, streams map[string][]bson.ObjectID) ([]error, error) {
+// Ordering is what keeps a duplicate from leaving an orphan reference (ADR
+// 0017): an ordered bulkWrite stops at the first failed op, and every
+// reference follows every body, so a rejected body is never followed by a
+// written reference. On a failure at op k, every op before k is stored; op
+// k's record gets its error and its remaining ops are dropped; every other op
+// after k, including the references of records whose bodies already landed,
+// is resubmitted in the same order. A record is reported successful only once
+// its body and all its references are durable (ADR 0038). A batch with k
+// per-record failures costs k+1 round trips and the common case costs one.
+func insertWithPendingOneTrip(ctx context.Context, ec, dc *mongo.Collection, records []*model.EventRecord, streams map[string][]*deliveryDoc) ([]error, error) {
 	client := ec.Database().Client()
 	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
-	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
+	dNS := mongo.ClientBulkWrite{Database: dc.Database().Name(), Collection: dc.Name()}
 	opts := oneTripBulkWriteOptions()
 
 	// A JTI repeated in the batch needs no special casing: the repeat's body
-	// insert fails the unique JTI index, and its markers are dropped before
+	// insert fails the unique JTI index, and its references are dropped before
 	// the resubmit.
 	ops := make([]oneTripOp, 0, len(records))
 	var marks []oneTripOp
@@ -269,9 +312,9 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 		w := evNS
 		w.Model = mongo.NewClientInsertOneModel().SetDocument(rec)
 		ops = append(ops, oneTripOp{rec: i, w: w})
-		for _, sid := range streams[rec.Jti] {
-			m := pNS
-			m.Model = mongo.NewClientInsertOneModel().SetDocument(&pendingDoc{Jti: rec.Jti, Sid: sid})
+		for _, doc := range streams[rec.Jti] {
+			m := dNS
+			m.Model = mongo.NewClientInsertOneModel().SetDocument(doc)
 			marks = append(marks, oneTripOp{rec: i, marker: true, w: m})
 		}
 	}
@@ -289,7 +332,8 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 		}
 		var cbe mongo.ClientBulkWriteException
 		if !errors.As(err, &cbe) || cbe.WriteError != nil || len(cbe.WriteConcernErrors) > 0 || len(cbe.WriteErrors) != 1 {
-			eLog.Error("Error bulk writing events with pending markers", "error", err)
+			// WARN, not ERROR: the ingest caller answers a retryable 503 and the sender retries (CONTEXT.md log-level policy).
+			eLog.Warn("Error bulk writing events with pending references", "error", err)
 			return nil, err
 		}
 		failed, we := -1, mongo.WriteError{}
@@ -307,7 +351,7 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 		case !bad.marker:
 			results[bad.rec] = errors.New(we.Error())
 		default:
-			// The body landed but a marker did not: not acknowledgeable.
+			// The body landed but a reference did not: not acknowledgeable.
 			results[bad.rec] = fmt.Errorf("pending marker write failed: %s", we.Error())
 		}
 		rest := make([]oneTripOp, 0, len(ops)-failed-1)
@@ -322,16 +366,12 @@ func insertWithPendingOneTrip(ctx context.Context, ec, pc *mongo.Collection, rec
 }
 
 // insertWithPendingTwoWrite is the pre-8.0 fallback: insert the bodies, then
-// write markers for the records that were actually stored. Markers are only
-// ever written after their body is known to be accepted, so no speculative
-// marker exists and nothing needs retracting (ADR 0043 supersedes the ADR 0038
-// concurrent-write mechanism).
-func (d *EventDAOMongo) insertWithPendingTwoWrite(ctx context.Context, records []*model.EventRecord, streams map[string][]bson.ObjectID) ([]error, error) {
+// write references for the records that were actually stored. References are
+// only ever written after their body is known to be accepted, so no
+// speculative reference exists and nothing needs retracting (ADR 0043
+// supersedes the ADR 0038 concurrent-write mechanism).
+func (d *EventDAOMongo) insertWithPendingTwoWrite(ctx context.Context, dc *mongo.Collection, records []*model.EventRecord, streams map[string][]*deliveryDoc) ([]error, error) {
 	results, err := d.InsertMany(ctx, records)
-	if err != nil {
-		return nil, err
-	}
-	pc, err := d.pendingColLoad()
 	if err != nil {
 		return nil, err
 	}
@@ -341,25 +381,26 @@ func (d *EventDAOMongo) insertWithPendingTwoWrite(ctx context.Context, records [
 		if results[i] != nil {
 			continue
 		}
-		for _, sid := range streams[rec.Jti] {
-			docs = append(docs, &pendingDoc{Jti: rec.Jti, Sid: sid})
+		for _, doc := range streams[rec.Jti] {
+			docs = append(docs, doc)
 			owners = append(owners, i)
 		}
 	}
 	if len(docs) == 0 {
 		return results, nil
 	}
-	_, err = pc.InsertMany(ctx, docs)
+	_, err = dc.InsertMany(ctx, docs)
 	if err == nil {
 		return results, nil
 	}
 	var bwe mongo.BulkWriteException
 	if !errors.As(err, &bwe) || bwe.WriteConcernError != nil {
-		eLog.Error("Error bulk inserting pending markers", "error", err)
+		// WARN, not ERROR: the ingest caller answers a retryable 503 and the sender retries (CONTEXT.md log-level policy).
+		eLog.Warn("Error bulk inserting pending references", "error", err)
 		return nil, err
 	}
 	// Ordered insert: every doc before the first failure is stored; the
-	// failed doc's record and every record whose markers came after it are
+	// failed doc's record and every record whose references came after it are
 	// not acknowledgeable.
 	first := len(docs)
 	for _, we := range bwe.WriteErrors {
@@ -434,6 +475,10 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 		}
 	}
 
+	// An outbound re-signed copy (originalJti set, stored by Ack) is not an
+	// inbound event: replay and reset never select it.
+	queryFilter = append(queryFilter, bson.E{Key: "originalJti", Value: bson.D{{Key: "$exists", Value: false}}})
+
 	opts := options.Find().SetSort(bson.D{bson.E{Key: "jti", Value: 1}})
 	cursor, err := c.Find(ctx, queryFilter, opts)
 	if err != nil {
@@ -462,8 +507,35 @@ func (d *EventDAOMongo) FindByTimeRange(ctx context.Context, from time.Time, to 
 	return filtered, nil
 }
 
-func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID string) error {
-	c, err := d.pendingColLoad()
+// pendingUpsertFilter and pendingUpsertPipeline are the AddPending upsert of
+// a reference: a pipeline update so createdAt can depend on the stored state. An absent or delivered
+// row gets createdAt; an already-pending row keeps its own. ackDate and
+// expireAt are removed, so a delivered row returns to pending cleanly.
+func pendingUpsertFilter(sid bson.ObjectID, jti string) bson.D {
+	return bson.D{{Key: "sid", Value: sid}, {Key: "jti", Value: jti}}
+}
+
+func pendingUpsertPipeline(doc *deliveryDoc) mongo.Pipeline {
+	return mongo.Pipeline{
+		{{Key: "$set", Value: bson.D{
+			{Key: "sid", Value: doc.Sid},
+			{Key: "jti", Value: bson.D{{Key: "$literal", Value: doc.Jti}}},
+			{Key: "ackJti", Value: bson.D{{Key: "$literal", Value: doc.AckJti}}},
+			{Key: "createdAt", Value: bson.D{{Key: "$cond", Value: bson.A{
+				bson.D{{Key: "$eq", Value: bson.A{"$state", interfaces.DeliveryStatePending}}},
+				"$createdAt",
+				doc.CreatedAt,
+			}}}},
+			{Key: "state", Value: interfaces.DeliveryStatePending},
+		}}},
+		{{Key: "$unset", Value: bson.A{"ackDate", "expireAt"}}},
+	}
+}
+
+// AddPending upserts the (streamID, ref.Jti) reference to state pending with
+// ref.AckJti (see the EventDAO contract for the createdAt rule).
+func (d *EventDAOMongo) AddPending(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return err
 	}
@@ -471,145 +543,179 @@ func (d *EventDAOMongo) AddPending(ctx context.Context, jti string, streamID str
 	if err != nil {
 		return err
 	}
-	doc := pendingDoc{Jti: jti, Sid: sid}
-	_, err = c.InsertOne(ctx, &doc)
+	doc := pendingDeliveryDoc(sid, ref, time.Now())
+	_, err = c.UpdateOne(ctx, pendingUpsertFilter(sid, doc.Jti), pendingUpsertPipeline(doc), options.UpdateOne().SetUpsert(true))
+	if err != nil {
+		eLog.Error("Error adding pending reference", "jti", ref.Jti, "streamID", streamID, "error", err)
+	}
 	return err
 }
 
-// EnsurePending upserts one pending marker per stream that has neither a
-// pending nor a delivered record for jti (#331). The upsert is keyed on
-// (sid, jti), so a concurrent duplicate cannot produce a second marker, and a
-// stream whose delivered record exists is skipped rather than re-queued.
-func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
-	if len(streamIDs) == 0 {
+// AddPendingMany is AddPending for every ref, in one bulk write.
+func (d *EventDAOMongo) AddPendingMany(ctx context.Context, refs []interfaces.PendingRef, streamID string) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	c, err := d.deliveriesColLoad()
+	if err != nil {
+		return err
+	}
+	sid, err := ParseObjectID(streamID)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	models := make([]mongo.WriteModel, len(refs))
+	for i, ref := range refs {
+		doc := pendingDeliveryDoc(sid, ref, now)
+		models[i] = mongo.NewUpdateOneModel().SetFilter(pendingUpsertFilter(sid, doc.Jti)).
+			SetUpdate(pendingUpsertPipeline(doc)).SetUpsert(true)
+	}
+	if _, err = c.BulkWrite(ctx, models); err != nil {
+		eLog.Error("Error adding pending references", "count", len(refs), "streamID", streamID, "error", err)
+	}
+	return err
+}
+
+// EnsurePending upserts one pending reference per stream that holds no
+// deliveries document for jti in either state (#331). The upsert is keyed on
+// (sid, jti) with $setOnInsert, so an existing document (its ackJti and
+// createdAt included) is untouched and a concurrent duplicate cannot produce a
+// second reference. The bulk write's UpsertedIDs name the queued streams.
+func (d *EventDAOMongo) EnsurePending(ctx context.Context, jti string, ackJtis map[string]string) ([]string, error) {
+	if len(ackJtis) == 0 {
 		return nil, nil
 	}
-	pc, err := d.pendingColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return nil, err
 	}
-	dc, err := d.deliveredColLoad()
-	if err != nil {
-		return nil, err
-	}
-	sids := make([]bson.ObjectID, len(streamIDs))
-	for i, streamID := range streamIDs {
-		if sids[i], err = ParseObjectID(streamID); err != nil {
+	now := time.Now()
+	streamIDs := make([]string, 0, len(ackJtis))
+	models := make([]mongo.WriteModel, 0, len(ackJtis))
+	for streamID, ackJti := range ackJtis {
+		sid, err := ParseObjectID(streamID)
+		if err != nil {
 			return nil, err
 		}
+		doc := pendingDeliveryDoc(sid, interfaces.PendingRef{Jti: jti, AckJti: ackJti}, now)
+		streamIDs = append(streamIDs, streamID)
+		models = append(models, mongo.NewUpdateOneModel().SetFilter(pendingUpsertFilter(sid, jti)).
+			SetUpdate(bson.D{{Key: "$setOnInsert", Value: doc}}).SetUpsert(true))
 	}
-	cursor, err := dc.Find(ctx, bson.M{"jti": jti, "sid": bson.M{"$in": sids}},
-		options.Find().SetProjection(bson.M{"sid": 1}))
+	res, err := c.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		eLog.Error("Error checking delivered records before re-queue", "jti", jti, "error", err)
-		return nil, err
+		var bwe mongo.BulkWriteException
+		if !errors.As(err, &bwe) || bwe.WriteConcernError != nil || !allDuplicateKey(bwe.WriteErrors) {
+			// WARN, not ERROR: the duplicate SET is refused and its sender retries (CONTEXT.md log-level policy).
+			eLog.Warn("Error re-queuing pending references", "jti", jti, "error", err)
+			return nil, err
+		}
+		// A duplicate key is a concurrent upsert that won the race: that
+		// stream already holds its reference, so it is not queued here.
 	}
-	var delivered []deliveredDoc
-	if err = cursor.All(ctx, &delivered); err != nil {
-		eLog.Error("Error parsing delivered records before re-queue", "jti", jti, "error", err)
-		return nil, err
-	}
-	done := make(map[bson.ObjectID]struct{}, len(delivered))
-	for _, doc := range delivered {
-		done[doc.Sid] = struct{}{}
+	if res == nil {
+		return nil, nil
 	}
 	var queued []string
-	for i, sid := range sids {
-		if _, ok := done[sid]; ok {
-			continue
-		}
-		res, uerr := pc.UpdateOne(ctx, bson.M{"sid": sid, "jti": jti},
-			bson.M{"$setOnInsert": bson.M{"sid": sid, "jti": jti}}, options.UpdateOne().SetUpsert(true))
-		if uerr != nil {
-			eLog.Error("Error re-queuing pending marker", "jti", jti, "sid", streamIDs[i], "error", uerr)
-			return queued, uerr
-		}
-		if res.UpsertedCount == 1 {
-			queued = append(queued, streamIDs[i])
+	for idx := range res.UpsertedIDs {
+		if idx >= 0 && int(idx) < len(streamIDs) {
+			queued = append(queued, streamIDs[idx])
 		}
 	}
 	return queued, nil
 }
 
-func (d *EventDAOMongo) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
-		return nil
+func allDuplicateKey(wes []mongo.BulkWriteError) bool {
+	for _, we := range wes {
+		if !mongo.IsDuplicateKeyError(we.WriteError) {
+			return false
+		}
 	}
-	c, err := d.pendingColLoad()
-	if err != nil {
-		return err
-	}
-	sid, err := ParseObjectID(streamID)
-	if err != nil {
-		return err
-	}
-	docs := make([]any, len(jtis))
-	for i, jti := range jtis {
-		docs[i] = &pendingDoc{Jti: jti, Sid: sid}
-	}
-	_, err = c.InsertMany(ctx, docs)
-	return err
+	return true
 }
 
-func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
-	c, err := d.pendingColLoad()
+// GetPendingForStream returns one page of streamID's pending references.
+//
+// Sort by jti, explicitly. jtis are UUIDv7 (goSet.GenerateJti), so ascending
+// jti IS ascending issue order, and the {sid,state,jti} index supplies that
+// order directly. The sort is stated rather than inherited because without it
+// the order is whatever plan the query planner happens to pick. Delivery order
+// is a contract receivers reason about (ADR 0040), so it may not be a side
+// effect of index selection. A limit <= 0 reads every pending reference.
+func (d *EventDAOMongo) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
+	page := interfaces.PendingPage{Refs: []interfaces.PendingRef{}}
+	c, err := d.deliveriesColLoad()
 	if err != nil {
-		return nil, 0, err
+		return page, err
 	}
 	sid, err := ParseObjectID(streamID)
 	if err != nil {
-		return nil, 0, err
+		return page, err
 	}
+	filter := bson.D{{Key: "sid", Value: sid}, {Key: "state", Value: interfaces.DeliveryStatePending}}
 
-	filter := bson.M{"sid": sid}
-
-	totalCount, err := c.CountDocuments(ctx, filter, options.Count())
+	page.Total, err = c.CountDocuments(ctx, filter)
 	if err != nil {
-		eLog.Error("Error counting pending events", "error", err)
-		return nil, 0, err
+		// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+		eLog.Warn("Error counting pending references", "error", err)
+		return page, err
+	}
+	if page.Total == 0 {
+		return page, nil
 	}
 
-	if totalCount == 0 {
-		return []string{}, 0, nil
-	}
-
-	// Sort by jti, explicitly. jtis are UUIDv7 (goSet.GenerateJti), so
-	// ascending jti IS ascending issue order, and the {sid:1,jti:1} index
-	// supplies that order directly — the sort adds no blocking stage and no
-	// round trip. The sort is stated rather than inherited because without it
-	// the order is whatever plan the query planner happens to pick: an
-	// unsorted find on this filter returned insertion order when the
-	// collection carried the legacy {sid:1} index and returns jti order under
-	// the compound one. Delivery order is a contract receivers reason about
-	// (ADR 0040), so it may not be a side effect of index selection.
 	opts := options.Find().SetSort(bson.D{{Key: "jti", Value: 1}})
 	if limit > 0 {
 		opts.SetLimit(int64(limit))
 	}
-
-	var docs []pendingDoc
 	cursor, err := c.Find(ctx, filter, opts)
 	if err != nil {
-		eLog.Error("Error getting event batch", "error", err)
-		return nil, 0, err
+		// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+		eLog.Warn("Error getting pending references", "error", err)
+		return page, err
+	}
+	var docs []deliveryDoc
+	if err = cursor.All(ctx, &docs); err != nil {
+		eLog.Error("Error parsing pending references", "error", err)
+		return page, err
+	}
+	for i := range docs {
+		page.Refs = append(page.Refs, docs[i].ref())
 	}
 
-	err = cursor.All(ctx, &docs)
-	if err != nil {
-		eLog.Error("Error parsing pending events", "error", err)
-		return nil, 0, err
+	if page.Total > int64(len(page.Refs)) && len(page.Refs) > 0 {
+		last := page.Refs[len(page.Refs)-1].Jti
+		beyond := bson.D{
+			{Key: "sid", Value: sid},
+			{Key: "state", Value: interfaces.DeliveryStatePending},
+			{Key: "jti", Value: bson.D{{Key: "$gt", Value: last}}},
+		}
+		var oldest deliveryDoc
+		err = c.FindOne(ctx, beyond, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: 1}})).Decode(&oldest)
+		switch {
+		case err == nil:
+			page.OldestBeyond = oldest.CreatedAt
+		case errors.Is(err, mongo.ErrNoDocuments):
+			// Drained between the count and this read.
+		default:
+			// WARN, not ERROR: a failed pending read is retried on the next wake, poll or refill (CONTEXT.md log-level policy).
+			eLog.Warn("Error reading oldest pending reference beyond the page", "error", err)
+			return page, err
+		}
 	}
-
-	ids := make([]string, len(docs))
-	for i, v := range docs {
-		ids[i] = v.Jti
-	}
-
-	return ids, totalCount, nil
+	return page, nil
 }
 
-func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
-	c, err := d.pendingColLoad()
+// StoredAckJtis returns the stored ackJti of each of jtis that has a
+// deliveries row on streamID, in either state, in one read on the {sid, jti}
+// key.
+func (d *EventDAOMongo) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	out := make(map[string]string, len(jtis))
+	if len(jtis) == 0 {
+		return out, nil
+	}
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return nil, err
 	}
@@ -617,44 +723,32 @@ func (d *EventDAOMongo) RemovePending(ctx context.Context, jti string, streamID 
 	if err != nil {
 		return nil, err
 	}
-
-	filter := bson.M{
-		"jti": jti,
-		"sid": sid,
-	}
-
-	res := c.FindOne(ctx, filter)
-	if res.Err() != nil {
-		if errors.Is(res.Err(), mongo.ErrNoDocuments) {
-			return nil, nil
-		}
-		return nil, res.Err()
-	}
-
-	var doc pendingDoc
-	err = res.Decode(&doc)
+	cursor, err := c.Find(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "jti", Value: bson.D{{Key: "$in", Value: jtis}}}},
+		options.Find().SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "ackJti", Value: 1}}))
 	if err != nil {
-		eLog.Error("Error decoding deliverable event", "error", err)
+		// WARN, not ERROR: the caller retries or redelivers (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading stored acknowledgement JTIs", "streamID", streamID, "error", err)
 		return nil, err
 	}
-
-	_, err = c.DeleteOne(ctx, filter)
-	if err != nil {
-		eLog.Error("Error deleting pending event", "error", err)
+	var docs []deliveryDoc
+	if err = cursor.All(ctx, &docs); err != nil {
+		eLog.Error("Error decoding stored acknowledgement JTIs", "streamID", streamID, "error", err)
 		return nil, err
 	}
-
-	return &interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()}, nil
+	for i := range docs {
+		out[docs[i].Jti] = docs[i].ref().AckJti
+	}
+	return out, nil
 }
 
-// RemovePendingMany finds streamID's pending entries for jtis in one query,
-// deletes exactly those in one DeleteMany, and returns them — two round trips
-// for the batch instead of two per JTI.
+// RemovePendingMany finds streamID's pending references for jtis in one query,
+// deletes exactly those in one DeleteMany, and returns them. Delivered
+// references are never touched.
 func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
 	if len(jtis) == 0 {
 		return nil, nil
 	}
-	c, err := d.pendingColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return nil, err
 	}
@@ -662,36 +756,47 @@ func (d *EventDAOMongo) RemovePendingMany(ctx context.Context, jtis []string, st
 	if err != nil {
 		return nil, err
 	}
-
-	cursor, err := c.Find(ctx, bson.M{"sid": sid, "jti": bson.M{"$in": jtis}})
+	filter := bson.D{
+		{Key: "sid", Value: sid},
+		{Key: "state", Value: interfaces.DeliveryStatePending},
+		{Key: "jti", Value: bson.D{{Key: "$in", Value: jtis}}},
+	}
+	cursor, err := c.Find(ctx, filter)
 	if err != nil {
-		eLog.Error("Error finding pending events", "error", err)
+		// WARN, not ERROR: the WAL drain keeps the entries and retries on its next pass (CONTEXT.md log-level policy).
+		eLog.Warn("Error finding pending references", "error", err)
 		return nil, err
 	}
-	var docs []pendingDoc
+	var docs []deliveryDoc
 	if err = cursor.All(ctx, &docs); err != nil {
-		eLog.Error("Error decoding pending events", "error", err)
+		eLog.Error("Error decoding pending references", "error", err)
 		return nil, err
 	}
 	if len(docs) == 0 {
 		return nil, nil
 	}
-
 	removed := make([]interfaces.DeliverableEvent, len(docs))
 	found := make([]string, len(docs))
-	for i, doc := range docs {
-		removed[i] = interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()}
-		found[i] = doc.Jti
+	for i := range docs {
+		removed[i] = docs[i].deliverable()
+		found[i] = docs[i].Jti
 	}
-	if _, err = c.DeleteMany(ctx, bson.M{"sid": sid, "jti": bson.M{"$in": found}}); err != nil {
-		eLog.Error("Error deleting pending events", "error", err)
+	del := bson.D{
+		{Key: "sid", Value: sid},
+		{Key: "state", Value: interfaces.DeliveryStatePending},
+		{Key: "jti", Value: bson.D{{Key: "$in", Value: found}}},
+	}
+	if _, err = c.DeleteMany(ctx, del); err != nil {
+		// WARN, not ERROR: the WAL drain keeps the entries and retries on its next pass (CONTEXT.md log-level policy).
+		eLog.Warn("Error deleting pending references", "error", err)
 		return nil, err
 	}
 	return removed, nil
 }
 
+// ClearPendingForStream deletes every pending reference of streamID.
 func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID string) (int64, error) {
-	c, err := d.pendingColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return 0, err
 	}
@@ -699,163 +804,296 @@ func (d *EventDAOMongo) ClearPendingForStream(ctx context.Context, streamID stri
 	if err != nil {
 		return 0, err
 	}
-
-	filter := bson.D{bson.E{Key: "sid", Value: sid}}
-	many, err := c.DeleteMany(ctx, filter)
+	many, err := c.DeleteMany(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "state", Value: interfaces.DeliveryStatePending}})
 	if err != nil {
-		eLog.Error("Error clearing pending events", "error", err)
+		eLog.Error("Error clearing pending references", "error", err)
 		return 0, err
 	}
 	return many.DeletedCount, nil
 }
 
-func (d *EventDAOMongo) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
-	c, err := d.deliveredColLoad()
-	if err != nil {
-		return err
+// ackFilterUpdate is the conditional state flip of an ack batch.
+func ackFilterUpdate(sid bson.ObjectID, batch interfaces.AckBatch) (bson.D, bson.D) {
+	filter := bson.D{
+		{Key: "sid", Value: sid},
+		{Key: "ackJti", Value: bson.D{{Key: "$in", Value: batch.Jtis}}},
+		{Key: "state", Value: interfaces.DeliveryStatePending},
 	}
-	sid, err := ParseObjectID(event.StreamId)
-	if err != nil {
-		return err
+	set := bson.D{
+		{Key: "state", Value: interfaces.DeliveryStateDelivered},
+		{Key: "ackDate", Value: batch.AckDate},
 	}
-	doc := deliveredDoc{Jti: event.Jti, Sid: sid, AckDate: ackDate}
-	_, err = c.InsertOne(ctx, &doc)
-	return err
+	if batch.ExpireAt != nil {
+		set = append(set, bson.E{Key: "expireAt", Value: *batch.ExpireAt})
+	}
+	return filter, bson.D{{Key: "$set", Value: set}}
 }
 
-// MarkDeliveredMany inserts one delivered document per event in a single
-// InsertMany.
-func (d *EventDAOMongo) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
-	if len(events) == 0 {
-		return nil
+// Ack acknowledges one stream's batch with one conditional write: every
+// pending reference of the stream whose ackJti is in batch.Jtis becomes
+// delivered, and batch.Copies are stored in events. There is no read and no
+// retract, so two concurrent acks of the same JTI move it exactly once. On
+// MongoDB 8.0+ (the strategy SetOneTripIngest selects) it is ONE unordered
+// client bulkWrite; below 8.0 the copies are an unordered insertMany followed
+// by the updateMany. Both run at w:1 (see ackBulkWriteOptions). A duplicate
+// key on a copy counts as stored.
+func (d *EventDAOMongo) Ack(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	if len(batch.Jtis) == 0 && len(batch.Copies) == 0 {
+		return 0, nil
 	}
-	c, err := d.deliveredColLoad()
+	dc, err := d.deliveriesColLoad()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	docs := make([]any, len(events))
-	for i, event := range events {
-		sid, err := ParseObjectID(event.StreamId)
-		if err != nil {
-			return err
-		}
-		docs[i] = &deliveredDoc{Jti: event.Jti, Sid: sid, AckDate: ackDate}
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return 0, err
 	}
-	_, err = c.InsertMany(ctx, docs)
-	return err
-}
-
-// ackBulkWriteOptions are the options of the one-trip ack bulkWrite. Verbose
-// results are what report, per JTI, whether a pending marker was deleted. The
-// call runs at w:1, the delivered collection's concern (#332): a client-level
-// bulkWrite takes a single concern, and an ack is post-persistence (ADR 0038
-// governs ingest only), so a pending delete rolled back on failover costs a
-// redelivery, which the receiver dedups by JTI, never a lost SET.
-func ackBulkWriteOptions() *options.ClientBulkWriteOptionsBuilder {
-	return options.ClientBulkWrite().SetOrdered(true).SetVerboseResults(true).SetWriteConcern(writeconcern.W1())
-}
-
-// AckDelivered removes streamID's pending markers for jtis and records the
-// acked JTIs as delivered at ackDate. On MongoDB 8.0+ (the strategy
-// SetOneTripIngest selects) this is ONE multi-namespace bulkWrite; below 8.0
-// it is RemovePendingMany followed by MarkDeliveredMany.
-func (d *EventDAOMongo) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	if len(jtis) == 0 {
-		return nil, nil
+	sid, err := ParseObjectID(batch.StreamID)
+	if err != nil {
+		return 0, err
 	}
 	if d.oneTrip.Load() {
-		return d.ackDeliveredOneTrip(ctx, jtis, streamID, ackDate)
+		return ackOneTrip(ctx, ec, dc, sid, batch)
 	}
-	removed, err := d.RemovePendingMany(ctx, jtis, streamID)
-	if err != nil || len(removed) == 0 {
-		return nil, err
-	}
-	if err = d.MarkDeliveredMany(ctx, removed, ackDate); err != nil {
-		return nil, err
-	}
-	acked := make([]string, len(removed))
-	for i, ev := range removed {
-		acked[i] = ev.Jti
-	}
-	return acked, nil
+	return ackTwoWrite(ctx, ec, dc, sid, batch)
 }
 
-// ackDeliveredOneTrip issues, as one ordered bulkWrite, a delete of each
-// JTI's pending markers for the stream followed by an insert of each JTI's
-// delivered record. A bulkWrite cannot make an insert conditional on a
-// delete, so the delivered insert is written for every JTI in the batch; the
-// verbose per-op delete counts then say which JTIs were really pending, and
-// the delivered records of any that were not (unknown or already acked, ADR
-// 0017) are retracted by _id in one follow-up delete. The common case, where
-// every acked JTI was pending, costs one round trip. Retracting by the _id
-// this call inserted never touches another ack's delivered record.
-func (d *EventDAOMongo) ackDeliveredOneTrip(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	pc, err := d.pendingColLoad()
-	if err != nil {
-		return nil, err
+// ackOneTrip and ackTwoWrite list the reference update and the copy inserts
+// in opposite orders. Neither order matters: the one-trip bulk write is
+// unordered, so the server may apply its operations in any order and one
+// failing does not stop the rest, and both paths tolerate a duplicate-key
+// error on a copy that is already stored. Either way the references move to
+// delivered and every copy ends up stored once.
+func ackOneTrip(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectID, batch interfaces.AckBatch) (int64, error) {
+	evNS := mongo.ClientBulkWrite{Database: ec.Database().Name(), Collection: ec.Name()}
+	dNS := mongo.ClientBulkWrite{Database: dc.Database().Name(), Collection: dc.Name()}
+	writes := make([]mongo.ClientBulkWrite, 0, len(batch.Copies)+1)
+	if len(batch.Jtis) > 0 {
+		filter, update := ackFilterUpdate(sid, batch)
+		w := dNS
+		w.Model = mongo.NewClientUpdateManyModel().SetFilter(filter).SetUpdate(update)
+		writes = append(writes, w)
 	}
-	dc, err := d.deliveredColLoad()
+	for _, rec := range batch.Copies {
+		w := evNS
+		w.Model = mongo.NewClientInsertOneModel().SetDocument(rec)
+		writes = append(writes, w)
+	}
+	res, err := dc.Database().Client().BulkWrite(ctx, writes, ackBulkWriteOptions())
+	if err == nil {
+		if res == nil {
+			return 0, nil
+		}
+		return res.ModifiedCount, nil
+	}
+	var cbe mongo.ClientBulkWriteException
+	if !errors.As(err, &cbe) || cbe.WriteError != nil || len(cbe.WriteConcernErrors) > 0 {
+		// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+		eLog.Warn("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
+		return 0, err
+	}
+	for _, we := range cbe.WriteErrors {
+		if !mongo.IsDuplicateKeyError(we) {
+			// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+			eLog.Warn("Error bulk writing ack", "streamID", batch.StreamID, "error", err)
+			return 0, err
+		}
+	}
+	if cbe.PartialResult == nil {
+		return 0, nil
+	}
+	return cbe.PartialResult.ModifiedCount, nil
+}
+
+func ackTwoWrite(ctx context.Context, ec, dc *mongo.Collection, sid bson.ObjectID, batch interfaces.AckBatch) (int64, error) {
+	w1 := options.Collection().SetWriteConcern(writeconcern.W1())
+	if len(batch.Copies) > 0 {
+		docs := make([]any, len(batch.Copies))
+		for i, rec := range batch.Copies {
+			docs[i] = rec
+		}
+		_, err := ec.Clone(w1).InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+		if err != nil {
+			var bwe mongo.BulkWriteException
+			if !errors.As(err, &bwe) || bwe.WriteConcernError != nil || !allDuplicateKey(bwe.WriteErrors) {
+				// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+				eLog.Warn("Error storing ack copies", "streamID", batch.StreamID, "error", err)
+				return 0, err
+			}
+		}
+	}
+	if len(batch.Jtis) == 0 {
+		return 0, nil
+	}
+	filter, update := ackFilterUpdate(sid, batch)
+	res, err := dc.Clone(w1).UpdateMany(ctx, filter, update)
 	if err != nil {
-		return nil, err
+		// WARN, not ERROR: a failed acknowledgement leaves the references pending; they are delivered again (CONTEXT.md log-level policy).
+		eLog.Warn("Error acking pending references", "streamID", batch.StreamID, "error", err)
+		return 0, err
+	}
+	return res.ModifiedCount, nil
+}
+
+// ResetPendingAckJti sets ackJti = jti on every pending reference of streamID
+// whose ackJti differs, in one pipeline updateMany at the collection's
+// (majority) concern. Delivered references are untouched.
+func (d *EventDAOMongo) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
+	c, err := d.deliveriesColLoad()
+	if err != nil {
+		return 0, err
 	}
 	sid, err := ParseObjectID(streamID)
 	if err != nil {
-		return nil, err
+		return 0, err
+	}
+	filter := bson.D{
+		{Key: "sid", Value: sid},
+		{Key: "state", Value: interfaces.DeliveryStatePending},
+		{Key: "$expr", Value: bson.D{{Key: "$ne", Value: bson.A{"$ackJti", "$jti"}}}},
+	}
+	update := mongo.Pipeline{{{Key: "$set", Value: bson.D{{Key: "ackJti", Value: "$jti"}}}}}
+	res, err := c.UpdateMany(ctx, filter, update)
+	if err != nil {
+		// WARN, not ERROR: the queue retries the reset on its next load or wake (CONTEXT.md log-level policy).
+		eLog.Warn("Error resetting pending ackJti", "streamID", streamID, "error", err)
+		return 0, err
+	}
+	return res.ModifiedCount, nil
+}
+
+// sweepBody is the projection of an events document SweepExpired reads.
+type sweepBody struct {
+	Jti         string    `bson:"jti"`
+	OriginalJti string    `bson:"originalJti,omitempty"`
+	SortTime    time.Time `bson:"sortTime"`
+}
+
+// SweepExpired removes every reference with expireAt <= now (one deleteMany),
+// then reads at most maxBodies event bodies with sortTime < bodyCutoff in
+// ascending sortTime from the in-process watermark (eventSortTime index) and
+// deletes each one whose reference key (originalJti when set, else jti) has no
+// deliveries document in either state. A short read means the scan reached the
+// cutoff, so the watermark wraps to the oldest body.
+func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
+	var result interfaces.SweepResult
+	dc, err := d.deliveriesColLoad()
+	if err != nil {
+		return result, err
+	}
+	ec, err := d.eventColLoad()
+	if err != nil {
+		return result, err
 	}
 
-	unique := make([]string, 0, len(jtis))
-	seen := make(map[string]struct{}, len(jtis))
-	for _, jti := range jtis {
-		if _, dup := seen[jti]; !dup {
-			seen[jti] = struct{}{}
-			unique = append(unique, jti)
+	res, err := dc.DeleteMany(ctx, bson.D{{Key: "expireAt", Value: bson.D{{Key: "$lte", Value: now}}}})
+	if err != nil {
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error removing expired delivery references", "error", err)
+		return result, err
+	}
+	result.References = res.DeletedCount
+	if maxBodies <= 0 {
+		return result, nil
+	}
+
+	d.sweepMu.Lock()
+	defer d.sweepMu.Unlock()
+	wm := d.sweep
+
+	timeRange := bson.D{{Key: "$lt", Value: bodyCutoff}}
+	if !wm.after.IsZero() {
+		timeRange = append(timeRange, bson.E{Key: "$gte", Value: wm.after})
+	}
+	filter := bson.D{{Key: "sortTime", Value: timeRange}}
+	if len(wm.seen) > 0 {
+		filter = append(filter, bson.E{Key: "jti", Value: bson.D{{Key: "$nin", Value: wm.seen}}})
+	}
+	opts := options.Find().
+		SetSort(bson.D{{Key: "sortTime", Value: 1}}).
+		SetLimit(int64(maxBodies)).
+		SetProjection(bson.D{{Key: "jti", Value: 1}, {Key: "originalJti", Value: 1}, {Key: "sortTime", Value: 1}})
+	cursor, err := ec.Find(ctx, filter, opts)
+	if err != nil {
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading event bodies for sweep", "error", err)
+		return result, err
+	}
+	var bodies []sweepBody
+	if err = cursor.All(ctx, &bodies); err != nil {
+		eLog.Error("Error parsing event bodies for sweep", "error", err)
+		return result, err
+	}
+	if len(bodies) == 0 {
+		d.sweep = sweepWatermark{}
+		return result, nil
+	}
+
+	keyOf := func(b sweepBody) string {
+		if b.OriginalJti != "" {
+			return b.OriginalJti
+		}
+		return b.Jti
+	}
+	keys := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		keys = append(keys, keyOf(b))
+	}
+	var refs []string
+	if err = dc.Distinct(ctx, "jti", bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: keys}}}}).Decode(&refs); err != nil {
+		// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+		eLog.Warn("Error reading delivery references for sweep", "error", err)
+		return result, err
+	}
+	referenced := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		referenced[r] = struct{}{}
+	}
+
+	var doomed []string
+	for _, b := range bodies {
+		if _, ok := referenced[keyOf(b)]; !ok {
+			doomed = append(doomed, b.Jti)
 		}
 	}
-
-	n := len(unique)
-	pNS := mongo.ClientBulkWrite{Database: pc.Database().Name(), Collection: pc.Name()}
-	dNS := mongo.ClientBulkWrite{Database: dc.Database().Name(), Collection: dc.Name()}
-	writes := make([]mongo.ClientBulkWrite, 2*n)
-	for i, jti := range unique {
-		del := pNS
-		del.Model = mongo.NewClientDeleteManyModel().SetFilter(bson.M{"sid": sid, "jti": jti})
-		writes[i] = del
-		ins := dNS
-		ins.Model = mongo.NewClientInsertOneModel().SetDocument(&deliveredDoc{Jti: jti, Sid: sid, AckDate: ackDate})
-		writes[n+i] = ins
-	}
-	res, err := pc.Database().Client().BulkWrite(ctx, writes, ackBulkWriteOptions())
-	if err != nil {
-		eLog.Error("Error bulk writing ack", "count", n, "streamID", streamID, "error", err)
-		return nil, err
+	if len(doomed) > 0 {
+		del, err := ec.DeleteMany(ctx, bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: doomed}}}})
+		if err != nil {
+			// WARN, not ERROR: the retention sweep retries on its next tick (CONTEXT.md log-level policy).
+			eLog.Warn("Error deleting swept event bodies", "error", err)
+			return result, err
+		}
+		result.Bodies = del.DeletedCount
 	}
 
-	acked := make([]string, 0, n)
-	var retract []any
-	for i, jti := range unique {
-		if res.DeleteResults[i].DeletedCount > 0 {
-			acked = append(acked, jti)
+	if len(bodies) < maxBodies {
+		d.sweep = sweepWatermark{}
+		return result, nil
+	}
+	// Advance: survivors at the last sortTime are skipped next pass; deleted
+	// bodies no longer match, so they need no entry.
+	last := bodies[len(bodies)-1].SortTime
+	next := sweepWatermark{after: last}
+	if last.Equal(wm.after) {
+		next.seen = append(next.seen, wm.seen...)
+	}
+	for _, b := range bodies {
+		if !b.SortTime.Equal(last) {
 			continue
 		}
-		ins, ok := res.InsertResults[n+i]
-		if !ok {
-			return nil, fmt.Errorf("ack bulkWrite: no insert result for op %d", n+i)
-		}
-		retract = append(retract, ins.InsertedID)
-	}
-	if len(retract) > 0 {
-		if _, err = dc.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": retract}}); err != nil {
-			eLog.Error("Error retracting delivered records of non-pending acks", "count", len(retract), "streamID", streamID, "error", err)
-			return nil, err
+		if _, ok := referenced[keyOf(b)]; ok {
+			next.seen = append(next.seen, b.Jti)
 		}
 	}
-	return acked, nil
+	d.sweep = next
+	return result, nil
 }
 
-// ListDeliveredForStream returns streamID's delivered (post-ack) events with
-// their AckDate — the retention purge clock's enumerator (ADR 0055).
+// ListDeliveredForStream returns streamID's delivered (post-ack) references
+// with their AckDate — the retention purge clock's enumerator (ADR 0055).
 func (d *EventDAOMongo) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
-	c, err := d.deliveredColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return nil, err
 	}
@@ -863,30 +1101,30 @@ func (d *EventDAOMongo) ListDeliveredForStream(ctx context.Context, streamID str
 	if err != nil {
 		return nil, err
 	}
-	cursor, err := c.Find(ctx, bson.M{"sid": sid})
+	cursor, err := c.Find(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "state", Value: interfaces.DeliveryStateDelivered}})
 	if err != nil {
-		eLog.Error("Error listing delivered events", "error", err)
+		eLog.Error("Error listing delivered references", "error", err)
 		return nil, err
 	}
-	var docs []deliveredDoc
+	var docs []deliveryDoc
 	if err = cursor.All(ctx, &docs); err != nil {
-		eLog.Error("Error parsing delivered events", "error", err)
+		eLog.Error("Error parsing delivered references", "error", err)
 		return nil, err
 	}
 	out := make([]interfaces.DeliveredEvent, len(docs))
-	for i, doc := range docs {
-		out[i] = interfaces.DeliveredEvent{
-			DeliverableEvent: interfaces.DeliverableEvent{Jti: doc.Jti, StreamId: doc.Sid.Hex()},
-			AckDate:          doc.AckDate,
+	for i := range docs {
+		out[i] = interfaces.DeliveredEvent{DeliverableEvent: docs[i].deliverable(), ExpireAt: docs[i].ExpireAt}
+		if docs[i].AckDate != nil {
+			out[i].AckDate = *docs[i].AckDate
 		}
 	}
 	return out, nil
 }
 
-// RemoveDelivered drops streamID's delivered entry for jti (its retention clock
-// firing). The global body is left untouched.
+// RemoveDelivered drops streamID's delivered reference for jti (its retention
+// clock firing). A pending reference and the global body are left untouched.
 func (d *EventDAOMongo) RemoveDelivered(ctx context.Context, jti string, streamID string) error {
-	c, err := d.deliveredColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return err
 	}
@@ -894,47 +1132,33 @@ func (d *EventDAOMongo) RemoveDelivered(ctx context.Context, jti string, streamI
 	if err != nil {
 		return err
 	}
-	_, err = c.DeleteOne(ctx, bson.M{"jti": jti, "sid": sid})
+	_, err = c.DeleteOne(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "jti", Value: jti}, {Key: "state", Value: interfaces.DeliveryStateDelivered}})
 	if err != nil {
-		eLog.Error("Error removing delivered event", "error", err)
+		eLog.Error("Error removing delivered reference", "error", err)
 	}
 	return err
 }
 
 // DeleteBodyIfUnreferenced deletes the global body for jti only when no stream
-// still references it in pending or delivered (refcount 0).
+// still references it in either state (refcount 0).
 func (d *EventDAOMongo) DeleteBodyIfUnreferenced(ctx context.Context, jti string) (bool, error) {
-	pendingCol, err := d.pendingColLoad()
+	dc, err := d.deliveriesColLoad()
 	if err != nil {
 		return false, err
 	}
-	deliveredCol, err := d.deliveredColLoad()
+	ec, err := d.eventColLoad()
 	if err != nil {
 		return false, err
 	}
-	eventCol, err := d.eventColLoad()
+	refs, err := dc.CountDocuments(ctx, bson.D{{Key: "jti", Value: jti}}, options.Count().SetLimit(1))
 	if err != nil {
+		eLog.Error("Error counting delivery references", "error", err)
 		return false, err
 	}
-
-	pendingRefs, err := pendingCol.CountDocuments(ctx, bson.M{"jti": jti})
-	if err != nil {
-		eLog.Error("Error counting pending refs", "error", err)
-		return false, err
-	}
-	if pendingRefs > 0 {
+	if refs > 0 {
 		return false, nil
 	}
-	deliveredRefs, err := deliveredCol.CountDocuments(ctx, bson.M{"jti": jti})
-	if err != nil {
-		eLog.Error("Error counting delivered refs", "error", err)
-		return false, err
-	}
-	if deliveredRefs > 0 {
-		return false, nil
-	}
-
-	res, err := eventCol.DeleteOne(ctx, bson.M{"jti": jti})
+	res, err := ec.DeleteOne(ctx, bson.D{{Key: "jti", Value: jti}})
 	if err != nil {
 		eLog.Error("Error deleting event body", "error", err)
 		return false, err
@@ -944,7 +1168,7 @@ func (d *EventDAOMongo) DeleteBodyIfUnreferenced(ctx context.Context, jti string
 
 // CountRetainedForStream counts streamID's delivered (post-ack-retained) JTIs.
 func (d *EventDAOMongo) CountRetainedForStream(ctx context.Context, streamID string) (int64, error) {
-	c, err := d.deliveredColLoad()
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return 0, err
 	}
@@ -952,23 +1176,23 @@ func (d *EventDAOMongo) CountRetainedForStream(ctx context.Context, streamID str
 	if err != nil {
 		return 0, err
 	}
-	return c.CountDocuments(ctx, bson.M{"sid": sid})
+	return c.CountDocuments(ctx, bson.D{{Key: "sid", Value: sid}, {Key: "state", Value: interfaces.DeliveryStateDelivered}})
 }
 
-func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
-	c, err := d.pendingColLoad()
+// WatchPending watches deliveries for inserts, updates and replaces whose
+// document is pending, and calls back with each reference.
+func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(ref interfaces.PendingRef, streamID string)) error {
+	c, err := d.deliveriesColLoad()
 	if err != nil {
 		return err
 	}
-	matchInserts := bson.D{
-		bson.E{
-			Key: "$match", Value: bson.D{
-				bson.E{Key: "operationType", Value: "insert"}},
-		},
-	}
+	match := bson.D{{Key: "$match", Value: bson.D{
+		{Key: "operationType", Value: bson.D{{Key: "$in", Value: bson.A{"insert", "update", "replace"}}}},
+		{Key: "fullDocument.state", Value: interfaces.DeliveryStatePending},
+	}}}
 
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-	eventStream, err := c.Watch(ctx, mongo.Pipeline{matchInserts}, opts)
+	eventStream, err := c.Watch(ctx, mongo.Pipeline{match}, opts)
 	if err != nil {
 		eLog.Error("Unable to initialize background event stream", "error", err)
 		return err
@@ -983,23 +1207,18 @@ func (d *EventDAOMongo) WatchPending(ctx context.Context, callback func(jti stri
 	eLog.Info("Background pending event watcher started")
 
 	for eventStream.Next(ctx) {
-		var change bson.M
+		var change struct {
+			FullDocument *deliveryDoc `bson:"fullDocument"`
+		}
 		if err := eventStream.Decode(&change); err != nil {
 			eLog.Error("Error decoding change event", "error", err)
 			continue
 		}
-
-		fullDoc, ok := change["fullDocument"].(bson.M)
-		if !ok {
+		doc := change.FullDocument
+		if doc == nil || doc.Jti == "" || doc.Sid.IsZero() || doc.State != interfaces.DeliveryStatePending {
 			continue
 		}
-
-		jti, _ := fullDoc["jti"].(string)
-		sid, _ := fullDoc["sid"].(bson.ObjectID)
-
-		if jti != "" && !sid.IsZero() {
-			callback(jti, sid.Hex())
-		}
+		callback(doc.ref(), doc.Sid.Hex())
 	}
 
 	if err := eventStream.Err(); err != nil {

@@ -583,7 +583,7 @@ func TestPushSigning_ForwardWithoutAKeyRelaysTheOriginalUntouched(t *testing.T) 
 		token.ID = jti
 		rec, err := h.eventService.AddEvent(ctx, token, sid, raw)
 		require.NoError(t, err)
-		require.NoError(t, h.eventService.AddEventToStream(ctx, rec.Jti, sid))
+		require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(rec.Jti), sid))
 	}
 
 	logs := captureLogs(t)

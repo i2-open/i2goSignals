@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,7 @@ func TestWakeSstp_UnknownTargetIsNoOp(t *testing.T) {
 type capturedSstpWake struct {
 	path string
 	body map[string]string
+	raw  []byte
 	auth string
 }
 
@@ -87,7 +89,7 @@ func stubWakePeer(t *testing.T, sink chan capturedSstpWake) *httptest.Server {
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]string
 		_ = json.Unmarshal(raw, &body)
-		sink <- capturedSstpWake{path: r.URL.Path, body: body, auth: r.Header.Get("Authorization")}
+		sink <- capturedSstpWake{path: r.URL.Path, body: body, raw: raw, auth: r.Header.Get("Authorization")}
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	t.Cleanup(srv.Close)
@@ -131,13 +133,14 @@ func TestHandleEvent_BroadcastsWakeSstpClientToRemoteOwner(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
 	peer := stubWakePeer(t, wakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
 	resource := fmt.Sprintf("sstp-client:%s", pairId)
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 
@@ -150,33 +153,56 @@ func TestHandleEvent_BroadcastsWakeSstpClientToRemoteOwner(t *testing.T) {
 		"the wake must reuse the cluster bearer-token scheme")
 }
 
-// TestHandleEvent_BroadcastsWakeSstpServerToActiveNodes verifies issue #167: when
-// HandleEvent matches an outbound event against an SSTP-server pair, it broadcasts
-// POST /_cluster/wake-sstp-server to the active cluster nodes so a held long-poll
-// returns the event (Q11.1).
-func TestHandleEvent_BroadcastsWakeSstpServerToActiveNodes(t *testing.T) {
+// TestHandleEvent_WakesSstpServerLeaseOwnerWithRefs: when HandleEvent matches
+// an outbound event against an SSTP-server pair whose acceptor lease another
+// node holds, only that owner is woken, directly and with the batch's
+// references (#365, replacing the #167 broadcast to every active node).
+func TestHandleEvent_WakesSstpServerLeaseOwnerWithRefs(t *testing.T) {
 	t.Setenv("I2SIG_CLUSTER_INTERNAL_TOKEN", "test-secret")
 	s := setupDedupRouterPollStream(t)
 	r := s.h.router
 
-	pairId := "pair-server-bcast"
-	txSid := "sstp-tx-server-bcast"
+	pairId := "pair-server-owner"
+	txSid := "sstp-tx-server-owner"
 	pair := sstpClientPairForMatch(txSid, pairId)
 	pair.SstpMethod.Role = model.SstpRoleResponder // server (responder) side
 
 	r.mu.Lock()
 	r.sstpServerStreams[txSid] = *pair
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
-	wakes := make(chan capturedSstpWake, 4)
-	peer := stubWakePeer(t, wakes)
-	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
+	ownerWakes := make(chan capturedSstpWake, 4)
+	owner := stubWakePeer(t, ownerWakes)
+	otherWakes := make(chan capturedSstpWake, 4)
+	other := stubWakePeer(t, otherWakes)
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: owner.URL, LastSeenAt: time.Now().UTC()}))
+	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-C", Address: other.URL, LastSeenAt: time.Now().UTC()}))
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.SstpServer.Resource(txSid), "node-B", 30*time.Second)
+	require.NoError(t, err)
+	require.True(t, acquired)
 
 	token := newRiscToken("jti-wake-server", dupTestIssuer, s.audience)
 	require.NoError(t, r.HandleEvent(token, `{"raw":true}`, s.streamID))
 
-	got := waitForWake(t, wakes, "/_cluster/wake-sstp-server")
-	assert.Equal(t, txSid, got.body["sid"], "the wake must target the pair's tx side")
+	got := waitForWake(t, ownerWakes, "/_cluster/wake-sstp-server")
+	var msg struct {
+		Sid  string   `json:"sid"`
+		Mode string   `json:"mode"`
+		Jtis []string `json:"jtis"`
+	}
+	require.NoError(t, json.Unmarshal(got.raw, &msg))
+	assert.Equal(t, txSid, msg.Sid, "the wake must target the pair's tx side")
+	assert.Equal(t, "sstp-server", msg.Mode)
+	assert.Equal(t, []string{"jti-wake-server"}, msg.Jtis, "the wake carries the batch's references")
+
+	select {
+	case w := <-otherWakes:
+		if w.path == "/_cluster/wake-sstp-server" {
+			t.Fatalf("a node that does not hold the acceptor lease was woken: %s", w.raw)
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
 // waitForWake blocks until a wake on the given path is observed, failing the test

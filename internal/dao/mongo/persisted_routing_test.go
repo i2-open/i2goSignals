@@ -52,7 +52,7 @@ func (s *PersistedRoutingSuite) SetupSuite() {
 	db := client.Database("test_persisted_routing")
 	s.eventCol = db.Collection("events")
 	s.filterCol = db.Collection("subject_filters")
-	s.eventDAO = NewEventDAO(s.eventCol, db.Collection("pending"), db.Collection("delivered"))
+	s.eventDAO = NewEventDAO(s.eventCol, db.Collection("deliveries"))
 	s.filterDAO = NewSubjectFilterDAO(s.filterCol)
 }
 

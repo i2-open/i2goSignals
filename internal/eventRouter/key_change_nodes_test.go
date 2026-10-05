@@ -76,6 +76,7 @@ func nodeOn(t *testing.T, persistence *dbProviders.Persistence, nodeId string, s
 		KeyService:           persistence.KeyService,
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
+		ServesClaims:         true,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PushDelivery:         seam,
 	}, nodeId).(*router)

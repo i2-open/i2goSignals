@@ -104,7 +104,7 @@ func TestPushWhilePollHeld_DefersInboundFeedbackForTheNextRequest(t *testing.T) 
 
 	// Drive the second push directly: the wake-driven spawn is the pair loop's
 	// concern, and this is the goroutine whose feedback was being dropped.
-	cls, _ := dialer.runSecondPush(ctx, &pair, 1)
+	cls, _ := dialer.runSecondPush(ctx, &pair)
 	require.Equal(t, goSetSstp.ClassOK, cls.Class)
 
 	require.Len(t, fake.ingestedCopy(), 1, "the response SET must still be ingested")
@@ -180,7 +180,7 @@ func TestPushWhilePollHeld_DrainsUntilOutboundEmpty(t *testing.T) {
 	})
 	dialer.Bind(fake)
 
-	cls, _ := dialer.runSecondPush(ctx, &pair, 1)
+	cls, _ := dialer.runSecondPush(ctx, &pair)
 	require.Equal(t, goSetSstp.ClassOK, cls.Class)
 
 	assert.Equal(t, int64(3), requestCount.Load(),
@@ -374,7 +374,7 @@ func runSecondPushK(t *testing.T, k, callers, queued int) (*secondPushKPeer, *fa
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cls, _ := dialer.runSecondPush(ctx, &pair, 1)
+			cls, _ := dialer.runSecondPush(ctx, &pair)
 			assert.Equal(t, goSetSstp.ClassOK, cls.Class)
 			returned.Add(1)
 		}()

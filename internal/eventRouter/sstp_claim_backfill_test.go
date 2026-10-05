@@ -26,10 +26,11 @@ func TestClaimOutbound_StoreFallbackSkipsJtisAlreadyClaimed(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	for i := 1; i <= 3; i++ {
-		require.NoError(t, r.eventService.AddEventToStream(context.Background(), fmt.Sprintf("jti-claim-%d", i), txSid))
+		require.NoError(t, r.eventService.AddEventToStream(context.Background(), refOf(fmt.Sprintf("jti-claim-%d", i)), txSid))
 	}
 
 	first := r.ClaimOutbound(pairId, 2)
@@ -37,7 +38,7 @@ func TestClaimOutbound_StoreFallbackSkipsJtisAlreadyClaimed(t *testing.T) {
 
 	second := r.ClaimOutbound(pairId, 2)
 	require.Len(t, second, 1, "the pending JTI past the claimed ones is claimed")
-	assert.NotContains(t, first, second[0])
+	assert.NotContains(t, refJtis(first), second[0].Jti)
 
 	assert.Empty(t, r.ClaimOutbound(pairId, 2), "nothing is left once every pending JTI is claimed")
 }

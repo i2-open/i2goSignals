@@ -89,7 +89,7 @@ func TestMemoryProvider_EventDAOIsInstrumented(t *testing.T) {
 	recs := []*model.EventRecord{{Jti: "daom-1"}, {Jti: "daom-2"}, {Jti: "daom-3"}}
 	_, err = p.EventDAO.InsertMany(ctx, recs)
 	require.NoError(t, err)
-	require.NoError(t, p.EventDAO.AddPendingMany(ctx, []string{"daom-1", "daom-2"}, "stream-1"))
+	require.NoError(t, p.EventDAO.AddPendingMany(ctx, refsFrom([]string{"daom-1", "daom-2"}), "stream-1"))
 
 	n, _ := histo(t, reg, durName, insOK)
 	assert.Equal(t, insBefore+1, n, "InsertMany ok latency observed")
@@ -123,7 +123,7 @@ func (f failingEventDAO) InsertMany(context.Context, []*model.EventRecord) ([]er
 	return nil, errBoom
 }
 
-func (f failingEventDAO) AddPendingMany(context.Context, []string, string) error {
+func (f failingEventDAO) AddPendingMany(context.Context, []interfaces.PendingRef, string) error {
 	return errBoom
 }
 
@@ -139,11 +139,11 @@ func TestWrap_OkAndErrorOutcomes(t *testing.T) {
 
 	_, err := ok.InsertMany(ctx, []*model.EventRecord{{Jti: "a"}, {Jti: "b"}})
 	require.NoError(t, err)
-	require.NoError(t, ok.AddPendingMany(ctx, []string{"a"}, "s"))
+	require.NoError(t, ok.AddPendingMany(ctx, refsFrom([]string{"a"}), "s"))
 
 	_, err = bad.InsertMany(ctx, []*model.EventRecord{{Jti: "c"}})
 	assert.ErrorIs(t, err, errBoom, "errors pass through verbatim")
-	assert.ErrorIs(t, bad.AddPendingMany(ctx, []string{"c", "d", "e"}, "s"), errBoom)
+	assert.ErrorIs(t, bad.AddPendingMany(ctx, refsFrom([]string{"c", "d", "e"}), "s"), errBoom)
 
 	for _, tc := range []struct {
 		op, outcome string
@@ -178,19 +178,17 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 	_, _ = d.FindByJTI(ctx, "j")
 	_, _ = d.FindByJTIs(ctx, []string{"j"})
 	_, _ = d.FindByTimeRange(ctx, time.Now(), nil, nil)
-	_ = d.AddPending(ctx, "j", "s")
-	_ = d.AddPendingMany(ctx, []string{"k"}, "s")
-	_, _ = d.EnsurePending(ctx, "q", []string{"s"})
-	_, _, _ = d.GetPendingForStream(ctx, "s", 10)
-	ev, _ := d.RemovePending(ctx, "j", "s")
+	_ = d.AddPending(ctx, refOf("j"), "s")
+	_ = d.AddPendingMany(ctx, refsFrom([]string{"k"}), "s")
+	_, _ = d.EnsurePending(ctx, "q", selfAck([]string{"s"}))
+	_, _, _ = pageJtis(d.GetPendingForStream(ctx, "s", 10))
 	_, _ = d.RemovePendingMany(ctx, []string{"k"}, "s")
-	_, _ = d.InsertWithPending(ctx, []*model.EventRecord{{Jti: "w"}}, map[string][]string{"s": {"w"}})
+	_, _ = d.InsertWithPending(ctx, []*model.EventRecord{{Jti: "w"}}, pendingRefsOf(map[string][]string{"s": {"w"}}))
 	_, _ = d.ClearPendingForStream(ctx, "s")
-	if ev == nil {
-		ev = &interfaces.DeliverableEvent{Jti: "j", StreamId: "s"}
-	}
-	_ = d.MarkDelivered(ctx, ev, time.Now())
-	_ = d.MarkDeliveredMany(ctx, []interfaces.DeliverableEvent{{Jti: "k", StreamId: "s"}}, time.Now())
+	_, _ = d.Ack(ctx, interfaces.AckBatch{StreamID: "s", Jtis: []string{"j"}, AckDate: time.Now()})
+	_, _ = d.ResetPendingAckJti(ctx, "s")
+	_, _ = d.SweepExpired(ctx, time.Now(), time.Now(), 1)
+	_, _ = d.MigrateLegacyDeliveries(ctx, nil)
 	_, _ = d.ListDeliveredForStream(ctx, "s")
 	_ = d.RemoveDelivered(ctx, "j", "s")
 	_, _ = d.DeleteBodyIfUnreferenced(ctx, "j")
@@ -198,13 +196,13 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 	// The memory WatchPending blocks until its context ends; hand it a done one.
 	done, stop := context.WithCancel(ctx)
 	stop()
-	_ = d.WatchPending(done, func(string, string) {})
+	_ = d.WatchPending(done, func(interfaces.PendingRef, string) {})
 
 	for _, op := range []string{
 		"Insert", "InsertMany", "FindByJTI", "FindByJTIs", "FindByTimeRange",
-		"AddPending", "AddPendingMany", "EnsurePending", "GetPendingForStream", "RemovePending",
+		"AddPending", "AddPendingMany", "EnsurePending", "GetPendingForStream",
 		"RemovePendingMany", "InsertWithPending", "ClearPendingForStream",
-		"MarkDelivered", "MarkDeliveredMany", "ListDeliveredForStream",
+		"Ack", "ResetPendingAckJti", "SweepExpired", "MigrateLegacyDeliveries", "ListDeliveredForStream",
 		"RemoveDelivered", "DeleteBodyIfUnreferenced", "CountRetainedForStream",
 		"WatchPending",
 	} {
@@ -213,9 +211,43 @@ func TestWrap_EveryMethodObserved(t *testing.T) {
 		assert.Equal(t, uint64(1), ok+bad, "%s observed once", op)
 	}
 
-	for _, op := range []string{"InsertMany", "AddPendingMany", "FindByJTIs", "RemovePendingMany", "MarkDeliveredMany"} {
+	for _, op := range []string{"InsertMany", "AddPendingMany", "FindByJTIs", "RemovePendingMany", "Ack"} {
 		n, sum := histo(t, reg, sizeName, map[string]string{"op": op})
 		assert.Equal(t, uint64(1), n, "%s batch size observed", op)
 		assert.Equal(t, float64(1), sum, "%s batch size", op)
 	}
+}
+
+// TestGetPendingForStream_BeyondLabel asserts a page with more pending rows
+// than it returns (Total > len(Refs), so the store also read OldestBeyond) is
+// observed under op GetPendingForStreamBeyond, and a page that holds every
+// pending row stays under GetPendingForStream (#366). The bench compares the
+// two labels' means to measure the cost of the OldestBeyond query.
+func TestGetPendingForStream_BeyondLabel(t *testing.T) {
+	ctx := context.Background()
+	m := daometrics.NewMetrics()
+	reg := privateRegistry(t, m)
+	d := daometrics.Wrap(memory.NewEventDAO(), m)
+
+	_, err := d.InsertMany(ctx, []*model.EventRecord{{Jti: "b1"}, {Jti: "b2"}, {Jti: "b3"}})
+	require.NoError(t, err)
+	require.NoError(t, d.AddPendingMany(ctx, refsFrom([]string{"b1", "b2", "b3"}), "s"))
+
+	page, err := d.GetPendingForStream(ctx, "s", 2)
+	require.NoError(t, err)
+	require.Greater(t, page.Total, int64(len(page.Refs)))
+
+	beyond, _ := histo(t, reg, durName, map[string]string{"op": "GetPendingForStreamBeyond", "outcome": "ok"})
+	plain, _ := histo(t, reg, durName, map[string]string{"op": "GetPendingForStream", "outcome": "ok"})
+	assert.Equal(t, uint64(1), beyond, "short page observed under the Beyond label")
+	assert.Equal(t, uint64(0), plain, "short page not double-counted")
+
+	page, err = d.GetPendingForStream(ctx, "s", 10)
+	require.NoError(t, err)
+	require.Equal(t, page.Total, int64(len(page.Refs)))
+
+	beyond, _ = histo(t, reg, durName, map[string]string{"op": "GetPendingForStreamBeyond", "outcome": "ok"})
+	plain, _ = histo(t, reg, durName, map[string]string{"op": "GetPendingForStream", "outcome": "ok"})
+	assert.Equal(t, uint64(1), beyond)
+	assert.Equal(t, uint64(1), plain, "full page observed under GetPendingForStream")
 }

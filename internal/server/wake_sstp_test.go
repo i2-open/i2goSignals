@@ -81,7 +81,7 @@ func (rr *recordingRouter) SubmitOperationalEvent(string, *goSet.SecurityEventTo
 func (rr *recordingRouter) GenerateVerifyEvent(string, string) (*model.EventRecord, error) {
 	return nil, nil
 }
-func (rr *recordingRouter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
+func (rr *recordingRouter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
 	return nil, false, http.StatusOK
 }
 func (rr *recordingRouter) CheckSstpSigningKey(*model.StreamStateRecord) error { return nil }
@@ -96,8 +96,12 @@ func (rr *recordingRouter) GetPushStreamCnt() float64                           
 func (rr *recordingRouter) GetPollStreamCnt() float64                                      { return 0 }
 func (rr *recordingRouter) IncrementCounter(*model.StreamStateRecord, *goSet.SecurityEventToken, bool) {
 }
-func (rr *recordingRouter) SetStatsHandler(interface{})      {}
-func (rr *recordingRouter) ResetStream(string)               {}
+func (rr *recordingRouter) SetStatsHandler(interface{}) {}
+func (rr *recordingRouter) ResetStream(string)          {}
+func (rr *recordingRouter) ReplayStream(context.Context, string, string, *time.Time) error {
+	return nil
+}
+func (rr *recordingRouter) DeliveryStarted() bool            { return true }
 func (rr *recordingRouter) WakeTransmitter(string, string)   {}
 func (rr *recordingRouter) NotifySubjectFilterChange(string) {}
 

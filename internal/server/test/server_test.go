@@ -18,6 +18,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
@@ -379,11 +380,13 @@ func (suite *ServerSuite) Test5_PollStreamDelivery() {
 	// time.Sleep(2 * time.Second)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.EventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 500)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 
@@ -474,7 +477,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	jtis, more = suite.servers[0].app.EventService.GetEventIds(context.Background(), suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
-	assert.Contains(suite.T(), jtis, jtiNew, "The new event should be present")
+	assert.Contains(suite.T(), pendingref.RefJtis(jtis), jtiNew, "The new event should be present")
 
 	ssf1Stream := suite.servers[0].stream.Id
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
@@ -545,11 +548,13 @@ func (suite *ServerSuite) Test7_PushStreamDelivery() {
 	time.Sleep(500 * time.Millisecond) // await processing (for reliable testing)
 	testLog.Println("Looking for event on SSF2...")
 	var event *model.EventRecord
-	event = suite.servers[1].GetEventRecord(jti)
+	// SSF2 receives the re-signed SET under its derived jti (#363).
+	rcvJti := deliveredJti(suite.servers[0].stream, jti)
+	event = suite.servers[1].GetEventRecord(rcvJti)
 	for i := 0; i < 5 && event == nil; i++ {
 		time.Sleep(time.Millisecond * 250)
-		testLog.Println("WAITING for event " + jti)
-		event = suite.servers[1].GetEventRecord(jti)
+		testLog.Println("WAITING for event " + rcvJti)
+		event = suite.servers[1].GetEventRecord(rcvJti)
 	}
 	assert.NotNil(suite.T(), event, "Event should be received")
 

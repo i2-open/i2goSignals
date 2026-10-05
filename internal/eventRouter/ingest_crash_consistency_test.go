@@ -8,6 +8,7 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -27,7 +28,7 @@ import (
 func orphanPendingMarker(t *testing.T, h *filterPushHarness, sid string) string {
 	t.Helper()
 	const jti = "orphan-no-body"
-	require.NoError(t, h.eventService.AddEventToStream(context.Background(), jti, sid))
+	require.NoError(t, h.eventService.AddEventToStream(context.Background(), refOf(jti), sid))
 	require.Nil(t, h.eventService.GetEventRecord(context.Background(), jti),
 		"the orphan must have a pending marker and no body")
 	return jti
@@ -48,7 +49,7 @@ func TestOrphanPendingMarker_PushSkipsAndDoesNotAck(t *testing.T) {
 	orphan := orphanPendingMarker(t, h, sid)
 	require.Equal(t, 2, h.pendingCount(sid))
 
-	res := h.router.pushBatch([]string{orphan, healthy}, stream, nil, "", 0)
+	res := h.router.pushBatch([]string{orphan, healthy}, stream, nil, "")
 
 	require.Empty(t, res.failedJti, "an orphan is not a delivery failure")
 	require.Equal(t, 1, res.acked, "only the SET that was really pushed is acked")
@@ -100,7 +101,8 @@ func TestOrphanPendingMarker_SstpServerSkips(t *testing.T) {
 	pair := *stream
 	pair.StreamConfiguration.RouteMode = model.RouteModeForward
 
-	sets, err := h.router.buildSstpOutboundSets(&pair, []string{orphan, healthy})
+	refs := []interfaces.PendingRef{{Jti: orphan, AckJti: orphan}, {Jti: healthy, AckJti: healthy}}
+	sets, err := h.router.buildSstpOutboundSets(&pair, h.router.resolveOutboundSets(refs))
 	require.NoError(t, err)
 
 	require.NotContains(t, sets, orphan, "an orphan must not be rendered onto an SSTP message")
@@ -143,7 +145,7 @@ func TestIngest_PendingMarkerIsIndependentOfBody(t *testing.T) {
 
 	// Marker first, body second — the order the concurrent writes may produce.
 	const jti = "marker-before-body"
-	require.NoError(t, h.eventService.AddEventToStream(ctx, jti, sid))
+	require.NoError(t, h.eventService.AddEventToStream(ctx, refOf(jti), sid))
 	require.Equal(t, 1, h.pendingCount(sid), "the marker stands on its own")
 
 	token := &goSet.SecurityEventToken{}

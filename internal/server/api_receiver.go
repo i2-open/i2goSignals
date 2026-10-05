@@ -1473,7 +1473,7 @@ func (ps *ClientPollStream) setTransmitterCausedStatus(stored *model.StreamState
 // pollEventsReceiver manages the event polling process by acquiring a lease, running the poll loop, and handling cluster lease renewal.
 func (ps *ClientPollStream) pollEventsReceiver() {
 	sid := ps.currentStream().StreamConfiguration.Id
-	resource := cluster.PollReceiverResource(sid)
+	resource := cluster.PollReceiver.Resource(sid)
 
 	defer func() {
 		ps.mu.Lock()
@@ -1509,7 +1509,7 @@ func (ps *ClientPollStream) pollEventsReceiver() {
 		}
 
 		// Attempt to acquire or renew the lease
-		acquired, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+		acquired, _, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
 		if ps.sa.Stats != nil {
 			ps.sa.Stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
@@ -1582,7 +1582,7 @@ func (ps *ClientPollStream) runPollLoop(resource string) {
 		for {
 			select {
 			case <-ticker.C:
-				ok, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
+				ok, _, _, err := ps.sa.Coordinator.TryAcquireOrRenewLease(resource, ps.sa.NodeID, 30*time.Second)
 				if ps.sa.Stats != nil {
 					ps.sa.Stats.TrackLeaseAcquisition(resource, ok && err == nil)
 				}

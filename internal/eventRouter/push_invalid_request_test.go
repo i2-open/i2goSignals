@@ -8,7 +8,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,7 +25,7 @@ func dispatchPushFailureFixture(t *testing.T, h *testHarness, stream *model.Stre
 	return h.router.dispatchPushFailure(
 		context.Background(), stream, jti, cls,
 		nil, RecoveryConfig{BaseDelay: time.Millisecond},
-		backfill, idle, services.NoFencingToken,
+		backfill, idle,
 	)
 }
 
@@ -47,7 +46,7 @@ func persistPushEvent(t *testing.T, h *testHarness, sid string, token *goSet.Sec
 	t.Helper()
 	rec, err := h.router.eventService.AddEvent(context.Background(), token, sid, "")
 	require.NoError(t, err)
-	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), rec.Jti, sid))
+	require.NoError(t, h.router.eventService.AddEventToStream(context.Background(), refOf(rec.Jti), sid))
 	return rec.Jti
 }
 

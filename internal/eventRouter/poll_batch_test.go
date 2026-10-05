@@ -108,13 +108,16 @@ func TestPollBatch_ResignsWholeBatch(t *testing.T) {
 	require.NotContains(t, sets, "ghost-jti")
 
 	for _, jti := range jtis {
-		raw, ok := sets[jti]
+		// A re-signed SET carries the stream's acknowledgement JTI (#363).
+		ackJti := wireAcks(h.router, sid, jti)[0]
+		require.NotEqual(t, jti, ackJti)
+		raw, ok := sets[ackJti]
 		require.True(t, ok, "jti %s missing from the response", jti)
 		require.Equal(t, 3, len(strings.Split(raw, ".")), "each SET is a compact JWS")
 		claims := jwt.MapClaims{}
 		_, _, err := jwt.NewParser().ParseUnverified(raw, claims)
 		require.NoError(t, err)
-		require.Equal(t, jti, claims["jti"])
+		require.Equal(t, ackJti, claims["jti"])
 		require.Equal(t, stream.StreamConfiguration.Iss, claims["iss"])
 	}
 }

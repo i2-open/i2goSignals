@@ -112,7 +112,7 @@ func TestPushBatch_PoolFansOutAndAcksTheBatch(t *testing.T) {
 	jtis := h.addPendingEvents(t, sid, 10)
 	require.Equal(t, 10, h.pendingCount(sid))
 
-	res := h.router.pushBatch(jtis, stream, nil, "", 0)
+	res := h.router.pushBatch(jtis, stream, nil, "")
 
 	require.Empty(t, res.failedJti)
 	require.Equal(t, 10, res.acked)
@@ -137,7 +137,7 @@ func TestPushBatch_ConcurrencyOneIsSerial(t *testing.T) {
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 6)
 
-	res := h.router.pushBatch(jtis, stream, nil, "", 0)
+	res := h.router.pushBatch(jtis, stream, nil, "")
 	require.Equal(t, 6, res.acked)
 	require.Equal(t, 0, h.pendingCount(sid))
 	calls, peak := seam.stats()
@@ -160,7 +160,7 @@ func TestPushBatch_FirstFailureStopsDispatchAndLeavesRestPending(t *testing.T) {
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 5)
 
-	res := h.router.pushBatch(jtis, stream, nil, "", 0)
+	res := h.router.pushBatch(jtis, stream, nil, "")
 
 	require.Equal(t, jtis[2], res.failedJti)
 	require.Equal(t, goSetPush.ClassTransport, res.failedCls.Class)
@@ -183,7 +183,7 @@ func TestPushBatch_MissingRecordIsSkippedNotFailed(t *testing.T) {
 	jtis := h.addPendingEvents(t, sid, 2)
 	batch := []string{jtis[0], "jti-never-stored", jtis[1]}
 
-	res := h.router.pushBatch(batch, stream, nil, "", 0)
+	res := h.router.pushBatch(batch, stream, nil, "")
 
 	require.Empty(t, res.failedJti)
 	require.Equal(t, 2, res.acked)

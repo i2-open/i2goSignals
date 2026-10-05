@@ -90,6 +90,7 @@ func newMongoRouterBenchWith(b *testing.B, log wal.Log) *mongoRouterBench {
 		KeyService:    p.KeyService,
 		EventService:  p.EventService,
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 		WAL:           log,
 	}, "node-bench").(*router)
 	b.Cleanup(r.Shutdown)
@@ -275,9 +276,9 @@ func BenchmarkMongoRouter(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			rec := m.p.EventService.GetEventRecord(context.Background(), jtis[i])
+			rec := m.p.EventService.GetEventRecord(context.Background(), jtis[i].Jti)
 			if rec == nil {
-				b.Fatalf("event %s vanished", jtis[i])
+				b.Fatalf("event %s vanished", jtis[i].Jti)
 			}
 			tok := &rec.Event
 			tok.Issuer = "https://local.example"
@@ -286,7 +287,7 @@ func BenchmarkMongoRouter(b *testing.B) {
 			if _, err := tok.JWS(jwt.SigningMethodRS256, m.signer); err != nil {
 				b.Fatal(err)
 			}
-			if err := m.p.EventService.AckEvent(context.Background(), jtis[i], m.outSid, 0); err != nil {
+			if err := m.p.EventService.AckEvent(context.Background(), jtis[i].Jti, m.outSid); err != nil {
 				b.Fatal(err)
 			}
 		}

@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -27,34 +26,8 @@ type ResetEgressObserver interface {
 	ObserveResetEgress(streamID string, event *model.EventRecord)
 }
 
-// NoFencingToken is the fencing token an ack carries when the caller holds no
-// cluster lease: a poll transmitter (ADR 0014) and the SSTP server side. It is
-// accepted only for a stream the FenceChecker reports as unleased; on a leased
-// stream it is always rejected, as is any token once the lease has expired
-// (an expired lease reads as token 0).
-const NoFencingToken int64 = 0
-
-// ErrStaleFencingToken is returned by AckEvent and AckEvents when the ack's
-// fencing token is not the current token of the stream's lease: the caller's
-// lease expired or another node took it over. Nothing is written, and the
-// caller must stop delivering on its lease (#334).
-var ErrStaleFencingToken = errors.New("stale fencing token: lease no longer held")
-
-// FenceChecker reports the lease that fences acks for a stream. leased is
-// false for a stream delivered by a mode that holds no lease, whose acks are
-// then not fenced. Otherwise token is the resource's current fencing token,
-// or 0 when the lease has expired or been released. The event router
-// implements it from its stream registry and the ClusterCoordinator.
-type FenceChecker interface {
-	CurrentFence(streamID string) (resource string, token int64, leased bool, err error)
-}
-
 type EventService struct {
 	eventDAO interfaces.EventDAO
-	// fenceChecker, when non-nil, fences AckEvent and AckEvents: an ack for a
-	// leased stream is written only when its token is the lease's current one.
-	// nil leaves acks unfenced (a service with no cluster behind it).
-	fenceChecker FenceChecker
 	// resetEgressObserver, when non-nil, receives one call per event
 	// ResetEventStream re-queues, so reset re-deliveries are metered as fresh
 	// egress. nil (the default) leaves the reset path unmetered — the community
@@ -81,39 +54,6 @@ func (s *EventService) WrapEventDAO(wrap func(interfaces.EventDAO) interfaces.Ev
 // fan-out egress uses (ADR 0055 Q91.4).
 func (s *EventService) SetResetEgressObserver(observer ResetEgressObserver) {
 	s.resetEgressObserver = observer
-}
-
-// SetFenceChecker installs (or clears, with nil) the checker that fences acks
-// on the stream's lease token. The event router wires itself here at
-// construction, before any delivery starts.
-func (s *EventService) SetFenceChecker(checker FenceChecker) {
-	s.fenceChecker = checker
-}
-
-// checkFence verifies an ack's fencing token against the stream's lease, once
-// per ack call and before any write (ADR 0035). A stream with no lease, or a
-// service with no checker, is not fenced. Whether a stream is leased is the
-// checker's call, never the token's: NoFencingToken on a leased stream is
-// rejected (#334). A lookup error fails closed.
-func (s *EventService) checkFence(streamID string, fencingToken int64) error {
-	if s.fenceChecker == nil {
-		// No cluster behind the service.
-		return nil
-	}
-	resource, current, leased, err := s.fenceChecker.CurrentFence(streamID)
-	if err != nil {
-		esLog.Error("Fence check failed, ack not written", "streamID", streamID, "error", err)
-		return err
-	}
-	if !leased {
-		// Delivery mode that holds no lease (poll transmitter, SSTP server side).
-		return nil
-	}
-	if fencingToken != NoFencingToken && fencingToken == current {
-		return nil
-	}
-	esLog.Warn("Rejected ack with stale fencing token", "streamID", streamID, "resource", resource, "token", fencingToken, "current", current)
-	return fmt.Errorf("%w: stream %s resource %s token %d current %d", ErrStaleFencingToken, streamID, resource, fencingToken, current)
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
@@ -199,14 +139,14 @@ func NewIngestRecords(events []*goSet.SecurityEventToken, sid string, raws []str
 
 // AddEventsWithPending persists a batch of candidate records together with
 // their delivery intents in one DAO call (ADR 0043). pending maps an outbound
-// stream document ID to the JTIs queued on it. The returned records and errors
+// stream document ID to the references queued on it. The returned records and errors
 // are index-aligned with recs: nil error means the record and all of its
 // pending markers are durably stored; a JTI that already exists comes back as
 // the existing record paired with ErrDuplicateJTI, with no marker written for
 // it; any other error means the SET is not durably queued and must not be
 // acknowledged (ADR 0038). When the batch itself fails, every position carries
 // that error and every record is nil.
-func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]string) ([]*model.EventRecord, []error) {
+func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.EventRecord, sid string, pending map[string][]interfaces.PendingRef) ([]*model.EventRecord, []error) {
 	out := make([]*model.EventRecord, len(recs))
 	errs := make([]error, len(recs))
 	if len(recs) == 0 {
@@ -214,8 +154,8 @@ func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.E
 	}
 	perRec, batchErr := s.eventDAO.InsertWithPending(ctx, recs, pending)
 	if batchErr != nil {
-		// WARN: the DAO already logged the failure at ERROR and the caller
-		// turns it into a retryable 503 (CONTEXT.md log-level policy).
+		// WARN: the caller turns the failure into a retryable 503 and the
+		// sender retries (CONTEXT.md log-level policy).
 		esLog.Warn("Error inserting event batch", "sid", sid, "count", len(recs), "error", batchErr)
 		for i := range errs {
 			errs[i] = batchErr
@@ -243,12 +183,13 @@ func (s *EventService) AddEventsWithPending(ctx context.Context, recs []*model.E
 // RequeueDuplicate closes the ADR 0043 residual (#331): a SET whose body
 // landed but whose marker write failed was answered 503, so its retry is a
 // duplicate for AddEventsWithPending and would otherwise be acked without ever
-// being queued. It queues jti on each of streamIDs that has neither a pending
-// nor a delivered record for it and returns the streams it queued on; a SET
-// that is still pending or already delivered everywhere is a no-op. An error
+// being queued. It queues jti on each stream of ackJtis (stream ID -> ackJti)
+// that has neither a pending nor a delivered record for it and returns the
+// streams it queued on; a SET that is still pending or already delivered
+// everywhere is a no-op. An existing record keeps its ackJti. An error
 // means the retry must again be answered 503, not acked.
-func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid string, streamIDs []string) ([]string, error) {
-	queued, err := s.eventDAO.EnsurePending(ctx, jti, streamIDs)
+func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid string, ackJtis map[string]string) ([]string, error) {
+	queued, err := s.eventDAO.EnsurePending(ctx, jti, ackJtis)
 	if err != nil {
 		// WARN: the DAO logged the failure at ERROR and the caller answers 503.
 		esLog.Warn("Error re-queuing duplicate SET", "jti", jti, "sid", sid, "error", err)
@@ -260,10 +201,10 @@ func (s *EventService) RequeueDuplicate(ctx context.Context, jti string, sid str
 	return queued, nil
 }
 
-func (s *EventService) AddEventToStream(ctx context.Context, jti string, streamID string) error {
-	err := s.eventDAO.AddPending(ctx, jti, streamID)
+func (s *EventService) AddEventToStream(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	err := s.eventDAO.AddPending(ctx, ref, streamID)
 	if err != nil {
-		esLog.Error("Error adding pending event to stream", "jti", jti, "streamID", streamID, "error", err)
+		esLog.Error("Error adding pending event to stream", "jti", ref.Jti, "streamID", streamID, "error", err)
 	}
 	return err
 }
@@ -319,27 +260,56 @@ func (s *EventService) GetEventRecord(ctx context.Context, jti string) *model.Ev
 	return rec
 }
 
-func (s *EventService) GetEventIds(ctx context.Context, streamID string, params model.PollParameters) ([]string, bool) {
-	jtis, total, err := s.eventDAO.GetPendingForStream(ctx, streamID, params.MaxEvents)
+// GetEventIds returns the stream's pending references (ascending inbound
+// JTI, each with its acknowledgement JTI) and whether more are pending.
+func (s *EventService) GetEventIds(ctx context.Context, streamID string, params model.PollParameters) ([]interfaces.PendingRef, bool) {
+	page, err := s.eventDAO.GetPendingForStream(ctx, streamID, params.MaxEvents)
 	if err != nil {
 		esLog.Error("Error getting event IDs", "error", err)
-		return []string{}, false
+		return []interfaces.PendingRef{}, false
 	}
+	return page.Refs, int64(len(page.Refs)) < page.Total
+}
 
-	more := false
-	if int64(len(jtis)) < total {
-		more = true
+// PendingPage returns the whole pending read for streamID: the references,
+// the pending total and the earliest enqueue time beyond the page.
+func (s *EventService) PendingPage(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
+	return s.eventDAO.GetPendingForStream(ctx, streamID, limit)
+}
+
+// StoredAckJtis returns the ackJti stored on streamID's row for each of jtis
+// (inbound JTIs) that has one.
+func (s *EventService) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
+	return s.eventDAO.StoredAckJtis(ctx, streamID, jtis)
+}
+
+// AckBatch acknowledges batch.Jtis (acknowledgement JTIs) for batch.StreamID
+// in one DAO write and returns the number of references moved to delivered.
+func (s *EventService) AckBatch(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	n, err := s.eventDAO.Ack(ctx, batch)
+	if err != nil {
+		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.
+		esLog.Warn("Error acknowledging batch", "count", len(batch.Jtis), "streamID", batch.StreamID, "error", err)
 	}
-	return jtis, more
+	return n, err
+}
+
+// ResetPendingAckJti sets ackJti = jti on every pending reference of
+// streamID and returns the count changed. Delivered references are untouched.
+func (s *EventService) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
+	return s.eventDAO.ResetPendingAckJti(ctx, streamID)
+}
+
+// MigrateLegacyDeliveries carries the pre-#359 pending/delivered collections
+// into deliveries. expireAt computes a delivered row's expiry.
+func (s *EventService) MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	return s.eventDAO.MigrateLegacyDeliveries(ctx, expireAt)
 }
 
 // AckEvent acknowledges one JTI for streamID through the same one-trip DAO
 // ack as AckEvents (#335). A JTI not pending for the stream is ignored.
-func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
-	if err := s.checkFence(streamID, fencingToken); err != nil {
-		return err
-	}
-	if _, err := s.eventDAO.AckDelivered(ctx, []string{jtiString}, streamID, time.Now()); err != nil {
+func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string) error {
+	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jtiString}, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SET stays pending and is redelivered.
 		esLog.Warn("Error acknowledging event", "jti", jtiString, "streamID", streamID, "error", err)
 		return err
@@ -348,18 +318,16 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 }
 
 // AckEvents acknowledges jtis for streamID as one batch: the pending entries
-// are removed and recorded as delivered by EventDAO.AckDelivered — one
-// multi-namespace bulkWrite on MongoDB 8.0+ (#335). A JTI not pending for the
+// are moved to delivered by EventDAO.Ack in one conditional write (#359) —
+// one unordered bulkWrite on MongoDB 8.0+. A JTI not pending for the
 // stream is ignored, exactly as AckEvent ignores it. An empty jtis is a
-// no-op. The fencing token is checked once for the batch, as for AckEvent.
-func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
+// no-op. Lease ownership is the caller's concern: the event router checks it
+// from memory before its acknowledgement batch (#364).
+func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string) error {
 	if len(jtis) == 0 {
 		return nil
 	}
-	if err := s.checkFence(streamID, fencingToken); err != nil {
-		return err
-	}
-	if _, err := s.eventDAO.AckDelivered(ctx, jtis, streamID, time.Now()); err != nil {
+	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: jtis, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.
 		esLog.Warn("Error acknowledging events", "count", len(jtis), "streamID", streamID, "error", err)
 		return err
@@ -367,7 +335,7 @@ func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID st
 	return nil
 }
 
-func (s *EventService) WatchPending(ctx context.Context, callback func(jti string, streamID string)) {
+func (s *EventService) WatchPending(ctx context.Context, callback func(ref interfaces.PendingRef, streamID string)) {
 	err := s.eventDAO.WatchPending(ctx, callback)
 	if err != nil {
 		esLog.Error("Error watching pending events", "error", err)
@@ -488,7 +456,7 @@ func matchesEventType(stream *model.StreamStateRecord, event *model.EventRecord)
 	return false
 }
 
-func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
+func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool, ackJti func(inboundJti string) string) error {
 	// Validate the request
 	if jti == "" && resetDate == nil {
 		return errors.New("reset error: a date or jti must be provided")
@@ -537,7 +505,11 @@ func (s *EventService) ResetEventStream(ctx context.Context, streamID string, jt
 	// (tagged source:reset downstream). A failed re-queue is not re-delivered and
 	// so is not metered.
 	for _, event := range events {
-		err = s.AddEventToStream(ctx, event.Jti, streamID)
+		ref := interfaces.PendingRef{Jti: event.Jti, AckJti: event.Jti, EnqueuedAt: time.Now()}
+		if ackJti != nil {
+			ref.AckJti = ackJti(event.Jti)
+		}
+		err = s.AddEventToStream(ctx, ref, streamID)
 		if err != nil {
 			esLog.Error("Error re-adding event to stream during reset", "jti", event.Jti, "streamID", streamID, "error", err)
 			continue

@@ -1,6 +1,7 @@
 package buffer
 
 import (
+	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -27,7 +28,7 @@ func TestAwaitNotify_EarlyWakeStopsTheDeadlineTimer(t *testing.T) {
 		start := time.Now()
 		notifier <- struct{}{}
 
-		if notified := awaitNotify(notifier, deadline); !notified {
+		if notified := awaitNotify(context.Background(), notifier, deadline); !notified {
 			t.Fatal("awaitNotify reported a timeout, want a notification")
 		}
 		if elapsed := time.Since(start); elapsed != 0 {
@@ -49,7 +50,7 @@ func TestAwaitNotify_DeadlineStopsItsOwnTimer(t *testing.T) {
 		deadline := time.NewTimer(30 * time.Second)
 
 		start := time.Now()
-		if notified := awaitNotify(notifier, deadline); notified {
+		if notified := awaitNotify(context.Background(), notifier, deadline); notified {
 			t.Fatal("awaitNotify reported a notification, want a timeout")
 		}
 		if elapsed := time.Since(start); elapsed != 30*time.Second {

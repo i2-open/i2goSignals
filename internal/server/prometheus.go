@@ -456,8 +456,24 @@ func (sa *SignalsApplication) InitializePrometheusWithRegisterer(reg prometheus.
 	for _, c := range daometrics.Default.Collectors() {
 		registerTo(reg, c)
 	}
-	// Delivery in-flight gauge + coalesced ack batch-size histogram (#336).
+	// Delivery in-flight gauge + coalesced ack batch-size histogram (#336),
+	// queue and acknowledgement time histograms (#352).
 	for _, c := range eventRouter.DeliveryCollectors() {
+		registerTo(reg, c)
+	}
+	// Per-stream backlog depth and oldest age, read from the owning router's
+	// delivery queues at scrape (#352).
+	if r, ok := sa.EventRouter.(interface {
+		BacklogCollector() prometheus.Collector
+	}); ok {
+		registerTo(reg, r.BacklogCollector())
+	}
+	// Peer claims answered and claim budget exhaustion (#365).
+	for _, c := range eventRouter.ClaimCollectors() {
+		registerTo(reg, c)
+	}
+	// Store/coordinator reads made under the router lock on fan-out (#362).
+	for _, c := range eventRouter.RoutingCollectors() {
 		registerTo(reg, c)
 	}
 	// Local WAL depth, drain lag, drained/replayed counts, drain duration (#341).

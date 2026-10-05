@@ -55,7 +55,7 @@ func (c *MemoryCoordinator) SetClock(now func() time.Time) {
 // Compile-time check.
 var _ cluster.ClusterCoordinator = (*MemoryCoordinator)(nil)
 
-func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -72,7 +72,7 @@ func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId strin
 	isOwner := entry.ownerNodeId == nodeId
 
 	if !expired && !isOwner {
-		return false, 0, nil
+		return false, 0, time.Time{}, nil
 	}
 
 	// A renewal by the holder of a live lease keeps its fencing token, so the
@@ -85,7 +85,7 @@ func (c *MemoryCoordinator) TryAcquireOrRenewLease(resource string, nodeId strin
 	entry.ownerNodeId = nodeId
 	entry.leaseUntil = leaseUntil
 	entry.updatedAt = now
-	return true, entry.fencingToken, nil
+	return true, entry.fencingToken, leaseUntil, nil
 }
 
 func (c *MemoryCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) error {

@@ -19,6 +19,11 @@ var (
 	// dedup key (RFC 8417 §2.2 globally unique). Callers MUST handle this
 	// sentinel; the existing record is retrievable via EventDAO.FindByJTI(jti).
 	ErrDuplicateJTI = errors.New("duplicate jti")
+	// ErrStoreNotReady wraps an error from a store that is not connected yet
+	// (a Mongo provider still in its background reconnect). Startup work that
+	// needs the store, such as the legacy deliveries migration (#361), defers
+	// on it rather than failing the process.
+	ErrStoreNotReady = errors.New("store not connected")
 )
 
 // StreamDAO handles stream configuration data access
@@ -89,99 +94,161 @@ type EventDAO interface {
 	// batch as a whole could not be attempted (the per-record slice is then
 	// nil). An empty batch returns (nil, nil).
 	InsertMany(ctx context.Context, records []*model.EventRecord) ([]error, error)
-	// InsertWithPending persists records together with their delivery intents
-	// (ADR 0043). pending maps a stream document ID to the JTIs of records that
-	// must be queued on that stream. The returned slice is index-aligned with
+	// InsertWithPending persists records together with their delivery
+	// references (ADR 0043). pending maps a stream document ID to the
+	// references of records that must be queued on that stream: one
+	// deliveries document per (stream, reference) in state pending, carrying
+	// the reference's AckJti (Jti when empty) and createdAt (EnqueuedAt, or
+	// the adapter clock when zero). The returned slice is index-aligned with
 	// records:
 	//
-	//   - nil: the record AND every pending marker for its JTI are stored.
+	//   - nil: the record AND every pending reference for its JTI are stored.
 	//   - ErrDuplicateJTI: the JTI already existed (ADR 0017); the existing
-	//     record is untouched and NO pending marker was written for it.
-	//   - any other error: the record, or one of its markers, was not stored,
-	//     so the SET must not be acknowledged (ADR 0038).
+	//     record is untouched and NO reference was written for it.
+	//   - any other error: the record, or one of its references, was not
+	//     stored, so the SET must not be acknowledged (ADR 0038).
 	//
-	// When a JTI appears more than once in records, its markers are written
-	// once, with the copy that is stored; later copies report ErrDuplicateJTI.
-	// A JTI in pending with no matching record is ignored. A non-nil error means
-	// the batch as a whole failed (the per-record slice is then nil). An empty
-	// batch returns (nil, nil).
-	InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error)
+	// When a JTI appears more than once in records, its references are
+	// written once, with the copy that is stored; later copies report
+	// ErrDuplicateJTI. A reference with no matching record is ignored. A
+	// non-nil error means the batch as a whole failed (the per-record slice
+	// is then nil). An empty batch returns (nil, nil).
+	InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]PendingRef) ([]error, error)
 	FindByJTI(ctx context.Context, jti string) (*model.EventRecord, error)
 	FindByJTIs(ctx context.Context, jtis []string) ([]*model.EventRecord, error)
+	// FindByTimeRange returns records whose sort time falls in [from, to]
+	// and that pass filter. Stored outbound copies (records carrying
+	// OriginalJti) are excluded, so a reset never re-queues a copy.
 	FindByTimeRange(ctx context.Context, from time.Time, to *time.Time, filter func(*model.EventRecord) bool) ([]*model.EventRecord, error)
 
-	// Pending events
-	AddPending(ctx context.Context, jti string, streamID string) error
-	// AddPendingMany appends jtis, in order, to streamID's pending list as one
-	// bulk write; equivalent to AddPending per JTI but one round trip. An
-	// empty jtis is a no-op.
-	AddPendingMany(ctx context.Context, jtis []string, streamID string) error
-	// EnsurePending queues jti on every stream of streamIDs that holds neither
-	// a pending nor a delivered record for it, and returns the stream IDs it
-	// queued on (a subset of streamIDs, order unspecified). A stream that
-	// already has the JTI pending or delivered is left untouched, so the call
-	// is idempotent. It is the ADR 0043 residual repair (#331): a retry of a
-	// SET whose body landed but whose marker write failed is a duplicate for
-	// InsertWithPending, and this is how that duplicate is (re)queued. An empty
-	// streamIDs returns (nil, nil).
-	EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error)
-	GetPendingForStream(ctx context.Context, streamID string, limit int32) (jtis []string, total int64, err error)
-	RemovePending(ctx context.Context, jti string, streamID string) (*DeliverableEvent, error)
-	// RemovePendingMany removes every entry of jtis that is pending for
-	// streamID and returns the removed entries (a subset of jtis, order
-	// unspecified). A JTI not pending for the stream is skipped, exactly as
-	// RemovePending returns nil for it. Equivalent to RemovePending per JTI
-	// but a bounded number of round trips. An empty jtis returns (nil, nil).
+	// Pending references (deliveries in state pending)
+	//
+	// AddPending upserts the (streamID, ref.Jti) reference to state pending
+	// with ref.AckJti, unsetting ackDate and expireAt. createdAt is set when
+	// the row is inserted, re-set when a delivered row returns to pending,
+	// and left unchanged when the row is already pending.
+	AddPending(ctx context.Context, ref PendingRef, streamID string) error
+	// AddPendingMany is AddPending for every ref, in one bulk write. An empty
+	// refs is a no-op.
+	AddPendingMany(ctx context.Context, refs []PendingRef, streamID string) error
+	// EnsurePending queues jti on every stream of ackJtis (stream ID ->
+	// ackJti) that holds no deliveries document for it in either state, and
+	// returns the stream IDs it queued on (order unspecified). An existing
+	// document is left untouched, including its ackJti and createdAt, so the
+	// call is idempotent. It is the ADR 0043 residual repair (#331). An empty
+	// ackJtis returns (nil, nil).
+	EnsurePending(ctx context.Context, jti string, ackJtis map[string]string) ([]string, error) // stream ID -> ackJti
+	// GetPendingForStream returns one page of streamID's pending references
+	// in ascending Jti order (see PendingPage).
+	GetPendingForStream(ctx context.Context, streamID string, limit int32) (PendingPage, error)
+	// StoredAckJtis returns the ackJti stored on streamID's deliveries row for
+	// each of jtis (inbound JTIs), in either state, keyed by inbound JTI. A JTI
+	// with no row is absent. It is the read a delivery queue makes for a
+	// reference it does not hold: rows keep the ackJti written at ingest.
+	StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error)
+	// RemovePendingMany deletes every entry of jtis (inbound JTIs) that is
+	// pending for streamID and returns the removed entries (order
+	// unspecified). A JTI not pending for the stream is skipped. An empty
+	// jtis returns (nil, nil).
 	RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]DeliverableEvent, error)
+	// ClearPendingForStream deletes every pending reference of streamID and
+	// returns the count. Delivered references are untouched.
 	ClearPendingForStream(ctx context.Context, streamID string) (int64, error)
 
-	// Delivered events
-	MarkDelivered(ctx context.Context, event *DeliverableEvent, ackDate time.Time) error
-	// MarkDeliveredMany records every event as delivered at ackDate as one
-	// bulk write; equivalent to MarkDelivered per event. An empty events is a
-	// no-op.
-	MarkDeliveredMany(ctx context.Context, events []DeliverableEvent, ackDate time.Time) error
-
-	// AckDelivered acknowledges jtis for streamID: every entry of jtis that
-	// is pending for streamID is removed from pending and recorded as
-	// delivered at ackDate (the ADR 0055 purge anchor), and the acked JTIs
-	// are returned (a subset of jtis, each at most once, order unspecified).
-	// A JTI not pending for the stream — unknown or already acked — is
-	// skipped and gets no delivered record (ADR 0017: a no-op, not an
-	// error). Equivalent to RemovePendingMany followed by MarkDeliveredMany;
-	// on MongoDB 8.0+ it is one multi-namespace bulkWrite. An empty jtis
-	// returns (nil, nil).
-	AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error)
+	// Ack acknowledges one stream's batch: every deliveries document of
+	// batch.StreamID whose ackJti is in batch.Jtis and whose state is pending
+	// becomes delivered at batch.AckDate (with batch.ExpireAt when set), and
+	// batch.Copies are stored in events (a duplicate key counts as stored).
+	// It is one conditional write with no read and no retract; it returns
+	// the number of references moved to delivered. A JTI not pending for the
+	// stream is skipped. Empty Jtis and empty Copies returns (0, nil).
+	Ack(ctx context.Context, batch AckBatch) (acked int64, err error)
+	// ResetPendingAckJti sets ackJti = jti on every pending reference of
+	// streamID whose ackJti differs, in one write, and returns the modified
+	// count. Delivered references are untouched.
+	ResetPendingAckJti(ctx context.Context, streamID string) (modified int64, err error)
+	// SweepExpired removes references with expireAt <= now, then deletes at
+	// most maxBodies unreferenced bodies older than bodyCutoff.
+	SweepExpired(ctx context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (SweepResult, error)
+	// MigrateLegacyDeliveries carries pendingEvents / deliveredEvents rows
+	// into deliveries and drops the old collections; idempotent.
+	MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (MigrationResult, error)
 
 	// --- Ack-anchored retention purge + occupancy sampling (ADR 0055) ---
 
 	// ListDeliveredForStream returns streamID's delivered (post-ack,
-	// not-yet-purged) events, each carrying its AckDate. It is the enumerator the
-	// per-(stream, JTI) retention clock reads to decide expiry. Order is
+	// not-yet-purged) references, each carrying its AckDate. Order is
 	// unspecified.
 	ListDeliveredForStream(ctx context.Context, streamID string) ([]DeliveredEvent, error)
 
-	// RemoveDelivered drops streamID's delivered entry for jti when its
-	// retention clock fires. It does NOT touch the global event body; body
-	// deletion is refcount-gated via DeleteBodyIfUnreferenced. Removing an entry
-	// that does not exist is not an error.
+	// RemoveDelivered drops streamID's delivered reference for jti. It does
+	// NOT touch the global event body; body deletion is refcount-gated via
+	// DeleteBodyIfUnreferenced. Removing an entry that does not exist (or is
+	// pending) is not an error.
 	RemoveDelivered(ctx context.Context, jti string, streamID string) error
 
-	// DeleteBodyIfUnreferenced deletes the global event body for jti ONLY when no
-	// stream still references it in pending or delivered (refcount 0 — the body
-	// survives to the maximum effective window across all referencing streams).
-	// Because pending is never purged, a still-pending JTI always keeps its body.
-	// It reports whether the body was deleted; a still-referenced or absent body
-	// is not an error.
+	// DeleteBodyIfUnreferenced deletes the global event body for jti ONLY
+	// when no deliveries document in either state has that jti. It reports
+	// whether the body was deleted; a still-referenced or absent body is not
+	// an error.
 	DeleteBodyIfUnreferenced(ctx context.Context, jti string) (deleted bool, err error)
 
-	// CountRetainedForStream returns the number of post-ack-retained (delivered,
-	// not-yet-purged) JTIs for streamID — the daily occupancy sampler's per-stream
-	// retained_count (pending excluded).
+	// CountRetainedForStream returns the number of delivered references of
+	// streamID (pending excluded).
 	CountRetainedForStream(ctx context.Context, streamID string) (int64, error)
 
-	// Change streams
-	WatchPending(ctx context.Context, callback func(jti string, streamID string)) error
+	// WatchPending reports every deliveries insert or update that leaves a
+	// row in state pending; the callback receives the row's jti and ackJti.
+	WatchPending(ctx context.Context, callback func(ref PendingRef, streamID string)) error
+}
+
+// Delivery reference states stored in deliveries.state. state is a string so
+// a later state needs no migration.
+const (
+	DeliveryStatePending   = "pending"
+	DeliveryStateDelivered = "delivered"
+)
+
+// PendingPage is one pending read for a stream.
+type PendingPage struct {
+	Refs         []PendingRef // state pending, ascending Jti, at most limit
+	Total        int64        // every pending row of the stream
+	OldestBeyond time.Time    // earliest createdAt among pending rows after the last of Refs; zero when Total == len(Refs)
+}
+
+// AckBatch is one stream's acknowledgement batch.
+type AckBatch struct {
+	StreamID string
+	Jtis     []string // acknowledgement JTIs: matched against deliveries.ackJti
+	AckDate  time.Time
+	ExpireAt *time.Time           // nil: keep forever
+	Copies   []*model.EventRecord // outbound re-signed copies to store; may be nil
+}
+
+// SweepResult reports one SweepExpired pass.
+type SweepResult struct {
+	References int64 // deliveries removed because expireAt <= now
+	Bodies     int64 // events documents deleted
+}
+
+// MigrationResult reports one MigrateLegacyDeliveries pass.
+type MigrationResult struct {
+	Pending   int64 // rows carried from pendingEvents
+	Delivered int64 // rows carried from deliveredEvents
+	Dropped   bool  // both old collections are gone
+}
+
+// PendingRef names one delivery reference. Jti is the inbound JTI (the events
+// key). AckJti is the JTI the SET carries on the wire for that stream and the
+// JTI the receiver acknowledges with. An empty AckJti is stored as Jti; every
+// read returns it non-empty. EnqueuedAt is the enqueue time (deliveries.createdAt):
+// a writer sets it from its own clock when it builds the reference; a zero
+// value is stored as the adapter's clock at the write; every read returns the
+// stored value.
+type PendingRef struct {
+	Jti        string
+	AckJti     string
+	EnqueuedAt time.Time
 }
 
 // SubjectFilterDAO handles per-stream SSF §8.1.3 subject filter entries. The
@@ -584,14 +651,17 @@ func (key KeySummary) AdjustBase(baseUrl *url.URL) KeySummary {
 // this internally as a bson.ObjectID via a private doc type for backward
 // compatibility with existing data.
 type DeliverableEvent struct {
-	Jti      string `json:"jti"`
-	StreamId string `json:"sid"`
+	Jti       string    `json:"jti"`
+	StreamId  string    `json:"sid"`
+	AckJti    string    `json:"ackJti,omitempty" bson:"ackJti,omitempty"`
+	CreatedAt time.Time `json:"createdAt,omitzero" bson:"createdAt,omitempty"`
 }
 
 // DeliveredEvent represents a delivered/acknowledged event
 type DeliveredEvent struct {
 	DeliverableEvent
-	AckDate time.Time `json:"ackDate"`
+	AckDate  time.Time  `json:"ackDate"`
+	ExpireAt *time.Time `json:"expireAt,omitempty"`
 }
 
 // KeyPairData holds a private/public key pair. PrivateKey is a crypto.Signer

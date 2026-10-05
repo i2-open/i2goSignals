@@ -11,6 +11,7 @@ import (
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/mongo_provider"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	daoInterfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/suite"
@@ -157,7 +158,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 
 	// Check Events by s.stream id
-	eventIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	eventIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(1, len(eventIds), "should be 1 event")
 
 	if len(eventIds) == 0 {
@@ -168,9 +169,9 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id)
 
-	nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(0, len(nextIds), "Should be no pending events")
 
 	s.generateEvent()
@@ -180,13 +181,13 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.generateEvent()
 	s.generateEvent()
 
-	nextIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	nextIds, _ = pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(5, len(nextIds), "Should be 5 max events")
 	s.ackEvents(nextIds)
 
-	finalIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true})
+	finalIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(1, len(finalIds), "should be 1 event")
-	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -200,7 +201,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 
 	var eventIds []string
 	s.Eventually(func() bool {
-		eventIds, _ = s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true})
+		eventIds, _ = pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 2, ReturnImmediately: true}))
 		return len(eventIds) > 0
 	}, 15*time.Second, 500*time.Millisecond)
 
@@ -213,7 +214,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 	callCount := 0
 	for len(events) < 10 && callCount < 30 {
 		log.Println("\nPolling for next events...")
-		nextIds, _ := s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
+		nextIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 100, ReturnImmediately: true}))
 		if len(nextIds) == 0 {
 			time.Sleep(1 * time.Second)
 			continue
@@ -242,7 +243,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id, 0)
+			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id)
 		}
 	}
 }
@@ -283,7 +284,7 @@ func (s *MongoProviderSuite) generateEvent() {
 
 	state, _ := s.provider.GetStreamService().GetStreamState(context.Background(), s.stream.Id)
 
-	_ = s.provider.GetEventService().AddEventToStream(context.Background(), test1.ID, state.Id.Hex())
+	_ = s.provider.GetEventService().AddEventToStream(context.Background(), daoInterfaces.PendingRef{Jti: test1.ID, AckJti: test1.ID}, state.Id.Hex())
 }
 
 func (s *MongoProviderSuite) TestF1_IssuerKeys() {

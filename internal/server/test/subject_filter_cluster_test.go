@@ -65,7 +65,7 @@ func TestAddSubjectNotifiesRemoteLeaseOwner(t *testing.T) {
 		Id:      "remote-owner",
 		Address: owner.URL,
 	}))
-	acquired, _, err := instance.app.Coordinator.TryAcquireOrRenewLease(
+	acquired, _, _, err := instance.app.Coordinator.TryAcquireOrRenewLease(
 		"push-transmitter:"+created.Id, "remote-owner", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)

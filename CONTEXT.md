@@ -247,8 +247,8 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
   ADR 0017's jti-only dedup and SSTP crash-recovery idempotency intact across
   the hop. `txn` (RFC 8417 §2.2) is the cross-hop audit linkage and is
   likewise preserved; never `act` (an access-token claim, not a SET claim).
-  Planned change (spec successor to planning #111): the re-signed copy
-  gets a new `jti` and carries `originalJti` — see **`originalJti`** below.
+  Since planning #112 the re-signed copy stored in `events` gets a new
+  `jti` and carries `originalJti` — see **`originalJti`** below.
 
 ### SET signing algorithm (`signing_alg`)
 
@@ -457,18 +457,18 @@ wake-ups stay in the router — the router consumes the classification
 and decides what to do next. `PollDelivery` (the symmetric poll-side
 seam) is deferred to a follow-up PRD.
 
-### DeliveryQueue (planned, spec successor to planning #111)
+### DeliveryQueue
 
 The per-stream module the `EventRouter` owns for one target stream's
 in-memory work: the pending JTIs still to deliver, the in-memory poll
 claims, and the coalesced acknowledgement batch. The acknowledgement
 batch is one Mongo write — a conditional update of the stream's
 `deliveries` documents from `pending` to `delivered`, plus w:1 inserts of
-the re-signed outbound copies into `events`. It replaces today's
+the re-signed outbound copies into `events`. It replaced the old
 pendingEvents `DeleteMany` + deliveredEvents `InsertOne` + retract
 `DeleteMany` sequence.
 
-### RoutingTable (planned, spec successor to planning #111)
+### RoutingTable
 
 An immutable snapshot of stream routing — stream id, status, delivery
 mode, event-type and subject filters — rebuilt whenever a stream is
@@ -476,7 +476,7 @@ added, removed or changes status, and read without taking the router
 lock. Lease ownership is deliberately not part of it; that stays in the
 **lease-owner cache** (see **Ingest read caches**).
 
-### PeerTransport (planned, spec successor to planning #111)
+### PeerTransport
 
 The seam for inter-node wake signalling. One method:
 `Wake(ctx, owner node, WakeMessage{StreamID, Mode, Reason, JTIs})`. The
@@ -485,7 +485,7 @@ looked up in Mongo); the two-node test harness uses an in-process
 adapter. The JTI list is advisory and capped — the receiving node falls
 back to reading its pending `deliveries` from Mongo.
 
-### LeaseManager (planned, spec successor to planning #111)
+### LeaseManager
 
 The node-level module that owns lease acquire / heartbeat / release for
 every stream on a node. It keeps the lease expiry each heartbeat returns
@@ -525,23 +525,58 @@ same repair. The only residual is a retry that arrives after retention purged
 the delivered record, which is re-queued (at-least-once).
 
 The pending-marker and delivered-record collections (pendingEvents /
-deliveredEvents) are being replaced by the single `deliveries` collection
-under the planned spec (successor to planning #111) — see below.
+deliveredEvents) were replaced by the single `deliveries` collection under
+planning #112 — see below. Legacy documents are migrated once at startup.
 
-### `deliveries` collection (planned, spec successor to planning #111)
+### `deliveries` collection
 
 Replaces the pendingEvents and deliveredEvents collections with one
 document per `(sid, jti)`:
-`{sid, jti, state: pending|delivered, createdAt, ackDate, expireAt}` — a
-reference only, never the body. Indexes: unique `(sid, jti)`;
-`(sid, state, jti)` for the pending read; TTL on `expireAt`; `jti` for
-the body sweep. `state` is open to a later `claimed` value. Because a
+`{sid, jti, ackJti, state: pending|delivered, createdAt, ackDate, expireAt}`
+— a reference only, never the body. `ackJti` is the row's
+**Acknowledgement JTI** (see below). Indexes: unique `(sid, jti)`;
+`(sid, ackJti)` for the acknowledgement match; `(sid, state, jti)` for the
+pending read; TTL on `expireAt`; `jti` for the body sweep; and a partial
+`(sid, createdAt)` index over `state: pending` rows only, for the
+backlog's oldest enqueue time. `state` is open to a later `claimed` value. Because a
 delivery document is a reference, a body in `events` is purged only when
 no delivery document in either state references it. `expireAt` is
 written at acknowledgement from the stream's retention policy (enterprise
 policy may vary it per stream).
 
-### Enqueue time / Queue time / Acknowledgement time / Backlog (planned, #352)
+### Acknowledgement JTI (`AckJti`)
+
+The JTI a receiver acknowledges a delivered SET by, stored on the
+`deliveries` row as `ackJti` when the row is written. For a Forward
+stream it is the inbound JTI; for a re-signing route mode it is the JTI
+of the re-signed outbound copy. An acknowledgement is matched against
+`ackJti`, never re-derived from the stream's current route mode, so a
+route-mode change does not orphan rows already written (#363).
+
+### Claim
+
+Two related meanings, both owned by the stream's lease owner:
+
+- **Poll claim** — a short in-memory hold the owner's **DeliveryQueue**
+  takes on the JTIs it hands to one RFC 8936 poll or SSTP-acceptor
+  request (`I2SIG_POLL_CLAIM_TTL`), so overlapping requests get disjoint
+  batches. An ack or release frees it; an expired claim makes its JTIs
+  servable again (at-least-once). A restart or lease takeover drops all
+  claims.
+- **Claim call** — `PeerTransport.Claim`: a node that receives a poll or
+  SSTP request for a stream it does not own forwards it to the lease
+  owner, which answers from its queue. The non-owner writes nothing and
+  builds no queue (#365).
+
+### ServesClaims
+
+`RouterDeps.ServesClaims`: true when the process serves poll and
+accepted-SSTP requests and mounts `/_cluster/claim` (the community
+server and goSsfServer). A router with it false (business routers) never
+takes a poll-transmitter or sstp-server lease; it wakes a known owner at
+ingest and otherwise leaves the rows pending (#365).
+
+### Enqueue time / Queue time / Acknowledgement time / Backlog (#352)
 
 The transmitter-side waiting vocabulary, per target stream:
 
@@ -559,7 +594,7 @@ The transmitter-side waiting vocabulary, per target stream:
   not yet acknowledged, whether or not it has been handed out. Reported as
   a depth and as the age of the oldest.
 
-### `originalJti` (field on `events`) (planned, spec successor to planning #111)
+### `originalJti` (field on `events`)
 
 Set on a re-signed outbound copy stored in `events`: the copy carries a
 new `jti`, and `originalJti` points at the inbound SET it was derived
@@ -587,9 +622,10 @@ the right one by what it answers, not by name:
   read cannot be straddled; `putIfCurrent` is the only writer, and callers sample
   the generation BEFORE the store read they intend to cache.
 - **Lease-owner cache** (`internal/eventRouter/lease_owner_cache.go`) — "who owns
-  this push transmitter lease?", 2 s TTL. A backstop behind this node's own
-  acquire / renew / lose / exit transitions, which keep it honest. It steers a
-  wake-up and **never authorises a delivery**. The SSTP-client lease is
+  this push-transmitter, poll-transmitter or sstp-server lease?", 2 s TTL. A
+  backstop behind this node's own acquire / renew / lose / exit transitions,
+  which keep it honest. It steers a wake-up or a Claim and **never authorises a
+  delivery**; a Claim answered `NotOwner` forgets the entry (#365). The SSTP-client lease is
   deliberately not cached: it is owned by the dialer in `internal/server`, so a
   cache here would be a bare TTL with no invalidation hook.
 
@@ -624,16 +660,9 @@ the structural fix that keeps the two adapters in lockstep.
 ### Fencing token
 
 Monotonically increasing per-resource counter handed back from
-`TryAcquireOrRenewLease`. Callers tag externally-visible operations
-(e.g. ack-event, push-receipt) with the fencing token so a stale node
-that lost its lease can be rejected at the boundary even if it's still
-trying to write. The `MemoryCoordinator`'s contract guarantees the
+`TryAcquireOrRenewLease`. The `MemoryCoordinator`'s contract guarantees the
 token never moves backward across the lifetime of a coordinator
-instance, even after takeover. `EventService.AckEvent(s)` checks the
-token against the stream's current lease before writing; modes that
-hold no lease (poll transmitter, SSTP server side) pass
-`NoFencingToken` (0) and are exempt only because the router reports no
-lease resource for the stream — a 0 token on a leased stream is refused.
+instance, even after takeover.
 
 ### Rebindable collection
 

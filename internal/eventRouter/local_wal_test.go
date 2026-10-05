@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/wal"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -34,7 +35,7 @@ type gatedEventDAO struct {
 
 var errInjectedStore = errors.New("injected store outage")
 
-func (g *gatedEventDAO) InsertWithPending(ctx context.Context, recs []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (g *gatedEventDAO) InsertWithPending(ctx context.Context, recs []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	g.calls.Add(1)
 	if g.gate != nil {
 		select {
@@ -92,6 +93,7 @@ func newWalRouterWith(t *testing.T, p *dbProviders.Persistence, walDir string, d
 		KeyService:    p.KeyService,
 		EventService:  services.NewEventService(dao),
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 		WAL:           log,
 	}
 	if adjust != nil {
@@ -144,7 +146,7 @@ func ensurePollStreamDurability(t *testing.T, p *dbProviders.Persistence, audien
 func (s *walSetup) pending(t *testing.T) []string {
 	t.Helper()
 	jtis, _ := s.p.EventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
-	return jtis
+	return pendingref.RefJtis(jtis)
 }
 
 func (s *walSetup) stored(jti string) bool {
@@ -219,7 +221,7 @@ func TestLocalWal_DuplicateInStoreCountsAsDrained(t *testing.T) {
 	tok := newRiscToken("wal-dup", dupTestIssuer, s.audience)
 	recs := services.NewIngestRecords([]*goSet.SecurityEventToken{tok}, s.streamID, []string{"first"})
 	pending := map[string][]string{s.stream.Id.Hex(): {"wal-dup"}}
-	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, pending)
+	_, errs := p.EventService.AddEventsWithPending(context.Background(), recs, s.streamID, pendingRefsOf(pending))
 	require.NoError(t, errs[0])
 
 	require.NoError(t, s.router.HandleEvent(tok, "second", s.streamID))
@@ -341,13 +343,18 @@ func assertWalRetention(t *testing.T, p *dbProviders.Persistence) {
 	require.NoError(t, s.router.HandleEvent(newRiscToken(jti, dupTestIssuer, s.audience), "raw", s.streamID))
 	s.waitDrained(t)
 	require.True(t, s.stored(jti))
-	require.NoError(t, p.EventService.AckEvent(ctx, jti, s.streamID, 0))
+	// Acknowledge as the router does with a 1-day window: expireAt is fixed
+	// at acknowledgement (#360).
+	window := 1
+	ackDate := time.Now()
+	expireAt := ackDate.Add(time.Duration(window) * 24 * time.Hour)
+	_, err := p.EventService.AckBatch(ctx, interfaces.AckBatch{StreamID: s.streamID, Jtis: []string{s.stream.AckJti(jti)}, AckDate: ackDate, ExpireAt: &expireAt})
+	require.NoError(t, err)
 
 	count, err := p.EventDAO.CountRetainedForStream(ctx, s.streamID)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), count)
 
-	window := 1
 	streams := []model.StreamStateRecord{{Id: s.stream.Id, RetentionWindowDays: &window}}
 	purged, err := services.NewRetentionEngine(p.EventDAO).PurgeExpired(ctx, time.Now().Add(48*time.Hour), streams, nil)
 	require.NoError(t, err)
@@ -393,6 +400,7 @@ func TestLocalWal_LocalStreamOnMajorityDeploymentUsesStore(t *testing.T) {
 		KeyService:    p.KeyService,
 		EventService:  p.EventService,
 		Coordinator:   p.Coordinator,
+		ServesClaims:  true,
 	}, "node-majority-test").(*router)
 	t.Cleanup(r.Shutdown)
 	aud := "https://receiver.example.com"

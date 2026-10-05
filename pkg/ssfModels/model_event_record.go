@@ -33,4 +33,9 @@ type EventRecord struct {
 		When set it is based upon one of the following attributes in order of preference:  toe, iat, time of insertion
 	*/
 	SortTime time.Time `bson:"sortTime"`
+
+	// OriginalJti is set only on a stored outbound re-signed copy: the inbound
+	// JTI of the SET it was re-signed from. Readers that replay history
+	// (FindByTimeRange) exclude records carrying it.
+	OriginalJti string `json:"originalJti,omitempty" bson:"originalJti,omitempty"`
 }

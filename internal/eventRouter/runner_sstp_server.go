@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -18,8 +19,10 @@ import (
 // SSTP-server side runner (PRD #154 slice 8, issue #165).
 //
 // The SSTP-server (responder) side answers POST /sstp/{id} and long-polls
-// outbound for the duration of the request. It takes NO cluster lease — every
-// node can serve the endpoint, so the receiver side scales horizontally (Q11.1).
+// outbound for the duration of the request. Every node can serve the endpoint,
+// so the receiver side scales horizontally (Q11.1); the outbound queue lives
+// only on the holder of the pair's sstp-server lease, and a non-owner serves
+// the outbound half through one Claim to it (#365).
 // It is parallel to PollEventsHandler/PollStreamHandler but drives both the
 // inbound (ingest) and outbound (long-poll drain) halves of one SSTP HTTP cycle.
 
@@ -52,6 +55,13 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// an empty response rather than panicking or re-looking-up.
 		return resp, nil
 	}
+	if err := r.startGate(); err != nil {
+		// Delivery waits for the legacy deliveries migration (#361): refuse
+		// the whole exchange before the owner is resolved, a queue is seeded
+		// or the peer's acks are applied; the peer resends on 503.
+		eventLogger.Debug("SSTP-SRV: delivery not started yet; exchange refused", "sid", rec.StreamConfiguration.Id)
+		return resp, err
+	}
 
 	// Seed the request memo with the pair the HTTP handler already resolved
 	// (issue #287). Without it resolveIngressStream re-derives the very same
@@ -72,18 +82,21 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// GetEvents only COPIES; only AckEvents removes — so without this, every
 	// delivered SET would be re-sent forever.
 	txSid := rec.StreamConfiguration.Id
+	var wireAcks, wireClears []string
 	if len(inbound.Ack) > 0 {
 		// Ack unconditionally, mirroring the RFC8936 poll transmitter
 		// (PollStreamHandler): the per-pair buffer's AckEvents is a no-op for any JTI
 		// not pending, and a peer can only ever ack JTIs from its own pair's outbound
 		// stream — so an ack for a not-yet-delivered JTI at worst drops that peer's own
-		// event, never another stream's. Crucially this endpoint takes NO cluster lease
-		// (any node serves it), so the ack MUST be honored regardless of which node
+		// event, never another stream's. Crucially any node serves this endpoint,
+		// so the ack MUST be honored regardless of which node
 		// delivered the SET; per-node delivery tracking would silently drop a legitimate
-		// cross-node ack and redeliver forever.
-		buf := r.sstpServerBufferFor(txSid)
-		buf.AckEvents(inbound.Ack)
-		_ = r.eventService.AckEvents(r.ctx, inbound.Ack, txSid, services.NoFencingToken)
+		// cross-node ack and redeliver forever. Since #365 a non-owner hands the
+		// ack to the acceptor lease owner in its Claim.
+		//
+		// The peer acks the acknowledgement JTIs it received (#363): they go to the
+		// store as received, in one Ack with any cleared setErrs below.
+		wireAcks = inbound.Ack
 	}
 
 	// Outbound setErr consumption: the peer's request also carries, in
@@ -118,11 +131,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			eventLogger.Warn("SSTP-SRV: peer rejected outbound SET, clearing it",
 				"sid", txSid, "jti", jti, "err", se.Err, "description", se.Description)
 		}
-		if len(disposition.Clear) > 0 {
-			buf := r.sstpServerBufferFor(txSid)
-			buf.AckEvents(disposition.Clear)
-			_ = r.eventService.AckEvents(r.ctx, disposition.Clear, txSid, services.NoFencingToken)
-		}
+		wireClears = disposition.Clear
 		if len(disposition.Fatal) > 0 {
 			eventLogger.Error("SSTP-SRV: peer reports the stream is dead, pausing pair",
 				"sid", txSid, "jti", disposition.Fatal[0],
@@ -130,6 +139,28 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 			r.pauseSstpPair(rec, fmt.Sprintf("SSTP-SRV: peer reports stream dead on pair=%s: %s: %s",
 				rec.PairId, disposition.FatalErr.Err, disposition.FatalErr.Description))
 		}
+	}
+
+	// The acceptor side is leased (#365): its owner holds the pair's one
+	// outbound queue and applies acks and cleared setErrs in its one write. A
+	// request that acks, clears or asks for events resolves the owner here; a
+	// non-owner sends all of it to the owner in one Claim after the inbound
+	// ingest below. A request with none of these (the second-push cycles of a
+	// dialing peer) makes no Claim.
+	resource := cluster.SstpServer.Resource(txSid)
+	hasAcks := len(wireAcks) > 0 || len(wireClears) > 0
+	wantsEvents := rec.Status == model.StreamStateEnabled && inbound.ReturnEventsResolved()
+	var owner string
+	var self bool
+	if hasAcks || wantsEvents {
+		owner, self = r.resolveOwner(resource)
+	}
+	claim := peer.ClaimRequest{Sid: txSid, Mode: peer.ModeSstpServer, AckJtis: wireAcks, SetErrJtis: wireClears}
+	if hasAcks && self {
+		// One acknowledgement write, through the pair's DeliveryQueue (#363).
+		r.claimLocal(ctx, claim, false)
+		claim.AckJtis, claim.SetErrJtis = nil, nil
+		hasAcks = false
 	}
 
 	// Inbound ingest: persist-then-process the parsed SETs as one batch via
@@ -185,14 +216,21 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// long-poll cycle keeps running and resumes draining on unpause — 4xx is
 	// reserved for the deleted-pair case (PRD #154 Q20, Q7.3), handled at the
 	// HTTP handler.
-	if rec.Status != model.StreamStateEnabled {
-		resp.ReturnEvents = goSetSstp.BoolPtr(false)
+	if !wantsEvents {
+		if hasAcks {
+			// MaxEvents 0: the owner applies the acks and claims nothing.
+			r.claimFor(ctx, resource, owner, self, claim)
+		}
+		if rec.Status != model.StreamStateEnabled {
+			resp.ReturnEvents = goSetSstp.BoolPtr(false)
+		}
 		return resp, nil
 	}
 
-	// Outbound long-poll drain: wait on the pair's EventPollBuffer for the duration
-	// of the request and return whatever SETs are available (Q7.1, Q15, Q19, Q20).
-	sets, signErr := r.drainSstpOutbound(ctx, rec, inbound)
+	// Outbound long-poll drain: one claim on the pair's queue, on the owner,
+	// for the duration of the request (Q7.1, Q19, Q20), carrying any acks
+	// not yet applied.
+	sets, signErr := r.drainSstpOutbound(ctx, rec, inbound, resource, owner, self, claim)
 	if signErr != nil {
 		// The key was checked when the exchange began (CheckSstpSigningKey) but
 		// could not sign this batch: send none of it, rather than a message that
@@ -209,70 +247,58 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	return resp, nil
 }
 
-// drainSstpOutbound long-polls the pair's outbound EventPollBuffer and returns the
-// SETs to send back this cycle (signed for publish mode, forwarded verbatim for
-// RouteModeForward). The wait reuses the I2SIG_POLL_DEFAULT_TIMEOUT /
-// I2SIG_POLL_MAX_TIMEOUT knobs (no SSTP-specific knob) and — per Q15 — does NOT
-// honor request-context cancellation: it waits the full buffer timeout even if the
-// client aborts, symmetric with the RFC8936 poll-transmitter handler.
-func (r *router) drainSstpOutbound(_ context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message) (map[string]string, error) {
-	if !inbound.ReturnEventsResolved() {
+// drainSstpOutbound claims the pair's next outbound SETs and returns them for
+// this cycle (signed for publish mode, forwarded verbatim for
+// RouteModeForward). The claim runs on the acceptor lease owner: here, or
+// through one Claim when another node owns it (#365). The wait reuses the
+// I2SIG_POLL_DEFAULT_TIMEOUT / I2SIG_POLL_MAX_TIMEOUT knobs (no SSTP-specific
+// knob) and ends when the request context is cancelled, so a peer that
+// disconnects cancels the Claim on the owner.
+func (r *router) drainSstpOutbound(ctx context.Context, rec *model.StreamStateRecord, inbound goSetSstp.Message, resource, owner string, self bool, claim peer.ClaimRequest) (map[string]string, error) {
+	// ReturnImmediately mirrors the wire field: a peer that sets
+	// returnImmediately=true declines long-polling and gets whatever is
+	// already queued (§2.1).
+	ri := inbound.ReturnImmediatelyResolved()
+	claim.MaxEvents = int32(r.backfillBatch)
+	claim.ReturnImmediately = ri
+	claim.WaitMs = r.claimWaitMs(0, ri)
+	if self && !ri {
+		claim.WaitMs = r.resolvedWait(0).Milliseconds()
+	}
+	resp, token, local := r.claimFor(ctx, resource, owner, self, claim)
+	if len(resp.Refs) == 0 {
 		return nil, nil
 	}
-
-	txSid := rec.StreamConfiguration.Id
-	buf := r.sstpServerBufferFor(txSid)
-
-	// Opportunistically prefetch pending JTIs when the buffer is empty (recovery
-	// after takeover relies on persisted outbound events, Q13).
-	if buf.Cnt() == 0 {
-		jtis, _ := r.eventService.GetEventIds(r.ctx, txSid, model.PollParameters{
-			MaxEvents:         int32(r.backfillBatch),
-			ReturnImmediately: true,
-		})
-		if len(jtis) > 0 {
-			buf.SubmitEvents(jtis)
+	if !local {
+		forward := rec.GetRouteMode() == model.RouteModeForward
+		var key crypto.Signer
+		var kid string
+		if !forward {
+			key, kid = r.checkAndLoadKey(rec.StreamConfiguration.Id, rec.StreamConfiguration.Iss, rec.StreamConfiguration.SigningAlg)
+			if key == nil {
+				return nil, errNoActiveSigningKey(rec.StreamConfiguration)
+			}
+		}
+		return r.signClaimedRefs(rec, resp.Refs, forward, key, kid)
+	}
+	sets, err := r.buildSstpOutboundSets(rec, r.resolveOutboundSets(resp.Refs))
+	if err != nil {
+		if buf, _ := r.heldBuffer(peer.ModeSstpServer, rec.StreamConfiguration.Id); buf != nil {
+			r.queueFor(rec.StreamConfiguration.Id).ReleaseClaim(token)
 		}
 	}
-
-	// Long-poll wait on the buffer. ReturnImmediately mirrors the wire field: a
-	// peer that sets returnImmediately=true declines long-polling and gets whatever
-	// is already queued (§2.1). Otherwise the buffer applies its resolved default
-	// timeout. The buffer's own select on its notifier is the wait; it intentionally
-	// does not observe the request context (Q15).
-	jtiSlice, _ := buf.GetEvents(model.PollParameters{
-		MaxEvents:         int32(r.backfillBatch),
-		ReturnImmediately: inbound.ReturnImmediatelyResolved(),
-	})
-	if jtiSlice == nil || len(*jtiSlice) == 0 {
-		return nil, nil
-	}
-
-	return r.buildSstpOutboundSets(rec, *jtiSlice)
+	return sets, err
 }
 
-// sstpServerBufferFor returns the outbound long-poll buffer for the pair's tx
-// SID, creating it (with the router's resolved poll timeouts) on first use.
-func (r *router) sstpServerBufferFor(txSid string) *buffer.EventPollBuffer {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if buf, ok := r.sstpServerBuffers[txSid]; ok {
-		return buf
-	}
-	buf := buffer.CreateEventPollBuffer(nil, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
-	r.sstpServerBuffers[txSid] = buf
-	return buf
-}
-
-// buildSstpOutboundSets renders each outbound JTI to its on-wire SET string:
+// buildSstpOutboundSets renders each outbound set to its on-wire SET string:
 // forwarded verbatim in RouteModeForward, or signed with the pair's issuer key
-// otherwise. Same shape as the poll transmitter's assemblePollResponse: one
-// read for the batch's records, then the re-signing fans out across the
-// signConcurrency pool (ADR 0036). A JTI whose record is gone is skipped and
-// stays in the buffer. With no active key, or when any SET fails to sign, it
+// under the set's Ref.AckJti otherwise. The records come resolved in one read
+// (resolveOutboundSets), then the re-signing fans out across the
+// signConcurrency pool (ADR 0036). A reference whose record is gone was
+// dropped by that read and stays in the buffer. With no active key, or when any SET fails to sign, it
 // returns no sets and the error, so the caller sends none of them rather than
 // a message that leaves one out (#312); every SET stays pending.
-func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []string) (map[string]string, error) {
+func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []OutboundSet) (map[string]string, error) {
 	forward := rec.GetRouteMode() == model.RouteModeForward
 	var key crypto.Signer
 	var kid string
@@ -283,32 +309,72 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		}
 	}
 
-	byJti := make(map[string]*model.EventRecord, len(jtis))
-	for _, eventRecord := range r.eventService.GetEventRecords(r.ctx, jtis) {
-		byJti[eventRecord.Jti] = eventRecord
-	}
-
-	sets := make(map[string]string, len(jtis))
-	work := make([]*model.EventRecord, 0, len(jtis))
-	for _, jti := range jtis {
-		eventRecord := byJti[jti]
-		if eventRecord == nil {
+	q := r.queueFor(rec.StreamConfiguration.Id)
+	sets := make(map[string]string, len(outbound))
+	work := make([]*model.EventRecord, 0, len(outbound))
+	ackJtiOf := make(map[*model.EventRecord]string, len(outbound))
+	for _, set := range outbound {
+		if set.Record == nil {
 			continue
 		}
 		if forward {
-			sets[jti] = eventRecord.Original
+			sets[set.Ref.Jti] = set.Record.Original
 			continue
 		}
-		work = append(work, eventRecord)
+		work = append(work, set.Record)
+		ackJtiOf[set.Record] = set.Ref.AckJti
 	}
 	if len(work) == 0 {
+		q.MarkHandedOut(mapKeys(sets), time.Now())
 		return sets, nil
 	}
 
+	// Each re-signed SET is a value copy of the stored token carrying the
+	// reference's acknowledgement JTI (#363); the message keys it by that
+	// JTI, which is what the peer acks.
 	cfg := rec.StreamConfiguration
 	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	// A reference claimed without its acknowledgement JTI (a bare buffer
+	// submit) takes its stored row's one, all in one Resolve; one with none
+	// is not sent and its claim is released.
+	var bare []string
+	for _, eventRecord := range work {
+		if ackJtiOf[eventRecord] == "" {
+			bare = append(bare, eventRecord.Jti)
+		}
+	}
+	if len(bare) > 0 {
+		refs, _ := q.Resolve(bare)
+		found := make(map[string]string, len(refs))
+		for _, ref := range refs {
+			found[ref.Jti] = ref.AckJti
+		}
+		resolved := work[:0]
+		for _, eventRecord := range work {
+			if ackJtiOf[eventRecord] == "" {
+				ackJti, ok := found[eventRecord.Jti]
+				if !ok {
+					continue
+				}
+				ackJtiOf[eventRecord] = ackJti
+			}
+			resolved = append(resolved, eventRecord)
+		}
+		work = resolved
+	}
+	if len(work) == 0 {
+		q.MarkHandedOut(mapKeys(sets), time.Now())
+		return sets, nil
+	}
+	idx := make(map[*model.EventRecord]int, len(work))
+	tokens := make([]goSet.SecurityEventToken, len(work))
+	for i, eventRecord := range work {
+		idx[eventRecord] = i
+		tokens[i] = eventRecord.Event
+		tokens[i].ID = ackJtiOf[eventRecord]
+	}
 	signed := SignSets(work, r.signConcurrency, func(eventRecord *model.EventRecord) (string, error) {
-		token := &eventRecord.Event
+		token := &tokens[idx[eventRecord]]
 		token.Issuer = cfg.Iss
 		token.Audience = cfg.Aud
 		token.IssuedAt = jwt.NewNumericDate(time.Now())
@@ -319,9 +385,22 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, jtis []stri
 		if signed[i].Err != nil {
 			return nil, fmt.Errorf("signing outbound JTI %s: %w", eventRecord.Jti, signed[i].Err)
 		}
-		sets[eventRecord.Jti] = signed[i].JWS
 	}
+	for i, eventRecord := range work {
+		sets[tokens[i].ID] = signed[i].JWS
+		q.Served(eventRecord, &tokens[i], signed[i].JWS)
+	}
+	q.MarkHandedOut(mapKeys(sets), time.Now())
 	return sets, nil
+}
+
+// mapKeys returns m's keys in no particular order.
+func mapKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // sstpInboundCounterRecord returns a view of the SSTP pair record whose

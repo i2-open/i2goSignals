@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,15 +192,16 @@ func TestAcker_CompleteAfterCloseDrainsInline(t *testing.T) {
 	assert.Equal(t, [][]string{{"c"}}, rec.snapshot())
 }
 
-// An ack refused on a stale fencing token fences the acker: the fenced
-// channel closes, later reservations and completions fail with the error, and
-// nothing is written again.
-func TestAcker_StaleFenceFences(t *testing.T) {
-	rec := &ackRecorder{err: fmt.Errorf("ack: %w", services.ErrStaleFencingToken)}
+// An ack refused because this node's lease tenure ran out (#364) is not
+// dropped: the batch goes back to the front of the queue with its JTIs still
+// in flight, no outcome is reported, and the next flush after a renewal writes
+// it. Nothing fences the acker; reservations go on.
+func TestAcker_NotOwnerRequeuesUntilRenewed(t *testing.T) {
+	rec := &ackRecorder{err: fmt.Errorf("ack: %w", errNotLeaseOwner)}
 	var appliedMu sync.Mutex
 	var applied []error
 	a := newAcker(context.Background(), ackerConfig{
-		sid: "s", transport: "sstp", apply: rec.apply, window: time.Hour, max: 64,
+		sid: "s", transport: "push", apply: rec.apply, window: time.Hour, max: 64,
 		onApplied: func(_ []string, err error) {
 			appliedMu.Lock()
 			applied = append(applied, err)
@@ -210,22 +210,29 @@ func TestAcker_StaleFenceFences(t *testing.T) {
 	})
 	defer func() { _ = a.close() }()
 
-	_, _ = a.reserve(context.Background(), []string{"a"})
-	require.NoError(t, a.complete([]string{"a"}, nil))
-	assert.ErrorIs(t, a.flush(), services.ErrStaleFencingToken)
-	waitClosed(t, a.fencedCh(), "fenced channel did not close")
+	_, _ = a.reserve(context.Background(), []string{"a", "b"})
+	require.NoError(t, a.complete([]string{"a", "b"}, nil))
+	assert.ErrorIs(t, a.flush(), errNotLeaseOwner)
+	assert.Equal(t, 2, a.size(), "the refused batch stays in flight")
+	appliedMu.Lock()
+	assert.Empty(t, applied, "a refused batch reports no outcome")
+	appliedMu.Unlock()
 
-	_, err := a.reserve(context.Background(), []string{"b"})
-	assert.ErrorIs(t, err, services.ErrStaleFencingToken)
-	assert.ErrorIs(t, a.complete([]string{"c"}, nil), services.ErrStaleFencingToken)
-	assert.Len(t, rec.snapshot(), 1, "a fenced acker writes nothing more")
-	assert.Equal(t, 0, a.size())
+	got, err := a.reserve(context.Background(), []string{"c"})
+	require.NoError(t, err, "a refused ack does not fence the acker")
+	assert.Equal(t, []string{"c"}, got)
+
+	rec.mu.Lock()
+	rec.err = nil
+	rec.mu.Unlock()
+	require.NoError(t, a.flush())
+	writes := rec.snapshot()
+	require.Len(t, writes, 2)
+	assert.Equal(t, writes[0], writes[1], "the renewed flush writes the same batch")
+	assert.Equal(t, 1, a.size(), "only the unacked reservation is left")
 	appliedMu.Lock()
 	defer appliedMu.Unlock()
-	require.Len(t, applied, 2, "every queued JTI reports its outcome, so SSTP claims are released")
-	for _, err := range applied {
-		assert.ErrorIs(t, err, services.ErrStaleFencingToken)
-	}
+	require.Equal(t, []error{nil}, applied)
 }
 
 func TestAckerEnv(t *testing.T) {
@@ -278,45 +285,43 @@ func TestPushAckCoalescing_RestartFlushesQueuedAcksNoResend(t *testing.T) {
 	}
 }
 
-// Queued acks refused after a takeover are not written: the SETs stay pending
-// for the new owner to redeliver, and the old runner stops delivering.
-func TestPushAckCoalescing_StaleFenceLeavesSentSetsPending(t *testing.T) {
+// Queued acks refused after a takeover are not written: once the old owner's
+// recorded tenure has run out its acker writes nothing, makes no lease call,
+// and the SETs stay pending for the new owner to redeliver (#364).
+func TestPushAckCoalescing_TenureEndLeavesSentSetsPending(t *testing.T) {
 	t.Setenv("I2SIG_ACK_COALESCE_WINDOW", "1h")
 	rx := newHoldingReceiver()
 	rx.release()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 	setter, ok := coord.(clockSetter)
 	require.True(t, ok)
 	clock := &leaseClock{t: time.Now().UTC()}
 	setter.SetClock(clock.now)
 	t.Cleanup(func() { setter.SetClock(nil) })
+	require.NotNil(t, h.router.leases)
+	h.router.leases.now = clock.now
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 3)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 	h.router.UpdateStreamState(stream.DeepCopy())
 	require.Eventually(t, func() bool { return len(rx.snapshot()) >= len(jtis) }, 10*time.Second, 5*time.Millisecond)
 	waitLeaseOwner(t, coord, resource, "node-restart")
+	require.True(t, h.router.leases.StillOwner(resource))
 
 	clock.advance(time.Minute)
-	took, _, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
+	took, _, _, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
 	require.NoError(t, err)
 	require.True(t, took)
+	assert.False(t, h.router.leases.StillOwner(resource), "the tenure ran out with the lease")
 
 	v, ok := h.router.pushAckers.Load(sid)
 	require.True(t, ok)
 	ack := v.(*acker)
-	assert.ErrorIs(t, ack.flush(), services.ErrStaleFencingToken)
-	waitClosed(t, ack.fencedCh(), "acker not fenced")
-	assert.Equal(t, len(jtis), h.pendingCount(sid), "a stale ack writes nothing; the SETs are redelivered by the owner")
-	// The fenced runner leaves its loop to re-acquire, which node-b holds.
-	require.Eventually(t, func() bool {
-		_, still := h.router.pushAckers.Load(sid)
-		return !still
-	}, 5*time.Second, 5*time.Millisecond, "the fenced runner kept delivering")
-	assert.Equal(t, len(jtis), h.pendingCount(sid))
+	assert.ErrorIs(t, ack.flush(), errNotLeaseOwner)
+	assert.Equal(t, len(jtis), h.pendingCount(sid), "an ack past the tenure writes nothing; the SETs are redelivered by the owner")
 }
 
 // An SSTP peer ack is queued on the pair's acker: the SET keeps its in-flight
@@ -335,7 +340,7 @@ func TestSstpAckCoalescing_ClaimHeldUntilAckWritten(t *testing.T) {
 	}
 	claimed := r.claimSstpJtis(pairId, jtis, len(jtis))
 	require.Len(t, claimed, 3)
-	sent := r.eventService.GetEventRecords(context.Background(), claimed)
+	sent := r.resolveOutboundSets(r.outboundRefs(pairId, claimed))
 	require.Len(t, sent, 3)
 
 	pending := func() int {
@@ -348,7 +353,7 @@ func TestSstpAckCoalescing_ClaimHeldUntilAckWritten(t *testing.T) {
 		return len(r.sstpInFlight[pairId])
 	}
 
-	n := r.handleSstpAcks(rec, nil, jtis[:2], sent, services.NoFencingToken)
+	n := r.handleSstpAcks(rec, nil, jtis[:2], sent)
 	assert.Equal(t, 2, n)
 	assert.Equal(t, 2, claims(), "the acked SETs stay claimed until their ack is written; the unacked one is released")
 	assert.Equal(t, 3, pending())

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/dao/groupcommit"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/wal"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -41,13 +42,20 @@ const (
 	walReadEntries = 256
 )
 
-// walTarget is the durable form of a fanoutTarget.
+// walTarget is the durable form of a fanoutTarget. AckJtis is index-aligned
+// with Jtis (#359); an entry written without it drains with ackJti = jti.
 type walTarget struct {
-	Mode  string   `bson:"mode"`
-	Key   string   `bson:"key"`
-	DocID string   `bson:"docId"`
-	Sid   string   `bson:"sid"`
-	Jtis  []string `bson:"jtis"`
+	Mode    string   `bson:"mode"`
+	Key     string   `bson:"key"`
+	DocID   string   `bson:"docId"`
+	Sid     string   `bson:"sid"`
+	Jtis    []string `bson:"jtis"`
+	AckJtis []string `bson:"ackJtis,omitempty"`
+}
+
+// fanout returns the fanoutTarget t was written from.
+func (t walTarget) fanout() *fanoutTarget {
+	return &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis, ackJtis: t.AckJtis}
 }
 
 // walEntry is one acknowledged inbound batch: the candidate records to store
@@ -462,13 +470,11 @@ func (r *router) handleEventsLocal(candidates []*model.EventRecord, sid string, 
 
 	var targets []*fanoutTarget
 	if !importOnly {
-		r.mu.RLock()
 		targets = r.planFanoutLocked(fresh, excludeSstpTxSid)
-		r.mu.RUnlock()
 	}
 	entry := &walEntry{Sid: sid, Records: fresh, Targets: make([]walTarget, 0, len(targets)), At: lw.now().UnixNano()}
 	for _, t := range targets {
-		entry.Targets = append(entry.Targets, walTarget{Mode: t.mode, Key: t.key, DocID: t.docID, Sid: t.sid, Jtis: t.jtis})
+		entry.Targets = append(entry.Targets, walTarget{Mode: t.mode, Key: t.key, DocID: t.docID, Sid: t.sid, Jtis: t.jtis, AckJtis: t.ackJtis})
 	}
 
 	data, err := encodeWalEntry(entry)
@@ -507,10 +513,15 @@ func (r *router) ringFeed(e *walEntry) {
 	if len(e.Targets) == 0 {
 		return
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, t := range e.Targets {
-		r.wakeTargetScopedLocked(&fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}, t.Jtis, wakeLocalOnly)
+	targets := make([]*fanoutTarget, len(e.Targets))
+	for i, t := range e.Targets {
+		targets[i] = t.fanout()
+	}
+	r.resolveOwners(targets)
+	r.fanoutRLock()
+	defer r.fanoutRUnlock()
+	for _, t := range targets {
+		r.wakeTargetScopedLocked(t, t.jtis, wakeLocalOnly)
 	}
 }
 
@@ -599,10 +610,13 @@ func (r *router) drainWalOnce(ctx context.Context) (more bool, err error) {
 		lastSeq = e.Seq
 	}
 
-	pending := map[string][]string{}
+	// A drained row's createdAt is the drain time: the delivery record is
+	// created now (#359).
+	pending := map[string][]interfaces.PendingRef{}
+	drainedAt := time.Now()
 	for _, d := range batch {
 		for _, t := range d.entry.Targets {
-			pending[t.DocID] = append(pending[t.DocID], t.Jtis...)
+			pending[t.DocID] = append(pending[t.DocID], t.fanout().refs(drainedAt)...)
 		}
 	}
 
@@ -704,7 +718,7 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 	}
 	targets := make([]*fanoutTarget, len(e.Targets))
 	for i, t := range e.Targets {
-		targets[i] = &fanoutTarget{mode: t.Mode, key: t.Key, docID: t.DocID, sid: t.Sid, jtis: t.Jtis}
+		targets[i] = t.fanout()
 	}
 	// A duplicate whose marker is missing is re-queued exactly as on the
 	// majority path (#331); a failed repair rewrites errs[i] so the drain
@@ -731,7 +745,7 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 		// A re-queued duplicate was fed then too, and its held ack (if it
 		// has already been delivered) removes the marker written above.
 		committed := make([]*fanoutTarget, 0, len(targets))
-		r.mu.RLock()
+		r.fanoutRLock()
 		for _, t := range targets {
 			hit := false
 			for _, jti := range t.jtis {
@@ -748,22 +762,34 @@ func (r *router) commitWalEntry(ctx context.Context, e *walEntry, recs []*model.
 				committed = append(committed, t)
 			}
 		}
-		r.mu.RUnlock()
+		r.fanoutRUnlock()
 		r.wakeCommittedRemote(committed)
 		return
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.resolveOwners(targets)
+	r.fanoutRLock()
+	defer r.fanoutRUnlock()
 	r.commitFanoutLocked(targets, accepted, requeued)
 }
 
 // wakeCommittedRemote sends the cross-node wake for ring-fed targets whose
 // SETs the drain has just stored (#347). It runs on the drain path once per
-// committed entry, so it holds no router lock and reads no uncached lease (see
-// wakeTargetRemote). The append-time local wake has already served a locally
-// owned target.
+// committed entry, so it holds no router lock and reads no uncached lease: the
+// PUSH owner comes from leaseOwners, and the SSTP-client owner is the one
+// resolveOwners noted at append, peeked without a load. The append-time local
+// wake has already served a locally owned target.
 func (r *router) wakeCommittedRemote(targets []*fanoutTarget) {
 	for _, t := range targets {
+		switch t.mode {
+		case routeModePush:
+			t.owner = r.pushLeaseOwner(t.key)
+		case routeModeSstpClient:
+			t.owner = r.leaseOwners.peek(cluster.SstpClient.Resource(t.key))
+		case routeModePoll:
+			t.owner = r.leaseOwners.peek(cluster.PollTransmitter.Resource(t.key))
+		case routeModeSstpServer:
+			t.owner = r.leaseOwners.peek(cluster.SstpServer.Resource(t.key))
+		}
 		r.wakeTargetRemote(t)
 	}
 }

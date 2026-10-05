@@ -30,12 +30,13 @@ func TestLocalWal_RingFedRemoteOwnerWokenAfterDrain(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
 	peer := stubWakePeer(t, wakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), "node-B", 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 
@@ -84,12 +85,13 @@ func TestLocalWal_RingFedCommitWakeReadsNoLease(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
 	peer := stubWakePeer(t, wakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), "node-B", 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 
@@ -121,12 +123,13 @@ func TestLocalWal_RingFedCommitWakeSkipsBroadcastWhenSelfOwns(t *testing.T) {
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *pair
 	r.sstpBuffers[pairId] = buffer.CreateEventPollBuffer(nil, 1, 1)
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	wakes := make(chan capturedSstpWake, 4)
 	peer := stubWakePeer(t, wakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), r.nodeId, 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(fmt.Sprintf("sstp-client:%s", pairId), r.nodeId, 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 

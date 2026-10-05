@@ -115,7 +115,7 @@ func (sa *SignalsApplication) purgeClusterRows(states map[string]model.StreamSta
 		}
 	}
 	keep := func(resource string) bool {
-		_, id, known := cluster.ResourceId(resource)
+		_, id, known := cluster.ParseResource(resource)
 		return !known || live[id]
 	}
 	if n, err := reaper.PurgeExpiredLeases(cutoff, keep); err != nil {

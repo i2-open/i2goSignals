@@ -39,6 +39,12 @@ type leaseHeartbeat struct {
 	// heartbeat's contract is the seam's contract.
 	Coordinator cluster.ClusterCoordinator
 
+	// Manager, when set, is the router's leaseManager: every renewal goes
+	// through it, so the heartbeat is the manager's renewal loop and each
+	// renewal refreshes the tenure StillOwner answers from (#364). Coordinator
+	// is then unused.
+	Manager *leaseManager
+
 	// Resource and NodeId identify the claim being renewed.
 	Resource string
 	NodeId   string
@@ -78,7 +84,10 @@ func (h leaseHeartbeat) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			held, _, err := h.Coordinator.TryAcquireOrRenewLease(h.Resource, h.NodeId, ttl)
+			if ctx.Err() != nil {
+				return
+			}
+			held, err := h.renew(ttl)
 			renewed := held && err == nil
 			if h.OnRenew != nil {
 				h.OnRenew(renewed)
@@ -97,4 +106,15 @@ func (h leaseHeartbeat) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// renew makes one acquire-or-renew call, through the manager when there is
+// one.
+func (h leaseHeartbeat) renew(ttl time.Duration) (bool, error) {
+	if h.Manager != nil {
+		held, _, err := h.Manager.acquire(h.Resource, h.NodeId, ttl)
+		return held, err
+	}
+	held, _, _, err := h.Coordinator.TryAcquireOrRenewLease(h.Resource, h.NodeId, ttl)
+	return held, err
 }

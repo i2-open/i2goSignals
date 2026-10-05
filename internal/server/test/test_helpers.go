@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
@@ -108,7 +109,8 @@ func (instance *ssfInstance) DeleteStream(streamId string) error {
 }
 
 func (instance *ssfInstance) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
-	return instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	refs, more := instance.eventSvc().GetEventIds(context.Background(), streamId, params)
+	return pendingref.RefJtis(refs), more
 }
 
 func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {
@@ -125,7 +127,7 @@ func (instance *ssfInstance) ClearPending(streamId string) error {
 }
 
 func (instance *ssfInstance) ResetEventStream(streamId, jti string, resetDate *time.Time, isStreamEvent func(*model.EventRecord) bool) error {
-	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent)
+	return instance.eventSvc().ResetEventStream(context.Background(), streamId, jti, resetDate, isStreamEvent, func(inboundJti string) string { return inboundJti })
 }
 
 // GetPrivateKey returns the issuer's signing key as the concrete RSA type the
@@ -261,4 +263,14 @@ func createServerWithHook(t *testing.T, dbName string, resetDb bool, beforeApp f
 	instance.projectId = eat.ProjectId
 
 	return &instance, nil
+}
+
+// deliveredJti is the jti a receiver of stream sees for inboundJti (#363): a
+// re-signed SET carries the stream's derived acknowledgement JTI, a forwarded
+// SET its inbound JTI.
+func deliveredJti(stream model.StreamConfiguration, inboundJti string) string {
+	if stream.RouteMode == model.RouteModeForward {
+		return inboundJti
+	}
+	return goSet.DeriveCopyJti(stream.Id, inboundJti)
 }

@@ -160,7 +160,7 @@ func (r *router) startPushRunnerIfReEnabled(sid string, runner *pushRunner) {
 // pendingPushJtis reads sid's pending JTIs from the store, to preload a new
 // runner's buffer. The caller does not hold r.mu.
 func (r *router) pendingPushJtis(sid string) []string {
-	jtis, _ := r.eventService.GetEventIds(r.ctx, sid, model.PollParameters{
+	jtis, _ := r.pendingJtis(r.ctx, sid, model.PollParameters{
 		MaxEvents:         0,
 		ReturnImmediately: true,
 		TimeoutSecs:       10,
@@ -303,6 +303,7 @@ func (r *router) completePushHandoff(sid string, old *pushRunner, handoff *pushH
 	if ownPause != "" && state.Status == model.StreamStatePause && state.ErrorMsg == ownPause {
 		state.SetStatus(model.StreamStateEnabled, "")
 		r.pushStreams[sid] = state
+		r.rebuildRoutingLocked()
 	}
 	r.initPushStreamLocked(sid, state.DeepCopy(), jtis)
 }
@@ -393,6 +394,7 @@ func (r *router) pushStreamHeldOff(sid string) bool {
 	if cur, ok := r.pushStreams[sid]; ok && cur.Status == state.Status && cur.ErrorMsg == state.ErrorMsg {
 		cur.SetStatus(stored.Status, stored.ErrorMsg)
 		r.pushStreams[sid] = cur
+		r.rebuildRoutingLocked()
 	}
 	r.mu.Unlock()
 	return false

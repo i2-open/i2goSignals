@@ -52,6 +52,7 @@ func routerOn(t *testing.T, persistence *dbProviders.Persistence, nodeId string)
 		KeyService:           persistence.KeyService,
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
+		ServesClaims:         true,
 		SubjectFilterService: persistence.SubjectFilterService,
 	}, nodeId).(*router)
 	t.Cleanup(r.Shutdown)
@@ -97,23 +98,23 @@ func (h *filterPushHarness) createSigningPollStream(t *testing.T, iss, routeMode
 func (h *filterPushHarness) queuePollEvents(t *testing.T, sid string, n int) []string {
 	t.Helper()
 	jtis := h.addPendingEvents(t, sid, n)
-	h.router.mu.RLock()
-	buf := h.router.pollBuffers[sid]
-	h.router.mu.RUnlock()
+	// The owner builds its buffer from a pending read on first use (#365),
+	// which may already hold some of jtis.
+	buf := h.router.pollBufferFor(sid)
 	require.NotNil(t, buf, "poll buffer must exist for stream %s", sid)
-	buf.SubmitEvents(jtis)
+	buf.SubmitEvents(buf.Absent(jtis))
 	require.Eventually(t, func() bool { return buf.Cnt() == h.pendingCount(sid) }, 2*time.Second, 5*time.Millisecond,
 		"queued JTIs must drain into the poll buffer")
 	return jtis
 }
 
 func (h *filterPushHarness) poll(sid string, acks ...string) (map[string]string, int) {
-	sets, _, status := h.router.PollStreamHandler(sid, model.PollParameters{
+	sets, _, status := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents:         100,
 		ReturnImmediately: true,
-		Acks:              acks,
+		Acks:              wireAcks(h.router, sid, acks...),
 	})
-	return sets, status
+	return inboundSets(h.router, sid, sets), status
 }
 
 func (h *filterPushHarness) stored(t *testing.T, sid string) *model.StreamStateRecord {

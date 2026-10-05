@@ -42,19 +42,20 @@ func (s *LeaseTestSuite) TestLeaseAcquisition() {
 	node2 := "node-2"
 
 	// 1. Node 1 acquires lease
-	acquired, token1, err := s.provider.TryAcquireOrRenewLease(resource, node1, 2*time.Second)
+	acquired, token1, _, err := s.provider.TryAcquireOrRenewLease(resource, node1, 2*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 	s.Greater(token1, int64(0))
 
 	// 2. Node 2 tries to acquire (should fail)
-	acquired, token2, err := s.provider.TryAcquireOrRenewLease(resource, node2, 2*time.Second)
+	acquired, token2, until2, err := s.provider.TryAcquireOrRenewLease(resource, node2, 2*time.Second)
 	s.NoError(err)
 	s.False(acquired)
 	s.Equal(int64(0), token2)
+	s.True(until2.IsZero(), "a lease held elsewhere returns no leaseUntil")
 
 	// 3. Node 1 renews its live lease — the fencing token is kept (#334)
-	acquired, token3, err := s.provider.TryAcquireOrRenewLease(resource, node1, 2*time.Second)
+	acquired, token3, _, err := s.provider.TryAcquireOrRenewLease(resource, node1, 2*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 	s.Equal(token1, token3)
@@ -63,7 +64,7 @@ func (s *LeaseTestSuite) TestLeaseAcquisition() {
 	time.Sleep(2500 * time.Millisecond)
 
 	// 5. Node 2 acquires lease
-	acquired, token4, err := s.provider.TryAcquireOrRenewLease(resource, node2, 2*time.Second)
+	acquired, token4, _, err := s.provider.TryAcquireOrRenewLease(resource, node2, 2*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 	s.Greater(token4, token3)
@@ -75,7 +76,7 @@ func (s *LeaseTestSuite) TestLeaseRelease() {
 	node2 := "node-2"
 
 	// 1. Node 1 acquires lease
-	acquired, _, err := s.provider.TryAcquireOrRenewLease(resource, node1, 10*time.Second)
+	acquired, _, _, err := s.provider.TryAcquireOrRenewLease(resource, node1, 10*time.Second)
 	s.Require().True(acquired)
 	s.Require().NoError(err)
 
@@ -84,7 +85,7 @@ func (s *LeaseTestSuite) TestLeaseRelease() {
 	s.NoError(err)
 
 	// 3. Node 2 acquires lease (should succeed because leaseUntil was shortened)
-	acquired, _, err = s.provider.TryAcquireOrRenewLease(resource, node2, 10*time.Second)
+	acquired, _, _, err = s.provider.TryAcquireOrRenewLease(resource, node2, 10*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 }
@@ -101,9 +102,10 @@ func (s *LeaseTestSuite) TestExpiredLeaseReadsUnowned() {
 	defer coord.SetClock(nil)
 	resource := "test-resource-expiry"
 
-	acquired, t1, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
+	acquired, t1, leaseUntil, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
 	s.Require().NoError(err)
 	s.Require().True(acquired)
+	s.True(leaseUntil.Equal(clock.Add(30*time.Second)), "acquire returns the stored leaseUntil (#364), got %v", leaseUntil)
 	owner, _, tok, err := coord.GetLeaseOwner(resource)
 	s.NoError(err)
 	s.Equal("node-1", owner)
@@ -116,7 +118,7 @@ func (s *LeaseTestSuite) TestExpiredLeaseReadsUnowned() {
 	s.True(until.IsZero())
 	s.Equal(int64(0), tok)
 
-	acquired, t2, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
+	acquired, t2, _, err := coord.TryAcquireOrRenewLease(resource, "node-1", 30*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 	s.Greater(t2, t1, "re-acquiring an expired lease is a new tenure")
@@ -141,14 +143,14 @@ func (s *LeaseTestSuite) TestPurgeExpiredLeasesAndStaleNodes() {
 	deleted, kept, live := "push-transmitter:reap-deleted", "push-transmitter:reap-kept", "push-transmitter:reap-live"
 	for _, res := range []string{deleted, kept, live} {
 		for i := 0; i < 3; i++ {
-			acquired, _, err := coord.TryAcquireOrRenewLease(res, "node-1", time.Second)
+			acquired, _, _, err := coord.TryAcquireOrRenewLease(res, "node-1", time.Second)
 			s.Require().NoError(err)
 			s.Require().True(acquired)
 			s.Require().NoError(coord.ReleaseLeaseIfOwned(res, "node-1"))
 		}
 	}
 	clock = clock.Add(5 * time.Minute)
-	_, _, err := coord.TryAcquireOrRenewLease(live, "node-1", 30*time.Second)
+	_, _, _, err := coord.TryAcquireOrRenewLease(live, "node-1", 30*time.Second)
 	s.Require().NoError(err)
 
 	keep := func(resource string) bool { return resource == kept }
@@ -156,9 +158,9 @@ func (s *LeaseTestSuite) TestPurgeExpiredLeasesAndStaleNodes() {
 	s.Require().NoError(err)
 	s.GreaterOrEqual(n, 1, "other suite tests may leave expired rows too")
 
-	_, tok, _ := coord.TryAcquireOrRenewLease(deleted, "node-2", time.Second)
+	_, tok, _, _ := coord.TryAcquireOrRenewLease(deleted, "node-2", time.Second)
 	s.Equal(int64(1), tok, "the purged row is gone")
-	_, tok, _ = coord.TryAcquireOrRenewLease(kept, "node-2", time.Second)
+	_, tok, _, _ = coord.TryAcquireOrRenewLease(kept, "node-2", time.Second)
 	s.Equal(int64(4), tok, "a kept row keeps its fencing history")
 	owner, _, _, _ := coord.GetLeaseOwner(live)
 	s.Equal("node-1", owner, "a live lease is untouched")

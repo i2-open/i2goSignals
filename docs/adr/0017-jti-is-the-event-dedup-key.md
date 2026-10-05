@@ -7,7 +7,7 @@ Date: 2026-06-07
 
 ## Status
 
-Accepted
+Accepted. Amended 2026-10-05 by planning spec #112 (community #359, #363): a SET's per-stream delivery intent is now a `deliveries` reference document (one per stream and inbound `jti`, `state` `pending` or `delivered`, carrying the stored wire `ackJti`), replacing the `pendingEvents` and `deliveredEvents` collections. `jti` stays the dedup key and the no-orphan-marker rule now applies to `deliveries` references. `jti` is the dedup key for inbound SETs only: a re-signed outbound copy gets a new JTI (the row's derived `ackJti`) and is stored in `events` under it with an `originalJti` back-reference to the inbound JTI (community #363); ingest duplicate detection stays on the inbound JTI. Retention on those references is recorded in planning ADR 0077 (independentid/i2gosignals-planning `docs/adr/0077-retention-window-fixed-at-acknowledgement-unreferenced-body-sweep.md`).
 
 ## Context
 

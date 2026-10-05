@@ -58,8 +58,8 @@ func mongoStore(t *testing.T) interfaces.EventDAO {
 	}
 	ctx := context.Background()
 	db := mongoClient.Database("test_group_commit")
-	ev, pend, del := db.Collection("events"), db.Collection("pending"), db.Collection("delivered")
-	for _, c := range []*mongo.Collection{ev, pend, del} {
+	ev, del := db.Collection("events"), db.Collection("deliveries")
+	for _, c := range []*mongo.Collection{ev, del} {
 		require.NoError(t, c.Drop(ctx))
 	}
 	_, err := ev.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -67,7 +67,7 @@ func mongoStore(t *testing.T) interfaces.EventDAO {
 		Options: options.Index().SetName("eventJtiUnique").SetUnique(true).SetSparse(true),
 	})
 	require.NoError(t, err)
-	return mongodao.NewEventDAO(ev, pend, del)
+	return mongodao.NewEventDAO(ev, del)
 }
 
 var stores = map[string]storeFactory{"memory": memoryStore, "mongo": mongoStore}
@@ -146,10 +146,10 @@ func scenario(t *testing.T, dao interfaces.EventDAO) outcome {
 			sid := streamIDs[i%len(streamIDs)]
 			if i%5 == 0 {
 				jtis := []string{fmt.Sprintf("p-%02d-a", i), fmt.Sprintf("p-%02d-b", i)}
-				record(fmt.Sprintf("pendmany-%02d", i), dao.AddPendingMany(ctx, jtis, sid))
+				record(fmt.Sprintf("pendmany-%02d", i), dao.AddPendingMany(ctx, refsFrom(jtis), sid))
 				return
 			}
-			record(fmt.Sprintf("pend-%02d", i), dao.AddPending(ctx, fmt.Sprintf("p-%02d", i), sid))
+			record(fmt.Sprintf("pend-%02d", i), dao.AddPending(ctx, refOf(fmt.Sprintf("p-%02d", i)), sid))
 		}(i)
 	}
 	wg.Wait()
@@ -171,7 +171,7 @@ func scenario(t *testing.T, dao interfaces.EventDAO) outcome {
 	}
 	sort.Strings(out.stored)
 	for _, sid := range streamIDs {
-		jtis, _, err := dao.GetPendingForStream(ctx, sid, 1000)
+		jtis, _, err := pageJtis(dao.GetPendingForStream(ctx, sid, 1000))
 		require.NoError(t, err)
 		sort.Strings(jtis)
 		out.pending[sid] = jtis
@@ -251,7 +251,9 @@ type failingDAO struct {
 func (f failingDAO) InsertMany(context.Context, []*model.EventRecord) ([]error, error) {
 	return nil, f.err
 }
-func (f failingDAO) AddPendingMany(context.Context, []string, string) error { return f.err }
+func (f failingDAO) AddPendingMany(context.Context, []interfaces.PendingRef, string) error {
+	return f.err
+}
 
 func TestWholeBatchFailureReachesEveryCaller(t *testing.T) {
 	boom := errors.New("connection reset")
@@ -272,7 +274,7 @@ func TestWholeBatchFailureReachesEveryCaller(t *testing.T) {
 		}(i)
 		go func(i int) {
 			defer wg.Done()
-			assert.ErrorIs(t, dao.AddPending(ctx, fmt.Sprintf("fp-%d", i), streamIDs[0]), boom)
+			assert.ErrorIs(t, dao.AddPending(ctx, refOf(fmt.Sprintf("fp-%d", i)), streamIDs[0]), boom)
 		}(i)
 	}
 	wg.Wait()
@@ -376,7 +378,7 @@ func ingestScenario(t *testing.T, dao interfaces.EventDAO) outcome {
 			if i == callers-1 {
 				pending[streamIDs[2]] = []string{b}
 			}
-			res, err := dao.InsertWithPending(ctx, recs, pending)
+			res, err := dao.InsertWithPending(ctx, recs, pendingRefsOf(pending))
 			mu.Lock()
 			defer mu.Unlock()
 			k := fmt.Sprintf("ing-%02d", i)
@@ -399,7 +401,7 @@ func ingestScenario(t *testing.T, dao interfaces.EventDAO) outcome {
 	}
 	sort.Strings(out.stored)
 	for _, sid := range streamIDs {
-		jtis, _, err := dao.GetPendingForStream(ctx, sid, 1000)
+		jtis, _, err := pageJtis(dao.GetPendingForStream(ctx, sid, 1000))
 		require.NoError(t, err)
 		sort.Strings(jtis)
 		out.pending[sid] = jtis

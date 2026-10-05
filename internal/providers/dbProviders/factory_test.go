@@ -127,7 +127,7 @@ func TestOpenPersistence_Memory(t *testing.T) {
 	assert.NotNil(t, p.Storage, "Storage must be set")
 
 	// Coordinator seam exercises the real (non-stub) MemoryCoordinator.
-	ok, _, err := p.Coordinator.TryAcquireOrRenewLease("smoke", "node-A", 5_000_000_000)
+	ok, _, _, err := p.Coordinator.TryAcquireOrRenewLease("smoke", "node-A", 5_000_000_000)
 	assert.NoError(t, err)
 	assert.True(t, ok, "MemoryCoordinator should grant first acquire")
 
@@ -162,13 +162,17 @@ func TestOpenPersistence_EventDAO_LiveInstance(t *testing.T) {
 	streamID := oid.Hex()
 
 	// Drive an event THROUGH the router (p.EventService) to delivered state:
-	// AddEvent (insert body) -> AddEventToStream (pending) -> AckEvent (delivered).
+	// AddEvent (insert body) -> AddEventToStream (pending) -> AckBatch
+	// (delivered, with the expireAt the router stamps for a 1-day window, #360).
 	evt := &goSet.SecurityEventToken{Events: map[string]interface{}{"x": "y"}}
 	evt.ID = "retention-jti-1"
 	_, err = p.EventService.AddEvent(ctx, evt, streamID, "raw-1")
 	assert.NoError(t, err, "AddEvent through the router should succeed")
-	assert.NoError(t, p.EventService.AddEventToStream(ctx, evt.ID, streamID))
-	assert.NoError(t, p.EventService.AckEvent(ctx, evt.ID, streamID, 0))
+	assert.NoError(t, p.EventService.AddEventToStream(ctx, refOf(evt.ID), streamID))
+	ackDate := time.Now()
+	expireAt := ackDate.Add(24 * time.Hour)
+	_, err = p.EventService.AckBatch(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{evt.ID}, AckDate: ackDate, ExpireAt: &expireAt})
+	assert.NoError(t, err)
 
 	// Same-instance visibility: a write performed through EventService is
 	// observable via the EventDAO handle exposed on Persistence.

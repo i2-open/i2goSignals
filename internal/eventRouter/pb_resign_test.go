@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPush"
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -91,7 +93,7 @@ func (h *pbResignHarness) createPBStream(t *testing.T, projectId, iss string, au
 
 // addSharedEvent persists one event carrying jti+txn and a source iss/aud, then
 // makes it pending on every supplied stream so a single stored event fans out.
-func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, sids ...string) {
+func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, streams ...*model.StreamStateRecord) {
 	t.Helper()
 	token := &goSet.SecurityEventToken{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -105,10 +107,13 @@ func (h *pbResignHarness) addSharedEvent(t *testing.T, jti, txn string, sids ...
 		},
 	}
 	ctx := context.Background()
-	rec, err := h.eventService.AddEvent(ctx, token, sids[0], "")
+	rec, err := h.eventService.AddEvent(ctx, token, streams[0].StreamConfiguration.Id, "")
 	require.NoError(t, err)
-	for _, sid := range sids {
-		require.NoError(t, h.eventService.AddEventToStream(ctx, rec.Jti, sid))
+	for _, st := range streams {
+		// Each row carries the stream's derived acknowledgement JTI, as the
+		// ingest row writer stores it (#363 S2).
+		ref := interfaces.PendingRef{Jti: rec.Jti, AckJti: st.AckJti(rec.Jti)}
+		require.NoError(t, h.eventService.AddEventToStream(ctx, ref, st.StreamConfiguration.Id))
 	}
 }
 
@@ -149,7 +154,7 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		jti := goSet.GenerateJti()
 		jtis[i] = jti
-		h.addSharedEvent(t, jti, "txn-"+jti, streamA.StreamConfiguration.Id, streamB.StreamConfiguration.Id)
+		h.addSharedEvent(t, jti, "txn-"+jti, streamA, streamB)
 	}
 
 	var wg sync.WaitGroup
@@ -157,14 +162,14 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for _, jti := range jtis {
-			cls, _, _ := h.router.prepareAndSendEvent(jti, streamA, keyA, "kid-A", 0)
+			cls, _, _ := h.router.prepareAndSendEvent(jti, streamA, keyA, "kid-A")
 			assert.Equal(t, goSetPush.ClassAccepted, cls.Class)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		for _, jti := range jtis {
-			cls, _, _ := h.router.prepareAndSendEvent(jti, streamB, keyB, "kid-B", 0)
+			cls, _, _ := h.router.prepareAndSendEvent(jti, streamB, keyB, "kid-B")
 			assert.Equal(t, goSetPush.ClassAccepted, cls.Class)
 		}
 	}()
@@ -185,7 +190,9 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 		assert.Equal(t, "https://issuer-A.example.com", parsed.Issuer, "stream A receiver must only see stream A's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-A.example.com"}, parsed.Audience, "stream A receiver must only see stream A's aud")
 		assert.NotEmpty(t, parsed.ID, "jti must be present and preserved")
-		assert.Equal(t, "txn-"+parsed.ID, parsed.TransactionId, "txn must be preserved verbatim alongside jti")
+		// txn is preserved verbatim; the re-signed SET carries the stream's
+		// derived acknowledgement JTI (#363).
+		assert.Equal(t, streamA.AckJti(strings.TrimPrefix(parsed.TransactionId, "txn-")), parsed.ID, "txn must be preserved verbatim alongside jti")
 	}
 	for _, body := range bodiesB {
 		parsed, err := goSet.Peek(body)
@@ -193,7 +200,9 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 		assert.Equal(t, "https://issuer-B.example.com", parsed.Issuer, "stream B receiver must only see stream B's iss (no cross-stream leak)")
 		assert.Equal(t, jwt.ClaimStrings{"https://aud-B.example.com"}, parsed.Audience, "stream B receiver must only see stream B's aud")
 		assert.NotEmpty(t, parsed.ID, "jti must be present and preserved")
-		assert.Equal(t, "txn-"+parsed.ID, parsed.TransactionId, "txn must be preserved verbatim alongside jti")
+		// txn is preserved verbatim; the re-signed SET carries the stream's
+		// derived acknowledgement JTI (#363).
+		assert.Equal(t, streamB.AckJti(strings.TrimPrefix(parsed.TransactionId, "txn-")), parsed.ID, "txn must be preserved verbatim alongside jti")
 	}
 }
 

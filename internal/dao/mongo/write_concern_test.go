@@ -33,10 +33,10 @@ func TestEventStoreWriteConcernIsFresh(t *testing.T) {
 	}
 }
 
-// TestAckBulkWriteIsW1Verbose asserts the one-trip ack bulkWrite (#335) runs
-// ordered at w:1 with verbose results, which AckDelivered needs to read the
-// per-JTI pending-delete counts.
-func TestAckBulkWriteIsW1Verbose(t *testing.T) {
+// TestAckBulkWriteIsW1Unordered asserts the one-trip ack bulkWrite (#359)
+// runs unordered at w:1: a duplicate copy insert must never stop the
+// conditional state update, and an ack is post-persistence.
+func TestAckBulkWriteIsW1Unordered(t *testing.T) {
 	var got options.ClientBulkWriteOptions
 	for _, apply := range ackBulkWriteOptions().List() {
 		if err := apply(&got); err != nil {
@@ -46,10 +46,7 @@ func TestAckBulkWriteIsW1Verbose(t *testing.T) {
 	if wc := got.WriteConcern; wc == nil || wc.W != 1 {
 		t.Errorf("want w:1, got %+v", got.WriteConcern)
 	}
-	if got.VerboseResults == nil || !*got.VerboseResults {
-		t.Error("ack bulkWrite must request verbose results")
-	}
-	if got.Ordered == nil || !*got.Ordered {
-		t.Error("ack bulkWrite must stay ordered")
+	if got.Ordered == nil || *got.Ordered {
+		t.Error("ack bulkWrite must be unordered")
 	}
 }

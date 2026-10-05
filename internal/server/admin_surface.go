@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/url"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -159,7 +160,7 @@ func (a *adminRouterAdapter) GenerateVerifyEvent(string, string) (*model.EventRe
 	return nil, nil
 }
 
-func (a *adminRouterAdapter) PollStreamHandler(string, model.PollParameters) (map[string]string, bool, int) {
+func (a *adminRouterAdapter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
 	a.unsupported("PollStreamHandler")
 	return nil, false, 0
 }
@@ -205,6 +206,15 @@ func (a *adminRouterAdapter) IncrementCounter(*model.StreamStateRecord, *goSet.S
 func (a *adminRouterAdapter) SetStatsHandler(interface{}) { a.unsupported("SetStatsHandler") }
 
 func (a *adminRouterAdapter) ResetStream(string) { a.unsupported("ResetStream") }
+
+// DeliveryStarted is true: the admin app runs no delivery, so it never
+// waits for the legacy deliveries migration.
+func (a *adminRouterAdapter) DeliveryStarted() bool { return true }
+
+func (a *adminRouterAdapter) ReplayStream(context.Context, string, string, *time.Time) error {
+	a.unsupported("ReplayStream")
+	return nil
+}
 
 func (a *adminRouterAdapter) WakeTransmitter(string, string) { a.unsupported("WakeTransmitter") }
 

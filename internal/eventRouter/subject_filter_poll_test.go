@@ -50,18 +50,19 @@ func (h *filterPushHarness) createPollStream(t *testing.T, defaultSubjects strin
 // ReturnImmediately poll observes them deterministically.
 func (h *filterPushHarness) loadPollBuffer(t *testing.T, sid string, jtis ...string) {
 	t.Helper()
-	h.router.mu.RLock()
-	buf := h.router.pollBuffers[sid]
-	h.router.mu.RUnlock()
+	// The owner builds its buffer from a pending read on first use (#365).
+	buf := h.router.pollBufferFor(sid)
 	require.NotNil(t, buf, "poll buffer must exist for stream %s", sid)
-	buf.SubmitEvents(jtis)
-	require.Eventually(t, func() bool { return buf.Cnt() == len(jtis) }, 2*time.Second, 5*time.Millisecond,
+	base := buf.Cnt()
+	missing := buf.Absent(jtis)
+	buf.SubmitEvents(missing)
+	require.Eventually(t, func() bool { return buf.Cnt() == base+len(missing) }, 2*time.Second, 5*time.Millisecond,
 		"submitted JTIs must drain into the poll buffer")
 }
 
 // pollImmediate serves a single non-blocking poll request for the stream.
 func (h *filterPushHarness) pollImmediate(sid string) (map[string]string, int) {
-	sets, _, status := h.router.PollStreamHandler(sid, model.PollParameters{
+	sets, _, status := h.router.PollStreamHandler(context.Background(), sid, model.PollParameters{
 		MaxEvents:         100,
 		ReturnImmediately: true,
 	})

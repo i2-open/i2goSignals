@@ -16,8 +16,9 @@ import (
 type legResult struct {
 	Transport string `json:"transport"` // PUSH, POLL or SSTP
 	Audience  string `json:"audience"`
-	TxStream  string `json:"tx_stream"` // goSignals1 transmitter stream id (SSTP: goSignals1 pair id)
-	RxStream  string `json:"rx_stream"` // goSignals2 receiver stream id (SSTP: goSignals2 inbound sid)
+	TxStream  string `json:"tx_stream"`             // goSignals1 transmitter stream id (SSTP: goSignals1 pair id)
+	RxStream  string `json:"rx_stream"`             // goSignals2 receiver stream id (SSTP: goSignals2 inbound sid)
+	RxStream2 string `json:"rx_stream_2,omitempty"` // POLL with --poll-targets both: the receiver at gs1b
 	Expected  int    `json:"expected"`
 	Delivered int    `json:"delivered"`
 	// DrainSeconds is measured from the END of ingest until the last event
@@ -75,6 +76,14 @@ type benchResult struct {
 	Gs1b            string       `json:"gs1b,omitempty"`
 	IngestSplit     *ingestSplit `json:"ingest_split,omitempty"`
 	Gs1bSyncSeconds float64      `json:"gs1b_sync_seconds,omitempty"`
+	// Gs1bInternal is --gs1b-internal: when set, goSignals2 polled the gs1b
+	// node and (SSTP responder role) dialed it, instead of goSignals1.
+	Gs1bInternal string `json:"gs1b_internal,omitempty"`
+	// PollTargets is --poll-targets ("both": one goSignals2 poll receiver per
+	// node); PollPinOwner is --poll-pin-owner (gs1b held the poll lease and
+	// goSignals2 polled goSignals1).
+	PollTargets  string `json:"poll_targets,omitempty"`
+	PollPinOwner bool   `json:"poll_pin_owner,omitempty"`
 
 	// Ingest: harness -> goSignals1 push-receive endpoint.
 	IngestSeconds         float64      `json:"ingest_seconds"`
@@ -100,6 +109,13 @@ type benchResult struct {
 	DaoGs1b       map[string]daoOpStats `json:"dao_gs1b,omitempty"` // --gs1b node only
 	DaoGs2        map[string]daoOpStats `json:"dao_gs2,omitempty"`
 	DominantDaoOp string                `json:"dominant_dao_op,omitempty"` // most total wall time on goSignals1
+	// BeyondGs1 / BeyondGs1b compare GetPendingForStream pages with and
+	// without the OldestBeyond read (#366), from the DAO histograms above.
+	BeyondGs1  *beyondCost `json:"oldest_beyond_gs1,omitempty"`
+	BeyondGs1b *beyondCost `json:"oldest_beyond_gs1b,omitempty"`
+	// Properties are planning #112's verified-property counters, diffed over
+	// the run and summed over goSignals1's cluster members (#366).
+	Properties *propertyStats `json:"properties,omitempty"`
 	// Journal is the WiredTiger journal delta on the Mongo primary (--mongo-uri).
 	Journal *journalResult `json:"journal,omitempty"`
 }
@@ -235,6 +251,15 @@ func (r *benchResult) printSummary() {
 	if r.Gs1b != "" {
 		fmt.Printf("gs1b stream sync: %.1fs\n", r.Gs1bSyncSeconds)
 	}
+	if r.Gs1bInternal != "" && r.PollTargets != pollTargetsBoth {
+		fmt.Printf("receiver legs: goSignals2 polls (and, as SSTP initiator, dials) %s\n", r.Gs1bInternal)
+	}
+	if r.PollTargets == pollTargetsBoth {
+		fmt.Printf("poll targets: goSignals2 polls both nodes (receivers %s, %s)\n", r.Poll.RxStream, r.Poll.RxStream2)
+	}
+	if r.PollPinOwner {
+		fmt.Printf("poll owner pinned: gs1b holds the poll lease, goSignals2 polls goSignals1\n")
+	}
 	for _, leg := range []legResult{r.Push, r.Poll, r.Sstp} {
 		fmt.Printf("%-6s : %d/%d delivered  e2e=%.2fs  drain-after-ingest=%.2fs  %.0f ev/s  complete=%v\n",
 			leg.Transport, leg.Delivered, leg.Expected, leg.EndToEndSeconds, leg.DrainSeconds, leg.EventsPerSecond, leg.Complete)
@@ -250,6 +275,12 @@ func (r *benchResult) printSummary() {
 	if r.Workers != "" {
 		fmt.Printf("workers: %s\n", r.Workers)
 	}
+	if p := r.Properties; p != nil {
+		fmt.Printf("properties: ack writes=%d batches=%d (%.3f writes/batch)  reads under router lock=%d  reads before ack=%d  peer claims served=%d (budget exhausted=%d)\n",
+			p.AckWrites, p.AckBatches, p.AckWritesPerBatch, p.ReadsUnderLock, p.ReadsBeforeAck, p.PeerClaimsServed, p.PeerClaimBudgetExhausted)
+	}
+	printBeyond("gs1", r.BeyondGs1)
+	printBeyond("gs1b", r.BeyondGs1b)
 	printDao("dao gs1", r.DaoGs1)
 	printDao("dao gs1b", r.DaoGs1b)
 	printDao("dao gs2", r.DaoGs2)
@@ -285,7 +316,7 @@ func printDao(prefix string, stats map[string]daoOpStats) {
 	sort.Slice(ops, func(i, j int) bool { return stats[ops[i]].TotalMs > stats[ops[j]].TotalMs })
 	for _, op := range ops {
 		s := stats[op]
-		fmt.Printf("%s: %-22s calls=%-6d total=%8.0fms mean=%6.2fms p50=%6.2fms p95=%6.2fms\n",
+		fmt.Printf("%s: %-26s calls=%-6d total=%8.0fms mean=%6.2fms p50=%6.2fms p95=%6.2fms\n",
 			prefix, op, s.Calls, s.TotalMs, s.MeanMs, s.P50Ms, s.P95Ms)
 	}
 }
@@ -297,4 +328,13 @@ func orDefault(v string) string {
 		return "default"
 	}
 	return v
+}
+
+// printBeyond prints the OldestBeyond query cost line for one node.
+func printBeyond(node string, c *beyondCost) {
+	if c == nil {
+		return
+	}
+	fmt.Printf("oldest-beyond %s: GetPendingForStreamBeyond calls=%d mean=%.2fms  vs GetPendingForStream calls=%d mean=%.2fms\n",
+		node, c.BeyondCalls, c.BeyondMeanMs, c.PlainCalls, c.PlainMeanMs)
 }

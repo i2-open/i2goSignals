@@ -109,7 +109,7 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	cfg := req.Stream.StreamConfiguration
 	pushCfg := cfg.Delivery.PushTransmitMethod
 
-	tokenString, err := a.tokenString(req)
+	tokenString, signed, err := a.tokenString(req)
 	if err != nil {
 		return PushOutcome{SignErr: err, Key: req.Key, Kid: req.Kid}
 	}
@@ -137,35 +137,42 @@ func (a *HTTPAdapter) attempt(ctx context.Context, req PushRequest) PushOutcome 
 	return PushOutcome{
 		Classification: cls,
 		RemoteAddress:  capturedAddr,
+		Signed:         signed,
+		JWS:            tokenString,
 	}
 }
 
 // tokenString is the SET to push: the original token as is in Forward mode, the
 // event re-signed under the stream's iss and signing_alg otherwise (an empty route
 // mode re-signs). A re-sign that fails returns the error, never an empty token.
-func (a *HTTPAdapter) tokenString(req PushRequest) (string, error) {
+func (a *HTTPAdapter) tokenString(req PushRequest) (string, *goSet.SecurityEventToken, error) {
 	cfg := req.Stream.StreamConfiguration
 	if cfg.RouteMode == model.RouteModeForward {
-		return req.Event.Original, nil
+		return req.Event.Original, nil, nil
 	}
 	// PB/IM re-sign: copy the stored event token before mutating iss/aud/iat/kid so
 	// concurrent multi-stream fan-out cannot race on or corrupt the shared in-memory
 	// event (PRD #196 #200). The copy is a value copy of the SecurityEventToken: every
 	// field touched below is reassigned (slice/pointer headers replaced, not mutated
 	// through shared backing storage), so the source event's iss/aud/iat/kid stay
-	// pristine. jti (RegisteredClaims.ID) and txn (TransactionId) are carried over by
-	// the copy and never touched, so they are preserved verbatim across the hop
-	// (ADR 0017 — jti is the dedup key).
+	// pristine. txn (TransactionId) is carried over verbatim. jti (RegisteredClaims.ID)
+	// is set to the request's AckJti: a re-signed SET is a new SET with its own
+	// derived jti (#363), and the inbound jti stays on the stored copy's originalJti.
 	token := req.Event.Event
 	token.Issuer = cfg.Iss
 	token.Audience = cfg.Aud
 	token.IssuedAt = jwt.NewNumericDate(time.Now())
 	token.Kid = req.Kid
+	// The copy carries the stream's acknowledgement JTI (#363): the receiver
+	// acks it, and the store matches it against the delivery's ackJti.
+	if req.AckJti != "" {
+		token.ID = req.AckJti
+	}
 	signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), req.Key)
 	if err != nil {
-		return "", fmt.Errorf("signing SET for issuer %s: %w", cfg.Iss, err)
+		return "", nil, fmt.Errorf("signing SET for issuer %s: %w", cfg.Iss, err)
 	}
-	return signed, nil
+	return signed, &token, nil
 }
 
 // persistRemoteAddress updates the stream's RemoteAddress field both in memory

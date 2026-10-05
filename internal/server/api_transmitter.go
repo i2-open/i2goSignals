@@ -7,7 +7,6 @@ import (
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -72,6 +71,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	// Convert to internal model type for application-layer processing
 	request := model.PollParameters{
 		MaxEvents:         pollReq.MaxEvents,
+		AckOnly:           pollReq.AckOnly,
 		ReturnImmediately: pollReq.ReturnImmediately,
 		Acks:              pollReq.Acks,
 		TimeoutSecs:       pollReq.TimeoutSecs,
@@ -119,20 +119,11 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	}
 	serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] %sPoll received...", authCtx.StreamId, wait))
 
-	// First, count the acknowledged events on the outbound metric. The acks
-	// themselves are applied once, as a batch, by PollStreamHandler below;
-	// acking here as well doubled the provider round trips per delivered event.
+	// The acks are applied once, as a batch, by PollStreamHandler below; its
+	// delivery queue counts each newly delivered row on the outbound metric,
+	// so no store read precedes the acknowledgement (#363).
 	if len(request.Acks) > 0 {
 		serverLog.Debug(fmt.Sprintf("POLL-SRV[%s] Acking %d events", authCtx.StreamId, len(request.Acks)))
-		tokens := sa.GetEventService().GetEvents(r.Context(), request.Acks)
-		byJti := make(map[string]*goSet.SecurityEventToken, len(tokens))
-		for _, token := range tokens {
-			byJti[token.ID] = token
-		}
-		for _, jti := range request.Acks {
-			serverLog.Debug(fmt.Sprintf("EventOut [%s]: Type: POLL ", sa.Name()))
-			sa.GetEventRouter().IncrementCounter(streamState, byJti[jti], false)
-		}
 	}
 
 	// Second, log any errors received
@@ -141,8 +132,16 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 		serverLog.Warn(errMsg)
 	}
 
-	sets, more, status := sa.GetEventRouter().PollStreamHandler(authCtx.StreamId, request)
+	sets, more, status := sa.GetEventRouter().PollStreamHandler(r.Context(), authCtx.StreamId, request)
 
+	if status == http.StatusServiceUnavailable {
+		// Delivery waits for the legacy deliveries migration at startup (#361):
+		// nothing was read or acknowledged; the receiver retries.
+		if !sa.GetEventRouter().DeliveryStarted() {
+			http.Error(w, "Delivery has not started yet; retry later", status)
+			return
+		}
+	}
 	if status == eventRouter.PollKeyUnavailableStatus {
 		// The stream has no active signing key: nothing was sent, its events
 		// stay queued and it is now paused (#312). Say which key is missing,

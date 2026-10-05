@@ -89,6 +89,28 @@ func TestCertNeedsRegeneration_CompleteCertificateKept(t *testing.T) {
 	}
 }
 
+// The benchmark stack's second cluster member (BENCH_CLUSTER=1) is reached by
+// goSignals2 as goSignals1b, so the shared server certificate must name it, and
+// a certificate issued before it was added must be reissued (i2-open/i2goSignals#367).
+func TestCertNeedsRegeneration_CertWithoutGoSignals1b(t *testing.T) {
+	var before []string
+	for _, n := range defaultServerDNSNames() {
+		if n != "goSignals1b" {
+			before = append(before, n)
+		}
+	}
+	if len(before) == len(defaultServerDNSNames()) {
+		t.Fatal("goSignals1b is not in the default server DNS names")
+	}
+	cert := &x509.Certificate{
+		DNSNames: before,
+		URIs:     []*url.URL{mustURL(t, "spiffe://cluster.i2gosignals.internal/workload/gosignals-node")},
+	}
+	if regen, reason := certNeedsRegeneration(cert, defaultServerDNSNames()); !regen {
+		t.Fatalf("a certificate without goSignals1b must be reissued, got keep (%s)", reason)
+	}
+}
+
 func TestCertNeedsRegeneration_MissingDNSSAN(t *testing.T) {
 	// A certificate generated before grafana was added to the desired set.
 	legacy := []string{"goSignals1", "goSignals2", "goSsfServer",

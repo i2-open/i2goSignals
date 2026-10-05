@@ -116,7 +116,7 @@ func Wrap(inner interfaces.EventDAO, cfg Config) interfaces.EventDAO {
 	d := &eventDAO{
 		EventDAO: inner,
 		cfg:      cfg,
-		pending:  make(map[string]*coalescer[string]),
+		pending:  make(map[string]*coalescer[interfaces.PendingRef]),
 	}
 	d.inserts = &coalescer[*model.EventRecord]{cfg: cfg, flush: d.flushInsert}
 	d.ingests = &coalescer[ingestItem]{cfg: cfg, flush: d.flushIngest}
@@ -229,7 +229,7 @@ type eventDAO struct {
 	ingests *coalescer[ingestItem]
 
 	pendMu  sync.Mutex
-	pending map[string]*coalescer[string] // per stream ID, created on first use
+	pending map[string]*coalescer[interfaces.PendingRef] // per stream ID, created on first use
 }
 
 // flushInsert is the coalesced InsertMany. The write runs on a detached
@@ -269,32 +269,32 @@ func (d *eventDAO) InsertMany(ctx context.Context, records []*model.EventRecord)
 
 // pendingFor returns streamID's pending coalescer. Entries are never removed:
 // one small struct per stream that has ever received an event.
-func (d *eventDAO) pendingFor(streamID string) *coalescer[string] {
+func (d *eventDAO) pendingFor(streamID string) *coalescer[interfaces.PendingRef] {
 	d.pendMu.Lock()
 	defer d.pendMu.Unlock()
 	c := d.pending[streamID]
 	if c == nil {
-		c = &coalescer[string]{cfg: d.cfg, flush: func(jtis []string) ([]error, error) {
-			return nil, d.EventDAO.AddPendingMany(context.Background(), jtis, streamID)
+		c = &coalescer[interfaces.PendingRef]{cfg: d.cfg, flush: func(refs []interfaces.PendingRef) ([]error, error) {
+			return nil, d.EventDAO.AddPendingMany(context.Background(), refs, streamID)
 		}}
 		d.pending[streamID] = c
 	}
 	return c
 }
 
-func (d *eventDAO) AddPending(ctx context.Context, jti string, streamID string) error {
-	_, err := d.pendingFor(streamID).submit(ctx, []string{jti})
+func (d *eventDAO) AddPending(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
+	_, err := d.pendingFor(streamID).submit(ctx, []interfaces.PendingRef{ref})
 	return err
 }
 
-func (d *eventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
+func (d *eventDAO) AddPendingMany(ctx context.Context, refs []interfaces.PendingRef, streamID string) error {
+	if len(refs) == 0 {
 		return nil
 	}
-	if len(jtis) >= d.cfg.Max {
-		return d.EventDAO.AddPendingMany(ctx, jtis, streamID)
+	if len(refs) >= d.cfg.Max {
+		return d.EventDAO.AddPendingMany(ctx, refs, streamID)
 	}
-	_, err := d.pendingFor(streamID).submit(ctx, jtis)
+	_, err := d.pendingFor(streamID).submit(ctx, refs)
 	return err
 }
 
@@ -303,18 +303,18 @@ func (d *eventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID s
 // write rebuild one merged pending map without mixing callers' intents.
 type ingestItem struct {
 	rec     *model.EventRecord
-	streams []string
+	streams []interfaces.StreamPending
 }
 
 // flushIngest is the coalesced InsertWithPending. The write runs on a
 // detached context (see the package doc).
 func (d *eventDAO) flushIngest(items []ingestItem) ([]error, error) {
 	records := make([]*model.EventRecord, len(items))
-	pending := make(map[string][]string)
+	pending := make(map[string][]interfaces.PendingRef)
 	for i, it := range items {
 		records[i] = it.rec
-		for _, sid := range it.streams {
-			pending[sid] = append(pending[sid], it.rec.Jti)
+		for _, sp := range it.streams {
+			pending[sp.StreamID] = append(pending[sp.StreamID], sp.Ref)
 		}
 	}
 	results, err := d.EventDAO.InsertWithPending(context.Background(), records, pending)
@@ -330,7 +330,7 @@ func (d *eventDAO) flushIngest(items []ingestItem) ([]error, error) {
 	return results, nil
 }
 
-func (d *eventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (d *eventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}

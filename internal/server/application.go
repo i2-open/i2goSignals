@@ -15,6 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/envcompat"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/delivery"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders"
 	"github.com/i2-open/i2goSignals/internal/providers/storage"
@@ -187,7 +188,47 @@ func (sa *SignalsApplication) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
+// AppOption adjusts how NewApplication wires the application. Production
+// passes none; the two-node test harness (#358, cluster_harness_test.go)
+// uses them to put the router on an in-process PeerTransport and shrink the
+// SSTP dialer's lease timing.
+type AppOption func(*appOptions)
+
+type appOptions struct {
+	peerTransportFor func(nodeID string) peer.PeerTransport
+	routerHook       func(nodeID string, router eventRouter.EventRouter)
+	sstpDialerTuning func(cfg *SstpDialerConfig)
+}
+
+// WithPeerTransport builds the router on the PeerTransport f returns for the
+// node, instead of the HTTP adapter.
+func WithPeerTransport(f func(nodeID string) peer.PeerTransport) AppOption {
+	return func(o *appOptions) { o.peerTransportFor = f }
+}
+
+// WithRouterHook calls f with the node's router once it is built.
+func WithRouterHook(f func(nodeID string, router eventRouter.EventRouter)) AppOption {
+	return func(o *appOptions) { o.routerHook = f }
+}
+
+// WithSstpDialerTuning lets f adjust the SSTP dialer's configuration before
+// the dialer is built.
+func WithSstpDialerTuning(f func(cfg *SstpDialerConfig)) AppOption {
+	return func(o *appOptions) { o.sstpDialerTuning = f }
+}
+
+func (o *appOptions) peerTransport(nodeID string) peer.PeerTransport {
+	if o.peerTransportFor == nil {
+		return nil
+	}
+	return o.peerTransportFor(nodeID)
+}
+
+func NewApplication(persistence *dbProviders.Persistence, baseUrlString string, opts ...AppOption) *SignalsApplication {
+	var o appOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	// Ensure the default HTTP client trusts configured CAs for outbound OAuth/token discovery calls
 	tlsSupport.CheckCaInstalled(http.DefaultClient)
 
@@ -251,6 +292,9 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 	if persistence.StreamService != nil {
 		sstpDialerCfg.EventValidationDefault = persistence.StreamService.EventValidationDefault()
 	}
+	if o.sstpDialerTuning != nil {
+		o.sstpDialerTuning(&sstpDialerCfg)
+	}
 	sstpDialer := NewSstpDialer(persistence.Coordinator, nodeID, nil, sstpDialerCfg)
 	sa.SstpDialer = sstpDialer
 
@@ -266,11 +310,20 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 		// RFC8935 jws_signature_failed rotate-and-retry sub-policy.
 		PushDelivery:    delivery.NewHTTPAdapter(persistence.StreamService, nil),
 		SstpDialerHooks: sstpDialer,
+		// This server serves poll and accepted SSTP requests and mounts
+		// /_cluster/claim, so it takes the poll-transmitter and sstp-server
+		// leases (#365).
+		ServesClaims: true,
 		// Non-nil only when I2SIG_STORE_WAL=local (ADR 0045).
 		WAL: persistence.WAL,
 		// I2SIG_STORE_WAL_RING_FED (#342); only meaningful with a WAL.
 		WALRingFed: persistence.WALRingFed,
+		// Nil in production, so the router builds the HTTP adapter (#358).
+		PeerTransport: o.peerTransport(nodeID),
 	}, nodeID)
+	if o.routerHook != nil {
+		o.routerHook(nodeID, sa.EventRouter)
+	}
 
 	// Late-bind the router as the dialer's narrow outbound surface. The
 	// router satisfies eventRouter.SstpOutbound (see internal/eventRouter/
@@ -335,7 +388,7 @@ func NewApplication(persistence *dbProviders.Persistence, baseUrlString string) 
 // decision 3), it is merely silent. Two independent things keep it silent — the
 // default resolver returns a window only when a per-stream override was set, and
 // community binds no RetentionEngine to the live store — so an operator reading
-// `keep_forever` here should size `events` and `deliveredEvents` for unbounded
+// `keep_forever` here should size `events` and `deliveries` for unbounded
 // growth. See docs/operations.md#event-retention.
 //
 // Cost is one extra StreamDAO.List at startup — the same query InitializeReceivers
@@ -517,8 +570,8 @@ func (sa *SignalsApplication) advertisedAddress() string {
 
 // StartServer creates a real net/http server wrapping the application handler.
 // This is used for production binaries. Tests can instead use NewApplication + httptest.Server.
-func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string) *SignalsApplication {
-	sa := NewApplication(persistence, baseUrlString)
+func StartServer(addr string, persistence *dbProviders.Persistence, baseUrlString string, opts ...AppOption) *SignalsApplication {
+	sa := NewApplication(persistence, baseUrlString, opts...)
 	server := http.Server{
 		Addr:     addr,
 		Handler:  sa.Handler,
@@ -587,6 +640,11 @@ func (sa *SignalsApplication) Shutdown() {
 
 	// Stop processing new events
 	sa.EventRouter.Shutdown()
+	// The router's shutdown cancels the SSTP pair loops; wait for them to
+	// release their leases before storage closes.
+	if sa.SstpDialer != nil {
+		sa.SstpDialer.Shutdown()
+	}
 
 	// Give some time to ensure all ops are finished.
 	if drain > 0 {

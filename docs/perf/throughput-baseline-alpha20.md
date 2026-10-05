@@ -185,3 +185,173 @@ workers.
   from both nodes.
 - Profiles were taken on Mongo only. Block sampling lowers throughput at 64
   clients.
+
+## Spec #112 single-node run (i2-open/i2goSignals#366)
+
+The run that closes the spec's single-node clause: 5000 events, 16
+clients, `--mix alternate`, one node, on the spec branch
+`spec-112-cluster-delivery` at `2a54c40` plus this slice. The branch already
+includes the `deliveries` collection (#359/#360), the per-stream delivery
+queue and coalesced ack, and #352's two observations per SET. Measured
+2026-10-05 on the same host as above.
+
+**Stack difference.** These runs used the benchmark stack
+(`make bench-stack-up`, `docker-compose-benchmark.yml`): a release image,
+majority durability, not Delve. The baseline above ran on the dev stack under
+Delve, so its absolute numbers are lower and the two rows are not
+like-for-like. To get a like-for-like comparison, `release-0.12.0` at
+`b38b9c2` (the spec branch's base) was built into the same benchmark image
+and run on the same stack between the spec runs.
+
+| Build | Stack | Runs | Ingest ev/s (mean, range) | Ingest p50 ms | Per-leg ev/s push / poll / SSTP | `InsertWithPending` mean ms |
+|---|---|---|---|---|---|---|
+| alpha.20 baseline (Mongo, default workers) | dev, Delve | 1 | 681 | - | 212 / 212 / 212 | (`InsertMany` + `AddPendingMany`) |
+| `release-0.12.0` `b38b9c2` (control) | bench | 3 | 1536 (1477-1576) | 8.6 | 450 / 450 / 450 (2 runs) | 5.92 |
+| spec #112 branch | bench | 6 | 1389 (1306-1536) | 9.9 | 406 / 406 / 405 | 6.78 |
+
+Every spec run drained all three legs to 100%. The third control run's SSTP
+leg stalled at 4 of 1666 events and timed out; that is an existing
+`release-0.12.0` flake, not counted in the control's per-leg mean, and its
+ingest figure (1477) is included.
+
+**Reading.** Against the alpha.20 table the spec branch ingests about 2x
+faster at 16 clients, but most of that is the stack (release image, no
+Delve). Against the like-for-like control the spec branch is about 9-10%
+lower (1389 against 1536 ev/s), at the edge of the 10% noise band; the spread
+of the six spec runs (1306-1536) overlaps the control's range. The visible
+cost is in the ingest write: `InsertWithPending` mean rises from 5.9 to
+6.8 ms, consistent with the `deliveries` collection carrying more indexes
+than the old pendingEvents collection (unique `(sid, jti)`, `(sid, state,
+jti)`, the partial `(sid, createdAt)` for `OldestBeyond`, `jti`, TTL). That
+is the spec's design, not something this slice changes.
+
+**Verified properties** (spec runs; the control build has no such counters):
+
+| Counter | Per run |
+|---|---|
+| Ack writes / ack batches | 1199-1756 / 1199-1756, so 1.000 writes per batch |
+| Reads under the router lock | 0 |
+| Reads before an ack batch | 0 |
+| Peer claims served / budget exhausted | 0 / 0 (single node, no peer) |
+
+**`OldestBeyond` query cost.** The queue window was smaller than the
+backlog in every spec run, so `GetPendingForStreamBeyond` fired 25-149 times
+a run (65, 144, 67, 27, 25, 149). Its mean was 3.0-4.7 ms, against
+2.0-4.6 ms for a plain `GetPendingForStream` page (one outlier run at
+14.4 ms). The extra `find ... sort({createdAt: 1}).limit(1)` over
+`deliveriesPendingCreatedAt` therefore adds about a millisecond to a read
+that is off the ingest path.
+
+## Spec #112 re-run at `0ef80a4` (i2-open/i2goSignals#366, #367)
+
+A second measurement of the spec branch, after the lock-audit gate:
+`I2SIG_ROUTER_LOCK_AUDIT` now turns the goroutine-ID router-lock audit on
+and off, and it is off by default (production). `docker-compose-benchmark.yml`
+sets it to `true` so that the bench's `properties:` line can count reads
+under the lock, so both settings were measured. Same host, same benchmark
+stack (`make build-docker`, fresh volumes), same load as the run above:
+5000 events, 16 clients, `--mix alternate`, one node. Measured 2026-10-05.
+
+| Build | Lock audit | Runs | Ingest ev/s median (range) | Ingest p50 ms | Per-leg ev/s | `InsertWithPending` mean ms |
+|---|---|---|---|---|---|---|
+| `release-0.12.0` `b38b9c2` (control, above) | n/a | 3 | 1536 mean (1477-1576) | 8.6 | 450 | 5.92 |
+| spec #112 at `2a54c40` (above) | on | 6 | 1389 mean (1306-1536) | 9.9 | 406 | 6.78 |
+| spec #112 at `0ef80a4` | **off** (production) | 6 | **1489** (1469-1523) | 8.8-9.2 | 426-439 | 5.93-6.19 |
+| spec #112 at `0ef80a4` | on (bench default) | 3 | 1455 (1449-1476) | 9.3-9.5 | 420-427 | - |
+
+Against the control's 1536 ev/s, the production setting is **3.1% lower** and
+the audit-on setting 5.3% lower. Both are inside the 10% noise band, and the
+production setting's range overlaps the control's. The audit's cost (about 2%
+between the two settings) is inside the noise, and #362 AC4 needs the
+reads-under-lock counter live in production, so the gate was later removed:
+the audit is always on and `I2SIG_ROUTER_LOCK_AUDIT` no longer exists. The
+"on" rows are the production figures from then on. The `InsertWithPending`
+mean is back at the control's figure (5.9-6.2 ms against 5.92 ms). Every
+leg of every run drained to 100%. Ack writes were 1.000 per batch, and reads
+under the lock and before an ack were 0 with the audit on.
+`GetPendingForStreamBeyond` fired 31-125 times a run, with a mean of
+2.9-5.5 ms.
+
+**Profile** (separate run with mutex and block sampling on, so it is not in
+the table; goSignals1, 4 s window). RSA signing accounts for about half of
+the CPU (`goSet.JWS` 57% cumulative: push delivery, poll response and the SSTP
+ack). That cost predates #112. The #112 paths (`deliveryQueue`, `acker`,
+`walReadThrough`, group commit) account for about 3% of CPU, and most of
+that is Mongo driver I/O. Contention on `sync.Mutex` is 0.12 s over a 4 s
+window across all goroutines; the rest of the mutex delay is the runtime
+scheduler lock. Blocking is dominated by ingest waiting on the
+`InsertWithPending` round trip, which is the design. No #112 hotspot could
+give a gain larger than the noise band, so no optimisation was attempted.
+
+### Two-node drains at 128 clients (#367)
+
+Benchmark stack with `BENCH_CLUSTER=1` (goSignals1 + goSignals1b, ingest
+alternating between them, WAL local), 5000 events, 128 clients, lock audit
+on. The benchmark certificates have no SAN for `goSignals1b`, so a scratch
+compose override gave goSignals1b the network alias `goSsfServer` (which is in
+the SAN and not run in this stack), and the `--gs1b-internal` runs used
+`https://goSsfServer:8888`. The first `--gs1b-internal` poll run, made without
+the alias, failed TLS verification and did not drain (goSignals2 logged `tls: failed to verify certificate`).
+
+| Leg | Receiver points at | Ingest ev/s | Drained | Leg ev/s | Delivery p50 / p95 ms | Peer claims served |
+|---|---|---|---|---|---|---|
+| push | - | 3455 | 5000/5000 | 1682 | 1128 / 1714 | 0 |
+| POLL | goSignals1 | 3087 | 5000/5000 | 2343 | 569 / 919 | 0 |
+| POLL | goSignals1b | 3334 | 5000/5000 | 2492 | 570 / 892 | 0 |
+| POLL (repeat) | goSignals1 | 3167 | 5000/5000 | 2396 | 516 / 733 | 0 |
+| POLL (repeat) | goSignals1b | 3334 | 5000/5000 | 2490 | 552 / 860 | 0 |
+| SSTP, goSignals1 dials | - | 3891 | 5000/5000 | 1782 | 1120 / 1337 | 0 |
+| SSTP, goSignals1 accepts | goSignals1 | 3828 | 5000/5000 | 1763 | 1108 / 1336 | **50** |
+| SSTP, goSignals1 accepts | goSignals1b | 3852 | 5000/5000 | 1771 | 1125 / 1338 | 0 |
+
+Every leg drained. The responder leg shows peer claims served (50, all
+counted on goSignals1b as `mode="sstp-server"`), so a non-owner served
+through the owner. **The POLL leg showed no peer claims in any of its four
+runs**, on either node (`goSignals_router_peer_claims_total` has no
+`poll-transmitter` series on either node). The polled node appears to hold
+the poll-transmitter lease each time, so the non-owner poll path did not run.
+#367's acceptance criterion for the POLL leg is therefore not met by these
+runs.
+
+### POLL peer claims: both nodes polled, and a pinned owner (#367)
+
+The four POLL runs above showed no peer claims because goSignals2 polls one
+node, which takes the stream's poll-transmitter lease on its first poll
+(`resolveOwnerSeeded`) and keeps it. Two bench options now put polls on a
+non-owner (#366): `--poll-targets both` creates one goSignals2 poll receiver
+per node, and `--poll-pin-owner` has the harness poll goSignals1b once (taking
+the lease) before goSignals2 starts polling goSignals1. The bench certificate
+now names `goSignals1b` (`make generate-certs` reissued the server
+certificate under the existing CA), so `--gs1b-internal
+https://goSignals1b:8888` works without the network alias.
+
+Same benchmark stack (`BENCH_CLUSTER=1`, fresh volumes, image as above, lock
+audit on), 5000 events, 128 clients, `--mix poll`, ingest alternating
+between the nodes. The lease owner was read from `cluster_leases` during
+each run. Measured 2026-10-05.
+
+| Run | Lease owner | Ingest ev/s | Drained | Leg ev/s | Delivery p50 / p95 ms | Peer claims served | Ack writes / batch | Reads under lock / before ack | Budget exhausted |
+|---|---|---|---|---|---|---|---|---|---|
+| both nodes, 1 | goSignals1 | 2733 | 5000/5000 | 2130 | 135 / 228 | **36** | 80 / 80 (1.000) | 0 / 0 | 0 |
+| both nodes, 2 | goSignals1 | 2580 | 5000/5000 | 2042 | 145 / 235 | **33** | 78 / 78 (1.000) | 0 / 0 | 0 |
+| both nodes, 3 | goSignals1 | 2700 | 5000/5000 | 2117 | 150 / 235 | **34** | 71 / 71 (1.000) | 0 / 0 | 0 |
+| pinned owner, 1 | goSignals1b | 3276 | 5000/5000 | 2458 | 583 / 910 | **52** | 52 / 52 (1.000) | 0 / 0 | 0 |
+| pinned owner, 2 | goSignals1b | 3432 | 5000/5000 | 2012 | 718 / 942 | **51** | 51 / 51 (1.000) | 0 / 0 | 0 |
+
+Every run drained, and every run shows peer claims served, so the
+non-owner poll path ran under load. With both nodes polled, a little under
+half of the poll batches (33-36 of 71-80 ack batches) were served to
+goSignals1b, the non-owner, through a peer claim. With the owner pinned, every
+poll batch was a peer claim (claims = ack batches). The peer counter is on the owner and carries the
+label `mode="poll"`, not `poll-transmitter`, so the earlier note that "no
+poll-transmitter series" exists was looking for the wrong label. The claim
+budget was never exhausted. Throughput stays in the range of the
+single-target runs above (2343-2492 ev/s), and the pinned worst case is no
+slower than polling the owner directly.
+
+Polling both nodes roughly quarters the delivery latency (p50 about 145 ms
+against about 550 ms) because two receivers each long-poll. Read that as a
+change in receiver concurrency, not as a gain from the peer hop.
+
+These were agent runs on the benchmark stack, not hand runs on the developer
+stack, which is what #367 specifies.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -166,6 +167,7 @@ func TestHandleEvent_TwoHopSstp_ExtendedEventType(t *testing.T) {
 	h.router.mu.Lock()
 	h.router.sstpServerStreams[hopATx] = *hopA
 	h.router.sstpServerStreams[hopBTx] = *hopB
+	h.router.rebuildRoutingLocked()
 	h.router.mu.Unlock()
 
 	token := &goSet.SecurityEventToken{
@@ -181,10 +183,10 @@ func TestHandleEvent_TwoHopSstp_ExtendedEventType(t *testing.T) {
 
 	params := model.PollParameters{MaxEvents: 100, ReturnImmediately: true}
 	hopBJtis, _ := h.router.eventService.GetEventIds(context.Background(), hopBTx, params)
-	assert.Contains(t, hopBJtis, "sstp-two-hop-jti",
+	assert.Contains(t, pendingref.RefJtis(hopBJtis), "sstp-two-hop-jti",
 		"hop 2 must carry the SET to the second pair's tx side")
 
 	hopAJtis, _ := h.router.eventService.GetEventIds(context.Background(), hopATx, params)
-	assert.NotContains(t, hopAJtis, "sstp-two-hop-jti",
+	assert.NotContains(t, pendingref.RefJtis(hopAJtis), "sstp-two-hop-jti",
 		"the ingesting pair must not be echoed back to its own peer")
 }

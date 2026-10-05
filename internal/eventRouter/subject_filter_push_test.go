@@ -51,6 +51,7 @@ func newFilterPushRouter(t *testing.T) *filterPushHarness {
 		KeyService:           persistence.KeyService,
 		EventService:         persistence.EventService,
 		Coordinator:          persistence.Coordinator,
+		ServesClaims:         true,
 		SubjectFilterService: persistence.SubjectFilterService,
 		PushDelivery:         adapter,
 	}, "node-filter-push").(*router)
@@ -115,7 +116,12 @@ func (h *filterPushHarness) addPendingEvent(t *testing.T, sid string, subject *g
 		rec, err = h.eventService.AddEvent(ctx, token, sid, "")
 	}
 	require.NoError(t, err)
-	require.NoError(t, h.eventService.AddEventToStream(ctx, rec.Jti, sid))
+	// Written as ingest writes it: the stream's acknowledgement JTI (#363).
+	ref := refOf(rec.Jti)
+	if st := h.router.streamRecord(sid); st != nil {
+		ref.AckJti = st.AckJti(rec.Jti)
+	}
+	require.NoError(t, h.eventService.AddEventToStream(ctx, ref, sid))
 	return rec.Jti
 }
 
@@ -144,7 +150,7 @@ func TestPushFilter_NoneStreamDiscardsUnmatchedEvent(t *testing.T) {
 	jti := h.addPendingEvent(t, stream.StreamConfiguration.Id, emailSubjectFor("alice@example.com"), false)
 	require.Equal(t, 1, h.pendingCount(stream.StreamConfiguration.Id), "precondition: event is pending")
 
-	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "", 0)
+	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "")
 
 	assert.Equal(t, 0, h.adapter.Calls(), "a filtered-out event must not be pushed")
 	assert.Equal(t, goSetPush.ClassAccepted, cls.Class, "a discarded event advances the loop as a no-op success")
@@ -161,7 +167,7 @@ func TestPushFilter_OperationalEventBypassesFilter(t *testing.T) {
 
 	jti := h.addPendingEvent(t, stream.StreamConfiguration.Id, emailSubjectFor("alice@example.com"), true)
 
-	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "", 0)
+	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "")
 
 	assert.Equal(t, 1, h.adapter.Calls(), "operational events must always be pushed regardless of the filter")
 	assert.Equal(t, goSetPush.ClassAccepted, cls.Class)
@@ -180,7 +186,7 @@ func TestPushFilter_NoneStreamDeliversAfterAddSubject(t *testing.T) {
 
 	jti := h.addPendingEvent(t, stream.StreamConfiguration.Id, emailSubjectFor("alice@example.com"), false)
 
-	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "", 0)
+	cls, _, _ := h.router.prepareAndSendEvent(jti, stream, nil, "")
 
 	assert.Equal(t, 1, h.adapter.Calls(), "after Add Subject a matching event must be pushed")
 	assert.Equal(t, goSetPush.ClassAccepted, cls.Class)

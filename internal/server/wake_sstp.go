@@ -52,8 +52,16 @@ func (sa *SignalsApplication) WakeSstpServer(w http.ResponseWriter, r *http.Requ
 // of a burst wakes at once, the rest share one trailing wake at the end of the
 // coalescing window (idempotency, issue #167; trailing edge, #347).
 func (sa *SignalsApplication) handleSstpWake(w http.ResponseWriter, r *http.Request, mode string, wake func(id string)) {
-	id, ok := authenticateClusterCall(w, r, mode)
-	if !ok {
+	req, ok := decodeWakeRequest(w, r)
+	if !ok || !authenticateCluster(w, r, req.Sid, mode) {
+		return
+	}
+	id := req.Sid
+	// An sstp-server wake to the acceptor's lease owner carries the batch's
+	// references (#365); it is applied at once rather than coalesced.
+	req.Mode = mode
+	if mode == sstpWakeServerMode && sa.applyRefWake(req) {
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	// The mode keeps SSTP keys distinct from push/poll keys for the same id.

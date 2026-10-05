@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -18,7 +19,7 @@ func pendingOutbound(t *testing.T, h *sstpRunnerHarness, txSid string) []string 
 		MaxEvents:         10,
 		ReturnImmediately: true,
 	})
-	return pending
+	return pendingref.RefJtis(pending)
 }
 
 // Transmit-side setErr consumption on the SSTP-server path. Clearing an outbound
@@ -129,6 +130,7 @@ func TestPauseSstpPair_PausesBothHalvesInMemoryAndClientMap(t *testing.T) {
 	require.NoError(t, r.streamService.PersistStreamStateRecord(context.Background(), rec))
 	r.mu.Lock()
 	r.sstpClientStreams[pairId] = *rec
+	r.rebuildRoutingLocked()
 	r.mu.Unlock()
 
 	reason := "SSTP-CLIENT: 4xx request error on pair=" + pairId

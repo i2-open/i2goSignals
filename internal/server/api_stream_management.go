@@ -860,20 +860,11 @@ func StreamUpdateHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		return
 	}
 
-	streamState, err := sa.GetStreamService().GetStreamStateBySID(r.Context(), streamId)
-	if err != nil {
-		serverLog.Error("Error getting stream state after update", "id", streamId, "error", err)
-	}
 	if resetDate != nil || resetJti != "" {
-		// reset the stream to a particular date
-		err := sa.GetEventService().ResetEventStream(r.Context(), streamId, resetJti, resetDate, func(eventRecord *model.EventRecord) bool {
-			// Operational events (verify, stream-updated) are point-to-point and excluded from replay.
-			if eventRecord.Operational {
-				return false
-			}
-			// Because reset goes through all events, this function confirms the stream should get the event
-			return sa.GetEventService().MatchesStream(streamState, eventRecord)
-		})
+		// Reset the stream to a JTI or a date through the router, which
+		// queues it while delivery waits for the legacy deliveries migration
+		// (#361).
+		err := sa.GetEventRouter().ReplayStream(r.Context(), streamId, resetJti, resetDate)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

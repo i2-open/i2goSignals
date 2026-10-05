@@ -10,7 +10,13 @@ package model
 
 type PollParameters struct {
 	// An OPTIONAL integer value indicating the maximum number of unacknowledged SETs to be returned. The SET Transmitter SHOULD NOT send more SETs than the specified maximum. If more than the maximum number of SETs are available, the SET Transmitter determines which to return first; the oldest SETs available MAY be returned first, or another selection algorithm MAY be used, such as prioritizing SETs in some manner that makes sense for the use case. A value of 0 MAY be used by SET Recipients that would like to perform an acknowledge-only request. This enables the Recipient to use separate HTTP requests for acknowledgement and reception of SETs. If this parameter is omitted, no limit is placed on the number of SETs to be returned.
-	MaxEvents         int32                   `json:"maxEvents,omitzero" bson:"maxEvents,omitempty"`
+	MaxEvents int32 `json:"maxEvents,omitzero" bson:"maxEvents,omitempty"`
+	// AckOnly marks an acknowledgement-only poll for in-process passing only:
+	// it is never serialized, so a stored poll config with "maxEvents": 0 is an
+	// unset maxEvents, not an ack-only request. The RFC 8936 wire request
+	// (goSetPoll.PollRequest) detects and sends ack-only as an explicit
+	// "maxEvents": 0.
+	AckOnly           bool                    `json:"-" bson:"-"`
 	ReturnImmediately bool                    `json:"returnImmediately,omitzero" bson:"returnImmediately,omitempty"`
 	Acks              []string                `json:"ack,omitempty" bson:"ack,omitempty"`
 	SetErrs           map[string]SetErrorType `json:"setErrs,omitempty" bson:"setErrs,omitempty"`

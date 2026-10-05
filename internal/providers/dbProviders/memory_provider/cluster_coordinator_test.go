@@ -27,7 +27,7 @@ func TestMemoryCoordinator_MutualExclusion(t *testing.T) {
 		go func(nid string) {
 			defer wg.Done()
 			<-start
-			ok, _, err := c.TryAcquireOrRenewLease("push-transmitter:s1", nid, 5*time.Second)
+			ok, _, _, err := c.TryAcquireOrRenewLease("push-transmitter:s1", nid, 5*time.Second)
 			assert.NoError(t, err)
 			if ok {
 				atomic.AddInt64(&winners, 1)
@@ -47,18 +47,18 @@ func TestMemoryCoordinator_TakeoverAfterExpiry(t *testing.T) {
 	c := NewMemoryCoordinator()
 	resource := "push-transmitter:s2"
 
-	ok, _, err := c.TryAcquireOrRenewLease(resource, "node-A", 50*time.Millisecond)
+	ok, _, _, err := c.TryAcquireOrRenewLease(resource, "node-A", 50*time.Millisecond)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 
 	// Before expiry, node-B is locked out.
-	ok, _, _ = c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
+	ok, _, _, _ = c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
 	assert.False(t, ok, "lease still held by node-A")
 
 	time.Sleep(80 * time.Millisecond)
 
 	// After expiry, node-B takes over.
-	ok, _, err = c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
+	ok, _, _, err = c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
 	assert.NoError(t, err)
 	assert.True(t, ok, "node-B should acquire after node-A's lease expires")
 
@@ -75,16 +75,16 @@ func TestMemoryCoordinator_FencingTokenMonotonic(t *testing.T) {
 	c := NewMemoryCoordinator()
 	resource := "push-transmitter:s3"
 
-	_, t1, err := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
+	_, t1, _, err := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
 	assert.NoError(t, err)
 
 	// Renew by same owner of a live lease — token is kept.
-	_, t2, _ := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
+	_, t2, _, _ := c.TryAcquireOrRenewLease(resource, "node-A", 200*time.Millisecond)
 	assert.Equal(t, t1, t2)
 
 	// Wait for expiry, takeover by another node — token increments.
 	time.Sleep(220 * time.Millisecond)
-	_, t3, _ := c.TryAcquireOrRenewLease(resource, "node-B", 200*time.Millisecond)
+	_, t3, _, _ := c.TryAcquireOrRenewLease(resource, "node-B", 200*time.Millisecond)
 	assert.Greater(t, t3, t2)
 
 	// Concurrent failed-acquire attempts must NOT advance the token.
@@ -93,7 +93,7 @@ func TestMemoryCoordinator_FencingTokenMonotonic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, _ = c.TryAcquireOrRenewLease(resource, "node-C", 200*time.Millisecond)
+			_, _, _, _ = c.TryAcquireOrRenewLease(resource, "node-C", 200*time.Millisecond)
 		}()
 	}
 	wg.Wait()
@@ -110,9 +110,14 @@ func TestMemoryCoordinator_ExpiredLeaseReadsUnowned(t *testing.T) {
 	c.SetClock(func() time.Time { return clock })
 	resource := "push-transmitter:s5"
 
-	ok, t1, err := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	ok, t1, leaseUntil, err := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
 	assert.NoError(t, err)
 	assert.True(t, ok)
+	assert.Equal(t, clock.Add(30*time.Second), leaseUntil, "acquire returns the lease's expiry (#364)")
+	held, _, otherUntil, err := c.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
+	assert.NoError(t, err)
+	assert.False(t, held)
+	assert.True(t, otherUntil.IsZero(), "a lease held elsewhere returns no expiry")
 	owner, _, tok, _ := c.GetLeaseOwner(resource)
 	assert.Equal(t, "node-A", owner)
 	assert.Equal(t, t1, tok)
@@ -124,7 +129,7 @@ func TestMemoryCoordinator_ExpiredLeaseReadsUnowned(t *testing.T) {
 	assert.True(t, until.IsZero())
 	assert.Equal(t, int64(0), tok)
 
-	ok, t2, _ := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	ok, t2, _, _ := c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
 	assert.True(t, ok)
 	assert.Greater(t, t2, t1, "re-acquiring an expired lease is a new tenure")
 }
@@ -134,7 +139,7 @@ func TestMemoryCoordinator_ExpiredLeaseReadsUnowned(t *testing.T) {
 func TestMemoryCoordinator_ReleasedLeaseReadsUnowned(t *testing.T) {
 	c := NewMemoryCoordinator()
 	resource := "push-transmitter:s6"
-	_, _, _ = c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	_, _, _, _ = c.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
 	assert.NoError(t, c.ReleaseLeaseIfOwned(resource, "node-A"))
 	owner, _, _, _ := c.GetLeaseOwner(resource)
 	assert.Equal(t, "", owner)
@@ -147,7 +152,7 @@ func TestMemoryCoordinator_ReleaseIfOwned(t *testing.T) {
 	c := NewMemoryCoordinator()
 	resource := "push-transmitter:s4"
 
-	_, _, _ = c.TryAcquireOrRenewLease(resource, "node-A", 5*time.Second)
+	_, _, _, _ = c.TryAcquireOrRenewLease(resource, "node-A", 5*time.Second)
 
 	// Non-owner attempts to release — no-op.
 	err := c.ReleaseLeaseIfOwned(resource, "node-B")
@@ -160,7 +165,7 @@ func TestMemoryCoordinator_ReleaseIfOwned(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Another node can acquire immediately.
-	ok, _, err := c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
+	ok, _, _, err := c.TryAcquireOrRenewLease(resource, "node-B", 5*time.Second)
 	assert.NoError(t, err)
 	assert.True(t, ok, "node-B should acquire immediately after node-A releases")
 }

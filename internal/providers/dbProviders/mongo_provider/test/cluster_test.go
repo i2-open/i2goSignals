@@ -33,7 +33,7 @@ func (s *MongoProviderSuite) TestClusterMethods() {
 
 	// Test TryAcquireOrRenewLease
 	resource := "test-resource"
-	acquired, token, err := s.provider.TryAcquireOrRenewLease(resource, "node-1", 10*time.Second)
+	acquired, token, _, err := s.provider.TryAcquireOrRenewLease(resource, "node-1", 10*time.Second)
 	s.NoError(err)
 	s.True(acquired)
 	s.Greater(token, int64(0))

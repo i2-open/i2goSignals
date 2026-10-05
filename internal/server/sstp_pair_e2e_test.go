@@ -557,16 +557,14 @@ func (s *SstpPairE2ESuite) TestSstpWireShape_UnchangedByKInFlight() {
 // ---------------------------------------------------------------------------
 
 // TestLeaseTakeover_NewOwnerNoDuplicateInbound is the cross-server lease-takeover
-// scenario (Q13, Q14, Q16). A faithful test needs TWO nodes sharing one real-time
-// cluster store so the sstp-client:<PairId> lease can transfer between them; the
-// memory provider (chosen for speed per Q47) gives each StartServer its own
-// isolated in-memory store, so two nodes cannot share a lease here. The takeover
-// mechanics — jittered re-acquire, single-retry heartbeat, no-two-node-race, and
-// JTI-dedup on the peer — are covered deterministically against a fake coordinator
-// in internal/eventRouter/runner_sstp_test.go. This e2e variant is skipped pending
-// a shared-Mongo two-node harness (TODO #171).
+// scenario (Q13, Q14, Q16). Two nodes must share one real-time cluster store for
+// the sstp-client:<PairId> lease to transfer between them, which the memory
+// provider cannot give, so it runs on the two-node Mongo harness
+// (cluster_harness_test.go, #358) and skips only when MONGO_URL is unset. The
+// takeover mechanics are also covered against a fake coordinator in
+// internal/eventRouter/runner_sstp_test.go.
 func (s *SstpPairE2ESuite) TestLeaseTakeover_NewOwnerNoDuplicateInbound() {
-	s.T().Skip("lease takeover needs a shared real-time cluster store (Mongo); memory provider isolates each node — see runner_sstp_test.go for the deterministic coverage (TODO #171)")
+	runLeaseTakeoverOnHarness(s.T())
 }
 
 // ---------------------------------------------------------------------------

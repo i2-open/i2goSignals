@@ -135,7 +135,7 @@ func newWalPushSetup(t *testing.T, dao *gatedEventDAO, onRelease func(resource s
 	})
 	h := &filterPushHarness{router: s.router, streamService: p.StreamService, keyService: p.KeyService, eventService: p.EventService}
 	push := h.createPushStream(t, "NONE")
-	resource := cluster.PushTransmitterResource(push.StreamConfiguration.Id)
+	resource := cluster.PushTransmitter.Resource(push.StreamConfiguration.Id)
 	s.router.UpdateStreamState(push.DeepCopy())
 	waitLeaseOwner(t, p.Coordinator, resource, "node-wal-test")
 	return &walPushSetup{walSetup: s, coord: p.Coordinator, resource: resource}
@@ -168,7 +168,8 @@ func TestLocalWal_ShutdownDrainsBeforeLeaseRelease(t *testing.T) {
 		return ctx.Err() == nil
 	})
 	s = newWalPushSetup(t, dao, func(resource string) {
-		if resource == s.resource {
+		// s is nil for the startup migration lease, released inside NewRouter.
+		if s != nil && resource == s.resource {
 			released.Store(true)
 			storedAtRelease.Store(s.stored("wal-stop"))
 		}

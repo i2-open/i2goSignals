@@ -8,6 +8,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
+	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/pkg/goSignals"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -264,6 +265,15 @@ func (h *HttpRouter) peerRoutes() Routes {
 			http.MethodPost,
 			eventRouter.StreamChangedPath,
 			h.sa.StreamChanged,
+			false,
+		},
+		// A peer asks this node, as a stream's lease owner, to apply acks and
+		// claim the next references (#358). Same SPIFFE/HMAC auth as the wakes.
+		Route{
+			"ClaimStream",
+			http.MethodPost,
+			peer.ClaimPath,
+			h.sa.ClaimStream,
 			false,
 		},
 

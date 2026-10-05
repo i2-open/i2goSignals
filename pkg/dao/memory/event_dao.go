@@ -13,11 +13,33 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
+// delivery is one deliveries row: the memory twin of the Mongo deliveries
+// document, keyed by (stream, inbound JTI).
+type delivery struct {
+	Jti       string
+	AckJti    string
+	State     string
+	CreatedAt time.Time
+	AckDate   time.Time
+	ExpireAt  *time.Time
+}
+
 type EventDAOMemory struct {
-	mu              sync.RWMutex
-	events          map[string]*model.EventRecord
-	pendingEvents   map[string][]interfaces.DeliverableEvent // streamId -> events
-	deliveredEvents map[string][]interfaces.DeliveredEvent   // streamId -> events
+	mu     sync.RWMutex
+	events map[string]*model.EventRecord
+	// deliveries holds one row per (stream, inbound JTI): streamId -> jti -> row.
+	deliveries map[string]map[string]*delivery
+	// byAck is the (stream, ackJti) -> inbound JTIs lookup Ack uses.
+	byAck map[string]map[string]map[string]struct{}
+	// now is the adapter clock (createdAt for a reference written with a
+	// zero EnqueuedAt).
+	now func() time.Time
+
+	// sweepAfterTime / sweepAfterJti are the SweepExpired body-scan
+	// watermark: the next pass resumes after (sortTime, jti). Zero values
+	// start from the oldest body. In-process only, guarded by mu.
+	sweepAfterTime time.Time
+	sweepAfterJti  string
 
 	// Persistence
 	persistDir string
@@ -26,10 +48,21 @@ type EventDAOMemory struct {
 
 func NewEventDAO() *EventDAOMemory {
 	return &EventDAOMemory{
-		events:          make(map[string]*model.EventRecord),
-		pendingEvents:   make(map[string][]interfaces.DeliverableEvent),
-		deliveredEvents: make(map[string][]interfaces.DeliveredEvent),
+		events:     make(map[string]*model.EventRecord),
+		deliveries: make(map[string]map[string]*delivery),
+		byAck:      make(map[string]map[string]map[string]struct{}),
+		now:        time.Now,
 	}
+}
+
+// SetClock replaces the adapter clock; tests use it to pin createdAt.
+func (d *EventDAOMemory) SetClock(now func() time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	d.now = now
 }
 
 func (d *EventDAOMemory) SetPersistDir(dir string) {
@@ -66,26 +99,25 @@ func (d *EventDAOMemory) InsertMany(_ context.Context, records []*model.EventRec
 	return results, nil
 }
 
-// InsertWithPending stores records and their pending markers under one lock
-// (ADR 0043): a marker is appended only for a record that was actually stored,
-// so a duplicate JTI never leaves a delivery intent behind.
-func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+// InsertWithPending stores records and their pending references under one
+// lock (ADR 0043): a reference is written only for a record that was actually
+// stored, so a duplicate JTI never leaves a delivery intent behind. A
+// reference row that already exists for (stream, JTI) is left untouched.
+func (d *EventDAOMemory) InsertWithPending(_ context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
 	streams := interfaces.StreamsByJti(pending)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.now()
 	results := make([]error, len(records))
 	for i, rec := range records {
 		if results[i] = d.insertLocked(rec); results[i] != nil {
 			continue
 		}
-		for _, streamID := range streams[rec.Jti] {
-			d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
-				Jti:      rec.Jti,
-				StreamId: streamID,
-			})
+		for _, t := range streams[rec.Jti] {
+			d.insertPendingLocked(t.StreamID, t.Ref, now)
 		}
 	}
 	return results, nil
@@ -180,7 +212,8 @@ func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *
 			inRange = inRange && (event.SortTime.Equal(toTruncated) || event.SortTime.Before(toTruncated))
 		}
 
-		if inRange {
+		// A stored outbound copy is never replayed by a reset.
+		if inRange && event.OriginalJti == "" {
 			if filter == nil || filter(event) {
 				sortedEvents = append(sortedEvents, event)
 			}
@@ -195,139 +228,227 @@ func (d *EventDAOMemory) FindByTimeRange(_ context.Context, from time.Time, to *
 	return sortedEvents, nil
 }
 
-// AddPending records a delivery intent for jti on streamID. The pending marker
-// is written independently of the event body — the body may not be stored yet,
+// rowLocked returns the (streamID, jti) row or nil; d.mu must be held.
+func (d *EventDAOMemory) rowLocked(streamID, jti string) *delivery {
+	return d.deliveries[streamID][jti]
+}
+
+// putRowLocked stores row for streamID and indexes its ackJti; d.mu must be held.
+func (d *EventDAOMemory) putRowLocked(streamID string, row *delivery) {
+	rows := d.deliveries[streamID]
+	if rows == nil {
+		rows = make(map[string]*delivery)
+		d.deliveries[streamID] = rows
+	}
+	rows[row.Jti] = row
+	d.indexAckLocked(streamID, row.AckJti, row.Jti)
+}
+
+func (d *EventDAOMemory) indexAckLocked(streamID, ackJti, jti string) {
+	acks := d.byAck[streamID]
+	if acks == nil {
+		acks = make(map[string]map[string]struct{})
+		d.byAck[streamID] = acks
+	}
+	set := acks[ackJti]
+	if set == nil {
+		set = make(map[string]struct{})
+		acks[ackJti] = set
+	}
+	set[jti] = struct{}{}
+}
+
+func (d *EventDAOMemory) unindexAckLocked(streamID, ackJti, jti string) {
+	acks := d.byAck[streamID]
+	if acks == nil {
+		return
+	}
+	if set := acks[ackJti]; set != nil {
+		delete(set, jti)
+		if len(set) == 0 {
+			delete(acks, ackJti)
+		}
+	}
+	if len(acks) == 0 {
+		delete(d.byAck, streamID)
+	}
+}
+
+// setAckJtiLocked changes row's ackJti, keeping the lookup in step.
+func (d *EventDAOMemory) setAckJtiLocked(streamID string, row *delivery, ackJti string) {
+	if row.AckJti == ackJti {
+		return
+	}
+	d.unindexAckLocked(streamID, row.AckJti, row.Jti)
+	row.AckJti = ackJti
+	d.indexAckLocked(streamID, ackJti, row.Jti)
+}
+
+// deleteRowLocked removes the (streamID, jti) row; d.mu must be held.
+func (d *EventDAOMemory) deleteRowLocked(streamID string, row *delivery) {
+	rows := d.deliveries[streamID]
+	if rows == nil {
+		return
+	}
+	delete(rows, row.Jti)
+	if len(rows) == 0 {
+		delete(d.deliveries, streamID)
+	}
+	d.unindexAckLocked(streamID, row.AckJti, row.Jti)
+}
+
+func refAckJti(ref interfaces.PendingRef) string {
+	if ref.AckJti == "" {
+		return ref.Jti
+	}
+	return ref.AckJti
+}
+
+func refCreatedAt(ref interfaces.PendingRef, now time.Time) time.Time {
+	if ref.EnqueuedAt.IsZero() {
+		return now
+	}
+	return ref.EnqueuedAt
+}
+
+// insertPendingLocked inserts a pending row for ref only when no row exists
+// for (streamID, ref.Jti) in either state, and reports whether it did.
+func (d *EventDAOMemory) insertPendingLocked(streamID string, ref interfaces.PendingRef, now time.Time) bool {
+	if d.rowLocked(streamID, ref.Jti) != nil {
+		return false
+	}
+	d.putRowLocked(streamID, &delivery{
+		Jti:       ref.Jti,
+		AckJti:    refAckJti(ref),
+		State:     interfaces.DeliveryStatePending,
+		CreatedAt: refCreatedAt(ref, now),
+	})
+	return true
+}
+
+// upsertPendingLocked applies AddPending to one reference: the row becomes
+// pending with ref's ackJti, ackDate and expireAt cleared; createdAt is set on
+// insert, re-set when the row was delivered, and kept when it was pending.
+func (d *EventDAOMemory) upsertPendingLocked(streamID string, ref interfaces.PendingRef, now time.Time) {
+	row := d.rowLocked(streamID, ref.Jti)
+	if row == nil {
+		d.insertPendingLocked(streamID, ref, now)
+		return
+	}
+	if row.State != interfaces.DeliveryStatePending {
+		row.CreatedAt = refCreatedAt(ref, now)
+	}
+	row.State = interfaces.DeliveryStatePending
+	row.AckDate = time.Time{}
+	row.ExpireAt = nil
+	d.setAckJtiLocked(streamID, row, refAckJti(ref))
+}
+
+// AddPending records a delivery intent for ref on streamID. The reference is
+// written independently of the event body — the body may not be stored yet,
 // or may never be, because ingest issues the two writes concurrently (ADR
-// 0038). This mirrors the Mongo DAO, whose pendingEvents insert has never
-// consulted the events collection. Every delivery path treats a pending JTI
-// with no body as a skip: it is neither delivered nor acked.
-func (d *EventDAOMemory) AddPending(_ context.Context, jti string, streamID string) error {
+// 0038). Every delivery path treats a pending JTI with no body as a skip.
+func (d *EventDAOMemory) AddPending(_ context.Context, ref interfaces.PendingRef, streamID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
-		Jti:      jti,
-		StreamId: streamID,
-	})
+	d.upsertPendingLocked(streamID, ref, d.now())
 	return nil
 }
 
-// AddPendingMany is AddPending for a batch, appending in the given order. As
-// with AddPending, a JTI whose body is not (yet) stored is still recorded.
-func (d *EventDAOMemory) AddPendingMany(_ context.Context, jtis []string, streamID string) error {
-	if len(jtis) == 0 {
+// AddPendingMany is AddPending for a batch under one lock acquisition.
+func (d *EventDAOMemory) AddPendingMany(_ context.Context, refs []interfaces.PendingRef, streamID string) error {
+	if len(refs) == 0 {
 		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	for _, jti := range jtis {
-		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
-			Jti:      jti,
-			StreamId: streamID,
-		})
+	now := d.now()
+	for _, ref := range refs {
+		d.upsertPendingLocked(streamID, ref, now)
 	}
 	return nil
 }
 
-// EnsurePending queues jti on each stream that has it neither pending nor
-// delivered (#331); a stream that already records it is left untouched.
-func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, streamIDs []string) ([]string, error) {
-	if len(streamIDs) == 0 {
+// EnsurePending queues jti on each stream of ackJtis that holds no row for it
+// in either state (#331); an existing row is left untouched.
+func (d *EventDAOMemory) EnsurePending(_ context.Context, jti string, ackJtis map[string]string) ([]string, error) {
+	if len(ackJtis) == 0 {
 		return nil, nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
+	now := d.now()
 	var queued []string
-	for _, streamID := range streamIDs {
-		if d.recordsJtiLocked(jti, streamID) {
-			continue
+	for streamID, ackJti := range ackJtis {
+		if d.insertPendingLocked(streamID, interfaces.PendingRef{Jti: jti, AckJti: ackJti}, now) {
+			queued = append(queued, streamID)
 		}
-		d.pendingEvents[streamID] = append(d.pendingEvents[streamID], interfaces.DeliverableEvent{
-			Jti:      jti,
-			StreamId: streamID,
-		})
-		queued = append(queued, streamID)
 	}
 	return queued, nil
 }
 
-// recordsJtiLocked reports whether streamID has jti pending or delivered;
-// d.mu must be held.
-func (d *EventDAOMemory) recordsJtiLocked(jti string, streamID string) bool {
-	for _, evt := range d.pendingEvents[streamID] {
-		if evt.Jti == jti {
-			return true
+// pendingSortedLocked returns streamID's pending rows in ascending jti order.
+func (d *EventDAOMemory) pendingSortedLocked(streamID string) []*delivery {
+	var out []*delivery
+	for _, row := range d.deliveries[streamID] {
+		if row.State == interfaces.DeliveryStatePending {
+			out = append(out, row)
 		}
 	}
-	for _, evt := range d.deliveredEvents[streamID] {
-		if evt.Jti == jti {
-			return true
-		}
-	}
-	return false
+	sort.Slice(out, func(i, j int) bool { return out[i].Jti < out[j].Jti })
+	return out
 }
 
-func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (jtis []string, total int64, err error) {
+// GetPendingForStream returns one page of streamID's pending references in
+// ascending jti order, matching the Mongo DAO. jtis are UUIDv7
+// (goSet.GenerateJti), so ascending jti IS ascending issue order; delivery
+// order is a contract receivers reason about (ADR 0040), so both providers
+// publish the same one. A limit <= 0 reads 10 references.
+func (d *EventDAOMemory) GetPendingForStream(_ context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	pending, ok := d.pendingEvents[streamID]
-	if !ok || len(pending) == 0 {
-		return []string{}, 0, nil
+	pending := d.pendingSortedLocked(streamID)
+	page := interfaces.PendingPage{Refs: []interfaces.PendingRef{}, Total: int64(len(pending))}
+	if len(pending) == 0 {
+		return page, nil
 	}
-
-	maxEvents := limit
+	maxEvents := int(limit)
 	if maxEvents <= 0 {
 		maxEvents = 10
 	}
-
-	// Sort by jti, matching the Mongo DAO's explicit ascending-jti sort. jtis
-	// are UUIDv7 (goSet.GenerateJti), so ascending jti IS ascending issue
-	// order. Delivery order is a contract receivers reason about (ADR 0040),
-	// so both providers must publish the same one — insertion order here would
-	// make the contract hold on Mongo and quietly not hold on memory.
-	ordered := make([]string, len(pending))
-	for i, event := range pending {
-		ordered[i] = event.Jti
+	n := min(maxEvents, len(pending))
+	for _, row := range pending[:n] {
+		page.Refs = append(page.Refs, interfaces.PendingRef{Jti: row.Jti, AckJti: row.AckJti, EnqueuedAt: row.CreatedAt})
 	}
-	sort.Strings(ordered)
-
-	var jtiList []string
-	for i, jti := range ordered {
-		if int32(i) >= maxEvents {
-			break
+	for _, row := range pending[n:] {
+		if page.OldestBeyond.IsZero() || row.CreatedAt.Before(page.OldestBeyond) {
+			page.OldestBeyond = row.CreatedAt
 		}
-		jtiList = append(jtiList, jti)
 	}
-
-	return jtiList, int64(len(pending)), nil
+	return page, nil
 }
 
-func (d *EventDAOMemory) RemovePending(_ context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Remove from pending
-	if pending, ok := d.pendingEvents[streamID]; ok {
-		var newPending []interfaces.DeliverableEvent
-		var acknowledged *interfaces.DeliverableEvent
-		for _, event := range pending {
-			if event.Jti == jti {
-				evt := event
-				acknowledged = &evt
-			} else {
-				newPending = append(newPending, event)
+// StoredAckJtis returns the stored ackJti of each of jtis that has a row on
+// streamID, in either state.
+func (d *EventDAOMemory) StoredAckJtis(_ context.Context, streamID string, jtis []string) (map[string]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make(map[string]string, len(jtis))
+	rows := d.deliveries[streamID]
+	for _, jti := range jtis {
+		if row, ok := rows[jti]; ok {
+			ackJti := row.AckJti
+			if ackJti == "" {
+				ackJti = row.Jti
 			}
+			out[jti] = ackJti
 		}
-		d.pendingEvents[streamID] = newPending
-		return acknowledged, nil
 	}
-	return nil, nil
+	return out, nil
 }
 
-// RemovePendingMany removes every pending entry of streamID whose JTI is in
+// RemovePendingMany deletes every pending row of streamID whose JTI is in
 // jtis under a single lock acquisition and returns the removed entries.
 func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
 	if len(jtis) == 0 {
@@ -336,130 +457,217 @@ func (d *EventDAOMemory) RemovePendingMany(_ context.Context, jtis []string, str
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	pending, ok := d.pendingEvents[streamID]
-	if !ok {
-		return nil, nil
-	}
-	want := make(map[string]struct{}, len(jtis))
-	for _, jti := range jtis {
-		want[jti] = struct{}{}
-	}
 	var removed []interfaces.DeliverableEvent
-	var newPending []interfaces.DeliverableEvent
-	for _, event := range pending {
-		if _, acked := want[event.Jti]; acked {
-			removed = append(removed, event)
-		} else {
-			newPending = append(newPending, event)
+	for _, jti := range jtis {
+		row := d.rowLocked(streamID, jti)
+		if row == nil || row.State != interfaces.DeliveryStatePending {
+			continue
 		}
+		d.deleteRowLocked(streamID, row)
+		removed = append(removed, row.deliverable(streamID))
 	}
-	d.pendingEvents[streamID] = newPending
 	return removed, nil
 }
 
+// ClearPendingForStream deletes streamID's pending rows; delivered rows stay.
 func (d *EventDAOMemory) ClearPendingForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	count := int64(len(d.pendingEvents[streamID]))
-	delete(d.pendingEvents, streamID)
+	var count int64
+	for _, row := range d.deliveries[streamID] {
+		if row.State == interfaces.DeliveryStatePending {
+			d.deleteRowLocked(streamID, row)
+			count++
+		}
+	}
 	return count, nil
 }
 
-func (d *EventDAOMemory) MarkDelivered(_ context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	delivered := interfaces.DeliveredEvent{
-		DeliverableEvent: *event,
-		AckDate:          ackDate,
-	}
-	d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], delivered)
-	return nil
-}
-
-// MarkDeliveredMany appends every event to its stream's delivered list under a
-// single lock acquisition.
-func (d *EventDAOMemory) MarkDeliveredMany(_ context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
-	if len(events) == 0 {
-		return nil
+// Ack moves every pending row of batch.StreamID whose ackJti is in batch.Jtis
+// to delivered and stores batch.Copies (a duplicate counts as stored), under
+// one lock: the conditional update is exactly-once across callers.
+func (d *EventDAOMemory) Ack(_ context.Context, batch interfaces.AckBatch) (int64, error) {
+	if len(batch.Jtis) == 0 && len(batch.Copies) == 0 {
+		return 0, nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for _, event := range events {
-		d.deliveredEvents[event.StreamId] = append(d.deliveredEvents[event.StreamId], interfaces.DeliveredEvent{
-			DeliverableEvent: event,
-			AckDate:          ackDate,
-		})
-	}
-	return nil
-}
-
-// AckDelivered composes RemovePendingMany and MarkDeliveredMany: the removed
-// entries, each JTI once, are recorded as delivered at ackDate and returned.
-func (d *EventDAOMemory) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	if len(jtis) == 0 {
-		return nil, nil
-	}
-	removed, err := d.RemovePendingMany(ctx, jtis, streamID)
-	if err != nil || len(removed) == 0 {
-		return nil, err
-	}
-	seen := make(map[string]struct{}, len(removed))
-	events := removed[:0]
-	acked := make([]string, 0, len(removed))
-	for _, ev := range removed {
-		if _, dup := seen[ev.Jti]; dup {
+	for _, rec := range batch.Copies {
+		if rec == nil {
 			continue
 		}
-		seen[ev.Jti] = struct{}{}
-		events = append(events, ev)
-		acked = append(acked, ev.Jti)
+		_ = d.insertLocked(rec) // ErrDuplicateJTI: the first stored copy wins
 	}
-	if err = d.MarkDeliveredMany(ctx, events, ackDate); err != nil {
-		return nil, err
+	var acked int64
+	acks := d.byAck[batch.StreamID]
+	for _, ackJti := range batch.Jtis {
+		for jti := range acks[ackJti] {
+			row := d.rowLocked(batch.StreamID, jti)
+			if row == nil || row.State != interfaces.DeliveryStatePending {
+				continue
+			}
+			row.State = interfaces.DeliveryStateDelivered
+			row.AckDate = batch.AckDate
+			if batch.ExpireAt != nil {
+				exp := *batch.ExpireAt
+				row.ExpireAt = &exp
+			} else {
+				row.ExpireAt = nil
+			}
+			acked++
+		}
 	}
 	return acked, nil
 }
 
-// ListDeliveredForStream returns a copy of streamID's delivered events (ADR 0055).
+// ResetPendingAckJti sets ackJti = jti on streamID's pending rows whose ackJti
+// differs; delivered rows are untouched.
+func (d *EventDAOMemory) ResetPendingAckJti(_ context.Context, streamID string) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var modified int64
+	for _, row := range d.deliveries[streamID] {
+		if row.State == interfaces.DeliveryStatePending && row.AckJti != row.Jti {
+			d.setAckJtiLocked(streamID, row, row.Jti)
+			modified++
+		}
+	}
+	return modified, nil
+}
+
+// SweepExpired removes every reference with expireAt <= now, then examines at
+// most maxBodies event bodies with sortTime < bodyCutoff, in ascending
+// (sortTime, jti) order from the in-process watermark, and deletes each one
+// whose reference key (OriginalJti when set, else Jti) has no deliveries row in
+// either state. The scan wraps to the oldest body once it reaches the end.
+func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var result interfaces.SweepResult
+	for streamID, rows := range d.deliveries {
+		for _, row := range rows {
+			if row.ExpireAt != nil && !row.ExpireAt.After(now) {
+				d.deleteRowLocked(streamID, row)
+				result.References++
+			}
+		}
+	}
+	if maxBodies <= 0 {
+		return result, nil
+	}
+
+	referenced := make(map[string]struct{})
+	for _, rows := range d.deliveries {
+		for jti := range rows {
+			referenced[jti] = struct{}{}
+		}
+	}
+
+	var candidates []*model.EventRecord
+	for _, rec := range d.events {
+		if rec.SortTime.Before(bodyCutoff) {
+			candidates = append(candidates, rec)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if !candidates[i].SortTime.Equal(candidates[j].SortTime) {
+			return candidates[i].SortTime.Before(candidates[j].SortTime)
+		}
+		return candidates[i].Jti < candidates[j].Jti
+	})
+
+	// Resume strictly after the watermark; wrap with the remaining budget.
+	start := sort.Search(len(candidates), func(i int) bool {
+		c := candidates[i]
+		if !c.SortTime.Equal(d.sweepAfterTime) {
+			return c.SortTime.After(d.sweepAfterTime)
+		}
+		return c.Jti > d.sweepAfterJti
+	})
+	n := maxBodies
+	if n > len(candidates) {
+		n = len(candidates)
+	}
+	examined := make([]*model.EventRecord, 0, n)
+	for i := 0; i < n; i++ {
+		examined = append(examined, candidates[(start+i)%len(candidates)])
+	}
+	if n == 0 || start+n == len(candidates) {
+		// Reached the end of the eligible range: start over next pass.
+		d.sweepAfterTime, d.sweepAfterJti = time.Time{}, ""
+	} else {
+		last := examined[n-1]
+		d.sweepAfterTime, d.sweepAfterJti = last.SortTime, last.Jti
+	}
+
+	for _, rec := range examined {
+		key := rec.Jti
+		if rec.OriginalJti != "" {
+			key = rec.OriginalJti
+		}
+		if _, ok := referenced[key]; ok {
+			continue
+		}
+		delete(d.events, rec.Jti)
+		if d.useDisk {
+			d.deleteEventFromDiskLocked(rec.Jti)
+		}
+		result.Bodies++
+	}
+	return result, nil
+}
+
+// MigrateLegacyDeliveries has nothing to carry in memory: the persisted files
+// already load into the deliveries map, so the old collections are "gone".
+func (d *EventDAOMemory) MigrateLegacyDeliveries(_ context.Context, _ func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	return interfaces.MigrationResult{Dropped: true}, nil
+}
+
+func (row *delivery) deliverable(streamID string) interfaces.DeliverableEvent {
+	return interfaces.DeliverableEvent{Jti: row.Jti, StreamId: streamID, AckJti: row.AckJti, CreatedAt: row.CreatedAt}
+}
+
+func (row *delivery) delivered(streamID string) interfaces.DeliveredEvent {
+	out := interfaces.DeliveredEvent{DeliverableEvent: row.deliverable(streamID), AckDate: row.AckDate}
+	if row.ExpireAt != nil {
+		exp := *row.ExpireAt
+		out.ExpireAt = &exp
+	}
+	return out
+}
+
+// ListDeliveredForStream returns streamID's delivered rows (ADR 0055).
 func (d *EventDAOMemory) ListDeliveredForStream(_ context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	delivered := d.deliveredEvents[streamID]
-	out := make([]interfaces.DeliveredEvent, len(delivered))
-	copy(out, delivered)
+	out := []interfaces.DeliveredEvent{}
+	for _, row := range d.deliveries[streamID] {
+		if row.State == interfaces.DeliveryStateDelivered {
+			out = append(out, row.delivered(streamID))
+		}
+	}
 	return out, nil
 }
 
-// RemoveDelivered drops streamID's delivered entry for jti. The global body is
+// RemoveDelivered drops streamID's delivered row for jti. The global body is
 // left intact — refcount-gated deletion is DeleteBodyIfUnreferenced's job.
 func (d *EventDAOMemory) RemoveDelivered(_ context.Context, jti string, streamID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	delivered, ok := d.deliveredEvents[streamID]
-	if !ok {
-		return nil
-	}
-	kept := delivered[:0:0]
-	for _, evt := range delivered {
-		if evt.Jti != jti {
-			kept = append(kept, evt)
-		}
-	}
-	if len(kept) == 0 {
-		delete(d.deliveredEvents, streamID)
-	} else {
-		d.deliveredEvents[streamID] = kept
+	if row := d.rowLocked(streamID, jti); row != nil && row.State == interfaces.DeliveryStateDelivered {
+		d.deleteRowLocked(streamID, row)
 	}
 	return nil
 }
 
-// DeleteBodyIfUnreferenced deletes the global body for jti only when no stream
-// references it in pending or delivered (refcount 0).
+// DeleteBodyIfUnreferenced deletes the global body for jti only when no row in
+// either state references it (refcount 0).
 func (d *EventDAOMemory) DeleteBodyIfUnreferenced(_ context.Context, jti string) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -467,18 +675,9 @@ func (d *EventDAOMemory) DeleteBodyIfUnreferenced(_ context.Context, jti string)
 	if _, ok := d.events[jti]; !ok {
 		return false, nil
 	}
-	for _, pending := range d.pendingEvents {
-		for _, evt := range pending {
-			if evt.Jti == jti {
-				return false, nil
-			}
-		}
-	}
-	for _, delivered := range d.deliveredEvents {
-		for _, evt := range delivered {
-			if evt.Jti == jti {
-				return false, nil
-			}
+	for _, rows := range d.deliveries {
+		if _, ok := rows[jti]; ok {
+			return false, nil
 		}
 	}
 
@@ -489,18 +688,23 @@ func (d *EventDAOMemory) DeleteBodyIfUnreferenced(_ context.Context, jti string)
 	return true, nil
 }
 
-// CountRetainedForStream returns the count of post-ack-retained (delivered)
-// JTIs for streamID — the daily occupancy sampler's retained_count.
+// CountRetainedForStream returns the count of delivered rows for streamID —
+// the daily occupancy sampler's retained_count.
 func (d *EventDAOMemory) CountRetainedForStream(_ context.Context, streamID string) (int64, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return int64(len(d.deliveredEvents[streamID])), nil
+	var n int64
+	for _, row := range d.deliveries[streamID] {
+		if row.State == interfaces.DeliveryStateDelivered {
+			n++
+		}
+	}
+	return n, nil
 }
 
-func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(jti string, streamID string)) error {
-	// Mock implementation: for now, we don't need to do anything here
-	// since HandleEvent already updates local buffers in the router.
-	// In a real mock test, we might want to simulate external events.
+func (d *EventDAOMemory) WatchPending(ctx context.Context, _ func(ref interfaces.PendingRef, streamID string)) error {
+	// The memory provider's notifying wrapper reports pending writes; the
+	// bare adapter has no change feed.
 	<-ctx.Done()
 	return nil
 }
@@ -544,6 +748,9 @@ func (d *EventDAOMemory) loadEventFromDisk(jti string) (*model.EventRecord, erro
 	return &record, nil
 }
 
+// GetState returns a copy of the store in its persisted shape: pending rows as
+// DeliverableEvent and delivered rows as DeliveredEvent, each list in
+// ascending jti order.
 func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -555,32 +762,87 @@ func (d *EventDAOMemory) GetState() (events map[string]*model.EventRecord, pendi
 	}
 
 	pending = make(map[string][]interfaces.DeliverableEvent)
-	for k, v := range d.pendingEvents {
-		copySlice := make([]interfaces.DeliverableEvent, len(v))
-		copy(copySlice, v)
-		pending[k] = copySlice
-	}
-
 	delivered = make(map[string][]interfaces.DeliveredEvent)
-	for k, v := range d.deliveredEvents {
-		copySlice := make([]interfaces.DeliveredEvent, len(v))
-		copy(copySlice, v)
-		delivered[k] = copySlice
+	for streamID, rows := range d.deliveries {
+		jtis := make([]string, 0, len(rows))
+		for jti := range rows {
+			jtis = append(jtis, jti)
+		}
+		sort.Strings(jtis)
+		for _, jti := range jtis {
+			row := rows[jti]
+			if row.State == interfaces.DeliveryStatePending {
+				pending[streamID] = append(pending[streamID], row.deliverable(streamID))
+			} else {
+				delivered[streamID] = append(delivered[streamID], row.delivered(streamID))
+			}
+		}
 	}
-
 	return events, pending, delivered
 }
 
+// SetState replaces the store from its persisted shape. A nil argument keeps
+// the current contents of that part (for pending / delivered: the rows in that
+// state). An entry loaded without ackJti gets ackJti = jti, and one without
+// createdAt gets the load time. A JTI listed both pending and delivered for a
+// stream is kept pending (at-least-once).
 func (d *EventDAOMemory) SetState(events map[string]*model.EventRecord, pending map[string][]interfaces.DeliverableEvent, delivered map[string][]interfaces.DeliveredEvent) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if events != nil {
 		d.events = events
 	}
-	if pending != nil {
-		d.pendingEvents = pending
+	if pending == nil && delivered == nil {
+		return
 	}
-	if delivered != nil {
-		d.deliveredEvents = delivered
+	now := d.now()
+	old := d.deliveries
+	d.deliveries = make(map[string]map[string]*delivery)
+	d.byAck = make(map[string]map[string]map[string]struct{})
+	for streamID, rows := range old {
+		for _, row := range rows {
+			if row.State == interfaces.DeliveryStatePending && pending == nil ||
+				row.State == interfaces.DeliveryStateDelivered && delivered == nil {
+				d.putRowLocked(streamID, row)
+			}
+		}
 	}
+	loaded := func(ev interfaces.DeliverableEvent) *delivery {
+		row := &delivery{Jti: ev.Jti, AckJti: ev.AckJti, CreatedAt: ev.CreatedAt}
+		if row.AckJti == "" {
+			row.AckJti = row.Jti
+		}
+		if row.CreatedAt.IsZero() {
+			row.CreatedAt = now
+		}
+		return row
+	}
+	for streamID, list := range delivered {
+		for _, ev := range list {
+			row := loaded(ev.DeliverableEvent)
+			row.State = interfaces.DeliveryStateDelivered
+			row.AckDate = ev.AckDate
+			if ev.ExpireAt != nil {
+				exp := *ev.ExpireAt
+				row.ExpireAt = &exp
+			}
+			d.replaceRowLocked(streamID, row)
+		}
+	}
+	for streamID, list := range pending {
+		for _, ev := range list {
+			row := loaded(ev)
+			row.State = interfaces.DeliveryStatePending
+			d.replaceRowLocked(streamID, row)
+		}
+	}
+}
+
+// replaceRowLocked stores row, first removing any row for the same
+// (streamID, jti) so the ackJti lookup stays exact.
+func (d *EventDAOMemory) replaceRowLocked(streamID string, row *delivery) {
+	if prev := d.rowLocked(streamID, row.Jti); prev != nil {
+		d.deleteRowLocked(streamID, prev)
+	}
+	d.putRowLocked(streamID, row)
 }

@@ -140,7 +140,7 @@ func TestEventJtiIndex_StartupSafetyNet(t *testing.T) {
 
 	// Insert through the DAO surface must NOT return ErrDuplicateJTI — the
 	// guarantee is off, by design.
-	dao := mongodao.NewEventDAO(p.eventCol, p.pendingCol, p.deliveredCol)
+	dao := mongodao.NewEventDAO(p.eventCol, p.deliveriesCol)
 	rec := &model.EventRecord{Jti: "legacy-dup", SortTime: time.Now()}
 	err = dao.Insert(ctx, rec)
 	if err != nil && errors.Is(err, interfaces.ErrDuplicateJTI) {

@@ -33,8 +33,13 @@ const CDbName = "ssef"
 const CDbStreamCfg = "streams"
 const CDbKeys = "keys"
 const CDbEvents = "events"
-const CDbPending = "pendingEvents"
-const CDbDelivered = "deliveredEvents"
+
+// CDbDeliveries is the single delivery-reference collection (#359): one
+// document per (stream, inbound JTI) carrying its pending/delivered state and
+// the ackJti the receiver acknowledges with. It replaced pendingEvents and
+// deliveredEvents, which the router's startup MigrateLegacyDeliveries carries
+// across and drops (#361).
+const CDbDeliveries = "deliveries"
 const CDbClients = "clients"
 const CDbLeases = "cluster_leases"
 const CDbNodes = "cluster_nodes"
@@ -139,8 +144,7 @@ type MongoProvider struct {
 	streamCol        *mongo.Collection
 	keyCol           *mongo.Collection
 	eventCol         *mongo.Collection
-	pendingCol       *mongo.Collection
-	deliveredCol     *mongo.Collection
+	deliveriesCol    *mongo.Collection
 	clientCol        *mongo.Collection
 	leaseCol         *mongo.Collection
 	nodeCol          *mongo.Collection
@@ -200,7 +204,7 @@ func (m *MongoProvider) initServices() {
 	defer m.mu.Unlock()
 
 	m.streamDAO = mongodao.NewStreamDAO(nil).(*mongodao.StreamDAOMongo)
-	m.eventDAO = mongodao.NewEventDAO(nil, nil, nil).(*mongodao.EventDAOMongo)
+	m.eventDAO = mongodao.NewEventDAO(nil, nil).(*mongodao.EventDAOMongo)
 	m.keyDAO = mongodao.NewKeyDAO(nil).(*mongodao.KeyDAOMongo)
 	m.clientDAO = mongodao.NewClientDAO(nil).(*mongodao.ClientDAOMongo)
 	m.serverDAO = mongodao.NewServerDAO(nil).(*mongodao.ServerDAOMongo)
@@ -282,12 +286,10 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 //
 //	collection        concern            why
 //	events            majority, j:true   ADR 0038: stored before ack
-//	pendingEvents     majority, j:true   ADR 0038: stored before ack
+//	deliveries        majority, j:true   ADR 0038: stored before ack
 //	cluster_leases    majority, j:true   a w:1 lease grant can roll back on
 //	                                     failover, letting two nodes own one
 //	                                     stream; fencing needs majority
-//	deliveredEvents   w:1                audit / ADR 0055 purge anchor: a lost
-//	                                     row only delays purge
 //	cluster_nodes     w:1                heartbeat registry, rewritten each tick
 //	streams, keys, clients, servers,
 //	tokens, subject_filters
@@ -297,14 +299,13 @@ func (m *MongoProvider) Coordinator() cluster.ClusterCoordinator {
 // (ADR 0043) does not take a collection's concern: a client-level bulkWrite
 // uses the client's concern, and the client carries none, so that call sets
 // majority+journal itself (mongodao.EventStoreWriteConcern).
-// The one-trip ack bulkWrite (pending delete + delivered insert, #335) sets
-// w:1 itself: a rolled-back pending delete only re-delivers a SET the
-// receiver already dedups by JTI (ADR 0017).
+// The ack (one conditional deliveries updateMany plus copy inserts, #359) sets
+// w:1 itself: a rolled-back state flip only re-delivers a SET the receiver
+// already dedups by JTI (ADR 0017).
 var collectionWriteConcerns = map[string]*writeconcern.WriteConcern{
 	CDbEvents:         mongodao.EventStoreWriteConcern(),
-	CDbPending:        mongodao.EventStoreWriteConcern(),
+	CDbDeliveries:     mongodao.EventStoreWriteConcern(),
 	CDbLeases:         mongodao.EventStoreWriteConcern(),
-	CDbDelivered:      writeconcern.W1(),
 	CDbNodes:          writeconcern.W1(),
 	CDbStreamCfg:      writeconcern.W1(),
 	CDbKeys:           writeconcern.W1(),
@@ -329,8 +330,7 @@ func (m *MongoProvider) collection(name string) *mongo.Collection {
 func (m *MongoProvider) openCollections() {
 	m.streamCol = m.collection(CDbStreamCfg)
 	m.keyCol = m.collection(CDbKeys)
-	m.deliveredCol = m.collection(CDbDelivered)
-	m.pendingCol = m.collection(CDbPending)
+	m.deliveriesCol = m.collection(CDbDeliveries)
 	m.eventCol = m.collection(CDbEvents)
 	m.clientCol = m.collection(CDbClients)
 	m.serverCol = m.collection(CDbServers)
@@ -412,7 +412,7 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 	// collections from the freshly-(re)connected database. Services hold
 	// the same DAO instances so they immediately see the new collections.
 	m.streamDAO.SetCollection(m.streamCol)
-	m.eventDAO.SetCollections(m.eventCol, m.pendingCol, m.deliveredCol)
+	m.eventDAO.SetCollections(m.eventCol, m.deliveriesCol)
 	m.keyDAO.SetCollection(m.keyCol)
 	m.clientDAO.SetCollection(m.clientCol)
 	m.serverDAO.SetCollection(m.serverCol)
@@ -448,91 +448,44 @@ func (m *MongoProvider) initialize(dbName string, ctx context.Context) error {
 // operational records missing the field are not rejected.
 const eventJtiIndexName = "eventJtiUnique"
 
-// Index names for the per-stream event reference collections
-// (pendingEvents, deliveredEvents). Named explicitly so they can be
-// asserted on and so the legacy single-field index can be retired by name.
+// Index names on the deliveries collection (#359) and the events
+// originalJti (#359) and sortTime (#360) indexes. Named explicitly so they can
+// be asserted on. The deliveries names and models live with the adapter, which
+// also ensures them before MigrateLegacyDeliveries (#361).
 const (
-	pendingSidJtiIndexName   = "pendingSidJti"
-	pendingJtiIndexName      = "pendingJti"
-	deliveredSidJtiIndexName = "deliveredSidJti"
-	deliveredJtiIndexName    = "deliveredJti"
-
-	// legacySidIndexName is Mongo's auto-generated name for the {sid:1}
-	// index this package used to create on both reference collections. The
-	// compound {sid:1,jti:1} index serves every query that one served (sid
-	// is its prefix), so it is retired to save the per-write index
-	// maintenance on the ingest path.
-	legacySidIndexName = "sid_1"
+	deliveriesSidJtiIndexName           = mongodao.DeliveriesSidJtiIndexName
+	deliveriesSidAckJtiIndexName        = mongodao.DeliveriesSidAckJtiIndexName
+	deliveriesSidStateJtiIndexName      = mongodao.DeliveriesSidStateJtiIndexName
+	deliveriesExpireAtIndexName         = mongodao.DeliveriesExpireAtIndexName
+	deliveriesJtiIndexName              = mongodao.DeliveriesJtiIndexName
+	deliveriesPendingCreatedAtIndexName = mongodao.DeliveriesPendingCreatedAtIndexName
+	eventOriginalJtiIndexName           = "eventOriginalJti"
+	eventSortTimeIndexName              = "eventSortTime"
 )
 
-// ensureEventRefIndexes installs the access-path indexes on a per-stream event
-// reference collection (pendingEvents or deliveredEvents) and retires the
-// legacy sid-only index.
-//
-//   - {sid:1, jti:1} — the batched-ack filter {sid, jti:{$in:[...]}} used by
-//     EventDAO.RemovePendingMany can only seek on the sid prefix of a
-//     single-field {sid:1} index, so it examined every pending document for
-//     the stream. The compound index bounds the scan by the $in list instead,
-//     and its sid prefix still serves the sid-only queries
-//     (ClearPendingForStream, CountRetainedForStream, the poll/push reads).
-//   - {jti:1} — EventDAO.DeleteBodyIfUnreferenced counts references by jti
-//     alone on the retention purge path. With no jti index that count is a
-//     full collection scan of a collection that can hold hundreds of
-//     thousands of documents.
-//
-// CreateOne is idempotent for an already-present identical spec, so this is
-// additive on an existing deployment and needs no migration step. The legacy
-// index is dropped only AFTER the compound index exists, so the sid access
-// path is never left unindexed, and only when it is actually present, so a
-// fresh database and a restart are both no-ops.
-func (m *MongoProvider) ensureEventRefIndexes(ctx context.Context, col *mongo.Collection, colName, sidJtiName, jtiName string) error {
-	models := []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "sid", Value: 1}, {Key: "jti", Value: 1}},
-			Options: options.Index().SetName(sidJtiName),
-		},
-		{
-			Keys:    bson.D{{Key: "jti", Value: 1}},
-			Options: options.Index().SetName(jtiName),
-		},
-	}
-	if _, err := col.Indexes().CreateMany(ctx, models); err != nil {
-		pLog.Error("Error creating indexes for event reference collection",
-			"collection", colName, "error", err)
-		return err
-	}
-
-	specs, err := col.Indexes().ListSpecifications(ctx, nil)
-	if err != nil {
-		pLog.Error("Error listing indexes for event reference collection",
-			"collection", colName, "error", err)
-		return err
-	}
-	for _, s := range specs {
-		if s.Name != legacySidIndexName {
-			continue
-		}
-		if err := col.Indexes().DropOne(ctx, legacySidIndexName); err != nil {
-			// Not fatal: the compound index already covers the sid access
-			// path, so the only cost of a failed drop is a redundant index.
-			pLog.Warn("Could not drop superseded sid-only index; it is redundant but harmless",
-				"collection", colName, "index", legacySidIndexName, "error", err)
-			break
-		}
-		pLog.Info("Dropped superseded sid-only index (covered by compound index)",
-			"collection", colName, "index", legacySidIndexName, "supersededBy", sidJtiName)
-		break
-	}
-	return nil
-}
-
 func (m *MongoProvider) createIndexes(ctx context.Context) error {
-	if err := m.ensureEventRefIndexes(ctx, m.pendingCol, CDbPending,
-		pendingSidJtiIndexName, pendingJtiIndexName); err != nil {
+	// CreateMany is idempotent for already-present identical specs, so this
+	// is additive on an existing deployment.
+	if _, err := m.deliveriesCol.Indexes().CreateMany(ctx, mongodao.DeliveriesIndexModels()); err != nil {
+		pLog.Error("Error creating indexes for deliveries", "error", err)
 		return err
 	}
-	if err := m.ensureEventRefIndexes(ctx, m.deliveredCol, CDbDelivered,
-		deliveredSidJtiIndexName, deliveredJtiIndexName); err != nil {
+	// Sparse {originalJti} on events: Ack stores outbound re-signed copies
+	// carrying originalJti, and FindByTimeRange excludes them.
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "originalJti", Value: 1}},
+		Options: options.Index().SetName(eventOriginalJtiIndexName).SetSparse(true),
+	}); err != nil {
+		pLog.Error("Error creating originalJti index for eventCol", "error", err)
+		return err
+	}
+	// {sortTime} on events: the retention sweep reads bodies older than the
+	// body cutoff in ascending sortTime (#360).
+	if _, err := m.eventCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sortTime", Value: 1}},
+		Options: options.Index().SetName(eventSortTimeIndexName),
+	}); err != nil {
+		pLog.Error("Error creating sortTime index for eventCol", "error", err)
 		return err
 	}
 
@@ -739,13 +692,12 @@ func (m *MongoProvider) ResetDb(initialize bool) error {
 	m.dbInit = false
 
 	if initialize {
-		m.pendingCol = nil
 		m.ssefDb = nil
 		m.eventCol = nil
 		m.streamCol = nil
 		m.serverCol = nil
 		m.keyCol = nil
-		m.deliveredCol = nil
+		m.deliveriesCol = nil
 		m.resumeTokens.Reset()
 		err = m.initialize(m.DbName, context.TODO())
 		if err != nil {
@@ -1055,7 +1007,7 @@ func (m *MongoProvider) Close() error {
 
 // Cluster pass-throughs retained for the lease/cluster integration tests
 // under mongo_provider/test/. Production callers use Persistence.Coordinator.
-func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 

@@ -23,13 +23,25 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
+	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
+
+// OutboundSet is one outbound SET of an SSTP pair: the claimed reference and
+// the stored record, travelling together so the dialer signs the copy with
+// Ref.AckJti (the value written with the row, #363) and the acknowledgement
+// is matched against the same value.
+type OutboundSet struct {
+	Ref    interfaces.PendingRef
+	Record *model.EventRecord
+}
 
 // SstpOutbound is the narrow per-pair facade the relocated dialer consumes.
 // Methods are keyed on PairId so the dialer never touches router internals
@@ -47,20 +59,21 @@ type SstpOutbound interface {
 	// one cycle (Finding #9 / #8).
 	RefreshPair(pairId string) (model.StreamStateRecord, bool)
 
-	// ClaimOutbound drains up to max outbound JTIs from the pair's buffer,
+	// ClaimOutbound drains up to max outbound references from the pair's buffer,
 	// falling back to the pending list when the buffer is empty (recovery
 	// after takeover relies on persisted outbound events, Q13). Returned
 	// JTIs are claimed in-flight for the pair; callers MUST later ack them
 	// (AckOutbound) or release them (ReleaseOutbound / ReleaseJtis). Returns
-	// nil when no outbound work exists.
-	ClaimOutbound(pairId string, max int) []string
+	// nil when no outbound work exists. Each reference carries the
+	// acknowledgement JTI written with its row (#363).
+	ClaimOutbound(pairId string, max int) []interfaces.PendingRef
 
-	// ResolveEvents turns claimed JTIs into event records to flush, dropping
+	// ResolveEvents turns claimed references into the outbound sets to flush, dropping
 	// any whose event record was deleted between claim and resolve. Callers
 	// receive the resolved events; the dropped JTIs have their claim
 	// released so a vanished event never holds a permanent claim (Finding
 	// mentioned in resolveSstpEventsByJti / releaseUnresolvedSstpClaims).
-	ResolveEvents(pairId string, claimed []string) []*model.EventRecord
+	ResolveEvents(pairId string, claimed []interfaces.PendingRef) []OutboundSet
 
 	// AckOutbound acks the peer-acknowledged JTIs among sent: removes them
 	// from the buffer (Finding #1 — copy-only GetEvents would otherwise
@@ -70,12 +83,30 @@ type SstpOutbound interface {
 	// released so it is re-drained on a later cycle. When acked is empty
 	// the entire sent set is treated as accepted (§2.3 success-without-
 	// detail). Returns the number of acked (and counted) events.
-	AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int
+	// acked are acknowledgement JTIs as the peer sent them, matched against
+	// each sent set's Ref.AckJti.
+	AckOutbound(stream *model.StreamStateRecord, acked []string, sent []OutboundSet) int
+
+	// NoteLease reports the outcome of one acquire-or-renew call the dialer
+	// made on the pair's sstp-client lease, so the router's lease manager
+	// answers the pair's acknowledgement ownership from memory (#364). start
+	// is when the call began; held false (a lost, refused or released lease)
+	// makes the pair's acknowledgements stop at once.
+	NoteLease(pairId string, start time.Time, held bool, leaseUntil time.Time, leaseDuration time.Duration)
+
+	// OutboundServed records the SET the dialer signed for rec (signed is
+	// nil for a forwarded SET), so its acknowledgement stores the outbound
+	// copy (#363).
+	OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string)
+
+	// OutboundHandedOut stamps handedOut on the stream's held references
+	// when the dialer sends its frame (#363).
+	OutboundHandedOut(stream *model.StreamStateRecord, ackJtis []string)
 
 	// ReleaseOutbound releases the in-flight claim on every JTI in events
 	// WITHOUT removing them from the buffer, so a failed-delivery SET is
 	// re-drained (and retried) on a later cycle.
-	ReleaseOutbound(pairId string, events []*model.EventRecord)
+	ReleaseOutbound(pairId string, events []OutboundSet)
 
 	// ReleaseJtis is the JTI-slice variant of ReleaseOutbound. Used when the
 	// caller only has JTIs (e.g. dropping a claimed-but-unresolvable JTI).
@@ -198,7 +229,30 @@ func (r *router) RefreshPair(pairId string) (model.StreamStateRecord, bool) {
 	return r.refreshSstpClientStream(pairId)
 }
 
-func (r *router) ClaimOutbound(pairId string, max int) []string {
+func (r *router) ClaimOutbound(pairId string, max int) []interfaces.PendingRef {
+	return r.outboundRefs(pairId, r.claimOutboundJtis(pairId, max))
+}
+
+// outboundRefs pairs each claimed JTI with the reference the pair's queue
+// holds for it.
+func (r *router) outboundRefs(pairId string, jtis []string) []interfaces.PendingRef {
+	if len(jtis) == 0 {
+		return nil
+	}
+	r.mu.RLock()
+	pair, ok := r.sstpClientStreams[pairId]
+	r.mu.RUnlock()
+	if !ok {
+		return pendingref.RefsFromJtis(jtis, time.Time{})
+	}
+	// A JTI with no acknowledgement JTI is not sent: its in-flight claim is
+	// released and the SET stays pending.
+	refs, unresolved := r.queueFor(pair.StreamConfiguration.Id).Resolve(jtis)
+	r.releaseSstpClaims(pairId, unresolved)
+	return refs
+}
+
+func (r *router) claimOutboundJtis(pairId string, max int) []string {
 	r.mu.RLock()
 	buf := r.sstpBuffers[pairId]
 	pair, ok := r.sstpClientStreams[pairId]
@@ -235,27 +289,39 @@ func (r *router) ClaimOutbound(pairId string, max int) []string {
 	r.mu.RLock()
 	claimed := len(r.sstpInFlight[pairId])
 	r.mu.RUnlock()
-	pending, _ := r.eventService.GetEventIds(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
+	pending, _ := r.pendingJtis(context.Background(), pair.StreamConfiguration.Id, model.PollParameters{
 		MaxEvents:         int32(max + claimed),
 		ReturnImmediately: true,
 	})
 	return r.claimSstpJtis(pairId, pending, max)
 }
 
-func (r *router) ResolveEvents(pairId string, claimed []string) []*model.EventRecord {
-	events := r.resolveSstpEventsByJti(claimed)
-	r.releaseUnresolvedSstpClaims(pairId, claimed, events)
-	return events
+func (r *router) ResolveEvents(pairId string, claimed []interfaces.PendingRef) []OutboundSet {
+	sets := r.resolveOutboundSets(claimed)
+	r.releaseUnresolvedSstpClaims(pairId, claimed, sets)
+	return sets
 }
 
-func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int {
+func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []OutboundSet) int {
 	r.mu.RLock()
 	buf := r.sstpBuffers[stream.PairId]
 	r.mu.RUnlock()
-	return r.handleSstpAcks(stream, buf, acked, sent, fencingToken)
+	return r.handleSstpAcks(stream, buf, acked, sent)
 }
 
-func (r *router) ReleaseOutbound(pairId string, events []*model.EventRecord) {
+func (r *router) NoteLease(pairId string, start time.Time, held bool, leaseUntil time.Time, leaseDuration time.Duration) {
+	r.leases.note(cluster.SstpClient.Resource(pairId), start, held, leaseUntil, leaseDuration)
+}
+
+func (r *router) OutboundServed(stream *model.StreamStateRecord, rec *model.EventRecord, signed *goSet.SecurityEventToken, jws string) {
+	r.queueFor(stream.StreamConfiguration.Id).Served(rec, signed, jws)
+}
+
+func (r *router) OutboundHandedOut(stream *model.StreamStateRecord, ackJtis []string) {
+	r.queueFor(stream.StreamConfiguration.Id).MarkHandedOut(ackJtis, time.Now())
+}
+
+func (r *router) ReleaseOutbound(pairId string, events []OutboundSet) {
 	r.releaseSstpEventClaims(pairId, events)
 }
 
@@ -348,6 +414,7 @@ var _ SstpOutbound = (*router)(nil)
 func (r *router) initSstpClientStreamLocked(state *model.StreamStateRecord, jtis []string) {
 	pairId := state.PairId
 	r.sstpClientStreams[pairId] = *state
+	r.rebuildRoutingLocked()
 	buf := buffer.CreateEventPollBuffer(jtis, r.pollDefaultTimeoutSecs, r.pollMaxTimeoutSecs)
 	r.sstpBuffers[pairId] = buf
 	if r.sstpDialer != nil {
@@ -391,6 +458,30 @@ func (r *router) drainSstpBuffer(pairId string, eventBuf *buffer.EventPollBuffer
 // resolveSstpEventsByJti turns a slice of JTIs into the event records to
 // flush, in the claimed order, skipping any that have since been deleted.
 // One GetEventRecords read serves the whole batch (ADR 0036).
+// resolveOutboundSets pairs each claimed reference with its event record, in
+// the claimed order, skipping any whose record has since been deleted. One
+// read serves the whole batch.
+func (r *router) resolveOutboundSets(refs []interfaces.PendingRef) []OutboundSet {
+	if len(refs) == 0 {
+		return nil
+	}
+	jtis := make([]string, len(refs))
+	for i, ref := range refs {
+		jtis[i] = ref.Jti
+	}
+	byJti := make(map[string]*model.EventRecord, len(refs))
+	for _, rec := range r.eventService.GetEventRecords(r.ctx, jtis) {
+		byJti[rec.Jti] = rec
+	}
+	sets := make([]OutboundSet, 0, len(refs))
+	for _, ref := range refs {
+		if rec := byJti[ref.Jti]; rec != nil {
+			sets = append(sets, OutboundSet{Ref: ref, Record: rec})
+		}
+	}
+	return sets
+}
+
 func (r *router) resolveSstpEventsByJti(jtis []string) []*model.EventRecord {
 	if len(jtis) == 0 {
 		return nil
@@ -412,31 +503,31 @@ func (r *router) resolveSstpEventsByJti(jtis []string) []*model.EventRecord {
 // NOT resolve to an event record (deleted between claim and resolve), so a
 // vanished event never holds a permanent claim that would block an unrelated
 // re-add.
-func (r *router) releaseUnresolvedSstpClaims(pairId string, claimed []string, resolved []*model.EventRecord) {
+func (r *router) releaseUnresolvedSstpClaims(pairId string, claimed []interfaces.PendingRef, resolved []OutboundSet) {
 	if len(claimed) == len(resolved) {
 		return
 	}
 	have := make(map[string]bool, len(resolved))
-	for _, ev := range resolved {
-		have[ev.Jti] = true
+	for _, set := range resolved {
+		have[set.Ref.Jti] = true
 	}
 	gone := make([]string, 0, len(claimed)-len(resolved))
-	for _, jti := range claimed {
-		if !have[jti] {
-			gone = append(gone, jti)
+	for _, ref := range claimed {
+		if !have[ref.Jti] {
+			gone = append(gone, ref.Jti)
 		}
 	}
 	r.releaseSstpClaims(pairId, gone)
 }
 
 // releaseSstpEventClaims releases the in-flight claim on every JTI in events.
-func (r *router) releaseSstpEventClaims(pairId string, events []*model.EventRecord) {
+func (r *router) releaseSstpEventClaims(pairId string, events []OutboundSet) {
 	if len(events) == 0 {
 		return
 	}
 	jtis := make([]string, len(events))
-	for i, ev := range events {
-		jtis[i] = ev.Jti
+	for i, set := range events {
+		jtis[i] = set.Ref.Jti
 	}
 	r.releaseSstpClaims(pairId, jtis)
 }
@@ -513,15 +604,24 @@ func (r *router) releaseSstpClaims(pairId string, jtis []string) {
 // ack (US 5). Any sent-but-NOT-acked JTI likewise has its claim released so
 // it is re-drained on a later cycle. Returns the number of acked (and
 // counted) events.
-func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord, fencingToken int64) int {
+func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []OutboundSet) int {
 	pairId := stream.PairId
 	if len(sent) == 0 {
 		return 0
 	}
 
+	// The peer acks the acknowledgement JTIs the dialer signed (#363), each
+	// the Ref.AckJti of a sent set; map each back to the inbound JTI the
+	// buffer, claims and queue key on.
 	sentByJti := make(map[string]*model.EventRecord, len(sent))
-	for _, ev := range sent {
-		sentByJti[ev.Jti] = ev
+	inboundOf := make(map[string]string, len(sent))
+	for _, set := range sent {
+		sentByJti[set.Ref.Jti] = set.Record
+		ackJti := set.Ref.AckJti
+		if ackJti == "" {
+			ackJti = set.Ref.Jti
+		}
+		inboundOf[ackJti] = set.Ref.Jti
 	}
 
 	// AC 3: literal ack semantics — no ack-all-sent fallback. An empty ack
@@ -533,8 +633,9 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 
 	ackedJtis := make([]string, 0, len(ackSet))
 	count := 0
-	for _, jti := range ackSet {
-		if sentByJti[jti] == nil {
+	for _, wire := range ackSet {
+		jti, ok := inboundOf[wire]
+		if !ok || sentByJti[jti] == nil {
 			continue // ack for a JTI we did not send this cycle — ignore.
 		}
 		ackedJtis = append(ackedJtis, jti)
@@ -546,14 +647,15 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 	// them out, and clear their in-flight claim. The provider ack is queued on
 	// the pair's coalescing acker (#336) and the rest follows once it is
 	// written, so the claim holds the SET until its ack is durable: a
-	// concurrent cycle cannot re-send it meanwhile. A failed or fenced ack
-	// releases the claim and the SET, still pending, is retried.
+	// concurrent cycle cannot re-send it meanwhile. A failed ack releases the
+	// claim and the SET, still pending, is retried; one the lease manager
+	// refused waits in the acker for the next renewal (#364).
 	if len(ackedJtis) > 0 {
 		events := make(map[string]sstpAckedSet, len(ackedJtis))
 		for _, jti := range ackedJtis {
 			events[jti] = sstpAckedSet{ev: sentByJti[jti], buf: eventBuf}
 		}
-		ack := r.sstpAckerFor(stream, fencingToken)
+		ack := r.sstpAckerFor(stream)
 		ack.addPending(events)
 		_ = ack.complete(ackedJtis, nil)
 	}
@@ -566,9 +668,9 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 		ackedSet[jti] = true
 	}
 	unacked := make([]string, 0, len(sent))
-	for _, ev := range sent {
-		if !ackedSet[ev.Jti] {
-			unacked = append(unacked, ev.Jti)
+	for _, set := range sent {
+		if !ackedSet[set.Ref.Jti] {
+			unacked = append(unacked, set.Ref.Jti)
 		}
 	}
 	r.releaseSstpClaims(pairId, unacked)
@@ -588,6 +690,7 @@ func (r *router) pauseSstpPair(stream *model.StreamStateRecord, reason string) {
 	if rec, ok := r.sstpClientStreams[stream.PairId]; ok {
 		rec.SetStatus(stream.Status, stream.ErrorMsg)
 		r.sstpClientStreams[stream.PairId] = rec
+		r.rebuildRoutingLocked()
 	}
 	r.mu.Unlock()
 }
@@ -655,11 +758,11 @@ func (r *router) releaseSstpSecondPushSlot(pairId string) {
 	delete(r.sstpSecondPushInFlight, pairId)
 }
 
-// sstpPairAcker is one SSTP-client pair's coalescing acker (#336), bound to
-// the fencing token of the dialer tenure that created it.
+// sstpPairAcker is one SSTP-client pair's coalescing acker (#336). It
+// outlives a dialer tenure: each write asks the lease manager whether this
+// node still owns the pair (#364).
 type sstpPairAcker struct {
 	*acker
-	token int64
 
 	mu     sync.Mutex
 	events map[string]sstpAckedSet
@@ -705,11 +808,8 @@ func (r *router) sstpAcker(pairId string) *acker {
 	return nil
 }
 
-// sstpAckerFor returns the pair's acker for fencingToken, creating it on
-// first use. An acker left from an earlier tenure is closed, which writes its
-// queued acks under their own token (refused, and so retried, if that tenure
-// has ended).
-func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int64) *sstpPairAcker {
+// sstpAckerFor returns the pair's acker, creating it on first use.
+func (r *router) sstpAckerFor(stream *model.StreamStateRecord) *sstpPairAcker {
 	pairId := stream.PairId
 	sid := stream.StreamConfiguration.Id
 	r.mu.Lock()
@@ -717,19 +817,19 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 		r.sstpAckers = map[string]*sstpPairAcker{}
 	}
 	cur := r.sstpAckers[pairId]
-	if cur != nil && cur.token == fencingToken {
+	if cur != nil {
 		r.mu.Unlock()
 		return cur
 	}
-	p := &sstpPairAcker{token: fencingToken, events: map[string]sstpAckedSet{}}
+	p := &sstpPairAcker{events: map[string]sstpAckedSet{}}
 	p.acker = newAcker(r.ctx, ackerConfig{
 		sid:       sid,
 		transport: "sstp",
 		window:    r.ackCoalesceWindow,
 		max:       r.inFlightMax(),
 		apply: func(ctx context.Context, jtis []string) error {
-			err := r.eventService.AckEvents(ctx, jtis, sid, fencingToken)
-			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
+			err := r.ackEvents(ctx, jtis, sid)
+			if err != nil && !errors.Is(err, errNotLeaseOwner) {
 				// Not acked: the SETs stay pending and are redelivered, so WARN
 				// (the DAO logs the store failure itself).
 				eventLogger.Warn("SSTP: Error acking outbound events", "sid", sid, "count", len(jtis), "error", err)
@@ -757,8 +857,5 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 	})
 	r.sstpAckers[pairId] = p
 	r.mu.Unlock()
-	if cur != nil {
-		_ = cur.close()
-	}
 	return p
 }

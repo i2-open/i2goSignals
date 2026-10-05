@@ -182,7 +182,7 @@ func (suite *PollBehaviorSuite) TestPollSetErrsProcessing() {
 	set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{
 		"reason": "test error",
 	})
-	jti := set.ID
+	jti := deliveredJti(suite.stream, set.ID) // the jti the receiver sees (#363)
 	err = suite.instance.app.EventRouter.HandleEvent(&set, "", suite.stream.Id)
 	assert.NoError(t, err)
 

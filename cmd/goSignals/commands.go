@@ -14,6 +14,7 @@ import (
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goScim/resource"
+	"github.com/i2-open/i2goSignals/pkg/goSetPoll"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
@@ -2559,7 +2560,7 @@ func (p *PollCmd) DoPolling(ctx context.Context, server *SsfServer, stream *Stre
 }
 
 func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params model.PollParameters, endpoint string, token string, exitCh chan struct{}) (*model.PollResponse, error) {
-	bodyBytes, err := json.MarshalIndent(params, "", " ")
+	bodyBytes, err := json.MarshalIndent(wirePollRequest(params), "", " ")
 	if err != nil {
 		return nil, err
 	}
@@ -2598,10 +2599,29 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params
 	return &pollResponse, nil
 }
 
+// wirePollRequest is the RFC 8936 poll request body for params; it is what
+// puts an AckOnly request on the wire as an explicit "maxEvents": 0.
+func wirePollRequest(params model.PollParameters) goSetPoll.PollRequest {
+	req := goSetPoll.PollRequest{
+		MaxEvents:         params.MaxEvents,
+		AckOnly:           params.AckOnly,
+		ReturnImmediately: params.ReturnImmediately,
+		Acks:              params.Acks,
+		TimeoutSecs:       params.TimeoutSecs,
+	}
+	if len(params.SetErrs) > 0 {
+		req.SetErrs = make(map[string]goSetPoll.SetErrType, len(params.SetErrs))
+		for jti, setErr := range params.SetErrs {
+			req.SetErrs[jti] = goSetPoll.SetErrType{Error: setErr.Error, Description: setErr.Description}
+		}
+	}
+	return req
+}
+
 func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint string, token string, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
-			MaxEvents:         0,
+			AckOnly:           true,
 			ReturnImmediately: true,
 			Acks:              p.Acks,
 		}

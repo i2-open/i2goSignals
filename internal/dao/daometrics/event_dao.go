@@ -119,7 +119,7 @@ func (d *eventDAO) InsertMany(ctx context.Context, records []*model.EventRecord)
 	return results, err
 }
 
-func (d *eventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (d *eventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	d.batch("InsertWithPending", len(records))
 	start := time.Now()
 	errs, err := d.inner.InsertWithPending(ctx, records, pending)
@@ -149,40 +149,51 @@ func (d *eventDAO) FindByTimeRange(ctx context.Context, from time.Time, to *time
 	return recs, err
 }
 
-func (d *eventDAO) AddPending(ctx context.Context, jti string, streamID string) error {
+func (d *eventDAO) AddPending(ctx context.Context, ref interfaces.PendingRef, streamID string) error {
 	start := time.Now()
-	err := d.inner.AddPending(ctx, jti, streamID)
+	err := d.inner.AddPending(ctx, ref, streamID)
 	d.observe("AddPending", start, err)
 	return err
 }
 
-func (d *eventDAO) AddPendingMany(ctx context.Context, jtis []string, streamID string) error {
-	d.batch("AddPendingMany", len(jtis))
+func (d *eventDAO) AddPendingMany(ctx context.Context, refs []interfaces.PendingRef, streamID string) error {
+	d.batch("AddPendingMany", len(refs))
 	start := time.Now()
-	err := d.inner.AddPendingMany(ctx, jtis, streamID)
+	err := d.inner.AddPendingMany(ctx, refs, streamID)
 	d.observe("AddPendingMany", start, err)
 	return err
 }
 
-func (d *eventDAO) EnsurePending(ctx context.Context, jti string, streamIDs []string) ([]string, error) {
+func (d *eventDAO) EnsurePending(ctx context.Context, jti string, ackJtis map[string]string) ([]string, error) {
 	start := time.Now()
-	queued, err := d.inner.EnsurePending(ctx, jti, streamIDs)
+	queued, err := d.inner.EnsurePending(ctx, jti, ackJtis)
 	d.observe("EnsurePending", start, err)
 	return queued, err
 }
 
-func (d *eventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) ([]string, int64, error) {
+func (d *eventDAO) GetPendingForStream(ctx context.Context, streamID string, limit int32) (interfaces.PendingPage, error) {
 	start := time.Now()
-	jtis, total, err := d.inner.GetPendingForStream(ctx, streamID, limit)
-	d.observe("GetPendingForStream", start, err)
-	return jtis, total, err
+	page, err := d.inner.GetPendingForStream(ctx, streamID, limit)
+	d.observe(pendingPageOp(page), start, err)
+	return page, err
 }
 
-func (d *eventDAO) RemovePending(ctx context.Context, jti string, streamID string) (*interfaces.DeliverableEvent, error) {
+func (d *eventDAO) StoredAckJtis(ctx context.Context, streamID string, jtis []string) (map[string]string, error) {
 	start := time.Now()
-	ev, err := d.inner.RemovePending(ctx, jti, streamID)
-	d.observe("RemovePending", start, err)
-	return ev, err
+	out, err := d.inner.StoredAckJtis(ctx, streamID, jtis)
+	d.observe("StoredAckJtis", start, err)
+	return out, err
+}
+
+// pendingPageOp labels a GetPendingForStream call. A page with more pending
+// rows than it returns (Total > len(Refs)) also paid for the OldestBeyond read,
+// so it is recorded under GetPendingForStreamBeyond instead; the difference of
+// the two labels' means is the cost of that query (#366, planning #112 S2).
+func pendingPageOp(page interfaces.PendingPage) string {
+	if page.Total > int64(len(page.Refs)) {
+		return "GetPendingForStreamBeyond"
+	}
+	return "GetPendingForStream"
 }
 
 func (d *eventDAO) RemovePendingMany(ctx context.Context, jtis []string, streamID string) ([]interfaces.DeliverableEvent, error) {
@@ -200,27 +211,33 @@ func (d *eventDAO) ClearPendingForStream(ctx context.Context, streamID string) (
 	return n, err
 }
 
-func (d *eventDAO) MarkDelivered(ctx context.Context, event *interfaces.DeliverableEvent, ackDate time.Time) error {
+func (d *eventDAO) Ack(ctx context.Context, batch interfaces.AckBatch) (int64, error) {
+	d.batch("Ack", len(batch.Jtis))
 	start := time.Now()
-	err := d.inner.MarkDelivered(ctx, event, ackDate)
-	d.observe("MarkDelivered", start, err)
-	return err
+	n, err := d.inner.Ack(ctx, batch)
+	d.observe("Ack", start, err)
+	return n, err
 }
 
-func (d *eventDAO) MarkDeliveredMany(ctx context.Context, events []interfaces.DeliverableEvent, ackDate time.Time) error {
-	d.batch("MarkDeliveredMany", len(events))
+func (d *eventDAO) ResetPendingAckJti(ctx context.Context, streamID string) (int64, error) {
 	start := time.Now()
-	err := d.inner.MarkDeliveredMany(ctx, events, ackDate)
-	d.observe("MarkDeliveredMany", start, err)
-	return err
+	n, err := d.inner.ResetPendingAckJti(ctx, streamID)
+	d.observe("ResetPendingAckJti", start, err)
+	return n, err
 }
 
-func (d *eventDAO) AckDelivered(ctx context.Context, jtis []string, streamID string, ackDate time.Time) ([]string, error) {
-	d.batch("AckDelivered", len(jtis))
+func (d *eventDAO) SweepExpired(ctx context.Context, now time.Time, bodyCutoff time.Time, maxBodies int) (interfaces.SweepResult, error) {
 	start := time.Now()
-	acked, err := d.inner.AckDelivered(ctx, jtis, streamID, ackDate)
-	d.observe("AckDelivered", start, err)
-	return acked, err
+	res, err := d.inner.SweepExpired(ctx, now, bodyCutoff, maxBodies)
+	d.observe("SweepExpired", start, err)
+	return res, err
+}
+
+func (d *eventDAO) MigrateLegacyDeliveries(ctx context.Context, expireAt func(streamID string, ackDate time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	start := time.Now()
+	res, err := d.inner.MigrateLegacyDeliveries(ctx, expireAt)
+	d.observe("MigrateLegacyDeliveries", start, err)
+	return res, err
 }
 
 func (d *eventDAO) ListDeliveredForStream(ctx context.Context, streamID string) ([]interfaces.DeliveredEvent, error) {
@@ -254,7 +271,7 @@ func (d *eventDAO) CountRetainedForStream(ctx context.Context, streamID string) 
 // WatchPending's latency is the setup time of the watch (Mongo returns once the
 // change stream is open); the memory store blocks until ctx ends, so there it
 // measures the watch's lifetime.
-func (d *eventDAO) WatchPending(ctx context.Context, callback func(jti string, streamID string)) error {
+func (d *eventDAO) WatchPending(ctx context.Context, callback func(ref interfaces.PendingRef, streamID string)) error {
 	start := time.Now()
 	err := d.inner.WatchPending(ctx, callback)
 	d.observe("WatchPending", start, err)

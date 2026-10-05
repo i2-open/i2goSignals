@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -54,7 +55,7 @@ func TestHandleEvents_BatchIngestsAndFansOut(t *testing.T) {
 	// 0040), not insertion order. These are literal test jtis rather than the
 	// UUIDv7s a real ingest mints, so "batch-seed" sorts last here where a real
 	// seed — minted before the batch — would sort first.
-	assert.Equal(t, []string{"batch-1", "batch-2", "batch-3", "batch-seed"}, pending,
+	assert.Equal(t, []string{"batch-1", "batch-2", "batch-3", "batch-seed"}, pendingref.RefJtis(pending),
 		"pending list must hold the seed and the batch's matching SETs, in jti order")
 
 	// Every non-duplicate SET was persisted, including the unmatched one.

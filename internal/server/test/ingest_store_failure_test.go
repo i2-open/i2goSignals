@@ -46,7 +46,7 @@ func (d *toggleFailEventDAO) InsertMany(ctx context.Context, records []*model.Ev
 	return d.EventDAO.InsertMany(ctx, records)
 }
 
-func (d *toggleFailEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]string) ([]error, error) {
+func (d *toggleFailEventDAO) InsertWithPending(ctx context.Context, records []*model.EventRecord, pending map[string][]interfaces.PendingRef) ([]error, error) {
 	if d.fail.Load() {
 		return nil, errStoreDown
 	}

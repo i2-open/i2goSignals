@@ -70,6 +70,8 @@ instead of minting one, pass
 | Poll leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=poll-receiver}` |
 | SSTP leg delivered / drain time | goSignals2 `goSignals_router_events_in_total{stream_id=<SSTP inbound id>, tfr=SSTP}` |
 | Delivery latency per leg, p50/p95/p99/max | goSignals2 `goSignals_router_event_age_at_receipt_seconds{tfr}`, diffed over the run |
+| Verified properties (`properties:` line, `properties` in the JSON) | goSignals1 (+ `--gs1b`) `goSignals_router_ack_writes_total` / `goSignals_router_ack_batches_total` (ack writes per batch), `goSignals_router_reads_under_lock_total`, `goSignals_router_reads_before_ack_total` (design value 0 for both) and `goSignals_router_peer_claims_total{result="served"}`, diffed over the run and summed over the cluster members |
+| `OldestBeyond` query cost (`oldest-beyond` line, `oldest_beyond_gs1` in the JSON) | `goSignals_dao_op_duration_seconds{op="GetPendingForStreamBeyond"}` count and mean against `{op="GetPendingForStream"}`: a pending page shorter than the stream's backlog also reads `PendingPage.OldestBeyond`, so the count is non-zero only when a backlog exceeds the queue window |
 
 ### Ingest breakdown (DAO metrics)
 
@@ -185,6 +187,9 @@ Useful flags:
 | `--drain-timeout` | give up waiting for goSignals2 (default 5m) |
 | `--gs1`, `--gs2`, `--ca`, `--bootstrap-token` | point at a different stack |
 | `--gs1b <url>` | a second member of goSignals1's cluster (e.g. `https://localhost:8887`); ingest workers alternate between `--gs1` and it (see [Two-node cluster ingest](#two-node-cluster-ingest)) |
+| `--gs1b-internal <url>` | with `--gs1b`, the base URL goSignals2 uses to reach the `--gs1b` node; the poll receiver polls it and, with `--sstp-role responder`, goSignals2 dials it for SSTP, instead of goSignals1 (#366) |
+| `--poll-targets one\|both` | `one` (default): one goSignals2 poll receiver, at goSignals1 or `--gs1b-internal`. `both` (needs `--gs1b-internal`): one receiver per node, so polls reach the poll-transmitter lease owner and the non-owner, which serves through a peer claim; the POLL leg counts both receivers (#366, for #367) |
+| `--poll-pin-owner` | with `--gs1b` (not `--gs1b-internal`): before any receiver exists the harness polls `--gs1b` once, so it takes the poll-transmitter lease and keeps it, then goSignals2 polls goSignals1 for the whole leg. Every poll is then a non-owner poll: the worst case for the peer hop (#367) |
 | `--gs1b-sync-timeout` | with `--gs1b`, how long to wait after creating the streams for the second node to register the run's outbound streams before ingest starts (default 90s; peers sync every 40 s) |
 
 Every run writes `bin/bench/bench-<timestamp>.json` with the full result

@@ -571,6 +571,12 @@ The existing `I2SIG_PUSH_BACKFILL_INTERVAL` and
 refilling — they are independent of the recovery state machine and remain at
 their previous defaults.
 
+Cluster lease ownership (#364) is tuned by one variable:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `I2SIG_LEASE_SAFETY_MARGIN` | `5s` | How long before a lease's recorded expiry a node stops acknowledging as its owner (Go duration). It covers clock drift and the time an acknowledgement batch takes to reach the store. A value over half the lease duration is capped at half (15s for the 30s production leases) and logged once at WARN; a negative value is treated as `0` and logged at WARN; an unparsable value falls back to the default |
+
 ---
 
 <!-- gosignals-brand-footer -->

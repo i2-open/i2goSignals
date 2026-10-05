@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,52 +45,46 @@ func waitLeaseOwner(t *testing.T, coord cluster.ClusterCoordinator, resource, ow
 	return token
 }
 
-// An ack carrying the token of a lease that expired and was taken by another
-// node is refused before any write, and a runner that loses its lease releases
-// nothing it does not own.
-func TestPushFence_StaleTokenAckRejectedAfterTakeover(t *testing.T) {
+// A lease that expired and was taken by another node carries a higher
+// fencing token, and the old owner's recorded tenure has run out: its ack
+// writes nothing and makes no lease call (#364). A runner that loses its lease
+// releases nothing it does not own.
+func TestPushFence_AckRefusedAfterTakeover(t *testing.T) {
 	rx := newHoldingReceiver()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 	setter, ok := coord.(clockSetter)
 	require.True(t, ok, "memory coordinator exposes SetClock")
 	clock := &leaseClock{t: time.Now().UTC()}
 	setter.SetClock(clock.now)
 	t.Cleanup(func() { setter.SetClock(nil) })
+	require.NotNil(t, h.router.leases)
+	h.router.leases.now = clock.now
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	jtis := h.addPendingEvents(t, sid, 3)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
 	oldToken := waitLeaseOwner(t, coord, resource, "node-restart")
-	require.Greater(t, oldToken, services.NoFencingToken)
+	require.Greater(t, oldToken, int64(0))
+	require.True(t, h.router.leases.StillOwner(resource))
 
 	// The lease lapses and node-b takes it over.
 	clock.advance(time.Minute)
-	took, newToken, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
+	took, newToken, _, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
 	require.NoError(t, err)
 	require.True(t, took)
 	require.Greater(t, newToken, oldToken)
 
 	before := h.pendingCount(sid)
-	err = h.eventService.AckEvents(t.Context(), jtis, sid, oldToken)
-	require.ErrorIs(t, err, services.ErrStaleFencingToken)
-	err = h.eventService.AckEvent(t.Context(), jtis[0], sid, oldToken)
-	require.ErrorIs(t, err, services.ErrStaleFencingToken)
-	assert.Equal(t, before, h.pendingCount(sid), "a stale ack writes nothing")
-	// Token 0 is never accepted on a leased stream once a coordinator is wired.
-	err = h.eventService.AckEvent(t.Context(), jtis[0], sid, services.NoFencingToken)
-	require.ErrorIs(t, err, services.ErrStaleFencingToken)
-	assert.Equal(t, before, h.pendingCount(sid), "a zero-token ack writes nothing")
+	err = h.router.ackEvents(t.Context(), jtis, sid)
+	require.ErrorIs(t, err, errNotLeaseOwner)
+	assert.Equal(t, before, h.pendingCount(sid), "an ack past the tenure writes nothing")
 
-	// The current holder's token is accepted.
-	require.NoError(t, h.eventService.AckEvent(t.Context(), jtis[0], sid, newToken))
-
-	// The old runner's own in-flight batch ack is refused too, and the runner
-	// stopping must not release node-b's lease.
+	// The runner stopping must not release node-b's lease.
 	runner := h.runnerFor(sid)
 	rx.release()
 	h.router.RemoveStream(sid)
@@ -107,12 +100,12 @@ func TestPushFence_StaleTokenAckRejectedAfterTakeover(t *testing.T) {
 func TestPushFence_RunnerReleasesLeaseOnStop(t *testing.T) {
 	rx := newHoldingReceiver()
 	h := newRestartHarness(t, rx)
-	coord := h.router.coordinator
+	coord := unwrapCoordinator(h.router.coordinator)
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	h.addPendingEvents(t, sid, 2)
-	resource := cluster.PushTransmitterResource(sid)
+	resource := cluster.PushTransmitter.Resource(sid)
 
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
@@ -126,29 +119,27 @@ func TestPushFence_RunnerReleasesLeaseOnStop(t *testing.T) {
 	owner, _, token, err := coord.GetLeaseOwner(resource)
 	require.NoError(t, err)
 	assert.Empty(t, owner, "a stopped runner leaves its lease unowned")
-	assert.Equal(t, services.NoFencingToken, token)
+	assert.Equal(t, int64(0), token)
 }
 
-// CurrentFence reports the push lease for a push stream and nothing for a
-// stream the router holds no lease for.
-func TestPushFence_CurrentFence(t *testing.T) {
+// ackResource names the push lease for a push stream and nothing for a stream
+// the router holds no lease for; the push runner's acquisition records a
+// tenure the lease manager answers from.
+func TestPushFence_AckResourceAndTenure(t *testing.T) {
 	rx := newHoldingReceiver()
 	h := newRestartHarness(t, rx)
 
-	_, _, leased, err := h.router.CurrentFence("no-such-stream")
-	require.NoError(t, err)
-	assert.False(t, leased)
+	assert.Empty(t, h.router.ackResource("no-such-stream"))
+	assert.True(t, h.router.stillOwnsAck("no-such-stream"), "an unleased stream is not checked")
 
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
 	h.addPendingEvents(t, sid, 1)
 	h.router.UpdateStreamState(stream.DeepCopy())
 	rx.waitEntered(t)
-	want := waitLeaseOwner(t, h.router.coordinator, cluster.PushTransmitterResource(sid), "node-restart")
+	waitLeaseOwner(t, h.router.coordinator, cluster.PushTransmitter.Resource(sid), "node-restart")
 
-	resource, token, leased, err := h.router.CurrentFence(sid)
-	require.NoError(t, err)
-	assert.True(t, leased)
-	assert.Equal(t, cluster.PushTransmitterResource(sid), resource)
-	assert.Equal(t, want, token)
+	assert.Equal(t, cluster.PushTransmitter.Resource(sid), h.router.ackResource(sid))
+	assert.True(t, h.router.stillOwnsAck(sid))
+	rx.release()
 }
