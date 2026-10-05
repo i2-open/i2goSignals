@@ -16,8 +16,9 @@ import (
 type legResult struct {
 	Transport string `json:"transport"` // PUSH, POLL or SSTP
 	Audience  string `json:"audience"`
-	TxStream  string `json:"tx_stream"` // goSignals1 transmitter stream id (SSTP: goSignals1 pair id)
-	RxStream  string `json:"rx_stream"` // goSignals2 receiver stream id (SSTP: goSignals2 inbound sid)
+	TxStream  string `json:"tx_stream"`             // goSignals1 transmitter stream id (SSTP: goSignals1 pair id)
+	RxStream  string `json:"rx_stream"`             // goSignals2 receiver stream id (SSTP: goSignals2 inbound sid)
+	RxStream2 string `json:"rx_stream_2,omitempty"` // POLL with --poll-targets both: the receiver at gs1b
 	Expected  int    `json:"expected"`
 	Delivered int    `json:"delivered"`
 	// DrainSeconds is measured from the END of ingest until the last event
@@ -78,6 +79,11 @@ type benchResult struct {
 	// Gs1bInternal is --gs1b-internal: when set, goSignals2 polled the gs1b
 	// node and (SSTP responder role) dialed it, instead of goSignals1.
 	Gs1bInternal string `json:"gs1b_internal,omitempty"`
+	// PollTargets is --poll-targets ("both": one goSignals2 poll receiver per
+	// node); PollPinOwner is --poll-pin-owner (gs1b held the poll lease and
+	// goSignals2 polled goSignals1).
+	PollTargets  string `json:"poll_targets,omitempty"`
+	PollPinOwner bool   `json:"poll_pin_owner,omitempty"`
 
 	// Ingest: harness -> goSignals1 push-receive endpoint.
 	IngestSeconds         float64      `json:"ingest_seconds"`
@@ -247,6 +253,12 @@ func (r *benchResult) printSummary() {
 	}
 	if r.Gs1bInternal != "" {
 		fmt.Printf("receiver legs: goSignals2 polls (and, as SSTP initiator, dials) %s\n", r.Gs1bInternal)
+	}
+	if r.PollTargets == pollTargetsBoth {
+		fmt.Printf("poll targets: goSignals2 polls both nodes (receivers %s, %s)\n", r.Poll.RxStream, r.Poll.RxStream2)
+	}
+	if r.PollPinOwner {
+		fmt.Printf("poll owner pinned: gs1b holds the poll lease, goSignals2 polls goSignals1\n")
 	}
 	for _, leg := range []legResult{r.Push, r.Poll, r.Sstp} {
 		fmt.Printf("%-6s : %d/%d delivered  e2e=%.2fs  drain-after-ingest=%.2fs  %.0f ev/s  complete=%v\n",

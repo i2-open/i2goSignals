@@ -43,6 +43,8 @@ type options struct {
 	gs1b                     string // second member of goSignals1's cluster
 	gs1bInternal             string // base URL goSignals2 uses to reach gs1b (moves the POLL/SSTP-responder legs there)
 	gs1bSyncTimeout          time.Duration
+	pollTargets              string // --poll-targets: one receiver, or one per node
+	pollPinOwner             bool   // --poll-pin-owner: gs1b takes the poll lease before goSignals2 polls goSignals1
 	gs1Internal, gs2Internal string
 	caFile                   string
 	insecure                 bool
@@ -80,6 +82,8 @@ func parseFlags() *options {
 	flag.StringVar(&o.gs2, "gs2", "https://localhost:8889", "host-side base URL of goSignals2 (receivers)")
 	flag.StringVar(&o.gs1b, "gs1b", "", "host-side base URL of a second node in goSignals1's cluster (e.g. https://localhost:8887); ingest workers alternate between --gs1 and it")
 	flag.StringVar(&o.gs1bInternal, "gs1b-internal", "", "base URL goSignals2 uses to reach the --gs1b node; when set, goSignals2 polls it and, with --sstp-role responder, dials it for SSTP")
+	flag.StringVar(&o.pollTargets, "poll-targets", pollTargetsOne, "goSignals2 poll receivers: \"one\" (at goSignals1, or --gs1b-internal) or \"both\" (one per node, so polls reach the lease owner and the non-owner; needs --gs1b-internal)")
+	flag.BoolVar(&o.pollPinOwner, "poll-pin-owner", false, "worst case: the harness polls --gs1b once so it owns the poll-transmitter lease, then goSignals2 polls goSignals1 (a non-owner) for the whole leg")
 	flag.StringVar(&o.gs1Internal, "gs1-internal", "", "base URL goSignals2 uses to reach goSignals1 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.gs2Internal, "gs2-internal", "", "base URL goSignals1 uses to reach goSignals2 (default: learned from the server's BASE_URL)")
 	flag.StringVar(&o.caFile, "ca", "config/certs/ca-cert.pem", "CA certificate used to verify both servers")
@@ -118,6 +122,10 @@ func parseFlags() *options {
 		o.issuerKeyFile = filepath.Join(o.outDir, keyFileName(o.issuer)+".pem")
 	}
 	if err := validateGs1bInternal(o); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := validatePollOptions(o); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -165,6 +173,7 @@ type topology struct {
 	rxPush  *model.StreamConfiguration // goSignals2 push-receive
 	txPoll  *model.StreamConfiguration // goSignals1 poll transmitter
 	rxPoll  *model.StreamConfiguration // goSignals2 poll-receive <- goSignals1
+	rxPoll2 *model.StreamConfiguration // second goSignals2 poll-receive, at gs1b (--poll-targets both)
 	sstp1   *model.StreamStateRecord   // goSignals1 half of the SSTP pair (tx = PairId)
 	sstp2   *model.StreamStateRecord   // goSignals2 half of the SSTP pair (rx = SstpInbound.Id)
 }
@@ -214,7 +223,7 @@ func run(o *options) error {
 	}
 
 	removeOrphans(o, gs1, gs2)
-	topo, err := buildTopology(gs1, gs2, o, mix)
+	topo, err := buildTopology(gs1, gs2, gs1b, o, mix)
 	if err != nil {
 		return err
 	}
@@ -318,6 +327,10 @@ func run(o *options) error {
 	expectPush, expectPoll, expectSstp := mix.expected(o.events)
 	result.Push = legResult{Transport: "PUSH", Audience: o.pushAud, TxStream: topo.txPush.Id, RxStream: topo.rxPush.Id, Expected: expectPush}
 	result.Poll = legResult{Transport: "POLL", Audience: o.pollAud, TxStream: topo.txPoll.Id, RxStream: topo.rxPoll.Id, Expected: expectPoll}
+	if topo.rxPoll2 != nil {
+		result.Poll.RxStream2 = topo.rxPoll2.Id
+	}
+	result.PollTargets, result.PollPinOwner = o.pollTargets, o.pollPinOwner
 	result.Sstp = legResult{Transport: "SSTP", Audience: o.sstpAud, Expected: expectSstp}
 	if topo.sstp1 != nil {
 		result.Sstp.TxStream, result.Sstp.RxStream = topo.sstp1.PairId, topo.sstp2.SstpInbound.Id
@@ -529,7 +542,7 @@ func ensureSigningAlgKey(gs1 *node, o *options) error {
 	return nil
 }
 
-func buildTopology(gs1, gs2 *node, o *options, mix audMix) (*topology, error) {
+func buildTopology(gs1, gs2, gs1b *node, o *options, mix audMix) (*topology, error) {
 	t := &topology{}
 	events := benchEventTypes
 
@@ -609,32 +622,47 @@ func buildTopology(gs1, gs2 *node, o *options, mix audMix) (*topology, error) {
 		return nil, fmt.Errorf("goSignals1 poll transmitter: %w", err)
 	}
 	t.txPoll = txPoll
-	pollEndpoint, err := rebase(txPoll.Delivery.PollTransmitMethod.EndpointUrl, receiverLegBase(gs1.internalBase, o.gs1bInternal))
-	if err != nil {
-		return nil, err
+	if o.pollPinOwner {
+		if err := pinPollOwner(gs1b, txPoll, o); err != nil {
+			return nil, err
+		}
 	}
-	rxPoll, err := gs2.createStream(streamRequest{
-		Description:     "bench poll receiver (goSignals2 polls goSignals1)",
-		Iss:             o.issuer,
-		Aud:             []string{o.pollAud},
-		EventsRequested: events,
-		IssuerJWKSUrl:   jwksURL,
-		RouteMode:       model.RouteModeImport,
-		Delivery: map[string]any{
-			"method":               model.ReceivePoll,
-			"endpoint_url":         pollEndpoint,
-			"authorization_header": txPoll.Delivery.PollTransmitMethod.AuthorizationHeader,
-			"poll_config": map[string]any{
-				"maxEvents":         500,
-				"returnImmediately": false,
-				"timeoutSecs":       10,
+	var pollEndpoints []string
+	for i, base := range pollReceiverBases(gs1.internalBase, o) {
+		pollEndpoint, err := rebase(txPoll.Delivery.PollTransmitMethod.EndpointUrl, base)
+		if err != nil {
+			return nil, err
+		}
+		rxPoll, err := gs2.createStream(streamRequest{
+			Description:     "bench poll receiver (goSignals2 polls " + base + ")",
+			Iss:             o.issuer,
+			Aud:             []string{o.pollAud},
+			EventsRequested: events,
+			IssuerJWKSUrl:   jwksURL,
+			RouteMode:       model.RouteModeImport,
+			Delivery: map[string]any{
+				"method":               model.ReceivePoll,
+				"endpoint_url":         pollEndpoint,
+				"authorization_header": txPoll.Delivery.PollTransmitMethod.AuthorizationHeader,
+				"poll_config": map[string]any{
+					"maxEvents":         500,
+					"returnImmediately": false,
+					"timeoutSecs":       10,
+				},
 			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("goSignals2 poll receiver: %w", err)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("goSignals2 poll receiver: %w", err)
+		}
+		if i == 0 {
+			t.rxPoll = rxPoll
+		} else {
+			t.rxPoll2 = rxPoll
+		}
+		pollEndpoints = append(pollEndpoints, pollEndpoint)
 	}
-	t.rxPoll = rxPoll
+	rxPoll := t.rxPoll
+	pollEndpoint := strings.Join(pollEndpoints, ",")
 
 	// 5. SSTP pair, only when the mix sends events over it. Events travel
 	// goSignals1 -> goSignals2 whichever HTTP role each node plays;
@@ -793,7 +821,7 @@ func waitForDrain(ingressNodes []*node, gs2 *node, beforeIngress []*streamCounte
 		}
 		allDone := true
 		for _, leg := range legs {
-			delivered := int(now2.In[leg.RxStream] - before2.In[leg.RxStream])
+			delivered := legDelivered(now2, before2, leg)
 			leg.Delivered = delivered
 			if leg.Complete {
 				continue

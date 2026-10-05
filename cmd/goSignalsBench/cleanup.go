@@ -26,7 +26,7 @@ func (t *topology) victims(gs1, gs2 *node) []victim {
 	if t.sstp1 != nil && t.sstp1.SstpMethod != nil && t.sstp1.SstpMethod.Role == model.SstpRoleResponder {
 		sstpInit, sstpResp = sstpResp, sstpInit
 	}
-	all := []victim{{gs2, idOf(t.rxPoll)}, {gs1, idOf(t.txPoll)}, {gs1, idOf(t.txPush)}, {gs2, idOf(t.rxPush)}, sstpInit, sstpResp, {gs1, idOf(t.ingress)}}
+	all := []victim{{gs2, idOf(t.rxPoll2)}, {gs2, idOf(t.rxPoll)}, {gs1, idOf(t.txPoll)}, {gs1, idOf(t.txPush)}, {gs2, idOf(t.rxPush)}, sstpInit, sstpResp, {gs1, idOf(t.ingress)}}
 	out := make([]victim, 0, len(all))
 	for _, v := range all {
 		if v.id != "" {
