@@ -102,3 +102,46 @@ func TestClusterMetrics(t *testing.T) {
 	// There should be 3 nodes: sa.NodeID (from NewApplication), test-node-1, test-node-2
 	assert.Contains(t, metrics, `goSignals_cluster_nodes_count 3`)
 }
+
+// TestDeliveryWaitAndBacklogMetrics: the router the community server builds
+// registers the queue and acknowledgement time histograms and the per-stream
+// backlog collector (#352), and /metrics serves the histograms under each tfr.
+func TestDeliveryWaitAndBacklogMetrics(t *testing.T) {
+	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
+	provider, err := memory_provider.Open("memorydb://localhost", "test_wait_metrics")
+	require.NoError(t, err)
+	persistence := &dbProviders.Persistence{
+		StreamService: provider.GetStreamService(),
+		KeyService:    provider.GetKeyService(),
+		EventService:  provider.GetEventService(),
+		ClientService: provider.GetClientService(),
+		ServerService: provider.GetServerService(),
+		TokenService:  provider.GetTokenService(),
+		Coordinator:   provider.Coordinator(),
+		Storage:       memory_provider.NewMemoryStorage(provider),
+	}
+	sa := NewApplication(persistence, "http://localhost:8080")
+	defer sa.Shutdown()
+
+	registry := prometheus.NewRegistry()
+	sa.InitializePrometheusWithRegisterer(registry)
+
+	rr := httptest.NewRecorder()
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	body, err := io.ReadAll(rr.Body)
+	require.NoError(t, err)
+	for _, name := range []string{"goSignals_router_queue_time_seconds", "goSignals_router_ack_time_seconds"} {
+		for _, tfr := range []string{"PUSH", "POLL", "SSTP"} {
+			assert.Contains(t, string(body), name+`_bucket{tfr="`+tfr+`",le="0.005"}`)
+			assert.Contains(t, string(body), name+`_bucket{tfr="`+tfr+`",le="60"}`)
+		}
+	}
+
+	// The backlog collector is registered: registering the router's collector
+	// again is refused as a duplicate.
+	bc, ok := sa.EventRouter.(interface{ BacklogCollector() prometheus.Collector })
+	require.True(t, ok, "the community router reports per-stream backlog")
+	var dup prometheus.AlreadyRegisteredError
+	require.ErrorAs(t, registry.Register(bc.BacklogCollector()), &dup)
+}

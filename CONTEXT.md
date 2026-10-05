@@ -541,7 +541,7 @@ no delivery document in either state references it. `expireAt` is
 written at acknowledgement from the stream's retention policy (enterprise
 policy may vary it per stream).
 
-### Enqueue time / Queue time / Acknowledgement time / Backlog (planned, #352)
+### Enqueue time / Queue time / Acknowledgement time / Backlog (#352)
 
 The transmitter-side waiting vocabulary, per target stream:
 

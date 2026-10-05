@@ -92,7 +92,7 @@ var (
 // DeliveryCollectors returns the acker's Prometheus collectors for the
 // server's registry.
 func DeliveryCollectors() []prometheus.Collector {
-	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge, ackWritesTotal, ackBatchesTotal, readsBeforeAckTotal}
+	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge, ackWritesTotal, ackBatchesTotal, readsBeforeAckTotal, queueTimeHist, ackTimeHist}
 }
 
 // ackerConfig configures one acker.
@@ -411,7 +411,67 @@ var (
 		Name:      "reads_before_ack_total",
 		Help:      "Store or coordinator calls made on the acknowledgement path before its write (design value 0).",
 	})
+
+	// Transmitter-side waiting (#352). Both are labelled by tfr only, never
+	// by stream (community ADR 0047), and observed once per SET at its
+	// receiver acknowledgement, for SETs this node handed out.
+	queueTimeHist = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "goSignals",
+		Subsystem: "router",
+		Name:      "queue_time_seconds",
+		Help:      "Enqueue time to first hand-out (push request sent, poll response written, SSTP frame sent), by transfer method.",
+		Buckets:   waitBuckets,
+	}, []string{"tfr"})
+	ackTimeHist = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "goSignals",
+		Subsystem: "router",
+		Name:      "ack_time_seconds",
+		Help:      "First hand-out to acknowledgement, by transfer method. Retries and redeliveries count here.",
+		Buckets:   waitBuckets,
+	}, []string{"tfr"})
 )
+
+// waitBuckets spans 5 ms to 60 s for the queue and acknowledgement time
+// histograms (#352). The top bound is pinned to exactly 60: the exponential
+// series lands a rounding error below it.
+var waitBuckets = func() []float64 {
+	b := prometheus.ExponentialBucketsRange(0.005, 60, 15)
+	b[len(b)-1] = 60
+	return b
+}()
+
+func init() {
+	// Every transfer method has a series from the first scrape, so a
+	// dashboard or alert sees zero rather than an absent metric.
+	for _, tfr := range []string{tfrPush, tfrPoll, tfrSstp} {
+		queueTimeHist.WithLabelValues(tfr)
+		ackTimeHist.WithLabelValues(tfr)
+	}
+}
+
+// tfr label values, as goSignals_router_events_out_total uses them.
+const (
+	tfrPush = "PUSH"
+	tfrPoll = "POLL"
+	tfrSstp = "SSTP"
+)
+
+// tfrOf is the tfr label of a target stream.
+func tfrOf(stream *model.StreamStateRecord) string {
+	switch stream.GetType() {
+	case model.DeliveryPoll, model.ReceivePoll:
+		return tfrPoll
+	case model.DeliverySstpPair:
+		return tfrSstp
+	}
+	return tfrPush
+}
+
+// waitSample is one acknowledged SET's hand-out timing, kept until the
+// acknowledging call has released q.mu and can resolve the stream's tfr.
+type waitSample struct {
+	enqueued, handedOut, acked time.Time
+}
 
 // queuedRef is one held reference (hook 2 of community #352).
 type queuedRef struct {
@@ -462,10 +522,9 @@ type deliveryQueue struct {
 	oldest refHeap
 	depth  int64
 	beyond time.Time
-	// onRemove is the single removal point's observer (#352): it sees every
-	// held reference that leaves on an acknowledgement, and whether it was a
-	// receiver acknowledgement (false: a discard). Called under q.mu.
-	onRemove func(qr queuedRef, receiverAck bool)
+	// samples are the wait timings of references removed on a receiver
+	// acknowledgement and not yet observed (#352).
+	samples []waitSample
 }
 
 func newDeliveryQueue(r *router, sid string, window int) *deliveryQueue {
@@ -757,8 +816,37 @@ func (q *deliveryQueue) removeLocked(qr *queuedRef, receiverAck bool) {
 	if qr.idx >= 0 && qr.idx < len(q.oldest) && q.oldest[qr.idx] == qr {
 		heap.Remove(&q.oldest, qr.idx)
 	}
-	if q.onRemove != nil {
-		q.onRemove(*qr, receiverAck)
+	// Only a SET this node handed out is timed: a subject-filter discard was
+	// never sent, and a SET handed out by a previous owner has no hand-out
+	// time here (owner failover), so neither is observed (#352).
+	if receiverAck && !qr.handedOut.IsZero() {
+		q.samples = append(q.samples, waitSample{enqueued: qr.ref.EnqueuedAt, handedOut: qr.handedOut, acked: time.Now()})
+	}
+}
+
+// observeWaits records the queue and acknowledgement time of the references
+// removed since the last call. Called without q.mu: the stream lookup takes
+// the router lock.
+func (q *deliveryQueue) observeWaits() {
+	q.mu.Lock()
+	samples := q.samples
+	q.samples = nil
+	q.mu.Unlock()
+	if len(samples) == 0 {
+		return
+	}
+	stream := q.stream()
+	if stream == nil {
+		return
+	}
+	tfr := tfrOf(stream)
+	qt := queueTimeHist.WithLabelValues(tfr)
+	at := ackTimeHist.WithLabelValues(tfr)
+	for _, s := range samples {
+		if !s.enqueued.IsZero() {
+			qt.Observe(max(0, s.handedOut.Sub(s.enqueued).Seconds()))
+		}
+		at.Observe(max(0, s.acked.Sub(s.handedOut).Seconds()))
 	}
 }
 
@@ -806,6 +894,7 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 		}
 	}
 	q.mu.Unlock()
+	q.observeWaits()
 	return n, nil
 }
 
@@ -850,6 +939,7 @@ func (q *deliveryQueue) AckWire(ctx context.Context, acks []string, setErrs []st
 		}
 	}
 	q.mu.Unlock()
+	q.observeWaits()
 	return inbound, n, nil
 }
 

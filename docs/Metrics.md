@@ -77,6 +77,79 @@ Deliberately **not** labeled by `stream_id` or event URI: either would make the
 series count unbounded on a busy receiver. A stream on `NONE` engages no
 validators and therefore records nothing, so there is no `mode="NONE"` series.
 
+## Delivery Wait and Backlog Metrics
+
+Transmitter-side waiting, per target stream (#352; vocabulary in `CONTEXT.md`,
+"Enqueue time / Queue time / Acknowledgement time / Backlog"). Both histograms
+and both gauges are read from the node's in-memory `DeliveryQueue`: no store or
+coordinator call is made to record or scrape them.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `goSignals_router_queue_time_seconds` | Histogram | `tfr` | Enqueue time to the SET's *first* hand-out on this node: push request sent, poll response written, SSTP frame sent (either role). Observed once per SET, when it is acknowledged. Buckets: exponential, 5 ms to 60 s (15 buckets). |
+| `goSignals_router_ack_time_seconds` | Histogram | `tfr` | First hand-out to acknowledgement. Retries and redeliveries fall inside it. Same buckets. |
+| `goSignals_router_stream_backlog_depth` | Gauge | `stream_id` | SETs enqueued for the stream and not yet acknowledged, handed out or not. |
+| `goSignals_router_stream_backlog_oldest_age_seconds` | Gauge | `stream_id` | Age at scrape time of the oldest SET in the stream's backlog; 0 when the backlog is empty. |
+
+`tfr` takes the same values as on `goSignals_router_events_out_total`: `PUSH`,
+`POLL` (RFC 8936 poll transmitter) and `SSTP` (both the acceptor and the dialer
+role of a pair). Per ADR 0047 the histograms carry no `stream_id`; per-stream
+health comes from the two gauges.
+
+What is not observed:
+
+- A subject-filtered SET is discarded without being sent: it leaves the backlog
+  but is observed in neither histogram.
+- A SET handed out by a previous owner of the stream has no hand-out time on the
+  new owner, so its acknowledgement there is not observed (owner failover).
+- A SET is timed only while this node holds its reference in the delivery queue;
+  a SET handed out from beyond the queue window is not observed.
+
+Each stream's gauges are reported only by the node that owns its lease. A node
+holding a queue for a stream it does not own reports nothing for it, and a
+removed stream's series stop on the next scrape. Summing across nodes therefore
+counts each stream once, and a stream with no series anywhere has no owner.
+
+Examples:
+
+```promql
+# p95 queue time and ack time by transfer method
+histogram_quantile(0.95, sum by (le, tfr) (rate(goSignals_router_queue_time_seconds_bucket[5m])))
+histogram_quantile(0.95, sum by (le, tfr) (rate(goSignals_router_ack_time_seconds_bucket[5m])))
+
+# Largest backlogs across the cluster
+topk(10, max by (stream_id) (goSignals_router_stream_backlog_depth))
+```
+
+Alert on the oldest pending SET:
+
+```yaml
+- alert: StreamBacklogStale
+  expr: max by (stream_id) (goSignals_router_stream_backlog_oldest_age_seconds) > 300
+  for: 5m
+  annotations:
+    summary: "Stream {{ $labels.stream_id }} has a SET pending for over 5 minutes"
+```
+
+Alert on a stream's backlog series going absent (no node owns it, or its owner
+stopped reporting). `absent()` takes a fixed selector, so the rule names the
+stream; for many streams, compare against a series every node exports per
+stream, such as `goSignals_router_stream_status_info`. A stream's backlog series
+appears once its owner has built its delivery queue, and a receiver-only stream
+has none, so scope the second rule to the transmitter streams you deliver to:
+
+```yaml
+- alert: StreamBacklogAbsent
+  expr: absent(goSignals_router_stream_backlog_depth{stream_id="<stream id>"})
+  for: 5m
+
+- alert: StreamBacklogUnreported
+  expr: |
+    count by (stream_id) (goSignals_router_stream_status_info{status="enabled"})
+      unless on (stream_id) count by (stream_id) (goSignals_router_stream_backlog_depth)
+  for: 5m
+```
+
 ## DAO Metrics
 
 Per-call latency and batch size at the `EventDAO` seam, so the ingest write
