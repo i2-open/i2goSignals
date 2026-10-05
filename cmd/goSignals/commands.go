@@ -2601,7 +2601,7 @@ func (p *PollCmd) DoPollRequest(ctx context.Context, client *http.Client, params
 func (p *PollCmd) DoAckOnly(ctx context.Context, client *http.Client, endpoint string, token string, exitCh chan struct{}) {
 	if p.AutoAck && len(p.Acks) > 0 {
 		pollRequest := model.PollParameters{
-			MaxEvents:         0,
+			AckOnly:           true,
 			ReturnImmediately: true,
 			Acks:              p.Acks,
 		}

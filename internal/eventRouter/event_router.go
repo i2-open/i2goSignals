@@ -2067,6 +2067,13 @@ func (r *router) PollStreamHandler(ctx context.Context, sid string, params model
 		return nil, false, http.StatusConflict
 	}
 
+	// An explicit maxEvents 0 is acknowledgement-only (RFC 8936 §2.4, #369):
+	// the acks are applied on the owner and nothing is claimed or waited for.
+	if params.AckOnly {
+		applyAcksOnly()
+		return map[string]string{}, false, http.StatusOK
+	}
+
 	// A signing transmitter (every route mode but Forward) needs an active key
 	// for its iss and signing_alg. Without one the poll sends nothing, the
 	// events stay queued and the stream takes the key-unavailable pause (#312).

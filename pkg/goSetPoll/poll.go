@@ -5,6 +5,7 @@
 package goSetPoll
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -16,7 +17,13 @@ import (
 // PollRequest represents the JSON body of an RFC8936 poll request.
 type PollRequest struct {
 	// MaxEvents is an optional integer indicating the maximum number of unacknowledged SETs to return.
+	// Zero means absent: the transmitter's default applies. An explicit 0 is AckOnly.
 	MaxEvents int32 `json:"maxEvents,omitzero"`
+
+	// AckOnly marks an acknowledgement-only request (RFC 8936 §2.4): it is sent,
+	// and parsed, as an explicit "maxEvents": 0, and the transmitter returns no
+	// SETs. MaxEvents is ignored when it is set.
+	AckOnly bool `json:"-"`
 
 	// ReturnImmediately indicates whether the transmitter should return immediately even if no results
 	// are available (short polling). When false, the transmitter may hold the connection open (long polling).
@@ -30,6 +37,55 @@ type PollRequest struct {
 
 	// TimeoutSecs is an optional timeout in seconds for long polling.
 	TimeoutSecs int `json:"timeoutSecs,omitzero"`
+}
+
+// pollRequestFields is PollRequest without its JSON methods.
+type pollRequestFields PollRequest
+
+// MarshalJSON writes an AckOnly request with an explicit "maxEvents": 0,
+// which omitzero would otherwise drop.
+func (p PollRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		MaxEvents *int32 `json:"maxEvents,omitempty"`
+		pollRequestFields
+	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)})
+}
+
+// UnmarshalJSON sets AckOnly when the request carries an explicit
+// "maxEvents": 0; an absent or null maxEvents leaves it false.
+func (p *PollRequest) UnmarshalJSON(data []byte) error {
+	var in struct {
+		MaxEvents *int32 `json:"maxEvents"`
+		pollRequestFields
+	}
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*p = PollRequest(in.pollRequestFields)
+	p.MaxEvents, p.AckOnly = readMaxEvents(in.MaxEvents)
+	return nil
+}
+
+// wireMaxEvents is the maxEvents a request sends: 0 for an ack-only request,
+// none when maxEvents is unset.
+func wireMaxEvents(maxEvents int32, ackOnly bool) *int32 {
+	if ackOnly {
+		zero := int32(0)
+		return &zero
+	}
+	if maxEvents == 0 {
+		return nil
+	}
+	return &maxEvents
+}
+
+// readMaxEvents splits a parsed maxEvents into its value and whether it was
+// an explicit 0.
+func readMaxEvents(maxEvents *int32) (int32, bool) {
+	if maxEvents == nil {
+		return 0, false
+	}
+	return *maxEvents, *maxEvents == 0
 }
 
 // PollResponse represents the JSON body of an RFC8936 poll response.

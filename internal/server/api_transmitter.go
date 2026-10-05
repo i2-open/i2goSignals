@@ -71,6 +71,7 @@ func PollEventsHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *htt
 	// Convert to internal model type for application-layer processing
 	request := model.PollParameters{
 		MaxEvents:         pollReq.MaxEvents,
+		AckOnly:           pollReq.AckOnly,
 		ReturnImmediately: pollReq.ReturnImmediately,
 		Acks:              pollReq.Acks,
 		TimeoutSecs:       pollReq.TimeoutSecs,
