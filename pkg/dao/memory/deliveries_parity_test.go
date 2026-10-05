@@ -3,8 +3,8 @@ package memory
 import (
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/daotest"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-	"github.com/i2-open/i2goSignals/pkg/dao/daotest"
 )
 
 func TestEventDAOMemory_DeliveriesParity(t *testing.T) {

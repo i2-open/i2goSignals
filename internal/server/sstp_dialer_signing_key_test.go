@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -146,7 +147,7 @@ func (n *dialKeyNode) stored(t *testing.T) *model.StreamStateRecord {
 
 func (n *dialKeyNode) pending() []string {
 	jtis, _ := n.persistence.EventService.GetEventIds(context.Background(), n.txSid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-	return interfaces.RefJtis(jtis)
+	return pendingref.RefJtis(jtis)
 }
 
 func TestSstpDialingEnd_KeyUnavailablePausesThenResumesAndDelivers(t *testing.T) {

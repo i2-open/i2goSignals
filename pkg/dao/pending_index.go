@@ -2,7 +2,6 @@ package dao
 
 import (
 	"sort"
-	"time"
 )
 
 // StreamPending is one (stream, reference) target of an InsertWithPending
@@ -40,48 +39,6 @@ func StreamsByJti(pending map[string][]PendingRef) map[string][]StreamPending {
 	}
 	for _, targets := range out {
 		sort.Slice(targets, func(i, j int) bool { return targets[i].StreamID < targets[j].StreamID })
-	}
-	return out
-}
-
-// RefsFromJtis builds references with AckJti = Jti and the given enqueue time
-// for every jti, in order.
-func RefsFromJtis(jtis []string, enqueuedAt time.Time) []PendingRef {
-	if len(jtis) == 0 {
-		return nil
-	}
-	refs := make([]PendingRef, len(jtis))
-	for i, jti := range jtis {
-		refs[i] = PendingRef{Jti: jti, AckJti: jti, EnqueuedAt: enqueuedAt}
-	}
-	return refs
-}
-
-// RefJtis returns the inbound JTIs of refs, in order.
-func RefJtis(refs []PendingRef) []string {
-	if len(refs) == 0 {
-		return nil
-	}
-	out := make([]string, len(refs))
-	for i, r := range refs {
-		out[i] = r.Jti
-	}
-	return out
-}
-
-// RefAckJtis returns the acknowledgement JTIs of refs, in order (Jti when a
-// reference's AckJti is empty).
-func RefAckJtis(refs []PendingRef) []string {
-	if len(refs) == 0 {
-		return nil
-	}
-	out := make([]string, len(refs))
-	for i, r := range refs {
-		if r.AckJti == "" {
-			out[i] = r.Jti
-		} else {
-			out[i] = r.AckJti
-		}
 	}
 	return out
 }

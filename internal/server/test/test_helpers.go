@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -109,7 +110,7 @@ func (instance *ssfInstance) DeleteStream(streamId string) error {
 
 func (instance *ssfInstance) GetEventIds(streamId string, params model.PollParameters) ([]string, bool) {
 	refs, more := instance.eventSvc().GetEventIds(context.Background(), streamId, params)
-	return daoInterfaces.RefJtis(refs), more
+	return pendingref.RefJtis(refs), more
 }
 
 func (instance *ssfInstance) GetEvent(jti string) *goSet.SecurityEventToken {

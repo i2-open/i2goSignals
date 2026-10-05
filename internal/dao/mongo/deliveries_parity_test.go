@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/i2-open/i2goSignals/internal/dao/daotest"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-	"github.com/i2-open/i2goSignals/pkg/dao/daotest"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"

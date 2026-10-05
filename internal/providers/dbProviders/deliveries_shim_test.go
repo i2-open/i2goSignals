@@ -1,6 +1,7 @@
 package dbProviders
 
 import (
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"time"
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
@@ -14,7 +15,7 @@ func refOf(jti string) interfaces.PendingRef {
 }
 
 func refsFrom(jtis []string) []interfaces.PendingRef {
-	return interfaces.RefsFromJtis(jtis, time.Time{})
+	return pendingref.RefsFromJtis(jtis, time.Time{})
 }
 
 func pendingRefsOf(m map[string][]string) map[string][]interfaces.PendingRef {
@@ -43,5 +44,5 @@ func selfAck(streamIDs []string) map[string]string {
 
 // pageJtis flattens a PendingPage to the pre-#359 (jtis, total, err) shape.
 func pageJtis(p interfaces.PendingPage, err error) ([]string, int64, error) {
-	return interfaces.RefJtis(p.Refs), p.Total, err
+	return pendingref.RefJtis(p.Refs), p.Total, err
 }

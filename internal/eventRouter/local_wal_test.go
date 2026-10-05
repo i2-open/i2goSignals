@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"context"
 	"errors"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"os"
 	"path/filepath"
 	"sync"
@@ -145,7 +146,7 @@ func ensurePollStreamDurability(t *testing.T, p *dbProviders.Persistence, audien
 func (s *walSetup) pending(t *testing.T) []string {
 	t.Helper()
 	jtis, _ := s.p.EventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 100, ReturnImmediately: true})
-	return interfaces.RefJtis(jtis)
+	return pendingref.RefJtis(jtis)
 }
 
 func (s *walSetup) stored(jti string) bool {

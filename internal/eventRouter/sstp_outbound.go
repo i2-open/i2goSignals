@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"os"
 	"strconv"
 	"sync"
@@ -242,7 +243,7 @@ func (r *router) outboundRefs(pairId string, jtis []string) []interfaces.Pending
 	pair, ok := r.sstpClientStreams[pairId]
 	r.mu.RUnlock()
 	if !ok {
-		return interfaces.RefsFromJtis(jtis, time.Time{})
+		return pendingref.RefsFromJtis(jtis, time.Time{})
 	}
 	q := r.queueFor(pair.StreamConfiguration.Id)
 	refs := make([]interfaces.PendingRef, 0, len(jtis))

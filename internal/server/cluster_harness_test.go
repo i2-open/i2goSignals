@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"net"
 	"net/http"
@@ -213,7 +214,7 @@ func (h *clusterHarness) leaseOwner(resource string, timeout time.Duration) stri
 // pendingFor returns the stream's undelivered JTIs from the shared store.
 func (h *clusterHarness) pendingFor(sid string) []string {
 	ids, _ := h.admin.EventService.GetEventIds(context.Background(), sid, model.PollParameters{MaxEvents: 1000, ReturnImmediately: true})
-	return interfaces.RefJtis(ids)
+	return pendingref.RefJtis(ids)
 }
 
 // persistStream stores a stream and loads it into every running node's router.

@@ -3,6 +3,7 @@ package eventRouter
 import (
 	"context"
 	"errors"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func pendingJtis(t *testing.T, h *filterPushHarness, sid string) []string {
 		MaxEvents:         100,
 		ReturnImmediately: true,
 	})
-	return interfaces.RefJtis(jtis)
+	return pendingref.RefJtis(jtis)
 }
 
 // TestIngest_ResentPendingSetKeepsOneIntent: a SET re-sent while its first copy
@@ -37,7 +38,7 @@ func TestIngest_ResentPendingSetKeepsOneIntent(t *testing.T) {
 	token := newRiscToken("resent-pending", dupTestIssuer, s.audience)
 	ids := func() []string {
 		jtis, _ := s.h.router.eventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-		return interfaces.RefJtis(jtis)
+		return pendingref.RefJtis(jtis)
 	}
 
 	require.NoError(t, s.h.router.HandleEvent(token, `{"first":true}`, s.streamID))
@@ -144,7 +145,7 @@ func TestIngest_RetryAfterMarkerFailureDeliversOnce(t *testing.T) {
 	token := newRiscToken("retry-after-marker-loss", dupTestIssuer, s.audience)
 	ids := func() []string {
 		jtis, _ := s.h.router.eventService.GetEventIds(context.Background(), s.streamID, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
-		return interfaces.RefJtis(jtis)
+		return pendingref.RefJtis(jtis)
 	}
 	seedBodyWithoutMarker(t, s.h.router.eventService, token, s.streamID)
 	require.Empty(t, ids(), "precondition: body stored, no marker")

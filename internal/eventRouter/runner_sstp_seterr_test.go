@@ -2,9 +2,9 @@ package eventRouter
 
 import (
 	"context"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"testing"
 
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -19,7 +19,7 @@ func pendingOutbound(t *testing.T, h *sstpRunnerHarness, txSid string) []string 
 		MaxEvents:         10,
 		ReturnImmediately: true,
 	})
-	return interfaces.RefJtis(pending)
+	return pendingref.RefJtis(pending)
 }
 
 // Transmit-side setErr consumption on the SSTP-server path. Clearing an outbound

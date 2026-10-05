@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"net/http"
 	"os"
 	"runtime"
@@ -1601,7 +1602,7 @@ func (r *router) pendingJtis(ctx context.Context, streamID string, params model.
 		return []string{}, false
 	}
 	r.queueFor(streamID).load(ctx, page)
-	return interfaces.RefJtis(page.Refs), int64(len(page.Refs)) < page.Total
+	return pendingref.RefJtis(page.Refs), int64(len(page.Refs)) < page.Total
 }
 
 // ackJtiAt returns the acknowledgement JTI of t.jtis[i].

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/i2-open/i2goSignals/internal/dao/pendingref"
 	"io"
 	"net/http"
 	"net/url"
@@ -21,7 +22,6 @@ import (
 	ssef "github.com/i2-open/i2goSignals/internal/server"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/constants"
-	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/httpSupport"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -477,7 +477,7 @@ func (suite *ServerSuite) Test6_ResetStream() {
 	jtis, more = suite.servers[0].app.EventService.GetEventIds(context.Background(), suite.servers[0].stream.Id, model.PollParameters{ReturnImmediately: true})
 	assert.False(suite.T(), more, "Should be no more events")
 	assert.Len(suite.T(), jtis, 2, "No event jtis returned")
-	assert.Contains(suite.T(), interfaces.RefJtis(jtis), jtiNew, "The new event should be present")
+	assert.Contains(suite.T(), pendingref.RefJtis(jtis), jtiNew, "The new event should be present")
 
 	ssf1Stream := suite.servers[0].stream.Id
 	suite.servers[0].app.EventRouter.RemoveStream(ssf1Stream)
