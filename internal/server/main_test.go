@@ -18,6 +18,13 @@ import (
 // that leaks a goroutine when a timer path regresses. The check is inert unless
 // goroutineleak.EnvVar is set, which `make qa` does and `go test` does not.
 func TestMain(m *testing.M) {
+	// Legacy fixtures here mint keys through CreateKeyPair / POST /key with no
+	// alg and assume RSA with kid == issuer; pin the pre-spec-#114 default.
+	// Spec #114 tests that exercise the ES256 default set I2SIG_KEY_ALG
+	// themselves (t.Setenv) before building the service.
+	if _, set := os.LookupEnv("I2SIG_KEY_ALG"); !set {
+		_ = os.Setenv("I2SIG_KEY_ALG", "RS256")
+	}
 	if os.Getenv("I2SIG_SHUTDOWN_DRAIN") == "" {
 		_ = os.Setenv("I2SIG_SHUTDOWN_DRAIN", "0")
 	}

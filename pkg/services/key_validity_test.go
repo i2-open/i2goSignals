@@ -283,7 +283,7 @@ func TestKeyValidity_SaveIsRefusedWithOnlyAnExpiredOrNotYetValidKey(t *testing.T
 		err := svc.RequireActiveSigningKey(ctx, &req)
 		require.ErrorIs(t, err, ErrInvalidRequest)
 		assert.Contains(t, err.Error(), keyedIssuer)
-		assert.Contains(t, err.Error(), "RS256")
+		assert.Contains(t, err.Error(), "any key type")
 		assert.Contains(t, err.Error(), "not valid until "+start.Format(time.RFC3339))
 	})
 }

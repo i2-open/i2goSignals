@@ -49,9 +49,7 @@ func transmit(t *testing.T, svc *KeyService, signingAlg string) string {
 	set.AddEventPayload("urn:example:event:a", map[string]string{"detail": "round-trip"})
 	set.Kid = kid
 
-	method, err := goSet.SigningMethodFor(signingAlg)
-	require.NoError(t, err)
-	signed, err := set.JWS(method, key)
+	signed, err := set.JWS(StreamSigningMethod(signingAlg, key), key)
 	require.NoError(t, err)
 	return signed
 }
@@ -134,17 +132,17 @@ func TestMLDSARoundTrip_TransmitterToJWKSToEveryReceiver(t *testing.T) {
 }
 
 // TestMLDSARoundTrip_AnRS256StreamOnTheSameIssuerIsUnaffected is the other half
-// of the opt-in promise: turning one stream post-quantum must be invisible to
-// every other stream of the same issuer.
+// of the opt-in promise: adding an ML-DSA key must be invisible to a stream
+// pinned to RS256 on the same issuer.
 func TestMLDSARoundTrip_AnRS256StreamOnTheSameIssuerIsUnaffected(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newMLDSATestService(t)
 
-	before := transmit(t, svc, "")
+	before := transmit(t, svc, "RS256")
 	beforeHeader := decodeJOSEHeader(t, before)
 	beforeJWKS := receiverJWKS(t, svc)
 	require.NoError(t, err0(svc.EnsureSigningKeyForAlg(ctx, rtIssuer, mldsa.Alg, "")))
-	after := transmit(t, svc, "")
+	after := transmit(t, svc, "RS256")
 
 	// Same alg, same kid, same key: nothing about the RS256 stream moved.
 	afterHeader := decodeJOSEHeader(t, after)

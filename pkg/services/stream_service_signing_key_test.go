@@ -98,7 +98,7 @@ func TestCreateStream_SigningTransmitterWithoutActiveKeyIsRefused(t *testing.T) 
 
 			_, err := svc.CreateStream(ctx, tc.req, "test-project", nil)
 
-			requireNoActiveKeyError(t, err, keylessIssuer, "RS256")
+			requireNoActiveKeyError(t, err, keylessIssuer, "any key type")
 			assert.Empty(t, svc.ListStreams(ctx), "a refused create must save nothing")
 		})
 	}
@@ -117,10 +117,10 @@ func TestCreateStream_SuspendedOrRevokedKeyIsNotActive(t *testing.T) {
 				pollSigningRequest(keyedIssuer, ""),
 			} {
 				_, err = svc.CreateStream(ctx, req, "test-project", nil)
-				requireNoActiveKeyError(t, err, keyedIssuer, "RS256")
+				requireNoActiveKeyError(t, err, keyedIssuer, "any key type")
 			}
 			_, err = svc.CreateSstpPair(ctx, signingPairBootstrap(keyedIssuer, model.SstpModePublish), "test-project", nil)
-			requireNoActiveKeyError(t, err, keyedIssuer, "RS256")
+			requireNoActiveKeyError(t, err, keyedIssuer, "any key type")
 			assert.Empty(t, svc.ListStreams(ctx))
 		})
 	}
@@ -171,7 +171,7 @@ func TestCreateSstpPair_PublishDirectionWithoutActiveKeyIsRefused(t *testing.T) 
 
 	_, err := svc.CreateSstpPair(ctx, signingPairBootstrap(keylessIssuer, model.SstpModePublish), "test-project", nil)
 
-	requireNoActiveKeyError(t, err, keylessIssuer, "RS256")
+	requireNoActiveKeyError(t, err, keylessIssuer, "any key type")
 	assert.Empty(t, svc.ListStreams(ctx), "a refused pair create must save nothing")
 
 	_, err = svc.CreateSstpPair(ctx, signingPairBootstrap(keyedIssuer, model.SstpModePublish), "test-project", nil)
@@ -188,7 +188,7 @@ func TestUpdateStream_LeavingASigningTransmitterWithoutActiveKeyIsRefused(t *tes
 	_, err = svc.UpdateStream(ctx, sid, "test-project", model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{Iss: keylessIssuer},
 	})
-	requireNoActiveKeyError(t, err, keylessIssuer, "RS256")
+	requireNoActiveKeyError(t, err, keylessIssuer, "any key type")
 	stored, err := svc.GetStreamState(ctx, sid)
 	require.NoError(t, err)
 	assert.Equal(t, keyedIssuer, stored.Iss, "a refused update must save nothing")
@@ -237,7 +237,7 @@ func TestUpdateStream_StreamWithMissingKeyOnlyAcceptsAFix(t *testing.T) {
 			_, err = svc.UpdateStream(ctx, sid, "test-project", model.StreamStateRecord{
 				StreamConfiguration: model.StreamConfiguration{Description: "unrelated edit"},
 			})
-			requireNoActiveKeyError(t, err, keyedIssuer, "RS256")
+			requireNoActiveKeyError(t, err, keyedIssuer, "any key type")
 			stored, err := svc.GetStreamState(ctx, sid)
 			require.NoError(t, err)
 			assert.NotEqual(t, "unrelated edit", stored.Description, "a refused update must save nothing")
@@ -271,7 +271,7 @@ func TestUpdateSstpPair_MissingPrimaryKeyOnlyAcceptsAFix(t *testing.T) {
 	_, err = svc.UpdateStream(ctx, rec.PairId, "test-project", model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{Aud: []string{"https://other-peer.example"}},
 	})
-	requireNoActiveKeyError(t, err, keyedIssuer, "RS256")
+	requireNoActiveKeyError(t, err, keyedIssuer, "any key type")
 
 	_, err = svc.UpdateStream(ctx, rec.PairId, "test-project", model.StreamStateRecord{
 		StreamConfiguration: model.StreamConfiguration{RouteMode: model.RouteModeForward},
@@ -302,13 +302,13 @@ func TestRequireActiveSigningKey_ReEnableCheck(t *testing.T) {
 
 	_, _, err = svc.keyService.SetKeyStatus(ctx, keyedIssuer, "", interfaces.KeyStatusSuspended)
 	require.NoError(t, err)
-	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, pushRec), keyedIssuer, "RS256")
-	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, pairRec), keyedIssuer, "RS256")
+	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, pushRec), keyedIssuer, "any key type")
+	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, pairRec), keyedIssuer, "any key type")
 	assert.NoError(t, svc.RequireActiveSigningKey(ctx, forwardRec), "a Forward transmitter needs no key")
 
 	legacy := pushRec.DeepCopy()
 	legacy.StreamConfiguration.RouteMode = ""
-	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, legacy), keyedIssuer, "RS256")
+	requireNoActiveKeyError(t, svc.RequireActiveSigningKey(ctx, legacy), keyedIssuer, "any key type")
 
 	_, _, err = svc.keyService.SetKeyStatus(ctx, keyedIssuer, "", interfaces.KeyStatusActive)
 	require.NoError(t, err)

@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
@@ -554,12 +555,46 @@ func (key *JwkKeyRec) StatusAt(now time.Time) string {
 func (key *JwkKeyRec) ToKeyState() KeyState {
 	return KeyState{
 		Kid:         key.Kid,
+		Alg:         key.keyAlg(),
 		Status:      key.Status(),
 		SuspendedAt: key.SuspendedAt,
 		RevokedAt:   key.RevokedAt,
 		NotBefore:   key.NotBefore,
 		NotAfter:    key.NotAfter,
 	}
+}
+
+// keyAlg is the JWS name of the record's key type for a KeyState: RS256 for
+// the empty stored Alg (RSA, PKCS#1, as every record before the discriminator
+// existed), the stored name otherwise, and "" for a record with no key
+// material (a receiver's jwksurl/external entry), which has no type to report.
+func (key *JwkKeyRec) keyAlg() string {
+	if len(key.KeyBytes) == 0 && len(key.PubKeyBytes) == 0 {
+		return ""
+	}
+	if key.Alg == "" {
+		return "RS256"
+	}
+	return key.Alg
+}
+
+// SortOldestFirst returns recs ordered oldest-first by JwkKeyRec.NewerThan,
+// the order signing selection ranks keys in, so the last active entry of an
+// alg in a KeySummary is that type's newest key (spec #114). recs is not
+// modified.
+func SortOldestFirst(recs []*JwkKeyRec) []*JwkKeyRec {
+	sorted := slices.Clone(recs)
+	slices.SortStableFunc(sorted, func(a, b *JwkKeyRec) int {
+		switch {
+		case b.NewerThan(a) && !a.NewerThan(b):
+			return -1
+		case a.NewerThan(b) && !b.NewerThan(a):
+			return 1
+		default:
+			return 0
+		}
+	})
+	return sorted
 }
 
 // ToKeyStateAt projects the per-kid state with the status derived at now.
@@ -597,7 +632,10 @@ func (key *JwkKeyRec) ToSummary() KeySummary {
 // KeyState carries the derived lifecycle status and timestamps for a single kid
 // so a KeySummary reports per-kid state without a second round trip (ADR 0028).
 type KeyState struct {
-	Kid         string    `json:"kid"`
+	Kid string `json:"kid"`
+	// Alg is the JWS name of the key's type: RS256, ES256 or ML-DSA-65. It is
+	// omitted for a record with no key material (jwksurl/external).
+	Alg         string    `json:"alg,omitempty"`
 	Status      string    `json:"status"` // "active" | "suspended" | "revoked" | "expired" | "not-yet-valid"
 	SuspendedAt time.Time `json:"suspendedAt,omitzero"`
 	RevokedAt   time.Time `json:"revokedAt,omitzero"`

@@ -168,7 +168,7 @@ func (a *HTTPAdapter) tokenString(req PushRequest) (string, *goSet.SecurityEvent
 	if req.AckJti != "" {
 		token.ID = req.AckJti
 	}
-	signed, err := token.JWS(goSet.SigningMethodOrRS256(cfg.SigningAlg), req.Key)
+	signed, err := token.JWS(services.StreamSigningMethod(cfg.SigningAlg, req.Key), req.Key)
 	if err != nil {
 		return "", nil, fmt.Errorf("signing SET for issuer %s: %w", cfg.Iss, err)
 	}

@@ -178,7 +178,7 @@ func TestPollSigningKey_SuspendedKeyAnswers503AndPauses(t *testing.T) {
 		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "no active signing key") {
 			errors++
 			assert.Contains(t, line, pollKeyIssuer)
-			assert.Contains(t, line, "alg=RS256")
+			assert.Contains(t, line, "alg=\"any key type\"")
 			assert.Contains(t, line, "remedy")
 		}
 	}
@@ -273,8 +273,8 @@ func TestPollSigningKey_SigningFailureWithholdsTheWholeResponse(t *testing.T) {
 	sid := stream.StreamConfiguration.Id
 	queued := h.queuePollEvents(t, sid, 2)
 
-	// A cached key that cannot sign this stream's RS256 SETs.
-	wrong, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// A cached key no JWS method can use (P-384), whatever the stream's alg.
+	wrong, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
 	h.router.signingKeys.put(pollKeyIssuer, "", wrong, "wrong")
 

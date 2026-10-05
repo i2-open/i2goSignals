@@ -40,7 +40,7 @@ func (s *ServerProvisioningAuthzSuite) TestPollEvents_NoActiveSigningKeyIs503Nam
 	rr = s.do(s.app.PollEvents, http.MethodPost, "/poll/"+sid, pollToken, pollBody, nil)
 	s.Equal(http.StatusServiceUnavailable, rr.Code)
 	s.Contains(rr.Header().Get("Content-Type"), "text/plain")
-	s.Contains(rr.Body.String(), "no active signing key for issuer "+iss+" (RS256)")
+	s.Contains(rr.Body.String(), "no active signing key for issuer "+iss+" (any key type)")
 
 	stored, err := s.app.StreamService.GetStreamState(context.Background(), sid)
 	s.Require().NoError(err)
@@ -83,6 +83,6 @@ func (s *ServerProvisioningAuthzSuite) TestPollEvents_ExpiredSigningKeyIs503Nami
 
 	rr = s.do(s.app.PollEvents, http.MethodPost, "/poll/"+sid, pollToken, []byte(`{"returnImmediately":true}`), nil)
 	s.Equal(http.StatusServiceUnavailable, rr.Code)
-	s.Contains(rr.Body.String(), "no active signing key for issuer "+iss+" (RS256)")
+	s.Contains(rr.Body.String(), "no active signing key for issuer "+iss+" (any key type)")
 	s.Contains(rr.Body.String(), "the signing key "+kid+" expired at ")
 }

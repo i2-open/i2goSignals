@@ -197,9 +197,9 @@ func (s *KeyService) UploadedKeySignsNow(keyName string, cert *x509.Certificate)
 }
 
 // holdsSigningKeyOf reports whether rec carries private key material of the
-// stored algorithm storedAlg ("" for RSA).
+// stored algorithm storedAlg ("" for RSA), or of any type for anyStoredAlg.
 func holdsSigningKeyOf(rec *interfaces.JwkKeyRec, storedAlg string) bool {
-	return len(rec.KeyBytes) > 0 && rec.Alg == storedAlg
+	return len(rec.KeyBytes) > 0 && (storedAlg == anyStoredAlg || rec.Alg == storedAlg)
 }
 
 // isSigningCandidate reports whether rec could sign storedAlg as far as its
@@ -289,7 +289,7 @@ func (s *KeyService) GetSignerUntil(ctx context.Context, issuer string, alg stri
 // alg at the service clock, with the instant the selection stops holding. With
 // no active record the error is validityCause's.
 func (s *KeyService) signingRecFor(ctx context.Context, issuer string, alg string) (*interfaces.JwkKeyRec, time.Time, error) {
-	storedAlg, err := storedAlgFor(alg)
+	storedAlg, err := selectionAlgFor(alg)
 	if err != nil {
 		return nil, time.Time{}, err
 	}

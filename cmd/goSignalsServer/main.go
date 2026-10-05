@@ -20,6 +20,7 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/constants"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 	"github.com/i2-open/i2goSignals/pkg/nodeid"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/tlsSupport"
 )
 
@@ -65,6 +66,14 @@ func main() {
 	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSignals server starting...", "version", constants.GoSignalsVersion)
+	// The default key type (I2SIG_KEY_ALG) is a startup error when it names no
+	// supported type, rather than a silent fallback (spec #114).
+	defaultKeyAlg, err := services.DefaultKeyAlgFromEnv()
+	if err != nil {
+		mLog.Error("Fatal: invalid default key type", "error", err)
+		os.Exit(-1)
+	}
+	mLog.Info("Default key type", "alg", defaultKeyAlg)
 	port := "8888"
 	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found

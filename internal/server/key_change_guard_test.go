@@ -259,7 +259,7 @@ func (s *KeyChangeGuardSuite) createKey(query, contentType string, body []byte) 
 func (s *KeyChangeGuardSuite) dualAlgIssuer() {
 	_, err := s.app.KeyService.EnsureSigningKeyForAlg(context.Background(), guardIssuer, "ES256", "proj-A")
 	s.Require().NoError(err)
-	s.pollTransmitter("rs-1", "", "", model.StreamStateEnabled)
+	s.pollTransmitter("rs-1", "RS256", "", model.StreamStateEnabled)
 	s.pollTransmitter("es-1", "ES256", model.RouteModePublish, model.StreamStateEnabled)
 	s.pollTransmitter("es-2", "ES256", "", model.StreamStatePause)
 }

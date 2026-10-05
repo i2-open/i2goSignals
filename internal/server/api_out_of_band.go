@@ -48,8 +48,9 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 	issuer, _ := url.QueryUnescape(rawIssuer)
 
 	// alg selects the one signature algorithm rotated; the issuer's keys of
-	// other algorithms are untouched (i2goSignals#314). Absent means RS256.
-	alg := r.URL.Query().Get("alg")
+	// other algorithms are untouched (i2goSignals#314). Absent means the
+	// default key type (I2SIG_KEY_ALG, spec #114).
+	alg := requestKeyAlg(sa, r)
 	if err := services.ValidateKeyAlg(alg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -101,6 +102,7 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 		})
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.Header().Set(keyIdHeader, kid)
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
@@ -115,14 +117,17 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 // Inputs:
 //   - keyName (path): The name of the key to create or load.
 //   - alg (query): Optional. The signature algorithm of the key to create, rotate
-//     or replace: RS256 (default), ES256 or ML-DSA-65; any other value is a 400.
+//     or replace: RS256, ES256 or ML-DSA-65; absent means the default key type
+//     (I2SIG_KEY_ALG, ES256 unless configured); any other value is a 400.
 //     Keys of other algorithms under keyName are left alone.
 //   - force (query): Optional. 'rotate' adds a new key of alg; 'replace' deletes
 //     keyName's keys of alg, then creates one. Without force, an existing
 //     non-revoked key of alg is a 409.
 //
 // Return values:
-//   - 201 Created: (If generating) PEM-encoded private key.
+//   - 201 Created: (If generating) PEM-encoded private key. Every minting
+//     response (create, replace, rotate) carries the new key's kid in the
+//     Key-Id header.
 //   - 200 OK: (If loading or rotating) PEM-encoded private key or success message.
 //
 // Errors:
@@ -244,11 +249,11 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 	force := queryParams.Get("force")
 	_, rotate := queryParams["rotate"]
 
-	// alg selects the signature algorithm this request acts on: RS256 (the
-	// default when absent), ES256 or ML-DSA-65. Create, rotate and replace each
-	// touch only that algorithm's keys, so an issuer can hold one of each (the
-	// dual-key JWKS of ADR 0034; i2goSignals#314).
-	alg := queryParams.Get("alg")
+	// alg selects the signature algorithm this request acts on: RS256, ES256 or
+	// ML-DSA-65, the default key type (I2SIG_KEY_ALG) when absent. Create,
+	// rotate and replace each touch only that algorithm's keys, so an issuer
+	// can hold one of each (the dual-key JWKS of ADR 0034; i2goSignals#314).
+	alg := requestKeyAlg(sa, r)
 	if err := services.ValidateKeyAlg(alg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -322,6 +327,9 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 			Bytes: pkcs8bytes,
 		})
 
+	// The kid travels in a header, not the PEM: a client strips only the
+	// BEGIN/END lines, so a PEM header would corrupt its key (spec #114).
+	w.Header().Set(keyIdHeader, kid)
 	w.WriteHeader(http.StatusCreated)
 	_, err = w.Write(keyPemBytes)
 	if err != nil {
@@ -1965,6 +1973,22 @@ func JwksJsonIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(keyBytes)
 	return
+}
+
+// keyIdHeader is the response header every minting POST /key/{name} carries
+// the new key's kid in (spec #114).
+const keyIdHeader = "Key-Id"
+
+// requestKeyAlg is a key request's ?alg=, or the key service's default key type
+// (I2SIG_KEY_ALG) when it is absent or blank (spec #114).
+func requestKeyAlg(sa SsfApplicationInterface, r *http.Request) string {
+	if alg := strings.TrimSpace(r.URL.Query().Get("alg")); alg != "" {
+		return alg
+	}
+	if ks := sa.GetKeyService(); ks != nil {
+		return ks.DefaultKeyAlg()
+	}
+	return services.DefaultKeyAlg
 }
 
 // isRSAKeyAlg reports whether a key request's alg ("" defaults to RS256) is RSA.

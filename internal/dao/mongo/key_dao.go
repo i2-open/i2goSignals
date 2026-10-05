@@ -432,7 +432,9 @@ func (d *KeyDAOMongo) KeySummary(ctx context.Context, keyName string) (*interfac
 	if len(recs) == 0 {
 		return nil, nil
 	}
-	// If multiple keys are returned assume it is rotated.  Just produce one summary for all.
+	// If multiple keys are returned assume it is rotated.  Just produce one summary for all,
+	// its kids and keyStates oldest-first (the order signing selection ranks them in).
+	recs = interfaces.SortOldestFirst(recs)
 	firstKey := recs[0]
 	var kids []string
 	var states []interfaces.KeyState

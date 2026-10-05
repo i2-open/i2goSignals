@@ -58,6 +58,9 @@ type KeyService struct {
 	expiryWarnWindow time.Duration
 	expiryWarnedAt   map[string]time.Time
 	lastExpiryScan   time.Time
+	// defaultKeyAlg is the key type a create with no algorithm mints
+	// (KeyAlgEnvVar, resolved once at construction).
+	defaultKeyAlg string
 }
 
 // NewKeyService constructs a KeyService. oauthServersLookup supplies the OAuth
@@ -72,6 +75,7 @@ func NewKeyService(keyDAO interfaces.KeyDAO, tokenIssuer string, tokenTracker au
 		keyLifetime:      durationFromEnv(keyLifetimeEnvVar, DefaultKeyLifetime),
 		expiryWarnWindow: durationFromEnv(keyExpiryWarningEnvVar, DefaultKeyExpiryWarning),
 		expiryWarnedAt:   map[string]time.Time{},
+		defaultKeyAlg:    defaultKeyAlgOrES256(),
 		authIssuer: &authSupport.AuthIssuer{
 			TokenIssuer:        tokenIssuer,
 			TokenTracker:       tokenTracker,
@@ -111,7 +115,8 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	// here — doing so would race with concurrent cluster nodes inserting their own
 	// kid=DEFAULT key, causing the JWKS to contain a different node's public key while
 	// this node's private key is used for signing.
-	s.tokenKey, err = s.CreateKeyPair(ctx, s.tokenIssuer, "sig", "")
+	// The token key is RSA whatever KeyAlgEnvVar says: auth tokens are RS256.
+	s.tokenKey, err = s.createRSAKeyPair(ctx, s.tokenIssuer, "sig", "")
 	if err != nil {
 		return fmt.Errorf("failed to create token key: %v", err)
 	}
@@ -122,7 +127,8 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	}
 
 	if defaultIssuer != s.tokenIssuer {
-		// Also create default issuer signing key if different
+		// Also create default issuer signing key if different, of the default
+		// key type (KeyAlgEnvVar).
 		_, err = s.CreateKeyPair(ctx, defaultIssuer, "sig", "")
 		if err != nil {
 			ksLog.Error("Error creating default issuer key", "error", err)
@@ -131,13 +137,30 @@ func (s *KeyService) InitializeTokenKey(ctx context.Context, defaultIssuer strin
 	return nil
 }
 
-// CreateKeyPair generates a new RSA key pair identified by keyName with the given use ("sig" or "enc").
+// CreateKeyPair generates a new key pair of the default key type
+// (DefaultKeyAlg, from KeyAlgEnvVar; ES256 unless configured) identified by
+// keyName with the given use ("sig" or "enc"). An RSA key takes keyName as its
+// kid, as keys always have; any other type gets a kid of its own
+// (CreateKeyPairForAlg).
 //
-// It returns a crypto.Signer rather than the concrete *rsa.PrivateKey it mints:
-// callers plumb the result to a signing site, and RSA-2048 being what this
-// method generates is an implementation choice, not something a caller should
-// be typed against.
+// It returns a crypto.Signer rather than a concrete key type: callers plumb the
+// result to a signing site, and which type it mints is configuration, not
+// something a caller should be typed against.
 func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use string, projectId string) (crypto.Signer, error) {
+	if alg := s.DefaultKeyAlg(); alg != jwtRS256 {
+		key, _, err := s.CreateKeyPairForAlg(ctx, keyName, alg, use, projectId)
+		if err != nil {
+			ksLog.Error("Error creating key pair", "keyName", keyName, "alg", alg, "error", err)
+			return nil, err
+		}
+		return key, nil
+	}
+	return s.createRSAKeyPair(ctx, keyName, use, projectId)
+}
+
+// createRSAKeyPair generates an RSA-2048 key pair whose kid is keyName: the
+// token key, and CreateKeyPair's key when the default key type is RS256.
+func (s *KeyService) createRSAKeyPair(ctx context.Context, keyName string, use string, projectId string) (crypto.Signer, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		ksLog.Error("Error generating key pair", "error", err)
@@ -158,7 +181,8 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 }
 
 // EnsureSigningKey idempotently guarantees a "sig" key pair exists for keyName,
-// creating one only when it is genuinely absent. It is the restart-safe
+// creating one of the default key type (CreateKeyPair) only when keyName has
+// no signing key of any type. It is the restart-safe
 // provisioning primitive for an administrator-declared SSF issuer (strict mode,
 // see goSsfServer.ProvisionStrictMode): unlike InitializeTokenKey — which seeds
 // the default-issuer key only on first init and short-circuits once the token
@@ -170,7 +194,7 @@ func (s *KeyService) CreateKeyPair(ctx context.Context, keyName string, use stri
 // rather than masked, so the caller surfaces it instead of inserting a duplicate
 // key against a flaky backend (the same discipline InitializeTokenKey uses).
 func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, projectId string) (bool, error) {
-	key, _, err := s.GetPrivateKeyWithKeyname(ctx, keyName)
+	key, _, _, err := s.GetSignerUntil(ctx, keyName, "")
 	if err == nil && key != nil {
 		return false, nil
 	}
@@ -186,7 +210,7 @@ func (s *KeyService) EnsureSigningKey(ctx context.Context, keyName string, proje
 	if ferr != nil {
 		return false, fmt.Errorf("failed to check signing key %q: %w", keyName, ferr)
 	}
-	if _, sawInactive := latestActiveSigningRec(recs, "", s.clock()); sawInactive {
+	if _, sawInactive := latestActiveSigningRec(recs, anyStoredAlg, s.clock()); sawInactive {
 		ksLog.Warn("Signing key exists but is suspended or revoked; not creating a replacement",
 			"keyName", keyName,
 			"remedy", "rotate a new key or reactivate the suspended key")
@@ -439,13 +463,14 @@ func (s *KeyService) GetPrivateKey(ctx context.Context, keyName string) (crypto.
 	return key, err
 }
 
-// GetPrivateKeyWithKeyname retrieves the latest ACTIVE private key and its kid
-// for keyName. Suspended and revoked records are never signing candidates. When
+// GetPrivateKeyWithKeyname retrieves the latest ACTIVE RSA private key and its
+// kid for keyName: the auth-token key lookup, which is RS256 whatever other
+// keys keyName holds (spec #114). Suspended and revoked records are never signing candidates. When
 // keyName has records but none are active, it logs a loud ERROR naming the
 // issuer and the remedy, and returns ErrKeyNotFound — there is deliberately no
 // fallback to an older inactive kid and no auto-rotation (ADR 0028).
 func (s *KeyService) GetPrivateKeyWithKeyname(ctx context.Context, keyName string) (crypto.Signer, string, error) {
-	key, kid, _, err := s.GetSignerUntil(ctx, keyName, "")
+	key, kid, _, err := s.GetSignerUntil(ctx, keyName, jwtRS256)
 	return key, kid, err
 }
 
@@ -525,10 +550,6 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 	if err != nil {
 		return false, err
 	}
-	if storedAlg == "" {
-		return s.EnsureSigningKey(ctx, keyName, projectId)
-	}
-
 	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		return false, fmt.Errorf("failed to check %s signing key %q: %w", alg, keyName, err)
@@ -544,6 +565,13 @@ func (s *KeyService) EnsureSigningKeyForAlg(ctx context.Context, keyName string,
 		return false, nil
 	}
 
+	if storedAlg == "" {
+		// An RSA key takes keyName as its kid, as CreateKeyPair's always has.
+		if _, err := s.createRSAKeyPair(ctx, keyName, "sig", projectId); err != nil {
+			return false, fmt.Errorf("failed to create signing key %q: %w", keyName, err)
+		}
+		return true, nil
+	}
 	privateKey, err := generateSigningKey(storedAlg)
 	if err != nil {
 		return false, fmt.Errorf("failed to generate %s signing key %q: %w", alg, keyName, err)
@@ -694,8 +722,11 @@ func recKid(rec *interfaces.JwkKeyRec) string {
 // algLabel renders a stored Alg for a log line, where "" would read as a
 // missing value rather than "the RSA default".
 func algLabel(alg string) string {
-	if alg == "" {
+	switch alg {
+	case "":
 		return "RS256"
+	case anyStoredAlg:
+		return SigningAlgLabel("")
 	}
 	return alg
 }
@@ -822,12 +853,13 @@ func (s *KeyService) SetKeyStatus(ctx context.Context, keyName string, kid strin
 		return nil, "", err
 	}
 
-	// Warn only when the keyName had signing material but no active key remains.
+	// Warn only when the keyName had signing material but no active key of any
+	// type remains (spec #114).
 	// A verification-only keyName (external/public records, no private key) never
 	// signs, so a "signing will fail" warning there would be misleading (ADR 0028).
 	warning := ""
 	if recs, ferr := s.keyDAO.FindByKeyName(ctx, keyName); ferr == nil {
-		if latest, sawInactive := latestActiveSigningRec(recs, "", s.clock()); latest == nil && sawInactive {
+		if latest, sawInactive := latestActiveSigningRec(recs, anyStoredAlg, s.clock()); latest == nil && sawInactive {
 			warning = fmt.Sprintf("no active signing key remains for issuer %q; signing will fail until you rotate a new key or reactivate a suspended key", keyName)
 			ksLog.Warn(warning, "issuer", keyName)
 		}

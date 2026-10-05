@@ -108,10 +108,10 @@ func TestGetSigner_SelectsByAlgorithmNotByRecency(t *testing.T) {
 	svc, _ := newMLDSATestService(t)
 	require.NoError(t, err0(svc.EnsureSigningKeyForAlg(ctx, "https://tx.example.com", mldsa.Alg, "")))
 
-	// The ML-DSA record is the NEWEST record for this issuer. An RS256 stream
-	// must still get the RSA key: selection is by algorithm, and getting this
-	// wrong would sign RS256 tokens with a key RS256 cannot use.
-	rsaSigner, rsaKid, err := svc.GetSigner(ctx, "https://tx.example.com", "")
+	// The ML-DSA record is the NEWEST record for this issuer. A stream pinned
+	// to RS256 must still get the RSA key: selection is by algorithm, and
+	// getting this wrong would sign RS256 tokens with a key RS256 cannot use.
+	rsaSigner, rsaKid, err := svc.GetSigner(ctx, "https://tx.example.com", "RS256")
 	require.NoError(t, err)
 	assert.IsType(t, &rsa.PrivateKey{}, rsaSigner)
 
@@ -121,11 +121,12 @@ func TestGetSigner_SelectsByAlgorithmNotByRecency(t *testing.T) {
 
 	assert.NotEqual(t, rsaKid, pqKid, "the two keys must be distinguishable by kid on the wire")
 
-	// An explicit RS256 is the same request as an unset signing_alg.
-	explicitSigner, explicitKid, err := svc.GetSigner(ctx, "https://tx.example.com", "RS256")
+	// An unset signing_alg takes the newest key of any type (spec #114): here
+	// the ML-DSA key.
+	newestSigner, newestKid, err := svc.GetSigner(ctx, "https://tx.example.com", "")
 	require.NoError(t, err)
-	assert.Equal(t, rsaKid, explicitKid)
-	assert.IsType(t, &rsa.PrivateKey{}, explicitSigner)
+	assert.Equal(t, pqKid, newestKid)
+	assert.IsType(t, &cryptomldsa.PrivateKey{}, newestSigner)
 }
 
 func TestGetSigner_RejectsAnAlgorithmTheStoreCannotServe(t *testing.T) {

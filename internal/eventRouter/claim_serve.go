@@ -15,7 +15,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
-	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -577,7 +577,7 @@ func (r *router) signClaimedRefs(state *model.StreamStateRecord, refs []interfac
 		return sets, nil
 	}
 	cfg := state.StreamConfiguration
-	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	method := services.StreamSigningMethod(cfg.SigningAlg, key)
 	signed := SignSets(work, r.signConcurrency, func(rec *model.EventRecord) (string, error) {
 		token := rec.Event
 		token.ID = ackOf[rec.Jti]

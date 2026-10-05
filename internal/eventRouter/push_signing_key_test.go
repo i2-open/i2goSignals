@@ -200,7 +200,7 @@ func TestPushSigningKey_SuspendedKeyPausesWithoutSending(t *testing.T) {
 
 	reason := services.NoActiveSigningKeyReason(signingKeyIssuer, "")
 	h.waitStoredStatus(t, sid, model.StreamStatePause, reason)
-	assert.Contains(t, reason, "(RS256)", "the reason names the algorithm")
+	assert.Contains(t, reason, "(any key type)", "an empty signing_alg is satisfied by any key type")
 	time.Sleep(400 * time.Millisecond) // several key retries and backfill ticks
 
 	assert.Len(t, rx.snapshot(), 1, "no request reaches the receiver while the key is missing")

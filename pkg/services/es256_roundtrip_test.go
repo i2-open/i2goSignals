@@ -100,18 +100,19 @@ func TestES256RoundTrip_TransmitterToJWKSToEveryReceiver(t *testing.T) {
 }
 
 // TestES256RoundTrip_AnRS256StreamOnTheSameIssuerIsUnaffected is the other half
-// of the opt-in promise, and the acceptance criterion that RS256 stays the
-// default: turning one stream to ES256 must be invisible to every other stream
-// of the same issuer, including to a receiver holding the pre-opt-in JWKS.
+// of the opt-in promise: adding an ES256 key must be invisible to a stream
+// pinned to RS256 on the same issuer, including to a receiver holding the
+// pre-opt-in JWKS. (An empty signing_alg follows the newest key since spec
+// #114; see key_alg_default_test.go.)
 func TestES256RoundTrip_AnRS256StreamOnTheSameIssuerIsUnaffected(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newMLDSATestService(t)
 
-	before := transmit(t, svc, "")
+	before := transmit(t, svc, "RS256")
 	beforeHeader := decodeJOSEHeader(t, before)
 	beforeJWKS := receiverJWKS(t, svc)
 	require.NoError(t, err0(svc.EnsureSigningKeyForAlg(ctx, rtIssuer, es256Alg, "")))
-	after := transmit(t, svc, "")
+	after := transmit(t, svc, "RS256")
 
 	// Same alg, same kid, same key: nothing about the RS256 stream moved.
 	afterHeader := decodeJOSEHeader(t, after)
@@ -153,8 +154,8 @@ func TestES256RoundTrip_TheRSAKidCannotVerifyTheECStream(t *testing.T) {
 }
 
 // TestES256RoundTrip_SignerIsSelectedByAlgorithmNotRecency: the EC record is the
-// newer one, so a store that picked "newest" would hand an RS256 stream a key
-// RS256 cannot use.
+// newer one, so a store that picked "newest" for a pinned RS256 stream would
+// hand it a key RS256 cannot use.
 func TestES256RoundTrip_SignerIsSelectedByAlgorithmNotRecency(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newMLDSATestService(t)
@@ -164,7 +165,7 @@ func TestES256RoundTrip_SignerIsSelectedByAlgorithmNotRecency(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, &ecdsa.PrivateKey{}, ecKey)
 
-	rsaKey, rsaKid, err := svc.GetSigner(ctx, rtIssuer, "")
+	rsaKey, rsaKid, err := svc.GetSigner(ctx, rtIssuer, "RS256")
 	require.NoError(t, err)
 	assert.NotEqual(t, ecKid, rsaKid, "the two keys must be published under distinct kids")
 	assert.NotEqual(t, ecKey, rsaKey)

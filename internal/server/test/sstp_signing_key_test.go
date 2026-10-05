@@ -103,7 +103,7 @@ func TestSstpAcceptingEnd_KeyUnavailableRefusesThenResumes(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, status, string(raw))
 	var refusal goSetPush.DeliveryErr
 	require.NoError(t, json.Unmarshal(raw, &refusal))
-	assert.Contains(t, refusal.Description, "no active signing key for issuer "+iss+" (RS256)")
+	assert.Contains(t, refusal.Description, "no active signing key for issuer "+iss+" (any key type)")
 	assert.Nil(t, instance.GetEvent(inbound.ID), "no inbound SET of a refused exchange is ingested")
 	pending, _ := instance.GetEventIds(txSid, model.PollParameters{MaxEvents: 10, ReturnImmediately: true})
 	assert.Equal(t, []string{outbound.ID}, pending, "no ack of a refused exchange is applied")
@@ -111,7 +111,7 @@ func TestSstpAcceptingEnd_KeyUnavailableRefusesThenResumes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.StreamStatePause, paused.Status)
 	assert.Equal(t, model.StreamStatePause, paused.InboundStatus, "both directions stop")
-	assert.Equal(t, "SSTP-SRV: no active signing key for issuer "+iss+" (RS256)", paused.ErrorMsg)
+	assert.Equal(t, "SSTP-SRV: no active signing key for issuer "+iss+" (any key type)", paused.ErrorMsg)
 	assert.NotNil(t, paused.KeyUnavailableSince)
 
 	_, _, err = instance.keySvc().SetKeyStatus(ctx, iss, "", dao.KeyStatusActive)

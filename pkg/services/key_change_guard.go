@@ -43,8 +43,9 @@ func RetireAlg(alg string) func(*interfaces.JwkKeyRec) bool {
 }
 
 // StrandedStream is a signing transmitter a key change would leave with no
-// active signing key (#311). SigningAlg is the effective algorithm, RS256 when
-// the stream's signing_alg is empty.
+// active signing key (#311). SigningAlg is the effective algorithm: the
+// stream's pinned signing_alg, or for an empty one the type of the issuer's
+// newest active key, the key it signs with now (spec #114).
 type StrandedStream struct {
 	StreamId    string `json:"stream_id"`
 	Description string `json:"description"`
@@ -78,7 +79,9 @@ func (s *StreamService) StrandedByKeyChange(ctx context.Context, keyName string,
 		if cfg == nil || cfg.Iss != keyName || rec.Status == model.StreamStateDisable {
 			continue
 		}
-		storedAlg, err := storedAlgFor(cfg.SigningAlg)
+		// An empty signing_alg selects any key type (spec #114), so such a stream
+		// is stranded only when no active key of any type would remain.
+		storedAlg, err := selectionAlgFor(cfg.SigningAlg)
 		if err != nil {
 			continue // an unsupported algorithm has no key to lose
 		}
@@ -96,10 +99,10 @@ func (s *StreamService) StrandedByKeyChange(ctx context.Context, keyName string,
 	var stranded []StrandedStream
 	lostAlgs := map[string]bool{}
 	for _, n := range needs {
-		if !lost(n.storedAlg) {
+		alg, isLost := lost(n.storedAlg)
+		if !isLost {
 			continue
 		}
-		alg := algLabel(n.storedAlg)
 		lostAlgs[alg] = true
 		stranded = append(stranded, StrandedStream{
 			StreamId:    n.rec.StreamConfiguration.Id,
@@ -120,10 +123,11 @@ func (s *StreamService) StrandedByKeyChange(ctx context.Context, keyName string,
 }
 
 // signingAlgsLostBy reads keyName's records once and returns a predicate
-// reporting whether a stored algorithm has an active signing key now and would
-// have none after change. "Active signing key" is latestActiveSigningRec, the
+// reporting whether a stored algorithm (anyStoredAlg for any type) has an
+// active signing key now and would have none after change, and the JWS name of
+// the key it signs with now. "Active signing key" is latestActiveSigningRec, the
 // same selection GetSigner makes, so the guard and the signer never disagree.
-func (s *KeyService) signingAlgsLostBy(ctx context.Context, keyName string, change KeyChange) (func(storedAlg string) bool, error) {
+func (s *KeyService) signingAlgsLostBy(ctx context.Context, keyName string, change KeyChange) (func(storedAlg string) (string, bool), error) {
 	recs, err := s.keyDAO.FindByKeyName(ctx, keyName)
 	if err != nil && !errors.Is(err, interfaces.ErrKeyNotFound) {
 		return nil, err
@@ -139,16 +143,19 @@ func (s *KeyService) signingAlgsLostBy(ctx context.Context, keyName string, chan
 	for _, alg := range change.Adds {
 		if storedAlg, err := storedAlgFor(alg); err == nil {
 			added[storedAlg] = true
+			added[anyStoredAlg] = true // a key of any type satisfies an empty signing_alg
 		}
 	}
-	return func(storedAlg string) bool {
-		if before, _ := latestActiveSigningRec(recs, storedAlg, now); before == nil {
-			return false
+	return func(storedAlg string) (string, bool) {
+		before, _ := latestActiveSigningRec(recs, storedAlg, now)
+		if before == nil {
+			return "", false
 		}
+		alg := algLabel(before.Alg)
 		if added[storedAlg] {
-			return false
+			return alg, false
 		}
 		after, _ := latestActiveSigningRec(kept, storedAlg, now)
-		return after == nil
+		return alg, after == nil
 	}, nil
 }
