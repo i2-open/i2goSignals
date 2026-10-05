@@ -247,7 +247,7 @@ func newTrackedRouter(t *testing.T) (*testHarness, *atomic.Int64) {
 	}, "node-test").(*router)
 	t.Cleanup(r.Shutdown)
 	reads := &atomic.Int64{}
-	r.locks.onRead = func() { reads.Add(1) }
+	r.locks.fanout.onRead = func() { reads.Add(1) }
 	dao.locks.Store(&r.locks)
 	return &testHarness{router: r, streamService: persistence.StreamService, keyService: persistence.KeyService}, reads
 }

@@ -109,23 +109,63 @@ func RoutingCollectors() []prometheus.Collector {
 	return []prometheus.Collector{readsUnderLockCounter}
 }
 
-// lockTracker records which goroutines hold the router lock in the fan-out
-// path, so a store or coordinator call made by one of them is counted in
-// goSignals_router_reads_under_lock_total. The goroutine id is read only while
-// some fan-out region is held, so a call made with none held costs one atomic
-// load.
-type lockTracker struct {
+// regionTracker records which goroutines are inside a code region, so a
+// store or coordinator call made by one of them can be counted. The goroutine
+// id is read only while some goroutine is inside, so a check made with none
+// inside costs one atomic load.
+type regionTracker struct {
 	held    atomic.Int64
 	holders sync.Map // goroutine id -> *atomic.Int64 depth
 	onRead  func()   // test hook, called for each read counted
+}
 
-	// The acknowledgement region (#364): from a DeliveryQueue's write entry
-	// to its AckBatch call. A coordinator call made by a goroutine inside it
-	// is counted in goSignals_router_reads_before_ack_total; the design value
-	// is zero, since ownership is answered by the leaseManager from memory.
-	ackHeld    atomic.Int64
-	ackHolders sync.Map // goroutine id -> *atomic.Int64 depth
-	onAckRead  func()   // test hook, called for each read counted
+// enter records the caller as inside the region. Regions nest.
+func (t *regionTracker) enter() {
+	t.held.Add(1)
+	d, _ := t.holders.LoadOrStore(goroutineID(), new(atomic.Int64))
+	d.(*atomic.Int64).Add(1)
+}
+
+// exit ends an enter.
+func (t *regionTracker) exit() {
+	gid := goroutineID()
+	if d, ok := t.holders.Load(gid); ok && d.(*atomic.Int64).Add(-1) <= 0 {
+		t.holders.Delete(gid)
+	}
+	t.held.Add(-1)
+}
+
+// heldByCaller reports whether the calling goroutine is inside the region.
+func (t *regionTracker) heldByCaller() bool {
+	if t.held.Load() == 0 {
+		return false
+	}
+	_, ok := t.holders.Load(goroutineID())
+	return ok
+}
+
+// noteRead counts a read in counter, and calls the test hook, if the caller
+// is inside the region.
+func (t *regionTracker) noteRead(counter prometheus.Counter) {
+	if !t.heldByCaller() {
+		return
+	}
+	counter.Inc()
+	if t.onRead != nil {
+		t.onRead()
+	}
+}
+
+// lockTracker holds the router's two tracked regions. A store or coordinator
+// call made inside the fan-out region (the router lock in the fan-out path)
+// is counted in goSignals_router_reads_under_lock_total. One made inside the
+// acknowledgement region (#364: from a DeliveryQueue's write entry to its
+// AckBatch call) is counted in goSignals_router_reads_before_ack_total; the
+// design value of both is zero, since ownership is answered by the
+// leaseManager from memory.
+type lockTracker struct {
+	fanout regionTracker
+	ack    regionTracker
 }
 
 // fanoutRLock takes r.mu for reading and records the caller as a holder.
@@ -140,72 +180,29 @@ func (r *router) fanoutRUnlock() {
 	r.mu.RUnlock()
 }
 
-func (l *lockTracker) enter() {
-	l.held.Add(1)
-	d, _ := l.holders.LoadOrStore(goroutineID(), new(atomic.Int64))
-	d.(*atomic.Int64).Add(1)
-}
+func (l *lockTracker) enter() { l.fanout.enter() }
 
-func (l *lockTracker) exit() {
-	gid := goroutineID()
-	if d, ok := l.holders.Load(gid); ok && d.(*atomic.Int64).Add(-1) <= 0 {
-		l.holders.Delete(gid)
-	}
-	l.held.Add(-1)
-}
+func (l *lockTracker) exit() { l.fanout.exit() }
 
 // heldByCaller reports whether the calling goroutine holds a fan-out region.
-func (l *lockTracker) heldByCaller() bool {
-	if l.held.Load() == 0 {
-		return false
-	}
-	_, ok := l.holders.Load(goroutineID())
-	return ok
-}
+func (l *lockTracker) heldByCaller() bool { return l.fanout.heldByCaller() }
 
-// noteRead counts a store or coordinator call if the caller holds the lock,
-// and separately if the caller is inside an acknowledgement region.
+// noteRead counts a store or coordinator call if the caller is inside an
+// acknowledgement region, and separately if it holds the fan-out lock.
 func (l *lockTracker) noteRead() {
-	if l.inAckByCaller() {
-		readsBeforeAckTotal.Inc()
-		if l.onAckRead != nil {
-			l.onAckRead()
-		}
-	}
-	if !l.heldByCaller() {
-		return
-	}
-	readsUnderLockCounter.Inc()
-	if l.onRead != nil {
-		l.onRead()
-	}
+	l.ack.noteRead(readsBeforeAckTotal)
+	l.fanout.noteRead(readsUnderLockCounter)
 }
 
 // enterAck records the caller as inside an acknowledgement region.
-func (l *lockTracker) enterAck() {
-	l.ackHeld.Add(1)
-	d, _ := l.ackHolders.LoadOrStore(goroutineID(), new(atomic.Int64))
-	d.(*atomic.Int64).Add(1)
-}
+func (l *lockTracker) enterAck() { l.ack.enter() }
 
 // exitAck ends an enterAck.
-func (l *lockTracker) exitAck() {
-	gid := goroutineID()
-	if d, ok := l.ackHolders.Load(gid); ok && d.(*atomic.Int64).Add(-1) <= 0 {
-		l.ackHolders.Delete(gid)
-	}
-	l.ackHeld.Add(-1)
-}
+func (l *lockTracker) exitAck() { l.ack.exit() }
 
 // inAckByCaller reports whether the calling goroutine is inside an
 // acknowledgement region. With none open it costs one atomic load.
-func (l *lockTracker) inAckByCaller() bool {
-	if l.ackHeld.Load() == 0 {
-		return false
-	}
-	_, ok := l.ackHolders.Load(goroutineID())
-	return ok
-}
+func (l *lockTracker) inAckByCaller() bool { return l.ack.heldByCaller() }
 
 // goroutineID returns the calling goroutine's id, parsed from the header line
 // of its stack ("goroutine 123 [...").
