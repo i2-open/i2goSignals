@@ -251,7 +251,7 @@ func (r *benchResult) printSummary() {
 	if r.Gs1b != "" {
 		fmt.Printf("gs1b stream sync: %.1fs\n", r.Gs1bSyncSeconds)
 	}
-	if r.Gs1bInternal != "" {
+	if r.Gs1bInternal != "" && r.PollTargets != pollTargetsBoth {
 		fmt.Printf("receiver legs: goSignals2 polls (and, as SSTP initiator, dials) %s\n", r.Gs1bInternal)
 	}
 	if r.PollTargets == pollTargetsBoth {

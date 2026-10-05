@@ -188,6 +188,8 @@ Useful flags:
 | `--gs1`, `--gs2`, `--ca`, `--bootstrap-token` | point at a different stack |
 | `--gs1b <url>` | a second member of goSignals1's cluster (e.g. `https://localhost:8887`); ingest workers alternate between `--gs1` and it (see [Two-node cluster ingest](#two-node-cluster-ingest)) |
 | `--gs1b-internal <url>` | with `--gs1b`, the base URL goSignals2 uses to reach the `--gs1b` node; the poll receiver polls it and, with `--sstp-role responder`, goSignals2 dials it for SSTP, instead of goSignals1 (#366) |
+| `--poll-targets one\|both` | `one` (default): one goSignals2 poll receiver, at goSignals1 or `--gs1b-internal`. `both` (needs `--gs1b-internal`): one receiver per node, so polls reach the poll-transmitter lease owner and the non-owner, which serves through a peer claim; the POLL leg counts both receivers (#366, for #367) |
+| `--poll-pin-owner` | with `--gs1b` (not `--gs1b-internal`): before any receiver exists the harness polls `--gs1b` once, so it takes the poll-transmitter lease and keeps it, then goSignals2 polls goSignals1 for the whole leg. Every poll is then a non-owner poll: the worst case for the peer hop (#367) |
 | `--gs1b-sync-timeout` | with `--gs1b`, how long to wait after creating the streams for the second node to register the run's outbound streams before ingest starts (default 90s; peers sync every 40 s) |
 
 Every run writes `bin/bench/bench-<timestamp>.json` with the full result

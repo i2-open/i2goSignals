@@ -308,3 +308,46 @@ runs**, on either node (`goSignals_router_peer_claims_total` has no
 the poll-transmitter lease each time, so the non-owner poll path did not run.
 #367's acceptance criterion for the POLL leg is therefore not met by these
 runs.
+
+### POLL peer claims: both nodes polled, and a pinned owner (#367)
+
+The four POLL runs above showed no peer claims because goSignals2 polls one
+node, which takes the stream's poll-transmitter lease on its first poll
+(`resolveOwnerSeeded`) and keeps it. Two bench options now put polls on a
+non-owner (#366): `--poll-targets both` creates one goSignals2 poll receiver
+per node, and `--poll-pin-owner` has the harness poll goSignals1b once (taking
+the lease) before goSignals2 starts polling goSignals1. The bench certificate
+now names `goSignals1b` (`make generate-certs` reissued the server
+certificate under the existing CA), so `--gs1b-internal
+https://goSignals1b:8888` works without the network alias.
+
+Same benchmark stack (`BENCH_CLUSTER=1`, fresh volumes, image as above, lock
+audit on), 5000 events, 128 clients, `--mix poll`, ingest alternating
+between the nodes. The lease owner was read from `cluster_leases` during
+each run. Measured 2026-10-05.
+
+| Run | Lease owner | Ingest ev/s | Drained | Leg ev/s | Delivery p50 / p95 ms | Peer claims served | Ack writes / batch | Reads under lock / before ack | Budget exhausted |
+|---|---|---|---|---|---|---|---|---|---|
+| both nodes, 1 | goSignals1 | 2733 | 5000/5000 | 2130 | 135 / 228 | **36** | 80 / 80 (1.000) | 0 / 0 | 0 |
+| both nodes, 2 | goSignals1 | 2580 | 5000/5000 | 2042 | 145 / 235 | **33** | 78 / 78 (1.000) | 0 / 0 | 0 |
+| both nodes, 3 | goSignals1 | 2700 | 5000/5000 | 2117 | 150 / 235 | **34** | 71 / 71 (1.000) | 0 / 0 | 0 |
+| pinned owner, 1 | goSignals1b | 3276 | 5000/5000 | 2458 | 583 / 910 | **52** | 52 / 52 (1.000) | 0 / 0 | 0 |
+| pinned owner, 2 | goSignals1b | 3432 | 5000/5000 | 2012 | 718 / 942 | **51** | 51 / 51 (1.000) | 0 / 0 | 0 |
+
+Every run drained, and every run shows peer claims served, so the
+non-owner poll path ran under load. With both nodes polled, about a third of
+the poll batches went through the owner (gs1b's 33-36 claims against gs1's
+71-80 ack batches). With the owner pinned, every poll batch was a peer claim
+(claims = ack batches). The peer counter is on the owner and carries the
+label `mode="poll"`, not `poll-transmitter`, so the earlier note that "no
+poll-transmitter series" exists was looking for the wrong label. The claim
+budget was never exhausted. Throughput stays in the range of the
+single-target runs above (2343-2492 ev/s), and the pinned worst case is no
+slower than polling the owner directly.
+
+Polling both nodes roughly quarters the delivery latency (p50 about 145 ms
+against about 550 ms) because two receivers each long-poll. Read that as a
+change in receiver concurrency, not as a gain from the peer hop.
+
+These were agent runs on the benchmark stack, not hand runs on the developer
+stack, which is what #367 specifies.
