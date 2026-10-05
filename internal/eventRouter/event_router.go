@@ -2247,7 +2247,7 @@ func (r *router) wakeNode(sid, mode, ownerNodeId, reason string) {
 func (r *router) PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int) {
 	if r.startGate() != nil {
 		// Delivery waits for the legacy deliveries migration (#361).
-		eventLogger.Warn("POLL-SRV: delivery not started yet; poll refused", "sid", sid)
+		eventLogger.Debug("POLL-SRV: delivery not started yet; poll refused", "sid", sid)
 		return nil, false, http.StatusServiceUnavailable
 	}
 	r.mu.RLock()
