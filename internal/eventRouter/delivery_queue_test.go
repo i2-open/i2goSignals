@@ -117,7 +117,7 @@ func TestDeliveryQueue_OneAckPerBatch(t *testing.T) {
 
 	writes := testutil.ToFloat64(ackWritesTotal)
 	batches := testutil.ToFloat64(ackBatchesTotal)
-	inbound, n, err := q.AckWire(context.Background(), []string{rec.AckJti("a"), rec.AckJti("b")}, nil, services.NoFencingToken)
+	inbound, n, err := q.AckWire(context.Background(), []string{rec.AckJti("a"), rec.AckJti("b")}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), n)
 	assert.ElementsMatch(t, []string{"a", "b"}, inbound)
@@ -141,7 +141,7 @@ func TestDeliveryQueue_CopiesWithOriginalJti(t *testing.T) {
 		signed.ID = q.AckJtiOf(jti, nil)
 		q.Served(&model.EventRecord{Jti: jti, Types: []string{"t"}}, &signed, "jws-"+jti)
 	}
-	_, _, err := q.AckWire(context.Background(), []string{rec.AckJti("a")}, []string{rec.AckJti("b")}, services.NoFencingToken)
+	_, _, err := q.AckWire(context.Background(), []string{rec.AckJti("a")}, []string{rec.AckJti("b")})
 	require.NoError(t, err)
 
 	copyA := findCopy(t, dao, rec.AckJti("a"))
@@ -156,7 +156,7 @@ func TestDeliveryQueue_CopiesWithOriginalJti(t *testing.T) {
 	_, _ = f.pendingJtis(context.Background(), fsid, model.PollParameters{MaxEvents: 10})
 	fq := f.queueFor(fsid)
 	fq.Served(&model.EventRecord{Jti: "x"}, nil, "orig")
-	_, _, err = fq.AckWire(context.Background(), []string{"x"}, nil, services.NoFencingToken)
+	_, _, err = fq.AckWire(context.Background(), []string{"x"}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, pendingAckJtis(t, fdao, fsid), "a Forward SET is acked by its inbound JTI")
 }
@@ -198,7 +198,7 @@ func TestDeliveryQueue_RouteModeChange(t *testing.T) {
 	r.queueFor(sid).routeModeChanged(context.Background())
 	_, _ = r.pendingJtis(context.Background(), sid, model.PollParameters{MaxEvents: 10})
 	assert.Equal(t, "a", r.queueFor(sid).AckJtiOf("a", nil), "a row written under Forward keeps its acknowledgement JTI")
-	_, err := r.queueFor(sid).AckInbound(context.Background(), []string{"a", "b"}, true, services.NoFencingToken)
+	_, err := r.queueFor(sid).AckInbound(context.Background(), []string{"a", "b"}, true)
 	require.NoError(t, err)
 	assert.Empty(t, pendingAckJtis(t, dao, sid))
 }

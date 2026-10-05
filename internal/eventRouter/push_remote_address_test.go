@@ -65,7 +65,7 @@ func TestPushBatch_ConcurrentHTTPDeliveriesRecordRemoteAddressWithoutRace(t *tes
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
-	res := r.pushBatch(jtis, stream, key, "kid-346", 0)
+	res := r.pushBatch(jtis, stream, key, "kid-346")
 
 	require.Empty(t, res.failedJti)
 	require.Equal(t, 12, res.acked)

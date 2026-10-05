@@ -306,10 +306,10 @@ func TestHandleEvent_SetMatchingTwoPollStreamsReachesEachOnce(t *testing.T) {
 func TestResolveOwners_PushAndSstpClientOwnersOnTarget(t *testing.T) {
 	r := newTestRouter(t).router
 	coord := unwrapCoordinator(r.coordinator)
-	ok, _, err := coord.TryAcquireOrRenewLease(cluster.PushTransmitterResource("push-o"), "node-push", time.Minute)
+	ok, _, _, err := coord.TryAcquireOrRenewLease(cluster.PushTransmitterResource("push-o"), "node-push", time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	ok, _, err = coord.TryAcquireOrRenewLease(cluster.SstpClientResource("pair-o"), "node-sstp", time.Minute)
+	ok, _, _, err = coord.TryAcquireOrRenewLease(cluster.SstpClientResource("pair-o"), "node-sstp", time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
 

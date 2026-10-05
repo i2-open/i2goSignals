@@ -169,7 +169,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 	s.Equal(1, len(events), "Should be 1 event")
 
 	// Acknowledge should transfer pending event to acked event leaving no pending events
-	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), eventIds[0], s.stream.Id)
 
 	nextIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(0, len(nextIds), "Should be no pending events")
@@ -187,7 +187,7 @@ func (s *MongoProviderSuite) TestC_PollEvents() {
 
 	finalIds, _ := pollJtis(s.provider.GetEventService().GetEventIds(context.Background(), s.stream.Id, model.PollParameters{MaxEvents: 5, ReturnImmediately: true}))
 	s.Equal(1, len(finalIds), "should be 1 event")
-	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id, 0)
+	_ = s.provider.GetEventService().AckEvent(context.Background(), finalIds[0], s.stream.Id)
 }
 
 // TestD_PollingCycle starts an independent thread that generates events over time. The test goes through repeat
@@ -243,7 +243,7 @@ func (s *MongoProviderSuite) TestD_PollingCycle() {
 func (s *MongoProviderSuite) ackEvents(ids []string) {
 	for _, id := range ids {
 		if id != "" {
-			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id, 0)
+			_ = s.provider.GetEventService().AckEvent(context.Background(), id, s.stream.Id)
 		}
 	}
 }

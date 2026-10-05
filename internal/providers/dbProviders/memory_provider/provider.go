@@ -335,7 +335,7 @@ func (m *MemoryProvider) Close() error {
 // Cluster coordination methods delegate to MemoryCoordinator. Real lease
 // semantics (atomic acquire, expiry, fencing-token monotonicity) live there.
 
-func (m *MemoryProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (m *MemoryProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 

@@ -158,14 +158,14 @@ func TestPrepareAndSendEvent_PBConcurrentFanOutProductionPath(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for _, jti := range jtis {
-			cls, _, _ := h.router.prepareAndSendEvent(jti, streamA, keyA, "kid-A", 0)
+			cls, _, _ := h.router.prepareAndSendEvent(jti, streamA, keyA, "kid-A")
 			assert.Equal(t, goSetPush.ClassAccepted, cls.Class)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		for _, jti := range jtis {
-			cls, _, _ := h.router.prepareAndSendEvent(jti, streamB, keyB, "kid-B", 0)
+			cls, _, _ := h.router.prepareAndSendEvent(jti, streamB, keyB, "kid-B")
 			assert.Equal(t, goSetPush.ClassAccepted, cls.Class)
 		}
 	}()

@@ -119,6 +119,14 @@ type lockTracker struct {
 	held    atomic.Int64
 	holders sync.Map // goroutine id -> *atomic.Int64 depth
 	onRead  func()   // test hook, called for each read counted
+
+	// The acknowledgement region (#364): from a DeliveryQueue's write entry
+	// to its AckBatch call. A coordinator call made by a goroutine inside it
+	// is counted in goSignals_router_reads_before_ack_total; the design value
+	// is zero, since ownership is answered by the leaseManager from memory.
+	ackHeld    atomic.Int64
+	ackHolders sync.Map // goroutine id -> *atomic.Int64 depth
+	onAckRead  func()   // test hook, called for each read counted
 }
 
 // fanoutRLock takes r.mu for reading and records the caller as a holder.
@@ -156,8 +164,15 @@ func (l *lockTracker) heldByCaller() bool {
 	return ok
 }
 
-// noteRead counts a store or coordinator call if the caller holds the lock.
+// noteRead counts a store or coordinator call if the caller holds the lock,
+// and separately if the caller is inside an acknowledgement region.
 func (l *lockTracker) noteRead() {
+	if l.inAckByCaller() {
+		readsBeforeAckTotal.Inc()
+		if l.onAckRead != nil {
+			l.onAckRead()
+		}
+	}
 	if !l.heldByCaller() {
 		return
 	}
@@ -165,6 +180,32 @@ func (l *lockTracker) noteRead() {
 	if l.onRead != nil {
 		l.onRead()
 	}
+}
+
+// enterAck records the caller as inside an acknowledgement region.
+func (l *lockTracker) enterAck() {
+	l.ackHeld.Add(1)
+	d, _ := l.ackHolders.LoadOrStore(goroutineID(), new(atomic.Int64))
+	d.(*atomic.Int64).Add(1)
+}
+
+// exitAck ends an enterAck.
+func (l *lockTracker) exitAck() {
+	gid := goroutineID()
+	if d, ok := l.ackHolders.Load(gid); ok && d.(*atomic.Int64).Add(-1) <= 0 {
+		l.ackHolders.Delete(gid)
+	}
+	l.ackHeld.Add(-1)
+}
+
+// inAckByCaller reports whether the calling goroutine is inside an
+// acknowledgement region. With none open it costs one atomic load.
+func (l *lockTracker) inAckByCaller() bool {
+	if l.ackHeld.Load() == 0 {
+		return false
+	}
+	_, ok := l.ackHolders.Load(goroutineID())
+	return ok
 }
 
 // goroutineID returns the calling goroutine's id, parsed from the header line
@@ -187,7 +228,7 @@ type trackedCoordinator struct {
 	locks *lockTracker
 }
 
-func (c *trackedCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (c *trackedCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	c.locks.noteRead()
 	return c.ClusterCoordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }

@@ -42,14 +42,18 @@ type leaseCall struct {
 	ttl      time.Duration
 }
 
-func (f *fakeLeaseStore) TryAcquireOrRenewLease(resource, nodeId string, ttl time.Duration) (bool, int64, error) {
+func (f *fakeLeaseStore) TryAcquireOrRenewLease(resource, nodeId string, ttl time.Duration) (bool, int64, time.Time, error) {
 	f.calls = append(f.calls, leaseCall{at: time.Now(), resource: resource, nodeId: nodeId, ttl: ttl})
 	idx := len(f.calls) - 1
 	if idx >= len(f.answers) {
 		idx = len(f.answers) - 1
 	}
 	a := f.answers[idx]
-	return a.held, int64(len(f.calls)), a.err
+	var until time.Time
+	if a.held {
+		until = time.Now().Add(ttl)
+	}
+	return a.held, int64(len(f.calls)), until, a.err
 }
 
 func (f *fakeLeaseStore) ReleaseLeaseIfOwned(string, string) error { return nil }
@@ -225,7 +229,7 @@ func TestLeaseHeartbeat_LosesTheLeaseToARealCoordinator(t *testing.T) {
 		coord := memory_provider.NewMemoryCoordinator()
 		const resource = "push:stream-1"
 
-		held, _, err := coord.TryAcquireOrRenewLease(resource, "node-a", leaseTTL)
+		held, _, _, err := coord.TryAcquireOrRenewLease(resource, "node-a", leaseTTL)
 		if err != nil || !held {
 			t.Fatalf("node-a could not take a free lease: held=%v err=%v", held, err)
 		}
@@ -244,7 +248,7 @@ func TestLeaseHeartbeat_LosesTheLeaseToARealCoordinator(t *testing.T) {
 
 		time.Sleep(25 * time.Second)
 		synctest.Wait()
-		if stolen, _, _ := coord.TryAcquireOrRenewLease(resource, "node-b", leaseTTL); stolen {
+		if stolen, _, _, _ := coord.TryAcquireOrRenewLease(resource, "node-b", leaseTTL); stolen {
 			t.Fatal("node-b took a lease node-a still holds and keeps renewing")
 		}
 
@@ -258,7 +262,7 @@ func TestLeaseHeartbeat_LosesTheLeaseToARealCoordinator(t *testing.T) {
 		// lease so it is still live when the test reads the owner below: an
 		// expired lease reads as unowned (#334).
 		time.Sleep(leaseTTL + time.Second)
-		stolen, bToken, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
+		stolen, bToken, _, err := coord.TryAcquireOrRenewLease(resource, "node-b", time.Hour)
 		if err != nil || !stolen {
 			t.Fatalf("node-b could not take the expired lease: stolen=%v err=%v", stolen, err)
 		}

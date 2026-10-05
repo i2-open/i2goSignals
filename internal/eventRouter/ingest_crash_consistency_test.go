@@ -48,7 +48,7 @@ func TestOrphanPendingMarker_PushSkipsAndDoesNotAck(t *testing.T) {
 	orphan := orphanPendingMarker(t, h, sid)
 	require.Equal(t, 2, h.pendingCount(sid))
 
-	res := h.router.pushBatch([]string{orphan, healthy}, stream, nil, "", 0)
+	res := h.router.pushBatch([]string{orphan, healthy}, stream, nil, "")
 
 	require.Empty(t, res.failedJti, "an orphan is not a delivery failure")
 	require.Equal(t, 1, res.acked, "only the SET that was really pushed is acked")

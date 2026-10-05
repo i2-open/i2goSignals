@@ -138,7 +138,7 @@ func TestHandleEvent_BroadcastsWakeSstpClientToRemoteOwner(t *testing.T) {
 	peer := stubWakePeer(t, wakes)
 	require.NoError(t, r.coordinator.RegisterNode(model.ClusterNode{Id: "node-B", Address: peer.URL, LastSeenAt: time.Now().UTC()}))
 	resource := fmt.Sprintf("sstp-client:%s", pairId)
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 

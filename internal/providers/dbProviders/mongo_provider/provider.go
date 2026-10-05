@@ -1007,7 +1007,7 @@ func (m *MongoProvider) Close() error {
 
 // Cluster pass-throughs retained for the lease/cluster integration tests
 // under mongo_provider/test/. Production callers use Persistence.Coordinator.
-func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (m *MongoProvider) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	return m.coordinator.TryAcquireOrRenewLease(resource, nodeId, leaseDuration)
 }
 

@@ -38,14 +38,14 @@ func TestMemoryCoordinator_PurgeExpiredLeases(t *testing.T) {
 
 	for _, res := range []string{"push-transmitter:deleted", "push-transmitter:kept", "push-transmitter:live"} {
 		for i := 0; i < 3; i++ { // three tenures, so the token is 3
-			ok, _, err := c.TryAcquireOrRenewLease(res, "node-A", time.Second)
+			ok, _, _, err := c.TryAcquireOrRenewLease(res, "node-A", time.Second)
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.NoError(t, c.ReleaseLeaseIfOwned(res, "node-A"))
 		}
 	}
 	clock = clock.Add(5 * time.Minute)
-	_, _, err := c.TryAcquireOrRenewLease("push-transmitter:live", "node-A", 30*time.Second)
+	_, _, _, err := c.TryAcquireOrRenewLease("push-transmitter:live", "node-A", 30*time.Second)
 	require.NoError(t, err)
 
 	keep := func(resource string) bool { return strings.HasSuffix(resource, ":kept") }
@@ -53,9 +53,9 @@ func TestMemoryCoordinator_PurgeExpiredLeases(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "only the expired, unwanted row is purged")
 
-	_, token, _ := c.TryAcquireOrRenewLease("push-transmitter:deleted", "node-B", time.Second)
+	_, token, _, _ := c.TryAcquireOrRenewLease("push-transmitter:deleted", "node-B", time.Second)
 	assert.Equal(t, int64(1), token, "the purged row is gone")
-	_, token, _ = c.TryAcquireOrRenewLease("push-transmitter:kept", "node-B", time.Second)
+	_, token, _, _ = c.TryAcquireOrRenewLease("push-transmitter:kept", "node-B", time.Second)
 	assert.Equal(t, int64(4), token, "a kept row keeps its fencing history")
 	owner, _, _, _ := c.GetLeaseOwner("push-transmitter:live")
 	assert.Equal(t, "node-A", owner, "a live lease is untouched")

@@ -47,7 +47,7 @@ func TestCoordinatorOpsAbortWhenTheLifecycleIsCancelled(t *testing.T) {
 
 	ops := map[string]func() error{
 		"TryAcquireOrRenewLease": func() error {
-			_, _, err := coord.TryAcquireOrRenewLease("resource", "node-1", 30*time.Second)
+			_, _, _, err := coord.TryAcquireOrRenewLease("resource", "node-1", 30*time.Second)
 			return err
 		},
 		"ReleaseLeaseIfOwned": func() error {

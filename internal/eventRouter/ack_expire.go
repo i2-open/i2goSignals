@@ -2,7 +2,6 @@ package eventRouter
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/i2-open/i2goSignals/pkg/services"
@@ -14,8 +13,8 @@ import (
 // caller of AckBatch: one Ack per batch, under each reference's
 // acknowledgement JTI, with the outbound copies this node served and the
 // retention expiry of #360. An empty jtis is a no-op.
-func (r *router) ackEvents(ctx context.Context, jtis []string, sid string, fencingToken int64) error {
-	_, err := r.queueFor(sid).AckInbound(ctx, jtis, true, fencingToken)
+func (r *router) ackEvents(ctx context.Context, jtis []string, sid string) error {
+	_, err := r.queueFor(sid).AckInbound(ctx, jtis, true)
 	return err
 }
 
@@ -57,23 +56,4 @@ func (r *router) streamRecordLocked(sid string) *model.StreamStateRecord {
 		}
 	}
 	return nil
-}
-
-// checkAckFence applies the EventService ack fence (#334) to an ack the
-// router writes through EventService.AckBatch: a leased stream's ack must
-// carry the lease's current token.
-func (r *router) checkAckFence(sid string, fencingToken int64) error {
-	resource, current, leased, err := r.CurrentFence(sid)
-	if err != nil {
-		eventLogger.Error("ROUTER: fence check failed, ack not written", "sid", sid, "error", err)
-		return err
-	}
-	if !leased {
-		return nil
-	}
-	if fencingToken != services.NoFencingToken && fencingToken == current {
-		return nil
-	}
-	eventLogger.Warn("ROUTER: rejected ack with stale fencing token", "sid", sid, "resource", resource, "token", fencingToken, "current", current)
-	return fmt.Errorf("%w: stream %s resource %s token %d current %d", services.ErrStaleFencingToken, sid, resource, fencingToken, current)
 }

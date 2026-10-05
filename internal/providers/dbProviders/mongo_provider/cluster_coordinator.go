@@ -107,10 +107,10 @@ var errCoordinatorNotInit = fmt.Errorf("mongo coordinator not initialized: %w", 
 // Compile-time check.
 var _ cluster.ClusterCoordinator = (*MongoCoordinator)(nil)
 
-func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, error) {
+func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (bool, int64, time.Time, error) {
 	col := c.leaseCol.Load()
 	if col == nil {
-		return false, 0, errCoordinatorNotInit
+		return false, 0, time.Time{}, errCoordinatorNotInit
 	}
 
 	ctx, cancel := c.opCtx()
@@ -156,12 +156,16 @@ func (c *MongoCoordinator) TryAcquireOrRenewLease(resource string, nodeId string
 	err := col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&lease)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return false, 0, nil
+			return false, 0, time.Time{}, nil
 		}
-		return false, 0, err
+		return false, 0, time.Time{}, err
 	}
 
-	return lease.OwnerNodeId == nodeId, lease.FencingToken, nil
+	// The After-document holds the expiry this call stored (#364).
+	if lease.OwnerNodeId != nodeId {
+		return false, lease.FencingToken, time.Time{}, nil
+	}
+	return true, lease.FencingToken, lease.LeaseUntil, nil
 }
 
 func (c *MongoCoordinator) ReleaseLeaseIfOwned(resource string, nodeId string) error {

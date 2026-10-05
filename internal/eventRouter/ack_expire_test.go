@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fixedFence is a coordinator whose every lease carries token.
+// fixedFence is a coordinator whose every lease carries token. Any lease call
+// other than GetLeaseOwner panics on the nil embedded interface, which proves
+// an ack path makes none.
 type fixedFence struct {
 	cluster.ClusterCoordinator
 	token int64
@@ -65,7 +67,7 @@ func deliveredExpireAt(t *testing.T, dao *memory.EventDAOMemory, sid string) (*t
 func TestAckEvents_FiniteWindowWritesExpireAt(t *testing.T) {
 	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	before := time.Now()
-	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid, services.NoFencingToken))
+	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	after := time.Now()
 
 	expireAt, ok := deliveredExpireAt(t, dao, sid)
@@ -92,7 +94,7 @@ func TestAckEvents_KeepForeverWritesNoExpireAt(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			r, dao, sid := ackRouter(t, c.window, c.days)
-			require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid, services.NoFencingToken))
+			require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 			expireAt, ok := deliveredExpireAt(t, dao, sid)
 			require.True(t, ok, "j1 delivered")
 			assert.Nil(t, expireAt)
@@ -104,25 +106,29 @@ func TestAckEvents_KeepForeverWritesNoExpireAt(t *testing.T) {
 func TestAckEvents_UnknownStreamWritesNoExpireAt(t *testing.T) {
 	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	r.pushStreams = map[string]model.StreamStateRecord{}
-	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid, services.NoFencingToken))
+	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	expireAt, ok := deliveredExpireAt(t, dao, sid)
 	require.True(t, ok)
 	assert.Nil(t, expireAt)
 }
 
-// The expireAt path keeps the ack fence (#334): a leased stream's ack with a
-// stale token is refused before it writes; the current token is accepted.
-func TestAckEvents_ExpireAtPathKeepsFence(t *testing.T) {
+// The expireAt path is guarded by the lease manager (#364): with no recorded
+// tenure on the stream's lease the ack writes nothing and returns
+// errNotLeaseOwner, without a coordinator call; once a renewal records the
+// tenure the same ack is written with its expireAt.
+func TestAckEvents_ExpireAtPathRequiresTenure(t *testing.T) {
 	r, dao, sid := ackRouter(t, services.DefaultEffectiveWindow, windowDays(3))
 	r.coordinator = fixedFence{token: 7}
+	r.leases = newLeaseManager(r.coordinator)
 
-	err := r.ackEvents(context.Background(), []string{"j1"}, sid, 6)
+	err := r.ackEvents(context.Background(), []string{"j1"}, sid)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, services.ErrStaleFencingToken))
+	assert.True(t, errors.Is(err, errNotLeaseOwner))
 	_, ok := deliveredExpireAt(t, dao, sid)
-	assert.False(t, ok, "a fenced ack must not write")
+	assert.False(t, ok, "an ack without tenure must not write")
 
-	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid, 7))
+	r.leases.note(cluster.PushTransmitterResource(sid), time.Now(), true, time.Now().Add(time.Minute), time.Minute)
+	require.NoError(t, r.ackEvents(context.Background(), []string{"j1"}, sid))
 	expireAt, ok := deliveredExpireAt(t, dao, sid)
 	require.True(t, ok)
 	assert.NotNil(t, expireAt)

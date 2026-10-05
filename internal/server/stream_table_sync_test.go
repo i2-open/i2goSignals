@@ -174,7 +174,7 @@ func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
 	coord.SetClock(func() time.Time { return past })
 	gone, live := cluster.PushTransmitterResource("deleted-sid"), cluster.PushTransmitterResource(statusPlainSid)
 	for _, res := range []string{gone, live} {
-		ok, _, err := coord.TryAcquireOrRenewLease(res, "node-old", time.Second)
+		ok, _, _, err := coord.TryAcquireOrRenewLease(res, "node-old", time.Second)
 		require.NoError(t, err)
 		require.True(t, ok)
 	}
@@ -185,9 +185,9 @@ func TestSyncStreamTable_PurgesStaleClusterRows(t *testing.T) {
 	app.syncStreamTable()
 	require.Equal(t, 1, app.router.syncCount())
 
-	_, token, _ := coord.TryAcquireOrRenewLease(gone, "node-now", time.Second)
+	_, token, _, _ := coord.TryAcquireOrRenewLease(gone, "node-now", time.Second)
 	assert.Equal(t, int64(1), token, "the deleted stream's lease row is purged")
-	_, token, _ = coord.TryAcquireOrRenewLease(live, "node-now", time.Second)
+	_, token, _, _ = coord.TryAcquireOrRenewLease(live, "node-now", time.Second)
 	assert.Equal(t, int64(2), token, "a live stream's lease row is kept")
 	old, _ := coord.GetNode("node-old")
 	assert.Nil(t, old, "a node silent past the GC window is purged")

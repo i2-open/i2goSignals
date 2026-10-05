@@ -42,7 +42,7 @@ func (d *migrateDAO) MigrateLegacyDeliveries(context.Context, func(string, time.
 // releasing it as a probe node.
 func leaseFree(t *testing.T, coord cluster.ClusterCoordinator) bool {
 	t.Helper()
-	held, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "probe", time.Second)
+	held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "probe", time.Second)
 	require.NoError(t, err)
 	if held {
 		require.NoError(t, coord.ReleaseLeaseIfOwned(migrationLeaseResource, "probe"))
@@ -63,7 +63,7 @@ func TestMigrateLegacyDeliveries_NilCoordinatorRunsDirectly(t *testing.T) {
 func TestMigrateLegacyDeliveries_WaitsForTheLease(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		coord := memory_provider.NewMemoryCoordinator()
-		held, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-z", time.Hour)
+		held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-z", time.Hour)
 		require.NoError(t, err)
 		require.True(t, held)
 
@@ -94,7 +94,7 @@ func TestMigrateLegacyDeliveries_WaitsForTheLease(t *testing.T) {
 func TestMigrateLegacyDeliveries_WaitCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		coord := memory_provider.NewMemoryCoordinator()
-		_, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-z", time.Hour)
+		_, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-z", time.Hour)
 		require.NoError(t, err)
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
@@ -126,7 +126,7 @@ func TestMigrateLegacyDeliveries_RenewsTheLease(t *testing.T) {
 		}()
 		time.Sleep(2 * migrationLeaseTTL)
 		synctest.Wait()
-		held, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-b", migrationLeaseTTL)
+		held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, "node-b", migrationLeaseTTL)
 		require.NoError(t, err)
 		assert.False(t, held, "lease lapsed while the migration was running")
 		require.NoError(t, <-done)
@@ -198,6 +198,6 @@ type notReadyCoordinator struct {
 	cluster.ClusterCoordinator
 }
 
-func (notReadyCoordinator) TryAcquireOrRenewLease(string, string, time.Duration) (bool, int64, error) {
-	return false, 0, fmt.Errorf("coordinator not initialized: %w", interfaces.ErrStoreNotReady)
+func (notReadyCoordinator) TryAcquireOrRenewLease(string, string, time.Duration) (bool, int64, time.Time, error) {
+	return false, 0, time.Time{}, fmt.Errorf("coordinator not initialized: %w", interfaces.ErrStoreNotReady)
 }

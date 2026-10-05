@@ -289,7 +289,7 @@ func TestAckEvents_MarksOnlyRemovedDelivered(t *testing.T) {
 	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}, "j-3": {}}}
 	svc := NewEventService(fake)
 
-	err := svc.AckEvents(context.Background(), []string{"j-1", "j-2", "j-3"}, "stream-1", 0)
+	err := svc.AckEvents(context.Background(), []string{"j-1", "j-2", "j-3"}, "stream-1")
 	if err != nil {
 		t.Fatalf("AckEvents: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestAckEvents_NothingPendingSkipsDelivered(t *testing.T) {
 	fake := &fakeEventDAO{}
 	svc := NewEventService(fake)
 
-	if err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1", 0); err != nil {
+	if err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1"); err != nil {
 		t.Fatalf("AckEvents: %v", err)
 	}
 	if fake.removePendingManyCalls != 1 || fake.markDeliveredManyCalls != 0 {
@@ -324,7 +324,7 @@ func TestAckEvents_NothingPendingSkipsDelivered(t *testing.T) {
 			fake.removePendingManyCalls, fake.markDeliveredManyCalls)
 	}
 
-	if err := svc.AckEvents(context.Background(), nil, "stream-1", 0); err != nil {
+	if err := svc.AckEvents(context.Background(), nil, "stream-1"); err != nil {
 		t.Fatalf("AckEvents empty: %v", err)
 	}
 	if fake.removePendingManyCalls != 1 || fake.ackCalls != 1 {
@@ -338,7 +338,7 @@ func TestAckEvent_RoutesThroughAck(t *testing.T) {
 	fake := &fakeEventDAO{pending: map[string]struct{}{"j-1": {}}}
 	svc := NewEventService(fake)
 
-	if err := svc.AckEvent(context.Background(), "j-1", "stream-1", 0); err != nil {
+	if err := svc.AckEvent(context.Background(), "j-1", "stream-1"); err != nil {
 		t.Fatalf("AckEvent: %v", err)
 	}
 	if fake.ackCalls != 1 {
@@ -359,7 +359,7 @@ func TestAckEvents_RemoveErrorPropagates(t *testing.T) {
 	fake := &fakeEventDAO{removePendingErr: boom}
 	svc := NewEventService(fake)
 
-	err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1", 0)
+	err := svc.AckEvents(context.Background(), []string{"j-1"}, "stream-1")
 	if !errors.Is(err, boom) {
 		t.Fatalf("AckEvents err = %v, want %v", err, boom)
 	}

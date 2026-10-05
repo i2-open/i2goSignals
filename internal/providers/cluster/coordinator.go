@@ -33,8 +33,12 @@ import (
 type ClusterCoordinator interface {
 	// TryAcquireOrRenewLease atomically acquires the lease if it is
 	// expired/unowned, or renews it if already owned by nodeId. Returns
-	// (acquired=true, fencingToken) only when this node is (or remains) owner.
-	TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (acquired bool, fencingToken int64, err error)
+	// (acquired=true, fencingToken, leaseUntil) only when this node is (or
+	// remains) owner; leaseUntil is the expiry the call stored on the lease
+	// row, and the zero time when the lease was not acquired. The event
+	// router's LeaseManager keeps it to answer "do I still own this stream"
+	// from memory (#364).
+	TryAcquireOrRenewLease(resource string, nodeId string, leaseDuration time.Duration) (acquired bool, fencingToken int64, leaseUntil time.Time, err error)
 
 	// ReleaseLeaseIfOwned clears the lease iff it is owned by nodeId.
 	ReleaseLeaseIfOwned(resource string, nodeId string) error

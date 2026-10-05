@@ -46,7 +46,7 @@ func TestClusterHarness_DeliveriesMigrationUnderLease(t *testing.T) {
 	require.NoError(t, err)
 
 	const resource = "migration:deliveries"
-	held, _, err := h.admin.Coordinator.TryAcquireOrRenewLease(resource, "node-z", time.Minute)
+	held, _, _, err := h.admin.Coordinator.TryAcquireOrRenewLease(resource, "node-z", time.Minute)
 	require.NoError(t, err)
 	require.True(t, held)
 

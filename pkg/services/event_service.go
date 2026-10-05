@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -27,34 +26,8 @@ type ResetEgressObserver interface {
 	ObserveResetEgress(streamID string, event *model.EventRecord)
 }
 
-// NoFencingToken is the fencing token an ack carries when the caller holds no
-// cluster lease: a poll transmitter (ADR 0014) and the SSTP server side. It is
-// accepted only for a stream the FenceChecker reports as unleased; on a leased
-// stream it is always rejected, as is any token once the lease has expired
-// (an expired lease reads as token 0).
-const NoFencingToken int64 = 0
-
-// ErrStaleFencingToken is returned by AckEvent and AckEvents when the ack's
-// fencing token is not the current token of the stream's lease: the caller's
-// lease expired or another node took it over. Nothing is written, and the
-// caller must stop delivering on its lease (#334).
-var ErrStaleFencingToken = errors.New("stale fencing token: lease no longer held")
-
-// FenceChecker reports the lease that fences acks for a stream. leased is
-// false for a stream delivered by a mode that holds no lease, whose acks are
-// then not fenced. Otherwise token is the resource's current fencing token,
-// or 0 when the lease has expired or been released. The event router
-// implements it from its stream registry and the ClusterCoordinator.
-type FenceChecker interface {
-	CurrentFence(streamID string) (resource string, token int64, leased bool, err error)
-}
-
 type EventService struct {
 	eventDAO interfaces.EventDAO
-	// fenceChecker, when non-nil, fences AckEvent and AckEvents: an ack for a
-	// leased stream is written only when its token is the lease's current one.
-	// nil leaves acks unfenced (a service with no cluster behind it).
-	fenceChecker FenceChecker
 	// resetEgressObserver, when non-nil, receives one call per event
 	// ResetEventStream re-queues, so reset re-deliveries are metered as fresh
 	// egress. nil (the default) leaves the reset path unmetered — the community
@@ -81,39 +54,6 @@ func (s *EventService) WrapEventDAO(wrap func(interfaces.EventDAO) interfaces.Ev
 // fan-out egress uses (ADR 0055 Q91.4).
 func (s *EventService) SetResetEgressObserver(observer ResetEgressObserver) {
 	s.resetEgressObserver = observer
-}
-
-// SetFenceChecker installs (or clears, with nil) the checker that fences acks
-// on the stream's lease token. The event router wires itself here at
-// construction, before any delivery starts.
-func (s *EventService) SetFenceChecker(checker FenceChecker) {
-	s.fenceChecker = checker
-}
-
-// checkFence verifies an ack's fencing token against the stream's lease, once
-// per ack call and before any write (ADR 0035). A stream with no lease, or a
-// service with no checker, is not fenced. Whether a stream is leased is the
-// checker's call, never the token's: NoFencingToken on a leased stream is
-// rejected (#334). A lookup error fails closed.
-func (s *EventService) checkFence(streamID string, fencingToken int64) error {
-	if s.fenceChecker == nil {
-		// No cluster behind the service.
-		return nil
-	}
-	resource, current, leased, err := s.fenceChecker.CurrentFence(streamID)
-	if err != nil {
-		esLog.Error("Fence check failed, ack not written", "streamID", streamID, "error", err)
-		return err
-	}
-	if !leased {
-		// Delivery mode that holds no lease (poll transmitter, SSTP server side).
-		return nil
-	}
-	if fencingToken != NoFencingToken && fencingToken == current {
-		return nil
-	}
-	esLog.Warn("Rejected ack with stale fencing token", "streamID", streamID, "resource", resource, "token", fencingToken, "current", current)
-	return fmt.Errorf("%w: stream %s resource %s token %d current %d", ErrStaleFencingToken, streamID, resource, fencingToken, current)
 }
 
 func (s *EventService) AddEvent(ctx context.Context, event *goSet.SecurityEventToken, sid string, raw string) (*model.EventRecord, error) {
@@ -362,10 +302,7 @@ func (s *EventService) MigrateLegacyDeliveries(ctx context.Context, expireAt fun
 
 // AckEvent acknowledges one JTI for streamID through the same one-trip DAO
 // ack as AckEvents (#335). A JTI not pending for the stream is ignored.
-func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string, fencingToken int64) error {
-	if err := s.checkFence(streamID, fencingToken); err != nil {
-		return err
-	}
+func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID string) error {
 	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: []string{jtiString}, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SET stays pending and is redelivered.
 		esLog.Warn("Error acknowledging event", "jti", jtiString, "streamID", streamID, "error", err)
@@ -378,13 +315,11 @@ func (s *EventService) AckEvent(ctx context.Context, jtiString string, streamID 
 // are moved to delivered by EventDAO.Ack in one conditional write (#359) —
 // one unordered bulkWrite on MongoDB 8.0+. A JTI not pending for the
 // stream is ignored, exactly as AckEvent ignores it. An empty jtis is a
-// no-op. The fencing token is checked once for the batch, as for AckEvent.
-func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string, fencingToken int64) error {
+// no-op. Lease ownership is the caller's concern: the event router checks it
+// from memory before its acknowledgement batch (#364).
+func (s *EventService) AckEvents(ctx context.Context, jtis []string, streamID string) error {
 	if len(jtis) == 0 {
 		return nil
-	}
-	if err := s.checkFence(streamID, fencingToken); err != nil {
-		return err
 	}
 	if _, err := s.eventDAO.Ack(ctx, interfaces.AckBatch{StreamID: streamID, Jtis: jtis, AckDate: time.Now()}); err != nil {
 		// WARN: the DAO logs the failure; the SETs stay pending and are redelivered.

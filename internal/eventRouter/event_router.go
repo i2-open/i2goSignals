@@ -205,6 +205,11 @@ type router struct {
 	// tests that do not need the dialer skip the callback).
 	sstpDialer  SstpDialerHooks
 	coordinator cluster.ClusterCoordinator
+	// leases answers "does this node still own resource X" from memory; the
+	// acknowledgement path consults it instead of reading the lease row
+	// (#364). Built over coordinator; with no coordinator it always answers
+	// true.
+	leases *leaseManager
 	// routes is the immutable routing snapshot the fan-out match step reads
 	// with no lock (#362); rebuildRoutingLocked republishes it on every
 	// stream-map write.
@@ -424,6 +429,9 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	}
 	if deps.Coordinator != nil {
 		router.coordinator = &trackedCoordinator{ClusterCoordinator: deps.Coordinator, locks: &router.locks}
+		router.leases = newLeaseManager(router.coordinator)
+	} else {
+		router.leases = newLeaseManager(nil)
 	}
 	router.routes.Store(&routingTable{})
 
@@ -433,11 +441,6 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	// observation to whatever MeteringObserver is registered (ADR 0055 Q91.4).
 	if deps.EventService != nil {
 		deps.EventService.SetResetEgressObserver(router)
-	}
-	// Fence acks on the stream's lease token (#334): an ack from a runner whose
-	// lease expired or was taken over is rejected before it writes.
-	if deps.EventService != nil && deps.Coordinator != nil {
-		deps.EventService.SetFenceChecker(router)
 	}
 	// Startup order (#361, seam S2): (1) load the stream state map once;
 	// (2) carry the legacy pendingEvents / deliveredEvents rows into
@@ -2009,7 +2012,7 @@ func (r *router) ackPolled(ctx context.Context, sid string, state *model.StreamS
 		setErrs = append(setErrs, jti)
 	}
 	sort.Strings(setErrs)
-	inbound, n, err := r.queueFor(sid).AckWire(ctx, params.Acks, setErrs, services.NoFencingToken)
+	inbound, n, err := r.queueFor(sid).AckWire(ctx, params.Acks, setErrs)
 	if err != nil {
 		eventLogger.Warn("POLL-SRV: Error acknowledging events", "sid", sid, "count", len(params.Acks)+len(setErrs), "error", err)
 	}
@@ -2177,7 +2180,7 @@ func SignSets(recs []*model.EventRecord, workers int, sign func(*model.EventReco
 // returned now nor on a later poll, keeping the pending buffer bounded.
 func (r *router) discardPolledEvents(sid string, jtis []string, pollBuffer *buffer.EventPollBuffer) {
 	pollBuffer.AckEvents(jtis)
-	if _, err := r.queueFor(sid).AckInbound(r.ctx, jtis, false, services.NoFencingToken); err != nil {
+	if _, err := r.queueFor(sid).AckInbound(r.ctx, jtis, false); err != nil {
 		eventLogger.Error("POLL-SRV: Error discarding filtered-out events", "sid", sid, "count", len(jtis), "error", err)
 	}
 }
@@ -2207,7 +2210,9 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 		}
 
 		// Attempt to acquire or renew the lease
-		acquired, fencingToken, err := r.coordinator.TryAcquireOrRenewLease(resource, r.nodeId, 30*time.Second)
+		// Through the lease manager, so the tenure it records is what the
+		// acknowledgement path's StillOwner answers from (#364).
+		acquired, fencingToken, err := r.tryLease(resource, leaseTTL)
 		if r.stats != nil {
 			r.stats.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
@@ -2245,8 +2250,10 @@ func (r *router) PushStreamHandler(stream *model.StreamStateRecord, runner *push
 		}
 
 		// Lease acquired, start the actual push loop
-		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid)
-		shouldRetry := r.runPushLoop(resource, stream, runner, fencingToken)
+		// The fencing token stays on the lease row and in the log, for lease
+		// history; acknowledgements no longer carry it (#364).
+		eventLogger.Info("PUSH-SRV: Node lease acquired, starting transmission", "sid", sid, "fencingToken", fencingToken)
+		shouldRetry := r.runPushLoop(resource, stream, runner)
 		if !shouldRetry {
 			return
 		}
@@ -2302,7 +2309,7 @@ func (r *router) leaseStreamEnabled(stream *model.StreamStateRecord) bool {
 // signal ends it. The stop is also checked before each new batch and once each batch returns: the
 // batches already in pushBatch (up to K, pushInFlightBatches) complete, acked or failed, and then a
 // stopped runner sends nothing more and acts on no failure from them (#309, #339).
-func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, runner *pushRunner, fencingToken int64) bool {
+func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, runner *pushRunner) bool {
 	sid := stream.StreamConfiguration.Id
 	eventLogger.Info("PUSH-SRV: Starting transmission loop", "sid", sid)
 	if r.stats != nil {
@@ -2327,8 +2334,11 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 
 	go func() {
 		defer close(heartbeatDone)
+		// The heartbeat renews through the lease manager: each renewal
+		// refreshes the tenure the acknowledgement path checks (#364).
 		leaseHeartbeat{
 			Coordinator:   r.coordinator,
+			Manager:       r.leaseRenewer(),
 			Resource:      resource,
 			NodeId:        r.nodeId,
 			Interval:      leaseRenewInterval,
@@ -2409,12 +2419,13 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	wakeup := eventBuf.WakeupCh()
 
 	// Send and ack are decoupled (#336): a batch's acks queue on the acker and
-	// are written, coalesced, while the next batch goes out. The acker is bound
-	// to this tenure's fencing token, so an ack refused as stale fences it and
-	// the loop re-acquires. However the loop exits, the acks already queued are
-	// written first, before the handler releases the lease; SETs sent but not
-	// acked stay pending and are redelivered.
-	ack := r.newPushAcker(sid, fencingToken)
+	// are written, coalesced, while the next batch goes out. Each write first
+	// asks the lease manager whether this node's tenure still holds (#364); a
+	// batch it refuses waits for the next renewal, and a lost lease ends the
+	// loop through the heartbeat. However the loop exits, the acks already
+	// queued are written first, before the handler releases the lease; SETs
+	// sent but not acked stay pending and are redelivered.
+	ack := r.newPushAcker(sid)
 	r.pushAckers.Store(sid, ack)
 	defer func() {
 		r.pushAckers.CompareAndDelete(sid, ack)
@@ -2463,17 +2474,13 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 	// pause or recovery, so recovery starts from the same place the serial loop
 	// did: nothing on the wire. A failure in one of those batches is not
 	// dispatched again — its SETs were released and stay pending, so backfill
-	// resends them once recovery resumes. It reports a stale fence among them.
-	quiesce := func() (stale bool) {
+	// resends them once recovery resumes.
+	quiesce := func() {
 		for inflight > 0 {
 			res := <-results
 			inflight--
 			fold(res)
-			if res.staleFence {
-				stale = true
-			}
 		}
-		return stale
 	}
 
 	for {
@@ -2486,12 +2493,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 		select {
 		case <-heartbeatCtx.Done():
 			// Heartbeat lost: re-acquire. Runner stopped or router shutting down: exit.
-			return !runner.stopped()
-		case <-ack.fencedCh():
-			// A coalesced ack was refused on a stale fencing token (#334): this
-			// node no longer speaks for the stream. Re-acquire; what was not
-			// acked stays pending for the owner.
-			eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
 			return !runner.stopped()
 		case v, ok := <-ready:
 			if !ok {
@@ -2519,10 +2520,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				if signingKey, kid = r.pushSigningKey(stream); signingKey == nil {
 					// Nothing sent. The JTI just taken stays pending in the store
 					// and returns through backfill.
-					if quiesce() {
-						eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
-						return !runner.stopped()
-					}
+					quiesce()
 					switch r.pauseForSigningKey(heartbeatCtx, stream, recoveryCfg, &keyWait, nil, backfillTicker, idle, eventBuf) {
 					case RecoveryOutcomeResumed:
 						continue
@@ -2543,9 +2541,6 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// full set waits here for the acker to drain: that is the bound.
 			jtis, err := ack.reserve(heartbeatCtx, jtis)
 			if err != nil {
-				if errors.Is(err, services.ErrStaleFencingToken) {
-					eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
-				}
 				return !runner.stopped()
 			}
 			if len(jtis) == 0 {
@@ -2558,17 +2553,10 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 				defer batches.Done()
 				// results holds K and at most K batches are in flight, so this
 				// send never blocks — even after the loop has returned.
-				results <- r.pushBatchVia(jtis, stream, signingKey, kid, fencingToken, ack)
+				results <- r.pushBatchVia(jtis, stream, signingKey, kid, ack)
 			}(jtis, signingKey, kid)
 		case res := <-results:
 			inflight--
-			if res.staleFence {
-				// The ack was refused: this node's lease expired or was taken
-				// over, so it no longer speaks for the stream (#334). Stop and
-				// re-acquire; the unacked SETs stay pending for the owner.
-				eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
-				return !runner.stopped()
-			}
 			if runner.stopped() {
 				// The batch has completed. A stopped runner sends nothing more,
 				// and a failure in that batch was a verdict on the settings being
@@ -2586,10 +2574,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// A failure in one batch takes the stream into a pause or recovery.
 			// The other batches in flight finish first; their 202s are acked and
 			// whatever else they did not deliver is redelivered after recovery.
-			if quiesce() {
-				eventLogger.Warn("PUSH-SRV: ack refused on a stale fencing token, re-acquiring the lease", "sid", sid)
-				return !runner.stopped()
-			}
+			quiesce()
 			if runner.stopped() {
 				return false
 			}
@@ -2613,7 +2598,7 @@ func (r *router) runPushLoop(resource string, stream *model.StreamStateRecord, r
 			// managed here so the recovery sub-loop doesn't have to know about either.
 			// Everything the batch did not get a 202 for is still pending and comes back
 			// through backfill once the buffer drains, exactly as a serial failure did.
-			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, res.failedJti, res.failedCls, statusFetcher, recoveryCfg, backfillTicker, idle, fencingToken)
+			recoverOutcome, exit := r.dispatchPushFailure(heartbeatCtx, stream, res.failedJti, res.failedCls, statusFetcher, recoveryCfg, backfillTicker, idle)
 			if exit {
 				return recoverOutcome == RecoveryOutcomeContextDone
 			}
@@ -2780,7 +2765,6 @@ func (r *router) dispatchPushFailure(
 	cfg RecoveryConfig,
 	backfillTicker *time.Ticker,
 	idle *idleKeepalive,
-	fencingToken int64,
 ) (RecoveryOutcome, bool) {
 	sid := stream.StreamConfiguration.Id
 
@@ -2826,9 +2810,10 @@ func (r *router) dispatchPushFailure(
 					"rfc8935ErrCode", cls.RFC8935ErrCode,
 					"description", cls.RFC8935Description)
 				// A clear, not a receiver acceptance: no outbound copy (#363).
-				if _, err := r.queueFor(sid).AckInbound(r.ctx, []string{jti}, false, fencingToken); err != nil {
-					if errors.Is(err, services.ErrStaleFencingToken) {
-						// This node no longer holds the lease: re-acquire (#334).
+				if _, err := r.queueFor(sid).AckInbound(r.ctx, []string{jti}, false); err != nil {
+					if errors.Is(err, errNotLeaseOwner) {
+						// This node's tenure ran out (#364): re-acquire. The SET
+						// stays pending, and is cleared again on redelivery.
 						return RecoveryOutcomeContextDone, true
 					}
 					eventLogger.Error("PUSH-SRV: Error acking rejected event", "sid", sid, "jti", jti, "error", err)
@@ -3148,17 +3133,17 @@ func (r *router) pushInFlightBatches() int {
 	return k
 }
 
-// newPushAcker builds the acker for one push runner's tenure, bound to its
-// fencing token.
-func (r *router) newPushAcker(sid string, fencingToken int64) *acker {
+// newPushAcker builds the acker for one push runner's tenure. Its writes are
+// checked against the lease manager, not a fencing token (#364).
+func (r *router) newPushAcker(sid string) *acker {
 	return newAcker(r.ctx, ackerConfig{
 		sid:       sid,
 		transport: "push",
 		window:    r.ackCoalesceWindow,
 		max:       r.inFlightMax(),
 		apply: func(ctx context.Context, jtis []string) error {
-			err := r.ackEvents(ctx, jtis, sid, fencingToken)
-			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
+			err := r.ackEvents(ctx, jtis, sid)
+			if err != nil && !errors.Is(err, errNotLeaseOwner) {
 				// Not acked: the SETs stay pending and are redelivered, so WARN
 				// (the DAO logs the store failure itself).
 				eventLogger.Warn("PUSH-SRV: Error acking events", "sid", sid, "count", len(jtis), "error", err)
@@ -3183,10 +3168,6 @@ type pushBatchResult struct {
 	// signErr is the first error signing a SET in the batch (#308). That SET was
 	// not sent and stays pending; it is not a receiver failure.
 	signErr error
-	// staleFence reports that the batch's ack was refused because its fencing
-	// token is no longer the lease's current one (#334). Nothing was acked and
-	// the runner must stop delivering on this lease.
-	staleFence bool
 }
 
 // pushBatch delivers a batch of JTIs for one push stream: one read for the
@@ -3201,14 +3182,14 @@ type pushBatchResult struct {
 // dedupe on jti. On the first failure the pool stops taking new work; pushes
 // already in flight run to completion and their 202s are acked. Failed and
 // never-dispatched JTIs stay pending for backfill.
-func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) pushBatchResult {
-	return r.pushBatchVia(jtis, config, signingKey, kid, fencingToken, nil)
+func (r *router) pushBatch(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string) pushBatchResult {
+	return r.pushBatchVia(jtis, config, signingKey, kid, nil)
 }
 
 // pushBatchVia is pushBatch with the batch's acks handed to ack (#336): the
 // acked JTIs queue for its next coalesced write and the rest leave its
 // in-flight set. A nil ack writes the ack inline, as pushBatch always did.
-func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64, ack *acker) pushBatchResult {
+func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, ack *acker) pushBatchResult {
 	sid := config.StreamConfiguration.Id
 	res := pushBatchResult{key: signingKey, kid: kid}
 
@@ -3345,8 +3326,9 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 			}
 		}
 		if err := ack.complete(ackJtis, released); err != nil {
-			if errors.Is(err, services.ErrStaleFencingToken) {
-				res.staleFence = true
+			if errors.Is(err, errNotLeaseOwner) {
+				// Not written: this node's tenure ran out (#364). The SETs
+				// stay pending and are redelivered.
 				return res
 			}
 		}
@@ -3354,9 +3336,8 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 		return res
 	}
 	if len(ackJtis) > 0 {
-		if err := r.ackEvents(r.ctx, ackJtis, sid, fencingToken); err != nil {
-			if errors.Is(err, services.ErrStaleFencingToken) {
-				res.staleFence = true
+		if err := r.ackEvents(r.ctx, ackJtis, sid); err != nil {
+			if errors.Is(err, errNotLeaseOwner) {
 				return res
 			}
 			eventLogger.Error("PUSH-SRV: Error acking events", "sid", sid, "count", len(ackJtis), "error", err)
@@ -3370,8 +3351,8 @@ func (r *router) pushBatchVia(jtis []string, config *model.StreamStateRecord, si
 // Classification along with the (possibly-rotated) signing key and kid. A
 // deleted or filtered-out event reports Accepted, as a no-op the caller
 // advances past.
-func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string, fencingToken int64) (goSetPush.Classification, crypto.Signer, string) {
-	res := r.pushBatch([]string{jti}, config, signingKey, kid, fencingToken)
+func (r *router) prepareAndSendEvent(jti string, config *model.StreamStateRecord, signingKey crypto.Signer, kid string) (goSetPush.Classification, crypto.Signer, string) {
+	res := r.pushBatch([]string{jti}, config, signingKey, kid)
 	if res.failedJti != "" {
 		return res.failedCls, res.key, res.kid
 	}

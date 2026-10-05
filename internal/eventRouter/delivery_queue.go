@@ -11,7 +11,6 @@ import (
 
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -93,15 +92,16 @@ var (
 // DeliveryCollectors returns the acker's Prometheus collectors for the
 // server's registry.
 func DeliveryCollectors() []prometheus.Collector {
-	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge, ackWritesTotal, ackBatchesTotal}
+	return []prometheus.Collector{deliveryInFlightGauge, ackBatchSizeHist, pollClaimedGauge, ackWritesTotal, ackBatchesTotal, readsBeforeAckTotal}
 }
 
 // ackerConfig configures one acker.
 type ackerConfig struct {
 	sid       string
 	transport string // metric label: "push" or "sstp"
-	// apply writes one coalesced ack. An error wrapping
-	// services.ErrStaleFencingToken fences the acker.
+	// apply writes one coalesced ack. An error wrapping errNotLeaseOwner
+	// means this node's lease tenure ran out before the write: nothing was
+	// written, and the batch is kept for the next drain (#364).
 	apply func(ctx context.Context, jtis []string) error
 	// onApplied, when set, runs after each apply with its JTIs and outcome,
 	// before they leave the in-flight set.
@@ -125,10 +125,8 @@ type acker struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
 	queue    []string
-	fenceErr error
 	// space is closed, and replaced, whenever the in-flight set shrinks.
 	space  chan struct{}
-	fenced chan struct{}
 	closed bool
 
 	// applyMu serialises applies, so a flush and a drain never write the same
@@ -157,7 +155,6 @@ func newAcker(ctx context.Context, cfg ackerConfig) *acker {
 		ctx:      ctx,
 		inflight: map[string]struct{}{},
 		space:    make(chan struct{}),
-		fenced:   make(chan struct{}),
 		kick:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -200,15 +197,10 @@ func (a *acker) run() {
 // reserve adds jtis to the in-flight set before they are sent and returns
 // the ones it added: a JTI already in flight is dropped, since it is being
 // sent or acked already. It waits while the set is full, and returns ctx's
-// error if ctx ends first, or the fence error once the acker is fenced.
+// error if ctx ends first.
 func (a *acker) reserve(ctx context.Context, jtis []string) ([]string, error) {
 	for {
 		a.mu.Lock()
-		if a.fenceErr != nil {
-			err := a.fenceErr
-			a.mu.Unlock()
-			return nil, err
-		}
 		fresh := make([]string, 0, len(jtis))
 		seen := make(map[string]struct{}, len(jtis))
 		for _, jti := range jtis {
@@ -239,7 +231,6 @@ func (a *acker) reserve(ctx context.Context, jtis []string) ([]string, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-a.fenced:
 		case <-space:
 		}
 	}
@@ -265,24 +256,11 @@ func (a *acker) size() int {
 // in-flight set, if they were not reserved) and stay in flight until their
 // ack is applied; released JTIs were not acked and leave the set at once,
 // still pending in the store. With a zero window the ack is applied here and
-// its error returned. Otherwise the error is the fence error, once an earlier
-// drain was fenced.
+// its error returned.
 func (a *acker) complete(acked, released []string) error {
 	a.mu.Lock()
 	for _, jti := range released {
 		delete(a.inflight, jti)
-	}
-	if a.fenceErr != nil {
-		for _, jti := range acked {
-			delete(a.inflight, jti)
-		}
-		err := a.fenceErr
-		a.shrankLocked()
-		a.mu.Unlock()
-		if len(acked) > 0 && a.cfg.onApplied != nil {
-			a.cfg.onApplied(acked, err)
-		}
-		return err
 	}
 	for _, jti := range acked {
 		a.inflight[jti] = struct{}{}
@@ -328,11 +306,6 @@ func (a *acker) close() error {
 	return err
 }
 
-// fencedCh is closed once an apply is refused on a stale fencing token.
-func (a *acker) fencedCh() <-chan struct{} {
-	return a.fenced
-}
-
 // drain applies the queued acks in one write.
 func (a *acker) drain() error {
 	a.applyMu.Lock()
@@ -345,6 +318,31 @@ func (a *acker) drain() error {
 		return nil
 	}
 	err := a.cfg.apply(a.ctx, batch)
+	if errors.Is(err, errNotLeaseOwner) {
+		// The lease manager refused the write: this node's tenure ran out
+		// before a renewal confirmed it (#364). Nothing was written. While
+		// the drain loop runs, the batch goes back to the front of the queue
+		// and stays in flight, so it is written by the first drain after the
+		// next successful heartbeat; a full in-flight set holds the sender
+		// back meanwhile. With no drain loop (a zero window, or a closed
+		// acker) the JTIs leave the set instead and stay pending in the
+		// store, to be redelivered: a duplicate at most, never a loss.
+		a.mu.Lock()
+		if a.cfg.window > 0 && !a.closed {
+			a.queue = append(batch, a.queue...)
+			a.mu.Unlock()
+			return err
+		}
+		for _, jti := range batch {
+			delete(a.inflight, jti)
+		}
+		a.shrankLocked()
+		a.mu.Unlock()
+		if a.cfg.onApplied != nil {
+			a.cfg.onApplied(batch, err)
+		}
+		return err
+	}
 	ackBatchSizeHist.WithLabelValues(a.cfg.transport).Observe(float64(len(batch)))
 	if a.cfg.onApplied != nil {
 		a.cfg.onApplied(batch, err)
@@ -352,10 +350,6 @@ func (a *acker) drain() error {
 	a.mu.Lock()
 	for _, jti := range batch {
 		delete(a.inflight, jti)
-	}
-	if err != nil && errors.Is(err, services.ErrStaleFencingToken) && a.fenceErr == nil {
-		a.fenceErr = err
-		close(a.fenced)
 	}
 	a.shrankLocked()
 	a.mu.Unlock()
@@ -407,6 +401,15 @@ var (
 		Subsystem: "router",
 		Name:      "ack_batches_total",
 		Help:      "Acknowledgement batches handed to the delivery queues: one per push batch, poll request or SSTP frame that acknowledged anything.",
+	})
+	// readsBeforeAckTotal counts coordinator calls made on the acknowledgement
+	// path before its AckBatch (#364). The design value is zero: the
+	// leaseManager answers ownership from memory.
+	readsBeforeAckTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "goSignals",
+		Subsystem: "router",
+		Name:      "reads_before_ack_total",
+		Help:      "Store or coordinator calls made on the acknowledgement path before its write (design value 0).",
 	})
 )
 
@@ -763,7 +766,7 @@ func (q *deliveryQueue) removeLocked(qr *queuedRef, receiverAck bool) {
 // runners' accepted SETs (receiverAck) and subject-filter discards. Each held
 // reference is acknowledged under its AckJti, with its outbound copy when
 // this node served it and receiverAck is set. One Ack call.
-func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiverAck bool, fencingToken int64) (int64, error) {
+func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiverAck bool) (int64, error) {
 	if len(inbound) == 0 {
 		return 0, nil
 	}
@@ -792,7 +795,7 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 		}
 	}
 	q.mu.Unlock()
-	n, err := q.write(ctx, ackJtis, copies, fencingToken)
+	n, err := q.write(ctx, ackJtis, copies)
 	if err != nil {
 		return n, err
 	}
@@ -811,7 +814,7 @@ func (q *deliveryQueue) AckInbound(ctx context.Context, inbound []string, receiv
 // held references whose AckJti is in the batch. setErrs store no copy. It
 // returns the inbound JTIs of the dropped references, for the caller's
 // buffer.
-func (q *deliveryQueue) AckWire(ctx context.Context, acks []string, setErrs []string, fencingToken int64) ([]string, int64, error) {
+func (q *deliveryQueue) AckWire(ctx context.Context, acks []string, setErrs []string) ([]string, int64, error) {
 	if len(acks) == 0 && len(setErrs) == 0 {
 		return nil, 0, nil
 	}
@@ -834,7 +837,7 @@ func (q *deliveryQueue) AckWire(ctx context.Context, acks []string, setErrs []st
 		}
 	}
 	q.mu.Unlock()
-	n, err := q.write(ctx, all, copies, fencingToken)
+	n, err := q.write(ctx, all, copies)
 	if err != nil {
 		return nil, n, err
 	}
@@ -850,21 +853,31 @@ func (q *deliveryQueue) AckWire(ctx context.Context, acks []string, setErrs []st
 	return inbound, n, nil
 }
 
-// write is the queue's one acknowledgement write: the fence check, the
+// write is the queue's one acknowledgement write: the ownership check, the
 // retention expiry (#360), then one AckBatch with the copies.
-func (q *deliveryQueue) write(ctx context.Context, ackJtis []string, copies []*model.EventRecord, fencingToken int64) (int64, error) {
+//
+// Ownership is answered by the router's leaseManager from memory (#364): no
+// store or coordinator call precedes the AckBatch, and the region up to it is
+// tracked so one that did would be counted in
+// goSignals_router_reads_before_ack_total. A node whose tenure has run out
+// writes nothing and returns errNotLeaseOwner; the SETs stay pending.
+func (q *deliveryQueue) write(ctx context.Context, ackJtis []string, copies []*model.EventRecord) (int64, error) {
 	if len(ackJtis) == 0 {
 		return 0, nil
 	}
 	ackBatchesTotal.Inc()
-	if err := q.r.checkAckFence(q.sid, fencingToken); err != nil {
-		return 0, err
+	q.r.locks.enterAck()
+	if !q.r.stillOwnsAck(q.sid) {
+		q.r.locks.exitAck()
+		eventLogger.Debug("ROUTER: lease tenure ended, acknowledgement batch skipped", "sid", q.sid, "count", len(ackJtis))
+		return 0, errNotLeaseOwner
 	}
 	ackDate := time.Now()
 	var expireAt *time.Time
 	if q.r.retentionWindow != nil {
 		expireAt = ackExpireAt(q.r.retentionWindow, q.stream(), ackDate)
 	}
+	q.r.locks.exitAck()
 	ackWritesTotal.Inc()
 	n, err := q.r.eventService.AckBatch(ctx, interfaces.AckBatch{StreamID: q.sid, Jtis: ackJtis, AckDate: ackDate, ExpireAt: expireAt, Copies: copies})
 	if err != nil {

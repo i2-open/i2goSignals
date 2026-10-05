@@ -127,7 +127,7 @@ func TestOpenPersistence_Memory(t *testing.T) {
 	assert.NotNil(t, p.Storage, "Storage must be set")
 
 	// Coordinator seam exercises the real (non-stub) MemoryCoordinator.
-	ok, _, err := p.Coordinator.TryAcquireOrRenewLease("smoke", "node-A", 5_000_000_000)
+	ok, _, _, err := p.Coordinator.TryAcquireOrRenewLease("smoke", "node-A", 5_000_000_000)
 	assert.NoError(t, err)
 	assert.True(t, ok, "MemoryCoordinator should grant first acquire")
 

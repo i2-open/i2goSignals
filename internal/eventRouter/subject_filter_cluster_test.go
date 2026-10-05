@@ -109,7 +109,7 @@ func TestNotifySubjectFilterChange_LocalOwnerInvalidatesWithoutHop(t *testing.T)
 
 	// node-A owns the push-transmitter lease for this stream.
 	resource := fmt.Sprintf("push-transmitter:%s", sid)
-	acquired, _, err := h.router.coordinator.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
+	acquired, _, _, err := h.router.coordinator.TryAcquireOrRenewLease(resource, "node-A", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 
@@ -169,7 +169,7 @@ func TestNotifySubjectFilterChange_RemoteOwnerSendsFilterChangeWake(t *testing.T
 		Address: peer.URL,
 	}))
 	resource := fmt.Sprintf("push-transmitter:%s", sid)
-	acquired, _, err := h.router.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
+	acquired, _, _, err := h.router.coordinator.TryAcquireOrRenewLease(resource, "node-B", 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 

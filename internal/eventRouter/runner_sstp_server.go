@@ -135,7 +135,7 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 	// JTIs: drop the matched references' inbound JTIs and the wire JTIs (a
 	// Forward stream's acknowledgement JTI is its inbound JTI).
 	if len(wireAcks) > 0 || len(wireClears) > 0 {
-		matched, _, err := r.queueFor(txSid).AckWire(r.ctx, wireAcks, wireClears, services.NoFencingToken)
+		matched, _, err := r.queueFor(txSid).AckWire(r.ctx, wireAcks, wireClears)
 		if err != nil {
 			eventLogger.Warn("SSTP-SRV: Error acknowledging outbound SETs", "sid", txSid, "error", err)
 		}

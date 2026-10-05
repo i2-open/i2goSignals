@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter/buffer"
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
 	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
-	"github.com/i2-open/i2goSignals/pkg/services"
 	"github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -71,7 +71,14 @@ type SstpOutbound interface {
 	// released so it is re-drained on a later cycle. When acked is empty
 	// the entire sent set is treated as accepted (§2.3 success-without-
 	// detail). Returns the number of acked (and counted) events.
-	AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int
+	AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord) int
+
+	// NoteLease reports the outcome of one acquire-or-renew call the dialer
+	// made on the pair's sstp-client lease, so the router's lease manager
+	// answers the pair's acknowledgement ownership from memory (#364). start
+	// is when the call began; held false (a lost, refused or released lease)
+	// makes the pair's acknowledgements stop at once.
+	NoteLease(pairId string, start time.Time, held bool, leaseUntil time.Time, leaseDuration time.Duration)
 
 	// OutboundAckJti returns the acknowledgement JTI the SET with inboundJti
 	// carries on stream (#363): the jti the dialer signs into its copy and
@@ -263,11 +270,15 @@ func (r *router) ResolveEvents(pairId string, claimed []string) []*model.EventRe
 	return events
 }
 
-func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int {
+func (r *router) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord) int {
 	r.mu.RLock()
 	buf := r.sstpBuffers[stream.PairId]
 	r.mu.RUnlock()
-	return r.handleSstpAcks(stream, buf, acked, sent, fencingToken)
+	return r.handleSstpAcks(stream, buf, acked, sent)
+}
+
+func (r *router) NoteLease(pairId string, start time.Time, held bool, leaseUntil time.Time, leaseDuration time.Duration) {
+	r.leases.note(cluster.SstpClientResource(pairId), start, held, leaseUntil, leaseDuration)
 }
 
 func (r *router) OutboundAckJti(stream *model.StreamStateRecord, inboundJti string) string {
@@ -541,7 +552,7 @@ func (r *router) releaseSstpClaims(pairId string, jtis []string) {
 // ack (US 5). Any sent-but-NOT-acked JTI likewise has its claim released so
 // it is re-drained on a later cycle. Returns the number of acked (and
 // counted) events.
-func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord, fencingToken int64) int {
+func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffer.EventPollBuffer, acked []string, sent []*model.EventRecord) int {
 	pairId := stream.PairId
 	if len(sent) == 0 {
 		return 0
@@ -580,14 +591,15 @@ func (r *router) handleSstpAcks(stream *model.StreamStateRecord, eventBuf *buffe
 	// them out, and clear their in-flight claim. The provider ack is queued on
 	// the pair's coalescing acker (#336) and the rest follows once it is
 	// written, so the claim holds the SET until its ack is durable: a
-	// concurrent cycle cannot re-send it meanwhile. A failed or fenced ack
-	// releases the claim and the SET, still pending, is retried.
+	// concurrent cycle cannot re-send it meanwhile. A failed ack releases the
+	// claim and the SET, still pending, is retried; one the lease manager
+	// refused waits in the acker for the next renewal (#364).
 	if len(ackedJtis) > 0 {
 		events := make(map[string]sstpAckedSet, len(ackedJtis))
 		for _, jti := range ackedJtis {
 			events[jti] = sstpAckedSet{ev: sentByJti[jti], buf: eventBuf}
 		}
-		ack := r.sstpAckerFor(stream, fencingToken)
+		ack := r.sstpAckerFor(stream)
 		ack.addPending(events)
 		_ = ack.complete(ackedJtis, nil)
 	}
@@ -690,11 +702,11 @@ func (r *router) releaseSstpSecondPushSlot(pairId string) {
 	delete(r.sstpSecondPushInFlight, pairId)
 }
 
-// sstpPairAcker is one SSTP-client pair's coalescing acker (#336), bound to
-// the fencing token of the dialer tenure that created it.
+// sstpPairAcker is one SSTP-client pair's coalescing acker (#336). It
+// outlives a dialer tenure: each write asks the lease manager whether this
+// node still owns the pair (#364).
 type sstpPairAcker struct {
 	*acker
-	token int64
 
 	mu     sync.Mutex
 	events map[string]sstpAckedSet
@@ -740,11 +752,8 @@ func (r *router) sstpAcker(pairId string) *acker {
 	return nil
 }
 
-// sstpAckerFor returns the pair's acker for fencingToken, creating it on
-// first use. An acker left from an earlier tenure is closed, which writes its
-// queued acks under their own token (refused, and so retried, if that tenure
-// has ended).
-func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int64) *sstpPairAcker {
+// sstpAckerFor returns the pair's acker, creating it on first use.
+func (r *router) sstpAckerFor(stream *model.StreamStateRecord) *sstpPairAcker {
 	pairId := stream.PairId
 	sid := stream.StreamConfiguration.Id
 	r.mu.Lock()
@@ -752,19 +761,19 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 		r.sstpAckers = map[string]*sstpPairAcker{}
 	}
 	cur := r.sstpAckers[pairId]
-	if cur != nil && cur.token == fencingToken {
+	if cur != nil {
 		r.mu.Unlock()
 		return cur
 	}
-	p := &sstpPairAcker{token: fencingToken, events: map[string]sstpAckedSet{}}
+	p := &sstpPairAcker{events: map[string]sstpAckedSet{}}
 	p.acker = newAcker(r.ctx, ackerConfig{
 		sid:       sid,
 		transport: "sstp",
 		window:    r.ackCoalesceWindow,
 		max:       r.inFlightMax(),
 		apply: func(ctx context.Context, jtis []string) error {
-			err := r.ackEvents(ctx, jtis, sid, fencingToken)
-			if err != nil && !errors.Is(err, services.ErrStaleFencingToken) {
+			err := r.ackEvents(ctx, jtis, sid)
+			if err != nil && !errors.Is(err, errNotLeaseOwner) {
 				// Not acked: the SETs stay pending and are redelivered, so WARN
 				// (the DAO logs the store failure itself).
 				eventLogger.Warn("SSTP: Error acking outbound events", "sid", sid, "count", len(jtis), "error", err)
@@ -792,8 +801,5 @@ func (r *router) sstpAckerFor(stream *model.StreamStateRecord, fencingToken int6
 	})
 	r.sstpAckers[pairId] = p
 	r.mu.Unlock()
-	if cur != nil {
-		_ = cur.close()
-	}
 	return p
 }

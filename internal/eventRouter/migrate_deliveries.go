@@ -53,7 +53,7 @@ func migrateLegacyDeliveries(ctx context.Context, es *services.EventService, coo
 	}
 	var lastLog time.Time
 	for {
-		held, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL)
+		held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL)
 		if err == nil && held {
 			break
 		}
@@ -80,7 +80,7 @@ func migrateLegacyDeliveries(ctx context.Context, es *services.EventService, coo
 			case <-renewCtx.Done():
 				return
 			case <-t.C:
-				if held, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL); err != nil || !held {
+				if held, _, _, err := coord.TryAcquireOrRenewLease(migrationLeaseResource, nodeId, migrationLeaseTTL); err != nil || !held {
 					eventLogger.Warn("ROUTER: deliveries migration lease renewal failed", "resource", migrationLeaseResource, "node", nodeId, "held", held, "error", err)
 				}
 			}

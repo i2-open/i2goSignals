@@ -624,16 +624,9 @@ the structural fix that keeps the two adapters in lockstep.
 ### Fencing token
 
 Monotonically increasing per-resource counter handed back from
-`TryAcquireOrRenewLease`. Callers tag externally-visible operations
-(e.g. ack-event, push-receipt) with the fencing token so a stale node
-that lost its lease can be rejected at the boundary even if it's still
-trying to write. The `MemoryCoordinator`'s contract guarantees the
+`TryAcquireOrRenewLease`. The `MemoryCoordinator`'s contract guarantees the
 token never moves backward across the lifetime of a coordinator
-instance, even after takeover. `EventService.AckEvent(s)` checks the
-token against the stream's current lease before writing; modes that
-hold no lease (poll transmitter, SSTP server side) pass
-`NoFencingToken` (0) and are exempt only because the router reports no
-lease resource for the stream — a 0 token on a leased stream is refused.
+instance, even after takeover.
 
 ### Rebindable collection
 

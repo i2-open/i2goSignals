@@ -286,7 +286,7 @@ func BenchmarkMongoRouter(b *testing.B) {
 			if _, err := tok.JWS(jwt.SigningMethodRS256, m.signer); err != nil {
 				b.Fatal(err)
 			}
-			if err := m.p.EventService.AckEvent(context.Background(), jtis[i].Jti, m.outSid, 0); err != nil {
+			if err := m.p.EventService.AckEvent(context.Background(), jtis[i].Jti, m.outSid); err != nil {
 				b.Fatal(err)
 			}
 		}

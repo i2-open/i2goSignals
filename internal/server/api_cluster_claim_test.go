@@ -193,7 +193,7 @@ func TestApplicationRouter_WakeReachesPeerOverHTTP(t *testing.T) {
 	const sid = "s-358-app"
 	now := time.Now().UTC()
 	require.NoError(t, p.Coordinator.RegisterNode(model.ClusterNode{Id: "node-b", Address: nodeB.URL, StartedAt: now, LastSeenAt: now}))
-	acquired, _, err := p.Coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), "node-b", time.Minute)
+	acquired, _, _, err := p.Coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), "node-b", time.Minute)
 	require.NoError(t, err)
 	require.True(t, acquired)
 

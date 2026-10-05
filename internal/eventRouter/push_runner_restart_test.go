@@ -312,7 +312,7 @@ type countingCoordinator struct {
 	attempts atomic.Int64
 }
 
-func (c *countingCoordinator) TryAcquireOrRenewLease(resource, nodeId string, d time.Duration) (bool, int64, error) {
+func (c *countingCoordinator) TryAcquireOrRenewLease(resource, nodeId string, d time.Duration) (bool, int64, time.Time, error) {
 	c.attempts.Add(1)
 	return c.ClusterCoordinator.TryAcquireOrRenewLease(resource, nodeId, d)
 }
@@ -551,7 +551,7 @@ func TestPushRunnerRestart_RunnerWaitingForLeaseExits(t *testing.T) {
 	})
 	stream := h.createPushStream(t, "NONE")
 	sid := stream.StreamConfiguration.Id
-	held, _, err := coord.ClusterCoordinator.TryAcquireOrRenewLease("push-transmitter:"+sid, "node-other", time.Hour)
+	held, _, _, err := coord.ClusterCoordinator.TryAcquireOrRenewLease("push-transmitter:"+sid, "node-other", time.Hour)
 	require.NoError(t, err)
 	require.True(t, held)
 

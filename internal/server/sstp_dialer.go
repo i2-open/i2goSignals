@@ -714,7 +714,7 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 			return
 		}
 
-		acquired, fencingToken, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+		acquired, fencingToken, err := d.tryLease(resource, pairId)
 		if s := d.statsSink(); s != nil {
 			s.TrackLeaseAcquisition(resource, acquired && err == nil)
 		}
@@ -734,14 +734,16 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 			continue
 		}
 
-		sstpDialerLog.Info("lease acquired, opening connection", "pairId", pairId)
+		// The fencing token stays on the lease row and in the log; acks no
+		// longer carry it (#364).
+		sstpDialerLog.Info("lease acquired, opening connection", "pairId", pairId, "fencingToken", fencingToken)
 		// Takeover jitter (Q16): spread thundering-herd after a cluster blip.
 		if !d.cfg.Sleep(ctx, d.cfg.Jitter()) {
 			d.releaseLease(resource, pairId)
 			return
 		}
 
-		shouldRetry := d.runCycleLoop(ctx, pairId, fencingToken)
+		shouldRetry := d.runCycleLoop(ctx, pairId)
 		d.releaseLease(resource, pairId)
 		if !shouldRetry {
 			return
@@ -758,6 +760,10 @@ func (d *SstpDialer) runPair(ctx context.Context, pairId string) {
 // releaseLease explicitly releases the Mongo lease so the next node can take
 // over immediately (Q14.b graceful-shutdown / lease-loss handoff).
 func (d *SstpDialer) releaseLease(resource, pairId string) {
+	// The router stops acknowledging for the pair first (#364).
+	if d.outbound != nil {
+		d.outbound.NoteLease(pairId, time.Time{}, false, time.Time{}, 0)
+	}
 	if err := d.coordinator.ReleaseLeaseIfOwned(resource, d.nodeID); err != nil {
 		sstpDialerLog.Warn("lease release failed", "pairId", pairId, "error", err)
 	}
@@ -770,7 +776,7 @@ func (d *SstpDialer) releaseLease(resource, pairId string) {
 // shutting down cancels cycleCtx, aborting any in-flight cycle (Q14.a).
 // Returns true when the caller should attempt to re-acquire (lease lost),
 // false to exit (shutdown, pair removed, stream disabled).
-func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fencingToken int64) bool {
+func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string) bool {
 	if s := d.statsSink(); s != nil {
 		s.IncLeasesHeld()
 		defer s.DecLeasesHeld()
@@ -783,16 +789,9 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 	cycleCtx, cycleCancel := context.WithCancel(parentCtx)
 	defer cycleCancel()
 
-	// The fencing token is strictly monotonic per resource (ClusterCoordinator
-	// contract): every successful acquire/renew increments it. Downstream
-	// ack ownership checks (eventService.AckEvent) compare against the
-	// stored expected token, so a stale value silently no-ops all acks
-	// after the first heartbeat renew. Publish it atomically so the
-	// heartbeat can update it in place while the cycle reads it.
-	var currentFencingToken atomic.Int64
-	currentFencingToken.Store(fencingToken)
-
-	go d.heartbeat(cycleCtx, cycleCancel, resource, pairId, &currentFencingToken)
+	// Each renewal is reported to the router's lease manager (tryLease), which
+	// answers the pair's acknowledgement ownership from memory (#364).
+	go d.heartbeat(cycleCtx, cycleCancel, resource, pairId)
 
 	delay := d.cfg.BaseDelay
 
@@ -836,7 +835,7 @@ func (d *SstpDialer) runCycleLoop(parentCtx context.Context, pairId string, fenc
 		// Run the primary cycle concurrently so the loop can react to a new
 		// outbound SET arriving while the peer holds this cycle's connection
 		// as a long-poll (push-while-poll-held, Q7.2, #166).
-		outcome, resumeDelay, exit, updatedPending := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, currentFencingToken.Load(), &delay, pending)
+		outcome, resumeDelay, exit, updatedPending := d.runPrimaryCycleWithSecondPush(cycleCtx, &streamCopy, &delay, pending)
 		_ = outcome
 		pending = updatedPending
 		if exit {
@@ -891,7 +890,7 @@ type secondPushDebt struct {
 // the updated pending-inbound-acks list (AC 1) — the primary owns the ack
 // list; the second push carries no Ack (returnEvents=false request, so the
 // peer already has no state that needs an ack echoed on that side POST).
-func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration, pending sstpPendingFeedback) (goSetSstp.Classification, time.Duration, bool, sstpPendingFeedback) {
+func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *model.StreamStateRecord, delay *time.Duration, pending sstpPendingFeedback) (goSetSstp.Classification, time.Duration, bool, sstpPendingFeedback) {
 	pairId := stream.PairId
 	type cycleResult struct {
 		cls     goSetSstp.Classification
@@ -901,7 +900,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 	}
 	done := make(chan cycleResult, 1)
 	go func() {
-		cls, dly, exit, updated := d.runCycle(ctx, stream, fencingToken, delay, pending)
+		cls, dly, exit, updated := d.runCycle(ctx, stream, delay, pending)
 		done <- cycleResult{cls: cls, delay: dly, exit: exit, pending: updated}
 	}()
 
@@ -947,7 +946,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 		secondPushWg.Add(1)
 		go func() {
 			defer secondPushWg.Done()
-			_, outcome := d.runSecondPush(ctx, &streamCopy, fencingToken)
+			_, outcome := d.runSecondPush(ctx, &streamCopy)
 			if outcome == secondPushRemaining || outcome == secondPushSkipped {
 				debt.pushOwed.Store(true)
 			}
@@ -1015,7 +1014,7 @@ func (d *SstpDialer) runPrimaryCycleWithSecondPush(ctx context.Context, stream *
 // exchange. This cycle's own inbound half (verified via goSetSstp.VerifySET,
 // fed to HandleInboundEvent WITHOUT re-parse — AC 2) becomes the returned
 // feedback so it rides the NEXT request.
-func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64, delay *time.Duration, pending sstpPendingFeedback) (goSetSstp.Classification, time.Duration, bool, sstpPendingFeedback) {
+func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateRecord, delay *time.Duration, pending sstpPendingFeedback) (goSetSstp.Classification, time.Duration, bool, sstpPendingFeedback) {
 	pairId := stream.PairId
 
 	// Gather the outbound JTIs to flush this cycle. Drain the buffer first
@@ -1070,7 +1069,7 @@ func (d *SstpDialer) runCycle(ctx context.Context, stream *model.StreamStateReco
 		// actually accepted is acked).
 		newFeedback := d.runInboundHalf(stream, received)
 		cleared, fatal := clearedOutbound(stream.PairId, acked, cls.SetErrs)
-		ackedCount := d.outbound.AckOutbound(stream, cleared, events, fencingToken)
+		ackedCount := d.outbound.AckOutbound(stream, cleared, events)
 		*delay = d.cfg.BaseDelay
 
 		// AC 1: the peer accepted the request, so the feedback we just echoed is
@@ -1251,16 +1250,16 @@ func (d *SstpDialer) validationStats() *PrometheusHandler {
 // failure is retried once after a short pause before the lease is declared
 // lost (Q14.c) — one-shot Mongo blips do not trigger takeover churn. On a
 // confirmed loss it cancels cycleCtx, aborting any in-flight cycle (Q14.a).
-// currentFencingToken is updated with the fresh token on every successful
-// renew so downstream ack ownership checks (eventService.AckEvent) see the
-// live token rather than the initial acquire's value.
-func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFunc, resource, pairId string, currentFencingToken *atomic.Int64) {
+// Every renewal reaches the router's lease manager through tryLease, so the
+// pair's acknowledgements stop within the lease safety margin of a missed
+// renewal (#364).
+func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFunc, resource, pairId string) {
 	ticker := time.NewTicker(d.cfg.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			if d.renewLeaseWithRetry(cycleCtx, resource, pairId, currentFencingToken) {
+			if d.renewLeaseWithRetry(cycleCtx, resource, pairId) {
 				continue
 			}
 			sstpDialerLog.Warn("lease lost, cancelling in-flight cycle", "pairId", pairId)
@@ -1274,16 +1273,13 @@ func (d *SstpDialer) heartbeat(cycleCtx context.Context, cancel context.CancelFu
 
 // renewLeaseWithRetry attempts a lease renew; on failure retries exactly
 // once after HeartbeatRetryDelay (cancellable via ctx). Returns true while
-// ownership is retained, false once the lease is confirmed lost. On success
-// stores the fresh fencing token into currentFencingToken so subsequent
-// AckOutbound/AckEvent calls carry the live value.
-func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId string, currentFencingToken *atomic.Int64) bool {
-	ok, token, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+// ownership is retained, false once the lease is confirmed lost.
+func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId string) bool {
+	ok, _, err := d.tryLease(resource, pairId)
 	if s := d.statsSink(); s != nil {
 		s.TrackLeaseAcquisition(resource, ok && err == nil)
 	}
 	if ok && err == nil {
-		currentFencingToken.Store(token)
 		return true
 	}
 	sstpDialerLog.Debug("heartbeat renew blip, retrying once", "pairId", pairId, "error", err)
@@ -1296,15 +1292,24 @@ func (d *SstpDialer) renewLeaseWithRetry(ctx context.Context, resource, pairId s
 		return false
 	}
 
-	ok, token, err = d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+	ok, _, err = d.tryLease(resource, pairId)
 	if s := d.statsSink(); s != nil {
 		s.TrackLeaseAcquisition(resource, ok && err == nil)
 	}
-	if ok && err == nil {
-		currentFencingToken.Store(token)
-		return true
+	return ok && err == nil
+}
+
+// tryLease makes one acquire-or-renew call on the pair's lease and reports
+// its outcome to the router's lease manager (SstpOutbound.NoteLease), which
+// answers the pair's acknowledgement ownership from it (#364). Its results
+// are the coordinator's.
+func (d *SstpDialer) tryLease(resource, pairId string) (bool, int64, error) {
+	start := time.Now()
+	held, token, leaseUntil, err := d.coordinator.TryAcquireOrRenewLease(resource, d.nodeID, d.cfg.LeaseDuration)
+	if d.outbound != nil {
+		d.outbound.NoteLease(pairId, start, held && err == nil, leaseUntil, d.cfg.LeaseDuration)
 	}
-	return false
+	return held, token, err
 }
 
 // secondPushOutcome is how a push-while-poll-held run ended, so the pair loop
@@ -1348,7 +1353,7 @@ const (
 //
 // It reports how the run ended, so the pair loop knows whether outbound work
 // may still be owed.
-func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) (goSetSstp.Classification, secondPushOutcome) {
+func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStateRecord) (goSetSstp.Classification, secondPushOutcome) {
 	pairId := stream.PairId
 
 	if !d.outbound.AcquireSecondPushSlot(pairId) {
@@ -1360,7 +1365,7 @@ func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStat
 	for ctx.Err() == nil {
 		var outcome secondPushOutcome
 		var more bool
-		cls, outcome, more = d.pushBatchWhilePollHeld(ctx, stream, fencingToken)
+		cls, outcome, more = d.pushBatchWhilePollHeld(ctx, stream)
 		if !more {
 			return cls, outcome
 		}
@@ -1372,7 +1377,7 @@ func (d *SstpDialer) runSecondPush(ctx context.Context, stream *model.StreamStat
 // when there is nothing more this path should send now, and outcome says why:
 // the buffer is empty, the peer left part of the batch unacked, or the
 // exchange failed.
-func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord, fencingToken int64) (cls goSetSstp.Classification, outcome secondPushOutcome, more bool) {
+func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.StreamStateRecord) (cls goSetSstp.Classification, outcome secondPushOutcome, more bool) {
 	pairId := stream.PairId
 
 	outJtis := d.outbound.ClaimOutbound(pairId, d.cfg.BackfillBatch)
@@ -1417,7 +1422,7 @@ func (d *SstpDialer) pushBatchWhilePollHeld(ctx context.Context, stream *model.S
 		// deterministically — such a rejection clears the SET on the same terms
 		// as an ack, while a retryable one stays pending for a later cycle.
 		cleared, fatal := clearedOutbound(pairId, acked, cls.SetErrs)
-		ackedCount := d.outbound.AckOutbound(stream, cleared, events, fencingToken)
+		ackedCount := d.outbound.AckOutbound(stream, cleared, events)
 		// A peer whose acceptor opportunistically ships queued outbound SETs
 		// on any 200 response (permitted by §2.1 semantics — returnEvents=false
 		// forbids long-poll waiting, not the return of already-queued SETs)

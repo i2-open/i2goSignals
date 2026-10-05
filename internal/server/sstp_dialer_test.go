@@ -194,12 +194,15 @@ func (f *fakeSstpOutbound) OutboundServed(*model.StreamStateRecord, *model.Event
 
 func (f *fakeSstpOutbound) OutboundHandedOut(*model.StreamStateRecord, []string) {}
 
+// NoteLease is a no-op: the fake has no lease manager.
+func (f *fakeSstpOutbound) NoteLease(string, time.Time, bool, time.Time, time.Duration) {}
+
 // AckOutbound mirrors the router's AC 3 semantics after PRD #49 slice 2c:
 // only the JTIs explicitly listed in `acked` are removed from the buffer.
 // An empty ack list confirms NOTHING — every sent SET has its in-flight
 // claim released so it is re-drained and retried on a later cycle (US 5
 // literal-ack semantics; the historical ack-all-sent fallback is gone).
-func (f *fakeSstpOutbound) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord, fencingToken int64) int {
+func (f *fakeSstpOutbound) AckOutbound(stream *model.StreamStateRecord, acked []string, sent []*model.EventRecord) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	sentSet := map[string]bool{}
@@ -349,12 +352,12 @@ type oneShotCoordinator struct {
 	fencing  int64
 }
 
-func (c *oneShotCoordinator) TryAcquireOrRenewLease(resource, nodeId string, d time.Duration) (bool, int64, error) {
+func (c *oneShotCoordinator) TryAcquireOrRenewLease(resource, nodeId string, d time.Duration) (bool, int64, time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.acquired.Store(true)
 	c.fencing++
-	return true, c.fencing, nil
+	return true, c.fencing, time.Now().Add(d), nil
 }
 
 func (c *oneShotCoordinator) ReleaseLeaseIfOwned(resource, nodeId string) error {

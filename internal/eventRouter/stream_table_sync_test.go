@@ -93,7 +93,7 @@ func countingPeer(t *testing.T, status func(call int32) int) (*httptest.Server, 
 // holdLease makes node the stream's push-transmitter lease holder.
 func holdLease(t *testing.T, r *router, sid, node string) {
 	t.Helper()
-	acquired, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), node, 30*time.Second)
+	acquired, _, _, err := r.coordinator.TryAcquireOrRenewLease(cluster.PushTransmitterResource(sid), node, 30*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
 }
