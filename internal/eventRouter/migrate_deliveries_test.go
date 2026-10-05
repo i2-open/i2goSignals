@@ -25,10 +25,15 @@ type migrateDAO struct {
 	calls atomic.Int32
 	took  time.Duration
 	err   error
+	// notReadyFor answers ErrStoreNotReady to the first notReadyFor calls.
+	notReadyFor int32
 }
 
 func (d *migrateDAO) MigrateLegacyDeliveries(context.Context, func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
-	d.calls.Add(1)
+	n := d.calls.Add(1)
+	if n <= d.notReadyFor {
+		return interfaces.MigrationResult{}, fmt.Errorf("%w: unbound", interfaces.ErrStoreNotReady)
+	}
 	if d.took > 0 {
 		time.Sleep(d.took)
 	}
@@ -176,21 +181,30 @@ func TestMigrationExpireAt(t *testing.T) {
 	assert.Nil(t, migrationExpireAt(nil, states)("s1", ack), "no window function")
 }
 
-// A store that is not connected yet does not wait for the lease and does not
-// stop NewRouter: the migration is deferred to the next start.
+// A store that is not connected yet does not wait for the lease: the call
+// returns ErrStoreNotReady at once.
 func TestMigrateLegacyDeliveries_StoreNotReady(t *testing.T) {
 	coord := &notReadyCoordinator{ClusterCoordinator: memory_provider.NewMemoryCoordinator()}
 	dao := &migrateDAO{}
 	_, err := migrateLegacyDeliveries(t.Context(), services.NewEventService(dao), coord, "node-a", nil)
 	assert.ErrorIs(t, err, interfaces.ErrStoreNotReady)
 	assert.EqualValues(t, 0, dao.calls.Load())
+}
+
+// NewRouter waits for a store that is not connected yet and runs the
+// migration once it is, before any delivery goroutine starts (#361): it does
+// not start without the migration.
+func TestNewRouter_WaitsForTheStoreBeforeTheMigration(t *testing.T) {
+	prev := migrationLeaseRetry
+	migrationLeaseRetry = 5 * time.Millisecond
+	t.Cleanup(func() { migrationLeaseRetry = prev })
 
 	p := openMemPersistence(t)
-	es := services.NewEventService(&migrateDAO{EventDAO: p.EventDAO, err: fmt.Errorf("%w: unbound", interfaces.ErrStoreNotReady)})
-	assert.NotPanics(t, func() {
-		r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: es, Coordinator: p.Coordinator}, "node-mig")
-		r.Shutdown()
-	})
+	dao := &migrateDAO{EventDAO: p.EventDAO, notReadyFor: 3}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator}, "node-mig")
+	t.Cleanup(r.Shutdown)
+	assert.EqualValues(t, 4, dao.calls.Load(), "NewRouter returned before the migration ran on a ready store")
+	assert.True(t, leaseFree(t, p.Coordinator), "lease held after the migration")
 }
 
 // notReadyCoordinator is a coordinator whose store is not connected.

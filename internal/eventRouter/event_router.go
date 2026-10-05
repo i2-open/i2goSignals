@@ -468,13 +468,8 @@ func NewRouter(deps RouterDeps, nodeId string) EventRouter {
 	// that reads or writes deliveries starts before step 2 completes.
 	states := router.streamService.GetStateMap(ctx)
 	if deps.EventService != nil {
-		res, err := migrateLegacyDeliveries(ctx, deps.EventService, deps.Coordinator, nodeId, migrationExpireAt(deps.RetentionWindow, states))
+		res, err := migrateUntilStoreReady(ctx, deps.EventService, deps.Coordinator, nodeId, migrationExpireAt(deps.RetentionWindow, states))
 		switch {
-		case errors.Is(err, interfaces.ErrStoreNotReady):
-			// The store is not connected yet (background reconnect): the node
-			// starts as it did before the migration existed, and the next
-			// start with the store up runs the idempotent migration.
-			eventLogger.Warn("ROUTER: store not connected at startup; legacy deliveries migration deferred to the next start", "error", err)
 		case err != nil:
 			// Refuse to start: new SETs would otherwise be delivered ahead of
 			// stranded older ones. The migration is idempotent, so the

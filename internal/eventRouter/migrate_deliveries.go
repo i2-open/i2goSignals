@@ -38,6 +38,28 @@ func migrationExpireAt(window services.EffectiveWindowFunc, states map[string]mo
 	}
 }
 
+// migrateUntilStoreReady runs migrateLegacyDeliveries and, while the store is
+// not connected yet (background reconnect), retries every
+// migrationLeaseRetry, logging at WARN every migrationWaitLogEvery. NewRouter
+// therefore starts no delivery goroutine until the migration has run on a
+// connected store (#361). Any other error, or ctx ending, is returned.
+func migrateUntilStoreReady(ctx context.Context, es *services.EventService, coord cluster.ClusterCoordinator, nodeId string, expireAt func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
+	var lastLog time.Time
+	for {
+		res, err := migrateLegacyDeliveries(ctx, es, coord, nodeId, expireAt)
+		if !errors.Is(err, interfaces.ErrStoreNotReady) {
+			return res, err
+		}
+		if now := time.Now(); now.Sub(lastLog) >= migrationWaitLogEvery {
+			lastLog = now
+			eventLogger.Warn("ROUTER: store not connected; waiting to run the legacy deliveries migration before starting delivery", "node", nodeId, "error", err)
+		}
+		if !SleepCtx(ctx, migrationLeaseRetry) {
+			return interfaces.MigrationResult{}, ctx.Err()
+		}
+	}
+}
+
 // migrateLegacyDeliveries runs EventService.MigrateLegacyDeliveries. With a
 // coordinator it holds the migration lease for the whole pass: a node refused
 // the lease retries every migrationLeaseRetry (logging at INFO every
@@ -46,7 +68,7 @@ func migrationExpireAt(window services.EffectiveWindowFunc, states map[string]mo
 // is renewed while the migration runs and released before returning, also on
 // failure. With a nil coordinator the migration runs directly. A store that is
 // not connected yet returns an error wrapping interfaces.ErrStoreNotReady
-// without waiting.
+// without waiting; migrateUntilStoreReady retries it.
 func migrateLegacyDeliveries(ctx context.Context, es *services.EventService, coord cluster.ClusterCoordinator, nodeId string, expireAt func(string, time.Time) *time.Time) (interfaces.MigrationResult, error) {
 	if coord == nil {
 		return es.MigrateLegacyDeliveries(ctx, expireAt)
