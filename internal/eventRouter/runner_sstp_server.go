@@ -55,6 +55,13 @@ func (r *router) SstpServerHandler(ctx context.Context, rec *model.StreamStateRe
 		// an empty response rather than panicking or re-looking-up.
 		return resp, nil
 	}
+	if err := r.startGate(); err != nil {
+		// Delivery waits for the legacy deliveries migration (#361): refuse
+		// the whole exchange before the owner is resolved, a queue is seeded
+		// or the peer's acks are applied; the peer resends on 503.
+		eventLogger.Debug("SSTP-SRV: delivery not started yet; exchange refused", "sid", rec.StreamConfiguration.Id)
+		return resp, err
+	}
 
 	// Seed the request memo with the pair the HTTP handler already resolved
 	// (issue #287). Without it resolveIngressStream re-derives the very same

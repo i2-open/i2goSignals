@@ -701,6 +701,17 @@ func (r *router) migrateThenStartDelivery(deps RouterDeps) {
 // transmitter retries it (503 + Retry-After, as for a store outage).
 var errDeliveryNotStarted = fmt.Errorf("%w: delivery starts after the legacy deliveries migration", ErrStoreUnavailable)
 
+// startGate refuses a delivery entry point while delivery waits for the
+// legacy deliveries migration (#361, seam S2): it answers
+// errDeliveryNotStarted (503 + Retry-After at the API) and nil once delivery
+// has started.
+func (r *router) startGate() error {
+	if r.startPending.Load() {
+		return errDeliveryNotStarted
+	}
+	return nil
+}
+
 // DeliveryStarted reports whether delivery has started: false while it waits
 // for the legacy deliveries migration (#361), when a poll is answered 503.
 func (r *router) DeliveryStarted() bool {

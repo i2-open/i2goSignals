@@ -12,6 +12,7 @@ import (
 	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	"github.com/i2-open/i2goSignals/internal/providers/dbProviders/memory_provider"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 	"github.com/stretchr/testify/assert"
@@ -360,4 +361,40 @@ func TestNewRouter_APIStreamWaitsForTheMigration(t *testing.T) {
 	assert.True(t, r.DeliveryStarted())
 	require.Eventually(t, func() bool { return dao.clears.Load() == 1 }, 5*time.Second, time.Millisecond, "the deferred reset never ran")
 	assert.Zero(t, dao.early.Load(), "deliveries accessed before the migration")
+}
+
+// An SSTP exchange that arrives while delivery waits for the legacy
+// migration is refused as a retryable store failure before it resolves the
+// acceptor owner, seeds a queue or applies the peer's acks (#361): nothing
+// reads or writes deliveries until the migration has completed.
+func TestNewRouter_SstpExchangeWaitsForTheMigration(t *testing.T) {
+	prev := migrationLeaseRetry
+	migrationLeaseRetry = 5 * time.Millisecond
+	t.Cleanup(func() { migrationLeaseRetry = prev })
+
+	p := openMemPersistence(t)
+	dao := &probeDAO{EventDAO: p.EventDAO}
+	r := NewRouter(RouterDeps{StreamService: p.StreamService, KeyService: p.KeyService, EventService: services.NewEventService(dao), Coordinator: p.Coordinator, ServesClaims: true}, "node-mig").(*router)
+	t.Cleanup(r.Shutdown)
+
+	rec := sstpServerPairState("sstp-tx-mig", "sstp-rx-mig", "pair-mig")
+	require.NoError(t, p.StreamService.PersistStreamStateRecord(t.Context(), rec))
+	inbound := []SstpInboundSet{{Jti: "sstp-mig-in", Token: newRiscToken("sstp-mig-in", "https://peer.example.com", dupTestIssuer), Raw: "raw"}}
+	resp, err := r.SstpServerHandler(t.Context(), rec, goSetSstp.Message{Ack: []string{"wire-ack-1"}, ReturnImmediately: goSetSstp.BoolPtr(true)}, inbound)
+	assert.ErrorIs(t, err, ErrStoreUnavailable, "an SSTP exchange before the migration must be told to retry")
+	assert.Empty(t, resp.Ack, "nothing may be acked before the migration")
+	assert.Zero(t, dao.early.Load(), "deliveries accessed before the migration")
+	assert.Zero(t, leaseHolderCount(t, p.Coordinator, cluster.SstpServerResource("sstp-tx-mig")), "acceptor owner resolved before the migration")
+}
+
+// leaseHolderCount is 1 when some node holds resource, else 0.
+func leaseHolderCount(t *testing.T, coord cluster.ClusterCoordinator, resource string) int {
+	t.Helper()
+	held, _, _, err := coord.TryAcquireOrRenewLease(resource, "probe", time.Second)
+	require.NoError(t, err)
+	if held {
+		require.NoError(t, coord.ReleaseLeaseIfOwned(resource, "probe"))
+		return 0
+	}
+	return 1
 }
