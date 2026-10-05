@@ -154,8 +154,9 @@ type router struct {
 	startDone chan struct{}
 	// startPending is set while a deferred delivery start waits for the
 	// legacy deliveries migration: nothing may read or write deliveries
-	// until it clears (#361, seam S2). Written under startMu; ingest reads it
-	// without the lock.
+	// until it clears (#361, seam S2). NewRouter sets it before the start
+	// goroutine exists, so that store needs no lock; it is cleared under
+	// startMu, and the entry points read it without the lock (startGate).
 	startPending atomic.Bool
 	// pendingResets holds the streams whose reset (ResetStream, or
 	// ReplayStream with its replay point) arrived while startPending was set;
