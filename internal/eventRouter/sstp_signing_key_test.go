@@ -88,7 +88,7 @@ func TestSstpServer_SigningFailureSendsNoSetsAndPauses(t *testing.T) {
 		h.persistOutboundEvent(t, txSid, jti)
 	}
 
-	wrong, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	wrong, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
 	h.router.signingKeys.put("DEFAULT", "", wrong, "wrong")
 

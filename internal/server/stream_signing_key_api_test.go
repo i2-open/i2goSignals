@@ -31,7 +31,7 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SigningTransmitterWithou
 
 	rr := s.do(s.app.StreamCreate, http.MethodPost, "/stream", s.streamToken("proj-A"), body, nil)
 	s.Equal(http.StatusBadRequest, rr.Code, rr.Body.String())
-	s.Contains(rr.Body.String(), "no active signing key for issuer https://keyless.example (RS256)")
+	s.Contains(rr.Body.String(), "no active signing key for issuer https://keyless.example (any key type)")
 	s.Empty(s.app.StreamService.ListStreams(context.Background()), "nothing is saved")
 
 	baseUrl, err := url.Parse("https://local.example")
@@ -40,7 +40,7 @@ func (s *ServerProvisioningAuthzSuite) TestStreamCreate_SigningTransmitterWithou
 	sstp := sstpBootstrapBody(s.T(), "https://keyless.example")
 	rr = s.do(s.app.StreamCreate, http.MethodPost, "/stream", s.streamToken("proj-A"), sstp, nil)
 	s.Equal(http.StatusBadRequest, rr.Code, rr.Body.String())
-	s.Contains(rr.Body.String(), "no active signing key for issuer https://keyless.example (RS256)")
+	s.Contains(rr.Body.String(), "no active signing key for issuer https://keyless.example (any key type)")
 	s.Empty(s.app.StreamService.ListStreams(context.Background()), "nothing is saved")
 }
 
@@ -71,7 +71,7 @@ func TestStreamUpdate_MissingSigningKeyIs400UntilFixed(t *testing.T) {
 		StreamConfiguration: model.StreamConfiguration{Description: "unrelated edit"},
 	})
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (RS256)")
+	assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (any key type)")
 	assert.Empty(t, app.router.updated, "a refused update changes nothing")
 
 	rr = app.putStream(t, bearer, statusPlainSid, model.StreamStateRecord{
@@ -93,7 +93,7 @@ func TestUpdateStatus_ReEnableNeedsAnActiveSigningKey(t *testing.T) {
 
 	rr := app.postStatus(t, bearer, statusPlainSid, model.StreamStateEnabled, "")
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (RS256)")
+	assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (any key type)")
 	assert.Equal(t, 0, app.refreshes(), "a refused re-enable changes nothing")
 	assert.Equal(t, model.StreamStatus{Status: model.StreamStateDisable, Reason: "stopped"},
 		app.getStatus(t, bearer, statusPlainSid), "the status is unchanged")
@@ -136,7 +136,7 @@ func TestUpdateStatus_ReEnableSstpPairNeedsAnActiveSigningKey(t *testing.T) {
 	for _, sid := range []string{statusPairTxSid, statusPairRxSid} {
 		rr := app.postStatus(t, bearer, sid, model.StreamStateEnabled, "")
 		require.Equal(t, http.StatusBadRequest, rr.Code, "re-enable via %s: %s", sid, rr.Body.String())
-		assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (RS256)")
+		assert.Contains(t, rr.Body.String(), "no active signing key for issuer "+reEnableIssuer+" (any key type)")
 	}
 	assert.Equal(t, 0, app.refreshes())
 	stopped := model.StreamStatus{Status: model.StreamStateDisable, Reason: "stopped"}

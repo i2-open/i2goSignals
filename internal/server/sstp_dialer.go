@@ -1693,7 +1693,7 @@ func buildSstpSetsAck(stream *model.StreamStateRecord, outbound []eventRouter.Ou
 	if len(work) == 0 {
 		return sets, nil
 	}
-	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	method := services.StreamSigningMethod(cfg.SigningAlg, key)
 	idx := make(map[*model.EventRecord]int, len(work))
 	tokens := make([]goSet.SecurityEventToken, len(work))
 	for i, ev := range work {

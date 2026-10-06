@@ -108,10 +108,10 @@ func TestBuildSstpSets_SignsBatchAcrossPool(t *testing.T) {
 }
 
 // TestBuildSstpSets_FirstSignFailureHalts: AC 5 is preserved under the pool.
-// A key RS256 cannot use fails every signature; the error names the first
+// A key no JWS method can use (P-384) fails every signature; the error names the first
 // JTI in batch order and no partial set map is returned.
 func TestBuildSstpSets_FirstSignFailureHalts(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P384(), cryptorand.Reader)
 	require.NoError(t, err)
 	stream := sstpBatchStream(model.RouteModePublish)
 

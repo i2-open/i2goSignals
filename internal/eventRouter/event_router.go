@@ -2453,7 +2453,7 @@ func (r *router) assemblePollResponse(sid string, state *model.StreamStateRecord
 		return sets, nil
 	}
 
-	method := goSet.SigningMethodOrRS256(state.StreamConfiguration.SigningAlg)
+	method := services.StreamSigningMethod(state.StreamConfiguration.SigningAlg, key)
 	iss, aud := state.StreamConfiguration.Iss, state.StreamConfiguration.Aud
 	q := r.queueFor(sid)
 	inbound := make([]string, len(work))

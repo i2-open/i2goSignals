@@ -216,7 +216,7 @@ func TestNewestRecordSites_AllPickTheSameRecord(t *testing.T) {
 	recs, newest := newestRecordScenario(t)
 
 	t.Run("signing selection", func(t *testing.T) {
-		got, _ := latestActiveSigningRec(recs, "", time.Now())
+		got, _ := latestActiveSigningRec(recs, pinnedAlg(""), time.Now())
 		require.NotNil(t, got)
 		assert.Equal(t, newest.Id, got.Id)
 	})

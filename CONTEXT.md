@@ -253,10 +253,21 @@ How `RouteMode` and the `EventSource` selector interact at the matcher
 ### SET signing algorithm (`signing_alg`)
 
 Which JWS algorithm a stream's SETs are signed with, chosen per stream
-rather than per server (ADR 0034, RFC 9964). `""` and `RS256` are the
-same thing — RSA-2048, what every stream signed with before the field
-existed, and still the default. `ES256` opts the stream into ECDSA
-P-256 and `ML-DSA-65` into post-quantum signatures.
+rather than per server (ADR 0034, RFC 9964). A pinned value — `RS256`
+(RSA-2048), `ES256` (ECDSA P-256) or `ML-DSA-65` (post-quantum) — signs
+with the issuer's newest active key of that type. `""` (unset) means
+**any key type**: the stream signs with the issuer's newest active key,
+and the JWS `alg` follows that key's type (spec #114). An issuer that
+only ever had its legacy RSA key therefore signs exactly as before; one
+that gains a newer ES256 key moves its unset streams to ES256, while the
+RSA key stays in the JWKS so SETs signed earlier still verify.
+
+New keys minted without an explicit algorithm take the type
+`I2SIG_KEY_ALG` names (default `ES256`; `RS256` and `ML-DSA-65` also
+accepted). The auth-token key is always RSA. Every minting
+`POST /key/{name}` response carries a `Key-Id` header naming the new
+kid, and a key summary's `keyStates[]` report each key's `alg`
+(`RS256` for a stored `""`), oldest-first.
 
 Each opt-in trades differently, which is why the choice is per stream:
 
@@ -284,10 +295,12 @@ The vocabulary that hangs off it:
   and its encoding contract: `""` RSA/PKCS#1, `ES256` SEC 1 + PKIX,
   `ML-DSA-65` raw seed + public bytes.
 - **`GetSigner(ctx, issuer, alg)`** — the transmitter's key-acquisition
-  seam. Selection is **by algorithm, not by recency**: an opted-in
-  record is always the newer one, and picking newest would hand an RS256
-  stream a key RS256 cannot use. The router caches per `(issuer, alg)` for the same
-  reason; invalidation stays issuer-level and evicts both.
+  seam. A pinned alg selects **by algorithm, then recency**: the newest
+  active key of that type, never a newer key of another type (which
+  RS256 could not use). An empty alg selects the newest active key of
+  any type, and `services.StreamSigningMethod` takes the JWS method from
+  that key. The router caches per `(issuer, alg)`; invalidation stays
+  issuer-level and evicts every entry.
 - **`goSet.AllowedAlgs()`** — `{RS256, ES256, ML-DSA-65}` on every node
   whether or not it transmits ML-DSA. The allow-list gates the token
   header before key lookup, and a receiver must be able to verify a

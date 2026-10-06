@@ -293,8 +293,8 @@ func (set *SecurityEventToken) JWS(signingMethod jwt.SigningMethod, key crypto.S
 // Handing this list to jwt.WithValidMethods closes that by construction: the
 // header alg is checked before the key is ever resolved.
 //
-// RS256 is the default a stream signs with and ES256 the per-stream opt-in for
-// transmitter throughput (i2goSignals#284).
+// ES256 is the default key type (spec #114; i2goSignals#284 for the
+// throughput case) and RS256 remains accepted for legacy RSA-keyed issuers.
 // ML-DSA-65 (RFC 9964, FIPS 204) is accepted for streams that opt into
 // post-quantum signatures via StreamConfiguration.signing_alg; it is listed
 // unconditionally because the allow-list gates the *header*, and a receiver
@@ -309,10 +309,11 @@ func AllowedAlgs() []string {
 	}
 }
 
-// SigningMethodFor maps a stream's configured signing_alg to the jwt.SigningMethod
-// the transmitter signs with. An empty alg means "unset", which is RS256 — the
-// behaviour every stream had before RFC 9964 ML-DSA became selectable, so an
-// existing stream config keeps signing exactly as it did.
+// SigningMethodFor maps a pinned signing_alg to the jwt.SigningMethod it names.
+// An empty alg maps to RS256 here, but signing sites do not ask it for an unset
+// stream: since spec #114 an unset signing_alg signs with the issuer's newest
+// key of any type, and services.StreamSigningMethod takes the method from that
+// key's type (an RSA-only issuer still gets RS256).
 //
 // It exists so the ~5 signing sites (poll response, push delivery, SSTP
 // outbound both directions, CLI) each say `goSet.SigningMethodFor(cfg.SigningAlg)`
@@ -330,8 +331,9 @@ func AllowedAlgs() []string {
 // slightly dearer than RS256 — so the receiver's side of the trade is real but
 // small next to the transmitter's saving.
 //
-// RS256 remains the default: a stream that never sets signing_alg keeps signing
-// exactly as it always did, and ES256 is opted into per stream.
+// RS256 is no longer the default key type (spec #114): new keys are ES256
+// unless I2SIG_KEY_ALG says otherwise, and an unset signing_alg follows the
+// issuer's newest key. A legacy RSA-only issuer keeps signing exactly as it did.
 func SigningMethodFor(alg string) (jwt.SigningMethod, error) {
 	switch alg {
 	case "", jwt.SigningMethodRS256.Alg():

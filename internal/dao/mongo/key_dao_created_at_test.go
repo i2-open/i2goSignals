@@ -252,3 +252,24 @@ func (suite *KeyDAOMongoSuite) TestFindLatestByKeyName_AgreesWithTheNewestRecord
 	suite.Require().NotNil(ruled)
 	suite.Equal(newest.Id, ruled.Id, "the shared rule picks the same record after the round trip")
 }
+
+// Spec #114 (S-ALG): the Mongo summary reports each key's alg and runs
+// oldest-first by creation, whatever order the documents were inserted in.
+func (suite *KeyDAOMongoSuite) TestKeySummary_ReportsAlgOldestFirst() {
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	for _, rec := range []*interfaces.JwkKeyRec{
+		{Id: bson.NewObjectID().Hex(), KeyName: "alg-order", Kid: "es", Alg: "ES256", KeyBytes: []byte{1}, CreatedAt: base.Add(2 * time.Minute)},
+		{Id: bson.NewObjectID().Hex(), KeyName: "alg-order", Kid: "rsa", KeyBytes: []byte{1}, CreatedAt: base.Add(time.Minute)},
+	} {
+		suite.Require().NoError(suite.dao.Insert(ctx, rec))
+	}
+
+	summary, err := suite.dao.KeySummary(ctx, "alg-order")
+	suite.Require().NoError(err)
+	suite.Require().NotNil(summary)
+	suite.Equal([]string{"rsa", "es"}, summary.Kids)
+	suite.Require().Len(summary.KeyStates, 2)
+	suite.Equal("RS256", summary.KeyStates[0].Alg)
+	suite.Equal("ES256", summary.KeyStates[1].Alg)
+}

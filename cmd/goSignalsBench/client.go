@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/rsa"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -68,9 +69,15 @@ func (e *httpError) Error() string {
 }
 
 func (n *node) do(method, path, bearer, contentType string, body []byte) (int, []byte, error) {
+	status, _, respBody, err := n.doWithHeader(method, path, bearer, contentType, body)
+	return status, respBody, err
+}
+
+// doWithHeader is do that also returns the response headers.
+func (n *node) doWithHeader(method, path, bearer, contentType string, body []byte) (int, http.Header, []byte, error) {
 	req, err := http.NewRequest(method, n.hostBase+path, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if bearer != "" {
 		if !strings.HasPrefix(bearer, "Bearer ") {
@@ -83,11 +90,11 @@ func (n *node) do(method, path, bearer, contentType string, body []byte) (int, [
 	}
 	resp, err := n.http.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, respBody, err
+	return resp.StatusCode, resp.Header, respBody, err
 }
 
 func (n *node) doJSON(method, path, bearer string, in any, out any, okStatus ...int) error {
@@ -155,21 +162,23 @@ func (n *node) hasIssuerKey(issuer string) bool {
 	return err == nil && status == http.StatusOK
 }
 
-// createIssuerKey asks the server to mint an RSA signing key whose kid is the
-// issuer name and returns the PKCS#8 private key the server hands back.
-func (n *node) createIssuerKey(bootstrapToken, issuer string) (*rsa.PrivateKey, []byte, error) {
-	status, body, err := n.do(http.MethodPost, keyPath("/key/", issuer), bootstrapToken, "", nil)
+// createIssuerKey asks the server to mint the issuer's signing key, of the
+// server's default type (I2SIG_KEY_ALG), and returns the PKCS#8 private key
+// the server hands back with the kid from its Key-Id header ("" when the
+// server sent none).
+func (n *node) createIssuerKey(bootstrapToken, issuer string) (crypto.Signer, []byte, string, error) {
+	status, header, body, err := n.doWithHeader(http.MethodPost, keyPath("/key/", issuer), bootstrapToken, "", nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if status != http.StatusCreated && status != http.StatusOK {
-		return nil, nil, &httpError{status, string(body)}
+		return nil, nil, "", &httpError{status, string(body)}
 	}
-	key, err := parseRSAPrivateKeyPEM(body)
+	key, err := parsePrivateKeyPEM(body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return key, body, nil
+	return key, body, header.Get(services.KeyIdHeader), nil
 }
 
 // createSigningAlgKey asks the server to create the issuer's signing key for
@@ -190,16 +199,18 @@ func (n *node) createSigningAlgKey(bootstrapToken, issuer, alg string) (bool, er
 	}
 }
 
-func parseRSAPrivateKeyPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
+// parsePrivateKeyPEM parses a PKCS#8 private key of any signing type (RSA,
+// P-256, ML-DSA-65), or a PKCS#1 RSA key.
+func parsePrivateKeyPEM(pemBytes []byte) (crypto.Signer, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
 		return nil, errors.New("no PEM block found")
 	}
 	if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if rsaKey, ok := k.(*rsa.PrivateKey); ok {
-			return rsaKey, nil
+		if signer, ok := k.(crypto.Signer); ok {
+			return signer, nil
 		}
-		return nil, errors.New("PKCS#8 key is not RSA")
+		return nil, fmt.Errorf("PKCS#8 key %T cannot sign", k)
 	}
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }

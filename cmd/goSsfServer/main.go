@@ -64,6 +64,9 @@ func main() {
 	tlsSupport.CheckCaInstalled(nil)
 
 	mLog.Info("i2goSSF server starting...", "version", constants.GoSignalsVersion)
+	// The default key type (I2SIG_KEY_ALG) is a startup error when it names no
+	// supported type, rather than a silent fallback (spec #114).
+	services.LogDefaultKeyAlgOrExit(mLog)
 	port := "8889"
 	if found := stripQuotes(os.Getenv("PORT")); found != "" {
 		port = found

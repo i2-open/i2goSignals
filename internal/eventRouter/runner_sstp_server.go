@@ -333,7 +333,7 @@ func (r *router) buildSstpOutboundSets(rec *model.StreamStateRecord, outbound []
 	// reference's acknowledgement JTI (#363); the message keys it by that
 	// JTI, which is what the peer acks.
 	cfg := rec.StreamConfiguration
-	method := goSet.SigningMethodOrRS256(cfg.SigningAlg)
+	method := services.StreamSigningMethod(cfg.SigningAlg, key)
 	// A reference claimed without its acknowledgement JTI (a bare buffer
 	// submit) takes its stored row's one, all in one Resolve; one with none
 	// is not sent and its claim is released.

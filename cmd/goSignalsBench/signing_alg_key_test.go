@@ -10,7 +10,8 @@ import (
 // TestEnsureSigningAlgKey_CreatesTheKeyBeforeStreams: a stream never creates a
 // signing key (i2goSignals#314), so --signing-alg ES256 or ML-DSA-65 must ask
 // goSignals1 for that algorithm's issuer key first. A 409 is a key that already
-// exists from an earlier run; RS256 is the issuer key ensureIssuerKey makes.
+// exists from an earlier run. RS256 is asked for too: since spec #114 the
+// issuer key ensureIssuerKey makes is of the server's default type (ES256).
 func TestEnsureSigningAlgKey_CreatesTheKeyBeforeStreams(t *testing.T) {
 	const issuer = "https://bench.example.com"
 	cases := []struct {
@@ -20,7 +21,8 @@ func TestEnsureSigningAlgKey_CreatesTheKeyBeforeStreams(t *testing.T) {
 		wantErr  bool
 	}{
 		{"", 0, false, false},
-		{"RS256", 0, false, false},
+		{"RS256", http.StatusCreated, true, false},
+		{"RS256", http.StatusConflict, true, false},
 		{"ES256", http.StatusCreated, true, false},
 		{"ML-DSA-65", http.StatusCreated, true, false},
 		{"ES256", http.StatusConflict, true, false},
@@ -48,7 +50,7 @@ func TestEnsureSigningAlgKey_CreatesTheKeyBeforeStreams(t *testing.T) {
 			}
 			if !tc.wantCall {
 				if calls != 0 {
-					t.Fatalf("RS256 needs no extra key request, got %d", calls)
+					t.Fatalf("an unset signing_alg needs no extra key request, got %d", calls)
 				}
 				return
 			}

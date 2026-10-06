@@ -1,13 +1,14 @@
 package main
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
@@ -98,12 +99,36 @@ type benchEvent struct {
 	set goSet.SecurityEventToken
 }
 
-// signNow stamps toe with the current time and signs the SET. toe keeps its
-// sub-second part on the wire (goSet toe codec), so the receiver's
-// event-age histogram resolves milliseconds.
-func (e *benchEvent) signNow(key *rsa.PrivateKey) (string, error) {
+// signingKey is the issuer key the ingest workers sign with: any crypto.Signer
+// the server mints (RSA, P-256 or ML-DSA-65), the JWS method its type names,
+// and its kid (spec #114).
+type signingKey struct {
+	signer crypto.Signer
+	method jwt.SigningMethod
+	kid    string
+}
+
+// newSigningKey resolves the signing method from the key's type. An empty kid
+// (no <issuer-key-file>.kid sidecar, or a server that sent no Key-Id) falls
+// back to the issuer name, the kid of a legacy first RSA key.
+func newSigningKey(signer crypto.Signer, kid, issuer string) (signingKey, error) {
+	method, _, err := services.SigningMethodOf(signer)
+	if err != nil {
+		return signingKey{}, err
+	}
+	if kid == "" {
+		kid = issuer
+	}
+	return signingKey{signer: signer, method: method, kid: kid}, nil
+}
+
+// signNow stamps toe with the current time and signs the SET with the key's
+// type and kid. toe keeps its sub-second part on the wire (goSet toe codec),
+// so the receiver's event-age histogram resolves milliseconds.
+func (e *benchEvent) signNow(key signingKey) (string, error) {
 	e.set.TimeOfEvent = &jwt.NumericDate{Time: time.Now()}
-	return e.set.JWS(jwt.SigningMethodRS256, key)
+	e.set.Kid = key.kid
+	return e.set.JWS(key.method, key.signer)
 }
 
 // buildEvent creates the i-th SET, unsigned. The payload shapes mirror the

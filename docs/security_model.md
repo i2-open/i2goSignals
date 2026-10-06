@@ -229,7 +229,7 @@ add server gosignals1 https://goSignals1:8888
 add server gosignals2 https://goSignals2:8889
 create iat gosignals1 --output=/scim/iat-gosignals1.jwt
 create bundle --output=/scim/spire-bundle.pem
-create key gosignals1 cluster.scim.example.com --file=/scim/cluster-scim-issuer.pem
+create key gosignals1 cluster.scim.example.com --alg=RS256 --file=/scim/cluster-scim-issuer.pem
 exit
 ```
 

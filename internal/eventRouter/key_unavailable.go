@@ -44,12 +44,11 @@ func inKeyUnavailablePause(rec *model.StreamStateRecord) bool {
 	return rec != nil && rec.Status == model.StreamStatePause && rec.KeyUnavailableSince != nil
 }
 
-// signingKeyAlg names the algorithm a transmitter signs with, RS256 when unset.
+// signingKeyAlg names the algorithm a transmitter signs with: its pinned
+// signing_alg, or "any key type" when unset (the issuer's newest key of any
+// type signs, spec #114).
 func signingKeyAlg(cfg model.StreamConfiguration) string {
-	if cfg.SigningAlg == "" {
-		return "RS256"
-	}
-	return cfg.SigningAlg
+	return services.SigningAlgLabel(cfg.SigningAlg)
 }
 
 // errNoActiveSigningKey is the error a refused exchange reports for cfg.

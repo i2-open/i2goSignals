@@ -131,3 +131,21 @@ A signing stream whose issuer has no active key for its algorithm is refused on
 save and follows the missing-key rule at runtime (ADR 0028 update, #308/#312).
 An ES256 or ML-DSA-65 key created under the token issuer's name does not become
 the auth token signing key, which stays RSA.
+
+## Amendment (2026-10-05): newest key decides; ES256 is the default key type (spec #114)
+
+**Decision 1's "RS256 remains the default" is superseded.** A stream with no
+`signing_alg` now signs with the issuer's newest active key of any type, and the
+JWS `alg` follows that key's type; a pinned `signing_alg` still selects the
+newest active key of that type. Keys minted with no explicit algorithm
+(`POST /key/{name}` without `?alg=`, `KeyService.CreateKeyPair`, the default
+issuer's startup key) take the type `I2SIG_KEY_ALG` names — `ES256` unless set,
+or `RS256` / `ML-DSA-65`; any other value stops the server at startup. The
+auth-token key stays RSA. An issuer that only holds its legacy RSA key signs
+byte-identically to before, and an RSA key stays in the JWKS after a newer
+ES256 key takes over, so SETs signed earlier still verify.
+
+ADR 0034's wording that signing selection is "by algorithm, not by recency"
+holds only for a pinned `signing_alg`; for an unset one, recency across types
+decides. Every minting `POST /key/{name}` response carries a `Key-Id` header,
+and key summaries report each key's `alg`, oldest-first.

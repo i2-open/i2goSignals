@@ -11,11 +11,12 @@ import (
 
 // NoActiveSigningKeyReason names the issuer and signature algorithm a signing
 // transmitter has no active key for (#308). It is the save-time rejection
-// message and the push runner's paused/disabled reason, so an operator reads the
+// message and the push runner's paused/disabled reason (an empty signing_alg
+// reads "any key type": any active key of the issuer would sign, spec #114), so an operator reads the
 // same words wherever the problem surfaces. It deliberately does not say whether
 // the key was never created, or is suspended or revoked.
 func NoActiveSigningKeyReason(issuer, signingAlg string) string {
-	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, algLabel(signingAlg))
+	return fmt.Sprintf("no active signing key for issuer %s (%s)", issuer, SigningAlgLabel(signingAlg))
 }
 
 // SigningKeyUnavailableReason is NoActiveSigningKeyReason, followed by the
