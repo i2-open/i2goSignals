@@ -124,6 +124,9 @@ type EventRouter interface {
 	// waits for the legacy deliveries migration (#361), when a poll is
 	// answered 503.
 	DeliveryStarted() bool
+	// ServesClaims reports RouterDeps.ServesClaims: whether this router serves
+	// poll requests and accepted SSTP requests (#377).
+	ServesClaims() bool
 	WakeTransmitter(sid string, mode string)
 	// WakeSstpClient wakes the SSTP-client outbound buffer for pairId so the
 	// lease owner drains a pending outbound event into the next outbound cycle.
@@ -434,10 +437,13 @@ type RouterDeps struct {
 	// forever: no expireAt is written. Community binds nothing here.
 	RetentionWindow services.EffectiveWindowFunc
 	// ServesClaims says this process serves poll requests and accepted SSTP
-	// requests and mounts /_cluster/claim (#365). The community server and
-	// goSsfServer set it. False (business routers) never acquires a
-	// poll-transmitter or sstp-server lease: such a router wakes a known
-	// owner at ingest and otherwise leaves the rows pending.
+	// requests and mounts /_cluster/claim (#365). Any router that serves the
+	// peer plane (poll or SSTP acceptor) must set it: the community server,
+	// goSsfServer and a router behind a pkg/goSignalsServer PeerSurface, which
+	// refuses a router without it (#377). False never acquires a
+	// poll-transmitter or sstp-server lease: such a router wakes a known owner
+	// at ingest and otherwise leaves the rows pending, so a poll it answers
+	// returns no SETs.
 	ServesClaims bool
 }
 
@@ -734,6 +740,11 @@ func (r *router) startGate() error {
 // for the legacy deliveries migration (#361), when a poll is answered 503.
 func (r *router) DeliveryStarted() bool {
 	return r.startGate() == nil
+}
+
+// ServesClaims reports RouterDeps.ServesClaims (#377).
+func (r *router) ServesClaims() bool {
+	return r.servesClaims
 }
 
 // deferredUntilStarted reports whether delivery still waits for the legacy

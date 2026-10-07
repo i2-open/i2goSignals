@@ -102,6 +102,7 @@ func (rr *recordingRouter) ReplayStream(context.Context, string, string, *time.T
 	return nil
 }
 func (rr *recordingRouter) DeliveryStarted() bool            { return true }
+func (rr *recordingRouter) ServesClaims() bool               { return true }
 func (rr *recordingRouter) WakeTransmitter(string, string)   {}
 func (rr *recordingRouter) NotifySubjectFilterChange(string) {}
 

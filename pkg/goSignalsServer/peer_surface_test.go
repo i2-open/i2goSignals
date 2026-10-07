@@ -7,12 +7,15 @@ package goSignalsServer_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -28,6 +31,13 @@ import (
 // persistence and build the business router through pkg/eventRouter, then fill
 // the public services. Tests override fields to exercise NewPeerSurface.
 func peerConfig(t *testing.T) goSignalsServer.PeerSurfaceConfig {
+	t.Helper()
+	return peerConfigServing(t, true)
+}
+
+// peerConfigServing is peerConfig with the business router's ServesClaims set
+// to servesClaims (#377).
+func peerConfigServing(t *testing.T, servesClaims bool) goSignalsServer.PeerSurfaceConfig {
 	t.Helper()
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	p, err := pkgrouter.OpenPersistence("memorydb:", "pkg_peer_surface_test")
@@ -47,6 +57,7 @@ func peerConfig(t *testing.T) goSignalsServer.PeerSurfaceConfig {
 		KeyService:    p.KeyService,
 		EventService:  p.EventService,
 		Coordinator:   p.Coordinator,
+		ServesClaims:  servesClaims,
 	}, "node-peer-surface-test")
 	t.Cleanup(br.Shutdown)
 
@@ -131,6 +142,7 @@ func (narrowRouter) HandleEvents([]*goSet.SecurityEventToken, []string, string) 
 func (narrowRouter) UpdateStreamState(*model.StreamStateRecord)          {}
 func (narrowRouter) RegisterMeteringObserver(pkgrouter.MeteringObserver) {}
 func (narrowRouter) Shutdown()                                           {}
+func (narrowRouter) ServesClaims() bool                                  { return true }
 
 var _ pkgrouter.BusinessRouter = narrowRouter{}
 
@@ -421,5 +433,105 @@ func TestPeerSurface_ExplicitAuthWins(t *testing.T) {
 	}
 	if len(rt.verified) != 1 || rt.verified[0] != stream.Id {
 		t.Fatalf("GenerateVerifyEvent calls: got %v, want [%s]", rt.verified, stream.Id)
+	}
+}
+
+// TestNewPeerSurface_RejectsRouterNotServingClaims (#377): a router built
+// with ServesClaims false never takes a poll-transmitter lease, so every poll
+// on the surface would answer 200 with empty sets. NewPeerSurface refuses it.
+func TestNewPeerSurface_RejectsRouterNotServingClaims(t *testing.T) {
+	_, err := goSignalsServer.NewPeerSurface(peerConfigServing(t, false))
+	if err == nil {
+		t.Fatal("NewPeerSurface accepted a router built with ServesClaims false")
+	}
+	if !strings.Contains(err.Error(), "ServesClaims") {
+		t.Errorf("error %q does not name ServesClaims", err)
+	}
+
+	if _, err := goSignalsServer.NewPeerSurface(peerConfigServing(t, true)); err != nil {
+		t.Fatalf("NewPeerSurface with ServesClaims true: %v", err)
+	}
+}
+
+// TestPeerSurface_PollReturnsHandledEvent (#377): a SET the business router
+// ingests through HandleEvent is returned by POST /poll/{id} on the peer
+// surface's routes.
+func TestPeerSurface_PollReturnsHandledEvent(t *testing.T) {
+	cfg := peerConfig(t)
+	surface, err := goSignalsServer.NewPeerSurface(cfg)
+	if err != nil {
+		t.Fatalf("NewPeerSurface: %v", err)
+	}
+	router := mountPeer(surface)
+
+	const project = "peer-project"
+	const aud = "http://rx.example"
+	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Iss:             testDefaultIssuer,
+			Aud:             []string{aud},
+			EventsRequested: []string{"https://schemas.openid.net/secevent/risc/event-type/account-disabled"},
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+			},
+		},
+	}, project, nil)
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	state, err := cfg.StreamService.GetStreamState(context.Background(), stream.Id)
+	if err != nil {
+		t.Fatalf("GetStreamState: %v", err)
+	}
+	cfg.Router.UpdateStreamState(state)
+
+	started, ok := cfg.Router.(interface{ DeliveryStarted() bool })
+	if !ok {
+		t.Fatal("business router has no DeliveryStarted")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !started.DeliveryStarted() {
+		if time.Now().After(deadline) {
+			t.Fatal("delivery did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	subject := &goSet.EventSubject{SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/peer-poll")}
+	set := goSet.CreateSet(subject, testDefaultIssuer, []string{aud})
+	set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
+	if err := cfg.Router.HandleEvent(&set, "", stream.Id); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	bearer, err := cfg.Auth.IssueStreamToken(stream.Id, project, nil)
+	if err != nil {
+		t.Fatalf("IssueStreamToken: %v", err)
+	}
+	rr := doJSON(t, router, http.MethodPost, "/poll/"+stream.Id, bearer, []byte(`{"returnImmediately":true,"maxEvents":10}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /poll: got %d, want 200 (body=%q)", rr.Code, rr.Body.String())
+	}
+	var resp model.PollResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode poll response: %v", err)
+	}
+	// The router re-issues the SET on the transmitter stream under its own
+	// jti, so match the SET by its subject.
+	if len(resp.Sets) != 1 {
+		t.Fatalf("poll returned %d SETs, want the 1 handled SET (sets=%v)", len(resp.Sets), resp.Sets)
+	}
+	for jti, raw := range resp.Sets {
+		parts := strings.Split(raw, ".")
+		if len(parts) != 3 {
+			t.Fatalf("SET %s is not a compact JWS: %q", jti, raw)
+		}
+		claims, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			t.Fatalf("decode SET %s claims: %v", jti, err)
+		}
+		if !strings.Contains(string(claims), "/Users/peer-poll") {
+			t.Fatalf("polled SET %s is not the handled SET: %s", jti, claims)
+		}
 	}
 }

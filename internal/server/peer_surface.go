@@ -131,6 +131,10 @@ func (a *peerRouterAdapter) PollStreamHandler(ctx context.Context, sid string, p
 
 func (a *peerRouterAdapter) DeliveryStarted() bool { return a.peer.DeliveryStarted() }
 
+// ServesClaims is true: the adapter carries a peer router, and
+// goSignalsServer.NewPeerSurface refuses one that does not serve claims (#377).
+func (a *peerRouterAdapter) ServesClaims() bool { return true }
+
 func (a *peerRouterAdapter) unsupported(method string) {
 	panic("goSignalsServer peer surface: eventRouter." + method +
 		" is not served by the peer-route surface (issue #373 serves only the five peer router methods)")
