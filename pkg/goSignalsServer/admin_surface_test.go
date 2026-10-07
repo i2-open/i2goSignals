@@ -85,6 +85,7 @@ type adminFixture struct {
 	surface  *goSignalsServer.AdminSurface
 	sink     *recordingSink
 	auth     *authSupport.AuthIssuer
+	keys     *services.KeyService
 	relayHit *relayProbe
 }
 
@@ -118,6 +119,13 @@ func (p *relayProbe) count() int {
 // dbProviders.OpenPersistence (which is internal/) is involved.
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
+	return newAdminFixtureWithAuth(t, nil)
+}
+
+// newAdminFixtureWithAuth is newAdminFixture with an explicit surface Auth.
+// A nil auth uses the fixture KeyService's own issuer.
+func newAdminFixtureWithAuth(t *testing.T, auth *authSupport.AuthIssuer) *adminFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	// KeyService with a real signing key so the AuthIssuer can both mint and
@@ -126,7 +134,9 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	if err := keyService.InitializeTokenKey(ctx, testDefaultIssuer); err != nil {
 		t.Fatalf("InitializeTokenKey: %v", err)
 	}
-	auth := keyService.GetAuthIssuer()
+	if auth == nil {
+		auth = keyService.GetAuthIssuer()
+	}
 
 	streamService := services.NewStreamService(
 		memory.NewStreamDAO(), keyService, testDefaultIssuer, services.StreamServiceConfig{})
@@ -186,7 +196,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		Sink:                 sink,
 	})
 
-	return &adminFixture{surface: surface, sink: sink, auth: auth, relayHit: probe}
+	return &adminFixture{surface: surface, sink: sink, auth: auth, keys: keyService, relayHit: probe}
 }
 
 // adminBearer mints an admin-scoped bearer (Roles ["admin","stream"]) the admin
@@ -408,4 +418,63 @@ func streamIDFromCreate(t *testing.T, body []byte) string {
 		t.Fatalf("create response carried no stream_id (body=%q)", string(body))
 	}
 	return resp.StreamId
+}
+
+// otherIssuer returns an AuthIssuer backed by its own KeyService and key store,
+// so its tokens are signed with a different key than any fixture KeyService.
+func otherIssuer(t *testing.T) *authSupport.AuthIssuer {
+	t.Helper()
+	ks := services.NewKeyService(memory.NewKeyDAO(), testDefaultIssuer, nil, nil)
+	if err := ks.InitializeTokenKey(context.Background(), testDefaultIssuer); err != nil {
+		t.Fatalf("InitializeTokenKey: %v", err)
+	}
+	return ks.GetAuthIssuer()
+}
+
+// TestAdminSurface_ExplicitAuthWins (#376): AdminSurfaceConfig.Auth from a
+// different key store than KeyService is the issuer the admin handlers
+// validate with; a token from KeyService's own issuer is rejected.
+func TestAdminSurface_ExplicitAuthWins(t *testing.T) {
+	f := newAdminFixtureWithAuth(t, otherIssuer(t))
+	if f.auth == f.keys.GetAuthIssuer() {
+		t.Fatal("fixture Auth is KeyService's issuer; the test needs two issuers")
+	}
+	mounted := mountAdmin(f.surface)
+
+	rr := doJSON(t, mounted, http.MethodGet, "/states", f.adminBearer(t, "proj-1"), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /states with an Auth-minted bearer: got %d, want 200 (body=%q)", rr.Code, rr.Body.String())
+	}
+
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{"proj-1"}}
+	keyTok, err := f.keys.GetAuthIssuer().IssueStreamClientToken(client, "proj-1", true, "")
+	if err != nil {
+		t.Fatalf("IssueStreamClientToken: %v", err)
+	}
+	rr = doJSON(t, mounted, http.MethodGet, "/states", keyTok, nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /states with a KeyService-minted bearer: got %d, want 401", rr.Code)
+	}
+}
+
+// TestAdminSurface_KeyRotationLeavesExplicitAuth (#376): rotating a KeyService
+// key whose name matches an explicit surface Auth's issuer leaves that Auth's
+// keys alone, so a bearer it minted before the rotation still verifies.
+func TestAdminSurface_KeyRotationLeavesExplicitAuth(t *testing.T) {
+	f := newAdminFixtureWithAuth(t, otherIssuer(t))
+	if f.auth.TokenIssuer != f.keys.GetAuthIssuer().TokenIssuer {
+		t.Fatal("fixture issuers have different names; the test needs a name collision")
+	}
+	mounted := mountAdmin(f.surface)
+	bearer := f.adminBearer(t, "proj-1")
+
+	rr := doJSON(t, mounted, http.MethodPost, "/key/"+f.auth.TokenIssuer+"?alg=RS256&force=rotate", bearer, nil)
+	if rr.Code != http.StatusOK && rr.Code != http.StatusCreated {
+		t.Fatalf("rotate: got %d, want 200/201 (body=%q)", rr.Code, rr.Body.String())
+	}
+
+	rr = doJSON(t, mounted, http.MethodGet, "/states", bearer, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /states with a pre-rotation bearer: got %d, want 200", rr.Code)
+	}
 }

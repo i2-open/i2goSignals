@@ -14,8 +14,8 @@ import (
 
 // TestPeerRouteTable_MatchesPeerRoutes (#373): every route the peer surface
 // exports is the gateway's own peerRoutes() entry of the same name — same
-// method, pattern and handler — and the exported set is the eight-route subset
-// the seam block names.
+// method, pattern and handler (before PeerRouteTable binds the surface issuer)
+// — and the exported set is the eight-route subset the seam block names.
 func TestPeerRouteTable_MatchesPeerRoutes(t *testing.T) {
 	sa := &SignalsApplication{}
 	full := map[string]Route{}
@@ -23,7 +23,16 @@ func TestPeerRouteTable_MatchesPeerRoutes(t *testing.T) {
 		full[r.Name] = r
 	}
 
-	got := sa.PeerRouteTable()
+	got := sa.peerRouteSubset()
+	exported := sa.PeerRouteTable()
+	if len(exported) != len(got) {
+		t.Fatalf("PeerRouteTable: got %d routes, subset has %d", len(exported), len(got))
+	}
+	for i, e := range exported {
+		if e.Name != got[i].Name || e.Method != got[i].Method || e.Pattern != got[i].Pattern || e.IsIdQuery != got[i].IsIdQuery {
+			t.Errorf("PeerRouteTable route %d: got {%s %s %s}, subset has {%s %s %s}", i, e.Name, e.Method, e.Pattern, got[i].Name, got[i].Method, got[i].Pattern)
+		}
+	}
 	wantNames := []string{"GenerateIat", "RegisterClient", "TriggerEvent", "ReceivePushEvent",
 		"VerificationRequestSSF", "JwksJson", "JwksJsonTenant", "PollEvents"}
 	if len(got) != len(wantNames) {

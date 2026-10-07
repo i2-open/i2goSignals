@@ -35,6 +35,12 @@ type PeerSurfaceConfig struct {
 	ClientService *services.ClientService
 	ServerService *services.ServerService
 	TokenService  *services.TokenService
+	// Auth validates and mints this surface's bearer tokens. It is required,
+	// and it takes precedence over KeyService.GetAuthIssuer(): an embedder may
+	// pass an issuer from a different key store than KeyService (#376). Requests
+	// through the surface's routes carry it to the services; an embedder
+	// calling StreamService or ClientService directly binds it with
+	// services.WithAuthIssuer(ctx, Auth), or those mint with KeyService's issuer.
 	Auth          *authSupport.AuthIssuer
 	Router        eventRouter.BusinessRouter
 	DefaultIssuer string
@@ -49,14 +55,19 @@ type PeerSurface struct {
 
 // NewPeerSurface binds the peer handlers against the supplied services and
 // router. It returns an error when cfg.Router or a service handle the handlers
-// read is nil, or the router lacks a router method the handlers call, so a bad
-// config fails at boot rather than per request.
+// read is nil, the router lacks a router method the handlers call, or the
+// router was built without ServesClaims (it would answer every poll with no
+// SETs, #377), so a bad config fails at boot rather than per request.
 func NewPeerSurface(cfg PeerSurfaceConfig) (*PeerSurface, error) {
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("goSignalsServer: peer surface needs a Router")
 	}
 	if nils := nilPeerFields(cfg); len(nils) > 0 {
 		return nil, fmt.Errorf("goSignalsServer: peer surface config has nil %s", strings.Join(nils, ", "))
+	}
+	if !cfg.Router.ServesClaims() {
+		return nil, fmt.Errorf("goSignalsServer: peer surface Router does not serve claims; " +
+			"build it with eventRouter.Deps{ServesClaims: true}: the peer plane (poll, SSTP acceptor) needs ServesClaims")
 	}
 	peer, ok := cfg.Router.(server.PeerEventRouter)
 	if !ok {

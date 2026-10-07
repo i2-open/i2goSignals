@@ -210,6 +210,7 @@ func (a *adminRouterAdapter) ResetStream(string) { a.unsupported("ResetStream") 
 // DeliveryStarted is true: the admin app runs no delivery, so it never
 // waits for the legacy deliveries migration.
 func (a *adminRouterAdapter) DeliveryStarted() bool { return true }
+func (a *adminRouterAdapter) ServesClaims() bool    { return false }
 
 func (a *adminRouterAdapter) ReplayStream(context.Context, string, string, *time.Time) error {
 	a.unsupported("ReplayStream")

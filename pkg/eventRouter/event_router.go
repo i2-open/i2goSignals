@@ -91,6 +91,10 @@ type BusinessRouter interface {
 	RegisterMeteringObserver(observer MeteringObserver)
 	// Shutdown stops the router's delivery goroutines.
 	Shutdown()
+	// ServesClaims reports Deps.ServesClaims: whether the router serves poll
+	// requests and accepted SSTP requests. A router behind the peer plane must
+	// (#377).
+	ServesClaims() bool
 }
 
 // NewBusinessRouter constructs the community business-stream router behind the

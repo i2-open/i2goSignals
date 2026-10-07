@@ -167,7 +167,7 @@ func (s *StreamService) RotateBearerOnGet(ctx context.Context, sid string, prese
 	// stored credential. A peer-supplied opaque bearer (e.g. an SSTP initiator's
 	// stored value) does not parse as a locally issued token, so it never rotates
 	// even on an exact string match.
-	storedJti := localJtiOf(s.keyService.GetAuthIssuer(), cred)
+	storedJti := localJtiOf(s.keyService.authIssuerFor(ctx), cred)
 	if storedJti == "" {
 		return rec, false, nil
 	}
@@ -204,7 +204,7 @@ func (s *StreamService) isLostResponseReread(ctx context.Context, currentCred st
 	if presentedEat == nil || revoker == nil {
 		return false
 	}
-	currentJti := localJtiOf(s.keyService.GetAuthIssuer(), currentCred)
+	currentJti := localJtiOf(s.keyService.authIssuerFor(ctx), currentCred)
 	if currentJti == "" {
 		return false
 	}
@@ -220,7 +220,7 @@ func (s *StreamService) isLostResponseReread(ctx context.Context, currentCred st
 // current id(s) with parentJti as the lineage parent. Returns the "Bearer "
 // header value.
 func (s *StreamService) mintReplacementBearer(ctx context.Context, rec *model.StreamStateRecord, isSstp bool, parentJti string) (string, error) {
-	issuer := s.keyService.GetAuthIssuer()
+	issuer := s.keyService.authIssuerFor(ctx)
 	// The lineage-parent session carries only the old JTI as the parent id
 	// (mirroring the CreateStream deliveryParent shape); other claims are minted
 	// fresh, so scopes/project come from the issuing function, not the old token.
