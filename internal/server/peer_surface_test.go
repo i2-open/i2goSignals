@@ -24,8 +24,14 @@ func TestPeerRouteTable_MatchesPeerRoutes(t *testing.T) {
 	}
 
 	got := sa.peerRouteSubset()
-	if n := len(sa.PeerRouteTable()); n != len(got) {
-		t.Fatalf("PeerRouteTable: got %d routes, subset has %d", n, len(got))
+	exported := sa.PeerRouteTable()
+	if len(exported) != len(got) {
+		t.Fatalf("PeerRouteTable: got %d routes, subset has %d", len(exported), len(got))
+	}
+	for i, e := range exported {
+		if e.Name != got[i].Name || e.Method != got[i].Method || e.Pattern != got[i].Pattern || e.IsIdQuery != got[i].IsIdQuery {
+			t.Errorf("PeerRouteTable route %d: got {%s %s %s}, subset has {%s %s %s}", i, e.Name, e.Method, e.Pattern, got[i].Name, got[i].Method, got[i].Pattern)
+		}
 	}
 	wantNames := []string{"GenerateIat", "RegisterClient", "TriggerEvent", "ReceivePushEvent",
 		"VerificationRequestSSF", "JwksJson", "JwksJsonTenant", "PollEvents"}

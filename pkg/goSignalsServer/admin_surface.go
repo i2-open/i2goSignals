@@ -81,7 +81,10 @@ type AdminSurfaceConfig struct {
 	// Auth validates and mints this surface's bearer tokens. It takes
 	// precedence over KeyService.GetAuthIssuer(): an embedder may pass an
 	// issuer from a different key store than KeyService (#376). Only when Auth
-	// is nil do the handlers fall back to KeyService.GetAuthIssuer().
+	// is nil do the handlers fall back to KeyService.GetAuthIssuer(). Requests
+	// through the surface's routes carry it to the services; an embedder
+	// calling StreamService or ClientService directly binds it with
+	// services.WithAuthIssuer(ctx, Auth), or those mint with KeyService's issuer.
 	Auth          *authSupport.AuthIssuer
 	DefaultIssuer string
 	BaseURL       *url.URL

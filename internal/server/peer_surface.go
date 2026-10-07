@@ -109,10 +109,10 @@ func (sa *SignalsApplication) peerRouteSubset() Routes {
 	return out
 }
 
-// bindSurfaceIssuer wraps each route's handler so the request context carries
-// GetAuth() (#376). Services that mint or check bearer tokens read it through
-// services.WithAuthIssuer, so a surface whose Auth differs from KeyService's
-// issuer never mixes two issuers.
+// bindSurfaceIssuer wraps each route's handler, in place, so the request
+// context carries GetAuth() via services.WithAuthIssuer (#376). Services that
+// mint or check bearer tokens read it back, so a surface whose Auth differs
+// from KeyService's issuer never mixes two issuers. Callers pass a fresh slice.
 func (sa *SignalsApplication) bindSurfaceIssuer(rs Routes) Routes {
 	for i := range rs {
 		next := rs[i].HandlerFunc
