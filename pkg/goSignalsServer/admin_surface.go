@@ -78,9 +78,13 @@ type AdminSurfaceConfig struct {
 	TokenService         *services.TokenService
 	SubjectFilterService *services.SubjectFilterService
 	SubjectRelayService  *services.SubjectRelayService
-	Auth                 *authSupport.AuthIssuer
-	DefaultIssuer        string
-	BaseURL              *url.URL
+	// Auth validates and mints this surface's bearer tokens. It takes
+	// precedence over KeyService.GetAuthIssuer(): an embedder may pass an
+	// issuer from a different key store than KeyService (#376). Only when Auth
+	// is nil do the handlers fall back to KeyService.GetAuthIssuer().
+	Auth          *authSupport.AuthIssuer
+	DefaultIssuer string
+	BaseURL       *url.URL
 	// Sink observes stream-state transitions emitted by the admin mutation
 	// handlers. Optional; nil is treated as a no-op sink (a read-only mount).
 	Sink StreamStateSink

@@ -368,3 +368,58 @@ func TestPeerRoutes_SmokeNoBearer(t *testing.T) {
 		})
 	}
 }
+
+// TestPeerSurface_ExplicitAuthWins (#376): PeerSurfaceConfig.Auth from a
+// different key store than KeyService is the issuer the peer handlers validate
+// with; a token minted by KeyService.GetAuthIssuer() gets 401 on /verify.
+func TestPeerSurface_ExplicitAuthWins(t *testing.T) {
+	cfg := peerConfig(t)
+	cfg.Auth = otherIssuer(t)
+	if cfg.Auth == cfg.KeyService.GetAuthIssuer() {
+		t.Fatal("Auth is KeyService's issuer; the test needs two issuers")
+	}
+	rt := &peerOnlyRouter{}
+	cfg.Router = rt
+	surface, err := goSignalsServer.NewPeerSurface(cfg)
+	if err != nil {
+		t.Fatalf("NewPeerSurface: %v", err)
+	}
+	router := mountPeer(surface)
+
+	const project = "peer-project"
+	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:             []string{"http://rx.example"},
+			EventsRequested: []string{"urn:ietf:params:sse:event-type:risc:account-enabled"},
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+			},
+		},
+	}, project, nil)
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{project}}
+	body := []byte(`{"stream_id":"` + stream.Id + `","state":"s1"}`)
+
+	keyTok, err := cfg.KeyService.GetAuthIssuer().IssueStreamClientToken(client, project, false, "")
+	if err != nil {
+		t.Fatalf("IssueStreamClientToken (KeyService): %v", err)
+	}
+	rr := doJSON(t, router, http.MethodPost, "/verify", keyTok, body)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /verify with a KeyService-minted bearer: got %d, want 401", rr.Code)
+	}
+
+	authTok, err := cfg.Auth.IssueStreamClientToken(client, project, false, "")
+	if err != nil {
+		t.Fatalf("IssueStreamClientToken (Auth): %v", err)
+	}
+	rr = doJSON(t, router, http.MethodPost, "/verify", authTok, body)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("POST /verify with an Auth-minted bearer: got %d, want 204 (body=%q)", rr.Code, rr.Body.String())
+	}
+	if len(rt.verified) != 1 || rt.verified[0] != stream.Id {
+		t.Fatalf("GenerateVerifyEvent calls: got %v, want [%s]", rt.verified, stream.Id)
+	}
+}

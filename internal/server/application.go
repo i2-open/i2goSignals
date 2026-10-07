@@ -129,17 +129,23 @@ func (sa *SignalsApplication) GetSubjectRelayService() *services.SubjectRelaySer
 func (sa *SignalsApplication) GetCoordinator() cluster.ClusterCoordinator { return sa.Coordinator }
 func (sa *SignalsApplication) GetStorage() storage.Storage                { return sa.Storage }
 
+// GetAuth returns the issuer every handler validates and mints bearer tokens
+// with. An explicitly configured sa.Auth wins (#376): the peer and admin
+// surfaces may be given an issuer from a different key store than KeyService.
+// KeyService.GetAuthIssuer() is the fallback only when sa.Auth is nil. The
+// gateway boot path sets sa.Auth from KeyService.GetAuthIssuer(), so both
+// rules pick the same issuer there.
 func (sa *SignalsApplication) GetAuth() *authSupport.AuthIssuer {
+	sa.mu.RLock()
+	auth := sa.Auth
+	sa.mu.RUnlock()
+	if auth != nil {
+		return auth
+	}
 	if sa.KeyService == nil {
 		return nil
 	}
-	auth := sa.KeyService.GetAuthIssuer()
-	if auth != nil {
-		sa.mu.Lock()
-		sa.Auth = auth
-		sa.mu.Unlock()
-	}
-	return auth
+	return sa.KeyService.GetAuthIssuer()
 }
 
 func (sa *SignalsApplication) GetDefIssuer() string {

@@ -35,6 +35,9 @@ type PeerSurfaceConfig struct {
 	ClientService *services.ClientService
 	ServerService *services.ServerService
 	TokenService  *services.TokenService
+	// Auth validates and mints this surface's bearer tokens. It is required,
+	// and it takes precedence over KeyService.GetAuthIssuer(): an embedder may
+	// pass an issuer from a different key store than KeyService (#376).
 	Auth          *authSupport.AuthIssuer
 	Router        eventRouter.BusinessRouter
 	DefaultIssuer string
