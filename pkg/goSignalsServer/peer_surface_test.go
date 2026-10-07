@@ -9,6 +9,8 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,10 +24,10 @@ import (
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
 
-// newPeerSurface stands up the peer surface the way enterprise would: open
-// persistence and build the business router through pkg/eventRouter, then hand
-// the router and the public services to NewPeerSurface.
-func newPeerSurface(t *testing.T) (*goSignalsServer.PeerSurface, *services.KeyService) {
+// peerConfig builds the peer-surface config the way enterprise would: open
+// persistence and build the business router through pkg/eventRouter, then fill
+// the public services. Tests override fields to exercise NewPeerSurface.
+func peerConfig(t *testing.T) goSignalsServer.PeerSurfaceConfig {
 	t.Helper()
 	t.Setenv("I2SIG_STORE_MEM_DIRECTORY", t.TempDir())
 	p, err := pkgrouter.OpenPersistence("memorydb:", "pkg_peer_surface_test")
@@ -49,7 +51,7 @@ func newPeerSurface(t *testing.T) (*goSignalsServer.PeerSurface, *services.KeySe
 	t.Cleanup(br.Shutdown)
 
 	base, _ := url.Parse("https://gateway.example")
-	surface, err := goSignalsServer.NewPeerSurface(goSignalsServer.PeerSurfaceConfig{
+	return goSignalsServer.PeerSurfaceConfig{
 		StreamService: p.StreamService,
 		KeyService:    p.KeyService,
 		ClientService: services.NewClientService(memory.NewClientDAO(), p.KeyService),
@@ -59,11 +61,30 @@ func newPeerSurface(t *testing.T) (*goSignalsServer.PeerSurface, *services.KeySe
 		Router:        br,
 		DefaultIssuer: testDefaultIssuer,
 		BaseURL:       base,
-	})
+	}
+}
+
+// newPeerSurface builds the peer surface over the business router.
+func newPeerSurface(t *testing.T) (*goSignalsServer.PeerSurface, *services.KeyService) {
+	t.Helper()
+	cfg := peerConfig(t)
+	surface, err := goSignalsServer.NewPeerSurface(cfg)
 	if err != nil {
 		t.Fatalf("NewPeerSurface with the business router: %v", err)
 	}
-	return surface, p.KeyService
+	return surface, cfg.KeyService
+}
+
+// mountPeer registers the peer routes on a fresh gorilla/mux router.
+func mountPeer(surface *goSignalsServer.PeerSurface) *mux.Router {
+	router := mux.NewRouter().StrictSlash(true).UseEncodedPath()
+	for _, rt := range surface.PeerRoutes() {
+		r := router.NewRoute().Name(rt.Name).Path(rt.Pattern).HandlerFunc(rt.HandlerFunc)
+		if rt.Method != "" {
+			r.Methods(rt.Method)
+		}
+	}
+	return router
 }
 
 // TestPeerRoutes_ExactSet: PeerRoutes() is exactly the eight routes of the
@@ -116,10 +137,9 @@ var _ pkgrouter.BusinessRouter = narrowRouter{}
 // TestNewPeerSurface_RejectsRouterWithoutPeerMethods: a router lacking the
 // methods the peer handlers call fails at construction, not per request.
 func TestNewPeerSurface_RejectsRouterWithoutPeerMethods(t *testing.T) {
-	_, err := goSignalsServer.NewPeerSurface(goSignalsServer.PeerSurfaceConfig{
-		Router:        narrowRouter{},
-		DefaultIssuer: testDefaultIssuer,
-	})
+	cfg := peerConfig(t)
+	cfg.Router = narrowRouter{}
+	_, err := goSignalsServer.NewPeerSurface(cfg)
 	if err == nil {
 		t.Fatal("NewPeerSurface accepted a router without the peer-handler methods")
 	}
@@ -168,5 +188,183 @@ func TestAdminAndPeerOnOneRouter_JwksDispatchByMethod(t *testing.T) {
 	rr = doJSON(t, router, http.MethodPost, "/jwks/new-issuer", "", nil)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("POST /jwks/new-issuer: got %d, want 403 from the admin CreateKey handler", rr.Code)
+	}
+}
+
+// wrongSigRouter has every peer method name, but GenerateVerifyEvent has the
+// wrong signature, so it fails the PeerEventRouter assertion by type, not name.
+type wrongSigRouter struct{ narrowRouter }
+
+func (wrongSigRouter) HandleEventCtx(context.Context, *goSet.SecurityEventToken, string, string) error {
+	return nil
+}
+func (wrongSigRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
+	return nil, nil
+}
+func (wrongSigRouter) GenerateVerifyEvent(string) (*model.EventRecord, error) { return nil, nil }
+func (wrongSigRouter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
+	return nil, false, 0
+}
+func (wrongSigRouter) DeliveryStarted() bool { return true }
+
+// TestNewPeerSurface_NamesWrongSignatureMethod (#374 review): a method with the
+// right name but the wrong signature is named in the error, never an empty list.
+func TestNewPeerSurface_NamesWrongSignatureMethod(t *testing.T) {
+	cfg := peerConfig(t)
+	cfg.Router = wrongSigRouter{}
+	_, err := goSignalsServer.NewPeerSurface(cfg)
+	if err == nil {
+		t.Fatal("NewPeerSurface accepted a router whose GenerateVerifyEvent has the wrong signature")
+	}
+	if !strings.Contains(err.Error(), "GenerateVerifyEvent (wrong signature)") {
+		t.Errorf("error %q does not name the wrong-signature method", err)
+	}
+	if strings.HasSuffix(strings.TrimSpace(err.Error()), ":") {
+		t.Errorf("error %q ends with an empty method list", err)
+	}
+	for _, ok := range []string{"HandleEventCtx", "SubmitOperationalEvent", "PollStreamHandler", "DeliveryStarted"} {
+		if strings.Contains(err.Error(), ok) {
+			t.Errorf("error %q names %s, which has the right signature", err, ok)
+		}
+	}
+}
+
+// TestNewPeerSurface_RejectsNilService (#374 review): every handle the peer
+// handlers read is checked at boot, so a missing one fails NewPeerSurface
+// rather than a request.
+func TestNewPeerSurface_RejectsNilService(t *testing.T) {
+	cases := map[string]func(*goSignalsServer.PeerSurfaceConfig){
+		"Auth":          func(c *goSignalsServer.PeerSurfaceConfig) { c.Auth = nil },
+		"StreamService": func(c *goSignalsServer.PeerSurfaceConfig) { c.StreamService = nil },
+		"KeyService":    func(c *goSignalsServer.PeerSurfaceConfig) { c.KeyService = nil },
+		"ClientService": func(c *goSignalsServer.PeerSurfaceConfig) { c.ClientService = nil },
+		"TokenService":  func(c *goSignalsServer.PeerSurfaceConfig) { c.TokenService = nil },
+		"ServerService": func(c *goSignalsServer.PeerSurfaceConfig) { c.ServerService = nil },
+	}
+	base := peerConfig(t)
+	for field, clear := range cases {
+		t.Run(field, func(t *testing.T) {
+			cfg := base
+			clear(&cfg)
+			_, err := goSignalsServer.NewPeerSurface(cfg)
+			if err == nil {
+				t.Fatalf("NewPeerSurface accepted a nil %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error %q does not name the nil field %s", err, field)
+			}
+		})
+	}
+}
+
+// peerOnlyRouter implements the pkg BusinessRouter (through the embedded
+// narrowRouter) plus only the five peer methods. It does not implement the full
+// internal EventRouter (no SSTP, cluster or counter methods), so NewPeerSurface
+// takes the adapter path.
+type peerOnlyRouter struct {
+	narrowRouter
+	verified []string
+}
+
+func (r *peerOnlyRouter) HandleEventCtx(context.Context, *goSet.SecurityEventToken, string, string) error {
+	return nil
+}
+func (r *peerOnlyRouter) SubmitOperationalEvent(string, *goSet.SecurityEventToken, string) (*model.EventRecord, error) {
+	return nil, nil
+}
+func (r *peerOnlyRouter) GenerateVerifyEvent(sid string, _ string) (*model.EventRecord, error) {
+	r.verified = append(r.verified, sid)
+	return &model.EventRecord{}, nil
+}
+func (r *peerOnlyRouter) PollStreamHandler(context.Context, string, model.PollParameters) (map[string]string, bool, int) {
+	return map[string]string{}, false, http.StatusOK
+}
+func (r *peerOnlyRouter) DeliveryStarted() bool { return true }
+
+// TestPeerSurface_PeerOnlyRouterThroughAdapter (#374 review): an external
+// router with only the peer methods serves /verify through the adapter.
+func TestPeerSurface_PeerOnlyRouterThroughAdapter(t *testing.T) {
+	rt := &peerOnlyRouter{}
+	// By construction the stub lacks the internal-only EventRouter methods, so
+	// the adapter (not a direct EventRouter type assertion) carries the calls.
+	for _, m := range []string{"SstpServerHandler", "WakeSstpServer", "ReplayStream"} {
+		if _, ok := reflect.TypeOf(rt).MethodByName(m); ok {
+			t.Fatalf("peerOnlyRouter has %s; it must not satisfy the full EventRouter", m)
+		}
+	}
+
+	cfg := peerConfig(t)
+	cfg.Router = rt
+	surface, err := goSignalsServer.NewPeerSurface(cfg)
+	if err != nil {
+		t.Fatalf("NewPeerSurface with a peer-only router: %v", err)
+	}
+	router := mountPeer(surface)
+
+	const project = "peer-project"
+	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:             []string{"http://rx.example"},
+			EventsRequested: []string{"urn:ietf:params:sse:event-type:risc:account-enabled"},
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+			},
+		},
+	}, project, nil)
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{project}}
+	bearer, err := cfg.Auth.IssueStreamClientToken(client, project, false, "")
+	if err != nil {
+		t.Fatalf("IssueStreamClientToken: %v", err)
+	}
+
+	body := []byte(`{"stream_id":"` + stream.Id + `","state":"s1"}`)
+	rr := doJSON(t, router, http.MethodPost, "/verify", bearer, body)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("POST /verify: got %d, want 204 (body=%q)", rr.Code, rr.Body.String())
+	}
+	if len(rt.verified) != 1 || rt.verified[0] != stream.Id {
+		t.Fatalf("GenerateVerifyEvent calls: got %v, want [%s]", rt.verified, stream.Id)
+	}
+}
+
+// TestPeerRoutes_SmokeNoBearer (#374 review): one unauthenticated request to
+// each of the eight peer routes answers without a 5xx — 200 for the JWKS
+// routes, 401/403 for the authed ones — so a handler that reads a field the
+// peer application does not wire fails here rather than in production.
+func TestPeerRoutes_SmokeNoBearer(t *testing.T) {
+	surface, _ := newPeerSurface(t)
+	router := mountPeer(surface)
+
+	cases := []struct {
+		method, target string
+		want           []int
+	}{
+		{http.MethodGet, "/iat", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{http.MethodPost, "/register", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{http.MethodPost, "/trigger-event", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		// RFC8935 §2.3: a push receiver reports an auth failure as 400 with an
+		// authentication_failed error body.
+		{http.MethodPost, "/events/no-such-stream", []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound}},
+		{http.MethodPost, "/verify", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{http.MethodGet, "/jwks.json", []int{http.StatusOK}},
+		{http.MethodGet, "/jwks/" + testDefaultIssuer, []int{http.StatusOK}},
+		{http.MethodPost, "/poll/no-such-stream", []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound}},
+	}
+	if len(cases) != len(surface.PeerRoutes()) {
+		t.Fatalf("smoke covers %d routes, surface exports %d", len(cases), len(surface.PeerRoutes()))
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.target, func(t *testing.T) {
+			rr := doJSON(t, router, c.method, c.target, "", []byte(`{}`))
+			if rr.Code >= 500 {
+				t.Fatalf("got %d, a 5xx (body=%q)", rr.Code, rr.Body.String())
+			}
+			if !slices.Contains(c.want, rr.Code) {
+				t.Errorf("got %d, want one of %v (body=%q)", rr.Code, c.want, rr.Body.String())
+			}
+		})
 	}
 }

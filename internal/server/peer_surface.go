@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"net/url"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
+	"github.com/i2-open/i2goSignals/pkg/goSetSstp"
 	"github.com/i2-open/i2goSignals/pkg/services"
 	model "github.com/i2-open/i2goSignals/pkg/ssfModels"
 )
@@ -100,11 +104,12 @@ func (sa *SignalsApplication) PeerRouteTable() Routes {
 }
 
 // peerRouterAdapter lifts a PeerEventRouter to the full EventRouter interface
-// that SignalsApplication holds. Only the five peer methods are wired; the
-// embedded EventRouter is nil, so any other method panics if reached, which
-// only a non-peer route bound onto a peer application could do.
+// that SignalsApplication holds. It is the path every external router takes: an
+// external module cannot implement the full EventRouter, whose SstpServerHandler
+// takes an internal type. The five peer methods delegate to the router; every
+// other method panics with a message naming the peer surface and the method,
+// which only a non-peer route bound onto a peer application could reach.
 type peerRouterAdapter struct {
-	eventRouter.EventRouter
 	peer PeerEventRouter
 }
 
@@ -125,3 +130,88 @@ func (a *peerRouterAdapter) PollStreamHandler(ctx context.Context, sid string, p
 }
 
 func (a *peerRouterAdapter) DeliveryStarted() bool { return a.peer.DeliveryStarted() }
+
+func (a *peerRouterAdapter) unsupported(method string) {
+	panic("goSignalsServer peer surface: eventRouter." + method +
+		" is not served by the peer-route surface (issue #373 serves only the five peer router methods)")
+}
+
+func (a *peerRouterAdapter) UpdateStreamState(*model.StreamStateRecord) {
+	a.unsupported("UpdateStreamState")
+}
+
+func (a *peerRouterAdapter) RemoveStream(string) { a.unsupported("RemoveStream") }
+
+func (a *peerRouterAdapter) NotifySubjectFilterChange(string) {
+	a.unsupported("NotifySubjectFilterChange")
+}
+
+func (a *peerRouterAdapter) HandleEvent(*goSet.SecurityEventToken, string, string) error {
+	a.unsupported("HandleEvent")
+	return nil
+}
+
+func (a *peerRouterAdapter) HandleEvents([]*goSet.SecurityEventToken, []string, string) []error {
+	a.unsupported("HandleEvents")
+	return nil
+}
+
+func (a *peerRouterAdapter) HandleEventsCtx(context.Context, []*goSet.SecurityEventToken, []string, string) []error {
+	a.unsupported("HandleEventsCtx")
+	return nil
+}
+
+func (a *peerRouterAdapter) CheckSstpSigningKey(*model.StreamStateRecord) error {
+	a.unsupported("CheckSstpSigningKey")
+	return nil
+}
+
+func (a *peerRouterAdapter) SstpServerHandler(context.Context, *model.StreamStateRecord, goSetSstp.Message, []eventRouter.SstpInboundSet) (goSetSstp.Message, error) {
+	a.unsupported("SstpServerHandler")
+	return goSetSstp.Message{}, nil
+}
+
+func (a *peerRouterAdapter) Shutdown() { a.unsupported("Shutdown") }
+
+func (a *peerRouterAdapter) SetEventCounter(*prometheus.CounterVec, *prometheus.CounterVec) {
+	a.unsupported("SetEventCounter")
+}
+
+func (a *peerRouterAdapter) RegisterMeteringObserver(eventRouter.MeteringObserver) {
+	a.unsupported("RegisterMeteringObserver")
+}
+
+func (a *peerRouterAdapter) PreInitializeCounter(*model.StreamStateRecord) {
+	a.unsupported("PreInitializeCounter")
+}
+
+func (a *peerRouterAdapter) GetPushStreamCnt() float64 {
+	a.unsupported("GetPushStreamCnt")
+	return 0
+}
+
+func (a *peerRouterAdapter) GetPollStreamCnt() float64 {
+	a.unsupported("GetPollStreamCnt")
+	return 0
+}
+
+func (a *peerRouterAdapter) IncrementCounter(*model.StreamStateRecord, *goSet.SecurityEventToken, bool) {
+	a.unsupported("IncrementCounter")
+}
+
+func (a *peerRouterAdapter) SetStatsHandler(interface{}) { a.unsupported("SetStatsHandler") }
+
+func (a *peerRouterAdapter) ResetStream(string) { a.unsupported("ResetStream") }
+
+func (a *peerRouterAdapter) ReplayStream(context.Context, string, string, *time.Time) error {
+	a.unsupported("ReplayStream")
+	return nil
+}
+
+func (a *peerRouterAdapter) WakeTransmitter(string, string) { a.unsupported("WakeTransmitter") }
+
+func (a *peerRouterAdapter) WakeSstpClient(string) { a.unsupported("WakeSstpClient") }
+
+func (a *peerRouterAdapter) WakeSstpServer(string) { a.unsupported("WakeSstpServer") }
+
+var _ eventRouter.EventRouter = (*peerRouterAdapter)(nil)

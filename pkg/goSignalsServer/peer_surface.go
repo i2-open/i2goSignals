@@ -48,11 +48,15 @@ type PeerSurface struct {
 }
 
 // NewPeerSurface binds the peer handlers against the supplied services and
-// router. It returns an error when cfg.Router is nil or lacks a router method
-// the handlers call, so a bad router fails at boot rather than per request.
+// router. It returns an error when cfg.Router or a service handle the handlers
+// read is nil, or the router lacks a router method the handlers call, so a bad
+// config fails at boot rather than per request.
 func NewPeerSurface(cfg PeerSurfaceConfig) (*PeerSurface, error) {
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("goSignalsServer: peer surface needs a Router")
+	}
+	if nils := nilPeerFields(cfg); len(nils) > 0 {
+		return nil, fmt.Errorf("goSignalsServer: peer surface config has nil %s", strings.Join(nils, ", "))
 	}
 	peer, ok := cfg.Router.(server.PeerEventRouter)
 	if !ok {
@@ -76,29 +80,49 @@ func NewPeerSurface(cfg PeerSurfaceConfig) (*PeerSurface, error) {
 // PeerRoutes returns the peer routes bound to the surface's handlers, with the
 // same names, methods and patterns the community gateway registers.
 func (p *PeerSurface) PeerRoutes() Routes {
-	internal := p.app.PeerRouteTable()
-	out := make(Routes, 0, len(internal))
-	for _, r := range internal {
-		out = append(out, Route{
-			Name:        r.Name,
-			Method:      r.Method,
-			Pattern:     r.Pattern,
-			HandlerFunc: r.HandlerFunc,
-			IsIdQuery:   r.IsIdQuery,
-		})
-	}
-	return out
+	return toRoutes(p.app.PeerRouteTable())
 }
 
-// missingMethods names the PeerEventRouter methods v does not have.
+// nilPeerFields names the service handles in cfg that are nil.
+func nilPeerFields(cfg PeerSurfaceConfig) []string {
+	var nils []string
+	for _, f := range []struct {
+		name  string
+		isNil bool
+	}{
+		{"Auth", cfg.Auth == nil},
+		{"StreamService", cfg.StreamService == nil},
+		{"KeyService", cfg.KeyService == nil},
+		{"ClientService", cfg.ClientService == nil},
+		{"TokenService", cfg.TokenService == nil},
+		{"ServerService", cfg.ServerService == nil},
+	} {
+		if f.isNil {
+			nils = append(nils, f.name)
+		}
+	}
+	return nils
+}
+
+// missingMethods names the PeerEventRouter methods v lacks, and those it has
+// with a different signature as "Name (wrong signature)". Called only after v
+// failed the PeerEventRouter assertion, it never returns an empty list.
 func missingMethods(v any) []string {
 	want := reflect.TypeOf((*server.PeerEventRouter)(nil)).Elem()
-	have := reflect.TypeOf(v)
+	have := reflect.ValueOf(v)
 	var missing []string
 	for i := 0; i < want.NumMethod(); i++ {
-		if _, ok := have.MethodByName(want.Method(i).Name); !ok {
-			missing = append(missing, want.Method(i).Name)
+		m := want.Method(i)
+		got := have.MethodByName(m.Name)
+		switch {
+		case !got.IsValid():
+			missing = append(missing, m.Name)
+		case got.Type() != m.Type:
+			missing = append(missing, m.Name+" (wrong signature)")
 		}
+	}
+	if len(missing) == 0 {
+		missing = append(missing, "(unidentified; see server.PeerEventRouter)")
 	}
 	return missing
 }
