@@ -31,6 +31,18 @@ import (
 	"github.com/i2-open/i2goSignals/pkg/wellKnownSupport"
 )
 
+// keyServiceAuth returns GetAuth() when it is KeyService's own issuer, else
+// nil. A surface given an explicit Auth (#376) manages that issuer's keys
+// itself: a KeyService key change must not replace its signing key or drop the
+// public keys it holds for tokens it already issued.
+func keyServiceAuth(sa SsfApplicationInterface) *authSupport.AuthIssuer {
+	auth := sa.GetAuth()
+	if auth == nil || sa.GetKeyService() == nil || auth != sa.GetKeyService().GetAuthIssuer() {
+		return nil
+	}
+	return auth
+}
+
 // rotateIssuer This function performs a key rotation on an existing issuer and ensures that previous public keys
 // remain available when JwksJsonIssuer is requested.
 func (sa *SignalsApplication) rotateIssuer(w http.ResponseWriter, r *http.Request, authCtx *authSupport.AuthContext) {
@@ -71,8 +83,8 @@ func RotateIssuerHandler(sa SsfApplicationInterface, w http.ResponseWriter, r *h
 
 	// If the rotated issuer is the token issuer, update the application's
 	// AuthIssuer. Auth tokens are signed RS256, so only an RSA rotation applies.
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == issuer && isRSAKeyAlg(alg) {
-		sa.GetAuth().UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
+	if auth := keyServiceAuth(sa); auth != nil && auth.TokenIssuer == issuer && isRSAKeyAlg(alg) {
+		auth.UpdateTokenKey(issuer, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	// Drop the issuer's cached signing keys, so this node signs with the rotated
@@ -311,8 +323,8 @@ func createKeyByNameHandler(sa SsfApplicationInterface, w http.ResponseWriter, r
 
 	// If the created issuer is the token issuer, update the application's
 	// AuthIssuer. Auth tokens are signed RS256, so only an RSA key applies.
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && isRSAKeyAlg(alg) {
-		sa.GetAuth().UpdateTokenKey(keyName, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
+	if auth := keyServiceAuth(sa); auth != nil && auth.TokenIssuer == keyName && isRSAKeyAlg(alg) {
+		auth.UpdateTokenKey(keyName, kid, issuerKey, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(issuerKey)
@@ -555,8 +567,8 @@ func loadKeyHandler(sa SsfApplicationInterface, writer http.ResponseWriter, requ
 
 	// If the loaded issuer is the token issuer, update the application's
 	// AuthIssuer. Auth tokens are signed RS256, so only an RSA key applies.
-	if sa.GetAuth() != nil && sa.GetAuth().TokenIssuer == keyName && priv != nil && isRSAKeyAlg(uploadAlg) {
-		sa.GetAuth().UpdateTokenKey(keyName, kid, priv, sa.GetKeyService().GetAuthValidatorPubKey())
+	if auth := keyServiceAuth(sa); auth != nil && auth.TokenIssuer == keyName && priv != nil && isRSAKeyAlg(uploadAlg) {
+		auth.UpdateTokenKey(keyName, kid, priv, sa.GetKeyService().GetAuthValidatorPubKey())
 	}
 
 	writer.WriteHeader(http.StatusOK)

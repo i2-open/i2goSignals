@@ -456,3 +456,25 @@ func TestAdminSurface_ExplicitAuthWins(t *testing.T) {
 		t.Fatalf("GET /states with a KeyService-minted bearer: got %d, want 401", rr.Code)
 	}
 }
+
+// TestAdminSurface_KeyRotationLeavesExplicitAuth (#376): rotating a KeyService
+// key whose name matches an explicit surface Auth's issuer leaves that Auth's
+// keys alone, so a bearer it minted before the rotation still verifies.
+func TestAdminSurface_KeyRotationLeavesExplicitAuth(t *testing.T) {
+	f := newAdminFixtureWithAuth(t, otherIssuer(t))
+	if f.auth.TokenIssuer != f.keys.GetAuthIssuer().TokenIssuer {
+		t.Fatal("fixture issuers have different names; the test needs a name collision")
+	}
+	mounted := mountAdmin(f.surface)
+	bearer := f.adminBearer(t, "proj-1")
+
+	rr := doJSON(t, mounted, http.MethodPost, "/key/"+f.auth.TokenIssuer+"?alg=RS256&force=rotate", bearer, nil)
+	if rr.Code != http.StatusOK && rr.Code != http.StatusCreated {
+		t.Fatalf("rotate: got %d, want 200/201 (body=%q)", rr.Code, rr.Body.String())
+	}
+
+	rr = doJSON(t, mounted, http.MethodGet, "/states", bearer, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /states with a pre-rotation bearer: got %d, want 200", rr.Code)
+	}
+}
