@@ -121,9 +121,13 @@ func NewAdminSurface(cfg AdminSurfaceConfig) *AdminSurface {
 // the router's 404 (route-not-registered) — the registration toggle the
 // enterprise REST-admin flag relies on.
 func (a *AdminSurface) AdminRoutes() Routes {
-	internal := a.app.AdminRouteTable()
-	out := make(Routes, 0, len(internal))
-	for _, r := range internal {
+	return toRoutes(a.app.AdminRouteTable())
+}
+
+// toRoutes copies an internal route table into the public Routes type.
+func toRoutes(in server.Routes) Routes {
+	out := make(Routes, 0, len(in))
+	for _, r := range in {
 		out = append(out, Route{
 			Name:        r.Name,
 			Method:      r.Method,
