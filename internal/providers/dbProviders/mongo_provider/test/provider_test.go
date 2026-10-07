@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"log"
@@ -293,12 +294,17 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	s.NoError(err)
 	s.NotNil(key, "Should be a key returned")
 
-	keyRetrieved, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), issuer)
+	// The default key type since spec #114 is ES256 (I2SIG_KEY_ALG), with a kid
+	// of its own, so look it up with the any-type signer, not the RSA-only
+	// token-key lookup (GetPrivateKey).
+	keyRetrieved, kid, err := s.provider.GetKeyService().GetSigner(context.Background(), issuer, "")
 	s.NoError(err, "Should be no error")
-	s.NotNil(keyRetrieved)
-	s.True(key.Public().(*rsa.PublicKey).Equal(keyRetrieved.Public()), "Should be same key")
+	s.Require().NotNil(keyRetrieved)
+	pub, ok := key.Public().(interface{ Equal(crypto.PublicKey) bool })
+	s.Require().True(ok, "public key should support Equal")
+	s.True(pub.Equal(keyRetrieved.Public()), "Should be same key")
 
-	keyFail, err := s.provider.GetKeyService().GetPrivateKey(context.Background(), "should.fail")
+	keyFail, _, err := s.provider.GetKeyService().GetSigner(context.Background(), "should.fail", "")
 	s.Error(err, "No key found for: should.fail")
 	s.Nil(keyFail, "Should be no key returned")
 
@@ -312,7 +318,7 @@ func (s *MongoProviderSuite) TestF1_IssuerKeys() {
 	if issPubJson != nil {
 		issPub, err := keyfunc.NewJSON(*issPubJson)
 		s.NoError(err, "No error parsing json into JWKS")
-		s.Contains(issPub.KIDs(), issuer, "Confirm issuer present")
+		s.Contains(issPub.KIDs(), kid, "Confirm the issuer's key present")
 	}
 
 	keys, _ := s.provider.GetKeyService().ListKeyNames(context.Background())
