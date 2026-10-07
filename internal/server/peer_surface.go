@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -90,9 +91,14 @@ func NewPeerApplication(deps PeerAppDeps) *SignalsApplication {
 }
 
 // PeerRouteTable returns the #373 subset of peerRoutes(), in peerRoutes()
-// order, bound to this application's handlers. It filters the gateway's own
-// table, so the exported routes cannot drift from what the gateway serves.
+// order, bound to this application's handlers and to GetAuth() (#376).
 func (sa *SignalsApplication) PeerRouteTable() Routes {
+	return sa.bindSurfaceIssuer(sa.peerRouteSubset())
+}
+
+// peerRouteSubset filters the gateway's own peerRoutes() table, so the exported
+// routes cannot drift from what the gateway serves.
+func (sa *SignalsApplication) peerRouteSubset() Routes {
 	h := &HttpRouter{sa: sa}
 	out := Routes{}
 	for _, r := range h.peerRoutes() {
@@ -101,6 +107,20 @@ func (sa *SignalsApplication) PeerRouteTable() Routes {
 		}
 	}
 	return out
+}
+
+// bindSurfaceIssuer wraps each route's handler so the request context carries
+// GetAuth() (#376). Services that mint or check bearer tokens read it through
+// services.WithAuthIssuer, so a surface whose Auth differs from KeyService's
+// issuer never mixes two issuers.
+func (sa *SignalsApplication) bindSurfaceIssuer(rs Routes) Routes {
+	for i := range rs {
+		next := rs[i].HandlerFunc
+		rs[i].HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
+			next(w, r.WithContext(services.WithAuthIssuer(r.Context(), sa.GetAuth())))
+		}
+	}
+	return rs
 }
 
 // peerRouterAdapter lifts a PeerEventRouter to the full EventRouter interface

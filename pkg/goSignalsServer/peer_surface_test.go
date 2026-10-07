@@ -7,6 +7,8 @@ package goSignalsServer_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -17,8 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 
+	"github.com/i2-open/i2goSignals/pkg/authSupport"
 	"github.com/i2-open/i2goSignals/pkg/dao/memory"
 	pkgrouter "github.com/i2-open/i2goSignals/pkg/eventRouter"
 	"github.com/i2-open/i2goSignals/pkg/goSet"
@@ -84,6 +88,25 @@ func newPeerSurface(t *testing.T) (*goSignalsServer.PeerSurface, *services.KeySe
 		t.Fatalf("NewPeerSurface with the business router: %v", err)
 	}
 	return surface, cfg.KeyService
+}
+
+// createPollStream creates a poll-transmitter stream in project through the
+// surface config's StreamService.
+func createPollStream(t *testing.T, cfg goSignalsServer.PeerSurfaceConfig, project string) model.StreamConfiguration {
+	t.Helper()
+	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
+		StreamConfiguration: model.StreamConfiguration{
+			Aud:             []string{"http://rx.example"},
+			EventsRequested: []string{"urn:ietf:params:sse:event-type:risc:account-enabled"},
+			Delivery: &model.OneOfStreamConfigurationDelivery{
+				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
+			},
+		},
+	}, project, nil)
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	return stream
 }
 
 // mountPeer registers the peer routes on a fresh gorilla/mux router.
@@ -314,18 +337,7 @@ func TestPeerSurface_PeerOnlyRouterThroughAdapter(t *testing.T) {
 	router := mountPeer(surface)
 
 	const project = "peer-project"
-	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
-		StreamConfiguration: model.StreamConfiguration{
-			Aud:             []string{"http://rx.example"},
-			EventsRequested: []string{"urn:ietf:params:sse:event-type:risc:account-enabled"},
-			Delivery: &model.OneOfStreamConfigurationDelivery{
-				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
-			},
-		},
-	}, project, nil)
-	if err != nil {
-		t.Fatalf("CreateStream: %v", err)
-	}
+	stream := createPollStream(t, cfg, project)
 	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{project}}
 	bearer, err := cfg.Auth.IssueStreamClientToken(client, project, false, "")
 	if err != nil {
@@ -399,18 +411,7 @@ func TestPeerSurface_ExplicitAuthWins(t *testing.T) {
 	router := mountPeer(surface)
 
 	const project = "peer-project"
-	stream, err := cfg.StreamService.CreateStream(context.Background(), model.StreamStateRecord{
-		StreamConfiguration: model.StreamConfiguration{
-			Aud:             []string{"http://rx.example"},
-			EventsRequested: []string{"urn:ietf:params:sse:event-type:risc:account-enabled"},
-			Delivery: &model.OneOfStreamConfigurationDelivery{
-				PollTransmitMethod: &model.PollTransmitMethod{Method: model.DeliveryPoll},
-			},
-		},
-	}, project, nil)
-	if err != nil {
-		t.Fatalf("CreateStream: %v", err)
-	}
+	stream := createPollStream(t, cfg, project)
 	client := model.SsfClient{Id: model.NewRecordId(), ProjectIds: []string{project}}
 	body := []byte(`{"stream_id":"` + stream.Id + `","state":"s1"}`)
 
@@ -433,6 +434,42 @@ func TestPeerSurface_ExplicitAuthWins(t *testing.T) {
 	}
 	if len(rt.verified) != 1 || rt.verified[0] != stream.Id {
 		t.Fatalf("GenerateVerifyEvent calls: got %v, want [%s]", rt.verified, stream.Id)
+	}
+}
+
+// TestPeerSurface_RegisterMintsWithExplicitAuth (#376): /register validates
+// the IAT with the surface's Auth, and the token it returns must be minted by
+// that same Auth so the surface accepts it. Before the fix ClientService
+// minted with KeyService's issuer and the returned token got 401 on /verify.
+func TestPeerSurface_RegisterMintsWithExplicitAuth(t *testing.T) {
+	cfg := peerConfig(t)
+	cfg.Auth = otherIssuer(t)
+	rt := &peerOnlyRouter{}
+	cfg.Router = rt
+	surface, err := goSignalsServer.NewPeerSurface(cfg)
+	if err != nil {
+		t.Fatalf("NewPeerSurface: %v", err)
+	}
+	router := mountPeer(surface)
+
+	const project = "peer-project"
+	iat, err := cfg.Auth.IssueProjectIat(&authSupport.AuthContext{ProjectId: project})
+	if err != nil {
+		t.Fatalf("IssueProjectIat: %v", err)
+	}
+	rr := doJSON(t, router, http.MethodPost, "/register", iat, []byte(`{}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /register: got %d, want 200 (body=%q)", rr.Code, rr.Body.String())
+	}
+	var reg model.RegisterResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &reg); err != nil || reg.Token == "" {
+		t.Fatalf("decode /register response: %v (body=%q)", err, rr.Body.String())
+	}
+
+	stream := createPollStream(t, cfg, project)
+	rr = doJSON(t, router, http.MethodPost, "/verify", reg.Token, []byte(`{"stream_id":"`+stream.Id+`","state":"s1"}`))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("POST /verify with the /register token: got %d, want 204 (body=%q)", rr.Code, rr.Body.String())
 	}
 }
 
@@ -500,7 +537,15 @@ func TestPeerSurface_PollReturnsHandledEvent(t *testing.T) {
 	subject := &goSet.EventSubject{SubjectIdentifier: *goSet.NewScimSubjectIdentifier("/Users/peer-poll")}
 	set := goSet.CreateSet(subject, testDefaultIssuer, []string{aud})
 	set.AddEventPayload("https://schemas.openid.net/secevent/risc/event-type/account-disabled", map[string]interface{}{})
-	if err := cfg.Router.HandleEvent(&set, "", stream.Id); err != nil {
+	signer, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	raw, err := set.JWS(jwt.SigningMethodRS256, signer)
+	if err != nil {
+		t.Fatalf("sign SET: %v", err)
+	}
+	if err := cfg.Router.HandleEvent(&set, raw, stream.Id); err != nil {
 		t.Fatalf("HandleEvent: %v", err)
 	}
 

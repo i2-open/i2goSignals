@@ -260,7 +260,7 @@ func (s *StreamService) CreateSstpPair(ctx context.Context, bootstrap model.Sstp
 		// Mint the per-pair bearer covering both SIDs: [txSid (== PairId), rxSid
 		// (== inbound SID)]. Both must be real so per-direction status/verify naming
 		// the inbound SID authorizes (finding #7).
-		token, err := s.keyService.GetAuthIssuer().IssueSstpPairToken(pairId, inboundSid, projectID, false, sessionFromCtx(ctx))
+		token, err := s.keyService.authIssuerFor(ctx).IssueSstpPairToken(pairId, inboundSid, projectID, false, sessionFromCtx(ctx))
 		if err != nil {
 			return model.StreamStateRecord{}, fmt.Errorf("failed to mint sstp pair token: %v", err)
 		}

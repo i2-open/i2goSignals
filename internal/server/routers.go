@@ -523,5 +523,5 @@ func (h *HttpRouter) adminRoutes() Routes {
 // behavior, no re-implementation). Peer routes are deliberately excluded.
 func (sa *SignalsApplication) AdminRouteTable() Routes {
 	h := &HttpRouter{sa: sa}
-	return h.adminRoutes()
+	return sa.bindSurfaceIssuer(h.adminRoutes())
 }

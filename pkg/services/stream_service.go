@@ -583,7 +583,7 @@ func (s *StreamService) CreateStream(ctx context.Context, request model.StreamSt
 		config.TxToken = &transmitToken
 	}
 
-	authIssuer := s.keyService.GetAuthIssuer()
+	authIssuer := s.keyService.authIssuerFor(ctx)
 	selectedTxServerParam := false
 	if txServer != nil || (request.TxWellKnownUrl != nil && request.TxToken != nil && *request.TxToken != "" && *request.TxWellKnownUrl != "") {
 		selectedTxServerParam = true

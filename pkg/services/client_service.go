@@ -44,7 +44,7 @@ func (s *ClientService) RegisterClient(ctx context.Context, client model.SsfClie
 	// the earlier #140 divergence, which withheld event from the token on the
 	// (incorrect) premise that such a token would be rejected at delivery anyway.
 	admin := slices.Contains(client.AllowedScopes, authSupport.ScopeStreamAdmin)
-	token, err := s.keyService.GetAuthIssuer().IssueStreamClientToken(client, projectID, admin, parentJTI)
+	token, err := s.keyService.authIssuerFor(ctx).IssueStreamClientToken(client, projectID, admin, parentJTI)
 	if err != nil {
 		csLog.Error("Error issuing stream client token", "error", err)
 		return nil
