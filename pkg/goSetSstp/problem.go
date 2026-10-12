@@ -32,8 +32,9 @@ package goSetSstp
 const problemURIPrefix = "https://schemas.independentid.com/secevent/i2sig/problem/v1/"
 
 // v1 SSTP setErrs problem URIs — 8 constants promoted verbatim from the
-// enterprise/admin controlset tables, plus ProblemServerSuspended. Comments preserve the emission
-// intent; the pkg verdict table below is the single source of retryability.
+// enterprise/admin controlset tables, plus ProblemServerSuspended.
+// Comments preserve the emission intent; the pkg verdict table below is
+// the single source of retryability.
 const (
 	// ProblemUnknownEventType: receiver does not implement the event-type
 	// URI. Not retryable → failed_unrecoverable.
@@ -53,8 +54,9 @@ const (
 	// aborted.
 	ProblemBindingRevoked = problemURIPrefix + "binding-revoked"
 	// ProblemServerSuspended: the Admin has suspended this server pending
-	// revocation (spec #118 force revoke). Reversible — the server keeps its
-	// redial cadence and is refused the same way on every dial until lifted.
+	// revocation (spec planning#118 force revoke). Retryable — reversible:
+	// the server keeps its redial cadence and is refused the same way on
+	// every dial until the suspension is lifted.
 	ProblemServerSuspended = problemURIPrefix + "server-suspended"
 	// ProblemEventsNotAllowedForPurpose: the events URI is outside the
 	// per-purpose whitelist of the receiving stream. Not retryable.
@@ -109,13 +111,13 @@ func (c SetErrClass) String() string {
 
 // setErrClassTable is the total classifier table for well-formed SetErr
 // values. It unions the v1 URI half (mechanical from the promoted
-// enterprise/admin tri-state) with the SSTP §2.3 keyword half (all 12
+// enterprise/admin tri-state, plus post-promotion additions) with the SSTP §2.3 keyword half (all 12
 // constants from errcode.go). Every entry is a pinned verdict — no
 // implicit defaults; unknown keys are handled explicitly in ClassifySetErr
 // and LookupSetErrClass so an unknown never silently maps to a keyword's
 // verdict.
 var setErrClassTable = map[string]SetErrClass{
-	// -- v1 URI half (promoted from enterprise/admin) -------------------
+	// -- v1 URI half (promoted from enterprise/admin + post-promotion) --
 	// Retryable: JWKS rotation / kid propagation can heal these.
 	ProblemSignatureInvalid: ClassSetErrRetryable,
 	ProblemUnknownKID:       ClassSetErrRetryable,

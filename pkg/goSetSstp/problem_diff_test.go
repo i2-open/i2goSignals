@@ -92,9 +92,10 @@ func TestProblemRegistry_VerdictIdenticalToAdmin(t *testing.T) {
 	assertVerdictIdentical(t, "admin", adminSnapshot)
 }
 
-// TestProblemRegistry_URISetIsUnionOfSources asserts the pkg's URI half is
-// exactly the union of the two source tables — no dropped URI, no added
-// URI. Combined with the two identity tests above, this pins verdict-and-
+// TestProblemRegistry_URISetIsUnionOfSources asserts the pkg's promoted
+// URIs are exactly the union of the two source tables — no dropped URI, no
+// added URI — and that post-promotion additions are registered in the pkg
+// only. Combined with the two identity tests above, this pins verdict-and-
 // membership identity across all three tables.
 func TestProblemRegistry_URISetIsUnionOfSources(t *testing.T) {
 	// Union = enterprise ∪ admin (which happens to be identical to both,
@@ -113,8 +114,8 @@ func TestProblemRegistry_URISetIsUnionOfSources(t *testing.T) {
 		}
 	}
 	// Every pkg-registered v1 URI must be present in a source table.
-	// (Iterate the 8 documented ProblemXxx constants — they are the
-	// canonical enumeration.)
+	// (Iterate the 8 ProblemXxx constants promoted from the source tables;
+	// post-promotion additions are checked below.)
 	pkgURIs := []string{
 		goSetSstp.ProblemUnknownEventType,
 		goSetSstp.ProblemSignatureInvalid,

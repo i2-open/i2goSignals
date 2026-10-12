@@ -8,8 +8,8 @@ import (
 
 // TestClassifySetErr_TotalCoverage_URIHalf pins the verdict for every one
 // of the nine v1 Problem* URIs (eight promoted + ProblemServerSuspended,
-// spec planning#118). Total coverage: any change to
-// the pkg's registry MUST update this table.
+// spec planning#118). Total coverage: any change to the pkg's registry
+// MUST update this table.
 func TestClassifySetErr_TotalCoverage_URIHalf(t *testing.T) {
 	cases := []struct {
 		uri  string
