@@ -7,7 +7,8 @@ import (
 )
 
 // TestClassifySetErr_TotalCoverage_URIHalf pins the verdict for every one
-// of the eight promoted v1 Problem* URIs. Total coverage: any change to
+// of the nine v1 Problem* URIs (eight promoted + ProblemServerSuspended,
+// spec planning#118). Total coverage: any change to
 // the pkg's registry MUST update this table.
 func TestClassifySetErr_TotalCoverage_URIHalf(t *testing.T) {
 	cases := []struct {
@@ -17,6 +18,8 @@ func TestClassifySetErr_TotalCoverage_URIHalf(t *testing.T) {
 		// Retryable — JWKS rotation / kid propagation can heal.
 		{goSetSstp.ProblemSignatureInvalid, goSetSstp.ClassSetErrRetryable},
 		{goSetSstp.ProblemUnknownKID, goSetSstp.ClassSetErrRetryable},
+		// Retryable — Admin suspension is reversible; keep redialling.
+		{goSetSstp.ProblemServerSuspended, goSetSstp.ClassSetErrRetryable},
 		// Stream-fatal — stream is dead.
 		{goSetSstp.ProblemBindingRevoked, goSetSstp.ClassSetErrStreamFatal},
 		// Non-retryable — retry cannot heal.
@@ -41,6 +44,15 @@ func TestClassifySetErr_TotalCoverage_URIHalf(t *testing.T) {
 				t.Errorf("LookupSetErrClass(%q).class = %v, want %v", tc.uri, class, tc.want)
 			}
 		})
+	}
+}
+
+// TestProblemServerSuspended_WireValue pins the exact problem URI the Admin
+// emits when refusing a suspended server (spec planning#118 seam).
+func TestProblemServerSuspended_WireValue(t *testing.T) {
+	const want = "https://schemas.independentid.com/secevent/i2sig/problem/v1/server-suspended"
+	if goSetSstp.ProblemServerSuspended != want {
+		t.Errorf("ProblemServerSuspended = %q, want %q", goSetSstp.ProblemServerSuspended, want)
 	}
 }
 

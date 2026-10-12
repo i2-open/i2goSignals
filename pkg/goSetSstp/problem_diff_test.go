@@ -130,6 +130,20 @@ func TestProblemRegistry_URISetIsUnionOfSources(t *testing.T) {
 			t.Errorf("pkg-registered URI %q not present in either source snapshot", u)
 		}
 	}
+	// Post-promotion additions are registered in the pkg only (the source
+	// tables are frozen snapshots); they must be registered and must NOT
+	// appear in either source snapshot.
+	postPromotionURIs := []string{
+		goSetSstp.ProblemServerSuspended, // spec planning#118
+	}
+	for _, u := range postPromotionURIs {
+		if _, ok := goSetSstp.LookupSetErrClass(u); !ok {
+			t.Errorf("post-promotion URI %q NOT registered in pkg", u)
+		}
+		if sourceURIs[u] {
+			t.Errorf("post-promotion URI %q unexpectedly present in a source snapshot", u)
+		}
+	}
 }
 
 func assertVerdictIdentical(t *testing.T, side string, snapshot map[string]sourceAnnotation) {

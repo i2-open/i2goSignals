@@ -2,7 +2,7 @@ package goSetSstp
 
 // v1 problem-URI registry + total per-JTI classifier for the SSTP setErrs
 // vocabulary (draft-hunt-secevent-sstp-00 §2.3 + planning ADR-0040 & the
-// enterprise/admin cross-repo registry). The eight ProblemXxx URI constants
+// enterprise/admin cross-repo registry). The nine ProblemXxx URI constants
 // below are the canonical vocabulary; the two verdict tables (URI half +
 // SSTP §2.3 keyword half) together map every well-formed SetErr to one of
 // three verdicts. Consumers execute the verdict; policy stays consumer-local
@@ -14,6 +14,9 @@ package goSetSstp
 // pkg becomes the single source. A one-time diff test in this pkg pins
 // verdict equivalence to the two source tables until they are removed
 // (problem_diff_test.go).
+//
+// Post-promotion additions (registered here only, not in the source
+// tables): ProblemServerSuspended (spec planning#118, retryable).
 //
 // Emission contract (pinned cross-repo, see the promoted comment): a
 // setErrs rejection with a registry semantic MUST carry the canonical v1
@@ -28,8 +31,8 @@ package goSetSstp
 // problemURIPrefix is the v1 problem-URI namespace root (ADR-0029).
 const problemURIPrefix = "https://schemas.independentid.com/secevent/i2sig/problem/v1/"
 
-// v1 SSTP setErrs problem URIs — 8 constants, promoted verbatim from the
-// enterprise/admin controlset tables. Comments preserve the emission
+// v1 SSTP setErrs problem URIs — 8 constants promoted verbatim from the
+// enterprise/admin controlset tables, plus ProblemServerSuspended. Comments preserve the emission
 // intent; the pkg verdict table below is the single source of retryability.
 const (
 	// ProblemUnknownEventType: receiver does not implement the event-type
@@ -49,6 +52,10 @@ const (
 	// sender transitions the stream to revoked and drains its outbox to
 	// aborted.
 	ProblemBindingRevoked = problemURIPrefix + "binding-revoked"
+	// ProblemServerSuspended: the Admin has suspended this server pending
+	// revocation (spec #118 force revoke). Reversible — the server keeps its
+	// redial cadence and is refused the same way on every dial until lifted.
+	ProblemServerSuspended = problemURIPrefix + "server-suspended"
 	// ProblemEventsNotAllowedForPurpose: the events URI is outside the
 	// per-purpose whitelist of the receiving stream. Not retryable.
 	ProblemEventsNotAllowedForPurpose = problemURIPrefix + "events-not-allowed-for-purpose"
@@ -112,6 +119,8 @@ var setErrClassTable = map[string]SetErrClass{
 	// Retryable: JWKS rotation / kid propagation can heal these.
 	ProblemSignatureInvalid: ClassSetErrRetryable,
 	ProblemUnknownKID:       ClassSetErrRetryable,
+	// Retryable: Admin suspension is reversible (spec planning#118).
+	ProblemServerSuspended: ClassSetErrRetryable,
 	// Stream-fatal: the stream itself is dead.
 	ProblemBindingRevoked: ClassSetErrStreamFatal,
 	// Non-retryable: sender or content is wrong at rest; retry cannot heal.
