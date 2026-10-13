@@ -6,6 +6,8 @@ package goSetPoll
 
 import (
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"log/slog"
 	"net/http"
 
@@ -42,28 +44,42 @@ type PollRequest struct {
 // pollRequestFields is PollRequest without its JSON methods.
 type pollRequestFields PollRequest
 
-// MarshalJSON writes an AckOnly request with an explicit "maxEvents": 0,
-// which omitzero would otherwise drop.
-func (p PollRequest) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+// MarshalJSONTo writes an AckOnly request with an explicit "maxEvents": 0,
+// which omitzero would otherwise drop. The hooks are the json/v2 streaming
+// forms and pin goSet.JSONOptionsV1; see its comment for why, and for why the
+// receiver is a value.
+func (p PollRequest) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, &struct {
 		MaxEvents *int32 `json:"maxEvents,omitempty"`
 		pollRequestFields
-	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)})
+	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)}, goSet.JSONOptionsV1)
 }
 
-// UnmarshalJSON sets AckOnly when the request carries an explicit
+// UnmarshalJSONFrom sets AckOnly when the request carries an explicit
 // "maxEvents": 0; an absent or null maxEvents leaves it false.
-func (p *PollRequest) UnmarshalJSON(data []byte) error {
+func (p *PollRequest) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var in struct {
 		MaxEvents *int32 `json:"maxEvents"`
 		pollRequestFields
 	}
-	if err := json.Unmarshal(data, &in); err != nil {
+	if err := jsonv2.UnmarshalDecode(dec, &in, goSet.JSONOptionsV1); err != nil {
 		return err
 	}
 	*p = PollRequest(in.pollRequestFields)
 	p.MaxEvents, p.AckOnly = readMaxEvents(in.MaxEvents)
 	return nil
+}
+
+// MarshalJSON is kept for callers that use the json.Marshaler interface
+// directly; encoding/json itself goes through MarshalJSONTo.
+func (p PollRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// UnmarshalJSON is kept for callers that use the json.Unmarshaler interface
+// directly; encoding/json itself goes through UnmarshalJSONFrom.
+func (p *PollRequest) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, p)
 }
 
 // wireMaxEvents is the maxEvents a request sends: 0 for an ack-only request,
