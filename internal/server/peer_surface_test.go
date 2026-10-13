@@ -97,17 +97,19 @@ func (f *fakePeerRouter) ServesClaims() bool {
 // built without ServesClaims is never reported as serving claims.
 func TestPeerRouterAdapter_ServesClaimsAsksTheRouter(t *testing.T) {
 	for _, serves := range []bool{true, false} {
-		app := NewPeerApplication(PeerAppDeps{Router: &fakePeerRouter{serves: serves}})
-		if got := app.EventRouter.ServesClaims(); got != serves {
-			t.Errorf("router ServesClaims %v: adapter reports %v", serves, got)
-		}
+		t.Run(fmt.Sprint(serves), func(t *testing.T) {
+			app := NewPeerApplication(PeerAppDeps{Router: &fakePeerRouter{serves: serves}})
+			if got := app.EventRouter.ServesClaims(); got != serves {
+				t.Errorf("router ServesClaims %v: adapter reports %v", serves, got)
+			}
+		})
 	}
 }
 
 // TestPeerRouterAdapter_DelegatesPeerMethodsAndNamesUnsupported (#374 review):
 // a narrow router is lifted to EventRouter by peerRouterAdapter. The
-// PeerEventRouter methods reach the router; any other method panics with a message naming the
-// peer surface and the method, not a bare nil dereference.
+// PeerEventRouter methods reach the router; any other method panics with a
+// message naming the peer surface and the method, not a bare nil dereference.
 func TestPeerRouterAdapter_DelegatesPeerMethodsAndNamesUnsupported(t *testing.T) {
 	fake := &fakePeerRouter{}
 	app := NewPeerApplication(PeerAppDeps{Router: fake})

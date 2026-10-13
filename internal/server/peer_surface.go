@@ -159,7 +159,7 @@ func (a *peerRouterAdapter) ServesClaims() bool { return a.peer.ServesClaims() }
 
 func (a *peerRouterAdapter) unsupported(method string) {
 	panic("goSignalsServer peer surface: eventRouter." + method +
-		" is not served by the peer-route surface (issue #373 serves only the five peer router methods)")
+		" is not served by the peer-route surface (issue #373 serves only the PeerEventRouter methods)")
 }
 
 func (a *peerRouterAdapter) UpdateStreamState(*model.StreamStateRecord) {

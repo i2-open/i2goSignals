@@ -293,9 +293,9 @@ func TestNewPeerSurface_RejectsNilService(t *testing.T) {
 }
 
 // peerOnlyRouter implements the pkg BusinessRouter (through the embedded
-// narrowRouter) plus only the five peer methods. It does not implement the full
-// internal EventRouter (no SSTP, cluster or counter methods), so NewPeerSurface
-// takes the adapter path.
+// narrowRouter) plus only the PeerEventRouter methods. It does not implement
+// the full internal EventRouter (no SSTP, cluster or counter methods), so
+// NewPeerSurface takes the adapter path.
 type peerOnlyRouter struct {
 	narrowRouter
 	verified []string
