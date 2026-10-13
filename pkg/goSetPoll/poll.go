@@ -44,30 +44,15 @@ type PollRequest struct {
 // pollRequestFields is PollRequest without its JSON methods.
 type pollRequestFields PollRequest
 
-// pollJSONOptions are the encoding/json (v1) semantics the poll request uses.
-// The hooks below are the json/v2 streaming forms, which encoding/json calls
-// in preference to MarshalJSON / UnmarshalJSON: a legacy hook makes the
-// encoder re-validate and copy its output, and the decoder buffer and decode
-// the body twice (BenchmarkPollRequestMarshal +74%, 5 -> 9 allocs/op).
-//
-// v1 error reporting is turned off for the nested call: with it on,
-// UnmarshalDecode scans the whole next value for syntax errors before decoding
-// it, and the top-level encoding/json call has already done that for the body,
-// so the request would be validated twice (BenchmarkParsePollRequest +11%).
-// The top-level call still reports errors in v1 form.
-//
-// MarshalJSONTo keeps a value receiver on purpose: under v1 method semantics a
-// pointer-receiver MarshalJSONTo is skipped for a non-addressable value and the
-// legacy MarshalJSON is called instead, which would recurse through json.Marshal.
-var pollJSONOptions = jsonv2.JoinOptions(json.DefaultOptionsV1(), json.ReportErrorsWithLegacySemantics(false))
-
 // MarshalJSONTo writes an AckOnly request with an explicit "maxEvents": 0,
-// which omitzero would otherwise drop.
+// which omitzero would otherwise drop. The hooks are the json/v2 streaming
+// forms and pin goSet.JSONOptionsV1; see its comment for why, and for why the
+// receiver is a value.
 func (p PollRequest) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return jsonv2.MarshalEncode(enc, &struct {
 		MaxEvents *int32 `json:"maxEvents,omitempty"`
 		pollRequestFields
-	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)}, pollJSONOptions)
+	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)}, goSet.JSONOptionsV1)
 }
 
 // UnmarshalJSONFrom sets AckOnly when the request carries an explicit
@@ -77,7 +62,7 @@ func (p *PollRequest) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		MaxEvents *int32 `json:"maxEvents"`
 		pollRequestFields
 	}
-	if err := jsonv2.UnmarshalDecode(dec, &in, pollJSONOptions); err != nil {
+	if err := jsonv2.UnmarshalDecode(dec, &in, goSet.JSONOptionsV1); err != nil {
 		return err
 	}
 	*p = PollRequest(in.pollRequestFields)
