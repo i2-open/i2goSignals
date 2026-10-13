@@ -57,7 +57,10 @@ func TestPeerRouteTable_MatchesPeerRoutes(t *testing.T) {
 }
 
 // fakePeerRouter records the peer calls the adapter forwards.
-type fakePeerRouter struct{ calls []string }
+type fakePeerRouter struct {
+	calls  []string
+	serves bool
+}
 
 func (f *fakePeerRouter) HandleEventCtx(context.Context, *goSet.SecurityEventToken, string, string) error {
 	f.calls = append(f.calls, "HandleEventCtx")
@@ -84,9 +87,26 @@ func (f *fakePeerRouter) DeliveryStarted() bool {
 	return true
 }
 
+func (f *fakePeerRouter) ServesClaims() bool {
+	f.calls = append(f.calls, "ServesClaims")
+	return f.serves
+}
+
+// TestPeerRouterAdapter_ServesClaimsAsksTheRouter (#378 review): the adapter
+// reports the wrapped router's ServesClaims rather than a constant, so a router
+// built without ServesClaims is never reported as serving claims.
+func TestPeerRouterAdapter_ServesClaimsAsksTheRouter(t *testing.T) {
+	for _, serves := range []bool{true, false} {
+		app := NewPeerApplication(PeerAppDeps{Router: &fakePeerRouter{serves: serves}})
+		if got := app.EventRouter.ServesClaims(); got != serves {
+			t.Errorf("router ServesClaims %v: adapter reports %v", serves, got)
+		}
+	}
+}
+
 // TestPeerRouterAdapter_DelegatesPeerMethodsAndNamesUnsupported (#374 review):
-// a narrow router is lifted to EventRouter by peerRouterAdapter. The five peer
-// methods reach the router; any other method panics with a message naming the
+// a narrow router is lifted to EventRouter by peerRouterAdapter. The
+// PeerEventRouter methods reach the router; any other method panics with a message naming the
 // peer surface and the method, not a bare nil dereference.
 func TestPeerRouterAdapter_DelegatesPeerMethodsAndNamesUnsupported(t *testing.T) {
 	fake := &fakePeerRouter{}
@@ -102,7 +122,8 @@ func TestPeerRouterAdapter_DelegatesPeerMethodsAndNamesUnsupported(t *testing.T)
 	_, _ = er.GenerateVerifyEvent("sid", "state")
 	_, _, _ = er.PollStreamHandler(ctx, "sid", model.PollParameters{})
 	_ = er.DeliveryStarted()
-	want := []string{"HandleEventCtx", "SubmitOperationalEvent", "GenerateVerifyEvent", "PollStreamHandler", "DeliveryStarted"}
+	_ = er.ServesClaims()
+	want := []string{"HandleEventCtx", "SubmitOperationalEvent", "GenerateVerifyEvent", "PollStreamHandler", "DeliveryStarted", "ServesClaims"}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("delegated calls: got %v, want %v", fake.calls, want)
 	}

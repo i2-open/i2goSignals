@@ -39,7 +39,8 @@ var peerSurfaceRouteNames = map[string]bool{
 // PeerEventRouter is the router surface the peer-surface handlers call:
 // ReceivePushEvent ingests (HandleEventCtx), TriggerEvent submits
 // (SubmitOperationalEvent), /verify generates (GenerateVerifyEvent) and
-// PollEvents polls (PollStreamHandler, DeliveryStarted). The router
+// PollEvents polls (PollStreamHandler, DeliveryStarted). ServesClaims reports
+// whether the router serves poll requests (#377). The router
 // eventRouter.NewRouter returns implements it.
 type PeerEventRouter interface {
 	HandleEventCtx(ctx context.Context, eventToken *goSet.SecurityEventToken, rawEvent string, sid string) error
@@ -47,6 +48,7 @@ type PeerEventRouter interface {
 	GenerateVerifyEvent(sid string, state string) (*model.EventRecord, error)
 	PollStreamHandler(ctx context.Context, sid string, params model.PollParameters) (map[string]string, bool, int)
 	DeliveryStarted() bool
+	ServesClaims() bool
 }
 
 var _ PeerEventRouter = (eventRouter.EventRouter)(nil)
@@ -109,24 +111,26 @@ func (sa *SignalsApplication) peerRouteSubset() Routes {
 	return out
 }
 
-// bindSurfaceIssuer wraps each route's handler, in place, so the request
-// context carries GetAuth() via services.WithAuthIssuer (#376). Services that
+// bindSurfaceIssuer returns a copy of rs whose handlers run with the request
+// context carrying GetAuth() via services.WithAuthIssuer (#376). Services that
 // mint or check bearer tokens read it back, so a surface whose Auth differs
-// from KeyService's issuer never mixes two issuers. Callers pass a fresh slice.
+// from KeyService's issuer never mixes two issuers.
 func (sa *SignalsApplication) bindSurfaceIssuer(rs Routes) Routes {
-	for i := range rs {
-		next := rs[i].HandlerFunc
-		rs[i].HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-			next(w, r.WithContext(services.WithAuthIssuer(r.Context(), sa.GetAuth())))
+	out := make(Routes, len(rs))
+	for i, r := range rs {
+		next := r.HandlerFunc
+		r.HandlerFunc = func(w http.ResponseWriter, req *http.Request) {
+			next(w, req.WithContext(services.WithAuthIssuer(req.Context(), sa.GetAuth())))
 		}
+		out[i] = r
 	}
-	return rs
+	return out
 }
 
 // peerRouterAdapter lifts a PeerEventRouter to the full EventRouter interface
 // that SignalsApplication holds. It is the path every external router takes: an
 // external module cannot implement the full EventRouter, whose SstpServerHandler
-// takes an internal type. The five peer methods delegate to the router; every
+// takes an internal type. The PeerEventRouter methods delegate to the router; every
 // other method panics with a message naming the peer surface and the method,
 // which only a non-peer route bound onto a peer application could reach.
 type peerRouterAdapter struct {
@@ -151,9 +155,7 @@ func (a *peerRouterAdapter) PollStreamHandler(ctx context.Context, sid string, p
 
 func (a *peerRouterAdapter) DeliveryStarted() bool { return a.peer.DeliveryStarted() }
 
-// ServesClaims is true: the adapter carries a peer router, and
-// goSignalsServer.NewPeerSurface refuses one that does not serve claims (#377).
-func (a *peerRouterAdapter) ServesClaims() bool { return true }
+func (a *peerRouterAdapter) ServesClaims() bool { return a.peer.ServesClaims() }
 
 func (a *peerRouterAdapter) unsupported(method string) {
 	panic("goSignalsServer peer surface: eventRouter." + method +
