@@ -6,6 +6,8 @@ package goSetPoll
 
 import (
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"log/slog"
 	"net/http"
 
@@ -42,28 +44,57 @@ type PollRequest struct {
 // pollRequestFields is PollRequest without its JSON methods.
 type pollRequestFields PollRequest
 
-// MarshalJSON writes an AckOnly request with an explicit "maxEvents": 0,
+// pollJSONOptions are the encoding/json (v1) semantics the poll request uses.
+// The hooks below are the json/v2 streaming forms, which encoding/json calls
+// in preference to MarshalJSON / UnmarshalJSON: a legacy hook makes the
+// encoder re-validate and copy its output, and the decoder buffer and decode
+// the body twice (BenchmarkPollRequestMarshal +74%, 5 -> 9 allocs/op).
+//
+// v1 error reporting is turned off for the nested call: with it on,
+// UnmarshalDecode scans the whole next value for syntax errors before decoding
+// it, and the top-level encoding/json call has already done that for the body,
+// so the request would be validated twice (BenchmarkParsePollRequest +11%).
+// The top-level call still reports errors in v1 form.
+//
+// MarshalJSONTo keeps a value receiver on purpose: under v1 method semantics a
+// pointer-receiver MarshalJSONTo is skipped for a non-addressable value and the
+// legacy MarshalJSON is called instead, which would recurse through json.Marshal.
+var pollJSONOptions = jsonv2.JoinOptions(json.DefaultOptionsV1(), json.ReportErrorsWithLegacySemantics(false))
+
+// MarshalJSONTo writes an AckOnly request with an explicit "maxEvents": 0,
 // which omitzero would otherwise drop.
-func (p PollRequest) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+func (p PollRequest) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, &struct {
 		MaxEvents *int32 `json:"maxEvents,omitempty"`
 		pollRequestFields
-	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)})
+	}{wireMaxEvents(p.MaxEvents, p.AckOnly), pollRequestFields(p)}, pollJSONOptions)
 }
 
-// UnmarshalJSON sets AckOnly when the request carries an explicit
+// UnmarshalJSONFrom sets AckOnly when the request carries an explicit
 // "maxEvents": 0; an absent or null maxEvents leaves it false.
-func (p *PollRequest) UnmarshalJSON(data []byte) error {
+func (p *PollRequest) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var in struct {
 		MaxEvents *int32 `json:"maxEvents"`
 		pollRequestFields
 	}
-	if err := json.Unmarshal(data, &in); err != nil {
+	if err := jsonv2.UnmarshalDecode(dec, &in, pollJSONOptions); err != nil {
 		return err
 	}
 	*p = PollRequest(in.pollRequestFields)
 	p.MaxEvents, p.AckOnly = readMaxEvents(in.MaxEvents)
 	return nil
+}
+
+// MarshalJSON is kept for callers that use the json.Marshaler interface
+// directly; encoding/json itself goes through MarshalJSONTo.
+func (p PollRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// UnmarshalJSON is kept for callers that use the json.Unmarshaler interface
+// directly; encoding/json itself goes through UnmarshalJSONFrom.
+func (p *PollRequest) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, p)
 }
 
 // wireMaxEvents is the maxEvents a request sends: 0 for an ack-only request,
