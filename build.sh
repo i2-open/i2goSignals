@@ -102,7 +102,10 @@ if [ "$multi" = "Y" ]; then
     done
     make_args+=("PLATFORMS=$platforms")
     if [ "$doPush" = "Y" ]; then
-        make_args+=("PUSH=1")
+        # build-docker-multiarch takes REGISTRY/NAMESPACE/TAG (S1 contract);
+        # map the legacy PUSH_REPO=<namespace>/<image> default onto them.
+        make_args+=("PUSH=1" "REGISTRY=${REGISTRY:-docker.io}" "NAMESPACE=${NAMESPACE:-independentid}"
+            "TAG=${tag:-$(tr -d '[:space:]' < pkg/constants/version.txt)}")
     fi
     exec make build-docker-multiarch "${make_args[@]}"
 elif [ "$doPush" = "Y" ]; then

@@ -19,7 +19,7 @@ make run                # build + build-docker + bring up docker-compose.yml dem
 
 # Docker image (production distroless, buildx) — not part of `make build`
 make build-docker            # local host-arch image -> i2gosignals:<ver> + :latest
-make build-docker-multiarch  # multi-arch validate-only; PUSH=1 to publish
+make build-docker-multiarch  # multi-arch validate-only; PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish
 
 # Dev stack with Delve debugger (ports 2345-2347)
 make dev-up             # docker compose -f docker-compose-dev.yml up -d

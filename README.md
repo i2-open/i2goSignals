@@ -194,7 +194,7 @@ and the OCI labels in lockstep.
 | :--- | :--- |
 | `make build` | Builds the Go CLI and server (`bin/goSignalsServer`). No Docker. |
 | `make build-docker` | Cross-compiles for the host arch and loads `i2gosignals:<version>` and `:latest` into the local Docker daemon. |
-| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is published. Add `PUSH=1` to push `:<version>` and `:latest` to `independentid/i2gosignals`. Override `PUSH_REPO=…` to publish elsewhere; override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder on first run. |
+| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is tagged or published. `PUSH=1 REGISTRY=<host> NAMESPACE=<ns> TAG=<tag>` (all three required) pushes exactly one ref, `<host>/<ns>/i2gosignals:<tag>`, and writes buildx metadata to `$(META_DIR)/build-meta-i2gosignals.json` (`META_DIR` defaults to `bin/`). It never tags `:latest` or `vX.Y` — the family publisher moves floating tags. Override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder (`BUILDX_BUILDER`, default `i2sig`) on first run. `make test-multiarch-contract` pins this surface. |
 | `make docker-sbom` | Builds the host-arch image and extracts its SBOM (SPDX 2.3 in-toto attestation) to `bin/sbom-<version>.json`. |
 | `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
 
@@ -202,7 +202,7 @@ Override the version for a one-off branded build without editing `version.txt`:
 
 ```bash
 make build-docker VERSION=1.2.3-rc1
-make build-docker-multiarch VERSION=1.2.3 PUSH=1 PUSH_REPO=ghcr.io/i2-open/i2gosignals
+make build-docker-multiarch PUSH=1 REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v1.2.3
 ```
 
 > `build.sh` is preserved as a thin shim that forwards its legacy flags

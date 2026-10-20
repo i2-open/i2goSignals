@@ -7,7 +7,7 @@ GO ?= go
 # pkg/constants/server.go), so bumping it in one place updates both the
 # compiled-in default and every Make-driven build/tag.
 VERSION    := $(shell tr -d '[:space:]' < pkg/constants/version.txt)
-VCS_REF    := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+VCS_REF    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Injected into every Go binary. Overrides the embedded default in
@@ -18,13 +18,19 @@ LDFLAGS     := -X $(VERSION_PKG).GoSignalsVersion=$(VERSION)
 GOFLAGS_BUILD := -trimpath
 GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 
-# Docker image settings. Override on the command line to publish elsewhere:
-#   make build-docker-multiarch REGISTRY=ghcr.io/i2-open IMAGE=i2gosignals
+# Docker image settings. build-docker-multiarch follows the family's S1
+# delegation contract (planning#26): the pushed ref is exactly
+# $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG), e.g.
+#   make build-docker-multiarch REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v0.12.0-alpha.21 PUSH=1
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
-PUSH_REPO   ?= independentid/i2gosignals
+IMAGE_NAME  := i2gosignals
+REGISTRY    ?=
+NAMESPACE   ?=
+TAG         ?=
 PLATFORMS   ?= linux/amd64,linux/arm64
 BUILDX_BUILDER ?= i2sig
+META_DIR    ?= $(BIN_DIR)
 
 CONSOLE_DIR := cmd/goSignals
 SERVER_DIR  := cmd/goSignalsServer
@@ -67,7 +73,7 @@ LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... 
 
 .PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-bench-algs dev-pprof \
     generate-certs check-certs licenses-check \
-    build-docker build-docker-multiarch docker-sbom cross-compile-linux \
+    build-docker build-docker-multiarch multiarch-push-guard test-multiarch-contract docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
     run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals \
     seams qa fmt-check vet test tidy-check bench leak-check
@@ -83,7 +89,8 @@ help:
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; add PUSH=1 to publish $(PUSH_REPO):$(VERSION) + :latest"
+	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG"
+	@echo "  test-multiarch-contract - assert build-docker-multiarch matches the S1 delegation contract (make -n; no build)"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
@@ -93,7 +100,7 @@ help:
 	@echo "  dev-bench-algs     - dev-bench once per signing algorithm in BENCH_ALGS=$(BENCH_ALGS), one history row each (see docs/perf/e2e-benchmark.md, Signing algorithms)"
 	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
-	@echo "  qa                 - full quality gate: fmt-check vet tidy-check test leak-check bench"
+	@echo "  qa                 - full quality gate: fmt-check test-multiarch-contract vet tidy-check test leak-check bench"
 	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
 	@echo "  vet                - go vet ./..."
 	@echo "  test               - go test -race ./..."
@@ -209,24 +216,47 @@ build-docker: cross-compile-linux
 		.
 	@echo ">> built $(LOCAL_IMAGE):$(VERSION) and $(LOCAL_IMAGE):latest"
 
-# Build a multi-arch image ($(PLATFORMS)) as a single manifest list. A multi-arch
-# manifest cannot be loaded into the local Docker daemon, so by default this
-# target just validates the build (layers stay in the buildx cache). Set PUSH=1
-# to publish to $(PUSH_REPO) with both :$(VERSION) and :latest tags. Needs a
-# buildx builder with the docker-container driver — created on demand if missing.
+# Build a multi-arch image ($(PLATFORMS)) as a single manifest list. This target
+# is the callee side of the family's S1 delegation contract (planning#26): the
+# planning publisher runs it inside a clean tag clone as
 #
-#   make build-docker-multiarch                # build only, no push
-#   make build-docker-multiarch PUSH=1         # build + push to $(PUSH_REPO)
-#   make build-docker-multiarch PUSH=1 PUSH_REPO=ghcr.io/i2-open/i2gosignals
+#   make build-docker-multiarch REGISTRY=docker.io NAMESPACE=independentid \
+#       TAG=v0.12.0-alpha.21 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
+#
+# PUSH unset: build every PLATFORMS arch into the buildx cache; push nothing,
+#   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
+# PUSH=1: REGISTRY (host only), NAMESPACE (namespace only) and TAG are all
+#   required (exit 2 otherwise) and the ONLY ref pushed is
+#   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG). This target never tags
+#   :latest or vX.Y -- floating tags are the publisher's job, applied by
+#   manifest re-tag of the pushed digest. buildx metadata (the publisher reads
+#   .["containerimage.digest"]) lands in $(META_DIR)/build-meta-$(IMAGE_NAME).json.
+# TAG also feeds --build-arg VERSION (the OCI version label); VERSION from
+# version.txt feeds ldflags only. Needs a docker-container buildx builder --
+# $(BUILDX_BUILDER) is created on demand if the current one is not.
+# `make test-multiarch-contract` (part of `make qa`) pins this surface.
+MULTIARCH_META := $(META_DIR)/build-meta-$(IMAGE_NAME).json
 ifdef PUSH
-DOCKER_MULTIARCH_OUTPUT := --push --tag $(PUSH_REPO):$(VERSION) --tag $(PUSH_REPO):latest --metadata-file $(BIN_DIR)/build-meta.json
-DOCKER_MULTIARCH_BANNER := pushed $(PUSH_REPO):$(VERSION) and :latest for $(PLATFORMS) (metadata at $(BIN_DIR)/build-meta.json)
+DOCKER_MULTIARCH_OUTPUT := --push --tag $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) --metadata-file $(MULTIARCH_META)
+DOCKER_MULTIARCH_BANNER := pushed $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
-DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 to publish to $(PUSH_REPO))
+DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
 endif
 
-build-docker-multiarch: cross-compile-linux
+# Contract guard: listed first among build-docker-multiarch's prerequisites so
+# a PUSH=1 call with a missing variable fails before anything is compiled.
+multiarch-push-guard:
+ifdef PUSH
+	@for v in REGISTRY:$(REGISTRY) NAMESPACE:$(NAMESPACE) TAG:$(TAG); do \
+		if [ -z "$${v#*:}" ]; then \
+			echo "build-docker-multiarch: $${v%%:*} is required when PUSH=1" >&2; \
+			exit 2; \
+		fi; \
+	done
+endif
+
+build-docker-multiarch: multiarch-push-guard cross-compile-linux
 	@current_driver=$$($(DOCKER) buildx inspect 2>/dev/null | awk '/^Driver:/ {print $$2}'); \
 	if [ "$$current_driver" != "docker-container" ]; then \
 		if ! $(DOCKER) buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
@@ -235,9 +265,10 @@ build-docker-multiarch: cross-compile-linux
 		fi; \
 		$(DOCKER) buildx use $(BUILDX_BUILDER); \
 	fi
+	@mkdir -p $(META_DIR)
 	$(DOCKER) buildx build \
 		--platform $(PLATFORMS) \
-		--build-arg VERSION=$(VERSION) \
+		--build-arg VERSION=$(or $(TAG),$(VERSION)) \
 		--build-arg VCS_REF=$(VCS_REF) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		--provenance=mode=max \
@@ -245,6 +276,37 @@ build-docker-multiarch: cross-compile-linux
 		$(DOCKER_MULTIARCH_OUTPUT) \
 		.
 	@echo ">> $(DOCKER_MULTIARCH_BANNER)"
+
+# Pin the S1 contract from the callee side: a change to build-docker-multiarch's
+# variables or flags fails here before the planning publisher sees it. Drives
+# `make -n` only (nothing is built or pushed), plus the guard target alone for
+# the exit-2 check.
+MULTIARCH_CONTRACT_PUSH := $(MAKE) --no-print-directory -n build-docker-multiarch \
+	REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 PUSH=1 META_DIR=/tmp/m PLATFORMS=linux/amd64,linux/arm64
+MULTIARCH_CONTRACT_SMOKE := $(MAKE) --no-print-directory -n build-docker-multiarch \
+	REGISTRY= NAMESPACE= TAG= PUSH= PLATFORMS=linux/amd64,linux/arm64
+test-multiarch-contract:
+	@echo ">> build-docker-multiarch S1 contract (make -n)"
+	@set -e; fail() { echo "ERROR: build-docker-multiarch S1 contract: $$*" >&2; exit 1; }; \
+	  out="$$($(MULTIARCH_CONTRACT_PUSH))"; \
+	  [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "PUSH=1 must produce exactly one --tag"; \
+	  printf '%s\n' "$$out" | grep -q -- '--tag r/n/i2gosignals:v9.9.9-alpha.1' || fail "missing --tag r/n/i2gosignals:v9.9.9-alpha.1"; \
+	  ! printf '%s\n' "$$out" | grep -q -- ':latest' || fail "must not tag :latest"; \
+	  ! printf '%s\n' "$$out" | grep -Eq -- ':v9\.9([^.]|$$)' || fail "must not tag vX.Y"; \
+	  for want in '--platform linux/amd64,linux/arm64' '--push' '--provenance=mode=max' '--sbom=true' \
+	      '--build-arg VERSION=v9.9.9-alpha.1' '--metadata-file /tmp/m/build-meta-i2gosignals.json'; do \
+	    printf '%s\n' "$$out" | grep -qF -- "$$want" || fail "PUSH=1 output missing '$$want'"; \
+	  done; \
+	  out="$$($(MULTIARCH_CONTRACT_SMOKE))"; \
+	  ! printf '%s\n' "$$out" | grep -q -- '--push' || fail "PUSH unset must not --push"; \
+	  ! printf '%s\n' "$$out" | grep -q -- '--tag' || fail "PUSH unset must not --tag"; \
+	  for v in REGISTRY NAMESPACE TAG; do \
+	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
+	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
+	    [ "$$rc" = 2 ] || fail "PUSH=1 with empty $$v must exit 2 (got $$rc)"; \
+	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
+	  done; \
+	  echo ">> build-docker-multiarch S1 contract: OK"
 
 # Export the image SBOM to a local file. BuildKit's tar exporter writes the
 # SBOM as sbom.spdx.json at the archive root; stream the archive and extract
@@ -442,10 +504,11 @@ seams:
 # rather than each remembering its own list of commands.
 #
 # Ordering is cheapest-first so an obvious failure reports in seconds rather
-# than after the race-detector suite: formatting, then vet, then the go.mod
+# than after the race-detector suite: formatting, then the build-docker-multiarch
+# contract (make -n only), then vet, then the go.mod
 # tidiness diff, then tests, then the goroutine-leak profile, then the
 # benchmark set.
-qa: fmt-check vet tidy-check test leak-check bench
+qa: fmt-check test-multiarch-contract vet tidy-check test leak-check bench
 	@echo ">> make qa: OK"
 
 # Go sources here are gofmt-canonical tabs. Any output from `gofmt -l` is a
