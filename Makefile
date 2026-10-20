@@ -236,24 +236,28 @@ build-docker: cross-compile-linux
 # $(BUILDX_BUILDER) is created on demand if the current one is not.
 # `make test-multiarch-contract` (part of `make qa`) pins this surface.
 MULTIARCH_META := $(META_DIR)/build-meta-$(IMAGE_NAME).json
+MULTIARCH_REF  := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG)
 ifdef PUSH
-DOCKER_MULTIARCH_OUTPUT := --push --tag $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) --metadata-file $(MULTIARCH_META)
-DOCKER_MULTIARCH_BANNER := pushed $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
+DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --metadata-file $(MULTIARCH_META)
+DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
 DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
 endif
 
-# Contract guard: listed first among build-docker-multiarch's prerequisites so
-# a PUSH=1 call with a missing variable fails before anything is compiled.
+# Contract guard: a PUSH=1 call with a missing variable fails before anything
+# is compiled. Prerequisite order alone does not hold under `make -j`, so when
+# build-docker-multiarch is a goal cross-compile-linux also gets an order-only
+# edge on the guard (other goals, e.g. build-docker, are unaffected).
 multiarch-push-guard:
 ifdef PUSH
-	@for v in REGISTRY:$(REGISTRY) NAMESPACE:$(NAMESPACE) TAG:$(TAG); do \
-		if [ -z "$${v#*:}" ]; then \
-			echo "build-docker-multiarch: $${v%%:*} is required when PUSH=1" >&2; \
-			exit 2; \
-		fi; \
-	done
+	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1" >&2; exit 2; }
+	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1" >&2; exit 2; }
+	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1" >&2; exit 2; }
+endif
+
+ifneq ($(filter build-docker-multiarch,$(MAKECMDGOALS)),)
+cross-compile-linux: | multiarch-push-guard
 endif
 
 build-docker-multiarch: multiarch-push-guard cross-compile-linux
@@ -281,10 +285,13 @@ build-docker-multiarch: multiarch-push-guard cross-compile-linux
 # variables or flags fails here before the planning publisher sees it. Drives
 # `make -n` only (nothing is built or pushed), plus the guard target alone for
 # the exit-2 check.
+# META_DIR=/tmp/m is a make -n fixture only: nothing is written there.
 MULTIARCH_CONTRACT_PUSH := $(MAKE) --no-print-directory -n build-docker-multiarch \
 	REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 PUSH=1 META_DIR=/tmp/m PLATFORMS=linux/amd64,linux/arm64
 MULTIARCH_CONTRACT_SMOKE := $(MAKE) --no-print-directory -n build-docker-multiarch \
 	REGISTRY= NAMESPACE= TAG= PUSH= PLATFORMS=linux/amd64,linux/arm64
+# Guard loop: `set -- …; set -- "$$@" "$$v="` appends "$$v=" after the full
+# REGISTRY/NAMESPACE/TAG set; make's last assignment wins, blanking only $$v.
 test-multiarch-contract:
 	@echo ">> build-docker-multiarch S1 contract (make -n)"
 	@set -e; fail() { echo "ERROR: build-docker-multiarch S1 contract: $$*" >&2; exit 1; }; \

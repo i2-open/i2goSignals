@@ -17,6 +17,11 @@
 # into every Go binary via //go:embed). `-n <tag>` here forwards as
 # `VERSION=<tag>` to make, which overrides the file at build time only.
 #
+# `-m -p` pushes exactly one ref, REGISTRY/NAMESPACE/i2gosignals:TAG (env
+# defaults docker.io and independentid; TAG is the -n value, else version.txt).
+# It ignores PUSH_REPO and no longer pushes :latest. Single-arch `-p` is
+# unchanged (PUSH_REPO, :<tag> and :latest).
+#
 set -euo pipefail
 
 echo ""
@@ -90,6 +95,9 @@ if [ -n "$tag" ]; then
     make_args+=("VERSION=$tag")
 fi
 
+# Effective version tag: -n value, else version.txt (mirrors Make's logic).
+effective_tag="${tag:-$(tr -d '[:space:]' < pkg/constants/version.txt)}"
+
 if [ "$multi" = "Y" ]; then
     platforms=""
     IFS=',' read -ra archs <<< "$aIn"
@@ -105,14 +113,13 @@ if [ "$multi" = "Y" ]; then
         # build-docker-multiarch takes REGISTRY/NAMESPACE/TAG (S1 contract);
         # map the legacy PUSH_REPO=<namespace>/<image> default onto them.
         make_args+=("PUSH=1" "REGISTRY=${REGISTRY:-docker.io}" "NAMESPACE=${NAMESPACE:-independentid}"
-            "TAG=${tag:-$(tr -d '[:space:]' < pkg/constants/version.txt)}")
+            "TAG=${effective_tag}")
     fi
     exec make build-docker-multiarch "${make_args[@]}"
 elif [ "$doPush" = "Y" ]; then
     # Single-arch push: build locally first, then docker push both tags.
     make build-docker "${make_args[@]}"
-    # Resolve the effective version for the push tags (mirrors Make's logic).
-    push_version="${tag:-$(tr -d '[:space:]' < pkg/constants/version.txt)}"
+    push_version="${effective_tag}"
     push_repo="${PUSH_REPO:-independentid/i2gosignals}"
     local_image="${LOCAL_IMAGE:-i2gosignals}"
     docker tag "${local_image}:${push_version}" "${push_repo}:${push_version}"

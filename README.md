@@ -208,6 +208,10 @@ make build-docker-multiarch PUSH=1 REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v1.2.3
 > `build.sh` is preserved as a thin shim that forwards its legacy flags
 > (`-n`, `-m`, `-p`, `-a`, `-t`, `-c`) to the equivalent `make` invocations,
 > so existing CI scripts keep working. New work should call `make` directly.
+> `./build.sh -m -p` now pushes exactly one ref,
+> `REGISTRY/NAMESPACE/i2gosignals:TAG` (defaults `docker.io/independentid`;
+> `TAG` from `-n` or `version.txt`). It ignores `PUSH_REPO` and no longer
+> pushes `:latest`. Single-arch `-p` is unchanged.
 
 ---
 
