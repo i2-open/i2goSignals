@@ -236,8 +236,9 @@ build-docker: cross-compile-linux
 # version.txt feeds ldflags only. Needs a docker-container buildx builder --
 # $(BUILDX_BUILDER) is created on demand if the current one is not.
 # `make test-multiarch-contract` (part of `make qa`) pins this surface.
-# Push only when PUSH is 1 or yes; any other value (or unset) is a smoke build.
-PUSH_ENABLED := $(filter 1 yes,$(strip $(PUSH)))
+# Push only when PUSH is the single word 1 or yes (surrounding spaces are
+# ignored); anything else (unset, 0, no, multi-word) is a smoke build.
+PUSH_ENABLED := $(if $(word 2,$(strip $(PUSH))),,$(filter 1 yes,$(strip $(PUSH))))
 MULTIARCH_META := $(META_DIR)/build-meta-$(IMAGE_NAME).json
 MULTIARCH_REF  := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG)
 ifneq ($(PUSH_ENABLED),)
@@ -329,6 +330,15 @@ test-multiarch-contract:
 	  [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "PUSH=yes must produce exactly one --tag"; \
 	  printf '%s\n' "$$out" | grep -q -- '--tag r/n/i2gosignals:v9.9.9-alpha.1' || fail "PUSH=yes missing --tag r/n/i2gosignals:v9.9.9-alpha.1"; \
 	  printf '%s\n' "$$out" | grep -qF -- '--push' || fail "PUSH=yes must --push"; \
+	  for p in 'no 1' '0 1' 'no yes'; do \
+	    for vars in 'REGISTRY= NAMESPACE= TAG=' 'REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 META_DIR=/tmp/m'; do \
+	      rc=0; msg="$$($(MAKE) --no-print-directory -n build-docker-multiarch PUSH="$$p" $$vars PLATFORMS=linux/amd64,linux/arm64 2>&1)" || rc=$$?; \
+	      [ "$$rc" = 0 ] || fail "PUSH='$$p' ($$vars) must exit 0 (got $$rc): $$msg"; \
+	      ! printf '%s\n' "$$msg" | grep -q -- '--push' || fail "PUSH='$$p' ($$vars) must not --push"; \
+	      ! printf '%s\n' "$$msg" | grep -q -- '--tag' || fail "PUSH='$$p' ($$vars) must not --tag"; \
+	      ! printf '%s\n' "$$msg" | grep -q -- 'is required when PUSH=1' || fail "PUSH='$$p' ($$vars) must not fire the push guard"; \
+	    done; \
+	  done; \
 	  for v in REGISTRY NAMESPACE TAG; do \
 	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
 	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
