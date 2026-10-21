@@ -7,6 +7,8 @@ GO ?= go
 # pkg/constants/server.go), so bumping it in one place updates both the
 # compiled-in default and every Make-driven build/tag.
 VERSION    := $(shell tr -d '[:space:]' < pkg/constants/version.txt)
+# Full SHA (not --short): the S1 delegation contract (planning#26) fixes the
+# OCI revision label; shared by every docker target.
 VCS_REF    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -26,21 +28,23 @@ GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
 IMAGE_NAME  := i2gosignals
-# REGISTRY and NAMESPACE default to the family's Docker Hub org; override them to
-# push to your own registry. A push still needs a login with write access. TAG has
-# no default.
-REGISTRY    ?= docker.io
-NAMESPACE   ?= independentid
+# REGISTRY, NAMESPACE and TAG have no defaults. This is a decision of the parent
+# planning spec (planning#26, seam S1): the delegated target is strict and the
+# publisher supplies all three (docker.io / independentid for the family), so a
+# bare PUSH=1 can never push to a namespace nobody named. A push still needs a
+# login with write access.
+REGISTRY    ?=
+NAMESPACE   ?=
 TAG         ?=
 PLATFORMS   ?= linux/amd64,linux/arm64
 BUILDX_BUILDER ?= i2sig
-META_DIR    ?= $(BIN_DIR)
 
 CONSOLE_DIR := cmd/goSignals
 SERVER_DIR  := cmd/goSignalsServer
 CONFIG_DIR  := config
 SCIM_CONFIG := $(CONFIG_DIR)/scim
 BIN_DIR     := bin
+META_DIR    ?= $(BIN_DIR)
 SERVER_BIN  := $(BIN_DIR)/goSignalsServer
 DEV_IMAGE   := i2gosignals-dev:latest
 DEV_IMAGE_STAMP := .dev-image.stamp
@@ -93,7 +97,7 @@ help:
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG (default docker.io/independentid)"
+	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG (all three required)"
 	@echo "  test-multiarch-contract - assert build-docker-multiarch matches the S1 delegation contract (make -n; no build)"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
@@ -229,8 +233,8 @@ build-docker: cross-compile-linux
 #
 # PUSH unset (or any value other than 1/yes): build every PLATFORMS arch into the buildx cache; push nothing,
 #   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
-# PUSH=1 (or yes): TAG is required, and REGISTRY (host only) and NAMESPACE (namespace
-#   only) must not be set empty (exit 2 otherwise); the ONLY ref pushed is
+# PUSH=1 (or yes): REGISTRY (host only), NAMESPACE (namespace only) and TAG are all
+#   required (exit 2 otherwise); the ONLY ref pushed is
 #   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG). This target never tags
 #   :latest or vX.Y -- floating tags are the publisher's job, applied by
 #   manifest re-tag of the pushed digest. buildx metadata (the publisher reads
@@ -255,12 +259,15 @@ endif
 # Contract guard: a PUSH=1 (or yes) call with a missing variable fails before anything
 # is compiled. Prerequisite order alone does not hold under `make -j`, so when
 # build-docker-multiarch is a goal cross-compile-linux also gets an order-only
-# edge on the guard (other goals, e.g. build-docker, are unaffected).
+# edge on the guard (other goals, e.g. build-docker, are unaffected). The first
+# line of the failure is the contract's verbatim message; the second suggests a
+# complete invocation.
+MULTIARCH_PUSH_HINT := hint: make build-docker-multiarch PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v$(VERSION)
 multiarch-push-guard:
 ifneq ($(PUSH_ENABLED),)
-	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1 (or yes)" >&2; exit 2; }
-	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1 (or yes)" >&2; exit 2; }
-	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1 (or yes)" >&2; exit 2; }
+	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
 endif
 
 ifneq ($(filter build-docker-multiarch,$(MAKECMDGOALS)),)
@@ -293,60 +300,53 @@ build-docker-multiarch: multiarch-push-guard cross-compile-linux
 # `make -n` only (nothing is built or pushed), plus the guard target alone for
 # the exit-2 check.
 # META_DIR=/tmp/m is a make -n fixture only: nothing is written there.
-MULTIARCH_CONTRACT_PUSH := $(MAKE) --no-print-directory -n build-docker-multiarch \
-	REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 PUSH=1 META_DIR=/tmp/m PLATFORMS=linux/amd64,linux/arm64
-MULTIARCH_CONTRACT_SMOKE := $(MAKE) --no-print-directory -n build-docker-multiarch \
-	REGISTRY= NAMESPACE= TAG= PUSH= PLATFORMS=linux/amd64,linux/arm64
-MULTIARCH_CONTRACT_ZERO := $(MAKE) --no-print-directory -n build-docker-multiarch \
-	REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 PUSH=0 META_DIR=/tmp/m PLATFORMS=linux/amd64,linux/arm64
-MULTIARCH_CONTRACT_ZERO_BARE := $(MAKE) --no-print-directory -n build-docker-multiarch \
-	REGISTRY= NAMESPACE= TAG= PUSH=0 PLATFORMS=linux/amd64,linux/arm64
-MULTIARCH_CONTRACT_YES := $(MAKE) --no-print-directory -n build-docker-multiarch \
-	REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 PUSH=yes META_DIR=/tmp/m PLATFORMS=linux/amd64,linux/arm64
+MULTIARCH_CONTRACT_REF  := r/n/i2gosignals:v9.9.9-alpha.1
+MULTIARCH_CONTRACT_FULL := REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 META_DIR=/tmp/m
+MULTIARCH_CONTRACT_BARE := REGISTRY= NAMESPACE= TAG=
+# Shell helpers inside the recipe:
+#   dry <vars..>            make -n build-docker-multiarch with the given vars; prints combined output
+#   pushes <label> <vars..> output must carry exactly one --tag, the contract ref, and --push
+#   smoke  <label> <vars..> must exit 0 with no --push, no --tag and no guard message
 # Guard loop: `set -- …; set -- "$$@" "$$v="` appends "$$v=" after the full
 # REGISTRY/NAMESPACE/TAG set; make's last assignment wins, blanking only $$v.
 test-multiarch-contract:
 	@echo ">> build-docker-multiarch S1 contract (make -n)"
-	@set -e; fail() { echo "ERROR: build-docker-multiarch S1 contract: $$*" >&2; exit 1; }; \
-	  out="$$($(MULTIARCH_CONTRACT_PUSH))"; \
-	  [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "PUSH=1 must produce exactly one --tag"; \
-	  printf '%s\n' "$$out" | grep -q -- '--tag r/n/i2gosignals:v9.9.9-alpha.1' || fail "missing --tag r/n/i2gosignals:v9.9.9-alpha.1"; \
-	  ! printf '%s\n' "$$out" | grep -q -- ':latest' || fail "must not tag :latest"; \
+	@set -e; \
+	  fail() { echo "ERROR: build-docker-multiarch S1 contract: $$*" >&2; exit 1; }; \
+	  has() { printf '%s\n' "$$2" | grep -qF -- "$$1"; }; \
+	  dry() { $(MAKE) --no-print-directory -n build-docker-multiarch "$$@" PLATFORMS=linux/amd64,linux/arm64 2>&1; }; \
+	  pushes() { label=$$1; shift; out="$$(dry "$$@")" || fail "$$label must exit 0: $$out"; \
+	    [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "$$label must produce exactly one --tag"; \
+	    has '--tag $(MULTIARCH_CONTRACT_REF)' "$$out" || fail "$$label missing --tag $(MULTIARCH_CONTRACT_REF)"; \
+	    has '--push' "$$out" || fail "$$label must --push"; }; \
+	  smoke() { label=$$1; shift; rc=0; out="$$(dry "$$@")" || rc=$$?; \
+	    [ "$$rc" = 0 ] || fail "$$label must exit 0 (got $$rc): $$out"; \
+	    ! has '--push' "$$out" || fail "$$label must not --push"; \
+	    ! has '--tag' "$$out" || fail "$$label must not --tag"; \
+	    ! has 'is required when PUSH=1' "$$out" || fail "$$label must not fire the push guard"; }; \
+	  pushes "PUSH=1" PUSH=1 $(MULTIARCH_CONTRACT_FULL); \
+	  ! has ':latest' "$$out" || fail "must not tag :latest"; \
 	  ! printf '%s\n' "$$out" | grep -Eq -- ':v9\.9([^.]|$$)' || fail "must not tag vX.Y"; \
-	  for want in '--platform linux/amd64,linux/arm64' '--push' '--provenance=mode=max' '--sbom=true' \
+	  for want in '--platform linux/amd64,linux/arm64' '--provenance=mode=max' '--sbom=true' \
 	      '--build-arg VERSION=v9.9.9-alpha.1' '--metadata-file /tmp/m/build-meta-i2gosignals.json'; do \
-	    printf '%s\n' "$$out" | grep -qF -- "$$want" || fail "PUSH=1 output missing '$$want'"; \
+	    has "$$want" "$$out" || fail "PUSH=1 output missing '$$want'"; \
 	  done; \
-	  out="$$($(MULTIARCH_CONTRACT_SMOKE))"; \
-	  ! printf '%s\n' "$$out" | grep -q -- '--push' || fail "PUSH unset must not --push"; \
-	  ! printf '%s\n' "$$out" | grep -q -- '--tag' || fail "PUSH unset must not --tag"; \
-	  out="$$($(MULTIARCH_CONTRACT_ZERO))" || fail "PUSH=0 with REGISTRY/NAMESPACE/TAG must exit 0"; \
-	  ! printf '%s\n' "$$out" | grep -q -- '--push' || fail "PUSH=0 must not --push"; \
-	  ! printf '%s\n' "$$out" | grep -q -- '--tag' || fail "PUSH=0 must not --tag"; \
-	  rc=0; msg="$$($(MULTIARCH_CONTRACT_ZERO_BARE) 2>&1)" || rc=$$?; \
-	  [ "$$rc" = 0 ] || fail "PUSH=0 with nothing else set must exit 0 (got $$rc): $$msg"; \
-	  ! printf '%s\n' "$$msg" | grep -q -- 'is required when PUSH=1' || fail "PUSH=0 must not fire the push guard"; \
-	  rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=0 REGISTRY= NAMESPACE= TAG= 2>&1)" || rc=$$?; \
-	  [ "$$rc" = 0 ] || fail "PUSH=0 guard must exit 0 (got $$rc): $$msg"; \
-	  ! printf '%s\n' "$$msg" | grep -q -- 'is required when PUSH=1' || fail "PUSH=0 guard must not fire: $$msg"; \
-	  out="$$($(MULTIARCH_CONTRACT_YES))"; \
-	  [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "PUSH=yes must produce exactly one --tag"; \
-	  printf '%s\n' "$$out" | grep -q -- '--tag r/n/i2gosignals:v9.9.9-alpha.1' || fail "PUSH=yes missing --tag r/n/i2gosignals:v9.9.9-alpha.1"; \
-	  printf '%s\n' "$$out" | grep -qF -- '--push' || fail "PUSH=yes must --push"; \
+	  pushes "PUSH=yes" PUSH=yes $(MULTIARCH_CONTRACT_FULL); \
+	  smoke "PUSH unset" PUSH= $(MULTIARCH_CONTRACT_BARE); \
+	  smoke "PUSH=0" PUSH=0 $(MULTIARCH_CONTRACT_FULL); \
+	  smoke "PUSH=0 bare" PUSH=0 $(MULTIARCH_CONTRACT_BARE); \
 	  for p in 'no 1' '0 1' 'no yes'; do \
-	    for vars in 'REGISTRY= NAMESPACE= TAG=' 'REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 META_DIR=/tmp/m'; do \
-	      rc=0; msg="$$($(MAKE) --no-print-directory -n build-docker-multiarch PUSH="$$p" $$vars PLATFORMS=linux/amd64,linux/arm64 2>&1)" || rc=$$?; \
-	      [ "$$rc" = 0 ] || fail "PUSH='$$p' ($$vars) must exit 0 (got $$rc): $$msg"; \
-	      ! printf '%s\n' "$$msg" | grep -q -- '--push' || fail "PUSH='$$p' ($$vars) must not --push"; \
-	      ! printf '%s\n' "$$msg" | grep -q -- '--tag' || fail "PUSH='$$p' ($$vars) must not --tag"; \
-	      ! printf '%s\n' "$$msg" | grep -q -- 'is required when PUSH=1' || fail "PUSH='$$p' ($$vars) must not fire the push guard"; \
-	    done; \
+	    smoke "PUSH='$$p' (bare)" PUSH="$$p" $(MULTIARCH_CONTRACT_BARE); \
+	    smoke "PUSH='$$p' (full)" PUSH="$$p" $(MULTIARCH_CONTRACT_FULL); \
 	  done; \
+	  rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=0 $(MULTIARCH_CONTRACT_BARE) 2>&1)" || rc=$$?; \
+	  [ "$$rc" = 0 ] || fail "PUSH=0 guard must exit 0 (got $$rc): $$msg"; \
+	  ! has 'is required when PUSH=1' "$$msg" || fail "PUSH=0 guard must not fire: $$msg"; \
 	  for v in REGISTRY NAMESPACE TAG; do \
 	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
 	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
 	    [ "$$rc" = 2 ] || fail "PUSH=1 with empty $$v must exit 2 (got $$rc)"; \
-	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1 (or yes)" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
+	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
 	  done; \
 	  echo ">> build-docker-multiarch S1 contract: OK"
 

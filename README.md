@@ -185,20 +185,23 @@ captures and opens a profile; see [`docs/perf/pprof.md`](docs/perf/pprof.md).
 ## Building Container Images
 
 All container image builds go through the `Makefile`. `pkg/constants/version.txt`
-is the single source of truth for the project version — it is embedded into
-every Go binary via `//go:embed` and read by the Makefile to tag images and
-inject `-ldflags`, so a one-line bump there keeps the binary, the image tag,
-and the OCI labels in lockstep.
+is the single source of truth for the binary version — it is embedded into
+every Go binary via `//go:embed` and read by the Makefile to inject `-ldflags`
+and to tag the local `make build-docker` image. Published multi-arch images are
+different: their image tag and OCI `version` label come from the `TAG` the
+family publisher passes to `make build-docker-multiarch`, and the OCI
+`revision` label is the full commit SHA.
 
 | Target | What it does |
 | :--- | :--- |
 | `make build` | Builds the Go CLI and server (`bin/goSignalsServer`). No Docker. |
 | `make build-docker` | Cross-compiles for the host arch and loads `i2gosignals:<version>` and `:latest` into the local Docker daemon. |
-| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is tagged or published. `PUSH=1 TAG=<tag>` pushes exactly one ref, `<REGISTRY>/<NAMESPACE>/i2gosignals:<tag>` (`REGISTRY`/`NAMESPACE` default to `docker.io`/`independentid`; override them to push to your own registry), and writes buildx metadata to `$(META_DIR)/build-meta-i2gosignals.json` (`META_DIR` defaults to `bin/`). It never tags `:latest` or `vX.Y` — the family publisher moves floating tags. Override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder (`BUILDX_BUILDER`, default `i2sig`) on first run. `make test-multiarch-contract` pins this surface. |
+| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is tagged or published. `PUSH=1 TAG=<tag>` pushes exactly one ref, `<REGISTRY>/<NAMESPACE>/i2gosignals:<tag>` (all three are required with `PUSH=1`; the family publisher passes `docker.io`/`independentid`), and writes buildx metadata to `$(META_DIR)/build-meta-i2gosignals.json` (`META_DIR` defaults to `bin/`). It never tags `:latest` or `vX.Y` — the family publisher moves floating tags. Override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder (`BUILDX_BUILDER`, default `i2sig`) on first run. `make test-multiarch-contract` pins this surface. |
 | `make docker-sbom` | Builds the host-arch image and extracts its SBOM (SPDX 2.3 in-toto attestation) to `bin/sbom-<version>.json`. |
 | `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
 
-Override the version for a one-off branded build without editing `version.txt`:
+Override the binary version for a one-off local image without editing
+`version.txt`, or push one multi-arch tag by hand to your own registry:
 
 ```bash
 make build-docker VERSION=1.2.3-rc1
