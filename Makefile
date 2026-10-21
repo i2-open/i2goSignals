@@ -93,7 +93,7 @@ help:
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) REGISTRY=.. NAMESPACE=.. TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG"
+	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG (default docker.io/independentid)"
 	@echo "  test-multiarch-contract - assert build-docker-multiarch matches the S1 delegation contract (make -n; no build)"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
@@ -229,8 +229,8 @@ build-docker: cross-compile-linux
 #
 # PUSH unset (or any value other than 1/yes): build every PLATFORMS arch into the buildx cache; push nothing,
 #   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
-# PUSH=1 (or yes): REGISTRY (host only), NAMESPACE (namespace only) and TAG are all
-#   required (exit 2 otherwise) and the ONLY ref pushed is
+# PUSH=1 (or yes): TAG is required, and REGISTRY (host only) and NAMESPACE (namespace
+#   only) must not be set empty (exit 2 otherwise); the ONLY ref pushed is
 #   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG). This target never tags
 #   :latest or vX.Y -- floating tags are the publisher's job, applied by
 #   manifest re-tag of the pushed digest. buildx metadata (the publisher reads
@@ -249,7 +249,7 @@ DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --metadata-file $(MULTI
 DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
-DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 (or yes) REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
+DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 (or yes) TAG=.. to publish)
 endif
 
 # Contract guard: a PUSH=1 (or yes) call with a missing variable fails before anything
