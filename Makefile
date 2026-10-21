@@ -253,7 +253,7 @@ DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --metadata-file $(MULTI
 DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
-DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 (or yes) TAG=.. to publish)
+DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
 endif
 
 # Contract guard: a PUSH=1 (or yes) call with a missing variable fails before anything
