@@ -258,9 +258,9 @@ endif
 # edge on the guard (other goals, e.g. build-docker, are unaffected).
 multiarch-push-guard:
 ifneq ($(PUSH_ENABLED),)
-	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1" >&2; exit 2; }
-	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1" >&2; exit 2; }
-	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1" >&2; exit 2; }
+	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1 (or yes)" >&2; exit 2; }
+	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1 (or yes)" >&2; exit 2; }
+	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1 (or yes)" >&2; exit 2; }
 endif
 
 ifneq ($(filter build-docker-multiarch,$(MAKECMDGOALS)),)
@@ -346,7 +346,7 @@ test-multiarch-contract:
 	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
 	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
 	    [ "$$rc" = 2 ] || fail "PUSH=1 with empty $$v must exit 2 (got $$rc)"; \
-	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
+	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1 (or yes)" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
 	  done; \
 	  echo ">> build-docker-multiarch S1 contract: OK"
 
