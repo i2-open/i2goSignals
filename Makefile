@@ -142,12 +142,16 @@ generate-certs:
 # Verify every third-party dependency uses a permissive license (no copyleft or
 # unlicensed code). Run this after changing go.mod, and update
 # THIRD-PARTY-NOTICES.txt to match. Installs google/go-licenses on demand.
+# GOROOT is pinned to the toolchain `go` actually runs: go-licenses tells the
+# standard library apart from third-party code by path prefix against GOROOT,
+# and when GOTOOLCHAIN switches to a downloaded toolchain (GOROOT under the
+# module cache) a stale shell GOROOT makes every stdlib package "unknown".
 licenses-check:
 	@command -v go-licenses >/dev/null 2>&1 || { \
 		echo ">> installing go-licenses..."; \
 		$(GO) install github.com/google/go-licenses@latest; \
 	}
-	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" go-licenses check ./... \
+	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" GOROOT="$$($(GO) env GOROOT)" go-licenses check ./... \
 		--disallowed_types=forbidden,restricted,unknown
 
 # --- Container image targets ----------------------------------------------
