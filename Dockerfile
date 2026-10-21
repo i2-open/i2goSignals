@@ -63,7 +63,8 @@ COPY --chmod=0755 ./bin/linux/${TARGETARCH}/goSsfServer     ./goSsfServer
 COPY --chmod=0755 ./bin/linux/${TARGETARCH}/goSignalsServer ./goSignalsServer
 
 # Build-time metadata, populated by the Makefile from pkg/constants/version.txt,
-# `git rev-parse --short HEAD`, and the build host's UTC clock.
+# `git rev-parse HEAD` (full SHA, per the S1 delegation contract), and the
+# build host's UTC clock.
 #
 # Declared LAST, deliberately — do not move these back above the COPYs. An ARG
 # in scope becomes part of the cache key of every step below it (visible in
