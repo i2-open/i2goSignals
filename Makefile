@@ -26,8 +26,11 @@ GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
 IMAGE_NAME  := i2gosignals
-REGISTRY    ?=
-NAMESPACE   ?=
+# REGISTRY and NAMESPACE default to the family's Docker Hub org; override them to
+# push to your own registry. A push still needs a login with write access. TAG has
+# no default.
+REGISTRY    ?= docker.io
+NAMESPACE   ?= independentid
 TAG         ?=
 PLATFORMS   ?= linux/amd64,linux/arm64
 BUILDX_BUILDER ?= i2sig
@@ -143,7 +146,7 @@ licenses-check:
 	@PATH="$$PATH:$$($(GO) env GOPATH)/bin" go-licenses check ./... \
 		--disallowed_types=forbidden,restricted,unknown
 
-# --- Container image targets (formerly in build.sh) -------------------------
+# --- Container image targets ----------------------------------------------
 #
 # The production Dockerfile is a binary-copy distroless image: it expects
 # pre-built per-arch binaries under bin/linux/<arch>/. `cross-compile-linux`

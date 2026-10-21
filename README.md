@@ -194,7 +194,7 @@ and the OCI labels in lockstep.
 | :--- | :--- |
 | `make build` | Builds the Go CLI and server (`bin/goSignalsServer`). No Docker. |
 | `make build-docker` | Cross-compiles for the host arch and loads `i2gosignals:<version>` and `:latest` into the local Docker daemon. |
-| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is tagged or published. `PUSH=1 REGISTRY=<host> NAMESPACE=<ns> TAG=<tag>` (all three required) pushes exactly one ref, `<host>/<ns>/i2gosignals:<tag>`, and writes buildx metadata to `$(META_DIR)/build-meta-i2gosignals.json` (`META_DIR` defaults to `bin/`). It never tags `:latest` or `vX.Y` — the family publisher moves floating tags. Override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder (`BUILDX_BUILDER`, default `i2sig`) on first run. `make test-multiarch-contract` pins this surface. |
+| `make build-docker-multiarch` | Validates a multi-arch (`linux/amd64,linux/arm64` by default) build — layers stay in the buildx cache, nothing is tagged or published. `PUSH=1 TAG=<tag>` pushes exactly one ref, `<REGISTRY>/<NAMESPACE>/i2gosignals:<tag>` (`REGISTRY`/`NAMESPACE` default to `docker.io`/`independentid`; override them to push to your own registry), and writes buildx metadata to `$(META_DIR)/build-meta-i2gosignals.json` (`META_DIR` defaults to `bin/`). It never tags `:latest` or `vX.Y` — the family publisher moves floating tags. Override `PLATFORMS=…` to change architectures. Creates a `docker-container` buildx builder (`BUILDX_BUILDER`, default `i2sig`) on first run. `make test-multiarch-contract` pins this surface. |
 | `make docker-sbom` | Builds the host-arch image and extracts its SBOM (SPDX 2.3 in-toto attestation) to `bin/sbom-<version>.json`. |
 | `make cross-compile-linux` | Stages per-arch Go binaries under `bin/linux/<arch>/` (used as a dependency by the docker targets). |
 
@@ -204,14 +204,6 @@ Override the version for a one-off branded build without editing `version.txt`:
 make build-docker VERSION=1.2.3-rc1
 make build-docker-multiarch PUSH=1 REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v1.2.3
 ```
-
-> `build.sh` is preserved as a thin shim that forwards its legacy flags
-> (`-n`, `-m`, `-p`, `-a`, `-t`, `-c`) to the equivalent `make` invocations,
-> so existing CI scripts keep working. New work should call `make` directly.
-> `./build.sh -m -p` now pushes exactly one ref,
-> `REGISTRY/NAMESPACE/i2gosignals:TAG` (defaults `docker.io/independentid`;
-> `TAG` from `-n` or `version.txt`). It ignores `PUSH_REPO` and no longer
-> pushes `:latest`. Single-arch `-p` is unchanged.
 
 ---
 
