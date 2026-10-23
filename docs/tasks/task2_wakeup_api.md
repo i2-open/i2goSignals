@@ -7,7 +7,7 @@ Implement the `POST /_cluster/wake-transmitter` endpoint and secure it with HMAC
 1.  Implement HMAC middleware for inter-node communication.
     - Uses `CLUSTER_INTERNAL_TOKEN` as the secret.
     - Validates incoming requests on the cluster wake port.
-2.  Add `POST /_cluster/wake-transmitter` to the server logic in `pkg/goSignals/server/application.go` or a dedicated internal router.
+2.  Add `POST /_cluster/wake-transmitter` to the server logic in `internal/server/application.go` or a dedicated internal router.
     - Request body: `{ "sid": "string", "mode": "push"|"poll" }`
     - Response: `202 Accepted`.
 3.  The handler should call `router.WakeTransmitter(sid, mode)`.
