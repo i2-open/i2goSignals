@@ -2,14 +2,11 @@ package server
 
 import (
 	"fmt"
-	"io/fs"
-	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	"github.com/i2-open/i2goSignals/internal/eventRouter"
 	"github.com/i2-open/i2goSignals/internal/eventRouter/peer"
-	"github.com/i2-open/i2goSignals/pkg/goSignals"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -36,13 +33,6 @@ func NewRouter(application *SignalsApplication) *HttpRouter {
 
 	// Add the Prometheus middleware first so logging happens inside
 	httpRouter.router.Use(PrometheusHttpMiddleware)
-
-	// Host swagger-ui
-	dist, err := fs.Sub(goSignals.SwaggerUI, "swagger-ui")
-	if err != nil {
-		log.Fatal(err)
-	}
-	httpRouter.router.PathPrefix("/swagger/").Handler(http.StripPrefix("/swagger/", http.FileServer(http.FS(dist))))
 
 	routes := httpRouter.getRoutes()
 	for _, route := range routes {
@@ -286,7 +276,8 @@ func (h *HttpRouter) peerRoutes() Routes {
 		},
 
 		// RFC 8414 OAuth 2.0 Authorization Server Metadata. The bare endpoint
-		// describes the default issuer; the {issuer:.+} variant captures a
+		// describes
+		// the default issuer; the {issuer:.+} variant captures a
 		// multi-segment local issuer path (ADR 0023) and resolves it the same
 		// local-rooted-then-bare way ssf-configuration/JWKS do (GH #209). When an
 		// external authorization server is configured the handler reflects its

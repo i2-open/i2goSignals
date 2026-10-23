@@ -1,12 +1,9 @@
 package goSsfServer
 
 import (
-	"io/fs"
-	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/i2-open/i2goSignals/pkg/goSignals"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -30,13 +27,6 @@ func NewRouter(application *SsfApplication) *HttpRouter {
 		router: mux.NewRouter().StrictSlash(true),
 		sa:     application,
 	}
-
-	// Host swagger-ui
-	dist, err := fs.Sub(goSignals.SwaggerUI, "swagger-ui")
-	if err != nil {
-		log.Fatal(err)
-	}
-	httpRouter.router.PathPrefix("/swagger/").Handler(http.StripPrefix("/swagger/", http.FileServer(http.FS(dist))))
 
 	routes := httpRouter.getRoutes()
 	for _, route := range routes {

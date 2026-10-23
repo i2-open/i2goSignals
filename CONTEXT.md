@@ -926,9 +926,9 @@ downstream by quietly removing a victim Subject.
 ## Package boundaries
 
 The server handler tree (`application.go`, `routers.go`, `api_*.go`, and
-their tests) lives in `internal/server`. `pkg/goSignals/` retains only
-genuinely library-shaped contents: the OpenAPI client (`api/`), the
-swagger UI assets (`swagger-ui/`, `swagger.go`), and the `Dockerfile`.
+their tests) lives in `internal/server`. The former `pkg/goSignals/` package
+(embedded Swagger UI served at `/swagger/`, plus codegen scaffolding) was
+removed in v0.12.0-alpha.21; neither server mounts a Swagger UI any more.
 
 **`pkg/goSignalsServer` (product export) vs `pkg/goSsfServer` (spec server).**
 `goSignals` — served by `cmd/goSignalsServer` over `internal/server.SignalsApplication` —
