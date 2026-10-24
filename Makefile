@@ -230,8 +230,7 @@ build-docker: cross-compile-linux
 
 # Build a multi-arch image ($(PLATFORMS)) as a single manifest list. This target
 # is the callee side of the family's S1 delegation contract (planning#26, rev 2
-# in planning#135): the
-# planning publisher runs it inside a clean tag clone as
+# in planning#135): the planning publisher runs it inside a clean tag clone as
 #
 #   make build-publish REGISTRY=docker.io NAMESPACE=independentid \
 #       TAG=v0.12.0-alpha.21 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
@@ -363,6 +362,7 @@ test-publish-contract:
 	  ! has '--push' "$$out" || fail "build-docker must not --push"; \
 	  ! printf '%s\n' "$$out" | grep -Eq -- '--platform [^ ]*,' || fail "build-docker must not build a multi-arch --platform list"; \
 	  ! printf '%s\n' "$$out" | grep -Eq -- 'r/n/|REGISTRY|NAMESPACE|:v9\.9\.9-alpha\.1' || fail "build-docker must not reference REGISTRY/NAMESPACE/TAG"; \
+	  ! $(MAKE) --no-print-directory -n build-docker-multiarch >/dev/null 2>&1 || fail "build-docker-multiarch must not exist (renamed build-publish, no alias)"; \
 	  echo ">> build-publish S1 contract: OK"
 
 # Export the image SBOM to a local file. BuildKit's tar exporter writes the
