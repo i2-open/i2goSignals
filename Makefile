@@ -20,10 +20,10 @@ LDFLAGS     := -X $(VERSION_PKG).GoSignalsVersion=$(VERSION)
 GOFLAGS_BUILD := -trimpath
 GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 
-# Docker image settings. build-docker-multiarch follows the family's S1
-# delegation contract (planning#26): the pushed ref is exactly
-# $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG), e.g.
-#   make build-docker-multiarch REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v0.12.0-alpha.21 PUSH=1
+# Docker image settings. build-publish follows the family's S1 delegation
+# contract (planning#26, rev 2 in planning#135): the pushed refs are exactly
+# $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and :latest (the dual tag), e.g.
+#   make build-publish REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v0.12.0-alpha.21 PUSH=1
 # (PUSH=yes also pushes; any other PUSH value is a smoke build.)
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
@@ -81,7 +81,7 @@ LEAK_PKGS ?= ./pkg/goSetPoll/... ./pkg/goSetPush/... ./internal/eventRouter/... 
 
 .PHONY: all help build run console-build server-build clean clean-scim dev-clean dev-bench dev-bench-sweep dev-bench-algs dev-pprof \
     generate-certs check-certs licenses-check \
-    build-docker build-docker-multiarch multiarch-push-guard test-multiarch-contract docker-sbom cross-compile-linux \
+    build-docker build-publish multiarch-push-guard test-publish-contract docker-sbom cross-compile-linux \
     dev-build-image dev-up dev-down dev-logs dev-rebuild ensure-dev-image \
     run-spiffe-demo dev-reset-spiffe dev-rebuild-spiffe-goSignals \
     seams qa fmt-check vet test tidy-check bench leak-check
@@ -97,8 +97,8 @@ help:
 	@echo "  generate-certs     - regenerate self-signed CA + certs under config/certs/"
 	@echo "  licenses-check     - verify Go deps use permissive licenses"
 	@echo "  build-docker       - build & --load i2gosignals:$(VERSION) (+ :latest)"
-	@echo "  build-docker-multiarch - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes exactly REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG (all three required)"
-	@echo "  test-multiarch-contract - assert build-docker-multiarch matches the S1 delegation contract (make -n; no build)"
+	@echo "  build-publish      - multi-arch ($(PLATFORMS)) validate-only build; PUSH=1 (or yes) TAG=.. pushes REGISTRY/NAMESPACE/$(IMAGE_NAME):TAG and :latest (all three required)"
+	@echo "  test-publish-contract - assert build-publish matches the S1 delegation contract (make -n; no build)"
 	@echo "  docker-sbom        - export the image SBOM to bin/sbom-$(VERSION).json"
 	@echo "  cross-compile-linux - cross-compile $(DOCKER_BINS) into bin/linux/<arch>/"
 	@echo "  dev-up / dev-down / dev-logs / dev-rebuild - dev compose stack with Delve"
@@ -108,7 +108,7 @@ help:
 	@echo "  dev-bench-algs     - dev-bench once per signing algorithm in BENCH_ALGS=$(BENCH_ALGS), one history row each (see docs/perf/e2e-benchmark.md, Signing algorithms)"
 	@echo "  dev-pprof          - profile a dev-stack node: PPROF_PORT=$(PPROF_PORT) PPROF_KIND=$(PPROF_KIND) PPROF_SECONDS=$(PPROF_SECONDS)"
 	@echo "  clean              - remove build artifacts"
-	@echo "  qa                 - full quality gate: fmt-check test-multiarch-contract vet tidy-check test leak-check bench"
+	@echo "  qa                 - full quality gate: fmt-check test-publish-contract vet tidy-check test leak-check bench"
 	@echo "  fmt-check          - fail if any Go file is not gofmt-clean"
 	@echo "  vet                - go vet ./..."
 	@echo "  test               - go test -race ./..."
@@ -162,8 +162,8 @@ licenses-check:
 #
 # PLATFORMS controls which architectures are produced. Override on the command
 # line, e.g.
-#   make build-docker-multiarch PLATFORMS=linux/amd64
-#   make build-docker-multiarch PLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
+#   make build-publish PLATFORMS=linux/amd64
+#   make build-publish PLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
 
 # Extract the architecture list from PLATFORMS (linux/amd64,linux/arm64 -> amd64 arm64).
 # `comma` must be defined before use because := expands its RHS immediately.
@@ -229,32 +229,34 @@ build-docker: cross-compile-linux
 	@echo ">> built $(LOCAL_IMAGE):$(VERSION) and $(LOCAL_IMAGE):latest"
 
 # Build a multi-arch image ($(PLATFORMS)) as a single manifest list. This target
-# is the callee side of the family's S1 delegation contract (planning#26): the
+# is the callee side of the family's S1 delegation contract (planning#26, rev 2
+# in planning#135): the
 # planning publisher runs it inside a clean tag clone as
 #
-#   make build-docker-multiarch REGISTRY=docker.io NAMESPACE=independentid \
+#   make build-publish REGISTRY=docker.io NAMESPACE=independentid \
 #       TAG=v0.12.0-alpha.21 PUSH=1 [PLATFORMS=..] [BUILDX_BUILDER=..] [META_DIR=<abs dir>]
 #
 # PUSH unset (or any value other than 1/yes): build every PLATFORMS arch into the buildx cache; push nothing,
 #   tag nothing (a multi-arch manifest cannot be --load'd into the daemon).
 # PUSH=1 (or yes): REGISTRY (host only), NAMESPACE (namespace only) and TAG are all
-#   required (exit 2 otherwise); the ONLY ref pushed is
-#   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG). This target never tags
-#   :latest or vX.Y -- floating tags are the publisher's job, applied by
-#   manifest re-tag of the pushed digest. buildx metadata (the publisher reads
+#   required (exit 2 otherwise); the manifest list is pushed under exactly two
+#   refs, $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and
+#   $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):latest (the dual tag). No other
+#   floating tag (vX.Y) is applied here. buildx metadata (the publisher reads
 #   .["containerimage.digest"]) lands in $(META_DIR)/build-meta-$(IMAGE_NAME).json.
 # TAG also feeds --build-arg VERSION (the OCI version label); VERSION from
 # version.txt feeds ldflags only. Needs a docker-container buildx builder --
 # $(BUILDX_BUILDER) is created on demand if the current one is not.
-# `make test-multiarch-contract` (part of `make qa`) pins this surface.
+# `make test-publish-contract` (part of `make qa`) pins this surface.
 # Push only when PUSH is the single word 1 or yes (surrounding spaces are
 # ignored); anything else (unset, 0, no, multi-word) is a smoke build.
 PUSH_ENABLED := $(if $(word 2,$(strip $(PUSH))),,$(filter 1 yes,$(strip $(PUSH))))
 MULTIARCH_META := $(META_DIR)/build-meta-$(IMAGE_NAME).json
 MULTIARCH_REF  := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG)
+MULTIARCH_LATEST := $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):latest
 ifneq ($(PUSH_ENABLED),)
-DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --metadata-file $(MULTIARCH_META)
-DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
+DOCKER_MULTIARCH_OUTPUT := --push --tag $(MULTIARCH_REF) --tag $(MULTIARCH_LATEST) --metadata-file $(MULTIARCH_META)
+DOCKER_MULTIARCH_BANNER := pushed $(MULTIARCH_REF) and $(MULTIARCH_LATEST) for $(PLATFORMS) (metadata at $(MULTIARCH_META))
 else
 DOCKER_MULTIARCH_OUTPUT :=
 DOCKER_MULTIARCH_BANNER := built $(PLATFORMS) into the buildx cache (no push; set PUSH=1 REGISTRY=.. NAMESPACE=.. TAG=.. to publish)
@@ -262,23 +264,23 @@ endif
 
 # Contract guard: a PUSH=1 (or yes) call with a missing variable fails before anything
 # is compiled. Prerequisite order alone does not hold under `make -j`, so when
-# build-docker-multiarch is a goal cross-compile-linux also gets an order-only
+# build-publish is a goal cross-compile-linux also gets an order-only
 # edge on the guard (other goals, e.g. build-docker, are unaffected). The first
 # line of the failure is the contract's verbatim message; the second suggests a
 # complete invocation.
-MULTIARCH_PUSH_HINT := hint: make build-docker-multiarch PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v$(VERSION)
+MULTIARCH_PUSH_HINT := hint: make build-publish PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v$(VERSION)
 multiarch-push-guard:
 ifneq ($(PUSH_ENABLED),)
-	@[ -n "$(REGISTRY)" ] || { echo "build-docker-multiarch: REGISTRY is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
-	@[ -n "$(NAMESPACE)" ] || { echo "build-docker-multiarch: NAMESPACE is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
-	@[ -n "$(TAG)" ] || { echo "build-docker-multiarch: TAG is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(REGISTRY)" ] || { echo "build-publish: REGISTRY is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(NAMESPACE)" ] || { echo "build-publish: NAMESPACE is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
+	@[ -n "$(TAG)" ] || { echo "build-publish: TAG is required when PUSH=1" >&2; echo "$(MULTIARCH_PUSH_HINT)" >&2; exit 2; }
 endif
 
-ifneq ($(filter build-docker-multiarch,$(MAKECMDGOALS)),)
+ifneq ($(filter build-publish,$(MAKECMDGOALS)),)
 cross-compile-linux: | multiarch-push-guard
 endif
 
-build-docker-multiarch: multiarch-push-guard cross-compile-linux
+build-publish: multiarch-push-guard cross-compile-linux
 	@current_driver=$$($(DOCKER) buildx inspect 2>/dev/null | awk '/^Driver:/ {print $$2}'); \
 	if [ "$$current_driver" != "docker-container" ]; then \
 		if ! $(DOCKER) buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
@@ -299,29 +301,34 @@ build-docker-multiarch: multiarch-push-guard cross-compile-linux
 		.
 	@echo ">> $(DOCKER_MULTIARCH_BANNER)"
 
-# Pin the S1 contract from the callee side: a change to build-docker-multiarch's
+# Pin the S1 contract from the callee side: a change to build-publish's
 # variables or flags fails here before the planning publisher sees it. Drives
 # `make -n` only (nothing is built or pushed), plus the guard target alone for
-# the exit-2 check.
+# the exit-2 check, and asserts the local sibling build-docker stays local
+# (--load, host arch only, no --push, no REGISTRY/NAMESPACE ref).
 # META_DIR=/tmp/m is a make -n fixture only: nothing is written there.
 MULTIARCH_CONTRACT_REF  := r/n/i2gosignals:v9.9.9-alpha.1
+MULTIARCH_CONTRACT_LATEST := r/n/i2gosignals:latest
 MULTIARCH_CONTRACT_FULL := REGISTRY=r NAMESPACE=n TAG=v9.9.9-alpha.1 META_DIR=/tmp/m
 MULTIARCH_CONTRACT_BARE := REGISTRY= NAMESPACE= TAG=
 # Shell helpers inside the recipe:
-#   dry <vars..>            make -n build-docker-multiarch with the given vars; prints combined output
-#   pushes <label> <vars..> output must carry exactly one --tag, the contract ref, and --push
+#   dry <vars..>            make -n build-publish with the given vars; prints combined output
+#   pushes <label> <vars..> output must carry exactly two --tags (the contract ref and :latest) and --push
 #   smoke  <label> <vars..> must exit 0 with no --push, no --tag and no guard message
+#   local                   make -n build-docker (with REGISTRY/NAMESPACE set) must --load, carry one
+#                           single-arch --platform, and never --push or reference REGISTRY/NAMESPACE
 # Guard loop: `set -- …; set -- "$$@" "$$v="` appends "$$v=" after the full
 # REGISTRY/NAMESPACE/TAG set; make's last assignment wins, blanking only $$v.
-test-multiarch-contract:
-	@echo ">> build-docker-multiarch S1 contract (make -n)"
+test-publish-contract:
+	@echo ">> build-publish S1 contract (make -n)"
 	@set -e; \
-	  fail() { echo "ERROR: build-docker-multiarch S1 contract: $$*" >&2; exit 1; }; \
+	  fail() { echo "ERROR: build-publish S1 contract: $$*" >&2; exit 1; }; \
 	  has() { printf '%s\n' "$$2" | grep -qF -- "$$1"; }; \
-	  dry() { $(MAKE) --no-print-directory -n build-docker-multiarch "$$@" PLATFORMS=linux/amd64,linux/arm64 2>&1; }; \
+	  dry() { $(MAKE) --no-print-directory -n build-publish "$$@" PLATFORMS=linux/amd64,linux/arm64 2>&1; }; \
 	  pushes() { label=$$1; shift; out="$$(dry "$$@")" || fail "$$label must exit 0: $$out"; \
-	    [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 1 ] || fail "$$label must produce exactly one --tag"; \
+	    [ "$$(printf '%s\n' "$$out" | grep -o -- '--tag [^ ]*' | wc -l | tr -d ' ')" = 2 ] || fail "$$label must produce exactly two --tags (:TAG and :latest)"; \
 	    has '--tag $(MULTIARCH_CONTRACT_REF)' "$$out" || fail "$$label missing --tag $(MULTIARCH_CONTRACT_REF)"; \
+	    has '--tag $(MULTIARCH_CONTRACT_LATEST)' "$$out" || fail "$$label missing --tag $(MULTIARCH_CONTRACT_LATEST)"; \
 	    has '--push' "$$out" || fail "$$label must --push"; }; \
 	  smoke() { label=$$1; shift; rc=0; out="$$(dry "$$@")" || rc=$$?; \
 	    [ "$$rc" = 0 ] || fail "$$label must exit 0 (got $$rc): $$out"; \
@@ -329,7 +336,6 @@ test-multiarch-contract:
 	    ! has '--tag' "$$out" || fail "$$label must not --tag"; \
 	    ! has 'is required when PUSH=1' "$$out" || fail "$$label must not fire the push guard"; }; \
 	  pushes "PUSH=1" PUSH=1 $(MULTIARCH_CONTRACT_FULL); \
-	  ! has ':latest' "$$out" || fail "must not tag :latest"; \
 	  ! printf '%s\n' "$$out" | grep -Eq -- ':v9\.9([^.]|$$)' || fail "must not tag vX.Y"; \
 	  for want in '--platform linux/amd64,linux/arm64' '--provenance=mode=max' '--sbom=true' \
 	      '--build-arg VERSION=v9.9.9-alpha.1' '--metadata-file /tmp/m/build-meta-i2gosignals.json'; do \
@@ -350,9 +356,14 @@ test-multiarch-contract:
 	    set -- REGISTRY=r NAMESPACE=n TAG=t; set -- "$$@" "$$v="; \
 	    rc=0; msg="$$($(MAKE) --no-print-directory multiarch-push-guard PUSH=1 "$$@" 2>&1)" || rc=$$?; \
 	    [ "$$rc" = 2 ] || fail "PUSH=1 with empty $$v must exit 2 (got $$rc)"; \
-	    printf '%s\n' "$$msg" | grep -qxF "build-docker-multiarch: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
+	    printf '%s\n' "$$msg" | grep -qxF "build-publish: $$v is required when PUSH=1" || fail "PUSH=1 with empty $$v: wrong message: $$msg"; \
 	  done; \
-	  echo ">> build-docker-multiarch S1 contract: OK"
+	  out="$$($(MAKE) --no-print-directory -n build-docker REGISTRY=r NAMESPACE=n PUSH=1 TAG=v9.9.9-alpha.1 2>&1)" || fail "build-docker must exit 0: $$out"; \
+	  has '--load' "$$out" || fail "build-docker must --load"; \
+	  ! has '--push' "$$out" || fail "build-docker must not --push"; \
+	  ! printf '%s\n' "$$out" | grep -Eq -- '--platform [^ ]*,' || fail "build-docker must not build a multi-arch --platform list"; \
+	  ! printf '%s\n' "$$out" | grep -Eq -- 'r/n/|REGISTRY|NAMESPACE|:v9\.9\.9-alpha\.1' || fail "build-docker must not reference REGISTRY/NAMESPACE/TAG"; \
+	  echo ">> build-publish S1 contract: OK"
 
 # Export the image SBOM to a local file. BuildKit's tar exporter writes the
 # SBOM as sbom.spdx.json at the archive root; stream the archive and extract
@@ -550,11 +561,11 @@ seams:
 # rather than each remembering its own list of commands.
 #
 # Ordering is cheapest-first so an obvious failure reports in seconds rather
-# than after the race-detector suite: formatting, then the build-docker-multiarch
+# than after the race-detector suite: formatting, then the build-publish
 # contract (make -n only), then vet, then the go.mod
 # tidiness diff, then tests, then the goroutine-leak profile, then the
 # benchmark set.
-qa: fmt-check test-multiarch-contract vet tidy-check test leak-check bench
+qa: fmt-check test-publish-contract vet tidy-check test leak-check bench
 	@echo ">> make qa: OK"
 
 # Go sources here are gofmt-canonical tabs. Any output from `gofmt -l` is a
