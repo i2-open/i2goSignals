@@ -205,7 +205,7 @@ Override the binary version for a one-off local image without editing
 
 ```bash
 make build-docker VERSION=1.2.3-rc1
-make build-publish PUSH=1 REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v1.2.3
+make build-publish PUSH=1 REGISTRY=docker.io NAMESPACE=independentid TAG=v1.2.3
 ```
 
 ---

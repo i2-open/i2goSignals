@@ -23,7 +23,7 @@ GO_BUILD := CGO_ENABLED=0 $(GO) build $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)"
 # Docker image settings. build-publish follows the family's S1 delegation
 # contract (planning#26, rev 2 in planning#135): the pushed refs are exactly
 # $(REGISTRY)/$(NAMESPACE)/$(IMAGE_NAME):$(TAG) and :latest (the dual tag), e.g.
-#   make build-publish REGISTRY=ghcr.io NAMESPACE=i2-open TAG=v0.12.0-alpha.21 PUSH=1
+#   make build-publish REGISTRY=docker.io NAMESPACE=independentid TAG=v0.12.0-alpha.21 PUSH=1
 # (PUSH=yes also pushes; any other PUSH value is a smoke build.)
 DOCKER      ?= docker
 LOCAL_IMAGE ?= i2gosignals
