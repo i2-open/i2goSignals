@@ -86,11 +86,7 @@ func (d *EventDAOMongo) MigratePingMarkers(ctx context.Context) (interfaces.Ping
 		if err = cursor.Decode(&b); err != nil {
 			return res, err
 		}
-		key := b.Jti
-		if b.OriginalJti != "" {
-			key = b.OriginalJti
-		}
-		keys = append(keys, key)
+		keys = append(keys, b.refKey())
 		if len(keys) == migrateBatch {
 			if err = flush(); err != nil {
 				return res, err

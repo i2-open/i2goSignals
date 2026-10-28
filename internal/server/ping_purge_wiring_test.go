@@ -45,7 +45,9 @@ func TestNewApplication_WiresPingPurger(t *testing.T) {
 
 	sa := NewApplication(persistence, "")
 	require.NotNil(t, sa.PingPurger, "NewApplication builds the ping purger")
-	assert.Contains(t, logs.String(), "ping retention 24h; purge every 6h, one node per cluster")
+	for _, want := range []string{"ping purge on, one node per cluster", "retention=24h", "interval=6h"} {
+		assert.Contains(t, logs.String(), want)
+	}
 	assert.Equal(t, base+1, purgeLoops(), "the purge loop runs")
 
 	loopsAtClose := -1

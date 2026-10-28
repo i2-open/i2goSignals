@@ -3,13 +3,12 @@ package services
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/i2-open/i2goSignals/internal/providers/cluster"
 	interfaces "github.com/i2-open/i2goSignals/pkg/dao"
 	"github.com/i2-open/i2goSignals/pkg/logger"
 )
@@ -25,7 +24,7 @@ const (
 	DefaultPingRetention = 24 * time.Hour
 	// PingPurgeLeaseResource is the lease one node holds while it purges. The
 	// lease row also carries the cluster's last completed purge.
-	PingPurgeLeaseResource = "maintenance:ping-purge"
+	PingPurgeLeaseResource = cluster.PingPurgeResource
 )
 
 const (
@@ -113,7 +112,9 @@ type PingPurger struct {
 
 // NewPingPurger builds the runner. coord may be nil (single node, no
 // coordinator): the runner purges without a lease and keeps the last-purge
-// time in memory.
+// time in memory. Pass an untyped nil; a nil pointer of a concrete
+// coordinator type is a non-nil interface and is used as a coordinator.
+// A nil eventDAO turns the purge off.
 func NewPingPurger(eventDAO interfaces.EventDAO, coord PingPurgeCoordinator, nodeID string, opts PingPurgeOptions) *PingPurger {
 	if opts.Interval <= 0 {
 		opts.Interval = defaultPingPurgeInterval
@@ -133,23 +134,10 @@ func NewPingPurger(eventDAO interfaces.EventDAO, coord PingPurgeCoordinator, nod
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	if opts.Retention < 0 {
+	if opts.Retention < 0 || eventDAO == nil {
 		opts.Retention = 0
 	}
-	if isNilCoordinator(coord) {
-		coord = nil
-	}
 	return &PingPurger{eventDAO: eventDAO, coord: coord, nodeID: nodeID, opts: opts}
-}
-
-// isNilCoordinator reports a nil interface or one holding a nil pointer, so a
-// typed-nil coordinator is treated as none.
-func isNilCoordinator(c PingPurgeCoordinator) bool {
-	if c == nil {
-		return true
-	}
-	v := reflect.ValueOf(c)
-	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // LogPosture logs the purge posture in one INFO line, beside the server's
@@ -159,8 +147,9 @@ func (p *PingPurger) LogPosture() {
 		pingLog.Info("ping purge off (I2SIG_PING_RETENTION=0)", "doc", "docs/operations.md#event-retention")
 		return
 	}
-	pingLog.Info(fmt.Sprintf("ping retention %s; purge every %s, one node per cluster",
-		formatPingDuration(p.opts.Retention), formatPingDuration(p.opts.Interval)),
+	pingLog.Info("ping purge on, one node per cluster",
+		"retention", formatPingDuration(p.opts.Retention),
+		"interval", formatPingDuration(p.opts.Interval),
 		"doc", "docs/operations.md#event-retention")
 }
 
@@ -233,7 +222,7 @@ func (p *PingPurger) loop(ctx context.Context, done chan struct{}) {
 // retries.
 func (p *PingPurger) RunOnce(ctx context.Context) (PingPurgeSummary, error) {
 	var sum PingPurgeSummary
-	if p.opts.Retention == 0 || p.eventDAO == nil {
+	if p.opts.Retention == 0 {
 		return sum, nil
 	}
 	p.runMu.Lock()
@@ -279,7 +268,7 @@ func (p *PingPurger) RunOnce(ctx context.Context) (PingPurgeSummary, error) {
 	}
 	for ok && from.Before(cutoff) {
 		if sum.Windows > 0 {
-			if err := p.between(ctx, token); err != nil {
+			if err := p.pauseAndRenewLease(ctx, token); err != nil {
 				sum.Duration = p.opts.Now().Sub(now)
 				return sum, err
 			}
@@ -324,9 +313,9 @@ func (p *PingPurger) RunOnce(ctx context.Context) (PingPurgeSummary, error) {
 	return sum, nil
 }
 
-// between pauses between windows and renews the lease; it fails when ctx is
-// done or the lease was lost.
-func (p *PingPurger) between(ctx context.Context, token int64) error {
+// pauseAndRenewLease pauses between windows and renews the lease; it fails
+// when ctx is done or the lease was lost.
+func (p *PingPurger) pauseAndRenewLease(ctx context.Context, token int64) error {
 	t := time.NewTimer(p.opts.Pause)
 	defer t.Stop()
 	select {

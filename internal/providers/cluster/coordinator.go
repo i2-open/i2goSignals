@@ -75,7 +75,7 @@ type ClusterCoordinator interface {
 }
 
 // PingPurgeResource is the lease resource of the cluster's one ping-purge
-// runner (services.PingPurgeLeaseResource). Its "maintenance" kind is not a
+// runner (aliased as services.PingPurgeLeaseResource). Its "maintenance" kind is not a
 // LeaseKind, so the stream-table reaper keeps the row and its lastPurgeAt.
 const PingPurgeResource = "maintenance:ping-purge"
 

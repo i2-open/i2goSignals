@@ -222,7 +222,8 @@ func preUpgradeSeeder(t *testing.T, d interfaces.EventDAO) PreUpgradeSeeder {
 // preUpgradePingPurgedByStoredAt (#389): a ping body with no receivedAt is
 // purged by its stored-at fallback once older than the cutoff; a younger one
 // stays; one still pending on a stream stays with its pending row; a
-// pre-upgrade data body of the same age is untouched.
+// pre-upgrade data body of the same age is untouched. The marker backfill runs
+// first, as the router runs it at startup before any purge.
 func preUpgradePingPurgedByStoredAt(t *testing.T, d interfaces.EventDAO) {
 	seed := preUpgradeSeeder(t, d)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -238,6 +239,9 @@ func preUpgradePingPurgedByStoredAt(t *testing.T, d interfaces.EventDAO) {
 	seed.SeedPreUpgradeBody(t, pre(pingRecord("pre-pending", old)), old)
 	addPending(t, d, sid, interfaces.PendingRef{Jti: "pre-pending", AckJti: "pre-pending", EnqueuedAt: old})
 	seed.SeedPreUpgradeBody(t, pre(dataRecord("pre-data", old)), old)
+	if _, err := d.MigratePingMarkers(context.Background()); err != nil {
+		t.Fatalf("MigratePingMarkers: %v", err)
+	}
 
 	res := purgePings(t, d, old.Add(-time.Hour), cutoff)
 	if res.Bodies != 1 {

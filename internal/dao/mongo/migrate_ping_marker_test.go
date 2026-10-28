@@ -128,3 +128,49 @@ func (s *EventDAOMongoSuite) TestLegacyPingWindowPlan() {
 		}
 	}
 }
+
+// TestPurgePingWindow_WaitsForMarkerBackfill: before MigratePingMarkers has
+// recorded its done flag, the purge leaves pre-upgrade ping bodies alone, so
+// the backfill can still find and mark their delivered rows; after it, the
+// row and body go together.
+func (s *EventDAOMongoSuite) TestPurgePingWindow_WaitsForMarkerBackfill() {
+	t := s.T()
+	ctx := context.Background()
+	d := s.markerDAO(t)
+	var seed daotest.PreUpgradeSeeder = d
+	at := time.Now().UTC().Truncate(time.Second).Add(-48 * time.Hour)
+	sid := ids.NewObjectID()
+
+	seed.SeedPreUpgradeBody(t, legacyRecord("legacy-ping", []string{events.VerificationEventUri}, at), at)
+	if err := d.AddPending(ctx, interfaces.PendingRef{Jti: "legacy-ping", AckJti: "legacy-ping", EnqueuedAt: at}, sid); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+	if _, err := d.Ack(ctx, interfaces.AckBatch{StreamID: sid, Jtis: []string{"legacy-ping"}, AckDate: time.Now()}); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	bodies := func() int64 {
+		t.Helper()
+		n, err := d.events.load().CountDocuments(ctx, bson.D{{Key: "jti", Value: "legacy-ping"}})
+		if err != nil {
+			t.Fatalf("count bodies: %v", err)
+		}
+		return n
+	}
+
+	if pr, err := d.PurgePingWindow(ctx, at.Add(-time.Hour), at.Add(time.Hour)); err != nil || pr.Deliveries != 0 || pr.Bodies != 0 {
+		t.Fatalf("purge before the backfill = (%+v, %v), want nothing purged", pr, err)
+	}
+	if bodies() != 1 {
+		t.Fatal("pre-upgrade body purged before the marker backfill")
+	}
+
+	if res, err := d.MigratePingMarkers(ctx); err != nil || res.Marked != 1 {
+		t.Fatalf("MigratePingMarkers = (%+v, %v), want 1 marked", res, err)
+	}
+	if pr, err := d.PurgePingWindow(ctx, at.Add(-time.Hour), at.Add(time.Hour)); err != nil || pr.Deliveries != 1 || pr.Bodies != 1 {
+		t.Errorf("purge after the backfill = (%+v, %v), want the row and body", pr, err)
+	}
+	if bodies() != 0 {
+		t.Error("pre-upgrade body left after the backfill and purge")
+	}
+}

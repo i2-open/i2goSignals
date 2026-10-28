@@ -120,7 +120,7 @@ func underMigrationLease(ctx context.Context, coord cluster.ClusterCoordinator, 
 		}
 		if now := time.Now(); now.Sub(lastLog) >= migrationWaitLogEvery {
 			lastLog = now
-			eventLogger.Info("ROUTER: waiting for the "+name+" migration lease", "resource", resource, "node", nodeId, "error", err)
+			eventLogger.Info("ROUTER: waiting for a migration lease", "migration", name, "resource", resource, "node", nodeId, "error", err)
 		}
 		if !SleepCtx(ctx, migrationLeaseRetry) {
 			return ctx.Err()
@@ -139,7 +139,7 @@ func underMigrationLease(ctx context.Context, coord cluster.ClusterCoordinator, 
 				return
 			case <-t.C:
 				if held, _, _, err := coord.TryAcquireOrRenewLease(resource, nodeId, migrationLeaseTTL); err != nil || !held {
-					eventLogger.Warn("ROUTER: "+name+" migration lease renewal failed", "resource", resource, "node", nodeId, "held", held, "error", err)
+					eventLogger.Warn("ROUTER: migration lease renewal failed", "migration", name, "resource", resource, "node", nodeId, "held", held, "error", err)
 				}
 			}
 		}
@@ -149,7 +149,7 @@ func underMigrationLease(ctx context.Context, coord cluster.ClusterCoordinator, 
 	stopRenew()
 	<-renewDone
 	if rerr := coord.ReleaseLeaseIfOwned(resource, nodeId); rerr != nil {
-		eventLogger.Warn("ROUTER: "+name+" migration lease release failed", "resource", resource, "node", nodeId, "error", rerr)
+		eventLogger.Warn("ROUTER: migration lease release failed", "migration", name, "resource", resource, "node", nodeId, "error", rerr)
 	}
 	return err
 }

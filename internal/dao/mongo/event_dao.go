@@ -1046,6 +1046,15 @@ type sweepBody struct {
 	SortTime    time.Time `bson:"sortTime"`
 }
 
+// refKey is the jti the body's delivery rows carry: OriginalJti when set,
+// else Jti.
+func (b sweepBody) refKey() string {
+	if b.OriginalJti != "" {
+		return b.OriginalJti
+	}
+	return b.Jti
+}
+
 // SweepExpired removes every reference with expireAt <= now (one deleteMany),
 // then reads at most maxBodies event bodies with sortTime < bodyCutoff in
 // ascending sortTime from the in-process watermark (eventSortTime index) and
@@ -1106,15 +1115,9 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 		return result, nil
 	}
 
-	keyOf := func(b sweepBody) string {
-		if b.OriginalJti != "" {
-			return b.OriginalJti
-		}
-		return b.Jti
-	}
 	keys := make([]string, 0, len(bodies))
 	for _, b := range bodies {
-		keys = append(keys, keyOf(b))
+		keys = append(keys, b.refKey())
 	}
 	var refs []string
 	if err = dc.Distinct(ctx, "jti", bson.D{{Key: "jti", Value: bson.D{{Key: "$in", Value: keys}}}}).Decode(&refs); err != nil {
@@ -1129,7 +1132,7 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 
 	var doomed []string
 	for _, b := range bodies {
-		if _, ok := referenced[keyOf(b)]; !ok {
+		if _, ok := referenced[b.refKey()]; !ok {
 			doomed = append(doomed, b.Jti)
 		}
 	}
@@ -1158,7 +1161,7 @@ func (d *EventDAOMongo) SweepExpired(ctx context.Context, now time.Time, bodyCut
 		if !b.SortTime.Equal(last) {
 			continue
 		}
-		if _, ok := referenced[keyOf(b)]; ok {
+		if _, ok := referenced[b.refKey()]; ok {
 			next.seen = append(next.seen, b.Jti)
 		}
 	}

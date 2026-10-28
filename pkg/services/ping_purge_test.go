@@ -205,8 +205,10 @@ func TestPingPurger_LogPosture(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		buf := captureLog(t)
 		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{Retention: DefaultPingRetention}).LogPosture()
-		if !strings.Contains(buf.String(), "ping retention 24h; purge every 6h, one node per cluster") {
-			t.Fatalf("posture line missing; log:\n%s", buf.String())
+		for _, want := range []string{"ping purge on, one node per cluster", "retention=24h", "interval=6h"} {
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("posture line missing %q; log:\n%s", want, buf.String())
+			}
 		}
 	})
 	t.Run("off", func(t *testing.T) {
@@ -214,6 +216,17 @@ func TestPingPurger_LogPosture(t *testing.T) {
 		NewPingPurger(memory.NewEventDAO(), nil, "n1", PingPurgeOptions{}).LogPosture()
 		if !strings.Contains(buf.String(), "ping purge off (I2SIG_PING_RETENTION=0)") {
 			t.Fatalf("off posture line missing; log:\n%s", buf.String())
+		}
+	})
+	t.Run("no event store", func(t *testing.T) {
+		buf := captureLog(t)
+		p := NewPingPurger(nil, nil, "n1", PingPurgeOptions{Retention: DefaultPingRetention})
+		p.LogPosture()
+		if !strings.Contains(buf.String(), "ping purge off (I2SIG_PING_RETENTION=0)") {
+			t.Fatalf("no event store should log the off posture; log:\n%s", buf.String())
+		}
+		if sum, err := p.RunOnce(context.Background()); err != nil || sum.Ran {
+			t.Fatalf("RunOnce without an event store = %+v, %v; want no run", sum, err)
 		}
 	})
 }
@@ -445,14 +458,13 @@ func TestPingPurger_FailedWindowNotRecorded(t *testing.T) {
 	}
 }
 
-// TestPingPurger_NoCoordinator: a nil coordinator (typed nil included) purges
+// TestPingPurger_NoCoordinator: a nil coordinator purges
 // without a lease and keeps the last purge in memory.
 func TestPingPurger_NoCoordinator(t *testing.T) {
 	d := memory.NewEventDAO()
 	seedDeliveredPing(t, d, "old", "s1", pingT0)
 	now := pingT0.Add(48 * time.Hour)
-	var typedNil *fakePurgeCoord
-	p := NewPingPurger(d, typedNil, "n1", PingPurgeOptions{Retention: 24 * time.Hour, Pause: time.Millisecond, Now: clockAt(now)})
+	p := NewPingPurger(d, nil, "n1", PingPurgeOptions{Retention: 24 * time.Hour, Pause: time.Millisecond, Now: clockAt(now)})
 	if sum, err := p.RunOnce(context.Background()); err != nil || !sum.Ran || bodyStored(t, d, "old") {
 		t.Fatalf("first run = %+v, %v", sum, err)
 	}

@@ -67,7 +67,8 @@ func legacyPingWindowFilter(from, to time.Time) bson.D {
 // is left, by its ObjectId _id time — and deletes each one whose reference key
 // (originalJti when set, else jti) has no pending deliveries row (ADR 0048,
 // ADR 0055 A5.22). Unmarked rows are not matched until MigratePingMarkers
-// marks them.
+// marks them, and the pre-upgrade pass waits for its done flag: the backfill
+// finds a row through its body, so a body purged first would strand the row.
 func (d *EventDAOMongo) PurgePingWindow(ctx context.Context, from, to time.Time) (interfaces.PingPurgeResult, error) {
 	var result interfaces.PingPurgeResult
 	dc, err := d.deliveriesColLoad()
@@ -96,8 +97,15 @@ func (d *EventDAOMongo) PurgePingWindow(ctx context.Context, from, to time.Time)
 	if err != nil {
 		return result, err
 	}
-	// The pre-upgrade pass runs only while a body without receivedAt is left
-	// (one indexed probe), so a drained store pays nothing for it.
+	// The pre-upgrade pass runs only once the marker backfill is done, and
+	// only while a body without receivedAt is left (one indexed probe), so a
+	// drained store pays nothing for it.
+	if err = d.migrationsCol(dc).FindOne(ctx, bson.D{{Key: "_id", Value: pingMarkerMigration}}).Err(); errors.Is(err, mongo.ErrNoDocuments) {
+		return result, nil
+	} else if err != nil {
+		eLog.Warn("Error reading the ping marker done flag for purge", "error", err)
+		return result, err
+	}
 	if err = ec.FindOne(ctx, legacyPingFilter(), options.FindOne().
 		SetProjection(bson.D{{Key: "_id", Value: 1}})).Err(); errors.Is(err, mongo.ErrNoDocuments) {
 		return result, nil
@@ -155,15 +163,9 @@ func purgePingBodies(ctx context.Context, ec, dc *mongo.Collection, filter bson.
 // deleteUnpendingBodies deletes the bodies of batch that no pending row
 // references and returns the count deleted.
 func deleteUnpendingBodies(ctx context.Context, ec, dc *mongo.Collection, batch []sweepBody) (int64, error) {
-	keyOf := func(b sweepBody) string {
-		if b.OriginalJti != "" {
-			return b.OriginalJti
-		}
-		return b.Jti
-	}
 	keys := make([]string, len(batch))
 	for i, b := range batch {
-		keys[i] = keyOf(b)
+		keys[i] = b.refKey()
 	}
 	var pending []string
 	if err := dc.Distinct(ctx, "jti", bson.D{
@@ -179,7 +181,7 @@ func deleteUnpendingBodies(ctx context.Context, ec, dc *mongo.Collection, batch 
 	}
 	var doomed []string
 	for _, b := range batch {
-		if _, ok := held[keyOf(b)]; !ok {
+		if _, ok := held[b.refKey()]; !ok {
 			doomed = append(doomed, b.Jti)
 		}
 	}

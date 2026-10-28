@@ -627,11 +627,7 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 	}
 
 	for _, rec := range examined {
-		key := rec.Jti
-		if rec.OriginalJti != "" {
-			key = rec.OriginalJti
-		}
-		if _, ok := referenced[key]; ok {
+		if _, ok := referenced[refKey(rec)]; ok {
 			continue
 		}
 		delete(d.events, rec.Jti)
@@ -641,6 +637,15 @@ func (d *EventDAOMemory) SweepExpired(_ context.Context, now time.Time, bodyCuto
 		result.Bodies++
 	}
 	return result, nil
+}
+
+// refKey is the jti a body's delivery rows carry: OriginalJti when set, else
+// Jti.
+func refKey(rec *model.EventRecord) string {
+	if rec.OriginalJti != "" {
+		return rec.OriginalJti
+	}
+	return rec.Jti
 }
 
 // storedAt is a body's stored-at time for the ping purge: ReceivedAt, else
@@ -681,11 +686,7 @@ func (d *EventDAOMemory) PurgePingWindow(_ context.Context, from, to time.Time) 
 		if at := storedAt(rec); at.IsZero() || at.Before(from) || !at.Before(to) {
 			continue
 		}
-		key := rec.Jti
-		if rec.OriginalJti != "" {
-			key = rec.OriginalJti
-		}
-		if _, ok := pending[key]; ok {
+		if _, ok := pending[refKey(rec)]; ok {
 			continue
 		}
 		delete(d.events, jti)
